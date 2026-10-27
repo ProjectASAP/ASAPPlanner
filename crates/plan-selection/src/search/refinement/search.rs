@@ -11,6 +11,8 @@ use crate::search::milp::direct_price_options::{
 pub(in crate::search) enum DirectPriceModel<'a> {
     Fixed(&'a DirectCostProfile),
     Joint(&'a JointPriceProfile),
+    /// Structural ordering only; every price comes from the evaluator.
+    Structural,
 }
 use std::time::{Duration, Instant};
 
@@ -412,6 +414,21 @@ fn search_with_solver(
                     .is_ok()
                 })
                 .cloned()
+                .map(|mut observation| {
+                    if matches!(
+                        restrictions.direct[direct_index].1,
+                        DirectPriceModel::Structural
+                    ) {
+                        observation.selected.modeled_cost = observation
+                            .selected
+                            .selected_candidates
+                            .iter()
+                            .map(|id| restricted.candidates[id.0].local_cost)
+                            .sum();
+                        observation.exact_cost = None;
+                    }
+                    observation
+                })
                 .collect();
             (
                 restricted,
@@ -467,6 +484,12 @@ fn search_with_solver(
         }
         let proposed = if use_direct {
             match restrictions.direct[direct_index].1 {
+                DirectPriceModel::Structural => propose(
+                    proposal_graph,
+                    &proposal_observations,
+                    Some(solve_budget.as_secs_f64()),
+                    &mut solve_metrics,
+                ),
                 DirectPriceModel::Fixed(profile) => solve_direct_cost_proposal_with_metrics(
                     proposal_graph,
                     &proposal_observations,
@@ -646,6 +669,15 @@ fn search_with_solver(
                     .direct_cost_best_validated_cost
                     .map_or(actual, |previous| previous.min(actual)),
             );
+        }
+        if use_direct
+            && actual_cost.is_some()
+            && matches!(
+                restrictions.direct[direct_index].1,
+                DirectPriceModel::Structural
+            )
+        {
+            direct_finished = true;
         }
         observations.push(ObservedAssignment {
             selected: proposal.selected,
@@ -832,6 +864,30 @@ mod tests {
         assert_eq!(result.lower_bound, 0.0);
         assert_eq!(result.status, CandidateSearchStatus::RefinementLimit);
         assert_eq!(result.solve_metrics.direct_cost_validated_plans, 1);
+    }
+
+    /// A structural seed's artificial objective never becomes a monetary
+    /// bound or a claim that direct pricing matched the evaluator.
+    #[test]
+    fn structural_restricted_seed_uses_only_evaluated_prices() {
+        let graph = choices(&[0.0, 0.0]);
+        let mut restricted = graph.clone();
+        restricted.query_roots[0].compatible_candidates = vec![PhysicalCandidateId(1)];
+        restricted.candidates[1].local_cost = 100.0;
+        let result = search_candidates_with_direct_feedback(
+            &graph,
+            limits(1),
+            &[1.0, 1.0],
+            &[],
+            &[],
+            &[(&restricted, DirectPriceModel::Structural)],
+            |_| Ok(Some(2.0).into()),
+        )
+        .unwrap();
+        assert_eq!(result.incumbent.unwrap().actual_cost, 2.0);
+        assert_eq!(result.lower_bound, 0.0);
+        assert_eq!(result.status, CandidateSearchStatus::RefinementLimit);
+        assert_eq!(result.solve_metrics.direct_cost_validated_plans, 0);
     }
 
     // Separate scan-price classes share one budget and retain the best validated DAG.
