@@ -767,7 +767,7 @@ fn counter_panes_merge_in_any_order() {
             .as_any()
             .downcast_ref::<ExactAccumulator>()
             .unwrap()
-            .evaluation(&planner_types::ir::schema::ExactKind::Increase, None, None)
+            .evaluation(planner_types::ir::schema::ExactKind::Increase, None, None)
             .unwrap()
             .unwrap()
     };
@@ -835,7 +835,7 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
     ] {
         let build = Operator::per_group_summary_build(
             input.clone(),
-            FieldDataType::ExactAggregate(kind.clone(), params),
+            FieldDataType::ExactAggregate(kind, params),
             0,
             None,
             vec![],

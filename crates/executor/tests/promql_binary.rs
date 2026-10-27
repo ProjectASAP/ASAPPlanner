@@ -342,7 +342,7 @@ fn stored_series_evaluations_support_filters_and_sets() {
         (ExactKind::Sum, ExactParams::Sum),
         (ExactKind::Count, ExactParams::Count),
     ] {
-        let family = FieldDataType::ExactAggregate(exact_kind.clone(), params);
+        let family = FieldDataType::ExactAggregate(exact_kind, params);
         let state_schema = Arc::new(planner_types::ir::schema::Schema {
             unique_keys: vec![],
             closed: false,

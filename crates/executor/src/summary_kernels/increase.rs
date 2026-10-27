@@ -2,12 +2,12 @@ use crate::AggregateCore;
 use serde::{Deserialize, Serialize};
 
 /// Accumulator for tracking increases in counter metrics
-/// Stores the starting and last seen measurements with timestamps
+/// Stores the starting and last seen values with timestamps
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IncreaseAccumulator {
-    pub starting_measurement: f64,
+    pub starting_value: f64,
     pub starting_timestamp: i64,
-    pub last_seen_measurement: f64,
+    pub last_seen_value: f64,
     pub last_seen_timestamp: i64,
     /// Sum of monotonic deltas, adding the post-reset value whenever the
     /// counter decreases. This is the reset correction Prometheus applies.
@@ -28,17 +28,16 @@ impl IncreaseAccumulator {
         };
         let mut merged = first.clone();
         if second.starting_timestamp > merged.last_seen_timestamp {
-            merged.total_increase += if second.starting_measurement >= merged.last_seen_measurement
-            {
-                second.starting_measurement - merged.last_seen_measurement
+            merged.total_increase += if second.starting_value >= merged.last_seen_value {
+                second.starting_value - merged.last_seen_value
             } else {
-                second.starting_measurement
+                second.starting_value
             };
         }
         merged.total_increase += second.total_increase;
         merged.sample_count = merged.sample_count.saturating_add(second.sample_count);
         if second.last_seen_timestamp > merged.last_seen_timestamp {
-            merged.last_seen_measurement = second.last_seen_measurement;
+            merged.last_seen_value = second.last_seen_value;
             merged.last_seen_timestamp = second.last_seen_timestamp;
         }
 
@@ -46,17 +45,17 @@ impl IncreaseAccumulator {
     }
 
     pub fn new(
-        starting_measurement: f64,
+        starting_value: f64,
         starting_timestamp: i64,
-        last_seen_measurement: f64,
+        last_seen_value: f64,
         last_seen_timestamp: i64,
     ) -> Self {
         let total_increase = if last_seen_timestamp <= starting_timestamp {
             0.0
-        } else if last_seen_measurement >= starting_measurement {
-            last_seen_measurement - starting_measurement
+        } else if last_seen_value >= starting_value {
+            last_seen_value - starting_value
         } else {
-            last_seen_measurement
+            last_seen_value
         };
         let sample_count = if last_seen_timestamp > starting_timestamp {
             2
@@ -64,28 +63,28 @@ impl IncreaseAccumulator {
             1
         };
         Self {
-            starting_measurement,
+            starting_value,
             starting_timestamp,
-            last_seen_measurement,
+            last_seen_value,
             last_seen_timestamp,
             total_increase,
             sample_count,
         }
     }
 
-    pub fn update(&mut self, measurement: f64, timestamp: i64) {
+    pub fn update(&mut self, value: f64, timestamp: i64) {
         if timestamp < self.last_seen_timestamp {
             return;
         }
         if timestamp == self.last_seen_timestamp {
             return;
         }
-        if measurement >= self.last_seen_measurement {
-            self.total_increase += measurement - self.last_seen_measurement;
+        if value >= self.last_seen_value {
+            self.total_increase += value - self.last_seen_value;
         } else {
-            self.total_increase += measurement;
+            self.total_increase += value;
         }
-        self.last_seen_measurement = measurement;
+        self.last_seen_value = value;
         self.last_seen_timestamp = timestamp;
         self.sample_count = self.sample_count.saturating_add(1);
     }
@@ -118,7 +117,7 @@ impl AggregateCore for IncreaseAccumulator {
     }
 
     fn approx_memory_bytes(&self) -> usize {
-        // Two f64 measurements, two i64 timestamps and the running totals.
+        // Two f64 values, two i64 timestamps and the running totals.
         std::mem::size_of::<Self>()
     }
 }
@@ -151,9 +150,8 @@ impl IncreaseAccumulator {
         let average_sample_interval = sampled_interval / (self.sample_count - 1) as f64;
         let extrapolation_threshold = average_sample_interval * 1.1;
 
-        if self.total_increase > 0.0 && self.starting_measurement >= 0.0 {
-            let duration_to_zero =
-                sampled_interval * (self.starting_measurement / self.total_increase);
+        if self.total_increase > 0.0 && self.starting_value >= 0.0 {
+            let duration_to_zero = sampled_interval * (self.starting_value / self.total_increase);
             duration_to_start = duration_to_start.min(duration_to_zero);
         }
         let mut extrapolate_to = sampled_interval;
@@ -181,27 +179,26 @@ mod tests {
 
     #[test]
     fn test_increase_accumulator_creation() {
-        let starting_measurement = 10.0;
-        let last_seen_measurement = 25.0;
-        let acc = IncreaseAccumulator::new(starting_measurement, 1000, last_seen_measurement, 2000);
+        let starting_value = 10.0;
+        let last_seen_value = 25.0;
+        let acc = IncreaseAccumulator::new(starting_value, 1000, last_seen_value, 2000);
 
-        assert_eq!(acc.starting_measurement, 10.0);
+        assert_eq!(acc.starting_value, 10.0);
         assert_eq!(acc.starting_timestamp, 1000);
-        assert_eq!(acc.last_seen_measurement, 25.0);
+        assert_eq!(acc.last_seen_value, 25.0);
         assert_eq!(acc.last_seen_timestamp, 2000);
     }
 
     #[test]
     fn test_increase_accumulator_update() {
-        let starting_measurement = 10.0;
-        let mut acc =
-            IncreaseAccumulator::new(starting_measurement, 1000, starting_measurement, 1000);
+        let starting_value = 10.0;
+        let mut acc = IncreaseAccumulator::new(starting_value, 1000, starting_value, 1000);
 
         let new_measurement = 25.0;
         acc.update(new_measurement, 2000);
 
-        assert_eq!(acc.last_seen_measurement, 25.0);
+        assert_eq!(acc.last_seen_value, 25.0);
         assert_eq!(acc.last_seen_timestamp, 2000);
-        assert_eq!(acc.starting_measurement, 10.0); // Should remain unchanged
+        assert_eq!(acc.starting_value, 10.0); // Should remain unchanged
     }
 }

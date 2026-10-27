@@ -28,7 +28,7 @@ fn merge_exact_states(
 /// state/type/range failures remain errors rather than empty results.
 pub fn insufficient_counter_raw_data_samples(
     state: &dyn AggregateCore,
-    statistic: &ExactKind,
+    statistic: ExactKind,
 ) -> bool {
     matches!(statistic, ExactKind::Rate | ExactKind::Increase)
         && state
@@ -42,7 +42,7 @@ pub fn insufficient_counter_raw_data_samples(
 /// or an empty MIN/MAX.
 pub fn exact_evaluation(
     states: impl IntoIterator<Item = Arc<dyn AggregateCore>>,
-    statistic: &ExactKind,
+    statistic: ExactKind,
     range_ms: Option<(i64, i64)>,
     key: Option<&[String]>,
 ) -> Result<Option<f64>, String> {
@@ -72,13 +72,13 @@ mod counter_tests {
             (ExactKind::Increase, ExactParams::Increase),
         ] {
             for keyed in [false, true] {
-                let mut state = counter(kind.clone(), params.clone(), keyed);
+                let mut state = counter(kind, params.clone(), keyed);
                 let key = keyed.then(|| vec!["checkout".to_string()]);
                 state.update(key.as_deref(), 10., 10_000);
                 assert_eq!(
                     exact_evaluation(
                         [Arc::new(state) as Arc<dyn AggregateCore>],
-                        &kind,
+                        kind,
                         None,
                         key.as_deref()
                     )
@@ -94,7 +94,7 @@ mod counter_tests {
     fn sparse_counter_is_absent_but_invalid_ranges_still_fail() {
         let mut state = counter(ExactKind::Rate, ExactParams::Rate, false);
         state.update(None, 10., 10_000);
-        let rate = &ExactKind::Rate;
+        let rate = ExactKind::Rate;
         let one = [Arc::new(state.clone()) as Arc<dyn AggregateCore>];
         assert_eq!(
             exact_evaluation(one, rate, Some((0, 60_000)), None).unwrap(),

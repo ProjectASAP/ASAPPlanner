@@ -987,7 +987,7 @@ fn invalid_rollups_fail_construction() {
     ] {
         let state = grouped(
             pane_rows(0, vec![]),
-            FieldDataType::ExactAggregate(kind.clone(), params),
+            FieldDataType::ExactAggregate(kind, params),
             Reduction::by(vec![2]),
         );
         assert!(

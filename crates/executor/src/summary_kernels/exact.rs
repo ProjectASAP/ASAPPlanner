@@ -71,7 +71,7 @@ impl TryFrom<ExactPayload> for ExactAccumulator {
 /// Planned evaluation of an exact summary. `lookback_ms` is the logical PromQL
 /// counter window, ending `offset_ms` before the evaluation time (PromQL
 /// `offset`); the evaluation range is resolved from them at run time.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ExactEvaluation {
     pub statistic: ExactKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,7 +89,7 @@ impl ExactAccumulator {
     /// `range_ms` extrapolates a counter Rate/Increase to that evaluation range.
     pub fn evaluation(
         &self,
-        statistic: &ExactKind,
+        statistic: ExactKind,
         range_ms: Option<(i64, i64)>,
         key: Option<&[String]>,
     ) -> Result<Option<f64>, Error> {
@@ -173,7 +173,7 @@ impl ExactAccumulator {
     }
     pub(crate) fn insufficient_counter_raw_data_samples(
         &self,
-        statistic: &ExactKind,
+        statistic: ExactKind,
         key: Option<&[String]>,
     ) -> bool {
         if statistic != self.statistic() {
@@ -216,15 +216,15 @@ impl ExactAccumulator {
         self.keyed.is_none().then_some(&self.scalar)
     }
 
-    fn statistic(&self) -> &ExactKind {
+    fn statistic(&self) -> ExactKind {
         statistic_of(&self.family)
     }
 }
 
 /// The statistic an exact `family` answers: its [`ExactKind`].
-pub(crate) fn statistic_of(family: &SummaryFamilyType) -> &ExactKind {
+pub(crate) fn statistic_of(family: &SummaryFamilyType) -> ExactKind {
     match family {
-        SummaryFamilyType::ExactAggregate(kind, _) => kind,
+        SummaryFamilyType::ExactAggregate(kind, _) => *kind,
         _ => unreachable!("validated exact family"),
     }
 }
@@ -273,7 +273,7 @@ impl ScalarState {
     /// counter. An empty MIN/MAX reads as `None`.
     pub(crate) fn evaluation(
         &self,
-        statistic: &ExactKind,
+        statistic: ExactKind,
         range_ms: Option<(i64, i64)>,
     ) -> Result<Option<f64>, Error> {
         match self {
@@ -283,7 +283,7 @@ impl ScalarState {
             ScalarState::Count(count) => Ok(Some(*count as f64)),
             ScalarState::Min(value) | ScalarState::Max(value) => Ok(*value),
             ScalarState::Counter(Some(counter)) => counter
-                .extrapolated_value(range_ms, *statistic == ExactKind::Rate)
+                .extrapolated_value(range_ms, statistic == ExactKind::Rate)
                 .map(Some),
             ScalarState::Counter(None) => Err("empty counter population".into()),
         }
@@ -469,7 +469,7 @@ mod tests {
         negative.update(None, -1e16, 1);
         restored.merge_from(&negative).unwrap();
         assert_eq!(
-            restored.evaluation(&ExactKind::Sum, None, None).unwrap(),
+            restored.evaluation(ExactKind::Sum, None, None).unwrap(),
             Some(1.0)
         );
     }
@@ -481,12 +481,12 @@ mod tests {
         state.update(None, f64::INFINITY, 0);
         state.update(None, 1.0, 0);
         assert_eq!(
-            state.evaluation(&ExactKind::Sum, None, None).unwrap(),
+            state.evaluation(ExactKind::Sum, None, None).unwrap(),
             Some(f64::INFINITY)
         );
         state.update(None, f64::NEG_INFINITY, 0);
         assert!(state
-            .evaluation(&ExactKind::Sum, None, None)
+            .evaluation(ExactKind::Sum, None, None)
             .unwrap()
             .unwrap()
             .is_nan());
@@ -503,7 +503,7 @@ mod tests {
         assert_eq!(restored.family(), &sum());
         assert_eq!(
             restored
-                .evaluation(&ExactKind::Sum, None, Some(&key))
+                .evaluation(ExactKind::Sum, None, Some(&key))
                 .unwrap(),
             Some(2.5)
         );

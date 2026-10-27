@@ -247,7 +247,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                     .as_any()
                     .downcast_ref::<asap_executor::summary_kernels::exact::ExactAccumulator>()
                     .unwrap()
-                    .evaluation(&ExactKind::Sum, None, None)
+                    .evaluation(ExactKind::Sum, None, None)
                     .unwrap()
                     .unwrap(),
                 expected

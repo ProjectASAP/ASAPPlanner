@@ -374,7 +374,7 @@ fn fragment(
                     kind @ (planner_types::ir::schema::ExactKind::Sum
                     | planner_types::ir::schema::ExactKind::Count),
                     _,
-                ) => kind.clone(),
+                ) => *kind,
                 _ => {
                     return Err(invalid(
                         "precompute finalization requires explicit Sum or Count semantics",

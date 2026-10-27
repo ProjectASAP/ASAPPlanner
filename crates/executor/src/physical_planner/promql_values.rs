@@ -234,7 +234,7 @@ pub fn compile_exact_evaluation(
         SummaryFamilyType::ExactAggregate(ExactKind::IRate, _) => {
             return Err(invalid("instant-rate state evaluation is not supported"))
         }
-        SummaryFamilyType::ExactAggregate(kind, _) => kind.clone(),
+        SummaryFamilyType::ExactAggregate(kind, _) => *kind,
         _ => return Err(invalid("exact evaluation requires an exact family")),
     };
     let is_counter = matches!(statistic, ExactKind::Rate | ExactKind::Increase);

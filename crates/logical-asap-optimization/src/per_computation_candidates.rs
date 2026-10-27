@@ -3345,7 +3345,7 @@ fn substitute_measure(
         ))?)
     };
     let finalized = |kind: &ExactKind, intent: &AggIntent, read| {
-        let state = state(exact_family(kind.clone()), intent, read)?;
+        let state = state(exact_family(*kind), intent, read)?;
         Ok::<_, PerComputationCandidateError>(OperatorNode::new_shared(Operator::ASAP(
             ASAPOp::FinalizeExactAccumulator { child: state },
         ))?)

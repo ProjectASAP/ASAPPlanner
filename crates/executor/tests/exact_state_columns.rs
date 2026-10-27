@@ -95,7 +95,7 @@ fn exact_records_merge_and_evaluate_as_kernel_objects_do() {
         (ExactKind::Rate, ExactParams::Rate),
         (ExactKind::Increase, ExactParams::Increase),
     ] {
-        let family = FieldDataType::ExactAggregate(kind.clone(), params);
+        let family = FieldDataType::ExactAggregate(kind, params);
         let build = || {
             Operator::per_group_summary_build(input(), family.clone(), 2, Some(1), vec![0]).unwrap()
         };
@@ -112,7 +112,7 @@ fn exact_records_merge_and_evaluate_as_kernel_objects_do() {
                 merged[0].schema().clone(),
                 1,
                 SummaryEvaluation::Exact(ExactEvaluation {
-                    statistic: kind.clone(),
+                    statistic: kind,
                     lookback_ms: None,
                     offset_ms: 0,
                 }),

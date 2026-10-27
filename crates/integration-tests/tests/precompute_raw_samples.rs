@@ -257,7 +257,7 @@ fn evaluations(state: &dyn AggregateCore, family: &FieldDataType) -> Vec<f64> {
         let FieldDataType::ExactAggregate(kind, _) = family else {
             unreachable!()
         };
-        return vec![exact.evaluation(kind, None, None).unwrap().unwrap()];
+        return vec![exact.evaluation(*kind, None, None).unwrap().unwrap()];
     }
     let FieldDataType::Sketch(kind, _) = family else {
         panic!("sketch state for exact family")

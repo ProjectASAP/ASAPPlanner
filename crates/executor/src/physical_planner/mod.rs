@@ -1043,7 +1043,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
             use planner_types::ir::schema::ExactKind as E;
             let statistic = match &input.fields[state].dtype {
                 FieldDataType::ExactAggregate(kind, _) => match kind {
-                    E::Sum | E::Count | E::Min | E::Max | E::Rate | E::Increase => kind.clone(),
+                    E::Sum | E::Count | E::Min | E::Max | E::Rate | E::Increase => *kind,
                     _ => return Err(invalid("exact family evaluation is unsupported")),
                 },
                 _ => return Err(invalid("exact finalization requires exact state")),
