@@ -215,8 +215,15 @@ fn lower_scalar(
                 && matches!(expression.scalar_type(schema), Ok((DataType::Timestamp, _))) =>
         {
             // Its row semantics, once; an error stays on the row path.
-            let value =
-                super::planner::evaluate(expression, &[], schema, evaluation_time_ms).ok()?;
+            // A timestamp shift reads no column and no label regex.
+            let value = super::planner::evaluate(
+                expression,
+                &[],
+                schema,
+                evaluation_time_ms,
+                &Default::default(),
+            )
+            .ok()?;
             (
                 VectorExpr::Literal(value, DataType::Timestamp),
                 DataType::Timestamp,
@@ -1032,6 +1039,21 @@ mod tests {
                 &batch,
             ));
             expressions.push(planner(compare(api(), op, ScalarExpr::Column(5)), &batch));
+        }
+        // Label regex matchers: NULLs (column 4), an empty match, anchoring.
+        for op in [CompareOpKind::Regex, CompareOpKind::NotRegex] {
+            for pattern in ["api|db", "", "a.*", "pi"] {
+                for column in [4, 5] {
+                    expressions.push(planner(
+                        compare(
+                            ScalarExpr::Column(column),
+                            op.clone(),
+                            ScalarExpr::Literal(ScalarValue::Utf8(pattern.into())),
+                        ),
+                        &batch,
+                    ));
+                }
+            }
         }
         expressions.extend([
             planner(

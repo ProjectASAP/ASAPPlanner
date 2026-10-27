@@ -274,7 +274,7 @@ pub(super) fn execute<'a>(
                 let to = layout(&output)?;
                 let regex = source_regex
                     .as_ref()
-                    .map(|(_, pattern)| regex::Regex::new(&format!("^(?s:{pattern})$")))
+                    .map(|(_, pattern)| crate::expressions::promql_anchored_regex(pattern))
                     .transpose()
                     .map_err(|e| invalid(&e.to_string()))?;
                 let mut seen = std::collections::BTreeSet::new();

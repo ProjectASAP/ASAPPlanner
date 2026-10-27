@@ -252,3 +252,104 @@ fn window_edges_and_an_empty_window() {
     assert_answers("sum_over_time(x[1m])", &samples, &[("a", 6.0)]);
     assert_answers("quantile_over_time(1, x[1m])", &samples, &[("a", 4.0)]);
 }
+
+// Label matchers select series as in PromQL: `=~` and `!~` are fully
+// anchored RE2 matches, like `=` and `!=`. Series `a` holds 1, 4, `b` 10, 30
+// and `c` 100.
+#[test]
+fn label_matchers_select_series() {
+    let samples = [
+        series("a", &[1.0, 4.0]),
+        series("b", &[10.0, 30.0]),
+        series("c", &[100.0]),
+    ]
+    .concat();
+    for (query, expected) in [
+        (r#"sum_over_time(x{instance="a"}[1m])"#, &[("a", 5.0)][..]),
+        (
+            r#"sum_over_time(x{instance!="a"}[1m])"#,
+            &[("b", 40.0), ("c", 100.0)],
+        ),
+        (
+            r#"sum_over_time(x{instance=~"a|b"}[1m])"#,
+            &[("a", 5.0), ("b", 40.0)],
+        ),
+        (
+            r#"sum_over_time(x{instance!~"a"}[1m])"#,
+            &[("b", 40.0), ("c", 100.0)],
+        ),
+        // `.` matches each one-character value.
+        (
+            r#"sum_over_time(x{instance=~"."}[1m])"#,
+            &[("a", 5.0), ("b", 40.0), ("c", 100.0)],
+        ),
+    ] {
+        assert_answers(query, &samples, expected);
+    }
+}
+
+// A pattern matches the whole value (`api` neither `api2` nor `xapi`), `.`
+// also matches a newline, and a `{` that opens no repetition is a literal
+// brace (`/api/{id}`), as in Prometheus.
+#[test]
+fn label_regexes_are_anchored_dotall_and_keep_literal_braces() {
+    let samples = [
+        series("api", &[1.0]),
+        series("api2", &[10.0]),
+        series("xapi", &[100.0]),
+        series("/api/{id}", &[1000.0]),
+        series("two\nlines", &[10000.0]),
+    ]
+    .concat();
+    for (query, expected) in [
+        (
+            r#"sum_over_time(x{instance=~"api"}[1m])"#,
+            &[("api", 1.0)][..],
+        ),
+        (
+            r#"sum_over_time(x{instance!~"api"}[1m])"#,
+            &[
+                ("/api/{id}", 1000.0),
+                ("api2", 10.0),
+                ("two\nlines", 10000.0),
+                ("xapi", 100.0),
+            ],
+        ),
+        (
+            r#"sum_over_time(x{instance=~"/api/{id}"}[1m])"#,
+            &[("/api/{id}", 1000.0)],
+        ),
+        (
+            r#"sum_over_time(x{instance=~"two.lines"}[1m])"#,
+            &[("two\nlines", 10000.0)],
+        ),
+    ] {
+        assert_answers(query, &samples, expected);
+    }
+}
+
+// A label a series lacks matches as the empty text, as in PromQL: only `a`
+// carries `zone`, so `zone=~""` and `zone!~".+"` select `b` and `c`.
+#[test]
+fn a_missing_label_matches_as_empty_text() {
+    let mut samples = [
+        series("a", &[1.0, 4.0]),
+        series("b", &[10.0]),
+        series("c", &[100.0]),
+    ]
+    .concat();
+    for sample in samples.iter_mut().filter(|s| s.labels["instance"] == "a") {
+        sample.labels.insert("zone".into(), "eu".into());
+    }
+    for query in [
+        r#"sum_over_time(x{zone=~""}[1m])"#,
+        r#"sum_over_time(x{zone!~".+"}[1m])"#,
+    ] {
+        assert_answers(query, &samples, &[("b", 10.0), ("c", 100.0)]);
+    }
+    assert_answers(
+        r#"sum_over_time(x{zone=~"e."}[1m])"#,
+        &samples,
+        &[("a", 5.0)],
+    );
+}

@@ -39,12 +39,14 @@ fn planned(expression: &ScalarExpr) -> PlannedExpr {
 use std::{cmp::Ordering, sync::Arc};
 
 /// `expr`'s value over `row`. `evaluation_time_ms` is SQL `now()`: the
-/// query's evaluation time, `None` outside a query run.
+/// query's evaluation time, `None` outside a query run. `regexes` holds the
+/// compiled pattern of each `=~` / `!~` in `expr` ([`label_regexes_of`]).
 pub(super) fn evaluate(
     expr: &ScalarExpr,
     row: &[Value],
     schema: &planner_types::ir::schema::Schema,
     evaluation_time_ms: Option<i64>,
+    regexes: &LabelRegexes,
 ) -> Result<Value, Error> {
     match expr {
         ScalarExpr::CurrentTimestamp => evaluation_time_ms.map(Value::Timestamp).ok_or_else(|| {
@@ -71,7 +73,7 @@ pub(super) fn evaluate(
             ScalarValue::Null => Value::Null,
         }),
         ScalarExpr::Cast { expr, to, .. } => {
-            let value = evaluate(expr, row, schema, evaluation_time_ms)?;
+            let value = evaluate(expr, row, schema, evaluation_time_ms, regexes)?;
             match (value, to) {
                 (Value::Null, _) => Ok(Value::Null),
                 (Value::Int64(value), DataType::Float64) => Ok(Value::Float64(value as f64)),
@@ -87,29 +89,52 @@ pub(super) fn evaluate(
                 _ => Err(Error::Invalid("unsupported cast".into())),
             }
         }
-        ScalarExpr::Negative { expr, .. } => match evaluate(expr, row, schema, evaluation_time_ms)?
-        {
-            Value::Float64(v) => Ok(Value::Float64(-v)),
-            Value::Int64(v) => v
-                .checked_neg()
-                .map(Value::Int64)
-                .ok_or_else(|| Error::Invalid("integer negation overflow".into())),
-            Value::Null => Ok(Value::Null),
-            _ => Err(Error::Invalid("invalid negation input".into())),
-        },
+        ScalarExpr::Negative { expr, .. } => {
+            match evaluate(expr, row, schema, evaluation_time_ms, regexes)? {
+                Value::Float64(v) => Ok(Value::Float64(-v)),
+                Value::Int64(v) => v
+                    .checked_neg()
+                    .map(Value::Int64)
+                    .ok_or_else(|| Error::Invalid("integer negation overflow".into())),
+                Value::Null => Ok(Value::Null),
+                _ => Err(Error::Invalid("invalid negation input".into())),
+            }
+        }
+        ScalarExpr::Compare {
+            left,
+            op: op @ (CompareOpKind::Regex | CompareOpKind::NotRegex),
+            right,
+            ..
+        } => {
+            let ScalarExpr::Literal(ScalarValue::Utf8(pattern)) = &**right else {
+                return Err(Error::Invalid(format!("{op:?} needs a literal pattern")));
+            };
+            let regex = regexes
+                .get(pattern.as_str())
+                .ok_or_else(|| Error::Invalid(format!("label regex {pattern:?} not compiled")))?;
+            match evaluate(left, row, schema, evaluation_time_ms, regexes)? {
+                Value::Null => Ok(Value::Null),
+                Value::Utf8(text) => Ok(Value::Bool(
+                    regex.is_match(text.as_ref()) == matches!(op, CompareOpKind::Regex),
+                )),
+                _ => Err(Error::Invalid(format!(
+                    "comparison {op:?} of non-text values"
+                ))),
+            }
+        }
         ScalarExpr::Compare {
             left, op, right, ..
         } => {
-            let left = evaluate(left, row, schema, evaluation_time_ms)?;
-            let right = evaluate(right, row, schema, evaluation_time_ms)?;
+            let left = evaluate(left, row, schema, evaluation_time_ms, regexes)?;
+            let right = evaluate(right, row, schema, evaluation_time_ms, regexes)?;
             compare(op, left, right)
         }
         ScalarExpr::Arithmetic {
             op, left, right, ..
         } => arithmetic(
             op,
-            evaluate(left, row, schema, evaluation_time_ms)?,
-            evaluate(right, row, schema, evaluation_time_ms)?,
+            evaluate(left, row, schema, evaluation_time_ms, regexes)?,
+            evaluate(right, row, schema, evaluation_time_ms, regexes)?,
         ),
         ScalarExpr::Case {
             operand: None,
@@ -118,21 +143,21 @@ pub(super) fn evaluate(
         } => {
             for (condition, value) in branches {
                 if matches!(
-                    evaluate(condition, row, schema, evaluation_time_ms)?,
+                    evaluate(condition, row, schema, evaluation_time_ms, regexes)?,
                     Value::Bool(true)
                 ) {
-                    return evaluate(value, row, schema, evaluation_time_ms);
+                    return evaluate(value, row, schema, evaluation_time_ms, regexes);
                 }
             }
             else_expr.as_ref().map_or(Ok(Value::Null), |e| {
-                evaluate(e, row, schema, evaluation_time_ms)
+                evaluate(e, row, schema, evaluation_time_ms, regexes)
             })
         }
         ScalarExpr::BoolAnd(parts) | ScalarExpr::BoolOr(parts) => {
             let and = matches!(expr, ScalarExpr::BoolAnd(_));
             let mut null = false;
             for part in parts {
-                match evaluate(part, row, schema, evaluation_time_ms)? {
+                match evaluate(part, row, schema, evaluation_time_ms, regexes)? {
                     Value::Bool(value) if value != and => return Ok(Value::Bool(value)),
                     Value::Bool(_) => {}
                     Value::Null => null = true,
@@ -141,17 +166,19 @@ pub(super) fn evaluate(
             }
             Ok(if null { Value::Null } else { Value::Bool(and) })
         }
-        ScalarExpr::Not(value) => match evaluate(value, row, schema, evaluation_time_ms)? {
-            Value::Bool(value) => Ok(Value::Bool(!value)),
-            Value::Null => Ok(Value::Null),
-            _ => Err(Error::Invalid("boolean predicate required".into())),
-        },
+        ScalarExpr::Not(value) => {
+            match evaluate(value, row, schema, evaluation_time_ms, regexes)? {
+                Value::Bool(value) => Ok(Value::Bool(!value)),
+                Value::Null => Ok(Value::Null),
+                _ => Err(Error::Invalid("boolean predicate required".into())),
+            }
+        }
         ScalarExpr::IsNull(value) => Ok(Value::Bool(matches!(
-            evaluate(value, row, schema, evaluation_time_ms)?,
+            evaluate(value, row, schema, evaluation_time_ms, regexes)?,
             Value::Null
         ))),
         ScalarExpr::IsNotNull(value) => Ok(Value::Bool(!matches!(
-            evaluate(value, row, schema, evaluation_time_ms)?,
+            evaluate(value, row, schema, evaluation_time_ms, regexes)?,
             Value::Null
         ))),
         ScalarExpr::FunctionCall { name, args } => {
@@ -160,7 +187,7 @@ pub(super) fn evaluate(
                 let values = args
                     .iter()
                     .map(
-                        |arg| match evaluate(arg, row, schema, evaluation_time_ms)? {
+                        |arg| match evaluate(arg, row, schema, evaluation_time_ms, regexes)? {
                             Value::Float64(v) => Ok(v),
                             _ => Err(Error::Invalid("PromQL function requires floats".into())),
                         },
@@ -169,7 +196,8 @@ pub(super) fn evaluate(
                 return Ok(Value::Float64(promql_function(name, &values)?));
             }
             if name == "promql_drop_metric_name" {
-                let Value::Utf8(encoded) = evaluate(&args[0], row, schema, evaluation_time_ms)?
+                let Value::Utf8(encoded) =
+                    evaluate(&args[0], row, schema, evaluation_time_ms, regexes)?
                 else {
                     return Err(Error::Invalid("series identity must be Utf8".into()));
                 };
@@ -202,7 +230,8 @@ pub(super) fn evaluate(
                     _ => None,
                 }
                 .ok_or_else(|| Error::Invalid("struct field selector".into()))?;
-                let Value::Struct(values) = evaluate(&args[0], row, schema, evaluation_time_ms)?
+                let Value::Struct(values) =
+                    evaluate(&args[0], row, schema, evaluation_time_ms, regexes)?
                 else {
                     return Err(Error::Invalid("struct field input".into()));
                 };
@@ -220,11 +249,13 @@ pub(super) fn evaluate(
                     .map_err(|error| Error::Invalid(error.to_string()))?
                     .0
                 {
-                    let Value::List(values) = evaluate(&args[0], row, schema, evaluation_time_ms)?
+                    let Value::List(values) =
+                        evaluate(&args[0], row, schema, evaluation_time_ms, regexes)?
                     else {
                         return Err(Error::Invalid("array access input".into()));
                     };
-                    let index = match evaluate(&args[1], row, schema, evaluation_time_ms)? {
+                    let index = match evaluate(&args[1], row, schema, evaluation_time_ms, regexes)?
+                    {
                         Value::Null => return Ok(Value::Null),
                         Value::Int64(index) => index,
                         _ => return Err(Error::Invalid("array access index".into())),
@@ -254,7 +285,7 @@ pub(super) fn evaluate(
                 .map_err(|error| Error::Invalid(error.to_string()))?;
             let values = args
                 .iter()
-                .map(|arg| evaluate(arg, row, schema, evaluation_time_ms))
+                .map(|arg| evaluate(arg, row, schema, evaluation_time_ms, regexes))
                 .collect::<Result<Vec<_>, _>>()?;
             match function {
                 MapScalarFunction::Construct => {
@@ -380,6 +411,35 @@ fn compare(op: &CompareOpKind, left: Value, right: Value) -> Result<Value, Error
         _ => return Err(Error::Invalid(format!("comparison {op:?}"))),
     };
     Ok(Value::Bool(value))
+}
+
+/// The compiled pattern of each PromQL `=~` / `!~` in an expression, by
+/// pattern text.
+pub(super) type LabelRegexes = std::collections::HashMap<String, regex::Regex>;
+
+/// Compiles every `=~` / `!~` pattern in `expr` ([`super::promql_anchored_regex`]).
+fn label_regexes_of(expr: &ScalarExpr) -> Result<LabelRegexes, Error> {
+    let mut regexes = LabelRegexes::new();
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        if let ScalarExpr::Compare {
+            op: CompareOpKind::Regex | CompareOpKind::NotRegex,
+            right,
+            ..
+        } = expr
+        {
+            if let ScalarExpr::Literal(ScalarValue::Utf8(pattern)) = &**right {
+                if !regexes.contains_key(pattern.as_str()) {
+                    let regex = super::promql_anchored_regex(pattern).map_err(|e| {
+                        Error::Invalid(format!("invalid label regex {pattern:?}: {e}"))
+                    })?;
+                    regexes.insert(pattern.to_string(), regex);
+                }
+            }
+        }
+        pending.extend(expr.children());
+    }
+    Ok(regexes)
 }
 
 fn arithmetic(op: &ArithmeticOpKind, left: Value, right: Value) -> Result<Value, Error> {
@@ -600,6 +660,10 @@ pub struct CompiledExpression {
     /// outside a query run.
     #[serde(skip)]
     evaluation_time_ms: Option<i64>,
+    /// Its `=~` / `!~` patterns, compiled when the expression is, or on
+    /// first use after deserialization; clones share them.
+    #[serde(skip)]
+    label_regexes: Arc<std::sync::OnceLock<LabelRegexes>>,
 }
 impl CompiledExpression {
     pub(crate) fn expression(&self) -> &ScalarExpr {
@@ -652,6 +716,7 @@ impl CompiledExpression {
             .scalar_type(&schema)
             .map_err(|e| Error::Invalid(e.to_string()))?;
         Ok(Self {
+            label_regexes: Arc::new(label_regexes_of(expression)?.into()),
             expression: expression.clone(),
             schema,
             output,
@@ -696,7 +761,21 @@ impl CompiledExpression {
                 "expression input differs from its bound schema".into(),
             ));
         }
-        evaluate(&self.expression, row, &self.schema, self.evaluation_time_ms)
+        evaluate(
+            &self.expression,
+            row,
+            &self.schema,
+            self.evaluation_time_ms,
+            self.label_regexes()?,
+        )
+    }
+
+    fn label_regexes(&self) -> Result<&LabelRegexes, Error> {
+        if let Some(regexes) = self.label_regexes.get() {
+            return Ok(regexes);
+        }
+        let regexes = label_regexes_of(&self.expression)?;
+        Ok(self.label_regexes.get_or_init(|| regexes))
     }
 }
 fn validate(expr: &ScalarExpr, schema: &planner_types::ir::schema::Schema) -> Result<(), Error> {
@@ -757,6 +836,30 @@ fn validate(expr: &ScalarExpr, schema: &planner_types::ir::schema::Schema) -> Re
                 }
             }
             Ok(())
+        }
+        // PromQL's `=~` / `!~`: text against a literal pattern, compiled
+        // here so a bad pattern fails before any row.
+        ScalarExpr::Compare {
+            left,
+            right,
+            op: CompareOpKind::Regex | CompareOpKind::NotRegex,
+            ..
+        } => {
+            validate(left, schema)?;
+            let text = left
+                .scalar_type(schema)
+                .map_err(|e| Error::Invalid(e.to_string()))?
+                .0;
+            match &**right {
+                ScalarExpr::Literal(ScalarValue::Utf8(pattern)) if text == DataType::Utf8 => {
+                    super::promql_anchored_regex(pattern)
+                        .map(|_| ())
+                        .map_err(|e| {
+                            Error::Invalid(format!("invalid label regex {pattern:?}: {e}"))
+                        })
+                }
+                _ => Err(invalid()),
+            }
         }
         ScalarExpr::Compare {
             left, right, op, ..
@@ -877,6 +980,64 @@ fn validate(expr: &ScalarExpr, schema: &planner_types::ir::schema::Schema) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A label regex must be a valid literal pattern over text; both fail at
+    // compile time, the bad pattern named.
+    #[test]
+    fn label_regex_rejects_bad_patterns_at_compile_time() {
+        let schema = std::sync::Arc::new(planner_types::ir::schema::Schema::new(vec![
+            planner_types::ir::schema::Field::plain("job", DataType::Utf8, false),
+            planner_types::ir::schema::Field::plain("v", DataType::Float64, false),
+        ]));
+        let matcher = |column: usize, right: PlannedExpr| {
+            CompiledExpression::compile(
+                &PlannedExpr::Compare {
+                    left: Box::new(PlannedExpr::Column(column)),
+                    op: CompareOpKind::Regex,
+                    right: Box::new(right),
+                    semantics: planner_types::ir::scalar::ExprSemantics::Promql,
+                },
+                &schema,
+            )
+        };
+        let text = |value: &str| PlannedExpr::Literal(ScalarValue::Utf8(value.into()));
+        assert!(matcher(0, text("api|db")).is_ok());
+        let error = matcher(0, text("a(")).unwrap_err().to_string();
+        assert!(error.contains("\"a(\""), "{error}");
+        // Non-text input fails the Planner's typing; a column pattern is not a literal.
+        assert!(matcher(1, text("1")).is_err());
+        assert!(matcher(0, PlannedExpr::Column(0)).is_err());
+    }
+
+    // The compiled patterns are not serialized: a deserialized expression
+    // compiles them on first use and matches as the original does.
+    #[test]
+    fn a_deserialized_label_regex_matches_as_compiled() {
+        let schema = std::sync::Arc::new(planner_types::ir::schema::Schema::new(vec![
+            planner_types::ir::schema::Field::plain("job", DataType::Utf8, false),
+        ]));
+        let compiled = CompiledExpression::compile(
+            &PlannedExpr::Compare {
+                left: Box::new(PlannedExpr::Column(0)),
+                op: CompareOpKind::NotRegex,
+                right: Box::new(PlannedExpr::Literal(ScalarValue::Utf8("api|db".into()))),
+                semantics: planner_types::ir::scalar::ExprSemantics::Promql,
+            },
+            &schema,
+        )
+        .unwrap();
+        let restored: CompiledExpression =
+            serde_json::from_str(&serde_json::to_string(&compiled).unwrap()).unwrap();
+        for (job, kept) in [("api", false), ("db", false), ("web", true), ("api2", true)] {
+            let row = [Value::Utf8(job.into())];
+            for expression in [&compiled, &restored] {
+                assert!(
+                    matches!(expression.evaluate(&row), Ok(Value::Bool(b)) if b == kept),
+                    "{job}"
+                );
+            }
+        }
+    }
     #[test]
     fn mixed_comparison_preserves_integer_precision_and_boundaries() {
         assert_eq!(
@@ -961,9 +1122,15 @@ mod tests {
         };
         validate(&now_minus_a_second, &schema).unwrap();
         assert!(matches!(
-            evaluate(&now_minus_a_second, &[], &schema, Some(5_000)),
+            evaluate(
+                &now_minus_a_second,
+                &[],
+                &schema,
+                Some(5_000),
+                &Default::default()
+            ),
             Ok(Value::Timestamp(4_000))
         ));
-        assert!(evaluate(&now_minus_a_second, &[], &schema, None).is_err());
+        assert!(evaluate(&now_minus_a_second, &[], &schema, None, &Default::default()).is_err());
     }
 }
