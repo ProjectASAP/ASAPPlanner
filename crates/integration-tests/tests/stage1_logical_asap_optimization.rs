@@ -256,11 +256,11 @@ fn topk_over_an_aggregate_ranks_its_labels() {
 }
 
 /// A subquery inside a measure filter is substituted too: each choice for
-/// the inner count gives its own DAG, and an approximate inner count clears
+/// the inner quantile gives its own DAG, and an approximate inner result clears
 /// the outer measure's guarantee.
 #[tokio::test]
 async fn subquery_in_a_measure_filter_is_substituted() {
-    let query = "SELECT src, count(*) FILTER (WHERE bytes > (SELECT count(*) FROM flows)) \
+    let query = "SELECT src, count(*) FILTER (WHERE bytes > (SELECT approx_percentile_cont(bytes, 0.5) FROM flows)) \
                  FROM flows GROUP BY src";
     let inventory = generate_per_computation_candidates(vec![(0, sql(query).await)]).unwrap();
     assert_eq!(inventory.targets.len(), 2);
@@ -277,7 +277,7 @@ async fn subquery_in_a_measure_filter_is_substituted() {
                 })
                 .is_some_and(|by| by.keys().is_empty())
         })
-        .expect("inner count");
+        .expect("inner quantile");
     let candidates = &inventory.targets[inner].choices.candidates;
     assert!(candidates.len() > 1);
     let (mut seen, mut approximate_inner) = (Vec::new(), false);
