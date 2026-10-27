@@ -610,7 +610,11 @@ fn empty_exact_count_is_an_integer_state_evaluation() {
 // A deployment source cannot pass a different row shape to bound expressions.
 #[test]
 fn source_batches_must_match_the_bound_schema() {
-    use asap_executor::{physical_planner, plan::PhysicalOperator, runtime};
+    use asap_executor::{
+        physical_planner,
+        plan::{Boundedness, Emission, PhysicalOperator, PlanProperties},
+        runtime,
+    };
     use planner_types::ir::properties::ExecutionDataState;
     use std::{cell::Cell, collections::BTreeMap, rc::Rc};
     struct WrongSource {
@@ -620,6 +624,12 @@ fn source_batches_must_match_the_bound_schema() {
     impl PhysicalOperator<Batch, SchemaRef> for WrongSource {
         fn name(&self) -> &str {
             "ExternalSource"
+        }
+        fn properties(&self, _: &[PlanProperties]) -> PlanProperties {
+            PlanProperties {
+                boundedness: Boundedness::Bounded,
+                emission: Emission::Unknown,
+            }
         }
         fn input_schemas(&self) -> Vec<SchemaRef> {
             vec![]
@@ -1175,9 +1185,7 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
 // The grouped temporal reducer's sample schema must survive physical Sort/Limit binding.
 #[test]
 fn grouped_temporal_schema_compiles_and_executes_topk() {
-    use asap_executor::physical_planner::{
-        compile_node, CompiledPhysicalDAG, InputContract, Source,
-    };
+    use asap_executor::physical_planner::{compile_node, CompiledPhysicalDAG, Source};
     use planner_types::ir::physical_export::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
     use planner_types::ir::properties::ExecutionDataState;
 
@@ -1246,16 +1254,13 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
     )
     .unwrap();
     let compiled = CompiledPhysicalDAG::from_operators(
-        [(0, InputContract::bounded(input.clone()))].into(),
+        [(0, input.clone())].into(),
         [(1, (vec![0], sort)), (2, (vec![1], limit))].into(),
         vec![2],
     )
     .unwrap();
-    let recovered =
-        serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&compiled).unwrap())
-            .unwrap();
-    assert_eq!(recovered.row_source(2), Some(0));
-    assert_eq!(recovered.operator_name(2), Some("Limit"));
+    assert_eq!(compiled.row_source(2), Some(0));
+    assert_eq!(compiled.operator_name(2), Some("Limit"));
     let expected = vec![Value::Utf8("api".into()), Value::Float64(9.)];
     let batch = Batch::try_new(
         input.clone(),
@@ -1266,7 +1271,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
     )
     .unwrap();
     let source = Box::new(Operator::source(input, vec![batch]).unwrap()) as Source<'_>;
-    let physical = recovered.instantiate([(0, source)].into()).unwrap();
+    let physical = compiled.instantiate([(0, source)].into()).unwrap();
     let mut stream = physical
         .execute(&[2], RunContext::new(query(), Limits::default()).unwrap())
         .unwrap()
@@ -1286,9 +1291,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
 // A certified candidate set must have authoritative values for every key, including after recovery.
 #[test]
 fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
-    use asap_executor::physical_planner::{
-        compile_node, CompiledPhysicalDAG, InputContract, Source,
-    };
+    use asap_executor::physical_planner::{compile_node, CompiledPhysicalDAG, Source};
     use planner_types::ir::properties::*;
     use planner_types::ir::schema::*;
 
@@ -1316,11 +1319,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
             }),
         };
         let dag = CompiledPhysicalDAG::from_operators(
-            [
-                (0, InputContract::bounded(schema.clone())),
-                (1, InputContract::bounded(schema.clone())),
-            ]
-            .into(),
+            [(0, schema.clone()), (1, schema.clone())].into(),
             [(
                 2,
                 (
@@ -1337,8 +1336,6 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
             vec![2],
         )
         .unwrap();
-        let dag = serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&dag).unwrap())
-            .unwrap();
         assert_eq!(
             dag.certified_pruning_keys(2),
             certified.then_some(&[(0, 0)][..])
@@ -1400,9 +1397,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
 // Precompute arithmetic must match population/window identities, never zip arrival order.
 #[test]
 fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
-    use asap_executor::physical_planner::{
-        compile_node, CompiledPhysicalDAG, InputContract, Source,
-    };
+    use asap_executor::physical_planner::{compile_node, CompiledPhysicalDAG, Source};
     use planner_types::ir::properties::*;
     use planner_types::ir::schema::*;
 
@@ -1433,11 +1428,7 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
         }),
     };
     let program = CompiledPhysicalDAG::from_operators(
-        [
-            (0, InputContract::bounded(input.clone())),
-            (1, InputContract::bounded(input.clone())),
-        ]
-        .into(),
+        [(0, input.clone()), (1, input.clone())].into(),
         [(
             2,
             (
@@ -1449,9 +1440,6 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
         vec![2],
     )
     .unwrap();
-    let program =
-        serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&program).unwrap())
-            .unwrap();
     for (right, expected) in [
         (vec![("b", 2, 3.), ("a", 1, 2.)], Some(vec![8., 17.])),
         (vec![("b", 2, 3.)], None),

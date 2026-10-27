@@ -6,9 +6,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use asap_executor::physical_planner::{
-    compile_candidate, frontier_from_timing, promql_rows, InputContract,
-};
+use asap_executor::physical_planner::{compile_candidate, frontier_from_timing, promql_rows};
 use asap_executor::runtime::Scope;
 use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
@@ -61,9 +59,7 @@ fn execute(candidate: &Rc<OperatorNode>) -> Vec<f64> {
     let frontier = frontier_from_timing(&dag).unwrap();
     let compiled = compile_candidate(
         &dag,
-        raw.iter()
-            .map(|(id, schema)| (*id, InputContract::bounded(schema.clone())))
-            .collect(),
+        &raw.keys().copied().collect(),
         &[dag.roots[0] as u64],
         &frontier,
     )

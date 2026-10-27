@@ -2,7 +2,7 @@
 //! fresh-run execution.
 mod physical_common;
 use asap_executor::{
-    physical_planner::{compile, InputContract, Source},
+    physical_planner::{compile, Source},
     runtime::{Limits, RunContext, Scope},
     sources::{DataSources, MemorySource},
     values::{Batch, Value},
@@ -14,7 +14,10 @@ use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use futures::StreamExt;
 use physical_common::compile_physical_asap_dag;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 /// SQL filtering and grouped aggregation survive logical/physical lowering;
 /// rebinding the compiled DAG runs against new data rather than cached results.
@@ -53,7 +56,7 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
             .all(|field| matches!(field.dtype, FieldDataType::Plain(_))));
         let plan = compile(
             &dag,
-            BTreeMap::from([(scan.id as u64, InputContract::bounded(schema.clone()))]),
+            &BTreeSet::from([scan.id as u64]),
             &[dag.roots[0] as u64],
         )
         .unwrap();

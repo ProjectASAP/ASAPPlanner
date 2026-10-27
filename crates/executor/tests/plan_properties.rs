@@ -1,4 +1,4 @@
-//! Finite-input contracts are validated before source execution.
+//! Finite-input requirements are validated before source execution.
 use asap_executor::{
     operators::{Operator, SortKey},
     plan::{Boundedness, Emission, PhysicalDAG},

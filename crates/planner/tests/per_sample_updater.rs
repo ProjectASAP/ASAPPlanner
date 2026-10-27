@@ -2,10 +2,10 @@
 //! with `StateColumnUpdater`, the code the plan's `SummaryAgg` runs on a
 //! batch (issue #762): the same states as the executor's pane build.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use asap_executor::operators::Operator as ExecutorOperator;
-use asap_executor::physical_planner::{compile, InputContract, Source};
+use asap_executor::physical_planner::{compile, Source};
 use asap_executor::planner::ir::physical_export::PhysicalASAPOperatorPayload as Payload;
 use asap_executor::planner::ir::ASAPOp;
 use asap_executor::runtime::{Limits, RunContext, Scope};
@@ -117,12 +117,7 @@ async fn per_sample_updates_build_the_stored_pane_the_plan_builds() {
         RawDataSampleSelector::new(dag, &output.inputs.raw_data_sample_windows[0]).unwrap();
     let input = selector.window_batch(end_ms, &samples).unwrap();
     let window = output.inputs.raw_data_sample_windows[0].time_range_node_id as u64;
-    let compiled = compile(
-        dag,
-        BTreeMap::from([(window, InputContract::bounded(input.schema().clone()))]),
-        &[output.node_id as u64],
-    )
-    .unwrap();
+    let compiled = compile(dag, &BTreeSet::from([window]), &[output.node_id as u64]).unwrap();
     let source: Source<'_> =
         Box::new(ExecutorOperator::source(input.schema().clone(), vec![input]).unwrap());
     let build = compiled
@@ -209,13 +204,10 @@ async fn answers(
     ids: &[u64],
     scope: Scope,
 ) -> Vec<Vec<(BTreeMap<String, String>, f64)>> {
-    // What each bound input holds: its schema.
-    let contracts = inputs
-        .iter()
-        .map(|(&id, batch)| (id, InputContract::bounded(batch.schema().clone())))
-        .collect();
+    // Which nodes are bound inputs; each one's schema is its DAG node's.
+    let boundaries: BTreeSet<u64> = inputs.keys().copied().collect();
     // The executor's plan for `ids`, cut at the bound inputs.
-    let compiled = compile(dag, contracts, ids).unwrap();
+    let compiled = compile(dag, &boundaries, ids).unwrap();
     // Each input as an in-memory source.
     let sources = inputs
         .into_iter()

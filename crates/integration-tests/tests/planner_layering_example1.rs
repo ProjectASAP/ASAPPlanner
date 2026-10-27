@@ -645,10 +645,9 @@ fn stage2_physical_asap_optimization_materializes_only_panes_at_ingestion() {
 /// Compile `p` in the physical planner (the runtime capability check), with
 /// the samples each time range reads as its input.
 fn compile_in_runtime(p: &Physical) -> Result<(), String> {
-    use asap_executor::physical_planner::{compile, InputContract};
-    use std::sync::Arc;
+    use asap_executor::physical_planner::compile;
     let dag = p.dag();
-    let mut inputs = BTreeMap::new();
+    let mut inputs = BTreeSet::new();
     let mut pending = dag.roots.clone();
     let mut seen = HashSet::new();
     while let Some(id) = pending.pop() {
@@ -656,15 +655,13 @@ fn compile_in_runtime(p: &Physical) -> Result<(), String> {
             continue;
         }
         if relational(dag.payload(id)).as_deref() == Some("time_range") {
-            let node = dag.nodes.iter().find(|n| n.id == id).unwrap();
-            let schema = Arc::new(node.output_schema.clone());
-            inputs.insert(id as u64, InputContract::bounded(schema));
+            inputs.insert(id as u64);
         } else {
             pending.extend(dag.producers(id));
         }
     }
     let roots: Vec<u64> = dag.roots.iter().map(|&id| id as u64).collect();
-    compile(dag, inputs, &roots)
+    compile(dag, &inputs, &roots)
         .map(|_| ())
         .map_err(|e| format!("{}: {e}", p.id))
 }

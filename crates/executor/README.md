@@ -48,7 +48,7 @@ assert!(matches!(batch.to_rows()[0][0], Value::Int64(-7)));
 # Ok::<(), asap_executor::Error>(())
 ```
 
-`physical_planner::compile` accepts a Planner `PhysicalASAPDAG` and typed input contracts.
+`physical_planner::compile` accepts a Planner `PhysicalASAPDAG` and the nodes to cut out as input slots.
 The resulting candidate is instantiated with deployment readers after selection. It rejects unsupported operations and
 schema mismatches before starting a source. Implement `PhysicalOperator` for a
 deployment source, including asynchronous I/O; computation operators remain in
@@ -80,7 +80,7 @@ See [the design](../../docs/design_docs/physical-planning-and-deployment.md).
 - `expressions`: scalar evaluation; typed builders and the Planner expression adapter.
 - `operators`: projection, filter, joins, aggregate/window, sort, limit and summary implementations.
 - `sources`: raw-source interface, Scan and the memory connector.
-- `physical_planner`: native operator lowering, typed input contracts and checked instantiation.
+- `physical_planner`: native operator lowering, typed input slots and checked instantiation.
 - `summary_kernels`: in-memory summary state over `asap_sketchlib` and exact Planner state: merge, typed evaluation and update adapters.
 - `evaluation`: evaluations over merged exact summary states.
 - `capability`: explicit kernel, native-batch and typed evaluation validation.
@@ -107,13 +107,15 @@ There is no spill or partitioned parallel execution in this implementation.
 
 ## Physical compilation and deployment inputs
 
-`physical_planner::compile` accepts a Planner `PhysicalASAPDAG`, typed
-`InputContract`s and output roots. It returns a reusable `CompiledPhysicalDAG`
+`physical_planner::compile` accepts a Planner `PhysicalASAPDAG`, the boundary
+nodes to cut out as input slots and output roots. Each input slot has its
+node's `output_schema`. It returns a reusable `CompiledPhysicalDAG`
 containing selected native operators and no live readers. Compilation validates
 schemas, input ordering, sharing and boundedness before deployment source access.
 
 A deployment calls `CompiledPhysicalDAG::instantiate` with exactly the declared
-inputs. This checks source schemas and execution properties and constructs the
+inputs. This checks that each source has its slot's schema and declares
+`Boundedness::Bounded`, and constructs the
 runnable DAG without repeating logical lowering. The DAG executes through
 the shared runtime with independent per-run state. Window coverage, revision and
 maintenance-policy admission remain deployment/planning contracts; this compiler

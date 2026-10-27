@@ -3,7 +3,7 @@ use asap_executor::{
     expressions::Expression,
     factory::create_planner_accumulator,
     operators::Operator,
-    physical_planner::{compile, CompiledPhysicalDAG, InputContract, Source},
+    physical_planner::{compile, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
@@ -17,7 +17,10 @@ use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{DataType, *};
 use planner_types::ir::ASAPOp;
 use planner_types::ir::NonASAPOp;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 // A projection over a summary may reorder/rename its columns; recovery must retain
 // the family and pass through the same immutable state, without decoding the payload.
@@ -104,21 +107,7 @@ fn summary_projection_survives_recovery() {
         roots: vec![1],
         scalar_roots: vec![],
     };
-    let program = compile(
-        &dag,
-        BTreeMap::from([(0, InputContract::bounded(schema.clone()))]),
-        &[1],
-    )
-    .unwrap();
-    let encoded = serde_json::to_vec(&program).unwrap();
-    let program = serde_json::from_slice::<CompiledPhysicalDAG>(&encoded).unwrap();
-    let mut forged: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-    forged["nodes"]["1"]["Operator"]["operator"]["output"]["fields"][1]["dtype"] =
-        serde_json::json!({"Plain": "float64"});
-    assert!(
-        serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&forged).unwrap())
-            .is_err()
-    );
+    let program = compile(&dag, &BTreeSet::from([0]), &[1]).unwrap();
     assert!(Operator::project(
         schema.clone(),
         vec![("invalid".into(), Expression::Column(2))]
@@ -132,7 +121,7 @@ fn summary_projection_survives_recovery() {
         )]
     )
     .is_err());
-    assert_eq!(*program.output_contract(1).unwrap().schema, output);
+    assert_eq!(*program.output_schema(1).unwrap(), output);
     let mut accumulator = create_planner_accumulator(
         &family,
         &SummaryUpdate::column(ColumnRef::SampleValue),
@@ -213,7 +202,7 @@ fn summary_merge_without_inputs_is_rejected() {
         roots: vec![0],
         scalar_roots: vec![],
     };
-    let error = compile(&dag, BTreeMap::new(), &[0])
+    let error = compile(&dag, &BTreeSet::new(), &[0])
         .err()
         .expect("rejected");
     assert!(

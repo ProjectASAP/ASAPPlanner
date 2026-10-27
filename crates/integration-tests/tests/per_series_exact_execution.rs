@@ -4,13 +4,10 @@
 //! the executor compiles and runs. The window's rows come from
 //! `RawDataSampleSelector`, as a runtime feeds them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
-use std::sync::Arc;
 
-use asap_executor::physical_planner::{
-    compile_candidate, frontier_from_timing, promql_rows, InputContract,
-};
+use asap_executor::physical_planner::{compile_candidate, frontier_from_timing, promql_rows};
 use asap_executor::runtime::Scope;
 use asap_executor::values::Value;
 use asap_executor::{series_labels_of_output_row, RawDataSample, RawDataSampleSelector};
@@ -117,10 +114,9 @@ fn execute(query: &str, samples: &[RawDataSample]) -> Vec<(String, f64)> {
         .unwrap()
         .window_batch(EVALUATION_MS, samples)
         .unwrap();
-    let schema = Arc::new(range.output_schema.clone());
     let compiled = compile_candidate(
         &dag,
-        BTreeMap::from([(range.id as u64, InputContract::bounded(schema))]),
+        &BTreeSet::from([range.id as u64]),
         &[dag.roots[0] as u64],
         &frontier_from_timing(&dag).unwrap(),
     )

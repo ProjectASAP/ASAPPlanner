@@ -3,12 +3,12 @@
 //! filter contributes nothing, but its group is kept.
 mod physical_common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use asap_executor::{
-    physical_planner::{compile, InputContract, Source},
+    physical_planner::{compile, Source},
     runtime::{Limits, RunContext, Scope},
     sources::{DataSources, MemorySource},
     values::{Batch, Value},
@@ -75,7 +75,7 @@ fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
     let schema = Arc::new(scan.output_schema.clone());
     let plan = compile(
         &dag,
-        BTreeMap::from([(scan.id as u64, InputContract::bounded(schema.clone()))]),
+        &BTreeSet::from([scan.id as u64]),
         &[dag.roots[0] as u64],
     )
     .unwrap();

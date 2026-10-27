@@ -61,30 +61,32 @@ pub use candidates::{
 };
 
 mod compiled;
-pub use compiled::{CompiledPhysicalDAG, InputContract};
+pub use compiled::CompiledPhysicalDAG;
 
 mod row_values;
 
 /// Compile computation without opening or retaining deployment readers.
-/// Input contracts identify explicit boundaries selected by maintenance planning.
+/// `boundaries` are the nodes cut out as input slots, each with its
+/// `output_schema` in `dag`; a raw-data `Scan` boundary must also have
+/// predicates that compile over that schema.
 pub fn compile(
     dag: &PhysicalASAPDAG,
-    inputs: BTreeMap<NodeId, InputContract>,
+    boundaries: &BTreeSet<NodeId>,
     roots: &[NodeId],
 ) -> Result<CompiledPhysicalDAG, Error> {
-    compile_before(dag, inputs, roots, None)
+    compile_before(dag, boundaries, roots, None)
 }
 
 /// Compile with cooperative cancellation between planning operations. The
 /// ordinary runtime compiler delegates here without a deadline.
 pub fn compile_before(
     dag: &PhysicalASAPDAG,
-    inputs: BTreeMap<NodeId, InputContract>,
+    boundaries: &BTreeSet<NodeId>,
     roots: &[NodeId],
     deadline: Option<std::time::Instant>,
 ) -> Result<CompiledPhysicalDAG, Error> {
     check_compile_deadline(deadline)?;
-    let compiled = compile_internal(dag, inputs, roots, deadline)?;
+    let compiled = compile_internal(dag, boundaries, roots, deadline)?;
     check_compile_deadline(deadline)?;
     Ok(compiled)
 }
@@ -97,38 +99,15 @@ fn check_compile_deadline(deadline: Option<std::time::Instant>) -> Result<(), Er
     }
 }
 
-/// Convenience for callers that already resolved inputs. Lowering still uses
-/// only their contracts, and instantiation checks those contracts again.
+/// Convenience for callers that already resolved inputs. Lowering never
+/// reads them; instantiation checks each against its slot.
 pub fn bind<'a>(
     dag: &PhysicalASAPDAG,
     sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
 ) -> Result<PhysicalDAG<'a, Batch, SchemaRef>, Error> {
-    let inputs = sources
-        .iter()
-        .map(|(&id, source)| (id, InputContract::from_source(source.as_ref())))
-        .collect();
-    compile(dag, inputs, roots)?.instantiate(sources)
-}
-
-/// The input contract of a raw-data `Scan` node, which a deployment binds to
-/// a data source at run time ([`bind_with_data_sources`]): its rows'
-/// schema, once its predicates compile over it as the bound scan compiles
-/// them. A compile check cuts a plan at its scans with these, to compile it
-/// without a reader.
-pub fn scan_contract(node: &PhysicalASAPDAGNode) -> Result<InputContract, Error> {
-    let Payload::NonASAP(NonASAPOp::Scan {
-        predicates, schema, ..
-    }) = &node.payload
-    else {
-        return Err(invalid(format!("node {} is not a Scan", node.id)));
-    };
-    let output = Arc::new(schema.clone());
-    crate::values::validate_schema(&output)?;
-    for predicate in predicates {
-        crate::sources::compile_scan_predicate(&local_scalar(&predicate.0)?, &output)?;
-    }
-    Ok(InputContract::bounded(output))
+    let boundaries = sources.keys().copied().collect();
+    compile(dag, &boundaries, roots)?.instantiate(sources)
 }
 
 /// Resolve raw scan connectors before invoking the reader-independent compiler.
@@ -184,7 +163,7 @@ fn helper_id(node: NodeId, index: u64) -> Result<NodeId, Error> {
 
 fn compile_internal(
     dag: &PhysicalASAPDAG,
-    mut sources: BTreeMap<NodeId, InputContract>,
+    boundaries: &BTreeSet<NodeId>,
     roots: &[NodeId],
     deadline: Option<std::time::Instant>,
 ) -> Result<CompiledPhysicalDAG, Error> {
@@ -234,7 +213,7 @@ fn compile_internal(
             .or_default()
             .push(edge.producer as u64);
     }
-    if !sources.keys().all(|id| nodes.contains_key(id)) {
+    if !boundaries.iter().all(|id| nodes.contains_key(id)) {
         return Err(invalid("source binding names an unknown node"));
     }
     let mut ordered = Vec::new();
@@ -253,7 +232,7 @@ fn compile_internal(
             return Err(invalid(format!("missing root {id}")));
         }
         pending.push((id, true));
-        if !sources.contains_key(&id) {
+        if !boundaries.contains(&id) {
             for &input in dependencies.get(&id).into_iter().flatten() {
                 pending.push((input, false));
             }
@@ -266,11 +245,27 @@ fn compile_internal(
         let auxiliary = helper_id(id, 0)?;
         let output = Arc::new(node.output_schema.clone());
         crate::values::validate_schema(&output)?;
-        if let Some(source) = sources.remove(&id) {
-            if source.schema != output {
-                return Err(invalid("frontier does not have the declared schema"));
+        if boundaries.contains(&id) {
+            // A raw-data scan slot is bound with the payload's schema, and its
+            // predicates compile over it, as the bound scan compiles them.
+            if let Payload::NonASAP(NonASAPOp::Scan {
+                predicates, schema, ..
+            }) = &node.payload
+            {
+                if *schema != node.output_schema {
+                    return Err(invalid(format!(
+                        "scan {id}: schema differs from its output schema"
+                    )));
+                }
+                for predicate in predicates {
+                    local_scalar(&predicate.0)
+                        .and_then(|predicate| {
+                            crate::sources::compile_scan_predicate(&predicate, &output)
+                        })
+                        .map_err(|error| invalid(format!("scan {id}: {error}")))?;
+                }
             }
-            physical_dag.add_input(id, source)?;
+            physical_dag.add_input(id, output)?;
         } else {
             #[cfg(test)]
             LOWERED_NODES.with(|count| count.set(count.get() + 1));
@@ -1663,16 +1658,16 @@ mod compilation_deadline_tests {
     fn expired_compilation_is_distinct_from_invalid_graph() {
         let dag = empty_dag();
         assert!(matches!(
-            compile_before(&dag, BTreeMap::new(), &[], Some(Instant::now())),
+            compile_before(&dag, &BTreeSet::new(), &[], Some(Instant::now())),
             Err(Error::CompilationDeadlineExceeded)
         ));
-        let unbounded = compile(&dag, BTreeMap::new(), &[]).err();
+        let unbounded = compile(&dag, &BTreeSet::new(), &[]).err();
         assert!(matches!(unbounded, Some(Error::Invalid(_))));
         assert_eq!(
             unbounded,
             compile_before(
                 &dag,
-                BTreeMap::new(),
+                &BTreeSet::new(),
                 &[],
                 Some(Instant::now() + Duration::from_secs(1)),
             )
@@ -1701,7 +1696,7 @@ mod compilation_deadline_tests {
             .collect();
         let deadline = Instant::now() + Duration::from_millis(1);
         assert!(matches!(
-            compile_before(&dag, BTreeMap::new(), &[], Some(deadline)),
+            compile_before(&dag, &BTreeSet::new(), &[], Some(deadline)),
             Err(Error::CompilationDeadlineExceeded)
         ));
     }

@@ -1,8 +1,7 @@
-//! Deserialized physical plans recover selected operators without logical lowering.
-//! Deployments choose the encoding; JSON is used here only as a test format.
+//! A compiled physical plan checks its producer/reader boundary.
 use asap_executor::{
     operators::{Operator, SortKey},
-    physical_planner::{CompiledPhysicalDAG, InputContract},
+    physical_planner::CompiledPhysicalDAG,
 };
 use planner_types::ir::schema::{DataType, Field, FieldDataType};
 use std::{collections::BTreeMap, sync::Arc};
@@ -20,7 +19,7 @@ fn sorted() -> CompiledPhysicalDAG {
         time_index: None,
     });
     CompiledPhysicalDAG::from_operators(
-        BTreeMap::from([(0, InputContract::bounded(schema.clone()))]),
+        BTreeMap::from([(0, schema.clone())]),
         BTreeMap::from([(
             1,
             (
@@ -42,65 +41,33 @@ fn sorted() -> CompiledPhysicalDAG {
     .unwrap()
 }
 
+/// A plan whose stored output schema differs from what its precompute DAG
+/// produces is rejected.
 #[test]
-fn recovery_retains_selected_operator_and_rejects_invalid_contracts() {
-    let bytes = serde_json::to_vec(&sorted()).unwrap();
-    let recovered = serde_json::from_slice::<CompiledPhysicalDAG>(&bytes).unwrap();
-    assert_eq!(serde_json::to_vec(&recovered).unwrap(), bytes);
-    for mutation in ["column", "edge", "output"] {
-        let mut wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        match mutation {
-            "column" => {
-                wire["nodes"]["1"]["Operator"]["operator"]["kind"]["Sort"]["keys"][0]["column"] =
-                    7.into()
-            }
-            "edge" => wire["nodes"]["1"]["Operator"]["inputs"][0] = 999.into(),
-            "output" => {
-                wire["nodes"]["1"]["Operator"]["operator"]["output"]["fields"][0]["dtype"] =
-                    serde_json::json!({"Plain":"utf8"})
-            }
-            _ => unreachable!(),
-        }
-        assert!(
-            serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&wire).unwrap())
-                .is_err(),
-            "accepted {mutation}"
-        );
-    }
-}
-
-#[test]
-fn candidate_recovery_preserves_materialization_boundary() {
+fn candidate_validation_checks_materialization_boundary() {
     use asap_executor::physical_planner::CompiledPhysicalPlan;
     let precompute = sorted();
-    let output = InputContract::bounded(precompute.output_contract(1).unwrap().schema);
+    let output = precompute.output_schema(1).unwrap();
     let query = CompiledPhysicalDAG::from_operators(
         BTreeMap::from([(1, output.clone())]),
         BTreeMap::from([(
             2,
             (
                 vec![1],
-                Operator::limit(output.schema.clone(), 3, 0, vec![]).unwrap(),
+                Operator::limit(output.clone(), 3, 0, vec![]).unwrap(),
             ),
         )]),
         vec![2],
     )
     .unwrap();
-    let candidate = CompiledPhysicalPlan {
+    let mut candidate = CompiledPhysicalPlan {
         precompute: Some(precompute),
         query,
-        materialized_outputs: BTreeMap::from([(1, output)]),
+        materialized_outputs: BTreeMap::from([(1, output.clone())]),
     };
-    let bytes = serde_json::to_vec(&candidate).unwrap();
-    let restored = serde_json::from_slice::<CompiledPhysicalPlan>(&bytes).unwrap();
-    assert_eq!(restored.precompute.as_ref().unwrap().roots(), &[1]);
-    assert_eq!(restored.query.roots(), &[2]);
-    assert_eq!(serde_json::to_vec(&restored).unwrap(), bytes);
-    let mut wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    wire["materialized_outputs"]["1"]["schema"]["fields"][0]["dtype"] =
-        serde_json::json!({"Plain":"utf8"});
-    assert!(
-        serde_json::from_slice::<CompiledPhysicalPlan>(&serde_json::to_vec(&wire).unwrap())
-            .is_err()
-    );
+    candidate.validate().unwrap();
+    let mut utf8 = (*output).clone();
+    utf8.fields[0].dtype = FieldDataType::Plain(DataType::Utf8);
+    candidate.materialized_outputs.insert(1, Arc::new(utf8));
+    assert!(candidate.validate().is_err());
 }

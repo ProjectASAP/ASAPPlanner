@@ -4,7 +4,7 @@ use asap_executor::{
     operators::Operator,
     physical_planner::{
         promql_rows::{decode_series_identity, series_row, SERIES_IDENTITY_COLUMN},
-        CompiledPhysicalDAG, InputContract, Source,
+        CompiledPhysicalDAG, Source,
     },
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
@@ -14,7 +14,10 @@ use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use planner_types::ir::properties::AccuracyTarget;
 use planner_types::ir::schema::{DataType, *};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 fn schema() -> Arc<Schema> {
     Arc::new(planner_types::ir::schema::Schema {
@@ -38,12 +41,8 @@ fn schema() -> Arc<Schema> {
     })
 }
 fn run(program: &CompiledPhysicalDAG, data: Batch, end: i64) -> Result<Vec<Batch>, String> {
-    let recovered = serde_json::from_slice::<CompiledPhysicalDAG>(
-        &serde_json::to_vec(&program).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    let input_id = recovered.input_contracts().next().unwrap().0;
-    let dag = recovered
+    let input_id = program.input_slots().next().unwrap().0;
+    let dag = program
         .instantiate(BTreeMap::from([(
             input_id,
             Box::new(Operator::source(data.schema().clone(), vec![data]).unwrap()) as Source<'_>,
@@ -58,7 +57,7 @@ fn run(program: &CompiledPhysicalDAG, data: Batch, end: i64) -> Result<Vec<Batch
     )
     .unwrap();
     block_on(async {
-        let mut stream = dag.execute(recovered.roots(), context).unwrap().remove(0);
+        let mut stream = dag.execute(program.roots(), context).unwrap().remove(0);
         let mut batches = Vec::new();
         while let Some(batch) = stream.next().await {
             batches.push((*batch.map_err(|e| e.to_string())?).clone());
@@ -87,7 +86,7 @@ fn input(samples: &[(&str, i64, f64)]) -> Batch {
 }
 fn snapshot_plan() -> CompiledPhysicalDAG {
     CompiledPhysicalDAG::from_operators(
-        BTreeMap::from([(0, InputContract::bounded(schema()))]),
+        BTreeMap::from([(0, schema())]),
         BTreeMap::from([(
             1,
             (
@@ -191,7 +190,7 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
         });
         let read = Operator::keyed_evaluation(build.schema(), 1, 1, output).unwrap();
         let plan = CompiledPhysicalDAG::from_operators(
-            BTreeMap::from([(0, InputContract::bounded(schema()))]),
+            BTreeMap::from([(0, schema())]),
             BTreeMap::from([
                 (
                     1,
@@ -349,7 +348,7 @@ fn population_fixture_compiles_with_dynamic_identity() {
         "maintained input must not be rebuilt"
     );
     assert!(encoded.contains("Sort") && encoded.contains("Limit"));
-    assert_eq!(snapshot_program.input_contracts().count(), 1);
+    assert_eq!(snapshot_program.input_slots().count(), 1);
     let root = Rc::new(with_series_identity(&original).unwrap());
     let selected = asap_logical_asap_optimization::test_support::population_over_selector(
         &root,
@@ -372,7 +371,7 @@ fn population_fixture_compiles_with_dynamic_identity() {
     let raw_schema = Arc::new(raw.output_schema.clone());
     let physical = compile(
         &logical,
-        BTreeMap::from([(raw.id as u64, InputContract::bounded(raw_schema.clone()))]),
+        &BTreeSet::from([raw.id as u64]),
         &[logical.roots[0] as u64],
     )
     .unwrap();

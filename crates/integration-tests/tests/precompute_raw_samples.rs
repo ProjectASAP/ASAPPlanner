@@ -140,10 +140,6 @@ fn execute(
                 .map(|n| (&n.output_schema, &n.payload))
         );
     });
-    let program = serde_json::from_slice::<asap_executor::physical_planner::CompiledPhysicalDAG>(
-        &serde_json::to_vec(&program).unwrap(),
-    )
-    .unwrap();
     let schema = precompute::raw_data_sample_schema();
     let batch = Batch::try_new(
         schema.clone(),

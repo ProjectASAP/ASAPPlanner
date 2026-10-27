@@ -53,10 +53,7 @@ pub fn compile_temporal(
 
 pub fn compile_histogram_quantile() -> Result<CompiledPhysicalDAG, Error> {
     CompiledPhysicalDAG::from_operators(
-        BTreeMap::from([
-            (0, InputContract::bounded(scalar_schema())),
-            (1, InputContract::bounded(vector_schema())),
-        ]),
+        BTreeMap::from([(0, scalar_schema()), (1, vector_schema())]),
         BTreeMap::from([(2, (vec![0, 1], Operator::histogram_quantile()))]),
         vec![2],
     )
@@ -73,10 +70,7 @@ pub fn compile_binary(
     let right = crate::operators::vector_binary::value_schema(right_scalar);
     let op = Operator::vector_binary(left.clone(), right.clone(), operator.clone(), return_bool)?;
     CompiledPhysicalDAG::from_operators(
-        BTreeMap::from([
-            (0, InputContract::bounded(left)),
-            (1, InputContract::bounded(right)),
-        ]),
+        BTreeMap::from([(0, left), (1, right)]),
         BTreeMap::from([(2, (vec![0, 1], op))]),
         vec![2],
     )
@@ -85,7 +79,7 @@ pub fn compile_binary(
 fn unary(operators: Vec<Operator>, input: SchemaRef) -> Result<CompiledPhysicalDAG, Error> {
     let root = operators.len() as u64;
     CompiledPhysicalDAG::from_operators(
-        BTreeMap::from([(0, InputContract::bounded(input))]),
+        BTreeMap::from([(0, input)]),
         operators
             .into_iter()
             .enumerate()

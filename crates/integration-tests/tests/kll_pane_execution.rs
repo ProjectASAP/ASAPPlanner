@@ -2,7 +2,7 @@
 mod physical_common;
 use asap_executor::{
     operators::{Operator, SummaryEvaluation},
-    physical_planner::{CompiledPhysicalDAG, InputContract, Source},
+    physical_planner::{CompiledPhysicalDAG, Source},
     plan::{PhysicalDAG, PhysicalOperator, PlanProperties},
     runtime::{Input, Limits, OutputStream, RunContext, Scope},
     summary_kernels::datasketches_kll::DatasketchesKLLAccumulator,
@@ -59,7 +59,7 @@ fn fixture() -> (CompiledPhysicalDAG, Operator, SchemaRef) {
         Operator::per_group_summary_build(raw.clone(), family(200), 0, None, vec![]).unwrap();
     let state = build.schema();
     let maintenance = CompiledPhysicalDAG::from_operators(
-        BTreeMap::from([(0, InputContract::bounded(raw))]),
+        BTreeMap::from([(0, raw)]),
         BTreeMap::from([(1, (vec![0], build))]),
         vec![1],
     )
@@ -152,9 +152,7 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
     let panes: Vec<_> = (0..6).map(|pane| pane_state(&maintenance, pane)).collect();
     drop(maintenance);
     let compiled = CompiledPhysicalDAG::from_operators(
-        (0..5)
-            .map(|id| (id, InputContract::bounded(schema.clone())))
-            .collect(),
+        (0..5).map(|id| (id, schema.clone())).collect(),
         BTreeMap::from([
             (
                 5,
@@ -282,7 +280,7 @@ fn panes_reject_parameters_schema_and_missing_binding() {
     };
     assert!(Batch::try_new(schema.clone(), vec![vec![wrong]]).is_err());
     let compiled = CompiledPhysicalDAG::from_operators(
-        BTreeMap::from([(0, InputContract::bounded(schema))]),
+        BTreeMap::from([(0, schema)]),
         BTreeMap::from([(1, (vec![0], merge))]),
         vec![1],
     )

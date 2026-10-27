@@ -1020,7 +1020,7 @@ fn stage3_plan_selection_selected_plan_has_at_most_one_univmon() {
 /// binding").
 #[test]
 fn stage3_plan_selection_selected_kmv_plan_executes_end_to_end() {
-    use asap_executor::physical_planner::{compile, promql_rows, InputContract};
+    use asap_executor::physical_planner::{compile, promql_rows};
     use asap_executor::runtime::Scope;
     use asap_executor::values::{Batch, Value};
     use asap_plan_selection::select_plan;
@@ -1060,7 +1060,7 @@ fn stage3_plan_selection_selected_kmv_plan_executes_end_to_end() {
         .collect();
     let labels = BTreeMap::from([("__name__".to_string(), "flows_src_ip".to_string())]);
     let dag = p.dag();
-    let mut inputs = BTreeMap::new();
+    let mut inputs = BTreeSet::new();
     let mut batches = BTreeMap::new();
     for node in &dag.nodes {
         if relational(&node.payload).as_deref() == Some("time_range") {
@@ -1073,13 +1073,13 @@ fn stage3_plan_selection_selected_kmv_plan_executes_end_to_end() {
                 node.id as u64,
                 Batch::try_new(schema.clone(), rows).unwrap(),
             );
-            inputs.insert(node.id as u64, InputContract::bounded(schema));
+            inputs.insert(node.id as u64);
         }
     }
     let q1 = p.query_roots[0] as u64;
-    let plan = compile(dag, inputs, &[q1]).unwrap_or_else(|e| panic!("{}: {e}", p.id));
+    let plan = compile(dag, &inputs, &[q1]).unwrap_or_else(|e| panic!("{}: {e}", p.id));
     let batches = plan
-        .input_contracts()
+        .input_slots()
         .map(|(id, _)| (id, batches[&id].clone()))
         .collect();
     let result = physical_common::execute(

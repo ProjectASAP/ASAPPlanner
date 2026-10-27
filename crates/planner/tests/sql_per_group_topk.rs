@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use asap_executor::operators::Operator as ExecutorOperator;
-use asap_executor::physical_planner::{bind_with_data_sources, compile, InputContract, Source};
+use asap_executor::physical_planner::{bind_with_data_sources, compile, Source};
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::sources::{DataSources, MemorySource};
 use asap_executor::values::{Batch, Value};
@@ -269,12 +269,10 @@ fn run_promql(plan: &InstallablePlan) -> Vec<Batch> {
             )
         })
         .collect();
-    let contracts = inputs
-        .iter()
-        .map(|(&id, batch)| (id, InputContract::bounded(batch.schema().clone())))
-        .collect();
+    // Which nodes are bound inputs; each one's schema is its DAG node's.
+    let boundaries: BTreeSet<u64> = inputs.keys().copied().collect();
     let roots = [reference.queries[0].root_node_id as u64];
-    let compiled = compile(dag, contracts, &roots).expect("the executor compiles the plan");
+    let compiled = compile(dag, &boundaries, &roots).expect("the executor compiles the plan");
     let sources = inputs
         .into_iter()
         .map(|(id, batch)| {

@@ -227,10 +227,7 @@ pub fn compile_current_series_evaluation(
         {
             return compile(
                 &dag,
-                BTreeMap::from([(
-                    population.id as u64,
-                    InputContract::bounded(Arc::new(population.output_schema.clone())),
-                )]),
+                &BTreeSet::from([population.id as u64]),
                 &dag.roots.iter().map(|r| *r as u64).collect::<Vec<_>>(),
             );
         }
@@ -284,17 +281,9 @@ pub fn compile_current_series_evaluation(
             .clone();
     }
     let frontier = frontier.ok_or_else(|| invalid("missing current-series population"))?;
-    let schema = Arc::new(
-        dag.nodes
-            .iter()
-            .find(|node| node.id as u64 == frontier)
-            .unwrap()
-            .output_schema
-            .clone(),
-    );
     compile(
         &dag,
-        BTreeMap::from([(frontier, InputContract::bounded(schema))]),
+        &BTreeSet::from([frontier]),
         &dag.roots.iter().map(|r| *r as u64).collect::<Vec<_>>(),
     )
 }
@@ -347,7 +336,7 @@ pub fn compile_rate_ranking(
         .ok_or_else(|| invalid("missing Rate frontier"))? as u64;
     let program = compile(
         &compiled.dag,
-        BTreeMap::from([(id, InputContract::bounded(Arc::new(source.schema.clone())))]),
+        &BTreeSet::from([id]),
         &compiled
             .dag
             .roots
@@ -418,10 +407,7 @@ pub fn compile_fixed_window_rate_aggregation(
     }
     compile_candidate(
         dag,
-        BTreeMap::from([(
-            source.id as u64,
-            InputContract::bounded(Arc::new(source.output_schema.clone())),
-        )]),
+        &BTreeSet::from([source.id as u64]),
         &dag.roots.iter().map(|r| *r as u64).collect::<Vec<_>>(),
         &[heap.id as u64],
     )

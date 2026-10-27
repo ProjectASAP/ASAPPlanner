@@ -12,7 +12,7 @@ evaluation, external exact engines, pricing/selection, and execution scheduling.
 
 A backend lowering is *covered* when `compile` accepts the corresponding
 `PhysicalASAPDAG` node and produces operators with the same result. The backend
-should then pass the timed DAG and its input contracts to `compile`. It should
+should then pass the timed DAG and its input slot nodes to `compile`. It should
 not rebuild operator choices from PromQL text or construct operators itself.
 
 ## Inventory
@@ -63,7 +63,7 @@ Status values:
 | 28 | `physical_values.rs` `compile`, `combine` | Translate `QueryTimeOperator` to `promql_values::*`; compose fragments | n/a | Supported | Exists only because of row 1. `CompiledPhysicalDAG::compose` is Planner API. |
 | 29 | `query_plan.rs` `compile_native_fragment` (Semi join, Exact aggregate, Sort, Limit, Filter) | Relational value ops | `RelationalJoin`, `Value::*` | Supported | Already calls `compile`. |
 | 30 | `query_time.rs` `selected_query_time_nodes`, `selected_native_expression`, `selected_aggregate_operator` | Recover operator identity from original PromQL text | Payload variants (`ExactKind::Min`/`Max`, `AggIntent`) | Supported | Payloads already carry the identity. These witnesses are needed only while row 1 remains. |
-| 31 | Scan, ExactSubquery, CandidateExactSubquery, CurrentSeries ingest, ReadMaterialization, ExternalExact | Storage reads and external engines | Input contracts | Backend | |
+| 31 | Scan, ExactSubquery, CandidateExactSubquery, CurrentSeries ingest, ReadMaterialization, ExternalExact | Storage reads and external engines | Input slots | Backend | |
 
 Totals at #475: 11 Supported, 4 Partial, 14 Missing, 2 Backend.
 

@@ -17,7 +17,7 @@ use planner_types::ir::schema::{DataType, Field, *};
 use planner_types::ir::NonASAPOp;
 use planner_types::ir::Predicate;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -279,6 +279,9 @@ fn schema_drift_and_memory_limits_fail_the_scan() {
         batch: Batch,
     }
     impl RawSource for Drift {
+        fn boundedness(&self) -> asap_executor::plan::Boundedness {
+            asap_executor::plan::Boundedness::Bounded
+        }
         fn schema(&self) -> SchemaRef {
             self.expected.clone()
         }
@@ -370,17 +373,12 @@ fn empty_sources_and_three_valued_predicates() {
 fn compile_without_readers_and_rebind_inputs() {
     use asap_executor::{
         operators::Operator,
-        physical_planner::{compile, InputContract, Source},
+        physical_planner::{compile, Source},
     };
     let (scan, schema, batches) = fixture();
     let dag = plan(scan, &schema, ExecutionDataState::QUERY_ROWS);
-    let compiled = compile(
-        &dag,
-        BTreeMap::from([(0, InputContract::bounded(schema.clone()))]),
-        &[2],
-    )
-    .unwrap();
-    assert_eq!(compiled.input_contracts().count(), 1);
+    let compiled = compile(&dag, &BTreeSet::from([0]), &[2]).unwrap();
+    assert_eq!(compiled.input_slots().count(), 1);
     for _ in 0..2 {
         let sources = BTreeMap::from([(
             0,
@@ -401,23 +399,51 @@ fn compile_without_readers_and_rebind_inputs() {
     assert!(compiled.instantiate(BTreeMap::new()).is_err());
 }
 
-// Input boundedness must be proved during compilation, before readers exist.
+// A `RawSource` that keeps the default `Unknown` boundedness is rejected.
 #[test]
-fn compilation_rejects_unknown_boundedness_for_sort() {
+fn binding_rejects_a_raw_source_of_unknown_boundedness() {
+    struct Unbounded(SchemaRef);
+    impl RawSource for Unbounded {
+        fn schema(&self) -> SchemaRef {
+            self.0.clone()
+        }
+        fn scan(&self, _: RunContext) -> Result<OutputStream<'_, Batch>, Error> {
+            Ok(stream::empty().boxed_local())
+        }
+    }
+    let (scan, schema, _) = fixture();
+    let dag = plan(scan, &schema, ExecutionDataState::QUERY_ROWS);
+    let sources = registry(Arc::new(Unbounded(schema)));
+    let Err(error) = bind_with_data_sources(&dag, BTreeMap::new(), &[2], &sources) else {
+        panic!("an Unknown-boundedness source was bound");
+    };
+    assert!(
+        error.to_string().contains("does not declare Bounded"),
+        "{error}"
+    );
+}
+
+// A source whose schema differs from the slot node's `output_schema` fails
+// at instantiation.
+#[test]
+fn instantiation_rejects_a_source_of_another_schema() {
     use asap_executor::{
-        physical_planner::{compile, InputContract},
-        plan::{Boundedness, Emission, PlanProperties},
+        operators::Operator,
+        physical_planner::{compile, Source},
     };
     let (scan, schema, _) = fixture();
     let dag = plan(scan, &schema, ExecutionDataState::QUERY_ROWS);
-    let input = InputContract {
-        schema,
-        properties: PlanProperties {
-            boundedness: Boundedness::Unknown,
-            emission: Emission::Unknown,
-        },
+    let compiled = compile(&dag, &BTreeSet::from([0]), &[2]).unwrap();
+    let mut other = (*schema).clone();
+    other.fields[0].dtype = FieldDataType::Plain(DataType::Float64);
+    let sources = BTreeMap::from([(
+        0,
+        Box::new(Operator::source(Arc::new(other), vec![]).unwrap()) as Source<'_>,
+    )]);
+    let Err(error) = compiled.instantiate(sources) else {
+        panic!("a source of another schema was bound");
     };
-    assert!(compile(&dag, BTreeMap::from([(0, input)]), &[2]).is_err());
+    assert!(error.to_string().contains("slot's schema"), "{error}");
 }
 
 // A filtering Scan reserves room for the filtered copy and the predicate's

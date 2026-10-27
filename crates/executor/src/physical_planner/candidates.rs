@@ -3,13 +3,12 @@ use super::*;
 
 /// One computation realization; materialization/window/revision requirements accompany
 /// it during optimization and deployment. Stored outputs have no storage identity.
-/// Deserialization validates the producer/reader boundary.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-#[serde(try_from = "UncheckedCompiledPhysicalPlan")]
+#[derive(Clone)]
+#[cfg_attr(any(test, feature = "test-support"), derive(serde::Serialize))]
 pub struct CompiledPhysicalPlan {
     pub precompute: Option<CompiledPhysicalDAG>,
     pub query: CompiledPhysicalDAG,
-    pub materialized_outputs: BTreeMap<NodeId, InputContract>,
+    pub materialized_outputs: BTreeMap<NodeId, SchemaRef>,
 }
 
 /// Compile an explicit materialization frontier selected by Planner maintenance
@@ -22,11 +21,11 @@ pub struct CompiledPhysicalPlan {
 /// different window or revision as interchangeable merely because types match.
 pub fn compile_candidate(
     dag: &PhysicalASAPDAG,
-    inputs: BTreeMap<NodeId, InputContract>,
+    boundaries: &BTreeSet<NodeId>,
     roots: &[NodeId],
     frontier: &[NodeId],
 ) -> Result<CompiledPhysicalPlan, Error> {
-    cut_candidate(&compile(dag, inputs, roots)?, frontier)
+    cut_candidate(&compile(dag, boundaries, roots)?, frontier)
 }
 
 /// Derive one frontier's candidate from a complete [`compile`] result by
@@ -54,26 +53,21 @@ pub fn cut_candidate(
     {
         return Err(invalid("frontier must contain distinct computed outputs"));
     }
-    let inputs: BTreeMap<_, _> = compiled
-        .input_contracts()
-        .map(|(id, contract)| (id, contract.clone()))
-        .collect();
+    let inputs: BTreeSet<_> = compiled.input_slots().map(|(id, _)| id).collect();
     let precompute = compiled.cut(&inputs, frontier)?;
+    let properties = precompute.output_properties()?;
     let mut materialized_outputs = BTreeMap::new();
     for &id in frontier {
-        let mut output = precompute.output_contract(id)?;
-        if output.properties.boundedness != Boundedness::Bounded {
+        // The retained result must be finite.
+        if properties.get(&id).map(|p| p.boundedness) != Some(Boundedness::Bounded) {
             return Err(invalid("materialized output requires bounded execution"));
         }
-        // A stored reader may stream batches even when the producer blocked.
-        // Its timing is independent; the retained result still must be finite.
-        output.properties.emission = Emission::Unknown;
-        materialized_outputs.insert(id, output);
+        materialized_outputs.insert(id, precompute.output_schema(id)?);
     }
     let mut query_inputs = inputs;
-    query_inputs.extend(materialized_outputs.clone());
+    query_inputs.extend(frontier);
     let query = compiled.cut(&query_inputs, compiled.roots())?;
-    let used: BTreeSet<_> = query.input_contracts().map(|(id, _)| id).collect();
+    let used: BTreeSet<_> = query.input_slots().map(|(id, _)| id).collect();
     if !frontier.iter().all(|id| used.contains(id)) {
         return Err(invalid(
             "frontier contains an output shadowed by another boundary",
@@ -141,11 +135,11 @@ pub fn frontier_from_timing(dag: &PhysicalASAPDAG) -> Result<Vec<NodeId>, Error>
 /// Exceeding the search budget returns an error, never a partial inventory.
 pub fn enumerate_frontiers(
     dag: &PhysicalASAPDAG,
-    inputs: &BTreeMap<NodeId, InputContract>,
+    boundaries: &BTreeSet<NodeId>,
     roots: &[NodeId],
     max_candidates: usize,
 ) -> Result<Vec<Vec<NodeId>>, Error> {
-    enumerate_compiled_frontiers(&compile(dag, inputs.clone(), roots)?, max_candidates)
+    enumerate_compiled_frontiers(&compile(dag, boundaries, roots)?, max_candidates)
 }
 
 fn enumerate_compiled_frontiers(
@@ -206,11 +200,11 @@ fn enumerate_compiled_frontiers(
 /// The DAG is lowered once; each frontier is a [`cut_candidate`] of it.
 pub fn compile_candidates(
     dag: &PhysicalASAPDAG,
-    inputs: BTreeMap<NodeId, InputContract>,
+    boundaries: &BTreeSet<NodeId>,
     roots: &[NodeId],
     frontiers: &[Vec<NodeId>],
 ) -> Vec<Result<CompiledPhysicalPlan, Error>> {
-    match compile(dag, inputs, roots) {
+    match compile(dag, boundaries, roots) {
         Ok(compiled) => frontiers
             .iter()
             .map(|frontier| cut_candidate(&compiled, frontier))
@@ -282,26 +276,6 @@ pub fn select_candidate<T>(
     selected.ok_or_else(|| invalid("no feasible priced physical candidate"))
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UncheckedCompiledPhysicalPlan {
-    precompute: Option<CompiledPhysicalDAG>,
-    query: CompiledPhysicalDAG,
-    materialized_outputs: BTreeMap<NodeId, InputContract>,
-}
-impl TryFrom<UncheckedCompiledPhysicalPlan> for CompiledPhysicalPlan {
-    type Error = Error;
-    fn try_from(candidate: UncheckedCompiledPhysicalPlan) -> Result<Self, Error> {
-        let result = Self {
-            precompute: candidate.precompute,
-            query: candidate.query,
-            materialized_outputs: candidate.materialized_outputs,
-        };
-        result.validate()?;
-        Ok(result)
-    }
-}
-
 impl CompiledPhysicalPlan {
     /// Validate the physical handoff, including the producer/reader boundary.
     pub fn validate(&self) -> Result<(), Error> {
@@ -318,19 +292,16 @@ impl CompiledPhysicalPlan {
         if outputs.is_empty() || outputs != precompute.roots().iter().copied().collect() {
             return Err(invalid("physical frontier differs from precompute outputs"));
         }
-        let readers: BTreeMap<_, _> = self.query.input_contracts().collect();
-        for (&id, contract) in &self.materialized_outputs {
-            let produced = precompute.output_contract(id)?;
+        let readers: BTreeMap<_, _> = self.query.input_slots().collect();
+        let properties = precompute.output_properties()?;
+        for (&id, schema) in &self.materialized_outputs {
             // Direct frontiers retain their node IDs. Temporal candidates can
             // read several window instances through distinct input slots;
             // their deployment bindings must validate those slots separately.
             let reader = readers.get(&id);
-            if contract.schema != produced.schema
-                || reader.is_some_and(|reader| contract.schema != reader.schema)
-                || produced.properties.boundedness != Boundedness::Bounded
-                || contract.properties.boundedness != Boundedness::Bounded
-                || reader
-                    .is_some_and(|reader| reader.properties.boundedness != Boundedness::Bounded)
+            if *schema != precompute.output_schema(id)?
+                || reader.is_some_and(|reader| schema != *reader)
+                || properties.get(&id).map(|p| p.boundedness) != Some(Boundedness::Bounded)
             {
                 return Err(invalid("physical frontier schema or boundedness mismatch"));
             }
@@ -344,7 +315,7 @@ mod tests {
     use super::*;
     use planner_types::workload::*;
 
-    fn grouped_rate() -> (PhysicalASAPDAG, BTreeMap<NodeId, InputContract>, NodeId) {
+    fn grouped_rate() -> (PhysicalASAPDAG, BTreeSet<NodeId>, NodeId) {
         let workload = PlanningWorkload {
             query_workload: QueryWorkload {
                 language: QueryLanguage::PromQL,
@@ -401,10 +372,7 @@ mod tests {
             .iter()
             .find(|node| matches!(node.payload, Payload::ASAP(ASAPOp::SummaryAgg { .. })))
             .unwrap();
-        let inputs = BTreeMap::from([(
-            state.id as u64,
-            InputContract::bounded(Arc::new(state.output_schema.clone())),
-        )]);
+        let inputs = BTreeSet::from([state.id as u64]);
         (dag.clone(), inputs, dag.roots[0] as u64)
     }
 
@@ -414,7 +382,7 @@ mod tests {
         let (dag, inputs, root) = grouped_rate();
         let lowered = || crate::physical_planner::LOWERED_NODES.with(|count| count.get());
         let before = lowered();
-        let compiled = compile(&dag, inputs, &[root]).unwrap();
+        let compiled = compile(&dag, &inputs, &[root]).unwrap();
         let once = lowered() - before;
         let frontiers = enumerate_compiled_frontiers(&compiled, 4096).unwrap();
         assert!(frontiers.len() >= 3, "{frontiers:?}");
@@ -453,7 +421,7 @@ mod tests {
         timed
     }
 
-    fn raw_input(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, InputContract> {
+    fn raw_input(dag: &PhysicalASAPDAG) -> BTreeSet<NodeId> {
         let raw = dag
             .nodes
             .iter()
@@ -464,10 +432,7 @@ mod tests {
                 )
             })
             .unwrap();
-        BTreeMap::from([(
-            raw.id as u64,
-            InputContract::bounded(Arc::new(raw.output_schema.clone())),
-        )])
+        BTreeSet::from([raw.id as u64])
     }
 
     /// Cutting one compilation by a `MatAtIngestion` timing and by the
@@ -481,7 +446,7 @@ mod tests {
         let inputs = raw_input(&mat_at_ingestion);
         let lowered = || crate::physical_planner::LOWERED_NODES.with(|count| count.get());
         let before = lowered();
-        let compiled = compile(&not_materialized, inputs.clone(), &[root]).unwrap();
+        let compiled = compile(&not_materialized, &inputs, &[root]).unwrap();
         let once = lowered() - before;
         let cuts = [&mat_at_ingestion, &not_materialized].map(|timed| {
             let frontier = frontier_from_timing(timed).unwrap();
@@ -493,7 +458,7 @@ mod tests {
         assert_eq!(cuts[0].1.len(), 1);
         assert!(cuts[1].1.is_empty());
         for (timed, frontier, cut) in cuts {
-            let expected = compile_candidate(timed, inputs.clone(), &[root], &frontier).unwrap();
+            let expected = compile_candidate(timed, &inputs, &[root], &frontier).unwrap();
             assert_eq!(
                 serde_json::to_vec(&cut).unwrap(),
                 serde_json::to_vec(&expected).unwrap()

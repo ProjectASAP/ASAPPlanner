@@ -2,10 +2,9 @@
 //! checked against the Planner's internals; the runtime's own end-to-end
 //! run, with public APIs only, is `crates/planner/tests/runtime_install.rs`.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::collections::BTreeSet;
 
-use asap_executor::physical_planner::{compile, frontier_from_timing, InputContract};
+use asap_executor::physical_planner::{compile, frontier_from_timing};
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_planner::{
     e2e_plan, plan_installable, FrontendInput, InstallablePlan, InstallablePlanError, PlanError,
@@ -110,18 +109,13 @@ async fn installable(workload: &PlanningWorkload) -> InstallablePlan {
     .expect("Example 4b plans")
 }
 
-/// The deployment's raw input contract for each raw `TimeRange` of `dag`:
-/// the rows a runtime binds to each range it scans.
-fn raw_range_inputs(dag: &PhysicalASAPDAG) -> BTreeMap<u64, InputContract> {
+/// The deployment's raw input slots: each raw `TimeRange` of `dag`, bound to
+/// the rows a runtime reads for the range it scans.
+fn raw_range_inputs(dag: &PhysicalASAPDAG) -> BTreeSet<u64> {
     dag.nodes
         .iter()
         .filter(|n| matches!(n.payload, Operator::NonASAP(NonASAPOp::TimeRange { .. })))
-        .map(|n| {
-            (
-                n.id as u64,
-                InputContract::bounded(Arc::new(n.output_schema.clone())),
-            )
-        })
+        .map(|n| n.id as u64)
         .collect()
 }
 
@@ -146,7 +140,7 @@ async fn installable_plan_has_its_pane_chains_expanded() {
     assert_eq!(pane_chain_count(dag), 0);
     assert_eq!(materialized_count(dag), plan.stored_outputs.len());
     let roots: Vec<u64> = dag.roots.iter().map(|&r| r as u64).collect();
-    compile(dag, raw_range_inputs(dag), &roots).expect("the executor compiles it");
+    compile(dag, &raw_range_inputs(dag), &roots).expect("the executor compiles it");
     assert_eq!(plan.queries.len(), 1);
     assert_eq!(
         plan.queries[0].query,

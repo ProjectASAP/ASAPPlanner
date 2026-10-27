@@ -515,19 +515,15 @@ impl InstallablePlan {
 
     fn check_compiles_before(&self, deadline: Option<Instant>) -> Result<(), ExecutorCompileError> {
         check_compile_deadline(deadline)?;
-        use asap_executor::physical_planner::{compile_before, scan_contract, InputContract};
-        use std::collections::BTreeMap;
+        use asap_executor::physical_planner::compile_before;
+        use std::collections::BTreeSet;
         let dag = &self.dag.dag;
         let indexed = IndexedDag::new(dag);
-        let contract = |id: PhysicalASAPNodeId| -> Result<(u64, InputContract), String> {
-            let node = indexed
-                .nodes
-                .get(&id)
-                .ok_or_else(|| format!("node {id} is not in the plan"))?;
-            Ok((
-                id as u64,
-                InputContract::bounded(std::sync::Arc::new(node.output_schema.clone())),
-            ))
+        let boundary = |id: PhysicalASAPNodeId| -> Result<u64, String> {
+            if !indexed.nodes.contains_key(&id) {
+                return Err(format!("node {id} is not in the plan"));
+            }
+            Ok(id as u64)
         };
         let stored: HashSet<PhysicalASAPNodeId> =
             self.stored_outputs.iter().map(|o| o.node_id).collect();
@@ -541,8 +537,8 @@ impl InstallablePlan {
                 .iter()
                 .map(|window| window.time_range_node_id)
                 .chain(output.inputs.stored_outputs.iter().copied())
-                .map(contract)
-                .collect::<Result<BTreeMap<_, _>, _>>()?;
+                .map(boundary)
+                .collect::<Result<BTreeSet<_>, _>>()?;
             let sub_dag;
             let below = match position {
                 0 => dag,
@@ -553,7 +549,7 @@ impl InstallablePlan {
             };
             #[cfg(test)]
             tests::COMPILED_NODES.with(|count| count.set(count.get() + below.nodes.len()));
-            compile_before(below, inputs, &[output.node_id as u64], deadline)
+            compile_before(below, &inputs, &[output.node_id as u64], deadline)
                 .map_err(|error| map_executor_compile_error(error, "stored output"))?;
         }
         // The query run reads the stored outputs it reaches from the roots
@@ -567,7 +563,6 @@ impl InstallablePlan {
             .map(|window| window.time_range_node_id)
             .collect();
         let mut read = Vec::new();
-        let mut scans = BTreeMap::new();
         let mut pending = roots.clone();
         let mut seen = HashSet::new();
         while let Some(id) = pending.pop() {
@@ -575,27 +570,29 @@ impl InstallablePlan {
             if !seen.insert(id) {
                 continue;
             }
-            if stored.contains(&id) || windows.contains(&id) {
-                read.push(id);
-            } else if let Some(NonASAPOp::Scan {
-                source: asap_types::ir::operator::Source::Table { .. },
-                ..
-            }) = indexed.relational(id)
+            // A table `Scan` is bound to a data source; `compile` checks
+            // that its predicates compile over its schema.
+            if stored.contains(&id)
+                || windows.contains(&id)
+                || matches!(
+                    indexed.relational(id),
+                    Some(NonASAPOp::Scan {
+                        source: asap_types::ir::operator::Source::Table { .. },
+                        ..
+                    })
+                )
             {
-                let scan = scan_contract(indexed.nodes[&id])
-                    .map_err(|error| format!("query run: scan {id}: {error}"))?;
-                scans.insert(id as u64, scan);
+                read.push(id);
             } else {
                 pending.extend(indexed.inputs.get(&id).into_iter().flatten().copied());
             }
         }
-        let mut inputs = read
+        let inputs = read
             .into_iter()
-            .map(contract)
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
-        inputs.extend(scans);
+            .map(boundary)
+            .collect::<Result<BTreeSet<_>, _>>()?;
         let roots: Vec<u64> = roots.into_iter().map(|id| id as u64).collect();
-        compile_before(dag, inputs, &roots, deadline)
+        compile_before(dag, &inputs, &roots, deadline)
             .map_err(|error| map_executor_compile_error(error, "query run"))?;
         check_compile_deadline(deadline)
     }
@@ -1275,7 +1272,7 @@ fn executor_builds(
     in_whole_plan: bool,
     deadline: Option<Instant>,
 ) -> Result<(), InstallablePlanError> {
-    use asap_executor::physical_planner::{compile_before, InputContract};
+    use asap_executor::physical_planner::compile_before;
     // The build reads only the nodes below it: compile them, or the whole
     // plan once, for the executor's checks of the whole plan.
     let sub_dag;
@@ -1293,12 +1290,9 @@ fn executor_builds(
         .iter()
         .map(|window| window.time_range_node_id)
         .chain(inputs.stored_outputs.iter().copied())
-        .map(|id| {
-            let schema = std::sync::Arc::new(indexed.nodes[&id].output_schema.clone());
-            (id as u64, InputContract::bounded(schema))
-        })
+        .map(|id| id as u64)
         .collect();
-    compile_before(below, bound, &[node as u64], deadline)
+    compile_before(below, &bound, &[node as u64], deadline)
         .map(|_| ())
         .map_err(|error| match error {
             asap_executor::Error::CompilationDeadlineExceeded => {
