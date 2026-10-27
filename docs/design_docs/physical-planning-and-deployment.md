@@ -470,7 +470,8 @@ executor, and a deployment runtime.
 
 ```rust
 pub struct InstallablePlan {
-    pub dag: PhysicalASAPDAGDocument, // a materialized-view node carries its retention_ms
+    pub wire_version: u32,            // versions the whole plan file
+    pub dag: PhysicalASAPDAG,         // a materialized-view node carries its retention_ms
     pub query_texts: Vec<String>,     // query i is answered by dag.roots[i]
 }
 impl InstallablePlan {
