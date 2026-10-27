@@ -378,7 +378,7 @@ fn compile_without_readers_and_rebind_inputs() {
     let (scan, schema, batches) = fixture();
     let dag = plan(scan, &schema, ExecutionDataState::QUERY_ROWS);
     let compiled = compile(&dag, &BTreeSet::from([0]), &[2]).unwrap();
-    assert_eq!(compiled.input_schemas().count(), 1);
+    assert_eq!(compiled.input_slots().count(), 1);
     for _ in 0..2 {
         let sources = BTreeMap::from([(
             0,
@@ -414,7 +414,13 @@ fn binding_rejects_a_raw_source_of_unknown_boundedness() {
     let (scan, schema, _) = fixture();
     let dag = plan(scan, &schema, ExecutionDataState::QUERY_ROWS);
     let sources = registry(Arc::new(Unbounded(schema)));
-    assert!(bind_with_data_sources(&dag, BTreeMap::new(), &[2], &sources).is_err());
+    let Err(error) = bind_with_data_sources(&dag, BTreeMap::new(), &[2], &sources) else {
+        panic!("an Unknown-boundedness source was bound");
+    };
+    assert!(
+        error.to_string().contains("does not declare Bounded"),
+        "{error}"
+    );
 }
 
 // A source whose schema differs from the slot node's `output_schema` fails
@@ -434,7 +440,10 @@ fn instantiation_rejects_a_source_of_another_schema() {
         0,
         Box::new(Operator::source(Arc::new(other), vec![]).unwrap()) as Source<'_>,
     )]);
-    assert!(compiled.instantiate(sources).is_err());
+    let Err(error) = compiled.instantiate(sources) else {
+        panic!("a source of another schema was bound");
+    };
+    assert!(error.to_string().contains("slot's schema"), "{error}");
 }
 
 // A filtering Scan reserves room for the filtered copy and the predicate's

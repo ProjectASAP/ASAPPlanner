@@ -246,11 +246,23 @@ fn compile_internal(
         let output = Arc::new(node.output_schema.clone());
         crate::values::validate_schema(&output)?;
         if boundaries.contains(&id) {
-            // A raw-data scan slot's predicates compile over its schema, as
-            // the bound scan compiles them.
-            if let Payload::NonASAP(NonASAPOp::Scan { predicates, .. }) = &node.payload {
+            // A raw-data scan slot is bound with the payload's schema, and its
+            // predicates compile over it, as the bound scan compiles them.
+            if let Payload::NonASAP(NonASAPOp::Scan {
+                predicates, schema, ..
+            }) = &node.payload
+            {
+                if *schema != node.output_schema {
+                    return Err(invalid(format!(
+                        "scan {id}: schema differs from its output schema"
+                    )));
+                }
                 for predicate in predicates {
-                    crate::sources::compile_scan_predicate(&local_scalar(&predicate.0)?, &output)?;
+                    local_scalar(&predicate.0)
+                        .and_then(|predicate| {
+                            crate::sources::compile_scan_predicate(&predicate, &output)
+                        })
+                        .map_err(|error| invalid(format!("scan {id}: {error}")))?;
                 }
             }
             physical_dag.add_input(id, output)?;

@@ -41,7 +41,7 @@ fn schema() -> Arc<Schema> {
     })
 }
 fn run(program: &CompiledPhysicalDAG, data: Batch, end: i64) -> Result<Vec<Batch>, String> {
-    let input_id = program.input_schemas().next().unwrap().0;
+    let input_id = program.input_slots().next().unwrap().0;
     let dag = program
         .instantiate(BTreeMap::from([(
             input_id,
@@ -348,7 +348,7 @@ fn population_fixture_compiles_with_dynamic_identity() {
         "maintained input must not be rebuilt"
     );
     assert!(encoded.contains("Sort") && encoded.contains("Limit"));
-    assert_eq!(snapshot_program.input_schemas().count(), 1);
+    assert_eq!(snapshot_program.input_slots().count(), 1);
     let root = Rc::new(with_series_identity(&original).unwrap());
     let selected = asap_logical_asap_optimization::test_support::population_over_selector(
         &root,

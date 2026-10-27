@@ -1079,7 +1079,7 @@ fn stage3_plan_selection_selected_kmv_plan_executes_end_to_end() {
     let q1 = p.query_roots[0] as u64;
     let plan = compile(dag, &inputs, &[q1]).unwrap_or_else(|e| panic!("{}: {e}", p.id));
     let batches = plan
-        .input_schemas()
+        .input_slots()
         .map(|(id, _)| (id, batches[&id].clone()))
         .collect();
     let result = physical_common::execute(

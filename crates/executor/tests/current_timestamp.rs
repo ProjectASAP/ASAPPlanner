@@ -156,5 +156,20 @@ fn compiling_a_scan_slot_checks_the_scan_predicates() {
     compile(&dag, &BTreeSet::from([0]), &[0]).expect("now() - INTERVAL compiles");
 
     let not_boolean = scan_plan(vec![Predicate(ScalarExpr::Column(1))]);
-    assert!(compile(&not_boolean, &BTreeSet::from([0]), &[0]).is_err());
+    let Err(error) = compile(&not_boolean, &BTreeSet::from([0]), &[0]) else {
+        panic!("a non-boolean scan predicate compiled");
+    };
+    assert!(error.to_string().contains("scan 0:"), "{error}");
+}
+
+/// A scan slot whose payload schema, which the bound scan is built from,
+/// differs from the node's output schema fails compilation.
+#[test]
+fn compiling_a_scan_slot_checks_the_payload_schema() {
+    let mut dag = scan_plan(vec![]);
+    dag.nodes[0].output_schema.fields.pop();
+    let Err(error) = compile(&dag, &BTreeSet::from([0]), &[0]) else {
+        panic!("a scan slot with two schemas compiled");
+    };
+    assert!(error.to_string().contains("scan 0:"), "{error}");
 }

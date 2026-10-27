@@ -297,7 +297,7 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
                 planner_types::ir::ASAPOp::FinalizeExactAccumulator { .. }
             )
         ));
-        assert_eq!(ranked.input_schemas().count(), 1);
+        assert_eq!(ranked.input_slots().count(), 1);
         let encoded = String::from_utf8(serde_json::to_vec(&ranked).unwrap()).unwrap();
         assert!(encoded.contains("PerGroupKeyedSummaryBuild"));
         assert!(encoded.contains("KeyedEvaluation"));
@@ -642,7 +642,7 @@ fn maintained_rate_heap_compiles_fixed_window_precompute() {
         let execute = |plan: &asap_executor::physical_planner::CompiledPhysicalDAG,
                        input: Batch,
                        scope: Scope| {
-            let id = plan.input_schemas().next().unwrap().0;
+            let id = plan.input_slots().next().unwrap().0;
             let source = Box::new(Operator::source(input.schema().clone(), vec![input]).unwrap())
                 as Source<'static>;
             let physical_dag = plan.instantiate(BTreeMap::from([(id, source)])).unwrap();

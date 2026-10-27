@@ -81,7 +81,7 @@ pub fn raw_data_sample_row(
     ]
 }
 
-/// Input contract of a precompute boundary: raw data sample rows for a raw time
+/// Input slot schema of a precompute boundary: raw data sample rows for a raw time
 /// series scan (or a `TimeRange`, optionally over stacked `TimeShift`s, of
 /// one), otherwise the stored population of its summary state.
 pub fn boundary_schema(

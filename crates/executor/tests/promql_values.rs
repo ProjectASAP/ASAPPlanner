@@ -271,7 +271,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
         vec![20, 30],
     )
     .unwrap();
-    assert_eq!(dag.input_schemas().count(), 1);
+    assert_eq!(dag.input_slots().count(), 1);
     let starts = std::rc::Rc::new(std::cell::Cell::new(0));
     for _ in 0..2 {
         let input = Batch::try_new(vector_schema(), vec![row(&[("job", "api")], 3.)]).unwrap();
@@ -311,7 +311,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
 #[test]
 fn compiled_constant_needs_no_deployment_source() {
     let dag = compile_scalar(3.).unwrap();
-    assert_eq!(dag.input_schemas().count(), 0);
+    assert_eq!(dag.input_slots().count(), 0);
     let result = run_inputs(dag, vec![]).unwrap();
     assert!(matches!(result[0][0], Value::Float64(3.)));
 }

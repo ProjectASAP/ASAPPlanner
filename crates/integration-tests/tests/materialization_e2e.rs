@@ -163,7 +163,7 @@ fn execute(
     )
     .unwrap();
     let raw_sources = |plan: &CompiledPhysicalDAG| {
-        plan.input_schemas()
+        plan.input_slots()
             .filter_map(|(id, _)| raw.get(&id).map(|(schema, name)| (id, batch(schema, name))))
             .collect::<BTreeMap<_, _>>()
     };

@@ -40,7 +40,7 @@ impl CompiledPhysicalDAG {
             let [root] = fragment.roots() else {
                 return Err(invalid("composed fragment requires one root"));
             };
-            if fragment.input_schemas().any(|(id, _)| id == *root) {
+            if fragment.input_slots().any(|(id, _)| id == *root) {
                 return Err(invalid("fragment root must be a computed output"));
             }
             schemas.insert(id, fragment.output_schema(*root)?);
@@ -57,11 +57,11 @@ impl CompiledPhysicalDAG {
             result.add_input(id, schema)?;
         }
         for (id, (inputs, fragment)) in fragments {
-            if inputs.len() != fragment.input_schemas().count() {
+            if inputs.len() != fragment.input_slots().count() {
                 return Err(invalid("physical fragment input arity mismatch"));
             }
             let mut mapping = BTreeMap::new();
-            for ((local, expected), global) in fragment.input_schemas().zip(inputs) {
+            for ((local, expected), global) in fragment.input_slots().zip(inputs) {
                 let actual = schemas
                     .get(&global)
                     .ok_or_else(|| invalid("missing physical fragment dependency"))?;
@@ -163,7 +163,8 @@ impl CompiledPhysicalDAG {
     pub fn roots(&self) -> &[NodeId] {
         &self.roots
     }
-    pub fn input_schemas(&self) -> impl Iterator<Item = (NodeId, &SchemaRef)> {
+    /// Each input slot and its schema.
+    pub fn input_slots(&self) -> impl Iterator<Item = (NodeId, &SchemaRef)> {
         self.nodes.iter().filter_map(|(&id, node)| match node {
             Node::Input(schema) => Some((id, schema)),
             Node::Operator { .. } => None,
@@ -187,7 +188,7 @@ impl CompiledPhysicalDAG {
     }
     /// A reader-free bounded stand-in for every input slot.
     fn unbound_inputs(&self) -> BTreeMap<NodeId, Source<'_>> {
-        self.input_schemas()
+        self.input_slots()
             .map(|(id, schema)| (id, Box::new(UnboundInput(schema.clone())) as Source<'_>))
             .collect()
     }
@@ -205,7 +206,7 @@ impl CompiledPhysicalDAG {
     /// each node in `boundaries` by a typed input. Nothing is lowered again.
     pub(super) fn cut(
         &self,
-        boundaries: &BTreeMap<NodeId, SchemaRef>,
+        boundaries: &BTreeSet<NodeId>,
         roots: &[NodeId],
     ) -> Result<Self, Error> {
         let mut result = Self::new(roots.to_vec());
@@ -214,9 +215,9 @@ impl CompiledPhysicalDAG {
             if result.nodes.contains_key(&id) {
                 continue;
             }
-            let node = match boundaries.get(&id) {
-                Some(schema) => Node::Input(schema.clone()),
-                None => self
+            let node = match boundaries.contains(&id) {
+                true => Node::Input(self.output_schema(id)?),
+                false => self
                     .nodes
                     .get(&id)
                     .cloned()
@@ -247,12 +248,14 @@ impl CompiledPhysicalDAG {
                     let source = sources
                         .remove(&id)
                         .ok_or_else(|| invalid(format!("missing physical input {id}")))?;
-                    if !source.input_schemas().is_empty()
-                        || source.output_schema() != *schema
-                        || source.properties(&[]).boundedness != Boundedness::Bounded
-                    {
+                    if !source.input_schemas().is_empty() || source.output_schema() != *schema {
                         return Err(invalid(format!(
-                            "physical input {id} needs a bounded source with the slot's schema"
+                            "physical input {id} source differs from the slot's schema"
+                        )));
+                    }
+                    if source.properties(&[]).boundedness != Boundedness::Bounded {
+                        return Err(invalid(format!(
+                            "physical input {id} source does not declare Bounded"
                         )));
                     }
                     dag.add_boxed(

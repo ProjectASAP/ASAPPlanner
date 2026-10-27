@@ -479,7 +479,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
         for physical in physical_asap_dags {
             let physical = physical.unwrap();
             let inputs = if let Some(precompute) = &physical.precompute {
-                let source_id = precompute.input_schemas().next().unwrap().0;
+                let source_id = precompute.input_slots().next().unwrap().0;
                 let stored = run(
                     precompute,
                     BTreeMap::from([(source_id, batch.clone())]),
@@ -493,7 +493,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
                 BTreeMap::from([(precompute.roots()[0], stored[0].clone())])
             } else {
                 BTreeMap::from([(
-                    physical.query.input_schemas().next().unwrap().0,
+                    physical.query.input_slots().next().unwrap().0,
                     batch.clone(),
                 )])
             };

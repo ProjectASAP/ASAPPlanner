@@ -53,10 +53,7 @@ pub fn cut_candidate(
     {
         return Err(invalid("frontier must contain distinct computed outputs"));
     }
-    let inputs: BTreeMap<_, _> = compiled
-        .input_schemas()
-        .map(|(id, schema)| (id, schema.clone()))
-        .collect();
+    let inputs: BTreeSet<_> = compiled.input_slots().map(|(id, _)| id).collect();
     let precompute = compiled.cut(&inputs, frontier)?;
     let properties = precompute.output_properties()?;
     let mut materialized_outputs = BTreeMap::new();
@@ -68,9 +65,9 @@ pub fn cut_candidate(
         materialized_outputs.insert(id, precompute.output_schema(id)?);
     }
     let mut query_inputs = inputs;
-    query_inputs.extend(materialized_outputs.clone());
+    query_inputs.extend(frontier);
     let query = compiled.cut(&query_inputs, compiled.roots())?;
-    let used: BTreeSet<_> = query.input_schemas().map(|(id, _)| id).collect();
+    let used: BTreeSet<_> = query.input_slots().map(|(id, _)| id).collect();
     if !frontier.iter().all(|id| used.contains(id)) {
         return Err(invalid(
             "frontier contains an output shadowed by another boundary",
@@ -295,7 +292,7 @@ impl CompiledPhysicalPlan {
         if outputs.is_empty() || outputs != precompute.roots().iter().copied().collect() {
             return Err(invalid("physical frontier differs from precompute outputs"));
         }
-        let readers: BTreeMap<_, _> = self.query.input_schemas().collect();
+        let readers: BTreeMap<_, _> = self.query.input_slots().collect();
         let properties = precompute.output_properties()?;
         for (&id, schema) in &self.materialized_outputs {
             // Direct frontiers retain their node IDs. Temporal candidates can
