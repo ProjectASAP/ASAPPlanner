@@ -50,9 +50,9 @@ assert!(matches!(batch.to_rows()[0][0], Value::Int64(-7)));
 
 `physical_planner::compile` accepts a Planner `PhysicalASAPDAG` and the nodes to cut out as input slots.
 The resulting candidate is instantiated with deployment readers after selection. It rejects unsupported operations and
-schema mismatches before starting a source. Implement `PhysicalOperator` for a
-deployment source, including asynchronous I/O; computation operators remain in
-the library. The public `planner` export identifies the exact Planner types used
+schema mismatches before starting a source. Implement `sources::TableProvider`
+for deployment data (raw tables and materialized views), including
+asynchronous I/O; computation operators remain in the library. The public `planner` export identifies the exact Planner types used
 by the crate. The physical compiler currently supports a subset of those types and
 operations; it does not interpret an unknown node as external fallback: a
 node without a native lowering fails compilation, and the deployment runtime
@@ -79,7 +79,7 @@ See [the design](../../docs/design_docs/physical-planning-and-deployment.md).
 - `runtime`: per-run streams, shared producers, memory reservations and cancellation.
 - `expressions`: scalar evaluation; typed builders and the Planner expression adapter.
 - `operators`: projection, filter, joins, aggregate/window, sort, limit and summary implementations.
-- `sources`: raw-source interface, Scan and the memory connector.
+- `sources`: the `TableProvider` data interface, `Scan` and the memory connector.
 - `physical_planner`: native operator lowering, typed input slots and checked instantiation.
 - `summary_kernels`: in-memory summary state over `asap_sketchlib` and exact Planner state: merge, typed evaluation and update adapters.
 - `evaluation`: evaluations over merged exact summary states.
@@ -93,7 +93,7 @@ frames, edge sampling and storage statistics belong to deployments. Kernels hold
 state; operators own grouping.
 
 A source must declare `Boundedness::Bounded` to feed a blocking operator.
-The default for a custom raw source is `Unknown`; query or ingestion scope alone
+The default for a custom `TableProvider` is `Unknown`; query or ingestion scope alone
 does not promise that its cursor ends. `PhysicalDAG::properties` validates these
 requirements before any source starts and returns boundedness and emission mode
 for every reachable node. The memory connector declares finite input. Custom
@@ -108,15 +108,18 @@ There is no spill or partitioned parallel execution in this implementation.
 ## Physical compilation and deployment inputs
 
 `physical_planner::compile` accepts a Planner `PhysicalASAPDAG`, the boundary
-nodes to cut out as input slots and output roots. Each input slot has its
-node's `output_schema`. It returns a reusable `CompiledPhysicalDAG`
+nodes to cut out as view slots and output roots. Every `Scan` leaf is a table
+slot. Each input slot has its node's `output_schema`. It returns a reusable `CompiledPhysicalDAG`
 containing selected native operators and no live readers. Compilation validates
 schemas, input ordering, sharing and boundedness before deployment source access.
 
-A deployment calls `CompiledPhysicalDAG::instantiate` with exactly the declared
-inputs. This checks that each source has its slot's schema and declares
-`Boundedness::Bounded`, and constructs the
-runnable DAG without repeating logical lowering. The DAG executes through
+A deployment calls `CompiledPhysicalDAG::instantiate` with a
+`BindingDataSources`: a `TableProvider` per `Source` for table slots and one per
+view slot's node id. This checks that each provider contains its slot's columns
+and declares `Boundedness::Bounded`, and constructs the runnable DAG without
+repeating logical lowering. Each slot asks its provider for the run's
+`ScanRequest` (time range, projection, predicates); for a table slot the
+request is a hint, and the executor re-applies all three. The DAG executes through
 the shared runtime with independent per-run state. Window coverage, revision and
 maintenance-policy admission remain deployment/planning contracts; this compiler
 does not discover storage or silently change a selected maintenance strategy.

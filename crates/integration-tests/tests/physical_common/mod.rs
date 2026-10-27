@@ -1,11 +1,12 @@
 use asap_executor::{
-    operators::Operator,
-    physical_planner::{CompiledPhysicalDAG, Source},
+    physical_planner::CompiledPhysicalDAG,
     runtime::{Limits, RunContext, Scope},
+    sources::{BindingDataSources, MemorySource, TableProvider},
     values::Batch,
 };
 use futures::{executor::block_on, StreamExt};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[allow(dead_code)]
 pub fn execute(
@@ -18,12 +19,16 @@ pub fn execute(
         .map(|(id, batch)| {
             (
                 id,
-                Box::new(Operator::source(batch.schema().clone(), vec![batch]).unwrap())
-                    as Source<'_>,
+                Arc::new(MemorySource::new(batch.schema().clone(), vec![batch]).unwrap())
+                    as Arc<dyn TableProvider>,
             )
         })
         .collect();
-    let dag = plan.instantiate(sources).unwrap();
+    let data_sources = BindingDataSources {
+        views: sources,
+        ..Default::default()
+    };
+    let dag = plan.instantiate(&data_sources).unwrap();
     block_on(async {
         let streams = dag
             .execute(
@@ -95,13 +100,9 @@ pub fn execute_raw_rows_at(
     rows: Vec<Vec<asap_executor::values::Value>>,
     evaluation_time_ms: i64,
 ) -> Vec<Vec<asap_executor::values::Value>> {
-    use asap_executor::{
-        physical_planner::bind_with_data_sources,
-        sources::{DataSources, MemorySource},
-    };
+    use asap_executor::{physical_planner::compile, sources::DataSources};
     use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
     use asap_types::ir::NonASAPOp;
-    use std::sync::Arc;
     let wire = compile_physical_asap_dag(root).unwrap();
     let (source, schema) = wire
         .nodes
@@ -115,15 +116,22 @@ pub fn execute_raw_rows_at(
         .expect("one scan");
     let input = Arc::new(schema);
     let batch = Batch::try_new(input.clone(), rows).unwrap();
-    let mut sources = DataSources::default();
-    sources
+    let mut tables = DataSources::default();
+    tables
         .register(
             source,
             Arc::new(MemorySource::new(input, vec![batch]).unwrap()),
         )
         .unwrap();
+    let data_sources = BindingDataSources {
+        tables,
+        ..Default::default()
+    };
     let root_id = wire.roots[0] as u64;
-    let plan = bind_with_data_sources(&wire, BTreeMap::new(), &[root_id], &sources).unwrap();
+    let plan = compile(&wire, &Default::default(), &[root_id])
+        .unwrap()
+        .instantiate(&data_sources)
+        .unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms,

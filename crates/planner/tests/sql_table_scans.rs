@@ -11,10 +11,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use asap_executor::operators::Operator as ExecutorOperator;
-use asap_executor::physical_planner::{bind_with_data_sources, compile};
+use asap_executor::physical_planner::compile;
 use asap_executor::runtime::{Limits, RunContext, Scope};
-use asap_executor::sources::{DataSources, MemorySource};
+use asap_executor::sources::{BindingDataSources, DataSources, MemorySource, TableProvider};
 use asap_executor::values::{Batch, Value};
 use asap_executor::TableRowSelector;
 use asap_planner::{
@@ -185,7 +184,12 @@ fn run_query(plan: &InstallablePlan, query: usize) -> (Vec<FieldDataType>, Vec<V
         )
         .unwrap();
     let roots = [reference.roots[query] as u64];
-    let bound = bind_with_data_sources(&reference, BTreeMap::new(), &roots, &sources)
+    let data_sources = BindingDataSources {
+        tables: sources,
+        ..Default::default()
+    };
+    let bound = compile(&reference, &BTreeSet::new(), &roots)
+        .and_then(|compiled| compiled.instantiate(&data_sources))
         .expect("the plan binds to the table");
     let context = RunContext::new(
         Scope::Query {
@@ -421,14 +425,15 @@ fn run_bound(
     let sources = inputs
         .into_iter()
         .map(|(id, batch)| {
-            let source = ExecutorOperator::source(batch.schema().clone(), vec![batch]).unwrap();
-            (
-                id,
-                Box::new(source) as asap_executor::physical_planner::Source<'_>,
-            )
+            let source = MemorySource::new(batch.schema().clone(), vec![batch]).unwrap();
+            (id, Arc::new(source) as Arc<dyn TableProvider>)
         })
         .collect();
-    let instance = compiled.instantiate(sources).unwrap();
+    let data_sources = BindingDataSources {
+        views: sources,
+        ..Default::default()
+    };
+    let instance = compiled.instantiate(&data_sources).unwrap();
     block_on(async {
         let context = RunContext::new(scope, Limits::default()).unwrap();
         let outputs = instance.execute(compiled.roots(), context).unwrap();

@@ -1,8 +1,9 @@
 //! A Hydra-grouped Count-Min `SummaryAgg` compiles through the physical
 //! planner and answers each group's item point counts from one shared grid.
+use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
 use asap_executor::{
     operators::{Operator, RowWeight},
-    physical_planner::{compile_node, CompiledPhysicalDAG, Source},
+    physical_planner::{compile_node, CompiledPhysicalDAG},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, SchemaRef, Value},
 };
@@ -188,7 +189,8 @@ fn try_run(
         contracts.insert(source, input.clone());
         sources.insert(
             source,
-            Box::new(Operator::source(input.clone(), vec![batch]).unwrap()) as Source<'_>,
+            Arc::new(MemorySource::new(input.clone(), vec![batch]).unwrap())
+                as Arc<dyn TableProvider>,
         );
         operators.insert(built, (vec![source], build.clone()));
         states.push(built);
@@ -221,7 +223,11 @@ fn try_run(
     .unwrap();
     operators.insert(300, (vec![merged], read));
     let compiled = CompiledPhysicalDAG::from_operators(contracts, operators, vec![300]).unwrap();
-    let dag = compiled.instantiate(sources).unwrap();
+    let data_sources = BindingDataSources {
+        views: sources,
+        ..Default::default()
+    };
+    let dag = compiled.instantiate(&data_sources).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,

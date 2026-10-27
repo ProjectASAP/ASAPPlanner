@@ -1,11 +1,11 @@
 //! Materialized frontiers are compiled by Planner, never rewritten by deployment.
+use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
 mod common;
 use asap_executor::{
     factory::create_planner_accumulator,
-    operators::Operator,
     physical_planner::{
         compile, compile_candidate, compile_candidates, cut_candidate, enumerate_frontiers,
-        select_candidate, CandidateCost, CompiledPhysicalDAG, CompiledPhysicalPlan, Source,
+        select_candidate, CandidateCost, CompiledPhysicalDAG, CompiledPhysicalPlan,
     },
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
@@ -63,11 +63,15 @@ fn run(plan: &CompiledPhysicalDAG, inputs: BTreeMap<u64, Batch>, scope: Scope) -
     let sources = inputs
         .into_iter()
         .map(|(id, batch)| {
-            let source = Operator::source(batch.schema().clone(), vec![batch]).unwrap();
-            (id, Box::new(source) as Source<'_>)
+            let source = MemorySource::new(batch.schema().clone(), vec![batch]).unwrap();
+            (id, Arc::new(source) as Arc<dyn TableProvider>)
         })
         .collect();
-    let dag = plan.instantiate(sources).unwrap();
+    let data_sources = BindingDataSources {
+        views: sources,
+        ..Default::default()
+    };
+    let dag = plan.instantiate(&data_sources).unwrap();
     block_on(async {
         let context = RunContext::new(scope, Limits::default()).unwrap();
         let mut output = dag.execute(plan.roots(), context).unwrap().remove(0);
@@ -294,10 +298,12 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     for candidate in candidates {
         let candidate = candidate.unwrap();
         let inputs = if let Some(precompute) = &candidate.precompute {
-            let source = Operator::source(batch.schema().clone(), vec![batch.clone()]).unwrap();
-            let invalid = precompute
-                .instantiate(BTreeMap::from([(state_id, Box::new(source) as Source<'_>)]))
-                .unwrap();
+            let source = MemorySource::new(batch.schema().clone(), vec![batch.clone()]).unwrap();
+            let data_sources = BindingDataSources {
+                views: BTreeMap::from([(state_id, Arc::new(source) as Arc<dyn TableProvider>)]),
+                ..Default::default()
+            };
+            let invalid = precompute.instantiate(&data_sources).unwrap();
             let context = RunContext::new(
                 Scope::Ingestion {
                     window_start_ms: 0,

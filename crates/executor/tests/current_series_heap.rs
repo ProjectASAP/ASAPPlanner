@@ -1,10 +1,11 @@
 //! Spatial heap weights come from a fresh instant vector, never sample history.
+use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
 mod common;
 use asap_executor::{
     operators::Operator,
     physical_planner::{
         promql_rows::{decode_series_identity, series_row, SERIES_IDENTITY_COLUMN},
-        CompiledPhysicalDAG, Source,
+        CompiledPhysicalDAG,
     },
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
@@ -42,12 +43,15 @@ fn schema() -> Arc<Schema> {
 }
 fn run(program: &CompiledPhysicalDAG, data: Batch, end: i64) -> Result<Vec<Batch>, String> {
     let input_id = program.input_slots().next().unwrap().0;
-    let dag = program
-        .instantiate(BTreeMap::from([(
+    let data_sources = BindingDataSources {
+        views: BTreeMap::from([(
             input_id,
-            Box::new(Operator::source(data.schema().clone(), vec![data]).unwrap()) as Source<'_>,
-        )]))
-        .unwrap();
+            Arc::new(MemorySource::new(data.schema().clone(), vec![data]).unwrap())
+                as Arc<dyn TableProvider>,
+        )]),
+        ..Default::default()
+    };
+    let dag = program.instantiate(&data_sources).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: end,
@@ -244,13 +248,15 @@ fn current_series_observes_resource_limits() {
     let plan = snapshot_plan();
     for cancelled in [false, true] {
         let data = input(&[("one", 50_000, 1.)]);
-        let dag = plan
-            .instantiate(BTreeMap::from([(
+        let data_sources = BindingDataSources {
+            views: BTreeMap::from([(
                 0,
-                Box::new(Operator::source(data.schema().clone(), vec![data]).unwrap())
-                    as Source<'_>,
-            )]))
-            .unwrap();
+                Arc::new(MemorySource::new(data.schema().clone(), vec![data]).unwrap())
+                    as Arc<dyn TableProvider>,
+            )]),
+            ..Default::default()
+        };
+        let dag = plan.instantiate(&data_sources).unwrap();
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 60_000,

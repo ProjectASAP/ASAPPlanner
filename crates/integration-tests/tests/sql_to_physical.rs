@@ -2,9 +2,9 @@
 //! fresh-run execution.
 mod physical_common;
 use asap_executor::{
-    physical_planner::{compile, Source},
+    physical_planner::compile,
     runtime::{Limits, RunContext, Scope},
-    sources::{DataSources, MemorySource},
+    sources::{BindingDataSources, DataSources, MemorySource},
     values::{Batch, Value},
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
@@ -14,10 +14,7 @@ use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use futures::StreamExt;
 use physical_common::compile_physical_asap_dag;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 /// SQL filtering and grouped aggregation survive logical/physical lowering;
 /// rebinding the compiled DAG runs against new data rather than cached results.
@@ -91,7 +88,6 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
             else {
                 unreachable!()
             };
-            let expression = asap_types::ir::OperatorNode::reachable(&selected).into_iter().find(|n| matches!(n.non_asap(), Some(asap_types::ir::NonASAPOp::Scan { source: s, .. }) if s == source)).unwrap();
             let mut sources = DataSources::default();
             sources
                 .register(
@@ -105,12 +101,11 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
                     ),
                 )
                 .unwrap();
-            let bound = plan
-                .instantiate(BTreeMap::from([(
-                    scan.id as u64,
-                    Box::new(sources.bind(&expression).unwrap()) as Source<'_>,
-                )]))
-                .unwrap();
+            let data_sources = BindingDataSources {
+                tables: sources,
+                ..Default::default()
+            };
+            let bound = plan.instantiate(&data_sources).unwrap();
             let mut stream = bound
                 .execute(
                     plan.roots(),

@@ -1,6 +1,7 @@
 //! Planner-selected summaries over raw data samples compile as precompute DAGs
 //! and produce the same estimates as feeding their kernel sample by sample.
 mod physical_common;
+use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use asap_types::ir::ASAPOp;
 use asap_types::ir::OperatorNode;
@@ -9,8 +10,7 @@ use std::{collections::BTreeMap, collections::BTreeSet, rc::Rc, sync::Arc};
 
 use asap_executor::{
     factory::create_planner_accumulator,
-    operators::Operator,
-    physical_planner::{precompute, Source},
+    physical_planner::precompute,
     runtime::{Limits, RunContext, Scope},
     summary_kernels::{exact::ExactAccumulator, weighted_frequency::WeightedFrequency},
     values::{Batch, Value},
@@ -150,9 +150,13 @@ fn execute(
     .unwrap();
     let sources = BTreeMap::from([(
         source,
-        Box::new(Operator::source(schema, vec![batch]).unwrap()) as Source<'_>,
+        Arc::new(MemorySource::new(schema, vec![batch]).unwrap()) as Arc<dyn TableProvider>,
     )]);
-    let physical_dag = program.instantiate(sources).unwrap();
+    let data_sources = BindingDataSources {
+        views: sources,
+        ..Default::default()
+    };
+    let physical_dag = program.instantiate(&data_sources).unwrap();
     let context = RunContext::new(
         Scope::Ingestion {
             window_start_ms: 0,

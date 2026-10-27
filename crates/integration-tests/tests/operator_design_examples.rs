@@ -140,16 +140,13 @@ async fn sql_scalar_subquery_retains_its_cardinality_contract() {
 #[tokio::test]
 async fn sql_sum_example_executes_with_sql_null_semantics() {
     use asap_executor::{
-        physical_planner::{compile, Source},
+        physical_planner::compile,
         runtime::{Limits, RunContext, Scope},
-        sources::{DataSources, MemorySource},
+        sources::{BindingDataSources, DataSources, MemorySource},
         values::{Batch, Value},
     };
     use futures::StreamExt;
-    use std::{
-        collections::{BTreeMap, BTreeSet},
-        sync::Arc,
-    };
+    use std::{collections::BTreeSet, sync::Arc};
     let root = lower_sql(
         "SELECT SUM(bytes) + 1 AS total_bytes FROM requests WHERE status = 200",
         &catalog(),
@@ -209,12 +206,11 @@ async fn sql_sum_example_executes_with_sql_null_semantics() {
                 ),
             )
             .unwrap();
-        let bound = plan
-            .instantiate(BTreeMap::from([(
-                scan.id as u64,
-                Box::new(sources.bind(&logical_scan).unwrap()) as Source<'_>,
-            )]))
-            .unwrap();
+        let data_sources = BindingDataSources {
+            tables: sources,
+            ..Default::default()
+        };
+        let bound = plan.instantiate(&data_sources).unwrap();
         let mut stream = bound
             .execute(
                 plan.roots(),
@@ -265,18 +261,10 @@ async fn sql_window_and_filtered_aggregate_types() {
 /// state. No replacement dag is constructed by the test.
 #[tokio::test]
 async fn batch_planning_replaces_summary_operators() {
-    use asap_executor::{
-        physical_planner::compile,
-        runtime::Scope,
-        values::{Batch, Value},
-    };
+    use asap_executor::values::Value;
     use asap_plan_selection::pass::PlanningModels;
     use asap_planner::{e2e_plan, FrontendInput, UserInput};
     use asap_types::workload::*;
-    use std::{
-        collections::{BTreeMap, BTreeSet},
-        sync::Arc,
-    };
     let queries = [
         "SELECT SUM(bytes) + 1 AS result FROM requests",
         "SELECT SUM(bytes) * 2 AS result FROM requests",
@@ -350,42 +338,11 @@ async fn batch_planning_replaces_summary_operators() {
         assert!(OperatorNode::reachable(root)
             .iter()
             .any(|n| Rc::ptr_eq(n, state)));
-        let wire = physical_common::compile_physical_asap_dag(root).unwrap();
-        let scan = wire
-            .nodes
-            .iter()
-            .find(|n| {
-                matches!(
-                    n.payload,
-                    asap_types::ir::physical_export::PhysicalASAPOperatorPayload::NonASAP(
-                        asap_types::ir::NonASAPOp::Scan { .. }
-                    )
-                )
-            })
-            .unwrap();
-        let schema = Arc::new(scan.output_schema.clone());
-        let program = compile(
-            &wire,
-            &BTreeSet::from([scan.id as u64]),
-            &[wire.roots[0] as u64],
-        )
-        .unwrap();
-        let result = physical_common::execute(
-            &program,
-            BTreeMap::from([(
-                scan.id as u64,
-                Batch::try_new(
-                    schema,
-                    vec![vec![Value::Float64(10.0)], vec![Value::Float64(20.0)]],
-                )
-                .unwrap(),
-            )]),
-            Scope::Query {
-                evaluation_time_ms: 0,
-                revision: 1,
-            },
+        // The table `requests` bound to its two rows.
+        let rows = physical_common::execute_raw_rows(
+            root,
+            vec![vec![Value::Float64(10.0)], vec![Value::Float64(20.0)]],
         );
-        let rows: Vec<_> = result[0].iter().flat_map(|batch| batch.to_rows()).collect();
         assert_eq!(rows.len(), 1);
         assert!(
             matches!(rows[0][0], Value::Float64(v) if v == expected),

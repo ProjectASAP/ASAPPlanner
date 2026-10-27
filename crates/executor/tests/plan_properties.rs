@@ -1,14 +1,21 @@
 //! Finite-input requirements are validated before source execution.
 use asap_executor::{
-    operators::{Operator, SortKey},
-    plan::{Boundedness, Emission, PhysicalDAG},
+    physical_planner::compile,
+    plan::{Boundedness, Emission},
     runtime::{Limits, OutputStream, RunContext, Scope},
-    sources::{DataSources, RawSource},
+    sources::{BindingDataSources, ScanRequest, TableProvider},
     values::{Batch, SchemaRef},
     Error,
 };
-use planner_types::ir::operator::Source;
-use planner_types::ir::schema::{DataType, Field, FieldDataType, Schema};
+use planner_types::ir::operator::{GroupKeys, Source};
+use planner_types::ir::physical_export::{
+    EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
+    PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
+};
+use planner_types::ir::properties::ExecutionDataState;
+use planner_types::ir::schema::{DataType, FieldDataType, Schema};
+use planner_types::ir::NonASAPOp;
+use std::collections::BTreeSet;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -18,43 +25,88 @@ struct DeclaredSource {
     boundedness: Boundedness,
     opens: Arc<AtomicUsize>,
 }
-impl RawSource for DeclaredSource {
+impl TableProvider for DeclaredSource {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
     fn boundedness(&self) -> Boundedness {
         self.boundedness
     }
-    fn scan(&self, _: RunContext) -> Result<OutputStream<'_, Batch>, Error> {
+    fn scan(&self, _: &ScanRequest, _: RunContext) -> Result<OutputStream<'_, Batch>, Error> {
         self.opens.fetch_add(1, Ordering::SeqCst);
         Ok(Box::pin(futures::stream::empty()))
     }
 }
-// A blocking parent must reject unknown and unbounded Scan inputs without opening a reader.
+/// `Sort(Scan(t))` over `schema`.
+fn sorted_scan(schema: &Schema, identity: &Source) -> PhysicalASAPDAG {
+    let node = |id, payload| PhysicalASAPDAGNode {
+        id,
+        payload,
+        output_state: ExecutionDataState::QUERY_ROWS,
+        materialization: Default::default(),
+        output_schema: schema.clone(),
+        guarantee: None,
+    };
+    PhysicalASAPDAG {
+        nodes: vec![
+            node(
+                0,
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan {
+                    source: identity.clone(),
+                    schema: schema.clone(),
+                    predicates: vec![],
+                }),
+            ),
+            node(
+                1,
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Sort {
+                    keys: vec![planner_types::ir::SortKey {
+                        expr: planner_types::ir::ScalarExpr::Column(0),
+                        ascending: true,
+                        nulls_first: false,
+                    }],
+                    partition_by: GroupKeys::by(vec![]),
+                    child: 0,
+                }),
+            ),
+        ],
+        edges: vec![PhysicalASAPDAGEdge {
+            producer: 0,
+            consumer: 1,
+            role: EdgeRole::Input,
+            intermediate_schema: schema.clone(),
+            data_state: ExecutionDataState::QUERY_ROWS,
+            grouping: GroupingEdgeCompatibility::NotApplicable,
+            window: WindowEdgeCompatibility::NotApplicable,
+        }],
+        roots: vec![1],
+        scalar_roots: vec![],
+    }
+}
+// A blocking parent over a table slot runs only over a provider that
+// declares Bounded; an unknown or unbounded one is rejected at
+// instantiation, without opening a reader.
 #[test]
 fn blocking_inputs_require_an_explicit_finite_source() {
-    let schema = Arc::new(planner_types::ir::schema::Schema {
-        unique_keys: vec![],
-        closed: false,
-        fields: vec![Field {
-            table: None,
-            name: "v".into(),
-            dtype: FieldDataType::Plain(DataType::Int64),
-            nullable: false,
-        }],
-        time_index: None,
-    });
+    let logical = Schema::new(vec![planner_types::ir::schema::Field::plain(
+        "v",
+        DataType::Int64,
+        false,
+    )]);
+    let schema = Arc::new(logical.clone());
+    let identity = Source::Table {
+        table_ref: "t".into(),
+    };
+    let compiled = compile(&sorted_scan(&logical, &identity), &BTreeSet::new(), &[1]).unwrap();
     for boundedness in [
         Boundedness::Unknown,
         Boundedness::Unbounded,
         Boundedness::Bounded,
     ] {
         let opens = Arc::new(AtomicUsize::new(0));
-        let mut registry = DataSources::default();
-        let identity = Source::Table {
-            table_ref: "t".into(),
-        };
-        registry
+        let mut data_sources = BindingDataSources::default();
+        data_sources
+            .tables
             .register(
                 identity.clone(),
                 Arc::new(DeclaredSource {
@@ -64,39 +116,6 @@ fn blocking_inputs_require_an_explicit_finite_source() {
                 }),
             )
             .unwrap();
-        let scan = registry
-            .bind(
-                &planner_types::ir::OperatorNode::new_shared(planner_types::ir::Operator::NonASAP(
-                    planner_types::ir::NonASAPOp::Scan {
-                        source: identity,
-                        schema: Schema::new(vec![planner_types::ir::schema::Field::plain(
-                            "v",
-                            DataType::Int64,
-                            false,
-                        )]),
-                        predicates: vec![],
-                    },
-                ))
-                .unwrap(),
-            )
-            .unwrap();
-        let mut dag = PhysicalDAG::default();
-        dag.add(0, vec![], scan).unwrap();
-        dag.add(
-            1,
-            vec![0],
-            Operator::sort(
-                schema.clone(),
-                vec![SortKey {
-                    column: 0,
-                    descending: false,
-                    nulls_first: false,
-                }],
-                vec![],
-            )
-            .unwrap(),
-        )
-        .unwrap();
         let run = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 0,
@@ -105,15 +124,21 @@ fn blocking_inputs_require_an_explicit_finite_source() {
             Limits::default(),
         )
         .unwrap();
-        if boundedness == Boundedness::Bounded {
-            let properties = dag.properties(&[1]).unwrap();
-            assert_eq!(properties[&1].emission, Emission::AfterInput);
-            assert_eq!(properties[&1].boundedness, Boundedness::Bounded);
-            assert!(dag.execute(&[1], run).is_ok());
-        } else {
-            assert!(
-                matches!(dag.execute(&[1], run), Err(Error::Invalid(message)) if message.contains("requires bounded inputs"))
-            );
+        match compiled.instantiate(&data_sources) {
+            Ok(dag) => {
+                assert_eq!(boundedness, Boundedness::Bounded);
+                let properties = dag.properties(&[1]).unwrap();
+                assert_eq!(properties[&1].emission, Emission::AfterInput);
+                assert_eq!(properties[&1].boundedness, Boundedness::Bounded);
+                assert!(dag.execute(&[1], run).is_ok());
+            }
+            Err(error) => {
+                assert_ne!(boundedness, Boundedness::Bounded);
+                assert!(
+                    error.to_string().contains("does not declare Bounded"),
+                    "{error}"
+                );
+            }
         }
         assert_eq!(opens.load(Ordering::SeqCst), 0);
     }

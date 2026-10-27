@@ -1,9 +1,10 @@
 //! Compile, persist and rebind dynamic-label computation without deployment lowering.
 use asap_executor::expressions::binary::{BinaryOpKind, BinaryOperator};
+use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
+use std::sync::Arc;
 
 use asap_executor::{
-    operators::Operator,
-    physical_planner::{promql_values::*, CompiledPhysicalDAG, Source},
+    physical_planner::{promql_values::*, CompiledPhysicalDAG},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
@@ -38,12 +39,16 @@ fn run_inputs(
         .map(|(id, batch)| {
             (
                 id as u64,
-                Box::new(Operator::source(batch.schema().clone(), vec![batch]).unwrap())
-                    as Source<'_>,
+                Arc::new(MemorySource::new(batch.schema().clone(), vec![batch]).unwrap())
+                    as Arc<dyn TableProvider>,
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let bound = dag.instantiate(sources).unwrap();
+    let data_sources = BindingDataSources {
+        views: sources,
+        ..Default::default()
+    };
+    let bound = dag.instantiate(&data_sources).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
@@ -209,39 +214,27 @@ fn histogram_quantile_keeps_each_label_group() {
 // Linking an ensemble preserves its shared producer and every selected operator.
 #[test]
 fn composed_ensemble_shares_a_producer_across_roots() {
-    use asap_executor::{
-        plan::{PhysicalOperator, PlanProperties},
-        runtime::{Input, OutputStream},
-        values::SchemaRef,
-    };
+    use asap_executor::{runtime::OutputStream, sources::ScanRequest, values::SchemaRef};
     use planner_types::ir::scalar::ArithmeticOpKind;
     struct Counted {
-        source: Operator,
-        starts: std::rc::Rc<std::cell::Cell<usize>>,
+        source: MemorySource,
+        starts: Arc<std::sync::atomic::AtomicUsize>,
     }
-    impl PhysicalOperator<Batch, SchemaRef> for Counted {
-        fn name(&self) -> &str {
-            "CountedInput"
-        }
-        fn input_schemas(&self) -> Vec<SchemaRef> {
-            vec![]
-        }
-        fn output_schema(&self) -> SchemaRef {
+    impl TableProvider for Counted {
+        fn schema(&self) -> SchemaRef {
             self.source.schema()
         }
-        fn output_bytes(&self, batch: &Batch) -> usize {
-            batch.memory_bytes()
+        fn boundedness(&self) -> asap_executor::plan::Boundedness {
+            self.source.boundedness()
         }
-        fn properties(&self, inputs: &[PlanProperties]) -> PlanProperties {
-            self.source.properties(inputs)
-        }
-        fn start<'a>(
-            &'a self,
-            inputs: Vec<Input<'a, Batch>>,
+        fn scan(
+            &self,
+            request: &ScanRequest,
             context: RunContext,
-        ) -> Result<OutputStream<'a, Batch>, asap_executor::Error> {
-            self.starts.set(self.starts.get() + 1);
-            self.source.start(inputs, context)
+        ) -> Result<OutputStream<'_, Batch>, asap_executor::Error> {
+            self.starts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.source.scan(request, context)
         }
     }
     let aggregate = compile_aggregate(
@@ -272,16 +265,18 @@ fn composed_ensemble_shares_a_producer_across_roots() {
     )
     .unwrap();
     assert_eq!(dag.input_slots().count(), 1);
-    let starts = std::rc::Rc::new(std::cell::Cell::new(0));
+    let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for _ in 0..2 {
         let input = Batch::try_new(vector_schema(), vec![row(&[("job", "api")], 3.)]).unwrap();
         let source = Counted {
-            source: Operator::source(vector_schema(), vec![input]).unwrap(),
+            source: MemorySource::new(vector_schema(), vec![input]).unwrap(),
             starts: starts.clone(),
         };
-        let bound = dag
-            .instantiate(BTreeMap::from([(0, Box::new(source) as Source<'_>)]))
-            .unwrap();
+        let data_sources = BindingDataSources {
+            views: BTreeMap::from([(0, Arc::new(source) as Arc<dyn TableProvider>)]),
+            ..Default::default()
+        };
+        let bound = dag.instantiate(&data_sources).unwrap();
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 0,
@@ -305,7 +300,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
         equal_rows(results[0].clone(), vec![row(&[("job", "api")], 6.)]);
         equal_rows(results[1].clone(), vec![row(&[("job", "api")], -3.)]);
     }
-    assert_eq!(starts.get(), 2);
+    assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
 #[test]

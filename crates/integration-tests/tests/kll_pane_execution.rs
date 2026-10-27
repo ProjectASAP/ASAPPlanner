@@ -1,8 +1,9 @@
 //! Maintenance -> stored pane state -> independently bound query execution.
 mod physical_common;
+use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
 use asap_executor::{
     operators::{Operator, SummaryEvaluation},
-    physical_planner::{CompiledPhysicalDAG, Source},
+    physical_planner::CompiledPhysicalDAG,
     plan::{PhysicalDAG, PhysicalOperator, PlanProperties},
     runtime::{Input, Limits, OutputStream, RunContext, Scope},
     summary_kernels::datasketches_kll::DatasketchesKLLAccumulator,
@@ -205,12 +206,16 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
             .map(|(&id, batch)| {
                 (
                     id,
-                    Box::new(Operator::source(schema.clone(), vec![batch.clone()]).unwrap())
-                        as Source<'_>,
+                    Arc::new(MemorySource::new(schema.clone(), vec![batch.clone()]).unwrap())
+                        as Arc<dyn TableProvider>,
                 )
             })
             .collect();
-        assert!(compiled.instantiate(incomplete).is_err());
+        let data_sources = BindingDataSources {
+            views: incomplete,
+            ..Default::default()
+        };
+        assert!(compiled.instantiate(&data_sources).is_err());
         let result = physical_common::execute(
             &compiled,
             inputs,
@@ -285,14 +290,20 @@ fn panes_reject_parameters_schema_and_missing_binding() {
         vec![1],
     )
     .unwrap();
-    assert!(compiled.instantiate(BTreeMap::new()).is_err());
+    let data_sources = BindingDataSources {
+        views: BTreeMap::new(),
+        ..Default::default()
+    };
+    assert!(compiled.instantiate(&data_sources).is_err());
     let raw = raw_schema();
-    let source = Operator::source(
+    let source = MemorySource::new(
         raw.clone(),
         vec![Batch::try_new(raw, vec![vec![Value::Float64(1.)]]).unwrap()],
     )
     .unwrap();
-    assert!(compiled
-        .instantiate(BTreeMap::from([(0, Box::new(source) as Source<'_>)]))
-        .is_err());
+    let data_sources = BindingDataSources {
+        views: BTreeMap::from([(0, Arc::new(source) as Arc<dyn TableProvider>)]),
+        ..Default::default()
+    };
+    assert!(compiled.instantiate(&data_sources).is_err());
 }
