@@ -215,7 +215,8 @@ fn project(
                                 input
                                     .compatible_producers
                                     .iter()
-                                    .map(|id| PhysicalCandidateId(candidates[&id.0]))
+                                    .filter_map(|id| candidates.get(&id.0))
+                                    .map(|&local| PhysicalCandidateId(local))
                                     .collect::<Vec<_>>(),
                             )
                         })
@@ -229,9 +230,12 @@ fn project(
             .iter()
             .map(|&id| {
                 let mut root = graph.query_roots[id].clone();
-                for id in &mut root.compatible_candidates {
-                    id.0 = candidates[&id.0];
-                }
+                root.compatible_candidates = root
+                    .compatible_candidates
+                    .iter()
+                    .filter_map(|id| candidates.get(&id.0))
+                    .map(|&local| PhysicalCandidateId(local))
+                    .collect();
                 root
             })
             .collect(),
@@ -252,9 +256,16 @@ fn project(
         let mapped = match constraint {
             ReaderConstraint::ActivationRequires {
                 required_candidate, ..
-            } => ReaderConstraint::ActivationRequires {
-                candidate,
-                required_candidate: PhysicalCandidateId(candidates[&required_candidate.0]),
+            } => match candidates.get(&required_candidate.0) {
+                Some(&required) => ReaderConstraint::ActivationRequires {
+                    candidate,
+                    required_candidate: PhysicalCandidateId(required),
+                },
+                // The required copy is outside the component: never select it.
+                None => ReaderConstraint::AllowedOutputs {
+                    candidate,
+                    outputs: Vec::new(),
+                },
             },
             ReaderConstraint::AllowedOutputs {
                 outputs: allowed, ..
@@ -367,6 +378,95 @@ fn extend_selection(
             candidate: candidate(root.candidate),
         }));
     global.modeled_cost += local.modeled_cost;
+}
+
+/// Each query's own plan, searched over the candidates it can reach and
+/// evaluated for that query alone, combined into one selection of the whole
+/// graph. `None` when a query finds no plan within `limits` (shared among
+/// the queries) or the combination is not a valid selection. It is only a
+/// proposal: the joint search still evaluates it for the whole workload.
+pub(in crate::search) fn independent_plan(
+    configured: &CandidateConfigurationInventory,
+    context: &CandidatePlanningContext<'_>,
+    limits: CandidateSearchLimits,
+) -> Option<SelectedCandidateGraph> {
+    let graph = &configured.inventory.graph;
+    let outputs = output_queries(context.original_roots);
+    if outputs.len() != graph.query_roots.len() {
+        return None;
+    }
+    let started = Instant::now();
+    let count = context.entries.len();
+    let mut combined = SelectedCandidateGraph {
+        selected_candidates: Vec::new(),
+        connections: Vec::new(),
+        query_roots: Vec::new(),
+        modeled_cost: 0.0,
+    };
+    let mut reach = vec![HashSet::new(); count];
+    for (output, &query) in outputs.iter().enumerate() {
+        let mut pending = graph.query_roots[output].compatible_candidates.clone();
+        while let Some(id) = pending.pop() {
+            if reach[query].insert(id.0) {
+                pending.extend(
+                    graph.candidates[id.0]
+                        .producer_requirements
+                        .iter()
+                        .flat_map(|input| input.compatible_producers.iter().copied()),
+                );
+            }
+        }
+    }
+    let mut readers = vec![0usize; graph.candidates.len()];
+    for candidates in &reach {
+        for &id in candidates {
+            readers[id] += 1;
+        }
+    }
+    for (query, reach) in reach.iter().enumerate() {
+        let own_outputs: Vec<_> = (0..outputs.len())
+            .filter(|&output| outputs[output] == query)
+            .collect();
+        // Only candidates no other query can reach: the query planned alone.
+        let mut candidates: Vec<_> = reach
+            .iter()
+            .copied()
+            .filter(|&id| readers[id] == 1)
+            .collect();
+        candidates.sort_unstable();
+        let component = Component {
+            queries: vec![query],
+            candidates,
+            outputs: own_outputs,
+        };
+        let local = project(configured, &component);
+        let roots = [context.original_roots[query].clone()];
+        let entries = [context.entries[query].clone()];
+        let local_context = CandidatePlanningContext {
+            original_roots: &roots,
+            entries: &entries,
+            ..*context
+        };
+        let result = optimize_configured_candidates(
+            &local,
+            &local_context,
+            CandidateSearchLimits {
+                wall_time: limits.wall_time.saturating_sub(started.elapsed())
+                    / (count - query) as u32,
+                max_refinements: limits.max_refinements,
+            },
+        )
+        .ok()?;
+        extend_selection(
+            &mut combined,
+            &result.search.incumbent?.selected,
+            &component,
+        );
+    }
+    combined.selected_candidates.sort_unstable();
+    combined.query_roots.sort_by_key(|root| root.query_root);
+    validate_selected_graph(graph, &combined).ok()?;
+    Some(combined)
 }
 
 /// Split only additive usage optimization, then validate the reconstructed full

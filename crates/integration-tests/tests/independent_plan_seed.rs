@@ -58,6 +58,8 @@ fn cost(queries: &[String]) -> f64 {
     )
     .unwrap();
     let selection = run.stage3_plan_selection.as_ref().unwrap();
+    let report = selection.search.candidate_connections.as_ref().unwrap();
+    println!("{queries:?}: status {}", report.status);
     selection.costs[&selection.selected]
         .cost_per_second
         .unwrap()

@@ -207,6 +207,26 @@ pub(in crate::search) fn optimize_configured_candidates(
     if let Some((graph, profile)) = &joint {
         direct_refs.push((graph, DirectPriceModel::Joint(profile)));
     }
+    // The model's lower bounds can rank many shared plans below the queries'
+    // separate plans, so the search could stop above what planning each query
+    // alone achieves. Evaluating their combination first rules that out. Only
+    // the seed-grid round (the one that refines materialization) does this:
+    // later rounds keep the best plan of every round, and their larger graphs
+    // make the per-query searches slower without better plans.
+    let independent: Vec<_> = if context.refine_materialization && context.entries.len() > 1 {
+        super::components::independent_plan(
+            configured,
+            context,
+            CandidateSearchLimits {
+                wall_time: limits.wall_time / 4,
+                ..limits
+            },
+        )
+        .into_iter()
+        .collect()
+    } else {
+        Vec::new()
+    };
     let mut search = search_candidates_with_direct_feedback(
         &configured.inventory.graph,
         CandidateSearchLimits {
@@ -214,6 +234,7 @@ pub(in crate::search) fn optimize_configured_candidates(
             ..limits
         },
         &weights,
+        &independent,
         &exclusions,
         &changes,
         &direct_refs,
