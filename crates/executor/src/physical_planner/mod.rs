@@ -64,7 +64,8 @@ mod row_values;
 /// Every reachable `Scan` leaf is a table slot, bound by its `Source`; its
 /// predicates must compile over its schema. `boundaries` are the other nodes
 /// cut out as view slots, bound by node id, each with its `output_schema` in
-/// `dag`.
+/// `dag`. ([`precompute::compile`] differs: its frontiers, a `Scan`
+/// included, are view slots bound by node id, with no derived window.)
 pub fn compile(
     dag: &PhysicalASAPDAG,
     boundaries: &BTreeSet<NodeId>,
@@ -807,9 +808,10 @@ fn below_shifts(
     Ok(None)
 }
 
-/// The window of a view slot at `id`: that of the `TimeRange` (over shifts
-/// without an `@` anchor) `id` reads as its only input, as an expanded pane
-/// reads its range. `None` for any other node, whose window is not derived.
+/// The window of a view slot at `id`: that of the range `TimeRange` (over
+/// shifts without an `@` anchor) `id` reads as its only input, as an
+/// expanded pane reads its range. `None` for any other node (an instant
+/// `TimeRange` included), whose window is not derived.
 fn view_window(
     id: NodeId,
     nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
@@ -818,7 +820,12 @@ fn view_window(
     let [input] = dependencies.get(&id).map_or(&[][..], Vec::as_slice) else {
         return Ok(None);
     };
-    let Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) = &nodes[input].payload else {
+    let Payload::NonASAP(NonASAPOp::TimeRange {
+        range,
+        kind: TimeRangeKind::Range,
+        ..
+    }) = &nodes[input].payload
+    else {
         return Ok(None);
     };
     match below_shifts(first_input(*input, dependencies), nodes, dependencies)? {

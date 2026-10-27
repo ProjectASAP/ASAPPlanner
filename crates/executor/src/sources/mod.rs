@@ -29,12 +29,15 @@ pub trait TableProvider {
     fn boundedness(&self) -> crate::plan::Boundedness {
         crate::plan::Boundedness::Unknown
     }
-    /// Rows for one run. For a table slot `request` is a hint: the executor
-    /// re-applies its time range, predicates and projection, so a provider
-    /// may ignore any field. A view's provider selects the panes with
-    /// `request.time_range_ms` (see [`ScanRequest::time_range_ms`]).
-    /// Batches are in [`Self::schema`], or in its `projection` columns when
-    /// the provider applies it.
+    /// Rows for one run, in [`Self::schema`] or in its `projection` columns
+    /// when the provider applies it.
+    ///
+    /// For a table slot `request` is a hint: the executor re-applies its
+    /// time range, predicates and projection, so a provider may ignore any
+    /// field. A view slot is not re-filtered: its provider returns exactly
+    /// the states the run reads, selected by `request.time_range_ms` (see
+    /// [`ScanRequest::time_range_ms`]). The executor treats a view's states
+    /// as held by the store, so a run is not charged for them.
     fn scan(
         &self,
         request: &ScanRequest,
@@ -45,14 +48,21 @@ pub trait TableProvider {
 /// What a slot reads in one run.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScanRequest<'a> {
-    /// `(start, end]` in milliseconds on the slot's time column. In a query
-    /// run at evaluation time `T` it is the smallest range covering the range windows above
-    /// the slot: a `TimeRange(w)` over `TimeShift`s summing to `s` reads
-    /// `(T - s - w, T - s]`. A table slot in an ingestion run reads the
-    /// ingestion window. `None` when a table slot is read outside a window,
-    /// or a view slot's window is not derivable from the DAG (it is only for
-    /// a view reading one `TimeRange` directly, as an expanded pane does) or
-    /// the run is an ingestion run.
+    /// `(start, end]` in milliseconds, in a query run at evaluation time `T`.
+    /// A `TimeRange(w)` over `TimeShift`s summing to `s` reads `(T - s - w,
+    /// T - s]`.
+    ///
+    /// - Table slot: the smallest range covering the range windows above
+    ///   the `Scan`, on the slot's time column; `None` when the `Scan` is
+    ///   read outside a range window. The executor re-applies it.
+    /// - View slot: the window of the one range `TimeRange` the view reads
+    ///   directly, as an expanded pane does; the provider returns the
+    ///   states whose pane ends in `(start, end]`. `None` when the window
+    ///   is not derivable from the DAG: the provider returns every state
+    ///   bound for this run, as a bound source did before.
+    ///
+    /// `None` in every ingestion run (until ingestion windows are defined
+    /// for slots): a table slot reads, and re-filters, as before.
     pub time_range_ms: Option<(i64, i64)>,
     /// The slot's columns, as indices into the provider's schema, in the
     /// slot's order.
@@ -248,13 +258,7 @@ impl Scan {
             Scope::Query {
                 evaluation_time_ms, ..
             } => window.at(evaluation_time_ms).map(Some),
-            Scope::Ingestion {
-                window_start_ms,
-                window_end_ms,
-                ..
-            } => Ok(self
-                .reapplies_time_range
-                .then_some((window_start_ms, window_end_ms))),
+            Scope::Ingestion { .. } => Ok(None),
         }
     }
     /// `batch` in the slot's schema: projected when it is in the provider's
@@ -356,6 +360,10 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                     return Err(Error::Cancelled);
                 }
                 let batch = self.to_output(batch?, &provider_schema)?;
+                if !self.reapplies_time_range {
+                    // A view's states are the store's, read by this run.
+                    batch.mark_states_held_outside_run();
+                }
                 if predicates.is_empty() && time_filter.is_none() {
                     return Ok(batch);
                 }
@@ -382,7 +390,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                         .iter()
                         .map(|t| Some(t.is_some_and(|t| t > start_ms && t <= end_ms)))
                         .collect();
-                    batch = batch.filter(&keep)?;
+                    batch = keep_rows(batch, &keep)?;
                 }
                 // Each predicate is one column over the rows the earlier ones
                 // kept; over dictionary-encoded labels it is evaluated once
@@ -396,12 +404,21 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                         .as_any()
                         .downcast_ref::<arrow::array::BooleanArray>()
                         .ok_or_else(|| Error::Invalid("Scan predicate is not boolean".into()))?;
-                    batch = batch.filter(keep)?;
+                    batch = keep_rows(batch, keep)?;
                 }
                 Ok(batch)
             })
             .boxed_local())
     }
+}
+
+/// The rows of `batch` that `keep` keeps; `batch` itself, uncopied, when it
+/// keeps every row.
+fn keep_rows(batch: Batch, keep: &arrow::array::BooleanArray) -> Result<Batch, Error> {
+    if keep.true_count() == batch.num_rows() {
+        return Ok(batch);
+    }
+    batch.filter(keep)
 }
 
 mod memory;
