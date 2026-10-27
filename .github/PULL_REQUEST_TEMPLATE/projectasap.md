@@ -57,6 +57,12 @@ Mark non-applicable forms explicitly; do not fabricate evidence.
 
 Give each new test a one- or two-line behavioral purpose.
 
+## Snapshot changes
+
+For each changed file under `crates/devtools/tests/corpus_snapshots/`: the
+query and why its plan changed. Write "None" if no snapshot changed. See
+[planner snapshots](../../docs/develop_docs/planner-snapshots.md).
+
 ## Architectural decisions
 
 List consequential decisions and rejected alternatives, or state why this is not
