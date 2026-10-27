@@ -37,22 +37,24 @@ struct TopKRankings {
     exact_groups: HashMap<MemoGroupId, Option<MemoGroupId>>,
 }
 
-/// The ranking a top-k reader can share: its reuse candidate (the readers of
-/// one input and partition) and that candidate's ranking.
-struct Ranking {
-    set: usize,
+/// One input's top-k readers' shared ranking: `Limit(k_max)` over `Sort`,
+/// and the readers' groups, whose queries the producer serves.
+struct SharedRanking {
     ranking: Rc<OperatorNode>,
+    groups: Vec<usize>,
 }
 
 impl SharedProducer for TopKRankings {
-    type Need = Ranking;
-    type Covering = Rc<OperatorNode>;
+    /// The ranking of the reader's input and partition, at the largest `k`
+    /// of its set.
+    type Need = Rc<OperatorNode>;
+    type Covering = SharedRanking;
 
-    fn readers(
+    fn sets(
         &mut self,
         memo: &CandidateMemo,
         deadline: Option<Instant>,
-    ) -> Result<Vec<Reader<Ranking>>, StateGroupExpansionError> {
+    ) -> Result<Vec<Vec<Reader<Rc<OperatorNode>>>>, StateGroupExpansionError> {
         let mut owners = HashMap::new();
         let mut roots = Vec::new();
         for (group, entry) in memo.groups.iter().enumerate() {
@@ -76,50 +78,42 @@ impl SharedProducer for TopKRankings {
         }
         Ok(topk_reuse_candidates(&roots)
             .into_iter()
-            .enumerate()
-            .flat_map(|(set, reuse)| {
-                let owners = &owners;
-                reuse.members.into_iter().filter_map(move |node| {
-                    Some(Reader {
-                        group: *owners.get(&Rc::as_ptr(&node))?,
-                        need: Ranking {
-                            set,
-                            ranking: Rc::clone(&reuse.ranking),
-                        },
+            .map(|reuse| {
+                reuse
+                    .members
+                    .iter()
+                    .filter_map(|node| {
+                        Some(Reader {
+                            group: *owners.get(&Rc::as_ptr(node))?,
+                            need: Rc::clone(&reuse.ranking),
+                        })
                     })
-                })
+                    .collect()
             })
             .collect())
     }
 
-    fn can_share(&self, a: &Reader<Ranking>, b: &Reader<Ranking>) -> bool {
-        a.need.set == b.need.set
-    }
-
-    fn covering(
+    fn coverings(
         &mut self,
-        _memo: &CandidateMemo,
-        sharing: &[Reader<Ranking>],
+        set: &[Reader<Rc<OperatorNode>>],
         _deadline: Option<Instant>,
-    ) -> Result<Vec<Rc<OperatorNode>>, StateGroupExpansionError> {
-        Ok(vec![Rc::clone(&sharing[0].need.ranking)])
-    }
-
-    fn serves(&self, _covering: &Rc<OperatorNode>, _reader: &Reader<Ranking>) -> bool {
-        // The largest `k` holds every smaller top-k.
-        true
+    ) -> Result<Vec<SharedRanking>, StateGroupExpansionError> {
+        // The largest `k` holds every smaller top-k, so it serves the set.
+        Ok(vec![SharedRanking {
+            ranking: Rc::clone(&set[0].need),
+            groups: set.iter().map(|reader| reader.group).collect(),
+        }])
     }
 
     fn derive(
         &mut self,
         memo: &mut CandidateMemo,
-        sharing: &[Reader<Ranking>],
-        reader: &Reader<Ranking>,
-        covering: &Rc<OperatorNode>,
+        reader: &Reader<Rc<OperatorNode>>,
+        covering: &SharedRanking,
     ) -> Result<usize, StateGroupExpansionError> {
         // Interning the ranking is idempotent, so every reader of the set
         // reads the producer the first one interned.
-        let Some(input_group) = memo.groups[sharing[0].group].children.first().copied() else {
+        let Some(input_group) = memo.groups[covering.groups[0]].children.first().copied() else {
             return Ok(0);
         };
         let Some(exact_input) = exact_input_group(memo, input_group, &mut self.exact_groups)?
@@ -127,19 +121,21 @@ impl SharedProducer for TopKRankings {
             return Ok(0);
         };
         let input = Rc::clone(&memo.groups[exact_input.0 as usize].node);
-        let queries: Vec<_> = sharing
+        let queries: Vec<_> = covering
+            .groups
             .iter()
-            .flat_map(|reader| memo.groups[reader.group].queries.iter().copied())
+            .flat_map(|&group| memo.groups[group].queries.iter().copied())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
-        let sort = covering.children()[0]
+        let sort = covering.ranking.children()[0]
             .with_new_children(|_| Rc::clone(&input))
             .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?;
         let sort_group =
             append_producer(memo, Rc::new(sort), &queries, CandidateOrigin::TopKReuse, 1)?;
         let sort = Rc::clone(&memo.groups[sort_group.0 as usize].node);
         let ranking = covering
+            .ranking
             .with_new_children(|_| Rc::clone(&sort))
             .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?;
         let ranking_group = append_producer(

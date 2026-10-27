@@ -21,69 +21,54 @@ pub(in crate::memo) trait SharedProducer {
     type Need;
     /// A producer's need that serves several readers at once.
     type Covering;
-    /// Every reader of this kind among the memo's candidates, in memo order.
-    fn readers(
+    /// The memo's readers of this kind, in sets whose members can all read
+    /// one producer; in memo order.
+    fn sets(
         &mut self,
         memo: &CandidateMemo,
         deadline: Option<Instant>,
-    ) -> Result<Vec<Reader<Self::Need>>, StateGroupExpansionError>;
-    /// Whether two readers can read one producer.
-    fn can_share(&self, a: &Reader<Self::Need>, b: &Reader<Self::Need>) -> bool;
-    /// The coverings to offer the readers `sharing`, which can all share.
-    fn covering(
+    ) -> Result<Vec<Vec<Reader<Self::Need>>>, StateGroupExpansionError>;
+    /// The coverings to offer the readers of `set`.
+    fn coverings(
         &mut self,
-        memo: &CandidateMemo,
-        sharing: &[Reader<Self::Need>],
+        set: &[Reader<Self::Need>],
         deadline: Option<Instant>,
     ) -> Result<Vec<Self::Covering>, StateGroupExpansionError>;
-    /// Whether a producer at `covering` serves `reader`.
-    fn serves(&self, covering: &Self::Covering, reader: &Reader<Self::Need>) -> bool;
-    /// Adds `reader`'s derivation from the producer at `covering`, one of
-    /// `sharing`'s coverings; the number of candidates added.
+    /// Adds `reader`'s derivation from the producer at `covering`, if that
+    /// producer serves it; the number of candidates added.
     fn derive(
         &mut self,
         memo: &mut CandidateMemo,
-        sharing: &[Reader<Self::Need>],
         reader: &Reader<Self::Need>,
         covering: &Self::Covering,
     ) -> Result<usize, StateGroupExpansionError>;
 }
 
-/// Groups `producer`'s readers into sets that can share, and gives every
-/// reader of a set spanning two or more groups its derivation from each
-/// covering that serves it; the number of candidates added.
+/// Whether `set`'s readers belong to two or more groups; a set inside one
+/// group shares nothing.
+pub(in crate::memo) fn spans_groups<N>(set: &[Reader<N>]) -> bool {
+    set.iter().any(|reader| reader.group != set[0].group)
+}
+
+/// Gives every reader of a set spanning two or more groups its derivation
+/// from each of the set's coverings; the number of candidates added.
 pub(in crate::memo) fn add_shared_producer_candidates<P: SharedProducer>(
     memo: &mut CandidateMemo,
     producer: &mut P,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {
     check_generation_deadline(deadline)?;
-    let mut sets: Vec<Vec<Reader<P::Need>>> = Vec::new();
-    for reader in producer.readers(memo, deadline)? {
-        match sets
-            .iter_mut()
-            .find(|set| producer.can_share(&set[0], &reader))
-        {
-            Some(set) => set.push(reader),
-            None => sets.push(vec![reader]),
-        }
-    }
     let mut added = 0;
-    for sharing in &sets {
+    for set in producer.sets(memo, deadline)? {
         check_generation_deadline(deadline)?;
-        if !sharing
-            .iter()
-            .any(|reader| reader.group != sharing[0].group)
-        {
+        if !spans_groups(&set) {
             continue;
         }
-        let coverings = producer.covering(memo, sharing, deadline)?;
-        for reader in sharing {
+        let coverings = producer.coverings(&set, deadline)?;
+        for reader in &set {
             for covering in &coverings {
                 check_generation_deadline(deadline)?;
-                if producer.serves(covering, reader) {
-                    added += producer.derive(memo, sharing, reader, covering)?;
-                }
+                added += producer.derive(memo, reader, covering)?;
             }
         }
     }

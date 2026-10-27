@@ -59,32 +59,35 @@ fn signature(node: &Rc<asap_types::ir::OperatorNode>) -> String {
     serde_json::to_string(&flatten(&[QueryRoot::Operator(Rc::clone(node))]).0).unwrap()
 }
 
-/// FNV-1a over every group's node and its candidates (origin, children and
-/// nodes), independent of the order groups and candidates were added in.
+/// FNV-1a over every group (node, edges, queries, roots) and its candidates
+/// (origin, budget share, implemented and child groups, node), in memo
+/// order: the search's tie-breaks depend on that order too.
 fn fingerprint(memo: &CandidateMemo) -> (usize, u64) {
     let mut entries: Vec<String> = Vec::new();
     for (group, candidates) in memo.groups.iter().zip(&memo.candidates) {
-        let mut own: Vec<String> = candidates
+        let own: Vec<String> = candidates
             .iter()
             .map(|candidate| {
-                let children: Vec<String> = candidate
-                    .children
-                    .iter()
-                    .map(|child| signature(&memo.groups[child.0 as usize].node))
-                    .collect();
                 format!(
-                    "{:?}|{}|{:?}|{}",
+                    "{:?}|{}|{:?}|{:?}|{}",
                     candidate.origin,
                     candidate.budget_share,
-                    children,
+                    candidate.implements,
+                    candidate.children,
                     signature(&candidate.node)
                 )
             })
             .collect();
-        own.sort();
-        entries.push(format!("{}=>{:?}", signature(&group.node), own));
+        entries.push(format!(
+            "{}|{:?}|{:?}|{:?}|{:?}=>{:?}",
+            signature(&group.node),
+            group.children,
+            group.parents,
+            group.queries,
+            group.roots_of,
+            own
+        ));
     }
-    entries.sort();
     let count = memo.candidates.iter().map(Vec::len).sum();
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in entries.join("\n").bytes() {
@@ -109,7 +112,7 @@ fn top_k_reuse_candidates_are_unchanged() {
         .iter()
         .flatten()
         .any(|candidate| candidate.origin == CandidateOrigin::TopKReuse));
-    assert_eq!(fingerprint(&memo), (313, 13956034881628269997));
+    assert_eq!(fingerprint(&memo), (313, 16940643818053118362));
 }
 
 /// Quantile readers of one input at different sizes.
@@ -122,7 +125,7 @@ fn shared_size_candidates_are_unchanged() {
         ],
         6_000,
     );
-    assert_eq!(fingerprint(&memo), (508, 2366282220866866287));
+    assert_eq!(fingerprint(&memo), (508, 7457272222287953080));
 }
 
 /// Nested windows of one sum, sharing a pane chain.
@@ -140,5 +143,5 @@ fn shared_pane_candidates_are_unchanged() {
             .iter()
             .any(|node| matches!(node.asap(), Some(asap_types::ir::ASAPOp::PaneChain { .. })))
     }));
-    assert_eq!(fingerprint(&memo), (729, 17784816355208127629));
+    assert_eq!(fingerprint(&memo), (729, 15532247561651645380));
 }
