@@ -118,7 +118,8 @@ impl Operator {
             return Err(invalid("label rewrite destination missing from output"));
         }
         if let Some((_, pattern)) = &source_regex {
-            regex::Regex::new(&format!("^(?s:{pattern})$")).map_err(|e| invalid(&e.to_string()))?;
+            crate::expressions::promql_anchored_regex(pattern)
+                .map_err(|e| invalid(&e.to_string()))?;
         }
         Ok(Self {
             kind: Kind::SeriesRelabel {
@@ -573,7 +574,7 @@ pub(super) fn execute<'a>(
                 let rows = series_rows(&left.batch, &operator.inputs[0])?;
                 let regex = source_regex
                     .as_ref()
-                    .map(|(_, pattern)| regex::Regex::new(&format!("^(?s:{pattern})$")))
+                    .map(|(_, pattern)| crate::expressions::promql_anchored_regex(pattern))
                     .transpose()
                     .map_err(|e| invalid(&e.to_string()))?;
                 // Each source's relabelled set, once.

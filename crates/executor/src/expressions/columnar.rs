@@ -215,8 +215,15 @@ fn lower_scalar(
                 && matches!(expression.scalar_type(schema), Ok((DataType::Timestamp, _))) =>
         {
             // Its row semantics, once; an error stays on the row path.
-            let value =
-                super::planner::evaluate(expression, &[], schema, evaluation_time_ms).ok()?;
+            // A timestamp shift reads no column and no label regex.
+            let value = super::planner::evaluate(
+                expression,
+                &[],
+                schema,
+                evaluation_time_ms,
+                &Default::default(),
+            )
+            .ok()?;
             (
                 VectorExpr::Literal(value, DataType::Timestamp),
                 DataType::Timestamp,

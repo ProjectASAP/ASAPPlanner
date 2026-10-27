@@ -278,10 +278,50 @@ fn label_matchers_select_series() {
             r#"sum_over_time(x{instance!~"a"}[1m])"#,
             &[("b", 40.0), ("c", 100.0)],
         ),
-        // Anchored: `a` alone does not match a longer value, `.` any text.
+        // `.` matches each one-character value.
         (
             r#"sum_over_time(x{instance=~"."}[1m])"#,
             &[("a", 5.0), ("b", 40.0), ("c", 100.0)],
+        ),
+    ] {
+        assert_answers(query, &samples, expected);
+    }
+}
+
+// A pattern matches the whole value (`api` neither `api2` nor `xapi`), `.`
+// also matches a newline, and a `{` that opens no repetition is a literal
+// brace (`/api/{id}`), as in Prometheus.
+#[test]
+fn label_regexes_are_anchored_dotall_and_keep_literal_braces() {
+    let samples = [
+        series("api", &[1.0]),
+        series("api2", &[10.0]),
+        series("xapi", &[100.0]),
+        series("/api/{id}", &[1000.0]),
+        series("two\nlines", &[10000.0]),
+    ]
+    .concat();
+    for (query, expected) in [
+        (
+            r#"sum_over_time(x{instance=~"api"}[1m])"#,
+            &[("api", 1.0)][..],
+        ),
+        (
+            r#"sum_over_time(x{instance!~"api"}[1m])"#,
+            &[
+                ("/api/{id}", 1000.0),
+                ("api2", 10.0),
+                ("two\nlines", 10000.0),
+                ("xapi", 100.0),
+            ],
+        ),
+        (
+            r#"sum_over_time(x{instance=~"/api/{id}"}[1m])"#,
+            &[("/api/{id}", 1000.0)],
+        ),
+        (
+            r#"sum_over_time(x{instance=~"two.lines"}[1m])"#,
+            &[("two\nlines", 10000.0)],
         ),
     ] {
         assert_answers(query, &samples, expected);

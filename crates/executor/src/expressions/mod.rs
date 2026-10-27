@@ -10,6 +10,49 @@ pub mod binary;
 mod columnar;
 mod planner;
 pub use planner::CompiledExpression;
+
+/// PromQL's fully anchored regex for `pattern`, as `=~`, `!~` and
+/// `label_replace` use it: `^(?s:pattern)$`. Like the PromQL parser, a `{`
+/// that does not start a repetition (`/api/{id}`, literal in Go's RE2) is
+/// retried as a literal brace.
+pub(crate) fn promql_anchored_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
+    regex::Regex::new(&format!("^(?s:{pattern})$")).or_else(|error| {
+        regex::Regex::new(&format!("^(?s:{})$", escape_literal_braces(pattern))).map_err(|_| error)
+    })
+}
+
+/// `pattern` with each `{` that does not open a `{n}`, `{n,}` or `{n,m}`
+/// repetition escaped; escaped characters are kept as they are.
+fn escape_literal_braces(pattern: &str) -> String {
+    let mut escaped = String::with_capacity(pattern.len() + 1);
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                escaped.push(c);
+                escaped.extend(chars.next());
+            }
+            '{' => {
+                let rest: String = chars.clone().collect();
+                let repetition = rest.find('}').is_some_and(|end| {
+                    let (low, high) = match rest[..end].split_once(',') {
+                        Some((low, high)) => (low, Some(high)),
+                        None => (&rest[..end], None),
+                    };
+                    !low.is_empty()
+                        && low.bytes().all(|b| b.is_ascii_digit())
+                        && high.is_none_or(|high| high.bytes().all(|b| b.is_ascii_digit()))
+                });
+                if !repetition {
+                    escaped.push('\\');
+                }
+                escaped.push(c);
+            }
+            _ => escaped.push(c),
+        }
+    }
+    escaped
+}
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub enum Expression {
     Binary {
@@ -481,4 +524,30 @@ pub(crate) fn numeric(op: &ArithmeticOpKind, a: Value, b: Value) -> Result<Value
 
 fn invalid(message: &str) -> Error {
     Error::Invalid(message.into())
+}
+
+#[cfg(test)]
+mod regex_tests {
+    use super::{escape_literal_braces, promql_anchored_regex};
+
+    // Only a `{` that opens no repetition is escaped, as the PromQL parser
+    // does, and the result matches the literal text.
+    #[test]
+    fn literal_braces_are_escaped_and_repetitions_kept() {
+        for (pattern, escaped) in [
+            ("abc{}", r"abc\{}"),
+            ("abc{def}", r"abc\{def}"),
+            ("abc{def", r"abc\{def"),
+            ("abc{1}", "abc{1}"),
+            ("abc{1,}", "abc{1,}"),
+            ("abc{1,2}", "abc{1,2}"),
+            ("abc{,2}", r"abc\{,2}"),
+            (r"a\{b", r"a\{b"),
+        ] {
+            assert_eq!(escape_literal_braces(pattern), escaped, "{pattern}");
+        }
+        let regex = promql_anchored_regex("/api/{id}").unwrap();
+        assert!(regex.is_match("/api/{id}") && !regex.is_match("/api/{id}x"));
+        assert!(promql_anchored_regex("a(").is_err());
+    }
 }
