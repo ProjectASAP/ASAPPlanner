@@ -172,7 +172,7 @@ fn filtered_grouped_aggregates_roll_up_finer_values() {
             "SELECT city, host, SUM(value), MAX(value) FROM metrics WHERE {WINDOW} GROUP BY city, host"
         ),
         format!(
-            "SELECT city, SUM(value), MAX(value) FROM metrics WHERE {WINDOW} AND (city = 'NYC' OR city = 'SF') GROUP BY city"
+            "SELECT city, SUM(value), MAX(value) FROM metrics WHERE {WINDOW} AND city IN ('NYC', 'SF') GROUP BY city"
         ),
     ]);
     let (owner, candidates) = rollups(&memo, 1);
@@ -186,7 +186,8 @@ fn filtered_grouped_aggregates_roll_up_finer_values() {
 /// Example C: two cities' p90 values cannot be combined, but their KLL
 /// states can: keep the NYC and SF states, merge them, estimate. The merged
 /// read gives the coarse KLL read's rows, SQL's one NULL row over an empty
-/// selection included.
+/// selection included; the query's own read keeps the rows the `OR` form
+/// keeps.
 #[test]
 fn filtered_kll_states_merge() {
     let memo = expanded(&[
@@ -203,18 +204,32 @@ fn filtered_kll_states_merge() {
             })
         })
         .expect("a candidate merging the filtered finer states");
-    let direct = memo.candidates[owner]
-        .iter()
-        .find(|candidate| {
-            candidate.origin == CandidateOrigin::Pass1
-                && OperatorNode::reachable(&candidate.node).iter().any(|node| {
-                    matches!(node.asap(), Some(ASAPOp::SummaryAgg { family, .. })
-                        if format!("{family:?}").contains("Kll"))
-                })
-        })
-        .expect("the query's own KLL candidate");
+    let own_kll = |memo: &CandidateMemo, owner: usize| {
+        memo.candidates[owner]
+            .iter()
+            .find(|candidate| {
+                candidate.origin == CandidateOrigin::Pass1
+                    && OperatorNode::reachable(&candidate.node).iter().any(|node| {
+                        matches!(node.asap(), Some(ASAPOp::SummaryAgg { family, .. })
+                            if format!("{family:?}").contains("Kll"))
+                    })
+            })
+            .expect("the query's own KLL candidate")
+            .clone()
+    };
+    let direct = own_kll(&memo, owner);
+    let or_memo = expanded(&[format!(
+        "SELECT {P90} FROM metrics WHERE {WINDOW} AND (city = 'NYC' OR city = 'SF')"
+    )]);
+    let or_direct = own_kll(&or_memo, rollups(&or_memo, 0).0);
     for rows in row_sets() {
         let before = physical_common::execute_raw_rows_at(&direct.node, rows.clone(), 1000);
+        let or_form = physical_common::execute_raw_rows_at(&or_direct.node, rows.clone(), 1000);
+        assert_eq!(
+            format!("{before:?}"),
+            format!("{or_form:?}"),
+            "rows {rows:?}"
+        );
         let after = physical_common::execute_raw_rows_at(&merged.node, rows.clone(), 1000);
         assert_eq!(format!("{after:?}"), format!("{before:?}"), "rows {rows:?}");
         assert_eq!(after.len(), 1);
