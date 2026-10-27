@@ -19,8 +19,8 @@ use asap_types::ir::schema::{
     SketchParams, SummaryUpdate,
 };
 use asap_types::ir::{
-    ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, ScalarExpr,
-    SchemaDerivationError, TimeRangeKind,
+    ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, OperatorResultKind, Predicate,
+    ProjectItem, ScalarExpr, SchemaDerivationError, TimeRangeKind,
 };
 
 const JOB: usize = 0;
@@ -1058,4 +1058,33 @@ fn a_finalized_rollup_has_the_direct_builds_schema() {
         finalize(rollup(finer, vec![1]).unwrap()).schema,
         finalize(coarse).schema
     );
+}
+
+/// A filter on the group keys of per-(job, region) states keeps whole
+/// states, so it is still state: merging the kept states covers the global
+/// build over the filtered rows. A filter reading the state column is not a
+/// selection of states and is rejected.
+#[test]
+fn a_key_filter_over_states_selects_states() {
+    let states = grouped(table(), kll_family(), Reduction::by(vec![JOB, REGION]));
+    let kept = filter(Rc::clone(&states), eq(JOB, "a"));
+    assert_eq!(kept.result_kind, OperatorResultKind::State);
+    let rolled = rollup(kept, vec![]).unwrap();
+    let direct = grouped(
+        filter(table(), eq(JOB, "a")),
+        kll_family(),
+        Reduction::by(vec![]),
+    );
+    assert_eq!(rolled.schema, direct.schema);
+    assert_eq!(
+        rolled.coverage().unwrap().definition_id(),
+        direct.coverage().unwrap().definition_id()
+    );
+    let on_state = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Filter {
+        pred: Predicate(ScalarExpr::IsNull(Box::new(ScalarExpr::Column(2)))),
+        child: states,
+    }))
+    .unwrap();
+    assert_eq!(on_state.result_kind, OperatorResultKind::Relation);
+    assert!(on_state.validate_structure().is_err());
 }

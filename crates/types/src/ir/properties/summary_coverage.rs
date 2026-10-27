@@ -278,6 +278,11 @@ impl SummaryCoverage {
         if let Some(coverage) = memo.get(&key) {
             return Ok(coverage.clone());
         }
+        if let Some(build) = selected_build(node)? {
+            let coverage = of_summary_agg(&build);
+            memo.insert(key, coverage.clone());
+            return Ok(coverage);
+        }
         let coverage = match node.asap() {
             Some(ASAPOp::SummaryAgg { .. }) => of_summary_agg(node),
             // Back-to-back panes cover the whole window one build over it
@@ -320,6 +325,67 @@ impl SummaryCoverage {
         memo.insert(key, coverage.clone());
         Ok(coverage)
     }
+}
+
+/// For a `Filter` that keeps whole states of a grouped `SummaryAgg` by
+/// their key columns, the build that computes exactly the kept states: the
+/// same build over its input rows filtered by the same predicate on the
+/// input columns those keys name. `None` for any other node.
+fn selected_build(node: &OperatorNode) -> Result<Option<Rc<OperatorNode>>, CoverageError> {
+    let Some(states) = crate::ir::operator::asap::selected_from(node) else {
+        return Ok(None);
+    };
+    let Some(NonASAPOp::Filter { pred, .. }) = node.non_asap() else {
+        return Ok(None);
+    };
+    let Some(ASAPOp::SummaryAgg {
+        child,
+        family,
+        input,
+        reduction: Reduction::Reduce(by),
+        grouping,
+        filter,
+    }) = states.asap()
+    else {
+        return Err(CoverageError::NotSummary);
+    };
+    if by.is_without() {
+        return Err(CoverageError::NotSummary);
+    }
+    // Each state key column is the input column of the same name it groups by.
+    let mut unmapped = None;
+    let rows_pred = pred.0.map_columns(&mut |column| {
+        let mapped = by.keys().get(column).copied().filter(|&input_column| {
+            matches!((states.schema.fields.get(column), child.schema.fields.get(input_column)),
+                (Some(at_state), Some(at_input)) if at_state.name == at_input.name)
+        });
+        mapped.unwrap_or_else(|| {
+            unmapped = Some(column);
+            column
+        })
+    });
+    if let Some(key) = unmapped {
+        return Err(CoverageError::NotAGroupKey { key });
+    }
+    let rows = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Filter {
+        pred: crate::ir::scalar::Predicate(rows_pred),
+        child: Rc::clone(child),
+    }))
+    .map_err(|error| CoverageError::RegroupedBuild {
+        reason: error.to_string(),
+    })?;
+    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+        child: rows,
+        family: family.clone(),
+        input: input.clone(),
+        reduction: Reduction::Reduce(by.clone()),
+        grouping: grouping.clone(),
+        filter: filter.clone(),
+    }))
+    .map(Some)
+    .map_err(|error| CoverageError::RegroupedBuild {
+        reason: error.to_string(),
+    })
 }
 
 /// The coverage of a merge of states covering `inputs`.

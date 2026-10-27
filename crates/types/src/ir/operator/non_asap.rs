@@ -866,6 +866,8 @@ impl NonASAPOp {
                 (_, kind) => kind,
             },
             Project { child, cols, .. } if cols.iter().any(|item| matches!(item.expr, ScalarExpr::Column(i) if child.schema.fields.get(i).is_some_and(|f| !f.is_plain()))) => OperatorResultKind::State,
+            // Selecting whole states by their plain (key) columns keeps them states.
+            Filter { child, pred } if selects_states(child, pred) => OperatorResultKind::State,
             Filter { child, .. }
             | Project { child, .. }
             | Dedup { child, .. }
@@ -949,7 +951,9 @@ impl NonASAPOp {
                 }
             }
             Filter { child, pred } => {
-                no_state(child, "Filter")?;
+                if !selects_states(child, pred) {
+                    no_state(child, "Filter")?;
+                }
                 predicate(pred, &child.schema)?;
             }
             Project { child, cols, .. } => {
@@ -1210,6 +1214,19 @@ fn inner_join_unique_keys(
         );
     }
     keys
+}
+
+/// Whether a `Filter` of `pred` over `child` selects whole summary states:
+/// `child` is state and `pred` reads only its plain columns, such as group keys.
+fn selects_states(child: &OperatorNode, pred: &Predicate) -> bool {
+    child.result_kind == OperatorResultKind::State
+        && pred.0.columns_referenced().iter().all(|&column| {
+            child
+                .schema
+                .fields
+                .get(column)
+                .is_some_and(|field| field.is_plain())
+        })
 }
 
 fn readable(kind: OperatorResultKind) -> OperatorResultKind {
