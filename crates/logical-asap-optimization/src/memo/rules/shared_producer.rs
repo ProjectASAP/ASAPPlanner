@@ -30,7 +30,7 @@ pub(in crate::memo) trait SharedProducer {
     ) -> Result<Vec<Vec<Reader<Self::Need>>>, StateGroupExpansionError>;
     /// The coverings to offer the readers of `set`.
     fn coverings(
-        &mut self,
+        &self,
         set: &[Reader<Self::Need>],
         deadline: Option<Instant>,
     ) -> Result<Vec<Self::Covering>, StateGroupExpansionError>;

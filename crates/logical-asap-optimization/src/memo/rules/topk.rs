@@ -41,7 +41,7 @@ struct TopKRankings {
 /// and the readers' groups, whose queries the producer serves.
 struct SharedRanking {
     ranking: Rc<OperatorNode>,
-    groups: Vec<usize>,
+    reader_groups: Vec<usize>,
 }
 
 impl SharedProducer for TopKRankings {
@@ -94,14 +94,14 @@ impl SharedProducer for TopKRankings {
     }
 
     fn coverings(
-        &mut self,
+        &self,
         set: &[Reader<Rc<OperatorNode>>],
         _deadline: Option<Instant>,
     ) -> Result<Vec<SharedRanking>, StateGroupExpansionError> {
         // The largest `k` holds every smaller top-k, so it serves the set.
         Ok(vec![SharedRanking {
             ranking: Rc::clone(&set[0].need),
-            groups: set.iter().map(|reader| reader.group).collect(),
+            reader_groups: set.iter().map(|reader| reader.group).collect(),
         }])
     }
 
@@ -113,7 +113,11 @@ impl SharedProducer for TopKRankings {
     ) -> Result<usize, StateGroupExpansionError> {
         // Interning the ranking is idempotent, so every reader of the set
         // reads the producer the first one interned.
-        let Some(input_group) = memo.groups[covering.groups[0]].children.first().copied() else {
+        let Some(input_group) = memo.groups[covering.reader_groups[0]]
+            .children
+            .first()
+            .copied()
+        else {
             return Ok(0);
         };
         let Some(exact_input) = exact_input_group(memo, input_group, &mut self.exact_groups)?
@@ -122,7 +126,7 @@ impl SharedProducer for TopKRankings {
         };
         let input = Rc::clone(&memo.groups[exact_input.0 as usize].node);
         let queries: Vec<_> = covering
-            .groups
+            .reader_groups
             .iter()
             .flat_map(|&group| memo.groups[group].queries.iter().copied())
             .collect::<std::collections::BTreeSet<_>>()

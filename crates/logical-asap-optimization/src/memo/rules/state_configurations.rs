@@ -68,14 +68,14 @@ struct StateNeed {
     family: FieldDataType,
     /// The reader's normalized pane layout, when its set shares panes: equal
     /// layouts of one set have one index, so a configuration rewrites them once.
-    template: Option<usize>,
+    normalized_layout: Option<usize>,
 }
 
 /// A shared build's need: one pane layout (its index among the set's pane
 /// configurations, for request deduplication) or one size.
 enum StateCovering {
     Panes {
-        index: usize,
+        configuration_index: usize,
         configuration: PaneConfiguration,
     },
     Size(FieldDataType),
@@ -91,7 +91,7 @@ struct SummaryStates {
     /// Every candidate's graph signature by group, so no rewrite repeats one.
     known: HashMap<(usize, String), Vec<Rc<OperatorNode>>>,
     rewrite_count: usize,
-    /// The (template, configuration index) rewrites already made.
+    /// The (normalized layout, configuration index) rewrites already made.
     requests: HashSet<(usize, usize)>,
 }
 
@@ -172,7 +172,7 @@ impl SharedProducer for SummaryStates {
                         build,
                         merge,
                         family,
-                        template: None,
+                        normalized_layout: None,
                     },
                 };
                 match sets
@@ -194,17 +194,17 @@ impl SharedProducer for SummaryStates {
                     .push(Rc::clone(&candidate.node));
             }
         }
-        let mut templates: Vec<(usize, usize, FlatDag)> = Vec::new();
+        let mut layouts: Vec<(usize, usize, FlatDag)> = Vec::new();
         for set in &mut sets {
             if spans_groups(set) {
-                assign_templates(memo, set, &mut templates, deadline)?;
+                assign_normalized_layouts(memo, set, &mut layouts, deadline)?;
             }
         }
         Ok(sets)
     }
 
     fn coverings(
-        &mut self,
+        &self,
         set: &[Reader<StateNeed>],
         deadline: Option<Instant>,
     ) -> Result<Vec<StateCovering>, StateGroupExpansionError> {
@@ -240,10 +240,12 @@ impl SharedProducer for SummaryStates {
             pane_configurations_before(&requirements, self.domain, deadline)?
                 .into_iter()
                 .enumerate()
-                .map(|(index, configuration)| StateCovering::Panes {
-                    index,
-                    configuration,
-                })
+                .map(
+                    |(configuration_index, configuration)| StateCovering::Panes {
+                        configuration_index,
+                        configuration,
+                    },
+                )
                 .collect(),
         )
     }
@@ -255,16 +257,24 @@ impl SharedProducer for SummaryStates {
         covering: &StateCovering,
     ) -> Result<usize, StateGroupExpansionError> {
         let need = &reader.need;
+        let serves = match covering {
+            StateCovering::Panes { configuration, .. } => {
+                configuration.serves(&pane_requirement(need).expect("pane set"))
+            }
+            StateCovering::Size(family) => {
+                shared_size(family, &need.family).is_some_and(|joined| same_family(&joined, family))
+            }
+        };
+        if !serves {
+            return Ok(0);
+        }
         let original = memo.candidates[reader.group][need.candidate].clone();
         let roots = [QueryRoot::Operator(Rc::clone(&original.node))];
         let result = match covering {
             StateCovering::Panes {
-                index,
+                configuration_index,
                 configuration,
             } => {
-                if !configuration.serves(&pane_requirement(need).expect("pane set")) {
-                    return Ok(0);
-                }
                 let Ok(count) =
                     u32::try_from(configuration.longest_window_ms / configuration.pane_width_ms)
                 else {
@@ -272,8 +282,8 @@ impl SharedProducer for SummaryStates {
                 };
                 if self.deduplicate_requests
                     && need
-                        .template
-                        .is_some_and(|template| !self.requests.insert((template, *index)))
+                        .normalized_layout
+                        .is_some_and(|layout| !self.requests.insert((layout, *configuration_index)))
                 {
                     return Ok(0);
                 }
@@ -287,11 +297,6 @@ impl SharedProducer for SummaryStates {
                 )
             }
             StateCovering::Size(family) => {
-                if !shared_size(family, &need.family)
-                    .is_some_and(|joined| same_family(&joined, family))
-                {
-                    return Ok(0);
-                }
                 self.rewrite_count += 1;
                 with_resized_build(&roots, &need.build, family.clone())
             }
@@ -336,12 +341,12 @@ impl SharedProducer for SummaryStates {
 /// panes: different original layouts can produce the same requested
 /// reader/configuration, so each is normalized once and its rewrite made once,
 /// instead of once for every existing pane width. Numbers continue across
-/// sets (`templates`), so a configuration index of one set never matches
+/// sets (`layouts`), so a configuration index of one set never matches
 /// another's.
-fn assign_templates(
+fn assign_normalized_layouts(
     memo: &CandidateMemo,
     set: &mut [Reader<StateNeed>],
-    templates: &mut Vec<(usize, usize, FlatDag)>,
+    layouts: &mut Vec<(usize, usize, FlatDag)>,
     deadline: Option<Instant>,
 ) -> Result<(), StateGroupExpansionError> {
     let Some(requirements) = set
@@ -351,7 +356,7 @@ fn assign_templates(
     else {
         return Ok(());
     };
-    let mut template_keys: HashMap<(usize, String), Vec<usize>> = HashMap::new();
+    let mut layout_keys: HashMap<(usize, String), Vec<usize>> = HashMap::new();
     for (reader, requirement) in set.iter_mut().zip(&requirements) {
         check_generation_deadline(deadline)?;
         let Ok(count) = u32::try_from(requirement.window_ms) else {
@@ -372,9 +377,9 @@ fn assign_templates(
         let flat = flatten(&normalized).0;
         let signature = serde_json::to_string(&flat)
             .map_err(|error| StateGroupExpansionError::StateConfiguration(error.to_string()))?;
-        let indices = template_keys.entry((reader.group, signature)).or_default();
+        let indices = layout_keys.entry((reader.group, signature)).or_default();
         let existing = indices.iter().copied().find(|&index| {
-            let (group, candidate, previous) = &templates[index];
+            let (group, candidate, previous) = &layouts[index];
             let previous_candidate = &memo.candidates[*group][*candidate];
             previous == &flat
                 && previous_candidate.origin == original.origin
@@ -382,9 +387,9 @@ fn assign_templates(
                 && previous_candidate.implements == original.implements
                 && previous_candidate.budget_share == original.budget_share
         });
-        reader.need.template = Some(existing.unwrap_or_else(|| {
-            let index = templates.len();
-            templates.push((reader.group, need.candidate, flat));
+        reader.need.normalized_layout = Some(existing.unwrap_or_else(|| {
+            let index = layouts.len();
+            layouts.push((reader.group, need.candidate, flat));
             indices.push(index);
             index
         }));

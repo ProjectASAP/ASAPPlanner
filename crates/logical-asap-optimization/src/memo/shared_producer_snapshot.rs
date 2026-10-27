@@ -145,3 +145,21 @@ fn shared_pane_candidates_are_unchanged() {
     }));
     assert_eq!(fingerprint(&memo), (729, 15532247561651645380));
 }
+
+/// Two top-k sets over different inputs, next to a pane set: pins the order
+/// sets are expanded in.
+#[test]
+fn several_top_k_sets_are_unchanged() {
+    let memo = expanded(
+        &[
+            ("topk(3, sum_over_time(m_gauge[2m]))", 0.0),
+            ("topk(10, sum_over_time(m_gauge[2m]))", 0.0),
+            ("topk(5, sum_over_time(m_gauge[2m]))", 0.0),
+            ("topk(2, sum_over_time(other[2m]))", 0.0),
+            ("topk(4, sum_over_time(other[2m]))", 0.0),
+            ("sum(sum_over_time(other[1m]))", 0.0),
+        ],
+        60_000,
+    );
+    assert_eq!(fingerprint(&memo), (994, 9213568444657927922));
+}
