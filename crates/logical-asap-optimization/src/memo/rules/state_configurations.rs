@@ -9,11 +9,14 @@ use asap_types::ir::flat::{flatten, FlatDag};
 use asap_types::ir::schema::{sketch::SketchKind, FieldDataType};
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 
+use super::shared_producer::{
+    add_shared_producer_candidates, spans_groups, Reader, SharedProducer,
+};
 use crate::asap_aware_cse::{with_pane_chain, with_resized_build};
 use crate::memo::candidates::CandidateMemo;
 use crate::memo::state_configurations::{
-    pane_configurations_before, shared_size, state_size_configurations, PaneRequirement,
-    PaneWidthDomain,
+    pane_configurations_before, shared_size, state_size_configurations, PaneConfiguration,
+    PaneRequirement, PaneWidthDomain,
 };
 use crate::memo::state_groups::{same_range_input, simple_build, StateGroupExpansionError};
 
@@ -57,12 +60,39 @@ fn with_child_nodes(
     out
 }
 
-struct Reader {
-    group: usize,
+/// A summary build one candidate reads: its own need of the shared producer.
+struct StateNeed {
     candidate: usize,
     build: Rc<OperatorNode>,
     merge: Option<Rc<OperatorNode>>,
     family: FieldDataType,
+    /// The reader's normalized pane layout, when its set shares panes: equal
+    /// layouts of one set have one index, so a configuration rewrites them once.
+    normalized_layout: Option<usize>,
+}
+
+/// A shared build's need: one pane layout (its index among the set's pane
+/// configurations, for request deduplication) or one size.
+enum StateCovering {
+    Panes {
+        configuration_index: usize,
+        configuration: PaneConfiguration,
+    },
+    Size(FieldDataType),
+}
+
+/// Summary builds of one family over one input at different sizes or pane
+/// layouts: each reader is rewritten to a build at each covering size or
+/// layout that serves it, and equal concrete builds become one state group
+/// later ([`super::super::state_groups`]).
+struct SummaryStates {
+    deduplicate_requests: bool,
+    domain: PaneWidthDomain,
+    /// Every candidate's graph signature by group, so no rewrite repeats one.
+    known: HashMap<(usize, String), Vec<Rc<OperatorNode>>>,
+    rewrite_count: usize,
+    /// The (normalized layout, configuration index) rewrites already made.
+    requests: HashSet<(usize, usize)>,
 }
 
 pub(in crate::memo) fn add_state_configuration_candidates_in_domain(
@@ -79,230 +109,292 @@ fn expand_configurations(
     domain: PaneWidthDomain,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {
-    check_generation_deadline(deadline)?;
-    let mut rewrite_count = 0;
-    let mut buckets: Vec<Vec<Reader>> = Vec::new();
-    for (group, candidates) in memo.candidates.iter().enumerate() {
-        check_generation_deadline(deadline)?;
-        for (candidate, entry) in candidates.iter().enumerate() {
+    let mut states = SummaryStates {
+        deduplicate_requests,
+        domain,
+        known: HashMap::new(),
+        rewrite_count: 0,
+        requests: HashSet::new(),
+    };
+    add_shared_producer_candidates(memo, &mut states, deadline)?;
+    Ok(states.rewrite_count)
+}
+
+impl SharedProducer for SummaryStates {
+    type Need = StateNeed;
+    type Covering = StateCovering;
+
+    fn sets(
+        &mut self,
+        memo: &CandidateMemo,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<Vec<Reader<StateNeed>>>, StateGroupExpansionError> {
+        let mut sets: Vec<Vec<Reader<StateNeed>>> = Vec::new();
+        for (group, candidates) in memo.candidates.iter().enumerate() {
             check_generation_deadline(deadline)?;
-            let Some((build, _)) = simple_build(memo, entry) else {
-                continue;
-            };
-            // Configuration expansion precedes Stage 2. The rewrite helpers
-            // create unassigned state; preserve any already assigned build.
-            if build.timing.is_some()
-                || build.materialization != asap_types::physical::Materialization::NotMaterialized
-            {
-                continue;
-            }
-            let family = match build.asap() {
-                Some(ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. }) => {
-                    family.clone()
-                }
-                _ => unreachable!(),
-            };
-            let merge = if matches!(build.asap(), Some(ASAPOp::PaneChain { .. })) {
-                let merges: Vec<_> = OperatorNode::reachable(&entry.node).into_iter().filter(|node| {
-                    matches!(node.asap(), Some(ASAPOp::SummaryMerge {children, group_by: None, ..})
-                        if children.len() == 1 && Rc::ptr_eq(&children[0], &build))
-                }).collect();
-                // The existing rewrite changes one plain merge. Other pane uses
-                // need their own explicit transformation, not guessed semantics.
-                if merges.len() != 1 {
+            for (candidate, entry) in candidates.iter().enumerate() {
+                check_generation_deadline(deadline)?;
+                let Some((build, _)) = simple_build(memo, entry) else {
+                    continue;
+                };
+                // Configuration expansion precedes Stage 2. The rewrite helpers
+                // create unassigned state; preserve any already assigned build.
+                if build.timing.is_some()
+                    || build.materialization
+                        != asap_types::physical::Materialization::NotMaterialized
+                {
                     continue;
                 }
-                Some(Rc::clone(&merges[0]))
-            } else {
-                None
-            };
-            let reader = Reader {
-                group,
-                candidate,
-                build,
-                merge,
-                family,
-            };
-            if let Some(bucket) = buckets
-                .iter_mut()
-                .find(|bucket| compatible(&bucket[0], &reader))
-            {
-                bucket.push(reader);
-            } else {
-                buckets.push(vec![reader]);
+                let family = match build.asap() {
+                    Some(ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. }) => {
+                        family.clone()
+                    }
+                    _ => unreachable!(),
+                };
+                let merge = if matches!(build.asap(), Some(ASAPOp::PaneChain { .. })) {
+                    let merges: Vec<_> = OperatorNode::reachable(&entry.node).into_iter().filter(|node| {
+                        matches!(node.asap(), Some(ASAPOp::SummaryMerge {children, group_by: None, ..})
+                            if children.len() == 1 && Rc::ptr_eq(&children[0], &build))
+                    }).collect();
+                    // The existing rewrite changes one plain merge. Other pane uses
+                    // need their own explicit transformation, not guessed semantics.
+                    if merges.len() != 1 {
+                        continue;
+                    }
+                    Some(Rc::clone(&merges[0]))
+                } else {
+                    None
+                };
+                let reader = Reader {
+                    group,
+                    need: StateNeed {
+                        candidate,
+                        build,
+                        merge,
+                        family,
+                        normalized_layout: None,
+                    },
+                };
+                match sets
+                    .iter_mut()
+                    .find(|set| compatible(&set[0].need, &reader.need))
+                {
+                    Some(set) => set.push(reader),
+                    None => sets.push(vec![reader]),
+                }
             }
         }
-    }
-    let mut known: HashMap<(usize, String), Vec<Rc<OperatorNode>>> = HashMap::new();
-    for (group, candidates) in memo.candidates.iter().enumerate() {
-        check_generation_deadline(deadline)?;
-        for candidate in candidates {
+        for (group, candidates) in memo.candidates.iter().enumerate() {
             check_generation_deadline(deadline)?;
-            known
-                .entry((group, graph_signature(&candidate.node)?))
-                .or_default()
-                .push(Rc::clone(&candidate.node));
+            for candidate in candidates {
+                check_generation_deadline(deadline)?;
+                self.known
+                    .entry((group, graph_signature(&candidate.node)?))
+                    .or_default()
+                    .push(Rc::clone(&candidate.node));
+            }
         }
+        let mut layouts: Vec<(usize, usize, FlatDag)> = Vec::new();
+        for set in &mut sets {
+            if spans_groups(set) {
+                assign_normalized_layouts(memo, set, &mut layouts, deadline)?;
+            }
+        }
+        Ok(sets)
     }
-    for readers in buckets {
-        check_generation_deadline(deadline)?;
-        if !readers
+
+    fn coverings(
+        &self,
+        set: &[Reader<StateNeed>],
+        deadline: Option<Instant>,
+    ) -> Result<Vec<StateCovering>, StateGroupExpansionError> {
+        let pane_requirements: Option<Vec<_>> = set
             .iter()
-            .any(|reader| reader.group != readers[0].group)
-        {
-            continue;
-        }
-        let pane_requirements: Option<Vec<_>> = readers.iter().map(pane_requirement).collect();
-        let pane_configurations = pane_requirements
-            .as_ref()
-            .map(|requirements| pane_configurations_before(requirements, domain, deadline))
-            .transpose()?;
-        let families = if pane_configurations.is_none() {
-            let requirements = readers
+            .map(|reader| pane_requirement(&reader.need))
+            .collect();
+        let Some(requirements) = pane_requirements else {
+            let requirements = set
                 .iter()
-                .map(|reader| match &reader.family {
+                .map(|reader| match &reader.need.family {
                     FieldDataType::Sketch(kind, _) => Some(kind.params().clone()),
                     _ => None,
                 })
                 .collect();
-            state_size_configurations(requirements, deadline)?
+            let first = &set[0].need.family;
+            return Ok(state_size_configurations(requirements, deadline)?
                 .into_iter()
-                .map(|configuration| match (&readers[0].family, configuration) {
-                    (FieldDataType::Sketch(kind, grouping), Some(params)) => FieldDataType::Sketch(
-                        SketchKind::new(kind.algorithm().clone(), params),
-                        grouping.clone(),
-                    ),
-                    _ => readers[0].family.clone(),
+                .map(|configuration| {
+                    StateCovering::Size(match (first, configuration) {
+                        (FieldDataType::Sketch(kind, grouping), Some(params)) => {
+                            FieldDataType::Sketch(
+                                SketchKind::new(kind.algorithm().clone(), params),
+                                grouping.clone(),
+                            )
+                        }
+                        _ => first.clone(),
+                    })
                 })
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
+                .collect());
         };
-        // Different original pane layouts can produce the same requested
-        // reader/configuration. Normalize once per reader and perform that
-        // rewrite once, instead of once for every existing pane width.
-        let mut templates: Vec<(usize, usize, FlatDag)> = Vec::new();
-        let mut template_keys: HashMap<(usize, String), Vec<usize>> = HashMap::new();
-        let mut requests = HashSet::new();
-        for reader in &readers {
-            check_generation_deadline(deadline)?;
-            let original = memo.candidates[reader.group][reader.candidate].clone();
-            let roots = [QueryRoot::Operator(Rc::clone(&original.node))];
-            let mut rewritten = Vec::new();
-            if let Some(configurations) = &pane_configurations {
-                let requirement = pane_requirement(reader).expect("pane bucket");
-                let template = if let Ok(count) = u32::try_from(requirement.window_ms) {
-                    let normalized = with_pane_chain(
-                        &roots,
-                        reader.merge.as_ref().unwrap(),
-                        reader.family.clone(),
-                        1,
-                        count,
-                    )
-                    .map_err(|error| {
-                        StateGroupExpansionError::StateConfiguration(error.to_string())
-                    })?;
-                    let flat = flatten(&normalized).0;
-                    let signature = serde_json::to_string(&flat).map_err(|error| {
-                        StateGroupExpansionError::StateConfiguration(error.to_string())
-                    })?;
-                    let indices = template_keys.entry((reader.group, signature)).or_default();
-                    let existing = indices.iter().copied().find(|&index| {
-                        let (group, candidate, previous) = &templates[index];
-                        let previous_candidate = &memo.candidates[*group][*candidate];
-                        previous == &flat
-                            && previous_candidate.origin == original.origin
-                            && previous_candidate.children == original.children
-                            && previous_candidate.implements == original.implements
-                            && previous_candidate.budget_share == original.budget_share
-                    });
-                    Some(existing.unwrap_or_else(|| {
-                        let index = templates.len();
-                        templates.push((reader.group, reader.candidate, flat));
-                        indices.push(index);
-                        index
-                    }))
-                } else {
-                    // Normalization must not narrow the legal long-window domain.
-                    None
-                };
-                for (configuration_index, configuration) in configurations.iter().enumerate() {
-                    check_generation_deadline(deadline)?;
-                    if !configuration.serves(&requirement) {
-                        continue;
-                    }
-                    let Ok(count) = u32::try_from(
-                        configuration.longest_window_ms / configuration.pane_width_ms,
-                    ) else {
-                        continue;
-                    };
-                    if deduplicate_requests
-                        && template.is_some_and(|template| {
-                            !requests.insert((template, configuration_index))
-                        })
-                    {
-                        continue;
-                    }
-                    rewrite_count += 1;
-                    rewritten.push(with_pane_chain(
-                        &roots,
-                        reader.merge.as_ref().unwrap(),
-                        configuration.family.clone(),
-                        configuration.pane_width_ms,
-                        count,
-                    ));
-                }
-            } else {
-                for family in &families {
-                    check_generation_deadline(deadline)?;
-                    if !shared_size(family, &reader.family)
-                        .is_some_and(|joined| same_family(&joined, family))
-                    {
-                        continue;
-                    }
-                    rewrite_count += 1;
-                    rewritten.push(with_resized_build(&roots, &reader.build, family.clone()));
-                }
-            }
-            let boundaries: HashSet<_> = original
-                .children
-                .iter()
-                .map(|group| Rc::as_ptr(&memo.groups[group.0 as usize].node))
-                .collect();
-            for result in rewritten {
-                check_generation_deadline(deadline)?;
-                let roots = result.map_err(|error| {
-                    StateGroupExpansionError::StateConfiguration(error.to_string())
-                })?;
-                let [QueryRoot::Operator(node)] = roots.as_slice() else {
-                    unreachable!("operator rewrite")
-                };
-                let node = with_child_nodes(&original.node, node, &boundaries, &mut HashMap::new());
-                // Resizing affects internal state types, never public output fields.
-                if original.node.schema.fields != node.schema.fields
-                    || original.node.schema.time_index != node.schema.time_index
-                    || original.node.schema.unique_keys != node.schema.unique_keys
-                    || (original.node.schema.closed && !node.schema.closed)
-                {
-                    return Err(StateGroupExpansionError::StateConfiguration(
-                        "state rewrite changed the reader output contract".into(),
-                    ));
-                }
-                let previous = known
-                    .entry((reader.group, graph_signature(&node)?))
-                    .or_default();
-                if previous.iter().any(|known| **known == *node) {
-                    continue;
-                }
-                previous.push(Rc::clone(&node));
-                let mut candidate = original.clone();
-                candidate.node = node;
-                memo.candidates[reader.group].push(candidate);
-            }
-        }
+        Ok(
+            pane_configurations_before(&requirements, self.domain, deadline)?
+                .into_iter()
+                .enumerate()
+                .map(
+                    |(configuration_index, configuration)| StateCovering::Panes {
+                        configuration_index,
+                        configuration,
+                    },
+                )
+                .collect(),
+        )
     }
-    check_generation_deadline(deadline)?;
-    Ok(rewrite_count)
+
+    fn derive(
+        &mut self,
+        memo: &mut CandidateMemo,
+        reader: &Reader<StateNeed>,
+        covering: &StateCovering,
+    ) -> Result<usize, StateGroupExpansionError> {
+        let need = &reader.need;
+        let serves = match covering {
+            StateCovering::Panes { configuration, .. } => {
+                configuration.serves(&pane_requirement(need).expect("pane set"))
+            }
+            StateCovering::Size(family) => {
+                shared_size(family, &need.family).is_some_and(|joined| same_family(&joined, family))
+            }
+        };
+        if !serves {
+            return Ok(0);
+        }
+        let original = memo.candidates[reader.group][need.candidate].clone();
+        let roots = [QueryRoot::Operator(Rc::clone(&original.node))];
+        let result = match covering {
+            StateCovering::Panes {
+                configuration_index,
+                configuration,
+            } => {
+                let Ok(count) =
+                    u32::try_from(configuration.longest_window_ms / configuration.pane_width_ms)
+                else {
+                    return Ok(0);
+                };
+                if self.deduplicate_requests
+                    && need
+                        .normalized_layout
+                        .is_some_and(|layout| !self.requests.insert((layout, *configuration_index)))
+                {
+                    return Ok(0);
+                }
+                self.rewrite_count += 1;
+                with_pane_chain(
+                    &roots,
+                    need.merge.as_ref().unwrap(),
+                    configuration.family.clone(),
+                    configuration.pane_width_ms,
+                    count,
+                )
+            }
+            StateCovering::Size(family) => {
+                self.rewrite_count += 1;
+                with_resized_build(&roots, &need.build, family.clone())
+            }
+        };
+        let boundaries: HashSet<_> = original
+            .children
+            .iter()
+            .map(|group| Rc::as_ptr(&memo.groups[group.0 as usize].node))
+            .collect();
+        let roots = result
+            .map_err(|error| StateGroupExpansionError::StateConfiguration(error.to_string()))?;
+        let [QueryRoot::Operator(node)] = roots.as_slice() else {
+            unreachable!("operator rewrite")
+        };
+        let node = with_child_nodes(&original.node, node, &boundaries, &mut HashMap::new());
+        // Resizing affects internal state types, never public output fields.
+        if original.node.schema.fields != node.schema.fields
+            || original.node.schema.time_index != node.schema.time_index
+            || original.node.schema.unique_keys != node.schema.unique_keys
+            || (original.node.schema.closed && !node.schema.closed)
+        {
+            return Err(StateGroupExpansionError::StateConfiguration(
+                "state rewrite changed the reader output contract".into(),
+            ));
+        }
+        let previous = self
+            .known
+            .entry((reader.group, graph_signature(&node)?))
+            .or_default();
+        if previous.iter().any(|known| **known == *node) {
+            return Ok(0);
+        }
+        previous.push(Rc::clone(&node));
+        let mut candidate = original;
+        candidate.node = node;
+        memo.candidates[reader.group].push(candidate);
+        Ok(1)
+    }
+}
+
+/// Numbers the normalized pane layouts of `set`'s readers, when it shares
+/// panes: different original layouts can produce the same requested
+/// reader/configuration, so each is normalized once and its rewrite made once,
+/// instead of once for every existing pane width. Numbers continue across
+/// sets (`layouts`), so a configuration index of one set never matches
+/// another's.
+fn assign_normalized_layouts(
+    memo: &CandidateMemo,
+    set: &mut [Reader<StateNeed>],
+    layouts: &mut Vec<(usize, usize, FlatDag)>,
+    deadline: Option<Instant>,
+) -> Result<(), StateGroupExpansionError> {
+    let Some(requirements) = set
+        .iter()
+        .map(|reader| pane_requirement(&reader.need))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(());
+    };
+    let mut layout_keys: HashMap<(usize, String), Vec<usize>> = HashMap::new();
+    for (reader, requirement) in set.iter_mut().zip(&requirements) {
+        check_generation_deadline(deadline)?;
+        let Ok(count) = u32::try_from(requirement.window_ms) else {
+            // Normalization must not narrow the legal long-window domain.
+            continue;
+        };
+        let need = &reader.need;
+        let original = &memo.candidates[reader.group][need.candidate];
+        let roots = [QueryRoot::Operator(Rc::clone(&original.node))];
+        let normalized = with_pane_chain(
+            &roots,
+            need.merge.as_ref().unwrap(),
+            need.family.clone(),
+            1,
+            count,
+        )
+        .map_err(|error| StateGroupExpansionError::StateConfiguration(error.to_string()))?;
+        let flat = flatten(&normalized).0;
+        let signature = serde_json::to_string(&flat)
+            .map_err(|error| StateGroupExpansionError::StateConfiguration(error.to_string()))?;
+        let indices = layout_keys.entry((reader.group, signature)).or_default();
+        let existing = indices.iter().copied().find(|&index| {
+            let (group, candidate, previous) = &layouts[index];
+            let previous_candidate = &memo.candidates[*group][*candidate];
+            previous == &flat
+                && previous_candidate.origin == original.origin
+                && previous_candidate.children == original.children
+                && previous_candidate.implements == original.implements
+                && previous_candidate.budget_share == original.budget_share
+        });
+        reader.need.normalized_layout = Some(existing.unwrap_or_else(|| {
+            let index = layouts.len();
+            layouts.push((reader.group, need.candidate, flat));
+            indices.push(index);
+            index
+        }));
+    }
+    Ok(())
 }
 
 fn graph_signature(node: &Rc<OperatorNode>) -> Result<String, StateGroupExpansionError> {
@@ -310,7 +402,7 @@ fn graph_signature(node: &Rc<OperatorNode>) -> Result<String, StateGroupExpansio
         .map_err(|error| StateGroupExpansionError::StateConfiguration(error.to_string()))
 }
 
-fn pane_requirement(reader: &Reader) -> Option<PaneRequirement> {
+fn pane_requirement(reader: &StateNeed) -> Option<PaneRequirement> {
     let ASAPOp::PaneChain {
         pane_width_ms,
         pane_count,
@@ -333,7 +425,7 @@ fn same_family(left: &FieldDataType, right: &FieldDataType) -> bool {
     left == right && serde_json::to_string(left).ok() == serde_json::to_string(right).ok()
 }
 
-fn compatible(left: &Reader, right: &Reader) -> bool {
+fn compatible(left: &StateNeed, right: &StateNeed) -> bool {
     if shared_size(&left.family, &right.family).is_none() {
         return false;
     }
@@ -349,7 +441,7 @@ fn compatible(left: &Reader, right: &Reader) -> bool {
     }
     // Ignore only the fields this rule rewrites. Build guarantees are derived
     // from these operators and are recomposed by the existing rewrite helpers.
-    let signature = |reader: &Reader| {
+    let signature = |reader: &StateNeed| {
         let mut operator = reader.build.operator.map_children(|_| ());
         match &mut operator {
             Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) => *family = left.family.clone(),

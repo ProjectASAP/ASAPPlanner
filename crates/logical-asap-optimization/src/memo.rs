@@ -8,6 +8,8 @@
 pub mod candidates;
 mod groups;
 mod rules;
+#[cfg(test)]
+mod shared_producer_snapshot;
 /// Shared finite state configuration enumeration.
 pub mod state_configurations;
 /// Concrete summary-state groups exposed by sharing rules.
