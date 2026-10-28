@@ -349,7 +349,6 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
         C::AccuracyTargetMissed,
         C::CountMinWeightsNotProvenNonNegative,
         C::PerEntityAggregateNotExecutable,
-        C::ExecutorCannotCompile,
         C::NoAccuracyGuarantee,
         C::RawDataNotRetained,
         C::LatencyBoundExceeded,
@@ -368,7 +367,6 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
             | C::AccuracyTargetMissed
             | C::CountMinWeightsNotProvenNonNegative
             | C::PerEntityAggregateNotExecutable
-            | C::ExecutorCannotCompile
             | C::NoAccuracyGuarantee
             | C::RawDataNotRetained
             | C::LatencyBoundExceeded

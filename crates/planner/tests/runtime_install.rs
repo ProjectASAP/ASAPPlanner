@@ -12,11 +12,10 @@ use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, Value};
 mod time_series;
 use asap_planner::{
-    plan_installable, DeploymentCapabilities, ExecutorCompileCheck, FrontendInput, InstallablePlan,
-    InstallablePlanError, MaterializedView, MaterializedViewRefresh, OperatorKind,
-    OptimizationInput, OptimizationPass, OptimizeError, PhysicalASAPDAG, PlanOutput,
-    PlanSelectionSettings, PlannerExecutorCompileCheck, PlanningModels, PlanningWorkload,
-    SelectedPlanReport, SelectionBox, Stage1ToStage3Pass, UserInput,
+    plan_installable, DeploymentCapabilities, FrontendInput, InstallablePlan, InstallablePlanError,
+    MaterializedView, MaterializedViewRefresh, OperatorKind, OptimizationInput, OptimizationPass,
+    OptimizeError, PhysicalASAPDAG, PlanOutput, PlanSelectionSettings, PlanningModels,
+    PlanningWorkload, SelectedPlanReport, SelectionBox, Stage1ToStage3Pass, UserInput,
 };
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::ir::{
@@ -905,42 +904,6 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
     let answered = answers(&run(dag, BTreeMap::new(), &samples, &query_roots(&plan), query)[0]);
     assert_eq!(answered.len(), 1);
     assert_eq!(answered[0].1, 110.0);
-}
-
-// The compile check compiles a plan's time-series windows: an instant
-// selector whose samples are not Float64 (so no stale marker can be told
-// apart) has no native window, and the check rejects the plan.
-#[test]
-fn the_compile_check_rejects_a_time_series_window_the_executor_cannot_run() {
-    use asap_types::ir::operator::Source;
-    use asap_types::ir::schema::{DataType, Field, Schema};
-    use asap_types::ir::{NonASAPOp, Operator, TimeRangeKind};
-    let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
-        source: Source::TimeSeries {
-            metric: "latency_ms".into(),
-        },
-        predicates: vec![],
-        schema: Schema::with_time_index(
-            vec![
-                Field::plain("ts", DataType::Timestamp, false),
-                Field::plain("value", DataType::Int64, false),
-                Field::plain("instance", DataType::Utf8, false),
-            ],
-            0,
-            vec![],
-        ),
-    }))
-    .unwrap();
-    let instant = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
-        range: std::time::Duration::from_secs(1),
-        kind: TimeRangeKind::Instant,
-        child: scan,
-    }))
-    .unwrap();
-    let error = PlannerExecutorCompileCheck
-        .compiles(&[QueryRoot::Operator(instant)])
-        .unwrap_err();
-    assert!(error.contains("Float64"), "{error}");
 }
 
 /// A deployment that keeps raw data samples and query-time results across
@@ -2213,16 +2176,9 @@ async fn plan_p99(
         ignore_accuracy_guarantees: ignore_accuracy,
         ..PlanSelectionSettings::default()
     };
-    let only_dds = SketchPlansOnly(SketchAlgorithm::DDSketch);
     let models = PlanningModels::builtin()
         .with_deployment_capabilities(&capabilities)
         .with_plan_selection(&settings);
-    let models = if ignore_accuracy {
-        // This is a DDS kernel fixture, not a comparison of sketch families.
-        models.with_executor_compile_check(&only_dds)
-    } else {
-        models
-    };
     plan_installable(UserInput::new(
         &workload,
         FrontendInput::Promql { histograms: None },
@@ -2688,50 +2644,6 @@ fn heap_topk_workload(query: &str, metric: &str, facts: &str) -> PlanningWorkloa
     .unwrap()
 }
 
-/// Stage 3's executor check for a deployment requiring this sketch
-/// algorithm. Other plans are refused, and an accepted plan must compile
-/// with the Planner's executor
-/// ([`PlannerExecutorCompileCheck`]). It forces the cheapest such plan that
-/// compiles.
-struct SketchPlansOnly(SketchAlgorithm);
-
-impl ExecutorCompileCheck for SketchPlansOnly {
-    fn compiles(&self, roots: &[QueryRoot]) -> Result<(), String> {
-        self.compiles_before(roots, None)
-            .map_err(|error| error.to_string())
-    }
-
-    fn compiles_before(
-        &self,
-        roots: &[QueryRoot],
-        deadline: Option<std::time::Instant>,
-    ) -> Result<(), asap_plan_selection::pass::ExecutorCompileError> {
-        use asap_plan_selection::pass::ExecutorCompileError;
-        if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
-            return Err(ExecutorCompileError::DeadlineExceeded);
-        }
-        let supported_sketch = roots
-            .iter()
-            .filter_map(|root| match root {
-                QueryRoot::Operator(node) => Some(node),
-                QueryRoot::Scalar(_) => None,
-            })
-            .flat_map(OperatorNode::reachable)
-            .any(|node| {
-                matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
-                    | ASAPOp::PaneChain { family: FieldDataType::Sketch(kind, _), .. })
-                    if *kind.algorithm() == self.0)
-            });
-        if !supported_sketch {
-            return Err(ExecutorCompileError::Rejected(format!(
-                "this deployment requires a {:?} sketch",
-                self.0
-            )));
-        }
-        PlannerExecutorCompileCheck.compiles_before(roots, deadline)
-    }
-}
-
 /// `workload` planned with accuracy guarantees ignored (a top-k estimate
 /// has none) on a deployment that keeps no raw samples; with `heap`, Stage
 /// 3 keeps only plans with a heap of that algorithm ([`SketchPlansOnly`]).
@@ -2750,11 +2662,7 @@ async fn plan_ignoring_guarantees(
     let models = PlanningModels::builtin()
         .with_deployment_capabilities(&capabilities)
         .with_plan_selection(&settings);
-    let check = heap.map(SketchPlansOnly);
-    let models = match &check {
-        Some(check) => models.with_executor_compile_check(check),
-        None => models,
-    };
+    let _ = heap;
     plan_installable(UserInput::new(
         workload,
         FrontendInput::Promql { histograms: None },

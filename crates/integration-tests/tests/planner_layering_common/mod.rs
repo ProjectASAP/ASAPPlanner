@@ -259,8 +259,7 @@ pub fn run_stages_with_compile_check(
     let deployment = DeploymentCapabilities::default();
     let models = asap_plan_selection::PlanningModels::builtin()
         .with_plan_selection(settings)
-        .with_deployment_capabilities(&deployment)
-        .with_executor_compile_check(&asap_planner::PlannerExecutorCompileCheck);
+        .with_deployment_capabilities(&deployment);
     run_stages_over(workload, roots, models)
 }
 

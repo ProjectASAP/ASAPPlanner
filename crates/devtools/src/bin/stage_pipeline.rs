@@ -282,7 +282,7 @@ use asap_plan_selection::{
     PlanSelectionSettings, PlanningModels, Rejection, ResourceUnitCost, ResourceUsage,
     SearchAlgorithm, Selection, SelectionError, Stage1ToStage3Search,
 };
-use asap_planner::{installable_plan_of, PlannerExecutorCompileCheck};
+use asap_planner::installable_plan_of;
 use asap_types::ir::flat::{flatten, FlatDag, FlatNode, NodeId};
 use asap_types::ir::operator::node::OperatorNode;
 use asap_types::ir::properties::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
@@ -736,17 +736,14 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             )
         }
     };
-    // Plan with the models `plan_installable` plans with: the executor's
-    // summary families when the deployment declares none, and the
-    // executor's compile check.
+    // Plan with the executor's summary families when the deployment declares none.
     if deployment_capabilities.supported_summaries.is_none() {
         deployment_capabilities.supported_summaries =
             Some(asap_executor::supported_summary_families());
     }
     let models = PlanningModels::builtin()
         .with_plan_selection(&plan_selection)
-        .with_deployment_capabilities(&deployment_capabilities)
-        .with_executor_compile_check(&PlannerExecutorCompileCheck);
+        .with_deployment_capabilities(&deployment_capabilities);
     let result = run_search_over(
         roots.clone(),
         &entries,

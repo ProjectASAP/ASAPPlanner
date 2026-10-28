@@ -45,7 +45,6 @@ use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_physical_asap_optimization::optimize_physical_asap;
 use asap_plan_selection::pass::Stage1ToStage3Search;
 use asap_plan_selection::{select_plan, PlanSelectionSettings, PlanningModels, SearchAlgorithm};
-use asap_planner::PlannerExecutorCompileCheck;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::sketch::SketchAlgorithm;
 use asap_types::ir::QueryRoot;
@@ -439,8 +438,7 @@ impl Planner {
         let deployment = workload.deployment();
         let models = PlanningModels::builtin()
             .with_plan_selection(&plan_selection)
-            .with_deployment_capabilities(&deployment)
-            .with_executor_compile_check(&PlannerExecutorCompileCheck);
+            .with_deployment_capabilities(&deployment);
         let run = match self.settings.search {
             SearchKind::Exhaustive => run_planning_stages_over(
                 roots.clone(),
@@ -521,8 +519,7 @@ impl Planner {
         let deployment = workload.deployment();
         let models = PlanningModels::builtin()
             .with_plan_selection(&plan_selection)
-            .with_deployment_capabilities(&deployment)
-            .with_executor_compile_check(&PlannerExecutorCompileCheck);
+            .with_deployment_capabilities(&deployment);
         let mut candidates =
             optimize_physical_asap("witness", &roots, &entries, &workload.data, &deployment)
                 .map_err(|e| format!("witness Stage 2: {e}"))?;

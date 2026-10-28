@@ -100,7 +100,7 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
   with its `cause` (`RejectionCause`) and reason: a failed check
   (`FailureProbabilityResizeFailed`, `AccuracyTargetMissed`,
   `CountMinWeightsNotProvenNonNegative`, `PerEntityAggregateNotExecutable`,
-  `ExecutorCannotCompile`, `NoAccuracyGuarantee`, `RawDataNotRetained`, `LatencyBoundExceeded`, `LatencyOverRepeatInterval`
+  `NoAccuracyGuarantee`, `RawDataNotRetained`, `LatencyBoundExceeded`, `LatencyOverRepeatInterval`
   (a repeating query's latency per evaluation is over its repeat interval,
   checked with or without a latency bound), or `OverClusterCapacity` under
   cost model 3) or a loss under the cost model (`Costlier`, `Slower`,

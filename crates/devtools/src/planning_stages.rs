@@ -126,7 +126,7 @@ pub fn run_planning_stages(
 /// languages: query `i` is `roots[i]`, with workload entry `entries[i]`
 /// (its accuracy target, latency bound, recurrence and predictability).
 /// Plan selection compares candidates under `models.plan_selection`'s cost
-/// model and rejects those `models.executor_compile_check` does not compile.
+/// model and applies the deployment capabilities.
 /// `models.deployment_capabilities` is what the executor can run and keep:
 /// Pass 1 offers only the summaries it supports, and Stages 2 and 3 read its
 /// retention.

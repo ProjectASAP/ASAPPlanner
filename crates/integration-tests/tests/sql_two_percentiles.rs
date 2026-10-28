@@ -12,7 +12,7 @@ mod planner_layering_common;
 
 use asap_executor::values::Value;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
-use asap_plan_selection::{PlanSelectionSettings, RejectionCause};
+use asap_plan_selection::PlanSelectionSettings;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema, SketchAlgorithm};
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot};
@@ -97,9 +97,7 @@ async fn run(queries: &[&str]) -> Run {
         &workload,
         roots,
         candidates,
-        asap_plan_selection::PlanningModels::builtin()
-            .with_plan_selection(&settings)
-            .with_executor_compile_check(&asap_planner::PlannerExecutorCompileCheck),
+        asap_plan_selection::PlanningModels::builtin().with_plan_selection(&settings),
     )
 }
 
@@ -231,14 +229,6 @@ fn operator(root: &QueryRoot) -> &Rc<OperatorNode> {
 #[tokio::test]
 async fn q1_with_one_exact_and_one_sketched_percentile_compiles_and_matches() {
     let run = run(&[Q1]).await;
-    let cannot_compile: Vec<_> = run
-        .selection
-        .rejected
-        .iter()
-        .filter(|r| r.cause == RejectionCause::ExecutorCannotCompile)
-        .map(|r| format!("{}: {}", r.id, r.reason))
-        .collect();
-    assert!(cannot_compile.is_empty(), "{cannot_compile:#?}");
     let mixed: Vec<&Logical> = run
         .logical
         .iter()

@@ -78,7 +78,6 @@ fn components(
     };
     let builtin = crate::PlanningModels::builtin();
     if !graph.resource_budgets.is_empty()
-        || context.models.executor_compile_check.is_some()
         || !std::ptr::eq(context.models.accuracy, builtin.accuracy)
         || !std::ptr::eq(context.models.evidence, builtin.evidence)
     {
