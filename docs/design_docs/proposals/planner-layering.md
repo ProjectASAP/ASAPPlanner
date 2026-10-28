@@ -378,10 +378,10 @@ one: `avg` computed from exact sum and count accumulators. The memo now has
 | KLL, `k` 1184 (`failure_probability` 5e-8) | 2 |
 
 The query has two approximate inputs (G2 and G4), so each summary comes
-sized for the whole accuracy budget and for a half of it. The last two KLL
-candidates are sized for the whole result: the per-value
-`failure_probability` is the target's 0.001 divided over the source's 10,000
-series. The memo stands for 7 × 7 = 49 candidate DAGs, all different:
+sized for the whole accuracy budget and for a half of it. Pass 1 offers each
+KLL at two scopes: per value (the first two KLL candidates) and for the
+whole result (the last two), where the per-value `failure_probability` is the
+target's 0.001 divided over the source's 10,000 series. The memo stands for 7 × 7 = 49 candidate DAGs, all different:
 - 16 = 4 × 4 use only `budget_share` 1.
 - 33 size at least one operand's summary for half of the budget.
 
@@ -399,11 +399,12 @@ all; the memo has 259 candidates.
   accumulators; and 2 `FinalizeExactAccumulator` groups (G6's sum and count
   readouts).
 - 1738 candidates. G2 and G4 have 691 each: 10 `Pass1` (the 7 above and
-  3 KLL candidates the state-configuration rule rewrote to a shared size),
+  3 KLL candidates the state-configuration rule rewrote: one to the shared
+  size `k` 1156, two keeping their size),
   336 `Panes` and 345 `SharedBuild`. G6 has 3: `Pass1`, `SummaryResult` and
   `SharedBuild`.
-- Enumeration stops at its limit of 1,000 candidate DAGs, as it does after
-  step 3.
+- Enumeration stops at `stage_pipeline`'s default limit of 1,000 candidate
+  DAGs (`--memo-enumeration-limit`), as it does after step 3.
 
 | After | Groups | Implementation candidates | Candidate DAGs |
 |---|---|---|---|
@@ -463,7 +464,7 @@ that vector.
 | Reason | Effect on the count | In the example |
 |---|---|---|
 | Shared group | A group several chosen candidates read takes one candidate per choice, not one per reader. | G1 is read by G2 and G4 and chosen once. |
-| Group needed only under some choices | A group joins the choice only when a chosen candidate reads it. | A `PaneChain` group is needed only when a `SharedBuild` candidate reading it is chosen; a choice of `Pass1` candidates only needs none of the 347 added groups. |
+| Group needed only under some choices | A group joins the choice only when a chosen candidate reads it. | A `PaneChain` group is needed only when a `SharedBuild` candidate reading it is chosen; a choice of `Pass1` candidates needs none of the 347 added groups. |
 | Fused candidate | The groups a fused candidate implements are computed inside it and never become pending. | None (the example has no fused computation). |
 
 In Pass 1 of the example the count happens to be a product, 7 × 7,
