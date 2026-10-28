@@ -195,7 +195,7 @@ NativeKllBuild(k=200)
 KllStateOutput
 
 Query DAG:
-ViewSlot<KllState>[5 panes]
+MaterializedViewSlot<KllState>[5 panes]
         ↓
 NativeKllMerge(k=200)
       ┌─┴────────┐
@@ -327,7 +327,7 @@ through a `TableProvider` (§4).
 ### Query Physical DAG
 
 ```text
-ViewSlot<KllState>(
+MaterializedViewSlot<KllState>(
     k = 200,
     coverage = requested aligned 5m
 )
@@ -349,7 +349,7 @@ do not know where those states are stored.
 For example:
 
 ```text
-ViewSlot<KllState>
+MaterializedViewSlot<KllState>
 ```
 
 is physical, while:
@@ -497,7 +497,7 @@ time, together with that position's schema, which is the DAG node's
 | Slot | Where | Holds | Bound by |
 | --- | --- | --- | --- |
 | **Table slot** | every `Scan` leaf | the `Scan`'s `Source`, schema, compiled predicates, and window (the widths and offsets of the `TimeRange`/`TimeShift`s above it) | `Source` |
-| **View slot** | a materialized view cut out of a query DAG | the view's schema | node id |
+| **Materialized view slot** | a materialized view cut out of a query DAG | the view's schema | node id |
 
 ```rust
 pub fn compile(dag: &PhysicalASAPDAG, materialized_views: &BTreeSet<NodeId>, roots: &[NodeId])
@@ -539,7 +539,7 @@ is still correct.
 ```rust
 pub struct BindingDataSources {
     pub tables: DataSources,                             // Source → provider
-    pub materialized_views: BTreeMap<NodeId, Arc<dyn TableProvider>>, // view slot → provider
+    pub materialized_views: BTreeMap<NodeId, Arc<dyn TableProvider>>, // materialized view slot → provider
 }
 impl CompiledPhysicalDAG {
     pub fn instantiate<'a>(&self, data_sources: &'a BindingDataSources)
@@ -572,7 +572,7 @@ over `Source::TimeSeries { metric: "latency" }`:
 Install (once):
     views     = plan.materialized_views()        // [pane node, refresh = at ingestion]
     refresh   = compile(dag, {}, [pane])          // Scan → TimeRange(1m) → NativeKllBuild(k=200)
-    query     = compile(dag, {pane}, [p50, p99])  // view slot → NativeKllMerge → NativeP50, NativeP99
+    query     = compile(dag, {pane}, [p50, p99])  // materialized view slot → NativeKllMerge → NativeP50, NativeP99
 
 Each complete pane (12:04, 12:05]:
     refresh.instantiate(&BindingDataSources { tables: { latency → time-series provider } })
@@ -581,7 +581,7 @@ Each complete pane (12:04, 12:05]:
 
 Query at T = 12:05 over (12:00, 12:05]:
     query.instantiate(&BindingDataSources { materialized_views: { pane → summary-store provider } })
-        the view slot asks for time_range_ms = (12:00, 12:05]
+        the materialized view slot asks for time_range_ms = (12:00, 12:05]
         ├── latency-kll-1m/(12:00,12:01]
         ├── latency-kll-1m/(12:01,12:02]
         ├── latency-kll-1m/(12:02,12:03]
@@ -625,7 +625,7 @@ The complete example makes the ownership boundary explicit:
 | **Materialization** | Record pane/window/freshness/reuse requirements and each node's execution timing |
 | **Physical Plan Compiler** | Lower to native KLL build, merge, and readout operators |
 | **Physical DAG** | Define precompute and query DAGs with typed input/output boundaries |
-| **Deployment interface** | Bind the `latency` table slot to a time-series `TableProvider`, and the pane view slot to the summary store's `TableProvider` |
+| **Deployment interface** | Bind the `latency` table slot to a time-series `TableProvider`, and the pane materialized view slot to the summary store's `TableProvider` |
 | **Deployment** | Schedule pane refreshes, store and resolve panes, run queries |
 
 ```text
