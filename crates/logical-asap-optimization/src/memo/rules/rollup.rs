@@ -126,6 +126,35 @@ pub(in crate::memo) fn add_rollup_candidates(
                 else {
                     continue;
                 };
+                // When the finer query's result is the value itself and every
+                // implementation of it is exact, read the finer query's group:
+                // one stored result then serves both queries, as the
+                // whole-workload rewrite does, without a separate producer the
+                // finer query would read through an identity projection.
+                let fine_result_is_value = *fine_node == *value
+                    && memo.groups[*fine_group].node.schema == value.schema
+                    && memo.candidates[*fine_group].iter().all(|candidate| {
+                        candidate
+                            .node
+                            .guarantee
+                            .as_ref()
+                            .is_some_and(|guarantee| guarantee.is_exact())
+                    });
+                if fine_result_is_value {
+                    let fine_result = Rc::clone(&memo.groups[*fine_group].node);
+                    let coarse_node = replace(
+                        &coarse_node,
+                        &HashMap::from([(Rc::as_ptr(&value), fine_result)]),
+                    );
+                    added += usize::from(append_reader(
+                        memo,
+                        *coarse_group,
+                        coarse,
+                        coarse_node,
+                        CandidateOrigin::Rollup,
+                    )?);
+                    continue;
+                }
                 let mut queries = memo.groups[*coarse_group].queries.clone();
                 queries.extend(&memo.groups[*fine_group].queries);
                 queries.sort_unstable();
@@ -288,4 +317,62 @@ pub(in crate::memo) fn add_window_rollup_candidates(
     }
     check_generation_deadline(deadline)?;
     Ok(added)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::memo::candidates::{try_populate_pass1, CandidateOrigin};
+    use crate::memo::state_groups::expand_concrete_summary_state_groups;
+    use crate::memo::LogicalMemo;
+    use crate::per_computation_candidates::generate_per_computation_candidates;
+    use crate::test_support::lower_promql;
+    use asap_types::ir::properties::AccuracyTarget;
+    use asap_types::ir::QueryRoot;
+
+    // When the finer query's own result is the finalized value the coarse
+    // query rolls up, the rollup reads the finer query's group, so one
+    // stored result serves both queries without a copy or an identity
+    // projection.
+    #[test]
+    fn a_rollup_reads_the_finer_query_result_itself() {
+        let roots: Vec<_> = ["sum by (job) (m)", "sum by (job, instance) (m)"]
+            .into_iter()
+            .enumerate()
+            .map(|(query, text)| {
+                (
+                    query,
+                    QueryRoot::Operator(lower_promql(text, AccuracyTarget::exact())),
+                )
+            })
+            .collect();
+        let initial = LogicalMemo::from_roots(&roots);
+        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let memo =
+            expand_concrete_summary_state_groups(try_populate_pass1(initial, &inventory).unwrap())
+                .unwrap()
+                .memo;
+        let root_of = |query| {
+            memo.groups
+                .iter()
+                .position(|group| group.roots_of == [query])
+                .unwrap()
+        };
+        let (coarse, fine) = (root_of(0), root_of(1));
+        assert!(
+            memo.candidates[coarse].iter().any(|candidate| {
+                candidate.origin == CandidateOrigin::Rollup
+                    && candidate
+                        .children
+                        .iter()
+                        .any(|child| child.0 as usize == fine)
+            }),
+            "the coarse rollup reads the finer query's group"
+        );
+        assert!(
+            !memo.candidates[fine]
+                .iter()
+                .any(|candidate| candidate.origin == CandidateOrigin::Rollup),
+            "the finer query needs no reader of a separate producer"
+        );
+    }
 }

@@ -265,15 +265,10 @@ fn shared_pane_chains() {
     );
 }
 
-/// Rollup: a coarse sum beside the finer sum it can be read from.
+/// Rollup: a coarse sum beside the finer sum it can be read from. The
+/// rollup reads the finer query's own result, so one stored result serves
+/// both queries.
 #[test]
-// Coverage gap (#979): the memo plan rolls up the same way but builds two
-// identical finalize nodes over q1's state, so it cannot store q1's
-// finalized rows once for both readers, as the whole-workload winner does.
-// Measured: whole-workload 0.0126783/s; memo 0.0137854/s at the default
-// budget (128-evaluation limit) and at 300 s / 4096 evaluations (202 made,
-// time limit).
-#[ignore = "coverage gap: #979"]
 fn rollup() {
     check(&[
         ("sum by (job) (m)", AccuracyTarget::exact()),
@@ -283,11 +278,14 @@ fn rollup() {
 
 /// Exact top-k reuse: two top-k of one ranking.
 #[test]
-// Coverage gap (#979): the memo plan stores the full Sort with two
-// identical Limit(10) nodes over it instead of one shared Limit(10) ▸ Sort.
-// Measured: whole-workload 0.7756417/s; memo 0.7800940/s at the default
-// budget and at 300 s / 4096 evaluations (35 made).
-#[ignore = "coverage gap: #979"]
+// Search miss (#963): the memo shares one stored Limit(10) ▸ Sort, and each
+// reader derives Limit(k) ▸ Project from it, as the whole-workload winner
+// does (which also re-sorts per reader). The search evaluates that shape
+// over a query-time pane chain (0.7800940/s or 0.8203239/s, by run) and
+// over a time range with the summary build stored (1.0255661/s), but not
+// over a time range with the Limit(10) stored, the winner's 0.7756417/s;
+// every lower bound is 0.
+#[ignore = "search miss: #963"]
 fn topk_reuse() {
     check(&[
         ("topk by (job) (5, rate(m[1m]))", AccuracyTarget::exact()),
