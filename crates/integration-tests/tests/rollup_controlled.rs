@@ -223,10 +223,18 @@ fn production_distinct_rollup_finds_shared_kmv() {
         rollup,
         "production search must select the cheaper legal rollup"
     );
-    // The same shape without a timed search: among fixed plans of the memo
-    // (a KMV per query, or both reading one KMV state group), plan
-    // selection with the built-in models picks one build and one rollup.
-    let memo = expanded_memo(fixture().1.into_iter().enumerate().collect(), &entries);
+}
+
+// The production shape without a timed search: among fixed plans of the
+// memo (a KMV per query, or both reading one KMV state group), plan
+// selection with the built-in models picks one build and one rollup, and
+// it costs less than a valid build per query.
+#[test]
+fn memo_offers_one_kmv_build_and_a_rollup() {
+    let (workload, roots) = fixture();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.as_ref().unwrap();
+    let memo = expanded_memo(roots.into_iter().enumerate().collect(), &entries);
     let (selected, separate, shared) = select_rollup(&memo, 2, &entries, data);
     assert!(shared < separate, "{shared} vs {separate}");
     assert_eq!(builds_and_rollups(&selected), (1, 1));

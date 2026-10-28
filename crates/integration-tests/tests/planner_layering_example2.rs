@@ -286,7 +286,7 @@ fn pipeline_with_distinct_bound(bound: Option<u64>) -> Run {
 /// on its own UnivMon; and, per UnivMon state group the memo shares between
 /// queries, those queries reading it.
 fn memo_pipeline() -> Run {
-    use asap_integration_tests::planning::{compose_memo_plan, expanded_memo};
+    use asap_integration_tests::planning::{compose_memo_plan, expanded_memo, own_choices};
     use asap_logical_asap_optimization::memo::candidates::{
         CandidateOrigin, ImplementationCandidate,
     };
@@ -304,15 +304,7 @@ fn memo_pipeline() -> Run {
     };
     // Query `q`'s topmost own group's first candidate `keep` accepts.
     let own = |q: usize, keep: &dyn Fn(&ImplementationCandidate) -> bool| {
-        (0..memo.groups.len())
-            .rev()
-            .filter(|&group| memo.groups[group].queries == [q])
-            .find_map(|group| {
-                memo.candidates[group]
-                    .iter()
-                    .position(keep)
-                    .map(|index| (group, index))
-            })
+        own_choices(&memo, q, keep).into_iter().next()
     };
     let mut choices = vec![BTreeMap::new()];
     for q in 0..queries {

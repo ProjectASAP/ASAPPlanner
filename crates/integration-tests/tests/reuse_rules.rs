@@ -257,13 +257,10 @@ fn select(
     let variants = (0..variants.len())
         .map(|i| cheapest_of(&selection, &format!("variant{i}")))
         .fold(f64::INFINITY, f64::min);
-    (
-        name,
-        roots,
-        built_once,
-        cheapest_of(&selection, "group"),
-        variants,
-    )
+    let own = cheapest_of(&selection, "group");
+    // A rejected baseline would make "cheaper than the baseline" hold trivially.
+    assert!(own.is_finite(), "the plan without reuse is valid");
+    (name, roots, built_once, own, variants)
 }
 
 /// `(group, candidate index)` of every candidate [`candidates_of`] yields.
