@@ -128715,6 +128715,7 @@
       }
     },
     "front": [],
+    "materialized_views": [],
     "pane_retention_ms": {},
     "rejected": [
       {
@@ -129088,8 +129089,7 @@
       "searched_as_one": null
     },
     "search_rejected": [],
-    "selected": "P3-m1",
-    "stored_outputs": []
+    "selected": "P3-m1"
   },
   "workload": {
     "data_workload": {

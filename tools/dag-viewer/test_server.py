@@ -383,7 +383,7 @@ class PlanEndpointTests(unittest.TestCase):
         self.assertEqual(document["workload"]["data_workload"]["sources"]["m"]["series_count"], 100)
         self.assertFalse(document["deployment_capabilities"]["raw_data_retained"])
         self.assertIsNotNone(document["stage3_plan_selection"]["selected"])
-        self.assertTrue(document["stage3_plan_selection"]["stored_outputs"])
+        self.assertTrue(document["stage3_plan_selection"]["materialized_views"])
 
     def test_plan_workload_endpoint_plans_a_sql_workload_with_its_tables(self):
         document = post_plan({"workload": SQL_WORKLOAD, "tables": [FLOWS_TABLE]}, "/api/plan-workload")

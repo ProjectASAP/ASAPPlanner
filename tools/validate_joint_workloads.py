@@ -68,7 +68,7 @@ def run(entry):
         selected = selection.get('selected')
         result['selected'] = selected
         result['error'] = selection.get('error')
-        result['stored_outputs_error'] = selection.get('stored_outputs_error')
+        result['materialized_views_error'] = selection.get('materialized_views_error')
         report = selection.get('search', {}).get('candidate_connections', {})
         result['search'] = report
         if selected:
@@ -99,7 +99,7 @@ def run(entry):
         exit_code == 0 and result.get('selected')
         and result.get('guarantees_enforced') and result['cost_certificate_valid']
         and result.get('accepted_queries') == result['expected_queries']
-        and not result.get('error') and not result.get('stored_outputs_error')
+        and not result.get('error') and not result.get('materialized_views_error')
     )
     print(json.dumps({k: result.get(k) for k in ['workload', 'wall_seconds', 'selected', 'accepted_queries', 'modeled_cost_per_second', 'error']}), flush=True)
     return result
