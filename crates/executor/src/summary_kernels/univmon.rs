@@ -160,29 +160,30 @@ impl UnivMonAccumulator {
 }
 
 impl AggregateCore for UnivMonAccumulator {
-    /// Counters and heap slots of every layer, plus an upper bound on the
-    /// variable-length keys the heaps retain: the smaller of every slot
-    /// holding the longest key seen and every layer holding a copy of every
-    /// key inserted. Constant time, since a build charges memory after
-    /// every row; the library exposes no eviction hook for an exact running
-    /// total, so a stream of long keys is still overcounted.
+    /// This accumulator's own fields, sketchlib's bytes for the sketch's
+    /// shape with keys that own no bytes ([`UnivMon::estimated_memory_bytes`]:
+    /// at least what it holds), and an upper bound on the variable-length
+    /// keys the heaps retain: the smaller of every slot holding the longest
+    /// key seen and every layer holding a copy of every key inserted.
+    /// Constant time, since a build charges memory after every row and
+    /// [`UnivMon::memory_bytes`] walks the heaps; the library exposes no
+    /// eviction hook for an exact running total, so a stream of long keys is
+    /// still overcounted.
     fn approx_memory_bytes(&self) -> usize {
-        let layers = self.inner.layers;
+        let (heap_size, rows, cols, layers) = self.dimensions();
         let key_bytes = layers
-            .saturating_mul(self.inner.heap_size)
+            .saturating_mul(heap_size)
             .saturating_mul(self.max_key_bytes)
             .min(layers.saturating_mul(self.inserted_key_bytes));
-        key_bytes
-            .saturating_add(std::mem::size_of::<Self>())
-            .saturating_add(
-                self.inner.layers.saturating_mul(
-                    self.inner
-                        .rows
-                        .saturating_mul(self.inner.cols)
-                        .saturating_mul(16)
-                        .saturating_add(self.inner.heap_size.saturating_mul(256)),
-                ),
-            )
+        (std::mem::size_of::<Self>() - std::mem::size_of::<UnivMon>())
+            .saturating_add(UnivMon::estimated_memory_bytes(
+                heap_size,
+                rows,
+                cols,
+                layers,
+                &DataInput::U64(0),
+            ))
+            .saturating_add(key_bytes)
     }
     fn clone_boxed_core(&self) -> Box<dyn AggregateCore> {
         Box::new(self.clone())

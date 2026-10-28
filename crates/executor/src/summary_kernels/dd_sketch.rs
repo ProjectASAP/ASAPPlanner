@@ -42,6 +42,12 @@ impl AggregateCore for DDSketchAccumulator {
         self.inner.get_count() == 0
     }
 
+    /// sketchlib's count of what the sketch holds now (its struct
+    /// included); the bucket stores grow with the values' range.
+    fn approx_memory_bytes(&self) -> usize {
+        self.inner.memory_bytes()
+    }
+
     /// Quantiles.
     fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
         match query {
