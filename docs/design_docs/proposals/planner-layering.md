@@ -360,11 +360,10 @@ avg by (job) (quantile_over_time(0.5, data[5m]) / quantile_over_time(0.5, data[5
 
 G1 is one group for its two readers, because a window directly over a scan
 may be shared. The two `quantile_over_time(0.5, data[5m])` are one group, G2:
-the PromQL frontend adds a series-identity column (`$promql_series_identity`)
-to every series, so the per-series quantile's output has a unique key
-(series identity and timestamp), and equal non-ASAP nodes with a unique key
-share one group. A non-ASAP node without a unique key, such as a
-`without(..)` grouping, would stay one group per reader.
+both compute the same rows from the same input, so one copy serves both
+operands. A unique key is not needed (the PromQL planning path happens to
+give this output one, series identity and timestamp); an unordered `LIMIT`
+would stay one group per reader.
 
 **Step 2, Stage 1 Pass 1.** `try_populate_pass1` gives G2 and G4 seven
 candidates each. G0, G1, G3 and G5 get one each, their own node. G6 gets

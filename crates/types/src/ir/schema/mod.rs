@@ -347,9 +347,7 @@ impl Schema {
             .position(|c| c.name == name && c.table.as_deref() == Some(table))
     }
 
-    /// Whether this schema has *any* provable unique key — the signal a
-    /// reuse-aware planning pass needs to decide whether a producer's output
-    /// can be safely shared across consumers.
+    /// Whether this schema has *any* provable unique key.
     pub fn has_unique_key(&self) -> bool {
         !self.unique_keys.is_empty()
     }
