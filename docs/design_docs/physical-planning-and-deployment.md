@@ -47,14 +47,16 @@ decided by a `MaterializationAssignment`, as the layer contract below states.
    families, readouts and sharing. It does not decide placement; timing that a
    realization strategy writes while building a candidate is provisional.
 2. **Materialization** (Stage 2, #509) chooses `NotMaterialized`,
-   `MatAtIngestion(medium)` or `MatAtQuery(medium)` for each sub-DAG whose
+   `MatAtIngestion(medium)`, `MatAtQuery(medium)` or
+   `MatAtQueryKeptAcrossEvaluations(medium)` for each sub-DAG whose
    output may be stored (a `SummaryAgg` or a `MaintainPopulation`) and records
    it in a `MaterializationAssignment`. `apply_materialization_timings` writes
    every node's `ExecutionTiming` and `Materialization`: a `MatAtIngestion`
    state and all of its inputs run at ingestion time; readouts, other
    consumers, and the other states run at query time. The default assignment
-   is `NotMaterialized` everywhere, which `PlanOutput::physical_asap_dag`
-   applies.
+   is `NotMaterialized` everywhere; `PlanOutput::physical_asap_dag` applies it
+   only to nodes the optimization pass left untimed (a pass's own timing, such
+   as Stage 3's ingestion-time panes, is kept).
 3. **Physical compile** (executor) reads the plan's materialized views: each
    view's refresh is one compiled DAG (the precompute DAG) and the query run
    another, joined by the views. It does not see raw ingestion, panes,
@@ -285,6 +287,11 @@ window; that requires supported boundary handling or a different candidate.
 
 ## 3. Materialization → Physical DAG
 
+Operator names in the diagrams of this section and §4 (`NativeKllBuild`,
+`NativeKllMerge`, `NativeP50`, `NativeQuantile`, `KllStateOutput`) are
+illustrative. The executor implements them as `SummaryAgg` (a KLL build),
+`SummaryMerge` and `SummaryEvaluation` (a quantile readout).
+
 The **Physical Plan Compiler** consumes both computation semantics and maintenance
 requirements:
 
@@ -401,8 +408,8 @@ the check, whether the view is refreshed at ingestion or on first read, so no
 materialization of an uncompilable computation is selected. SQL `now()` is the
 query's evaluation time (`Scope::Query`); it has no value in an ingestion run.
 
-A trailing window is a range `TimeRange(w)` over a `Scan`, below any
-`TimeShift`s a tumbling pane adds (offsets summing to `s`). At evaluation time
+A trailing window is a range `TimeRange(w)` over any `TimeShift`s (a tumbling
+pane adds them, offsets summing to `s`) over a `Scan`. At evaluation time
 `T` it keeps the rows whose time lies in `(T - s - w, T - s]`, which is the
 window a PromQL range selector reads and a SQL filter against `now()`. Each
 `TimeShift` passes the rows through. The same operator serves a SQL table and
