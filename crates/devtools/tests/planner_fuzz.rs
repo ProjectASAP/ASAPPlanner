@@ -291,3 +291,124 @@ fn smaller_topk_witness_prices_over_the_same_input() {
         Witness::SmallerTopK { from: 10, to: 3 }
     );
 }
+
+/// (l): a filtered share of a grouped rate reads the rate from q's result
+/// (ASAPWorkloads #12); the plain graft cannot price (its numerator is an
+/// unplanned raw rate), so the witness planned with the operand must.
+#[test]
+fn ratio_witness_prices_over_the_shared_rate() {
+    let q = promql(
+        "m_counter",
+        Some(RangeFunction::Rate),
+        Some((OuterOp::Sum, &["job"])),
+    );
+    assert!(matches!(
+        witness_of(Relation::BinaryOverResult, generated(q, false)),
+        Witness::GraftWithOperand { .. }
+    ));
+}
+
+/// (l), avg as sum / count: the sum is read from q's result.
+#[test]
+fn sum_over_count_witness_prices_over_the_shared_sum() {
+    let q = promql(
+        "m_gauge",
+        Some(RangeFunction::SumOverTime),
+        Some((OuterOp::Sum, &["job"])),
+    );
+    assert!(matches!(
+        witness_of(Relation::BinaryOverResult, generated(q, false)),
+        Witness::GraftWithOperand { .. } | Witness::Graft { .. }
+    ));
+}
+
+/// (o): `increase` is q's `rate` times the window.
+#[test]
+fn increase_witness_prices_as_the_scaled_rate() {
+    let q = promql(
+        "m_counter",
+        Some(RangeFunction::Rate),
+        Some((OuterOp::Sum, &["job"])),
+    );
+    assert!(matches!(
+        witness_of(Relation::EquivalentRangeFunction, generated(q, false)),
+        Witness::Graft { .. }
+    ));
+}
+
+/// (g): a threshold over a grouped minimum reads q's result.
+#[test]
+fn threshold_witness_prices_over_the_result() {
+    let q = promql(
+        "m_gauge",
+        Some(RangeFunction::MaxOverTime),
+        Some((OuterOp::Min, &["job"])),
+    );
+    assert!(matches!(
+        witness_of(Relation::OuterOverResult, generated(q, false)),
+        Witness::Graft { .. }
+    ));
+}
+
+/// (m): a longer window lengthens q's pane chain of exact sums.
+#[test]
+fn longer_window_witness_prices_over_a_lengthened_chain() {
+    let q = promql(
+        "m_gauge",
+        Some(RangeFunction::SumOverTime),
+        Some((OuterOp::Sum, &["job"])),
+    );
+    assert!(matches!(
+        witness_of(Relation::LongerWindow, generated(q, false)),
+        Witness::LongerWindow { rollup: None, .. }
+    ));
+}
+
+/// (n): the lengthened chain rolled up to one key fewer.
+#[test]
+fn longer_window_rollup_witness_prices() {
+    let q = promql(
+        "m_gauge",
+        Some(RangeFunction::SumOverTime),
+        Some((OuterOp::Sum, &["job", "region"])),
+    );
+    assert!(matches!(
+        witness_of(Relation::LongerWindowRollup, generated(q, false)),
+        Witness::LongerWindow {
+            rollup: Some(_),
+            ..
+        }
+    ));
+}
+
+/// (h): a distinct count of the high-cardinality column next to its
+/// frequency L2 reads one UnivMon, from q's own state or from `W ∪ {q'}`
+/// planned with UnivMon only (planner-layering Example 2).
+#[test]
+fn other_frequency_statistic_witness_prices_from_one_univmon() {
+    use asap_devtools::planner_fuzz::generate::generated_workload;
+    use asap_devtools::planner_fuzz::{FuzzQuery, Language};
+    use asap_types::ir::properties::AccuracyTarget;
+    let l2 = QuerySpec::Sql(SqlSpec {
+        table: "metrics".into(),
+        aggregate: SqlAggregate::FrequencyL2("src_ip".into()),
+        group_by: vec![],
+        filters: vec![],
+        window_ms: 60_000,
+    });
+    let w = generated_workload(
+        Language::Sql,
+        vec![FuzzQuery::generated(
+            l2,
+            AccuracyTarget::max_error(0.05).failure_probability(0.01),
+            10_000,
+            None,
+        )],
+        10_000,
+        15_000,
+    );
+    assert!(matches!(
+        witness_of(Relation::OtherStatistic, w),
+        Witness::OtherStatistic { .. } | Witness::UnivMonOnly
+    ));
+}

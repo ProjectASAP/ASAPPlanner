@@ -120,6 +120,10 @@ pub enum SqlAggregate {
     Min,
     Quantile(f64),
     CountDistinct(String),
+    /// The L2 norm and the entropy of a column's value frequencies, in the
+    /// SQL idioms of planner-layering Example 2.
+    FrequencyL2(String),
+    FrequencyEntropy(String),
 }
 
 /// The PromQL metrics the generator reads, with their type.
@@ -132,8 +136,17 @@ pub const PROMQL_LABELS: [(&str, u64); 3] = [("job", 5), ("instance", 50), ("reg
 /// distinct value counts; `value` is the measured float column.
 pub const SQL_TABLE: &str = "metrics";
 pub const SQL_COLUMNS: [(&str, u64); 2] = [("city", 10), ("host", 100)];
+/// A high-cardinality column (one value per series) that only the frequency
+/// aggregates read: where one UnivMon is cheaper than exact counts, as for
+/// the source IPs of planner-layering Example 2 and the users of
+/// ASAPWorkloads #107 and #110.
+pub const SQL_FREQUENCY_COLUMN: &str = "src_ip";
 
 const WINDOWS_MS: [u64; 4] = [60_000, 120_000, 300_000, 600_000];
+/// The windows a related query may also take: production rule sets pair a
+/// 5-minute window with 30-minute and 1-hour ones over one metric
+/// (ASAPWorkloads query catalog #1–#2, #122).
+const RELATED_WINDOWS_MS: [u64; 6] = [60_000, 120_000, 300_000, 600_000, 1_800_000, 3_600_000];
 const REPEAT_INTERVALS_MS: [u64; 3] = [10_000, 30_000, 60_000];
 const QUANTILES: [f64; 4] = [0.5, 0.9, 0.95, 0.99];
 const SERIES_COUNTS: [u64; 3] = [100, 1_000, 10_000];
@@ -235,6 +248,31 @@ impl PromqlSpec {
 
 impl SqlSpec {
     pub fn render(&self) -> String {
+        let window = format!("ts > now() - {}", sql_interval(self.window_ms));
+        let filters: String = self
+            .filters
+            .iter()
+            .map(|(column, value)| format!(" AND {column} = '{value}'"))
+            .collect();
+        match &self.aggregate {
+            SqlAggregate::FrequencyL2(column) => {
+                return format!(
+                    "SELECT SQRT(SUM(CAST(c AS DOUBLE) * CAST(c AS DOUBLE))) AS v FROM \
+                     (SELECT {column}, COUNT(*) AS c FROM {} WHERE {window}{filters} \
+                     GROUP BY {column})",
+                    self.table
+                )
+            }
+            SqlAggregate::FrequencyEntropy(column) => {
+                return format!(
+                    "SELECT -SUM(p * LN(p)) AS v FROM (SELECT COUNT(*) * 1.0 / \
+                     SUM(COUNT(*)) OVER () AS p FROM {} WHERE {window}{filters} \
+                     GROUP BY {column})",
+                    self.table
+                )
+            }
+            _ => {}
+        }
         let aggregate = match &self.aggregate {
             SqlAggregate::Sum => "SUM(value)".to_string(),
             SqlAggregate::Count => "COUNT(*)".to_string(),
@@ -245,18 +283,17 @@ impl SqlSpec {
                 format!("percentile_cont({q}) WITHIN GROUP (ORDER BY value)")
             }
             SqlAggregate::CountDistinct(column) => format!("COUNT(DISTINCT {column})"),
+            SqlAggregate::FrequencyL2(_) | SqlAggregate::FrequencyEntropy(_) => {
+                unreachable!("rendered above")
+            }
         };
         let mut select: Vec<String> = self.group_by.clone();
         select.push(format!("{aggregate} AS v"));
         let mut text = format!(
-            "SELECT {} FROM {} WHERE ts > now() - {}",
+            "SELECT {} FROM {} WHERE {window}{filters}",
             select.join(", "),
-            self.table,
-            sql_interval(self.window_ms)
+            self.table
         );
-        for (column, value) in &self.filters {
-            text.push_str(&format!(" AND {column} = '{value}'"));
-        }
         if !self.group_by.is_empty() {
             text.push_str(&format!(" GROUP BY {}", self.group_by.join(", ")));
         }
@@ -432,12 +469,22 @@ fn random_sql_spec(rng: &mut Rng) -> SqlSpec {
             SqlAggregate::Quantile(q),
             SqlAggregate::Quantile(0.9),
             SqlAggregate::CountDistinct("host".into()),
+            SqlAggregate::CountDistinct(SQL_FREQUENCY_COLUMN.into()),
+            SqlAggregate::FrequencyL2(SQL_FREQUENCY_COLUMN.into()),
+            SqlAggregate::FrequencyEntropy(SQL_FREQUENCY_COLUMN.into()),
         ])
         .clone();
+    // The frequency idioms reduce the whole selection to one value.
+    let ungrouped = matches!(
+        aggregate,
+        SqlAggregate::FrequencyL2(_) | SqlAggregate::FrequencyEntropy(_)
+    );
     let group_by: Vec<String> = SQL_COLUMNS
         .iter()
         .filter(|(column, _)| {
-            rng.chance(0.45) && !matches!(&aggregate, SqlAggregate::CountDistinct(c) if c == column)
+            !ungrouped
+                && rng.chance(0.45)
+                && !matches!(&aggregate, SqlAggregate::CountDistinct(c) if c == column)
         })
         .map(|(column, _)| column.to_string())
         .collect();
@@ -465,12 +512,20 @@ pub fn label_value(label: &str, n: usize) -> String {
 }
 
 /// A related query: a small edit of `spec` (another operator, grouping,
-/// window or quantile), so a workload holds queries that could share.
+/// window, quantile, or `rate` for `increase`), so a workload holds queries
+/// that could share.
 fn related_spec(rng: &mut Rng, spec: &QuerySpec) -> QuerySpec {
     let mut spec = spec.clone();
     match &mut spec {
-        QuerySpec::Promql(p) => match rng.below(4) {
-            0 => p.window_ms = *rng.pick(&WINDOWS_MS),
+        QuerySpec::Promql(p) => match rng.below(5) {
+            0 => p.window_ms = *rng.pick(&RELATED_WINDOWS_MS),
+            // One counter read by `rate` and by `increase`, as the
+            // recording rules of ASAPWorkloads #1–#2 do.
+            4 => match p.range {
+                Some(RangeFunction::Rate) => p.range = Some(RangeFunction::Increase),
+                Some(RangeFunction::Increase) => p.range = Some(RangeFunction::Rate),
+                _ => p.window_ms = *rng.pick(&RELATED_WINDOWS_MS),
+            },
             1 => {
                 if let Some(outer) = &mut p.outer {
                     outer.labels = PROMQL_LABELS
@@ -499,8 +554,12 @@ fn related_spec(rng: &mut Rng, spec: &QuerySpec) -> QuerySpec {
             }
         },
         QuerySpec::Sql(s) => match rng.below(3) {
-            0 => s.window_ms = *rng.pick(&WINDOWS_MS),
-            1 => {
+            0 => s.window_ms = *rng.pick(&RELATED_WINDOWS_MS),
+            1 if !matches!(
+                s.aggregate,
+                SqlAggregate::FrequencyL2(_) | SqlAggregate::FrequencyEntropy(_)
+            ) =>
+            {
                 s.group_by = SQL_COLUMNS
                     .iter()
                     .filter(|_| rng.chance(0.5))
@@ -513,6 +572,24 @@ fn related_spec(rng: &mut Rng, spec: &QuerySpec) -> QuerySpec {
             _ => {
                 if let SqlAggregate::Quantile(_) = s.aggregate {
                     s.aggregate = SqlAggregate::Quantile(*rng.pick(&QUANTILES));
+                } else if s.group_by.is_empty()
+                    && matches!(
+                        &s.aggregate,
+                        SqlAggregate::CountDistinct(c)
+                        | SqlAggregate::FrequencyL2(c)
+                        | SqlAggregate::FrequencyEntropy(c) if c == SQL_FREQUENCY_COLUMN
+                    )
+                {
+                    // Another frequency statistic of the same column, as
+                    // profiling asks for (ASAPWorkloads #57).
+                    let column = SQL_FREQUENCY_COLUMN.to_string();
+                    s.aggregate = rng
+                        .pick(&[
+                            SqlAggregate::CountDistinct(column.clone()),
+                            SqlAggregate::FrequencyL2(column.clone()),
+                            SqlAggregate::FrequencyEntropy(column),
+                        ])
+                        .clone();
                 } else {
                     s.filters.clear();
                 }
@@ -582,11 +659,13 @@ pub fn generated_workload(
             (sources, Vec::new())
         }
         Language::Sql => {
-            let labels: Vec<(String, u64)> = SQL_COLUMNS
+            let mut labels: Vec<(String, u64)> = SQL_COLUMNS
                 .iter()
                 .map(|(column, n)| (column.to_string(), *n))
                 .collect();
-            let columns: Vec<&str> = SQL_COLUMNS.iter().map(|(column, _)| *column).collect();
+            labels.push((SQL_FREQUENCY_COLUMN.to_string(), series_count));
+            let mut columns: Vec<&str> = SQL_COLUMNS.iter().map(|(column, _)| *column).collect();
+            columns.push(SQL_FREQUENCY_COLUMN);
             let sources = json!({
                 SQL_TABLE: source_facts(series_count, sample_interval_ms, None, &labels),
             });
@@ -605,6 +684,7 @@ pub fn generated_workload(
         tables,
         raw_data_retained: true,
         query_time_results_retained: false,
+        sketch_families: None,
     };
     workload.set_arrival_from_sources();
     workload

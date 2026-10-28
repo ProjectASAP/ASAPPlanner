@@ -19,7 +19,9 @@ use super::{FuzzQuery, FuzzSettings, FuzzWorkload, Language, Planner};
 pub struct DocumentedPattern {
     pub pattern: &'static str,
     /// The doc (under `docs/design_docs/`) section and line range on the
-    /// main branch that states it.
+    /// main branch that states it, and for the patterns taken from
+    /// production queries, their numbers in the ASAPWorkloads query catalog
+    /// (`ProjectASAP/ASAPWorkloads`, `docs/query-catalog.md`).
     pub doc_reference: &'static str,
     pub relation: Option<Relation>,
     /// Why no relation checks it, or how one does.
@@ -76,13 +78,13 @@ pub fn documented_patterns() -> Vec<DocumentedPattern> {
             pattern: "A query over another query's result (topk over a shared sum) reads that result",
             doc_reference: "joint-planning-search.md worked example L177–187; planner-layering.md L583–585",
             relation: Some(Relation::OuterOverResult),
-            note: "",
+            note: "the operator follows q's own: topk, bottomk, max, quantile(0.5) or a threshold `> 0` (ASAPWorkloads #4, #12, #17, #18)",
         },
         DocumentedPattern {
             pattern: "Summary capability: another statistic the family answers from one build (FamilyCapability::answers)",
             doc_reference: "planner-layering.md Pass 2 rule table L586, examples L611–617, Example 2 L1306–1370",
             relation: Some(Relation::OtherStatistic),
-            note: "checks the Total (count) readout",
+            note: "UnivMon's count, distinct count, L2 and entropy (ASAPWorkloads #57, #107–#108); the witness reads q's own state, or is W ∪ {q'} planned with UnivMon as the only family",
         },
         DocumentedPattern {
             pattern: "gcd pane grid across repeat intervals: queries at different intervals read one chain at their own cadence",
@@ -122,9 +124,33 @@ pub fn documented_patterns() -> Vec<DocumentedPattern> {
         },
         DocumentedPattern {
             pattern: "avg as sum/count: shared exact accumulators",
-            doc_reference: "planner-layering.md L372–383, L502–503",
-            relation: None,
-            note: "the derivation needs two accumulators, not one operator over q",
+            doc_reference: "planner-layering.md L372–383, L502–503; ASAPWorkloads #8",
+            relation: Some(Relation::BinaryOverResult),
+            note: "q = sum_over_time (no outer or sum), q' = q / count_over_time: checks that the sum is shared, not that both share one accumulator",
+        },
+        DocumentedPattern {
+            pattern: "A ratio with a shared operand: a filtered share of a rate, or one rate over another",
+            doc_reference: "ASAPWorkloads #11, #12, #30, #126",
+            relation: Some(Relation::BinaryOverResult),
+            note: "",
+        },
+        DocumentedPattern {
+            pattern: "Longer window over the same panes: one chain serves 5m and 1h windows",
+            doc_reference: "planner-layering.md window composition L790–807; ASAPWorkloads #1–#2, #19, #122",
+            relation: Some(Relation::LongerWindow),
+            note: "rate and increase excluded, as for d",
+        },
+        DocumentedPattern {
+            pattern: "Longer window rolled up to a coarser grouping",
+            doc_reference: "ASAPWorkloads #1–#2, #61–#62, #65",
+            relation: Some(Relation::LongerWindowRollup),
+            note: "a composition of m and c",
+        },
+        DocumentedPattern {
+            pattern: "rate and increase of one counter read one state",
+            doc_reference: "ASAPWorkloads #1–#2",
+            relation: Some(Relation::EquivalentRangeFunction),
+            note: "",
         },
         DocumentedPattern {
             pattern: "Stored-state reuse (view matching); sliding windows, exponential histograms, SummarySubtract",
@@ -712,6 +738,24 @@ fn derivation_text(witness: &Witness) -> String {
             "a `SummaryMerge` of q's state and the other selection's state, then q's estimate"
                 .into()
         }
+        Witness::GraftWithOperand { text, operand } => format!(
+            "`{text}` with its inner `q` read from q's result and `{operand}` from its own \
+             plan, planned with `W`"
+        ),
+        Witness::UnivMonOnly => {
+            "`W ∪ {q'}` planned with UnivMon as the only sketch family, priced with every family"
+                .into()
+        }
+        Witness::LongerWindow { window_ms, rollup } => {
+            let lengthened = format!(
+                "q's pane chain lengthened to cover {window_ms} ms (q merges its old newest \
+                 panes), merged whole"
+            );
+            match rollup {
+                Some(rollup) => format!("{lengthened}, then {}", derivation_text(rollup)),
+                None => lengthened,
+            }
+        }
     }
 }
 
@@ -771,10 +815,10 @@ fn write_draft(
             format!("A duplicate of `{q}` is not answered from the same result")
         }
         Relation::OuterOverResult => {
-            format!("`topk(3, …)` over `{q}` does not read `{q}`'s result")
+            format!("An operator over `{q}` does not read `{q}`'s result")
         }
         Relation::OtherStatistic => {
-            format!("A count over `{q}`'s input does not read the count `{q}`'s sketch answers")
+            format!("Another frequency statistic of `{q}`'s values does not read one UnivMon")
         }
         Relation::OtherRepeatInterval => {
             format!("`{q}` at a longer repeat interval does not read the same result or state")
@@ -782,6 +826,18 @@ fn write_draft(
         Relation::SmallerTopK => format!("A smaller k of `{q}` does not read its top-k result"),
         Relation::UnionOfSelections => {
             format!("A union of two selections of `{q}` does not merge their states")
+        }
+        Relation::BinaryOverResult => {
+            format!("A ratio with `{q}` as an operand does not read `{q}`'s result")
+        }
+        Relation::LongerWindow => {
+            format!("A longer window of `{q}` does not extend its pane chain")
+        }
+        Relation::LongerWindowRollup => format!(
+            "A longer window and coarser grouping of `{q}` does not roll up its extended chain"
+        ),
+        Relation::EquivalentRangeFunction => {
+            format!("`{q}` with `rate` and `increase` swapped does not scale its result")
         }
         Relation::TighterAccuracy => "Tightening an accuracy target lowers the planned cost".into(),
         Relation::AddedQuery => "Adding a query lowers the planned cost".into(),

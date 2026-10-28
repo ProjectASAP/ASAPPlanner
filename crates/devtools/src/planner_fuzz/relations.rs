@@ -18,7 +18,7 @@ use asap_types::ir::operator::agg_intent::AggIntent;
 use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::family_capability::FamilyCapability;
-use asap_types::ir::schema::sketch::SketchStatistic;
+use asap_types::ir::schema::sketch::{SketchAlgorithm, SketchStatistic};
 use asap_types::ir::schema::{DataType, FieldDataType};
 use asap_types::ir::{
     ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, QueryRoot,
@@ -52,10 +52,14 @@ pub enum Relation {
     OtherQuantileRank,
     /// (f) `q'` = `q`: derived by reading `q`.
     ExactDuplicate,
-    /// (g) `q'` = `topk(3, q)`: derived by a top-k over `q`'s result.
+    /// (g) `q'` = an outer operator over `q` (`topk`, `bottomk`, `max`,
+    /// `quantile` or a threshold, by `q`'s own outer operator): derived by
+    /// that operator over `q`'s result.
     OuterOverResult,
-    /// (h) `q'` = the count `q`'s sketch also answers (`Total`): derived by
-    /// another estimate from `q`'s state when its family answers it.
+    /// (h) `q'` = another frequency statistic of `q`'s SQL column (row
+    /// count, distinct count, L2): derived by another estimate from `q`'s
+    /// state when its family answers it, or from one UnivMon the planner
+    /// sizes for both.
     OtherStatistic,
     /// (i) `q'` = `q` evaluated at a longer repeat interval: derived by
     /// reading `q`'s result or state at its own cadence.
@@ -66,6 +70,20 @@ pub enum Relation {
     /// (k) `q'` = `q` over the union of two disjoint selections, both of
     /// which the workload computes: derived by merging the two states.
     UnionOfSelections,
+    /// (l) `q'` = a ratio of `q` and a sibling query (a filtered share of
+    /// `q`, or `q`'s `sum_over_time` over its `count_over_time`): derived by
+    /// the division with `q` read from `q`'s result.
+    BinaryOverResult,
+    /// (m) `q'` = `q` over a longer window that is a multiple of it:
+    /// derived by lengthening `q`'s pane chain, which `q` reads the newest
+    /// panes of.
+    LongerWindow,
+    /// (n) `q'` = `q` over a longer window and grouped by one key fewer:
+    /// derived by a rollup over (m)'s derivation.
+    LongerWindowRollup,
+    /// (o) `q'` = `q` with `rate` and `increase` swapped: derived by scaling
+    /// `q`'s result by the window length.
+    EquivalentRangeFunction,
     /// Tightening a query's accuracy target never lowers cost.
     TighterAccuracy,
     /// Adding a query never lowers cost.
@@ -86,7 +104,7 @@ pub enum Relation {
 }
 
 impl Relation {
-    pub const ALL: [Relation; 19] = [
+    pub const ALL: [Relation; 23] = [
         Relation::LooserAccuracy,
         Relation::FilterOnGroupKey,
         Relation::CoarserGrouping,
@@ -98,6 +116,10 @@ impl Relation {
         Relation::OtherRepeatInterval,
         Relation::SmallerTopK,
         Relation::UnionOfSelections,
+        Relation::BinaryOverResult,
+        Relation::LongerWindow,
+        Relation::LongerWindowRollup,
+        Relation::EquivalentRangeFunction,
         Relation::TighterAccuracy,
         Relation::AddedQuery,
         Relation::NoRawRetention,
@@ -122,6 +144,10 @@ impl Relation {
             Relation::OtherRepeatInterval => "i-other-repeat-interval",
             Relation::SmallerTopK => "j-smaller-topk",
             Relation::UnionOfSelections => "k-union-of-selections",
+            Relation::BinaryOverResult => "l-binary-over-result",
+            Relation::LongerWindow => "m-longer-window",
+            Relation::LongerWindowRollup => "n-longer-window-rollup",
+            Relation::EquivalentRangeFunction => "o-equivalent-range-function",
             Relation::TighterAccuracy => "tighter-accuracy",
             Relation::AddedQuery => "added-query",
             Relation::NoRawRetention => "no-raw-retention",
@@ -133,7 +159,7 @@ impl Relation {
         }
     }
 
-    /// Parses a CLI name or, for (a) to (k), its letter.
+    /// Parses a CLI name or, for (a) to (o), its letter.
     pub fn parse(text: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|r| {
             r.name() == text
@@ -158,6 +184,10 @@ impl Relation {
                 | Relation::OtherRepeatInterval
                 | Relation::SmallerTopK
                 | Relation::UnionOfSelections
+                | Relation::BinaryOverResult
+                | Relation::LongerWindow
+                | Relation::LongerWindowRollup
+                | Relation::EquivalentRangeFunction
         )
     }
 
@@ -227,6 +257,21 @@ pub enum Witness {
     /// `q`'s root estimate over a `SummaryMerge` of its state and the state
     /// of `W`'s last query (the other selection, added to `W`).
     UnionWithLast,
+    /// `q`'s pane chain lengthened to cover `window_ms`: every reader of
+    /// the chain in `W`'s plan merges its old newest panes of the longer
+    /// chain, and `q'` merges all of them, then applies `rollup` when set.
+    LongerWindow {
+        window_ms: u64,
+        rollup: Option<Box<Witness>>,
+    },
+    /// Like [`Witness::Graft`], for a `text` that also reads the sibling
+    /// query `operand`: `W` is planned with `operand` added, and both its
+    /// and `q`'s lowerings inside `text` read their planned roots.
+    GraftWithOperand { text: String, operand: String },
+    /// `W ∪ {q'}` planned with UnivMon as the only sketch family, so the
+    /// planner sizes one UnivMon for both statistics (its summary-capability
+    /// rule), priced with every family.
+    UnivMonOnly,
 }
 
 /// The exact rollup of a sum, count (a sum of counts), max or min.
@@ -394,74 +439,10 @@ pub fn derive(relation: Relation, workload: &FuzzWorkload, target: usize) -> Opt
                 )
             }
         },
-        Relation::CoarserGrouping => match q.spec.as_ref()? {
-            QuerySpec::Promql(spec) => {
-                let outer = spec.outer.as_ref()?;
-                let fine = spec.group_labels();
-                if fine.len() < 2 || matches!(outer.op, OuterOp::Topk(_)) {
-                    return None;
-                }
-                let coarse_labels = fine[..fine.len() - 1].to_vec();
-                let mut coarse = spec.clone();
-                coarse.outer = Some(OuterAggregation {
-                    op: outer.op,
-                    labels: if outer.without {
-                        let mut without = outer.labels.clone();
-                        without.push(fine[fine.len() - 1].clone());
-                        without
-                    } else {
-                        coarse_labels.clone()
-                    },
-                    without: outer.without,
-                });
-                let rollup_op = match outer.op {
-                    OuterOp::Sum | OuterOp::Count => Some(RollupOp::Sum),
-                    OuterOp::Max => Some(RollupOp::Max),
-                    OuterOp::Min => Some(RollupOp::Min),
-                    _ => None,
-                };
-                let mut witnesses = vec![Witness::SketchRollup {
-                    labels: coarse_labels.clone(),
-                }];
-                if let Some(op) = rollup_op {
-                    witnesses.insert(
-                        0,
-                        Witness::ExactRollup {
-                            labels: coarse_labels.clone(),
-                            op,
-                        },
-                    );
-                }
-                derived(q.with_spec(QuerySpec::Promql(coarse)), witnesses)
-            }
-            QuerySpec::Sql(spec) => {
-                if spec.group_by.len() < 2 {
-                    return None;
-                }
-                let coarse_columns = spec.group_by[..spec.group_by.len() - 1].to_vec();
-                let mut coarse = spec.clone();
-                coarse.group_by = coarse_columns.clone();
-                let rollup_op = match spec.aggregate {
-                    SqlAggregate::Sum | SqlAggregate::Count => Some(RollupOp::Sum),
-                    SqlAggregate::Max => Some(RollupOp::Max),
-                    SqlAggregate::Min => Some(RollupOp::Min),
-                    _ => None,
-                };
-                let mut witnesses = vec![Witness::SketchRollup {
-                    labels: coarse_columns.clone(),
-                }];
-                if let Some(op) = rollup_op {
-                    witnesses.insert(
-                        0,
-                        Witness::ExactRollup {
-                            labels: coarse_columns.clone(),
-                            op,
-                        },
-                    );
-                }
-                derived(q.with_spec(QuerySpec::Sql(coarse)), witnesses)
-            }
-        },
+        Relation::CoarserGrouping => {
+            let (coarse, witnesses) = coarser(q.spec.as_ref()?)?;
+            derived(q.with_spec(coarse), witnesses)
+        }
         Relation::NestedShorterWindow => {
             let spec = match q.spec.as_ref()? {
                 QuerySpec::Promql(spec) => {
@@ -525,52 +506,52 @@ pub fn derive(relation: Relation, workload: &FuzzWorkload, target: usize) -> Opt
             )
         }
         Relation::OtherStatistic => {
-            let total = SketchStatistic::PointCount {
-                key: ColumnRef::SampleValue,
-                value: None,
+            // One UnivMon answers a column's distinct count, frequency L2
+            // and entropy and the row count (planner-layering Example 2);
+            // q' asks for another of them than q.
+            let QuerySpec::Sql(spec) = q.spec.as_ref()? else {
+                return None;
             };
-            let spec = match q.spec.as_ref()? {
-                QuerySpec::Promql(spec) => {
-                    let mut count = spec.clone();
-                    match (&spec.outer, spec.range) {
-                        (
-                            Some(OuterAggregation {
-                                op: OuterOp::Quantile(_),
-                                ..
-                            }),
-                            None,
-                        ) => {
-                            count.outer.as_mut().expect("matched").op = OuterOp::Count;
-                        }
-                        (None, Some(RangeFunction::QuantileOverTime(_))) => {
-                            count.range = Some(RangeFunction::CountOverTime);
-                        }
-                        _ => return None,
-                    }
-                    QuerySpec::Promql(count)
-                }
-                QuerySpec::Sql(spec) => {
-                    if !matches!(
-                        spec.aggregate,
-                        SqlAggregate::Quantile(_) | SqlAggregate::CountDistinct(_)
-                    ) {
-                        return None;
-                    }
-                    let mut count = spec.clone();
-                    count.aggregate = SqlAggregate::Count;
-                    QuerySpec::Sql(count)
-                }
+            if !spec.group_by.is_empty() {
+                return None;
+            }
+            let (aggregate, statistic) = match &spec.aggregate {
+                SqlAggregate::CountDistinct(_) => (
+                    SqlAggregate::Count,
+                    SketchStatistic::PointCount {
+                        key: ColumnRef::SampleValue,
+                        value: None,
+                    },
+                ),
+                SqlAggregate::FrequencyL2(c) => (
+                    SqlAggregate::CountDistinct(c.clone()),
+                    SketchStatistic::Cardinality,
+                ),
+                SqlAggregate::FrequencyEntropy(c) => (
+                    SqlAggregate::FrequencyL2(c.clone()),
+                    SketchStatistic::FrequencyL2,
+                ),
+                _ => return None,
             };
+            let mut other = spec.clone();
+            other.aggregate = aggregate;
             derived(
-                q.with_spec(spec),
-                vec![Witness::OtherStatistic { statistic: total }],
+                q.with_spec(QuerySpec::Sql(other)),
+                vec![Witness::OtherStatistic { statistic }, Witness::UnivMonOnly],
             )
         }
         Relation::OuterOverResult => match q.spec.as_ref()? {
             QuerySpec::Promql(PromqlSpec {
                 outer: Some(outer), ..
             }) if !matches!(outer.op, OuterOp::Topk(_)) && !outer.labels.is_empty() => {
-                let text = format!("topk(3, {})", q.text());
+                // The operator follows q's own, so a shrunk q keeps it.
+                let text = match outer.op {
+                    OuterOp::Count => format!("bottomk(3, {})", q.text()),
+                    OuterOp::Max => format!("max({})", q.text()),
+                    OuterOp::Avg => format!("quantile(0.5, {})", q.text()),
+                    OuterOp::Min | OuterOp::Quantile(_) => format!("{} > 0", q.text()),
+                    _ => format!("topk(3, {})", q.text()),
+                };
                 let mut query = q.clone();
                 query.entry.query.0 = text.clone();
                 query.spec = None;
@@ -637,7 +618,219 @@ pub fn derive(relation: Relation, workload: &FuzzWorkload, target: usize) -> Opt
                 base_addition: Some(q.with_spec(other_spec)),
             })
         }
+        Relation::BinaryOverResult => {
+            let QuerySpec::Promql(spec) = q.spec.as_ref()? else {
+                return None;
+            };
+            // Vector matching pairs q's series one to one with the
+            // numerator's: no top-k or quantile that picks series.
+            if spec.range.is_none()
+                || spec.outer.as_ref().is_some_and(|o| {
+                    o.without || matches!(o.op, OuterOp::Topk(_) | OuterOp::Quantile(_))
+                })
+            {
+                return None;
+            }
+            let mut numerator = spec.clone();
+            if spec.range == Some(RangeFunction::SumOverTime)
+                && spec
+                    .outer
+                    .as_ref()
+                    .is_none_or(|o| matches!(o.op, OuterOp::Sum))
+            {
+                // avg as sum / count, with q the sum.
+                let mut count = spec.clone();
+                count.range = Some(RangeFunction::CountOverTime);
+                let text = format!("{} / {}", spec.render(), count.render());
+                let mut query = q.clone();
+                query.entry.query.0 = text.clone();
+                query.spec = None;
+                return derived(
+                    query,
+                    vec![
+                        Witness::GraftWithOperand {
+                            text: text.clone(),
+                            operand: count.render(),
+                        },
+                        Witness::Graft { text },
+                    ],
+                );
+            }
+            // A filtered share of q, on a label q does not group by.
+            let grouped = spec.group_labels();
+            let (label, _) = super::generate::PROMQL_LABELS.iter().find(|(l, _)| {
+                (spec.outer.is_none() || !grouped.iter().any(|g| g == l))
+                    && spec.matchers.iter().all(|(m, _)| m != l)
+            })?;
+            numerator
+                .matchers
+                .push((label.to_string(), label_value(label, 0)));
+            let text = format!("{} / {}", numerator.render(), spec.render());
+            let mut query = q.clone();
+            query.entry.query.0 = text.clone();
+            query.spec = None;
+            derived(
+                query,
+                vec![
+                    Witness::GraftWithOperand {
+                        text: text.clone(),
+                        operand: numerator.render(),
+                    },
+                    Witness::Graft { text },
+                ],
+            )
+        }
+        Relation::LongerWindow | Relation::LongerWindowRollup => {
+            let (longer, window_ms) = match q.spec.as_ref()? {
+                QuerySpec::Promql(spec) => {
+                    // As for (d): rate and increase read more than merged
+                    // pane state.
+                    if matches!(spec.range?, RangeFunction::Rate | RangeFunction::Increase) {
+                        return None;
+                    }
+                    let mut longer = spec.clone();
+                    longer.window_ms = longer_window(spec.window_ms)?;
+                    (QuerySpec::Promql(longer.clone()), longer.window_ms)
+                }
+                QuerySpec::Sql(spec) => {
+                    let mut longer = spec.clone();
+                    longer.window_ms = longer_window(spec.window_ms)?;
+                    (QuerySpec::Sql(longer.clone()), longer.window_ms)
+                }
+            };
+            if relation == Relation::LongerWindow {
+                return derived(
+                    q.with_spec(longer),
+                    vec![Witness::LongerWindow {
+                        window_ms,
+                        rollup: None,
+                    }],
+                );
+            }
+            let (coarse, rollups) = coarser(&longer)?;
+            derived(
+                q.with_spec(coarse),
+                rollups
+                    .into_iter()
+                    .map(|rollup| Witness::LongerWindow {
+                        window_ms,
+                        rollup: Some(Box::new(rollup)),
+                    })
+                    .collect(),
+            )
+        }
+        Relation::EquivalentRangeFunction => {
+            let QuerySpec::Promql(spec) = q.spec.as_ref()? else {
+                return None;
+            };
+            // A count of series does not scale with its values.
+            if spec
+                .outer
+                .as_ref()
+                .is_some_and(|o| matches!(o.op, OuterOp::Count))
+            {
+                return None;
+            }
+            let seconds = spec.window_ms / 1_000;
+            let mut swapped = spec.clone();
+            let text = match spec.range? {
+                RangeFunction::Rate => {
+                    swapped.range = Some(RangeFunction::Increase);
+                    format!("({}) * {seconds}", q.text())
+                }
+                RangeFunction::Increase => {
+                    swapped.range = Some(RangeFunction::Rate);
+                    format!("({}) / {seconds}", q.text())
+                }
+                _ => return None,
+            };
+            derived(
+                q.with_spec(QuerySpec::Promql(swapped)),
+                vec![Witness::Graft { text }],
+            )
+        }
         _ => None,
+    }
+}
+
+/// The shortest longer window, from the generator's windows up to an hour,
+/// that is a multiple of `window_ms`.
+fn longer_window(window_ms: u64) -> Option<u64> {
+    [120_000, 300_000, 600_000, 1_800_000, 3_600_000]
+        .into_iter()
+        .find(|&w| w > window_ms && w.is_multiple_of(window_ms))
+}
+
+/// `spec` grouped by one key fewer, with the rollups that derive it from
+/// `spec`'s result or state, or `None` with fewer than two keys or a top-k.
+fn coarser(spec: &QuerySpec) -> Option<(QuerySpec, Vec<Witness>)> {
+    match spec {
+        QuerySpec::Promql(spec) => {
+            let outer = spec.outer.as_ref()?;
+            let fine = spec.group_labels();
+            if fine.len() < 2 || matches!(outer.op, OuterOp::Topk(_)) {
+                return None;
+            }
+            let coarse_labels = fine[..fine.len() - 1].to_vec();
+            let mut coarse = spec.clone();
+            coarse.outer = Some(OuterAggregation {
+                op: outer.op,
+                labels: if outer.without {
+                    let mut without = outer.labels.clone();
+                    without.push(fine[fine.len() - 1].clone());
+                    without
+                } else {
+                    coarse_labels.clone()
+                },
+                without: outer.without,
+            });
+            let rollup_op = match outer.op {
+                OuterOp::Sum | OuterOp::Count => Some(RollupOp::Sum),
+                OuterOp::Max => Some(RollupOp::Max),
+                OuterOp::Min => Some(RollupOp::Min),
+                _ => None,
+            };
+            let mut witnesses = vec![Witness::SketchRollup {
+                labels: coarse_labels.clone(),
+            }];
+            if let Some(op) = rollup_op {
+                witnesses.insert(
+                    0,
+                    Witness::ExactRollup {
+                        labels: coarse_labels.clone(),
+                        op,
+                    },
+                );
+            }
+            Some((QuerySpec::Promql(coarse), witnesses))
+        }
+        QuerySpec::Sql(spec) => {
+            if spec.group_by.len() < 2 {
+                return None;
+            }
+            let coarse_columns = spec.group_by[..spec.group_by.len() - 1].to_vec();
+            let mut coarse = spec.clone();
+            coarse.group_by = coarse_columns.clone();
+            let rollup_op = match spec.aggregate {
+                SqlAggregate::Sum | SqlAggregate::Count => Some(RollupOp::Sum),
+                SqlAggregate::Max => Some(RollupOp::Max),
+                SqlAggregate::Min => Some(RollupOp::Min),
+                _ => None,
+            };
+            let mut witnesses = vec![Witness::SketchRollup {
+                labels: coarse_columns.clone(),
+            }];
+            if let Some(op) = rollup_op {
+                witnesses.insert(
+                    0,
+                    Witness::ExactRollup {
+                        labels: coarse_columns.clone(),
+                        op,
+                    },
+                );
+            }
+            Some((QuerySpec::Sql(coarse), witnesses))
+        }
     }
 }
 
@@ -839,31 +1032,10 @@ pub fn witness_root(
             .map_err(|e| format!("filter: {e}"))
         }
         Witness::Graft { text } => {
-            let mut derivation = base.clone();
-            derivation.queries = vec![FuzzQuery {
-                spec: None,
-                entry: {
-                    let mut entry = base.queries[target].entry.clone();
-                    entry.query.0 = text.clone();
-                    entry
-                },
-            }];
-            let lowered = planner.lower(&derivation)?;
-            let lowered = lowered[0]
-                .as_operator()
-                .ok_or("the derivation is a scalar query")?;
             let lowered_q = planned.stage0_roots[target]
                 .as_operator()
                 .ok_or("q is a scalar query")?;
-            let names = |node: &OperatorNode| -> Vec<String> {
-                node.schema.fields.iter().map(|f| f.name.clone()).collect()
-            };
-            if names(lowered_q) != names(q_root) {
-                return Err("q's plan and q's lowering have different output columns".into());
-            }
-            rewrite_root(lowered, "lowering of q inside the derivation", |node| {
-                (**node == **lowered_q).then(|| q_root.clone())
-            })
+            graft(planner, base, target, text, &[(lowered_q, q_root)])
         }
         Witness::ExactRollup { labels, op } => {
             let fields = &q_root.schema.fields;
@@ -1048,19 +1220,46 @@ pub fn witness_root(
             })
         }
         Witness::OtherStatistic { statistic } => {
-            let (state, _) = root_estimate(q_root)?;
-            let family = state_family(&state)?;
-            if !FamilyCapability::of(&family).answers(statistic) {
-                return Err(format!(
-                    "q's family {family:?} does not answer {statistic:?}"
-                ));
+            let answers = |state: &OperatorNode| -> Result<(), String> {
+                let family = state_family(state)?;
+                if FamilyCapability::of(&family).answers(statistic) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "q's family {family:?} does not answer {statistic:?}"
+                    ))
+                }
+            };
+            if let Ok((state, _)) = root_estimate(q_root) {
+                answers(&state)?;
+                let estimate = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
+                    summary_input: state,
+                    query: statistic.clone(),
+                }))
+                .map_err(|e| format!("estimate: {e}"))?;
+                return with_root_estimate(q_root, estimate, &[]);
             }
-            let estimate = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
-                summary_input: state,
-                query: statistic.clone(),
-            }))
-            .map_err(|e| format!("estimate: {e}"))?;
-            with_root_estimate(q_root, estimate, &[])
+            // SQL's frequency idioms join the estimate with an exact row
+            // count, for their NULL on empty input: swap the statistic in
+            // place under q's root projection. That projection keeps q's
+            // value expression (the entropy idiom's sign and log base, a
+            // Float64 result), so the witness answers q' up to that scalar
+            // step, which costs the same.
+            let mut done = false;
+            rewrite_root(q_root, "summary estimate", |node| {
+                let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = node.asap() else {
+                    return None;
+                };
+                if done || answers(summary_input).is_err() {
+                    return None;
+                }
+                done = true;
+                OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
+                    summary_input: summary_input.clone(),
+                    query: statistic.clone(),
+                }))
+                .ok()
+            })
         }
         Witness::UnionWithLast => {
             let other_root = base_roots
@@ -1092,7 +1291,252 @@ pub fn witness_root(
             .map_err(|e| format!("union estimate: {e}"))?;
             with_root_estimate(q_root, estimate, &[])
         }
+        Witness::LongerWindow { .. } | Witness::UnivMonOnly | Witness::GraftWithOperand { .. } => {
+            Err("the derivation changes W's roots: see witness_roots".into())
+        }
     }
+}
+
+/// The frontends' lowering of `text` (in `base`'s language, with query
+/// `target`'s requirements) with each lowered subtree of `planned_for`
+/// replaced by its planned root.
+fn graft(
+    planner: &Planner,
+    base: &FuzzWorkload,
+    target: usize,
+    text: &str,
+    planned_for: &[(&Rc<OperatorNode>, &Rc<OperatorNode>)],
+) -> Result<Rc<OperatorNode>, String> {
+    let mut derivation = base.clone();
+    derivation.queries = vec![FuzzQuery {
+        spec: None,
+        entry: {
+            let mut entry = base.queries[target].entry.clone();
+            entry.query.0 = text.to_string();
+            entry
+        },
+    }];
+    let lowered = planner.lower(&derivation)?;
+    let lowered = lowered[0]
+        .as_operator()
+        .ok_or("the derivation is a scalar query")?;
+    let names = |node: &OperatorNode| -> Vec<String> {
+        node.schema.fields.iter().map(|f| f.name.clone()).collect()
+    };
+    if planned_for
+        .iter()
+        .any(|(lowering, planned)| names(lowering) != names(planned))
+    {
+        return Err("a plan and its lowering have different output columns".into());
+    }
+    rewrite_root(lowered, "lowering of q inside the derivation", |node| {
+        planned_for
+            .iter()
+            .find(|(lowering, _)| ***lowering == **node)
+            .map(|(_, planned)| (*planned).clone())
+    })
+}
+
+/// The witness's roots: `W`'s selected logical roots plus `q'`'s root,
+/// with `W`'s roots rewritten when the derivation changes a node they
+/// share ([`Witness::LongerWindow`]).
+pub fn witness_roots(
+    planner: &mut Planner,
+    witness: &Witness,
+    base: &FuzzWorkload,
+    related: &FuzzWorkload,
+    planned: &Planned,
+    base_roots: &[QueryRoot],
+    target: usize,
+) -> Result<Vec<QueryRoot>, String> {
+    if let Witness::GraftWithOperand { text, operand } = witness {
+        let mut sibling = base.queries[target].clone();
+        sibling.entry.query.0 = operand.clone();
+        sibling.spec = None;
+        let with_operand = base.with_query(sibling);
+        let planned = planner
+            .plan(&with_operand)
+            .map_err(|e| format!("W with q's sibling operand does not plan: {e}"))?;
+        let roots = planned
+            .logical_roots
+            .clone()
+            .ok_or("the search keeps no logical plan for W with q's sibling operand")?;
+        let n = base.queries.len();
+        let operator = |roots: &[QueryRoot], i: usize| -> Result<Rc<OperatorNode>, String> {
+            roots[i]
+                .as_operator()
+                .cloned()
+                .ok_or_else(|| "a scalar operand".to_string())
+        };
+        let (lowered_q, lowered_operand) = (
+            operator(&planned.stage0_roots, target)?,
+            operator(&planned.stage0_roots, n)?,
+        );
+        let (q_root, operand_root) = (operator(&roots, target)?, operator(&roots, n)?);
+        let root = graft(
+            planner,
+            base,
+            target,
+            text,
+            &[(&lowered_q, &q_root), (&lowered_operand, &operand_root)],
+        )?;
+        let mut roots = roots[..n].to_vec();
+        roots.push(QueryRoot::Operator(root));
+        return Ok(roots);
+    }
+    if let Witness::UnivMonOnly = witness {
+        let univmon_only = FuzzWorkload {
+            sketch_families: Some(vec![SketchAlgorithm::UnivMon]),
+            ..related.clone()
+        };
+        return planner
+            .plan(&univmon_only)
+            .map_err(|e| format!("W ∪ {{q'}} with UnivMon only does not plan: {e}"))?
+            .logical_roots
+            .clone()
+            .ok_or_else(|| "the search keeps no logical plan with UnivMon only".into());
+    }
+    let Witness::LongerWindow { window_ms, rollup } = witness else {
+        let root = witness_root(planner, witness, base, planned, base_roots, target)?;
+        let mut roots = base_roots.to_vec();
+        roots.push(QueryRoot::Operator(root));
+        return Ok(roots);
+    };
+    let (mut roots, long_root) = longer_chain_roots(base_roots, target, *window_ms)?;
+    let root = match rollup {
+        None => long_root,
+        Some(rollup) => {
+            let mut with_long = roots.clone();
+            with_long[target] = QueryRoot::Operator(long_root);
+            witness_root(planner, rollup, base, planned, &with_long, target)?
+        }
+    };
+    roots.push(QueryRoot::Operator(root));
+    Ok(roots)
+}
+
+/// The first node under `node` (depth first, `node` included) that `pred`
+/// accepts.
+fn find_first(
+    node: &Rc<OperatorNode>,
+    pred: &dyn Fn(&OperatorNode) -> bool,
+) -> Option<Rc<OperatorNode>> {
+    if pred(node) {
+        return Some(node.clone());
+    }
+    node.operator
+        .children()
+        .into_iter()
+        .find_map(|child| find_first(child, pred))
+}
+
+/// The distinct nodes under `node` (`node` included) that `pred` accepts.
+fn collect(
+    node: &Rc<OperatorNode>,
+    pred: &dyn Fn(&OperatorNode) -> bool,
+    found: &mut Vec<Rc<OperatorNode>>,
+) {
+    if found.iter().any(|f| Rc::ptr_eq(f, node)) {
+        return;
+    }
+    if pred(node) {
+        found.push(node.clone());
+    }
+    for child in node.operator.children() {
+        collect(child, pred, found);
+    }
+}
+
+/// `W`'s roots with the pane chain `q` merges whole lengthened to cover
+/// `window_ms`, every merge of it reading its old newest panes of the
+/// longer chain; and `q`'s root merging the whole longer chain.
+fn longer_chain_roots(
+    base_roots: &[QueryRoot],
+    target: usize,
+    window_ms: u64,
+) -> Result<(Vec<QueryRoot>, Rc<OperatorNode>), String> {
+    let q_root = base_roots[target]
+        .as_operator()
+        .ok_or("q is a scalar query")?;
+    let whole_chain_merge = |node: &OperatorNode| {
+        matches!(
+            node.asap(),
+            Some(ASAPOp::SummaryMerge { children, newest_panes: None, .. })
+                if matches!(children.as_slice(), [chain] if matches!(chain.asap(), Some(ASAPOp::PaneChain { .. })))
+        )
+    };
+    let merge = find_first(q_root, &whole_chain_merge)
+        .ok_or("q's plan has no summary merge over a pane chain")?;
+    // Lengthening one of several chains (say, an SQL idiom's exact row
+    // count beside its statistic) would leave the others at q's window.
+    let mut merges = Vec::new();
+    collect(q_root, &whole_chain_merge, &mut merges);
+    if merges.len() > 1 {
+        return Err(format!(
+            "q's plan merges {} pane chains whole",
+            merges.len()
+        ));
+    }
+    let Some(ASAPOp::SummaryMerge { children, .. }) = merge.asap() else {
+        unreachable!("found a merge");
+    };
+    let chain = children[0].clone();
+    let mut operator = chain.operator.clone();
+    let Operator::ASAP(ASAPOp::PaneChain {
+        pane_width_ms,
+        pane_count,
+        ..
+    }) = &mut operator
+    else {
+        unreachable!("found a pane chain");
+    };
+    let old_count = *pane_count;
+    if !window_ms.is_multiple_of(*pane_width_ms) || window_ms / *pane_width_ms <= old_count as u64 {
+        return Err(format!(
+            "q's chain of {old_count} panes of {pane_width_ms} ms does not extend to {window_ms} ms"
+        ));
+    }
+    *pane_count = (window_ms / *pane_width_ms) as u32;
+    let long_chain = with_operator(&chain, operator);
+    let reread = |node: &Rc<OperatorNode>, whole: bool| {
+        let Some(ASAPOp::SummaryMerge {
+            children,
+            newest_panes,
+            group_by,
+        }) = node.asap()
+        else {
+            return None;
+        };
+        let [child] = children.as_slice() else {
+            return None;
+        };
+        Rc::ptr_eq(child, &chain).then(|| {
+            with_operator(
+                node,
+                Operator::ASAP(ASAPOp::SummaryMerge {
+                    children: vec![long_chain.clone()],
+                    newest_panes: if whole {
+                        None
+                    } else {
+                        Some(newest_panes.unwrap_or(old_count))
+                    },
+                    group_by: group_by.clone(),
+                }),
+            )
+        })
+    };
+    let mut memo = HashMap::new();
+    let roots = base_roots
+        .iter()
+        .map(|root| match root.as_operator() {
+            Some(node) => {
+                rewrite(node, &mut |n| reread(n, false), &mut memo).map(QueryRoot::Operator)
+            }
+            None => Ok(root.clone()),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let long_root = rewrite(q_root, &mut |n| reread(n, true), &mut HashMap::new())?;
+    Ok((roots, long_root))
 }
 
 fn planned(
@@ -1289,17 +1733,16 @@ fn evaluate_marginal(
     let mut best: Option<(Witness, Priced)> = None;
     let mut failures = Vec::new();
     for witness in &derived.witnesses {
-        let priced = witness_root(
+        let priced = witness_roots(
             planner,
             witness,
             base_workload,
+            related,
             base,
             &base_roots,
             check.target,
         )
-        .and_then(|root| {
-            let mut roots = base_roots.clone();
-            roots.push(QueryRoot::Operator(root));
+        .and_then(|roots| {
             planner.price(related, &roots, matches!(witness, Witness::Filter { .. }))
         });
         match priced {
@@ -1407,7 +1850,10 @@ pub fn renamed(workload: &FuzzWorkload, suffix: &str, labels: bool) -> Option<Fu
                 for (c, _) in &mut spec.filters {
                     *c = label(c);
                 }
-                if let SqlAggregate::CountDistinct(c) = &mut spec.aggregate {
+                if let SqlAggregate::CountDistinct(c)
+                | SqlAggregate::FrequencyL2(c)
+                | SqlAggregate::FrequencyEntropy(c) = &mut spec.aggregate
+                {
                     *c = label(c);
                 }
                 QuerySpec::Sql(spec)
@@ -1556,11 +2002,8 @@ mod tests {
             rank.witnesses,
             vec![Witness::QuantileRank { from: 0.9, to: 0.5 }]
         );
-        let count = derive(Relation::OtherStatistic, &w, 0).unwrap();
-        assert_eq!(
-            count.query.text(),
-            "count_over_time(m_gauge{job=\"job1\"}[5m])"
-        );
+        // A quantile sketch answers only quantiles: (e), not (h).
+        assert!(derive(Relation::OtherStatistic, &w, 0).is_none());
         let union = derive(Relation::UnionOfSelections, &w, 0).unwrap();
         assert_eq!(
             union.base_addition.unwrap().text(),
@@ -1605,6 +2048,102 @@ mod tests {
             .contains("AND city = 'city1' GROUP BY city, host"));
         let coarser = derive(Relation::CoarserGrouping, &w, 0).unwrap();
         assert!(coarser.query.text().ends_with("GROUP BY city"));
+    }
+
+    /// The relations taken from the ASAPWorkloads query catalog derive its
+    /// shapes: a ratio over q, a longer window (rolled up), `rate` as
+    /// `increase`, and an outer operator that follows q's own.
+    #[test]
+    fn workload_catalog_relations_derive() {
+        let rate = promql(sum_by(&["job", "instance"]), AccuracyTarget::exact());
+        let text = |w: &FuzzWorkload, r| derive(r, w, 0).map(|d| d.query.text().to_string());
+        assert_eq!(
+            text(&rate, Relation::BinaryOverResult).as_deref(),
+            Some(
+                "sum by (job, instance) (rate(m_counter{region=\"region1\"}[5m])) / \
+                 sum by (job, instance) (rate(m_counter[5m]))"
+            )
+        );
+        let increase = derive(Relation::EquivalentRangeFunction, &rate, 0).unwrap();
+        assert_eq!(
+            increase.query.text(),
+            "sum by (job, instance) (increase(m_counter[5m]))"
+        );
+        assert_eq!(
+            increase.witnesses,
+            vec![Witness::Graft {
+                text: "(sum by (job, instance) (rate(m_counter[5m]))) * 300".into()
+            }]
+        );
+        // As for (d), a rate's window is not merged pane state.
+        assert_eq!(text(&rate, Relation::LongerWindow), None);
+
+        let mut sum = sum_by(&["job", "instance"]);
+        sum.metric = "m_gauge".into();
+        sum.range = Some(RangeFunction::SumOverTime);
+        sum.outer.as_mut().unwrap().op = OuterOp::Max;
+        let w = promql(sum, AccuracyTarget::exact());
+        assert_eq!(
+            text(&w, Relation::BinaryOverResult).as_deref(),
+            // Not an average under max: the filtered share instead.
+            Some(
+                "max by (job, instance) (sum_over_time(m_gauge{region=\"region1\"}[5m])) / \
+                 max by (job, instance) (sum_over_time(m_gauge[5m]))"
+            )
+        );
+        assert_eq!(
+            text(&w, Relation::OuterOverResult).as_deref(),
+            Some("max(max by (job, instance) (sum_over_time(m_gauge[5m])))")
+        );
+        assert_eq!(
+            text(&w, Relation::LongerWindow).as_deref(),
+            Some("max by (job, instance) (sum_over_time(m_gauge[10m]))")
+        );
+        let rollup = derive(Relation::LongerWindowRollup, &w, 0).unwrap();
+        assert_eq!(
+            rollup.query.text(),
+            "max by (job) (sum_over_time(m_gauge[10m]))"
+        );
+        assert_eq!(
+            rollup.witnesses[0],
+            Witness::LongerWindow {
+                window_ms: 600_000,
+                rollup: Some(Box::new(Witness::ExactRollup {
+                    labels: vec!["job".into()],
+                    op: RollupOp::Max
+                }))
+            }
+        );
+        // (h): one UnivMon answers the count, distinct count, L2 and
+        // entropy; q' asks for another than q.
+        let entropy = SqlSpec {
+            table: "metrics".into(),
+            aggregate: SqlAggregate::FrequencyEntropy("src_ip".into()),
+            group_by: vec![],
+            filters: vec![],
+            window_ms: 60_000,
+        };
+        let w = generated_workload(
+            Language::Sql,
+            vec![FuzzQuery::generated(
+                QuerySpec::Sql(entropy),
+                AccuracyTarget::max_error(0.05),
+                10_000,
+                None,
+            )],
+            100_000,
+            15_000,
+        );
+        let h = derive(Relation::OtherStatistic, &w, 0).unwrap();
+        assert_eq!(
+            h.query.text(),
+            "SELECT SQRT(SUM(CAST(c AS DOUBLE) * CAST(c AS DOUBLE))) AS v FROM \
+             (SELECT src_ip, COUNT(*) AS c FROM metrics WHERE ts > now() - INTERVAL '1' \
+             MINUTE GROUP BY src_ip)"
+        );
+        assert_eq!(h.witnesses[1], Witness::UnivMonOnly);
+        assert_eq!(longer_window(600_000), Some(1_800_000));
+        assert_eq!(longer_window(3_600_000), None);
     }
 
     /// Renaming renames sources, labels, facts and tables; a disjoint copy

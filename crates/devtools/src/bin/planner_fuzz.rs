@@ -14,7 +14,7 @@
 // draft per distinct shrunk violation with its two workload files. Nothing
 // is filed.
 //
-// `--relations` takes relation names or the letters a–k (default: all);
+// `--relations` takes relation names or the letters a–o (default: all);
 // `--search` is `candidate-connections` (the default search) or
 // `exhaustive`; `--ignore-accuracy-guarantees` plans as `stage_pipeline`
 // does by default (guarantees are enforced here by default, as
