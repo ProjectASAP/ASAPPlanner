@@ -193,3 +193,53 @@ fn expanded_memo_enumeration_stops_at_the_limit_and_every_candidate_composes() {
         }
     }
 }
+
+/// Candidates may read each other: a coarse quantile's rollup reads the finer
+/// grouping, whose candidates may read the coarse one. A choice taking both
+/// composes no DAG: `compose` says so, and `enumerate` leaves it out.
+#[test]
+fn choices_whose_candidates_read_each_other_are_left_out() {
+    let queries = [
+        "quantile_over_time(0.5, data[1m])",
+        "quantile_over_time(0.9, data[5m])",
+        "quantile by (host, job) (0.5, data)",
+        "quantile by (job) (0.5, data)",
+    ];
+    let entry = QueryWorkloadEntry {
+        query: Default::default(),
+        requirements: QueryRequirements {
+            accuracy: approximate(),
+            max_latency_ms: None,
+        },
+        predictability: Default::default(),
+        recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(
+            10_000,
+        ))),
+        range_evaluation: None,
+    };
+    let memo = expanded_memo(roots(&queries), &vec![entry; queries.len()]);
+    let mutual = (0..memo.groups.len())
+        .flat_map(|group| (0..memo.candidates[group].len()).map(move |index| (group, index)))
+        .find_map(|(group, index)| {
+            memo.candidates[group][index]
+                .children
+                .iter()
+                .find_map(|&child| {
+                    memo.candidates[child.0 as usize]
+                        .iter()
+                        .position(|c| c.children.contains(&MemoGroupId(group as u32)))
+                        .map(|back| (child, back))
+                })
+                .map(|(child, back)| [(MemoGroupId(group as u32), index), (child, back)])
+        })
+        .expect("a pair of groups whose candidates read each other");
+    assert!(matches!(
+        compose(&memo, &mutual.into()),
+        Err(asap_logical_asap_optimization::memo::enumeration::ComposeError::Cycle { .. })
+    ));
+    let enumeration = enumerate(&memo, 2_000);
+    assert!(!enumeration.choices.is_empty());
+    for choice in &enumeration.choices {
+        compose(&memo, choice).unwrap();
+    }
+}

@@ -162,6 +162,14 @@ test('a memo-MILP document shows its shared sketch, readers and certified summar
   assert.equal(view.groups.find((g) => g.id === 'G3').chosen, 'Panes · Project · at S1');
 });
 
+test('the validator accepts a document with and without its memo section', () => {
+  const doc = memoDoc('ratio-of-quantiles');
+  assert.deepEqual(doc.memo.steps.map((s) => s.step), ['stage0', 'pass1', 'pass2', 'concrete_states']);
+  assert.deepEqual([...call('validateStagePipeline', doc)], []);
+  delete doc.memo;
+  assert.deepEqual([...call('validateStagePipeline', doc)], []);
+});
+
 test('a memo-MILP document shows a sketch rollup, a union schedule and a widened scan', () => {
   const rollup = call('memoSearchView', memoDoc('rollupheavy-t11-service-endpoint-5m'));
   assert.match(rollup.groups.find((g) => g.id === 'G3').chosen, /^Rollup · Project · reads G2, G6 · at S1$/);

@@ -11,10 +11,12 @@
 //! that differ only in what recomposing guarantees re-derives compose equal
 //! DAGs. Composing checks only that a choice composes; input contracts,
 //! accuracy at the roots, Stage 2 legality and Stage 3 cost stay with the
-//! validator and the later stages. The memo must be acyclic, as every memo
-//! step builds it.
+//! validator and the later stages. The memo's groups are acyclic, as every
+//! memo step builds them, but candidates may read each other (a rollup of
+//! a finer grouping whose candidate reads the coarser one): a choice taking
+//! such candidates together composes no DAG and is not enumerated.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::{OperatorNode, QueryRoot};
@@ -52,13 +54,18 @@ pub enum ComposeError {
         candidate: usize,
         child: MemoGroupId,
     },
+    /// The chosen candidates read each other in a cycle (e.g. a coarse
+    /// group's rollup reads a finer group whose chosen candidate reads it).
+    #[error("group {group:?} reads itself through the chosen candidates")]
+    Cycle { group: MemoGroupId },
     /// Re-deriving the composed nodes' schemas and guarantees failed.
     #[error("recomposing the composed DAG: {0}")]
     Recompose(#[from] PerComputationCandidateError),
 }
 
 /// Every choice of one candidate per needed group, starting from the query
-/// roots, stopping after `limit` choices.
+/// roots, stopping after `limit` choices. A choice whose candidates read
+/// each other in a cycle composes no DAG and is left out.
 pub fn enumerate(memo: &CandidateMemo, limit: usize) -> MemoEnumeration {
     fn walk(
         memo: &CandidateMemo,
@@ -81,6 +88,15 @@ pub fn enumerate(memo: &CandidateMemo, limit: usize) -> MemoEnumeration {
             }
         };
         for (index, candidate) in memo.candidates[group.0 as usize].iter().enumerate() {
+            // A candidate reading a group that already reads this one closes
+            // a cycle; every edge is checked as its group is chosen.
+            if candidate
+                .children
+                .iter()
+                .any(|&child| reaches(memo, choice, child, group))
+            {
+                continue;
+            }
             choice.insert(group, index);
             let mut next = pending.clone();
             next.extend(candidate.children.iter().rev());
@@ -113,9 +129,13 @@ pub fn compose(
         group: MemoGroupId,
         choice: &MemoChoice,
         done: &mut HashMap<MemoGroupId, Rc<OperatorNode>>,
+        composing: &mut HashSet<MemoGroupId>,
     ) -> Result<Rc<OperatorNode>, ComposeError> {
         if let Some(found) = done.get(&group) {
             return Ok(Rc::clone(found));
+        }
+        if !composing.insert(group) {
+            return Err(ComposeError::Cycle { group });
         }
         let index = choice.get(&group).copied().unwrap_or(0);
         let candidate =
@@ -125,7 +145,7 @@ pub fn compose(
                     group,
                     candidate: index,
                 })?;
-        let own_nodes: std::collections::HashSet<_> = OperatorNode::reachable(&candidate.node)
+        let own_nodes: HashSet<_> = OperatorNode::reachable(&candidate.node)
             .iter()
             .map(Rc::as_ptr)
             .collect();
@@ -139,18 +159,22 @@ pub fn compose(
                     child,
                 });
             }
-            replacements.insert(Rc::as_ptr(old), composed(memo, child, choice, done)?);
+            replacements.insert(
+                Rc::as_ptr(old),
+                composed(memo, child, choice, done, composing)?,
+            );
         }
         let node = replace(&candidate.node, &replacements);
         done.insert(group, Rc::clone(&node));
         Ok(node)
     }
     let mut done = HashMap::new();
+    let mut composing = HashSet::new();
     let (groups, roots): (Vec<_>, Vec<_>) = root_groups(memo)
         .map(|group| {
             Ok((
                 group,
-                QueryRoot::Operator(composed(memo, group, choice, &mut done)?),
+                QueryRoot::Operator(composed(memo, group, choice, &mut done, &mut composing)?),
             ))
         })
         .collect::<Result<Vec<_>, ComposeError>>()?
@@ -165,6 +189,24 @@ pub fn compose(
             QueryRoot::Scalar(_) => unreachable!("composed from operator roots"),
         })
         .collect())
+}
+
+/// Whether `from` is `to` or reads it through the candidates `choice` names.
+fn reaches(memo: &CandidateMemo, choice: &MemoChoice, from: MemoGroupId, to: MemoGroupId) -> bool {
+    let mut pending = vec![from];
+    let mut seen = HashSet::new();
+    while let Some(group) = pending.pop() {
+        if group == to {
+            return true;
+        }
+        if !seen.insert(group) {
+            continue;
+        }
+        if let Some(&index) = choice.get(&group) {
+            pending.extend(&memo.candidates[group.0 as usize][index].children);
+        }
+    }
+    false
 }
 
 fn root_groups(memo: &CandidateMemo) -> impl DoubleEndedIterator<Item = MemoGroupId> + '_ {

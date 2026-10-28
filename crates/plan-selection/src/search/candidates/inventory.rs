@@ -62,14 +62,17 @@ pub(in crate::search) fn build_candidate_inventory(
     node_local_cost: impl FnMut(&OperatorNode) -> Result<f64, String>,
 ) -> Result<CandidateInventory, CandidateInventoryError> {
     build_candidate_inventory_before(memo, output_groups, node_local_cost, None)
+        .map(|(inventory, _)| inventory)
 }
 
+/// The inventory, and the root ID of each memo candidate, indexed like
+/// `CandidateMemo::candidates` (factoring may give several the same ID).
 pub(in crate::search) fn build_candidate_inventory_before(
     memo: &CandidateMemo,
     output_groups: &[MemoGroupId],
     node_local_cost: impl FnMut(&OperatorNode) -> Result<f64, String>,
     deadline: Option<std::time::Instant>,
-) -> Result<CandidateInventory, CandidateInventoryError> {
+) -> Result<(CandidateInventory, Vec<Vec<PhysicalCandidateId>>), CandidateInventoryError> {
     let mut inventory = build_with_compatibility_memo(
         memo,
         output_groups,
@@ -77,8 +80,13 @@ pub(in crate::search) fn build_candidate_inventory_before(
         deadline,
         &mut CompatibilityMemo::default(),
     )?;
-    crate::search::candidates::factoring::factor_terminal_readers(&mut inventory, deadline)?;
-    Ok(inventory)
+    let mut memo_candidate_roots = inventory.group_candidates.clone();
+    crate::search::candidates::factoring::factor_terminal_readers(
+        &mut inventory,
+        &mut memo_candidate_roots,
+        deadline,
+    )?;
+    Ok((inventory, memo_candidate_roots))
 }
 
 fn build_with_compatibility_memo(

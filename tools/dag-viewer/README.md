@@ -319,6 +319,23 @@ are ignored, `stage_pipeline`'s default.
   candidates they come from.
 - When Pass 1 fails, Stage 1 has `error` and no candidates. When selection
   fails, `selected` is null, with the rejections or with `error`.
+- `memo` (left out with `--no-memo`) is the memo the search built, from
+  the planning round whose plan was selected: `steps`, one per memo step
+  (`stage0`, `pass1`, `pass2`: local window composition, `concrete_states`:
+  the Pass 2 memo rules and the concrete summary-state groups), each with
+  its groups (`id`, `label`, `children`, `parents`, `queries`, `roots_of`,
+  `dag`) and their candidates (`candidate_count`,
+  `candidate_count_by_origin`, `candidates_capped`, and the first
+  `--max-memo-candidates`, default 64, under `candidates`: `index`,
+  `implements`, `children`, `origin`, `budget_share`, `added`, `label`,
+  `dag`, `group_of_node`); `selected_choice`, the selected plan's
+  candidate index per group of the last step (null with
+  `selected_choice_unavailable` when it has none); and `enumeration`: each
+  step's number of candidate DAGs up to `--memo-enumeration-limit` (default
+  1000) under `per_step`, and the first `--max-enumerated` (default 200)
+  `choices` of `step` (the last step enumerated completely within that
+  many, else the last step), each composed into its `dag`. The page does
+  not draw it yet. `examples/memo-ratio-of-quantiles.json` has one.
 
 The viewer checks the document before showing it: one root per query, node,
 edge and root references, `scalar_roots` positions, `from_logical`, the Stage 3 ids, costs and
@@ -346,7 +363,7 @@ shown. If a check fails, it shows the problems instead.
   `deployment_capabilities` and `cost_model`) is committed under
   `examples/`. The committed documents are
   `examples/planner-layering-example1.json` and workload-01 of each
-  ASAPQuery set and the six sharing examples. Historical snapshots retain
+  ASAPQuery set, the six sharing examples and the memo example. Historical snapshots retain
   their original plans; `crates/devtools/tests/stage_pipeline.rs` checks input
   consistency and newly generated plan validity and materialized-view linkage.
   Timed searches are not required to reproduce snapshot IDs or prove optimality.
@@ -364,6 +381,9 @@ shown. If a check fails, it shows the problems instead.
   data retained, AWS Fargate prices and accuracy guarantees enforced. Their
   `examples.json` entries name `"search": "candidate-connections"`, which server.py
   passes as `--search`; their documents are committed under `examples/`.
+  `ratio-of-quantiles-5m.json` (one ratio of two equal per-series quantiles
+  plus a third, every minute, ε = 0.01, δ = 0.001) shows the `memo`
+  section: the memo after each step.
 - `cytoscape.min.js`, `dagre.min.js`, `cytoscape-dagre.js`: vendored, so the
   page works offline.
 
