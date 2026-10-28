@@ -93,6 +93,7 @@ pub(in crate::search) fn apply(
                     .flat_map(|input| input.compatible_producers.iter().map(|producer| producer.0)),
             );
         }
+        let lookbacks = shortest_reader_windows(configured);
         let nodes: Vec<_> = (0..count)
             .map(|id| {
                 let configuration = configured.configurations[id];
@@ -108,7 +109,23 @@ pub(in crate::search) fn apply(
                         return None;
                     }
                     match (template.non_asap(), template.asap()) {
-                        (Some(NonASAPOp::Project { .. }), _)
+                        // A query-time scan reads at least its shortest
+                        // reader window ([`shortest_reader_windows`]); the
+                        // row operators and builds above it read at least
+                        // the rows that bound certifies.
+                        (Some(NonASAPOp::Scan { .. }), _) if lookbacks[id].is_none() => {
+                            return None
+                        }
+                        (
+                            Some(
+                                NonASAPOp::Project { .. }
+                                | NonASAPOp::Scan { .. }
+                                | NonASAPOp::TimeRange { .. }
+                                | NonASAPOp::TimeShift { .. }
+                                | NonASAPOp::Aggregate { .. },
+                            ),
+                            _,
+                        )
                         | (
                             _,
                             Some(
@@ -116,7 +133,14 @@ pub(in crate::search) fn apply(
                                 | ASAPOp::FinalizeExactAccumulator { .. },
                             ),
                         ) => ExecutionDataState::QUERY_ROWS,
-                        (_, Some(ASAPOp::SummaryMerge { .. })) => ExecutionDataState {
+                        (
+                            _,
+                            Some(
+                                ASAPOp::SummaryMerge { .. }
+                                | ASAPOp::SummaryAgg { .. }
+                                | ASAPOp::PaneChain { .. },
+                            ),
+                        ) => ExecutionDataState {
                             timing: ExecutionTiming::QueryTime,
                             primitive: DataPrimitive::SummaryState,
                         },
@@ -200,6 +224,7 @@ pub(in crate::search) fn apply(
                 id,
                 configured,
                 &nodes,
+                &lookbacks,
                 context,
                 query_rate_floor,
                 &mut cache,
@@ -242,6 +267,65 @@ pub(in crate::search) fn apply(
         .validate()
         .map_err(|e| e.to_string())?;
     Ok(metrics)
+}
+
+/// Each candidate's shortest reader window: the least window any candidate
+/// that may read it (through time shifts) reads, as the evaluator's
+/// `windows_read` counts windows (a time range's range, a pane chain's
+/// panes). A query-time scan reads its readers' longest window, or every
+/// row held when no reader has one; both are at least the rows of this
+/// window capped by the rows held. `None` when no reader has a window.
+fn shortest_reader_windows(configured: &CandidateConfigurationInventory) -> Vec<Option<u64>> {
+    let graph = &configured.inventory.graph;
+    let mut readers = vec![Vec::new(); graph.candidates.len()];
+    for (reader, candidate) in graph.candidates.iter().enumerate() {
+        for requirement in &candidate.producer_requirements {
+            for producer in requirement.compatible_producers.iter() {
+                readers[producer.0].push(reader);
+            }
+        }
+    }
+    (0..graph.candidates.len())
+        .map(|id| {
+            let mut shortest: Option<u64> = None;
+            let mut pending = vec![id];
+            let mut seen = std::collections::HashSet::new();
+            while let Some(producer) = pending.pop() {
+                if !seen.insert(producer) {
+                    continue;
+                }
+                for &reader in &readers[producer] {
+                    let window = match configured.inventory.templates[reader]
+                        .as_ref()
+                        .map(|template| &template.operator)
+                    {
+                        Some(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeRange {
+                            range,
+                            ..
+                        })) => Some(range.as_millis() as u64),
+                        Some(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeShift {
+                            ..
+                        })) => {
+                            pending.push(reader);
+                            None
+                        }
+                        // A chain kept across evaluations reads one pane;
+                        // its scans are never certified (retained ancestors).
+                        Some(asap_types::ir::Operator::ASAP(ASAPOp::PaneChain {
+                            pane_width_ms,
+                            pane_count,
+                            ..
+                        })) => Some(pane_width_ms.saturating_mul(u64::from(*pane_count))),
+                        _ => None,
+                    };
+                    if let Some(window) = window {
+                        shortest = Some(shortest.map_or(window, |least| least.min(window)));
+                    }
+                }
+            }
+            shortest
+        })
+        .collect()
 }
 
 fn round_down_small_bounds(costs: &mut [f64]) -> usize {
@@ -432,6 +516,7 @@ fn certified_price<'a>(
     id: usize,
     configured: &CandidateConfigurationInventory,
     nodes: &'a [Option<PhysicalASAPDAGNode>],
+    lookbacks: &[Option<u64>],
     context: &'a CandidatePlanningContext<'a>,
     query_rate_floor: f64,
     cache: &mut [Option<PricedNode<'a>>],
@@ -459,6 +544,7 @@ fn certified_price<'a>(
                     supplier.0,
                     configured,
                     nodes,
+                    lookbacks,
                     context,
                     query_rate_floor,
                     cache,
@@ -565,7 +651,9 @@ fn certified_price<'a>(
                     query_rate_floor
                 },
             ),
-            asap_types::ir::physical_export::ScanWindow::Unbounded,
+            // Stage 3 scans the width of the union of the readers' windows,
+            // at least the shortest one, whatever their offsets.
+            crate::trailing_window(lookbacks[id]),
             retained,
             maintained_window,
             context.data,
