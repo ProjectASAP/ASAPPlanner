@@ -57,6 +57,7 @@ function validateMemo(memo, queryCount) {
     const at = `memo.steps[${s}]`;
     if (!step || typeof step !== 'object') { errors.push(`${at} must be an object`); return; }
     const position = MEMO_STEPS.indexOf(step.step);
+    if (typeof step.title !== 'string') errors.push(`${at}: title must be a string`);
     if (position < 0) errors.push(`${at}: step must be one of ${MEMO_STEPS.join(', ')}`);
     else if (position <= previous) errors.push(`${at}: step ${step.step} is out of pipeline order or repeated`);
     else previous = position;
@@ -70,6 +71,7 @@ function validateMemo(memo, queryCount) {
     step.groups.forEach((group, g) => {
       if (!group || !ids.has(group.id)) return;
       const where = `${at} G${group.id}`;
+      if (typeof group.label !== 'string') errors.push(`${where}: label must be a string`);
       const names = (list) => memoIsIndexList(list) && list.every((id) => ids.has(id));
       if (!names(group.children) || !names(group.parents)) errors.push(`${where}: children and parents must name groups of the step`);
       if (!memoIsIndexList(group.queries) || !memoIsIndexList(group.roots_of)
@@ -91,12 +93,14 @@ function validateMemo(memo, queryCount) {
         }
         indices.add(candidate.index);
         if (!(candidate.origin in MEMO_ORIGINS)) errors.push(`${cw}: unknown origin ${JSON.stringify(candidate.origin)}`);
+        else if (!(byOrigin && byOrigin[candidate.origin] > 0)) errors.push(`${cw}: origin ${candidate.origin} is not counted in candidate_count_by_origin`);
+        if (typeof candidate.label !== 'string' || typeof candidate.budget_share !== 'number') errors.push(`${cw}: needs a label and a numeric budget_share`);
         if (!names(candidate.children)) errors.push(`${cw}: children must name groups of the step`);
         if (typeof candidate.added !== 'boolean') errors.push(`${cw}: added must be a boolean`);
         errors.push(...memoDagErrors(candidate.dag, cw));
         const boundaries = candidate.group_of_node;
         const nodes = candidate.dag && Array.isArray(candidate.dag.nodes) ? candidate.dag.nodes.length : 0;
-        if (!boundaries || typeof boundaries !== 'object' || Object.entries(boundaries).some(([node, child]) => !(Number(node) >= 0 && Number(node) < nodes)
+        if (!boundaries || typeof boundaries !== 'object' || Object.entries(boundaries).some(([node, child]) => !(/^\d+$/.test(node) && Number(node) < nodes)
           || !(Array.isArray(candidate.children) && candidate.children.includes(child)))) errors.push(`${cw}: group_of_node must map its dag's nodes to its child groups`);
       });
     });
@@ -117,21 +121,22 @@ function validateMemo(memo, queryCount) {
   return errors;
 }
 
-// What step `s` changed: its groups and candidates, and how many of each it
-// added over step `s - 1` (all of them at the first step). A group's
-// candidates are counted by `candidate_count`, listed or not; `listedAdded`
-// counts the listed candidates marked `added`.
+// What step `s` changed: its groups, the groups it added and removed over
+// step `s - 1` (all of them added at the first step), its candidates and
+// their net change (`candidatesDelta`). A group's candidates are counted by
+// `candidate_count`, listed or not; `listedAdded` counts the listed
+// candidates marked `added`.
 function memoStepDiff(memo, s) {
   const groups = memo.steps[s].groups;
   const before = s > 0 ? new Map(memo.steps[s - 1].groups.map((g) => [g.id, g])) : new Map();
   const candidates = groups.reduce((n, g) => n + g.candidate_count, 0);
-  const candidatesAdded = groups.reduce((n, g) => n + g.candidate_count - (before.has(g.id) ? before.get(g.id).candidate_count : 0), 0);
+  const candidatesDelta = groups.reduce((n, g) => n + g.candidate_count - (before.has(g.id) ? before.get(g.id).candidate_count : 0), 0);
   return {
     groups: groups.length,
     groupsAdded: groups.filter((g) => !before.has(g.id)).map((g) => g.id),
     groupsRemoved: [...before.keys()].filter((id) => !groups.some((g) => g.id === id)),
     candidates,
-    candidatesAdded,
+    candidatesDelta,
     listedAdded: groups.reduce((n, g) => n + g.candidates.filter((c) => c.added).length, 0),
   };
 }
@@ -140,7 +145,7 @@ function memoStepDiff(memo, s) {
 function memoStepText(memo, s) {
   const d = memoStepDiff(memo, s);
   const plus = (n) => (s > 0 ? ` (${n >= 0 ? '+' : ''}${n})` : '');
-  return `${d.groups} groups${plus(d.groupsAdded.length - d.groupsRemoved.length)} · ${d.candidates} candidates${plus(d.candidatesAdded)}`
+  return `${d.groups} groups${plus(d.groupsAdded.length - d.groupsRemoved.length)} · ${d.candidates} candidates${plus(d.candidatesDelta)}`
     + (d.listedAdded ? ` · ${d.listedAdded} listed candidates new at this step` : '');
 }
 
@@ -243,22 +248,32 @@ function memoStepElements(memo, s, options) {
     if (collapsed) {
       const listed = new Map();
       group.candidates.forEach((c) => {
-        if (!listed.has(c.origin)) listed.set(c.origin, { added: 0, children: new Set(), chosen: false });
+        if (!listed.has(c.origin)) listed.set(c.origin, { added: 0, children: new Set(), chosen: false, chosenChildren: [] });
         const entry = listed.get(c.origin);
         if (c.added) entry.added += 1;
         c.children.forEach((child) => entry.children.add(child));
-        if (c.index === chosenIndex) entry.chosen = true;
+        if (c.index === chosenIndex) { entry.chosen = true; entry.chosenChildren = c.children; }
       });
       items = Object.entries(group.candidate_count_by_origin).filter(([, count]) => count > 0).map(([origin, count]) => {
-        const entry = listed.get(origin) || { added: 0, children: new Set(), chosen: false };
+        const entry = listed.get(origin);
         const lines = [`${count} ${MEMO_ORIGINS[origin].name}`];
+        if (!entry) {
+          // The document lists a prefix of the group's candidates in memo
+          // order; none of this origin is in it.
+          lines.push('none listed');
+          return {
+            data: { id: `g${group.id}o${origin}`, kind: 'origin', groupId: group.id, origin, count, color: MEMO_ORIGINS[origin].color,
+              label: lines.join('\n'), queries, w: MEMO_ITEM.width, h: MEMO_ITEM.height },
+            classes: 'memoItem', children: [], chosenChildren: [], chosen: false,
+          };
+        }
         const notes = [entry.added ? `✚ ${entry.added} new` : '', entry.chosen ? '✓ selected' : ''].filter(Boolean);
         lines.push(notes.length ? notes.join(' · ') : 'click to expand');
         return {
           data: { id: `g${group.id}o${origin}`, kind: 'origin', groupId: group.id, origin, count, color: MEMO_ORIGINS[origin].color,
             label: lines.join('\n'), queries, w: MEMO_ITEM.width, h: MEMO_ITEM.height },
           classes: ['memoItem', entry.chosen ? 'chosen' : '', entry.added ? 'added' : ''].filter(Boolean).join(' '),
-          children: [...entry.children], chosen: entry.chosen,
+          children: [...entry.children], chosenChildren: entry.chosenChildren, chosen: entry.chosen,
         };
       });
     } else {
@@ -269,15 +284,17 @@ function memoStepElements(memo, s, options) {
           data: { id: `g${group.id}c${c.index}`, kind: 'candidate', groupId: group.id, index: c.index, origin: c.origin, color: MEMO_ORIGINS[c.origin].color,
             label: `${memoClip(`#${c.index} ${c.label}`, 30)}\n${memoClip(notes.join(' · '), 30)}`, queries, w: MEMO_ITEM.width, h: MEMO_ITEM.height },
           classes: ['memoItem', chosen ? 'chosen' : '', c.added ? 'added' : ''].filter(Boolean).join(' '),
-          children: c.children, chosen,
+          children: c.children, chosenChildren: chosen ? c.children : [], chosen,
         };
       });
     }
     const count = group.candidates_capped ? `${group.candidate_count} candidates (${group.candidates.length} listed)`
       : `${group.candidate_count} candidate${group.candidate_count === 1 ? '' : 's'}`;
+    // The selected candidate may lie past the listed prefix.
+    const unlisted = chosenIndex !== null && !group.candidates.some((c) => c.index === chosenIndex) ? ` · ✓ selected #${chosenIndex} (not listed)` : '';
     const roots = group.roots_of.length ? ` · root of ${group.roots_of.map(queryName).join(', ')}` : '';
     const toggle = collapsible ? (collapsed ? ' · click a count to expand' : ' · click the group to collapse') : '';
-    const label = `G${group.id} · ${memoClip(group.label, 40)}\n${group.candidates.length || s > 0 ? count : 'no candidates yet'}${roots}${toggle}`;
+    const label = `G${group.id} · ${memoClip(group.label, 40)}\n${step.step !== 'stage0' ? count : 'no candidates yet'}${unlisted}${roots}${toggle}`;
     const columns = Math.min(Math.max(items.length, 1), MEMO_ITEM.columns);
     const rows = Math.max(1, Math.ceil(items.length / MEMO_ITEM.columns));
     const width = items.length ? columns * MEMO_ITEM.width + (columns - 1) * MEMO_ITEM.gap + 2 * MEMO_ITEM.pad : 230;
@@ -332,7 +349,9 @@ function memoStepElements(memo, s, options) {
           y: box.y + MEMO_ITEM.label + MEMO_ITEM.pad + row * (MEMO_ITEM.height + MEMO_ITEM.gap) + MEMO_ITEM.height / 2,
         },
       });
-      item.children.forEach((child) => edge(item.data.id, child, item.chosen, box.queries));
+      // Only the selected candidate's own edges are marked, not those of
+      // the other candidates sharing its origin count.
+      item.children.forEach((child) => edge(item.data.id, child, item.chosenChildren.includes(child), box.queries));
     });
     if (!items.length) group.children.forEach((child) => edge(`g${group.id}`, child, false, box.queries));
   });
@@ -434,6 +453,17 @@ function memoViewController() {
     return `<ol class="memo-own">${own.map((n) => `<li><code>node ${esc(n.node)}</code> ${esc(n.lines.join(' · '))}</li>`).join('')}</ol>`;
   }
 
+  // The selected plan's candidate of `group`, on the last step only.
+  function selectedText(group) {
+    const choice = memo.selected_choice;
+    if (stepIndex !== memo.steps.length - 1) return 'shown on the last tab';
+    if (!choice) return `unavailable: ${memo.selected_choice_unavailable || 'none'}`;
+    if (!Object.prototype.hasOwnProperty.call(choice, String(group.id))) return 'no candidate chosen in this group';
+    const index = choice[String(group.id)];
+    const c = group.candidates.find((x) => x.index === index);
+    return c ? `#${index} ${c.label} (${MEMO_ORIGINS[c.origin].name})` : `#${index} (not listed)`;
+  }
+
   function showGroup(group) {
     const top = memoDagTop(group.dag);
     const origins = Object.entries(group.candidate_count_by_origin).map(([o, n]) => `${n} ${MEMO_ORIGINS[o].name}`).join(', ');
@@ -442,6 +472,7 @@ function memoViewController() {
       ['reads', groupList(group.children)], ['read by', groupList(group.parents)],
       ['queries reaching it', queryList(group.queries)], ['root of', queryList(group.roots_of)],
       ['candidates', `${group.candidate_count}${group.candidates_capped ? ` (${group.candidates.length} listed)` : ''}${origins ? `: ${origins}` : ''}`],
+      ['selected plan', selectedText(group)],
     ])}<details><summary>Group DAG (JSON)</summary><pre>${esc(JSON.stringify(group.dag, null, 2))}</pre></details>`;
   }
 

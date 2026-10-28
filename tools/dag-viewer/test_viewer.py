@@ -1106,6 +1106,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(self.memo_ids(js, "g2")), 13)
         self.assertIn("Memo group G2", self.text(js, "details"))
         self.assertIn("20 (13 listed): 2 Pass1, 9 Panes, 9 SharedBuild", self.text(js, "details"))
+        self.assertIn("selected plan#2 rate accumulator over G6's panes, variant 1 (Panes)", self.text(js, "details"))
         self.tap_memo(js, "g2")
         self.assertEqual(len(self.memo_ids(js, "g2")), 3)
 

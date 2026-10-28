@@ -46,6 +46,9 @@ test('memo violations are reported', () => {
   assert.match(broken((m) => { m.steps[1].groups[5].candidate_count = 2; }), /candidate_count must count at least/);
   assert.match(broken((m) => { m.steps[2].groups[2].candidates_capped = false; }), /candidates_capped/);
   assert.match(broken((m) => { m.steps[1].groups[2].candidate_count_by_origin = { pass1: 1 }; }), /candidate_count_by_origin/);
+  assert.match(broken((m) => { m.steps[1].groups[2].candidate_count_by_origin = { pass1: 1, panes: 1 }; m.steps[1].groups[2].candidates[1].origin = 'rollup'; }), /origin rollup is not counted/);
+  assert.match(broken((m) => { m.steps[1].groups[3].candidates[0].group_of_node = { '1.5': 2 }; }), /group_of_node must map/);
+  assert.match(broken((m) => { delete m.steps[1].groups[3].candidates[0].label; }), /needs a label/);
   assert.match(broken((m) => { m.steps[1].groups[3].candidates[0].group_of_node = { 0: 4 }; }), /group_of_node must map/);
   assert.match(broken((m) => { m.steps[1].groups[3].candidates[0].dag.nodes[3].operator.NonASAP.Aggregate.child = 7; }), /reads missing node 7/);
   assert.match(broken((m) => { m.selected_choice = { 9: 0 }; }), /9 is not a group of the last step/);
@@ -56,17 +59,17 @@ test('memo violations are reported', () => {
 
 test('each step says what it added over the previous one', () => {
   const memo = fixture();
-  assert.deepEqual(call('memoStepDiff', memo, 0), { groups: 6, groupsAdded: [0, 1, 2, 3, 4, 5], groupsRemoved: [], candidates: 0, candidatesAdded: 0, listedAdded: 0 });
+  assert.deepEqual(call('memoStepDiff', memo, 0), { groups: 6, groupsAdded: [0, 1, 2, 3, 4, 5], groupsRemoved: [], candidates: 0, candidatesDelta: 0, listedAdded: 0 });
   const pass1 = call('memoStepDiff', memo, 1);
   assert.equal(pass1.candidates, 10);
-  assert.equal(pass1.candidatesAdded, 10);
+  assert.equal(pass1.candidatesDelta, 10);
   assert.equal(pass1.listedAdded, 10);
   assert.deepEqual(pass1.groupsAdded, []);
   const pass2 = call('memoStepDiff', memo, 2);
   // G2 grows from 2 to 20 (18 Panes and SharedBuild, 11 listed), G3 gains a
   // rollup, the new pane-chain group G6 has one.
   assert.deepEqual(pass2.groupsAdded, [6]);
-  assert.equal(pass2.candidatesAdded, 18 + 1 + 1);
+  assert.equal(pass2.candidatesDelta, 18 + 1 + 1);
   assert.equal(pass2.listedAdded, 11 + 1 + 1);
   assert.equal(call('memoStepText', memo, 0), '6 groups · 0 candidates');
   assert.equal(call('memoStepText', memo, 2), '7 groups (+1) · 30 candidates (+20) · 13 listed candidates new at this step');
@@ -122,6 +125,10 @@ test('a large group collapses to one count per origin and expands on request', (
   assert.match(byId(open, 'g2c2').classes, /chosen/);
   assert.match(byId(open, 'g2c2>g6').classes, /chosen/);
   assert.equal(cytoscape(open).getElementById('g2').children().length, 13);
+  // An origin with no listed candidate says so.
+  const capped = fixture();
+  capped.steps[2].groups[2].candidates = capped.steps[2].groups[2].candidates.filter((c) => c.origin !== 'shared_build');
+  assert.equal(byId(call('memoStepElements', capped, 2, { collapseAbove: 4 }), 'g2oshared_build').data.label, '9 SharedBuild\nnone listed');
   // A threshold above the listed count draws every candidate.
   assert.equal(inG2(call('memoStepElements', memo, 2, { collapseAbove: 20 })).length, 13);
 });
@@ -135,6 +142,26 @@ test('the selected choice is highlighted on the last step only', () => {
   memo.selected_choice = null;
   memo.selected_choice_unavailable = 'no plan selected';
   assert.ok(!call('memoStepElements', memo, 2, {}).some((e) => /chosen/.test(e.classes || '')));
+});
+
+test('a collapsed count marks only the selected candidate\'s edges', () => {
+  const memo = fixture();
+  // Another listed Panes candidate of G2 reads G1 instead of G6.
+  const other = memo.steps[2].groups[2].candidates.find((c) => c.index === 3);
+  other.children = [1];
+  other.group_of_node = { 1: 1 };
+  const elements = call('memoStepElements', memo, 2, {});
+  assert.match(byId(elements, 'g2opanes>g6').classes, /chosen/);
+  assert.equal(byId(elements, 'g2opanes>g1').classes, '');
+});
+
+test('a selected candidate past the listed prefix is named on its group', () => {
+  const memo = fixture();
+  memo.selected_choice['2'] = 15;
+  assert.deepEqual(call('validateMemo', memo, 2), []);
+  const elements = call('memoStepElements', memo, 2, {});
+  assert.match(byId(elements, 'g2').data.label, /✓ selected #15 \(not listed\)/);
+  assert.ok(!nodesOf(elements).some((e) => e.data.parent === 'g2' && /chosen/.test(e.classes)));
 });
 
 test('highlighting a query dims the groups it does not reach', () => {
