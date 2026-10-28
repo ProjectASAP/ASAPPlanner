@@ -35,6 +35,7 @@
 //! budget (a ratio's operands); the whole-workload path has no such plans.
 use std::rc::Rc;
 
+use asap_devtools::planning_stages::lower_promql_roots;
 use asap_integration_tests::planning::expanded_memo;
 use asap_logical_asap_optimization::memo::candidates::{
     CandidateMemo, CandidateOrigin, ImplementationCandidate,
@@ -45,9 +46,8 @@ use asap_logical_asap_optimization::per_computation_candidates::{
     compose_logical_candidate, PerComputationCandidates,
 };
 use asap_plan_selection::{
-    run_stage1_to_stage3_with, PlanningModels, Stage1ToStage3Run, Stage1ToStage3Search,
+    run_stage1_to_stage3_with, MemoSteps, PlanningModels, Stage1ToStage3Run, Stage1ToStage3Search,
 };
-use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{FieldDataType, SketchParams};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use asap_types::workload::{PlanningWorkload, Query, RepeatedDemand, RepetitionInterval};
@@ -57,7 +57,7 @@ const RATIO_OF_QUANTILES: &str = concat!(
     "/../../tools/dag-viewer/memo-examples/promql/ratio-of-quantiles-5m.json"
 );
 
-/// The example's failure probability.
+/// The example's failure probability, as in its workload file.
 const FAILURE_PROBABILITY: f64 = 0.001;
 
 /// One root per query, in query order.
@@ -86,17 +86,11 @@ fn with_queries(queries: &[&str], interval_ms: u32) -> PlanningWorkload {
 }
 
 /// The frontend's roots, each with the series-identity column, as
-/// `Stage1ToStage3Pass` lowers a PromQL workload.
+/// `Stage1ToStage3Pass` and `stage_pipeline` lower a PromQL workload.
 fn production_roots(workload: &PlanningWorkload) -> Vec<(usize, QueryRoot)> {
-    asap_frontend_promql::lower_promql_query_workload(workload)
+    lower_promql_roots(workload)
         .unwrap()
         .into_iter()
-        .map(|root| match root {
-            QueryRoot::Operator(node) => {
-                QueryRoot::Operator(with_promql_series_identity(&node).unwrap())
-            }
-            scalar => scalar,
-        })
         .enumerate()
         .collect()
 }
@@ -120,6 +114,12 @@ fn complete_domain_round() -> Stage1ToStage3Search {
         milp_time_limit_ms: Some(3_600_000),
         ..Stage1ToStage3Search::default()
     }
+}
+
+fn memo_steps(run: &Stage1ToStage3Run<usize>) -> &MemoSteps {
+    run.memo_steps
+        .as_ref()
+        .expect("a planning round recorded its memo within the time budget")
 }
 
 fn candidate_count(memo: &CandidateMemo) -> usize {
@@ -194,11 +194,13 @@ fn kll(candidate: &ImplementationCandidate) -> Vec<(u32, Option<f64>)> {
 }
 
 /// Pass 1's accuracy-scoped candidate: a KLL sized for the whole result, at
-/// a failure probability below the query's.
+/// the query's failure probability divided over the source's series (1e-7
+/// here), far below what a per-value KLL is sized for (the query's, or half
+/// of it).
 fn sized_for_whole_result(candidate: &ImplementationCandidate) -> bool {
     kll(candidate)
         .iter()
-        .any(|(_, p)| p.is_some_and(|p| p < FAILURE_PROBABILITY / candidate.budget_share as f64))
+        .any(|(_, p)| p.is_some_and(|p| p < FAILURE_PROBABILITY / 10.0))
 }
 
 /// Checks the relation of the module doc between the Pass 1 memo's
@@ -207,7 +209,7 @@ fn sized_for_whole_result(candidate: &ImplementationCandidate) -> bool {
 fn assert_pass1_memo_and_whole_workload_plans(
     run: &Stage1ToStage3Run<usize>,
 ) -> (usize, usize, usize, usize) {
-    let memo = &run.memo_steps.as_ref().unwrap().pass1;
+    let memo = &memo_steps(run).pass1;
     let enumeration = enumerate(memo, 100_000);
     assert!(enumeration.complete);
     let plans: Vec<_> = enumeration
@@ -260,10 +262,12 @@ fn assert_pass1_memo_and_whole_workload_plans(
     (plans.len(), whole_budget.len(), whole.len(), both)
 }
 
+/// The example's memo after each production step, and the `budget_share`
+/// of the state-configuration rule's rewrites (one test: one 11 s run).
 #[test]
-fn ratio_of_quantiles_memo_after_each_production_step() {
+fn ratio_of_quantiles_production_memo() {
     let run = production_run(&ratio_of_quantiles(), complete_domain_round());
-    let steps = run.memo_steps.as_ref().unwrap();
+    let steps = memo_steps(&run);
     // Stage 0: series identity makes the two `quantile 0.5` one group.
     assert_eq!(steps.stage0.groups.len(), 7);
     assert_eq!(candidate_count(&steps.stage0), 0);
@@ -292,21 +296,16 @@ fn ratio_of_quantiles_memo_after_each_production_step() {
             compose(last, &choice).unwrap_or_else(|e| panic!("G{group} candidate {index}: {e}"));
         }
     }
-}
-
-/// The state-size rewrite resizes a candidate's KLL to the size readers of
-/// that state share, keeping its `budget_share`. In each quantile group the
-/// `budget_share` 1 KLL `k` 567 (sized for the whole result) is rewritten to
-/// `k` 1156 and to `k` 1184, the size of the group's `budget_share` 2 KLL.
-/// That rewrite has `budget_share` 1 and composes the same DAG as the
-/// `budget_share` 2 candidate, which keeps 2: one sketch, sized for half the
-/// budget, which also meets the whole budget. The label is sound, not a
-/// share-2 candidate relabelled.
-#[test]
-fn state_size_rewrite_keeps_the_budget_share_of_the_candidate_it_resizes() {
-    let run = production_run(&ratio_of_quantiles(), complete_domain_round());
-    let steps = run.memo_steps.as_ref().unwrap();
-    let (pass1, last) = (&steps.pass1, &steps.concrete_states);
+    // The state-configuration rule rewrites a candidate's KLL to the size
+    // the readers of a state share; the rewrite is a copy of the candidate
+    // (`derive` in `memo/rules/state_configurations.rs`), so it keeps its
+    // `budget_share`. In each quantile group the `budget_share` 1 KLL `k` 567
+    // (sized for the whole result) gets copies at `k` 567, 1156 and 1184,
+    // all with `budget_share` 1; the `budget_share` 2 KLL `k` 1184 keeps 2.
+    // The `k` 1184 copy with `budget_share` 1 composes the same DAG as the
+    // `budget_share` 2 candidate: one sketch, sized for half the budget,
+    // which also meets the whole budget, so the label is sound.
+    let pass1 = &steps.pass1;
     let quantile_groups: Vec<_> = (0..pass1.groups.len())
         .filter(|&group| pass1.candidates[group].len() == 7)
         .collect();

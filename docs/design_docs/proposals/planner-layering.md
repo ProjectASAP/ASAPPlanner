@@ -399,9 +399,10 @@ all; the memo has 259 candidates.
   accumulators; and 2 `FinalizeExactAccumulator` groups (G6's sum and count
   readouts).
 - 1738 candidates. G2 and G4 have 691 each: 10 `Pass1` (the 7 above and
-  3 the state-size rule made from the `budget_share` 1 KLL `k` 567 by
-  resizing it to `k` 567, 1156 and 1184; each keeps `budget_share` 1, and the
-  `k` 1184 one composes the same DAG as the `budget_share` 2 KLL),
+  3 copies of the `budget_share` 1 KLL `k` 567 that the state-configuration
+  rule rewrote to the shared configurations with `k` 567, 1156 and 1184; each
+  keeps `budget_share` 1, and the `k` 1184 one composes the same DAG as the
+  `budget_share` 2 KLL),
   336 `Panes` and 345 `SharedBuild`. G6 has 3: `Pass1`, `SummaryResult` and
   `SharedBuild`.
 - Enumeration stops at `stage_pipeline`'s default limit of 1,000 candidate
