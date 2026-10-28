@@ -97,6 +97,7 @@
   function highlightQuery(id) {
     highlightedQuery = id;
     cys.forEach((cy, i) => dim(i, queryKeep(i)));
+    if (window.MemoView) window.MemoView.highlightQuery(id);
   }
 
   const fmtCost = (x) => (Math.abs(x) >= 100 ? x.toFixed(1) : String(Number(x.toPrecision(3))));
@@ -224,13 +225,14 @@
     renderRanking();
   }
 
-  function restyle() { cys.forEach((cy) => cy && cy.style(style())); }
+  function restyle() { cys.forEach((cy) => cy && cy.style(style())); if (window.MemoView) window.MemoView.restyle(); }
 
   const HINT = '<p class="hint">Select a node to see its operator, output schema, timing and Stage 3 cost; select an edge to see the schema and data state it carries.</p>';
 
   // Show one stage document; `source` names it, `story` explains it.
   function showDocument(data, source, story) {
     const errors = validateStagePipeline(data);
+    if (!errors.length && typeof validateMemo === 'function') errors.push(...validateMemo(data.memo, data.workload.queries.length));
     if (errors.length) throw new Error(errors.slice(0, 3).join('; '));
     doc = data;
     current = { logical: null, physical: null };
@@ -284,6 +286,7 @@
     }
     renderMaterializedViews();
     renderMemoSearch();
+    if (window.MemoView) window.MemoView.show(doc, queryIds);
   }
 
   const table = (head, body) => `<table><thead><tr>${head.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>`;

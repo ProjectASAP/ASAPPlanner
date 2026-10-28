@@ -139,6 +139,7 @@ tr.clickable { cursor: pointer; }
 tr.clickable:hover td { background: var(--panel-2); }
 tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset: -2px; }
 .set-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.memo-own { margin: 4px 0 0; padding-left: 20px; font-size: 12.5px; display: grid; gap: 2px; }
 .set-head select { font: inherit; font-size: 13px; color: var(--fg); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; max-width: 100%; }
 </style>
 </head>
@@ -234,6 +235,12 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
           <div class="lane-meta" id="views-meta"></div>
           <div class="table-wrap" id="materializedViews"></div>
         </section>
+        <section class="panel lane" id="memoView" aria-labelledby="memoView-title" hidden>
+          <div class="panel-head"><div><div class="eyebrow">Stage 0 and Stage 1 · memo after each step</div><h2 id="memoView-title">Memo</h2></div>
+            <nav class="tabs" id="memoTabs" aria-label="Memo step"></nav></div>
+          <div class="lane-meta" id="memoView-meta"></div>
+          <div class="cy" id="cyMemo"></div>
+        </section>
         <section class="panel" id="memoPanel" aria-labelledby="memo-title" hidden>
           <div class="panel-head"><div><div class="eyebrow">Joint search · selected plan</div><h2 id="memo-title">Search metrics and sharing</h2></div></div>
           <div class="lane-meta" id="memo-meta"></div>
@@ -264,6 +271,7 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
 <script src="cytoscape-dagre.js"></script>
 <script src="node-style.js"></script>
 <script src="stages.js"></script>
+<script src="memo.js"></script>
 <script src="app.js"></script>
 <script src="editor.js"></script>
 <script src="workload-sets.js"></script>

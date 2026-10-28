@@ -28,6 +28,10 @@ EXAMPLE1 = HERE / "examples" / "planner-layering-example1.json"
 # workload-01 (nine repeating PromQL queries), planned with the default
 # search as the MVP deployment; its selected plan keeps panes at ingestion.
 SEED862 = HERE / "examples" / "random-mixed-seed-862-workload-01.json"
+# A hand-written `memo` section over example1's two queries (memo.js tests).
+MEMO_SMALL = HERE / "test-fixtures" / "memo-small.json"
+# The planner's memo for #1005's ratio-of-quantiles query, written by stage_pipeline.
+MEMO_REAL = HERE / "examples" / "memo-ratio-of-quantiles.json"
 WORKLOADS = HERE / "workloads"
 # Standalone scalar queries at positions 0, 2 and 4 (first, middle, last):
 # scalar(sum(m)), sum(n), time(), sum by (job) (k), 1 + 2.
@@ -762,7 +766,7 @@ class PageTests(unittest.TestCase):
     def test_every_element_the_scripts_use_is_on_the_page(self):
         page = (HERE / "index.html").read_text()
         ids = set(re.findall(r'id="([^"]+)"', page))
-        for script in ("app.js", "editor.js"):
+        for script in ("app.js", "editor.js", "memo.js"):
             used = set(re.findall(r"\$\('([^']+)'\)", (HERE / script).read_text()))
             with self.subTest(script):
                 self.assertLessEqual(used, ids)
@@ -884,7 +888,7 @@ class AppTests(unittest.TestCase):
     def page(self, search="", files=None, hash_=""):
         js = py_mini_racer.MiniRacer()
         js.eval(STUB_DOM)
-        for name in ("node-style.js", "stages.js"):
+        for name in ("node-style.js", "stages.js", "memo.js"):
             js.eval((HERE / name).read_text())
         for url, text in (files or {}).items():
             js.eval(f"__files[{json.dumps(url)}] = {json.dumps(text)};")
@@ -1062,6 +1066,97 @@ class AppTests(unittest.TestCase):
     def test_an_invalid_document_shows_an_error(self):
         js = self.page("?doc=bad.json", {"bad.json": json.dumps({"format": "nope"})})
         self.assertIn("Could not load", js.eval("__els.queries.innerHTML"))
+
+    def memo_page(self):
+        doc = example1()
+        doc.update(json.loads(MEMO_SMALL.read_text()))
+        return self.page("?doc=m.json", {"m.json": json.dumps(doc)})
+
+    def tap_memo(self, js, element_id):
+        js.eval(f"__taps['cyMemo node']({{ target: {{ data() {{ return __rendered.cyMemo.find((e) => e.data.id === {json.dumps(element_id)}).data; }} }} }})")
+
+    def memo_ids(self, js, parent=None):
+        return [e["data"]["id"] for e in self.ev(js, "__rendered.cyMemo") if "source" not in e["data"] and (parent is None or e["data"].get("parent") == parent)]
+
+    def test_a_document_without_a_memo_hides_the_memo_view(self):
+        js = self.page("?doc=e1.json", {"e1.json": EXAMPLE1.read_text()})
+        self.assertTrue(js.eval("__els.memoView.hidden"))
+        self.assertFalse(js.eval("'cyMemo' in __rendered"))
+        self.assertIn("✓ selected", self.text(js, "lane2-meta"))
+
+    def test_the_memo_view_has_a_tab_per_step_and_opens_on_the_last(self):
+        js = self.memo_page()
+        self.assertFalse(js.eval("__els.memoView.hidden"))
+        tabs = js.eval("__els.memoTabs.innerHTML")
+        self.assertEqual(re.findall(r">([^<]+)</button>", tabs), ["Stage 0", "Stage 1, Pass 1", "Stage 1, Pass 2"])
+        self.assertIn('data-step="2" aria-pressed="true"', tabs)
+        meta = self.text(js, "memoView-meta")
+        self.assertIn("7 groups (+1) · 30 candidates (+20)", meta)
+        self.assertIn("selected plan's candidates highlighted (7 groups)", meta)
+        # G2 is collapsed to its origin counts; the rest list their candidates.
+        self.assertEqual(self.memo_ids(js, "g2"), ["g2opass1", "g2opanes", "g2oshared_build"])
+        js.eval("window.MemoView.selectStep(0)")
+        self.assertEqual(len(self.memo_ids(js)), 6)
+        self.assertIn("6 groups · 0 candidates", self.text(js, "memoView-meta"))
+        self.assertIn("shown on the last tab", self.text(js, "memoView-meta"))
+
+    def test_tapping_a_count_expands_its_group_and_the_group_collapses_it(self):
+        js = self.memo_page()
+        self.tap_memo(js, "g2opanes")
+        self.assertEqual(len(self.memo_ids(js, "g2")), 13)
+        self.assertIn("Memo group G2", self.text(js, "details"))
+        self.assertIn("20 (13 listed): 2 Pass1, 9 Panes, 9 SharedBuild", self.text(js, "details"))
+        self.tap_memo(js, "g2")
+        self.assertEqual(len(self.memo_ids(js, "g2")), 3)
+
+    def test_tapping_a_candidate_lists_its_own_nodes(self):
+        js = self.memo_page()
+        self.tap_memo(js, "g5c1")
+        details = self.text(js, "details")
+        self.assertIn("Candidate #1 of G5", details)
+        self.assertIn("chosen for this group", details)
+        self.assertIn("Project", details)
+        self.assertIn("SummaryEstimate", details)
+        self.assertIn("Reads G1 (node 1).", details)
+        self.assertNotIn("node 0</code>", js.eval("__els.details.innerHTML"))
+
+    def test_highlighting_a_query_dims_the_memo_groups_it_does_not_reach(self):
+        js = self.memo_page()
+        js.eval("__els.queryPick.__on.change({ target: { value: 'q2' } })")
+        dimmed = set(self.ev(js, "__dimmed.cyMemo"))
+        self.assertIn("g2", dimmed)
+        self.assertIn("g3c0", dimmed)
+        self.assertNotIn("g5c1", dimmed)
+        js.eval("__els.queryPick.__on.change({ target: { value: '' } })")
+        self.assertEqual(js.eval("__dimmed.cyMemo.length"), 0)
+
+    def test_a_broken_memo_is_refused(self):
+        doc = example1()
+        memo = json.loads(MEMO_SMALL.read_text())["memo"]
+        memo["steps"][1]["groups"][0]["children"] = [42]
+        doc["memo"] = memo
+        js = self.page("?doc=m.json", {"m.json": json.dumps(doc)})
+        self.assertIn("G0: children and parents must name groups", js.eval("__els.queries.innerHTML"))
+
+    @unittest.skipUnless(MEMO_REAL.exists(), "needs the stage_pipeline memo example")
+    def test_the_real_memo_example(self):
+        """#1005's acceptance: on the ratio-of-quantiles example, 8 groups
+        on the Stage 0 tab, 26 candidates on the Pass 1 tab, and G2's Panes
+        and SharedBuild counts on the later tab."""
+        doc = json.loads(MEMO_REAL.read_text())
+        js = self.page("?doc=r.json", {"r.json": json.dumps(doc)})
+        steps = [s["step"] for s in doc["memo"]["steps"]]
+        js.eval(f"window.MemoView.selectStep({steps.index('stage0')})")
+        groups = [e for e in self.ev(js, "__rendered.cyMemo") if e["data"].get("kind") == "group"]
+        self.assertEqual(len(groups), 8)
+        js.eval(f"window.MemoView.selectStep({steps.index('pass1')})")
+        self.assertIn("· 26 candidates", self.text(js, "memoView-meta"))
+        js.eval(f"window.MemoView.selectStep({len(steps) - 1})")
+        g2 = doc["memo"]["steps"][-1]["groups"]
+        by_origin = next(g for g in g2 if g["id"] == 2)["candidate_count_by_origin"]
+        labels = [e["data"]["label"].split("\n")[0] for e in self.ev(js, "__rendered.cyMemo") if e["data"].get("parent") == "g2"]
+        self.assertIn(f"{by_origin['panes']} Panes", labels)
+        self.assertIn(f"{by_origin['shared_build']} SharedBuild", labels)
 
 
 if __name__ == "__main__":
