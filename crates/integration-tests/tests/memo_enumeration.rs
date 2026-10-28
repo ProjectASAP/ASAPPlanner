@@ -4,14 +4,15 @@
 //! `compose_logical_candidate` builds from the assignments of the Pass 1
 //! inventory. The memo's other choices size an operand's summary for a share
 //! of the budget (a ratio's operands); the whole-workload path has no such
-//! plans.
+//! plans. (No query here splits its budget among its inputs in the
+//! whole-workload path; one that did would match the choices at its share.)
 use std::rc::Rc;
 
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::expanded_memo;
 use asap_logical_asap_optimization::memo::candidates::{try_populate_pass1, CandidateMemo};
 use asap_logical_asap_optimization::memo::enumeration::{compose, enumerate};
-use asap_logical_asap_optimization::memo::LogicalMemo;
+use asap_logical_asap_optimization::memo::{LogicalMemo, MemoGroupId};
 use asap_logical_asap_optimization::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, PerComputationCandidates,
 };
@@ -162,10 +163,11 @@ fn shared_quantiles_pass1_memo_stands_for_whole_workload_plans() {
 }
 
 /// After Pass 2 and the concrete state groups the memo stands for too many
-/// DAGs to list: the limit stops the enumeration, and every choice found
-/// composes.
+/// DAGs to list: the limit stops the enumeration. Depth-first, the first
+/// choices vary only the last groups popped, so every candidate is also
+/// composed once, each in the choice that names only it.
 #[test]
-fn expanded_memo_enumeration_stops_at_the_limit() {
+fn expanded_memo_enumeration_stops_at_the_limit_and_every_candidate_composes() {
     let entry = QueryWorkloadEntry {
         query: Default::default(),
         requirements: QueryRequirements {
@@ -179,7 +181,15 @@ fn expanded_memo_enumeration_stops_at_the_limit() {
         range_evaluation: None,
     };
     let memo = expanded_memo(roots(&[RATIO_OF_QUANTILES]), &[entry]);
+    assert_eq!(memo.groups.len(), 378);
+    assert_eq!(memo.candidates.iter().map(Vec::len).sum::<usize>(), 2614);
     let (plans, complete) = memo_plans(&memo, 2_000);
     assert!(!complete);
     assert_eq!(plans.len(), 2_000);
+    for (group, candidates) in memo.candidates.iter().enumerate() {
+        for index in 0..candidates.len() {
+            let choice = [(MemoGroupId(group as u32), index)].into();
+            compose(&memo, &choice).unwrap_or_else(|e| panic!("G{group} candidate {index}: {e}"));
+        }
+    }
 }

@@ -6,6 +6,13 @@
 //! nodes are built once and shared; which groups are needed depends on the
 //! candidates chosen above them. The count is therefore not a product over
 //! groups.
+//!
+//! A choice is counted, not the DAG it composes: two candidates of a group
+//! that differ only in what recomposing guarantees re-derives compose equal
+//! DAGs. Composing checks only that a choice composes; input contracts,
+//! accuracy at the roots, Stage 2 legality and Stage 3 cost stay with the
+//! validator and the later stages. The memo must be acyclic, as every memo
+//! step builds it.
 
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
@@ -45,8 +52,9 @@ pub enum ComposeError {
         candidate: usize,
         child: MemoGroupId,
     },
-    #[error("the composed DAG's guarantees: {0}")]
-    Guarantee(#[from] PerComputationCandidateError),
+    /// Re-deriving the composed nodes' schemas and guarantees failed.
+    #[error("recomposing the composed DAG: {0}")]
+    Recompose(#[from] PerComputationCandidateError),
 }
 
 /// Every choice of one candidate per needed group, starting from the query
@@ -93,7 +101,9 @@ pub fn enumerate(memo: &CandidateMemo, limit: usize) -> MemoEnumeration {
 /// Each root group (one with a query's root) and its DAG under `choice`:
 /// each needed group implemented by its chosen candidate over its children's
 /// composed DAGs, a group read several times composed once and shared. Every
-/// node then carries its composed guarantee, as in plan reconstruction.
+/// node is then rebuilt with its derived schema and composed guarantee, as
+/// in plan reconstruction. A scalar query's expression is not rebuilt: its
+/// operator roots are root groups like any other query's.
 pub fn compose(
     memo: &CandidateMemo,
     choice: &MemoChoice,
