@@ -301,8 +301,10 @@ pub(in crate::search) fn optimize_configured_candidates(
                 .incumbent
                 .as_ref()
                 .is_none_or(|best| best.actual_cost > separate_cost * (1.0 + 1e-9));
+        // An evaluator error leaves the joint result as it is: the separate
+        // plans are only a safeguard.
         if above {
-            if let Some(cost) = evaluate(&separate)?.actual_cost {
+            if let Some(cost) = evaluate(&separate).ok().and_then(|e| e.actual_cost) {
                 if search
                     .incumbent
                     .as_ref()
@@ -311,6 +313,11 @@ pub(in crate::search) fn optimize_configured_candidates(
                     search.incumbent = Some(EvaluatedCandidate {
                         selected: separate,
                         actual_cost: cost,
+                    });
+                    search.relative_gap = Some(if cost == 0.0 {
+                        0.0
+                    } else {
+                        ((cost - search.lower_bound) / cost).max(0.0)
                     });
                 }
             }
