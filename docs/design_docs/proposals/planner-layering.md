@@ -342,72 +342,85 @@ One query, evaluated every minute, with `max_error 0.01` and
 avg by (job) (quantile_over_time(0.5, data[5m]) / quantile_over_time(0.5, data[5m]) + quantile_over_time(0.9, data[5m]))
 ```
 
-**Step 1, Stage 0.** `LogicalMemo::from_roots` makes 8 groups:
+**Step 1, Stage 0.** `LogicalMemo::from_roots` makes 7 groups:
 
 | Group | Logical sub-expression | Reads |
 |---|---|---|
 | G0 | `Scan data` | – |
 | G1 | `TimeRange 5m` | G0 |
 | G2 | per-series `quantile 0.5` | G1 |
-| G3 | per-series `quantile 0.5`, structurally equal to G2 | G1 |
-| G4 | `G2 / G3` | G2, G3 |
-| G5 | per-series `quantile 0.9` | G1 |
-| G6 | `G4 + G5` | G4, G5 |
-| G7 | `avg by (job)` | G6 |
+| G3 | `G2 / G2` | G2 (as both operands) |
+| G4 | per-series `quantile 0.9` | G1 |
+| G5 | `G3 + G4` | G3, G4 |
+| G6 | `avg by (job)` | G5 |
 
-G1 is one group for its three readers, because a window directly over a scan
-may be shared. G2 and G3 stay two groups: a per-series quantile is a non-ASAP
-node, and its output schema has no unique key.
+G1 is one group for its two readers, because a window directly over a scan
+may be shared. The two `quantile_over_time(0.5, data[5m])` are one group, G2:
+the PromQL frontend adds a series-identity column (`$promql_series_identity`)
+to every series, so the per-series quantile's output has a unique key
+(series identity and timestamp), and equal non-ASAP nodes with a unique key
+share one group. A non-ASAP node without a unique key, such as a
+`without(..)` grouping, would stay one group per reader.
 
-**Step 2, Stage 1 Pass 1.** `try_populate_pass1` gives G2, G3 and G5 seven
-candidates each. G0, G1, G4 and G6 get one each, their own node. G7 gets
-one: `avg` computed from exact sum and count accumulators.
+**Step 2, Stage 1 Pass 1.** `try_populate_pass1` gives G2 and G4 seven
+candidates each. G0, G1, G3 and G5 get one each, their own node. G6 gets
+one: `avg` computed from exact sum and count accumulators. The memo now has
+19 candidates.
 
+| Candidate of G2 or G4 | `budget_share` |
+|---|---|
+| Exact | 1 |
+| KLL, `k` 345 (`failure_probability` 0.001) | 1 |
+| KLL, `k` 746 (`failure_probability` 0.0005) | 2 |
+| DDSketch, `alpha` 0.01 | 1 |
+| DDSketch, `alpha` 0.004963 | 2 |
+| KLL, `k` 567 (`failure_probability` 1e-7) | 1 |
+| KLL, `k` 1184 (`failure_probability` 5e-8) | 2 |
 
-| Candidate of G2, G3 or G5 | `budget_share` | Count |
-|---|---|---|
-| Exact | 1 | 1 |
-| KLL sketch | 1, 2, 3 | 3 |
-| DDSketch | 1, 2, 3 | 3 |
+The query has two approximate inputs (G2 and G4), so each summary comes
+sized for the whole accuracy budget and for a half of it. Pass 1 offers each
+KLL at two scopes: per value (the first two KLL candidates) and for the
+whole result (the last two), where the per-value `failure_probability` is the
+target's 0.001 divided over the source's 10,000 series. The memo stands for 7 × 7 = 49 candidate DAGs, all different:
+- 16 = 4 × 4 use only `budget_share` 1.
+- 33 size at least one operand's summary for half of the budget.
 
-The query has three approximate inputs, so each summary comes sized for the
-whole accuracy budget, a half of it and a third of it (the KLL's `k` is 345,
-746 and 1167). The memo now has 26 candidates and stands for
-7 × 7 × 7 = 343 candidate DAGs:
-- 27 = 3 × 3 × 3 use only `budget_share` 1. They are exactly the plans the
-  whole-workload path composes from the Pass 1 choices
-  (`compose_logical_candidate`).
-- 316 size at least one operand's summary for a half or a third of the budget.
-  Only the memo has them.
+**Step 3, Stage 1 Pass 2: window composition.** The groups stay the same 7.
+G2 and G4 get 120 `Panes` candidates each (6 summary candidates × 20 pane
+widths, from 1 s to 60 s, that divide one minute), 127 candidates each in
+all; the memo has 259 candidates.
 
-**Step 3, Stage 1 Pass 2 and the concrete summary-state groups.** Window
-composition at every pane width that divides one minute (60 widths), then
-every Pass 2 rule (`expand_concrete_summary_state_groups_before`), with
-shared sizes and pane layouts on the seed grids:
-- 378 groups: the 8 above; 360 `PaneChain` groups (one per chain layout,
-  60 widths × 6 summary candidates); 8 `SummaryAgg` state groups (KLL and
-  DDSketch at three sizes each, and G7's sum and count accumulators); and
-  2 `FinalizeExactAccumulator` groups (G7's sum and count readouts). Each
-  `PaneChain` and `SummaryAgg` group has one `SharedBuild` candidate; each
-  `FinalizeExactAccumulator` group has a `SummaryResult` and a `SharedBuild`
-  candidate.
-- 2614 candidates. G2, G3 and G5 have 745 each: 13 `Pass1` (the 7 above and
-  6 whole-budget summaries rewritten to a shared size), 360 `Panes`
-  (60 widths × 6 summary candidates) and 372 `SharedBuild`. G7 has 3: `Pass1`, `SummaryResult` and `SharedBuild`.
-- More candidate DAGs than can be listed: enumerating them stops at any limit
-  tried, up to 1,000,000.
+**Step 4, the other Pass 2 rules and the concrete summary-state groups**
+(`expand_concrete_summary_state_groups_before`):
+- 354 groups: the 7 above; 336 `PaneChain` groups (7 summary configurations
+  × 48 pane layouts, with pane widths from 20 ms to 60 s); 7 `SummaryAgg`
+  state groups (the 6 summaries above and a KLL with `k` 1156,
+  `failure_probability` 1e-7); 2 `SummaryAgg` groups for G6's sum and count
+  accumulators; and 2 `FinalizeExactAccumulator` groups (G6's sum and count
+  readouts).
+- 1738 candidates. G2 and G4 have 691 each: 10 `Pass1` (the 7 above and
+  3 KLL candidates the state-configuration rule rewrote: one to the shared
+  size `k` 1156, two keeping their size),
+  336 `Panes` and 345 `SharedBuild`. G6 has 3: `Pass1`, `SummaryResult` and
+  `SharedBuild`.
+- Enumeration stops at `stage_pipeline`'s default limit of 1,000 candidate
+  DAGs (`--memo-enumeration-limit`), as it does after step 3.
 
 | After | Groups | Implementation candidates | Candidate DAGs |
 |---|---|---|---|
-| Stage 0 | 8 | – (each group is its own node) | 1 |
-| Stage 1, Pass 1 | 8 | 26 | 343 = 27 whole-budget + 316 budget-share variants |
-| Stage 1, Pass 2 and concrete summary-state groups | 378 | 2614 | over 1,000,000 (enumeration stopped at its limit) |
+| Stage 0 | 7 | – (each group is its own node) | 1 |
+| Stage 1, Pass 1 | 7 | 19 | 49 = 16 whole-budget + 33 budget-share variants |
+| Stage 1, Pass 2 window composition | 7 | 259 | over 1,000 (enumeration stopped at its limit) |
+| Stage 1, Pass 2 rules and concrete summary-state groups | 354 | 1738 | over 1,000 (enumeration stopped at its limit) |
 
-The 8 groups, the 343 = 27 + 316 split and the 378 groups and 2614 candidates
-are checked by `crates/integration-tests/tests/memo_enumeration.rs`. The
-Pass 2 numbers come from the `expanded_memo` test helper, which builds steps 1–3 without the
-production search's query pruning, pane-width rounds and accuracy-scoped
-candidates, so a production run of the same query can have different counts.
+These numbers are the production planner's, read from the stage-pipeline
+document `tools/dag-viewer/examples/memo-ratio-of-quantiles.json` (made by
+`stage_pipeline` from `tools/dag-viewer/memo-examples/promql/ratio-of-quantiles-5m.json`,
+with accuracy guarantees enforced and the `aws-fargate-us-east-1` cost model).
+The `lower_promql` test helper used by
+`crates/integration-tests/tests/memo_enumeration.rs` lowers the query without
+the series-identity column, so there the two `quantile 0.5` stay two groups
+and the counts are larger.
 
 #### Algorithm: memo to candidate DAGs
 
@@ -450,19 +463,19 @@ that vector.
 
 | Reason | Effect on the count | In the example |
 |---|---|---|
-| Shared group | A group several chosen candidates read takes one candidate per choice, not one per reader. | G1 is read by G2, G3 and G5 and chosen once. |
-| Group needed only under some choices | A group joins the choice only when a chosen candidate reads it. | A `PaneChain` group is needed only when a `SharedBuild` candidate reading it is chosen; a choice of `Pass1` candidates only needs none of the 370 added groups. |
+| Shared group | A group several chosen candidates read takes one candidate per choice, not one per reader. | G1 is read by G2 and G4 and chosen once. |
+| Group needed only under some choices | A group joins the choice only when a chosen candidate reads it. | A `PaneChain` group is needed only when a `SharedBuild` candidate reading it is chosen; a choice of `Pass1` candidates needs none of the 347 added groups. |
 | Fused candidate | The groups a fused candidate implements are computed inside it and never become pending. | None (the example has no fused computation). |
 
-In Pass 1 of the example the count happens to be a product, 7 × 7 × 7,
-because only G2, G3 and G5 have more than one candidate and all of them read
-only G1.
+In Pass 1 of the example the count happens to be a product, 7 × 7,
+because only G2 and G4 have more than one candidate and both read only G1.
 
 **Correctness.** Every recorded choice composes unless the memo has a
 construction bug (`ChildNotInCandidate`). For Pass 1 of the example
-each of the 343 choices composes a different DAG, and the 27 whole-budget
-choices compose exactly the whole-workload plans
-(`memo_enumeration.rs`, also on a three-query workload). `enumerate` counts
+each of the 49 choices composes a different DAG. That the whole-budget
+choices compose exactly the whole-workload plans is checked by
+`memo_enumeration.rs` on the test helper's lowering (also on a three-query
+workload). `enumerate` counts
 choices, not DAGs: two candidates of a group that differ only in what
 recomposing re-derives compose equal DAGs. It does not check validity: input
 contracts, accuracy at the query roots, Stage 2 legality and Stage 3
