@@ -7,7 +7,9 @@ summaries). It does not deploy or execute the plan; downstream systems such
 as ASAPQuery-backend run it.
 
 For the integration workflow, start with [ASAPPlanner input, output, and
-workflows](input-output-workflow.md). The stages are defined in the
+workflows](input-output-workflow.md). For where each key type and entry point
+lives and how the Stage 1–3 structures relate, see the [system
+architecture](system-architecture.md). The stages are defined in the
 [planning stages design](../proposals/planner-layering.md).
 
 ## Planner component flow
@@ -67,6 +69,7 @@ operational feedback, and must not silently change Planner-owned semantics.
 
 ## Further reading
 
+- [System architecture: components, key types and a name decoder](system-architecture.md)
 - [Planning stages design](../proposals/planner-layering.md)
 - [Parsing and canonicalization](parse-and-canonicalize.md)
 - [Pre-ASAP IR](../concepts/pre-asap-ir.md)
