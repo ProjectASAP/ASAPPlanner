@@ -31,6 +31,9 @@ SEED862 = HERE / "examples" / "random-mixed-seed-862-workload-01.json"
 # A hand-written priced `memo` section for Example 1: four enumerated
 # Pass 1 DAGs, E2 selected, E3 cheaper than it, E4 invalid.
 MEMO_ENUMERATION = HERE / "test-fixtures" / "memo-enumeration-small.json"
+# stage_pipeline's memo example (#1003): the ratio of quantiles, with its
+# Pass 1 memo enumerated (49 = 7 × 7 candidate DAGs).
+MEMO_RATIO = HERE / "examples" / "memo-ratio-of-quantiles.json"
 WORKLOADS = HERE / "workloads"
 # Standalone scalar queries at positions 0, 2 and 4 (first, middle, last):
 # scalar(sum(m)), sum(n), time(), sum by (job) (k), 1 + 2.
@@ -1130,6 +1133,27 @@ class AppTests(unittest.TestCase):
         roots, meta = self.enumerated_roots(doc, "E1")
         self.assertEqual(sorted(roots.values()), [["root group #1"], ["root group #2"]])
         self.assertIn("roots not matched to queries", meta)
+
+    def test_the_ratio_of_quantiles_example_lists_its_pass1_dags_and_draws_one(self):
+        """On stage_pipeline's own example the panel counts 49 Pass 1 DAGs,
+        lists them all, and a click redraws the Stage 1 lane with that DAG
+        and clears Stage 2."""
+        doc = json.loads(MEMO_RATIO.read_text())
+        js = self.page("?doc=m.json", {"m.json": json.dumps(doc)})
+        self.assertFalse(js.eval("__els.enumPanel.hidden"))
+        meta = js.eval("__els['enum-meta'].textContent")
+        self.assertIn("Pass 1: 49", meta)
+        self.assertIn("listed: all 49 Pass 1 DAGs", meta)
+        self.assertEqual(js.eval("__els.enumRows.innerHTML").count("<li>"), 49)
+        before = self.ev(js, "__rendered.cy1")
+        choice = doc["memo"]["enumeration"]["choices"][1]
+        js.eval(f"__els.enumRows.__on.click({{ target: {{ closest() {{ return {{ dataset: {{ id: {json.dumps(choice['id'])} }} }}; }} }} }})")
+        after = self.ev(js, "__rendered.cy1")
+        self.assertNotEqual(after, before)
+        self.assertEqual(len([e for e in after if "source" not in e["data"]]), len(choice["dag"]["nodes"]))
+        self.assertEqual([e["data"]["rootFor"] for e in after if e["data"].get("rootFor")], [[doc["workload"]["queries"][0]["id"]]])
+        self.assertIn(f"enumerated DAG {choice['id']}", self.text(js, "lane1-meta"))
+        self.assertIn("no physical plan for an enumerated DAG", js.eval("__els['lane2-meta'].textContent"))
 
     def test_a_broken_enumeration_refuses_the_document(self):
         doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
