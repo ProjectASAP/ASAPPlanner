@@ -62,9 +62,6 @@ pub fn needs_merge(form: WindowForm, query_window_ms: u64) -> bool {
     }
 }
 
-// ── Query-language frontends ──────────────────────────────────────────
-
-/// PromQL workload roots, each series' identity as a column.
 /// `roots` with every identical sub-DAG made one node (the identical-
 /// expression rule, as the memo's group identity applies it).
 #[allow(dead_code)]
@@ -84,6 +81,25 @@ pub fn share_identical(roots: &[QueryRoot]) -> Vec<QueryRoot> {
     .collect()
 }
 
+/// The number of distinct nodes (by identity) `roots` reach: smaller after
+/// [`share_identical`] exactly when some sub-DAG was shared.
+#[allow(dead_code)]
+pub fn distinct_nodes(roots: &[QueryRoot]) -> usize {
+    roots
+        .iter()
+        .filter_map(|root| match root {
+            QueryRoot::Operator(node) => Some(node),
+            QueryRoot::Scalar(_) => None,
+        })
+        .flat_map(asap_types::ir::OperatorNode::reachable)
+        .map(|node| std::rc::Rc::as_ptr(&node))
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
+// ── Query-language frontends ──────────────────────────────────────────
+
+/// PromQL workload roots, each series' identity as a column.
 pub fn lower_promql(workload: &PlanningWorkload) -> Vec<QueryRoot> {
     lower_promql_roots(workload).expect("workload lowers")
 }

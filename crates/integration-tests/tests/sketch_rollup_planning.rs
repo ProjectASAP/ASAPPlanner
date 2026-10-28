@@ -4,25 +4,17 @@
 //! less than a build per query over the raw rows. Selection prices fixed
 //! plans made of the memo's candidates, so no assertion depends on a timed
 //! search.
-use std::rc::Rc;
-
 use asap_executor::physical_planner::promql_rows;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_integration_tests::planning::{
-    cheapest_of, compose_memo_plan, expanded_memo, select_among,
-};
-use asap_logical_asap_optimization::memo::candidates::{
-    CandidateMemo, CandidateOrigin, ImplementationCandidate,
-};
+use asap_integration_tests::planning::{builds_and_rollups, expanded_memo, select_rollup};
 use asap_types::ir::properties::{AccuracyMetric, AccuracyScope, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
-use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
+use asap_types::ir::QueryRoot;
 use asap_types::workload::{
     DataWorkload, Predictability, QueryRecurrence, QueryRequirements, QueryWorkloadEntry,
     RepeatedDemand, RepetitionInterval,
 };
-use std::collections::BTreeMap;
 
 fn catalog() -> SqlCatalog {
     SqlCatalog::new().with_table(
@@ -81,137 +73,6 @@ async fn sql_roots(queries: &[&str], accuracy: &AccuracyTarget) -> Vec<(usize, Q
         roots.push((i, QueryRoot::Operator(root)));
     }
     roots
-}
-
-/// Whether `node` builds a summary.
-fn is_build(node: &Rc<OperatorNode>) -> bool {
-    matches!(
-        node.asap(),
-        Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
-    )
-}
-
-/// `(group, candidate index)` of query `q`'s own groups' (read by `q`
-/// alone) candidates `keep` accepts; those of the topmost group first.
-fn own_choices(
-    memo: &CandidateMemo,
-    q: usize,
-    keep: impl Fn(&ImplementationCandidate) -> bool,
-) -> Vec<(usize, usize)> {
-    let mut found: Vec<_> = memo
-        .candidates
-        .iter()
-        .enumerate()
-        .filter(|(group, _)| memo.groups[*group].queries == [q])
-        .flat_map(|(group, candidates)| {
-            candidates
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| keep(c))
-                .map(move |(index, _)| (group, index))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    // Children come before parents in the memo.
-    found.sort_by_key(|(group, _)| std::cmp::Reverse(*group));
-    found
-}
-
-/// The selected plan's roots among fixed plans of `memo`'s queries, and
-/// the selection's lowest prices of `separate` and of the `shared` plans:
-/// - `separate`: each query reads its own summary build (its topmost own
-///   group's first Pass 1 candidate that builds one);
-/// - `shared{g}`: every query reads the summary state group `g`, its own
-///   estimate or a regrouping merge of it, when every query can.
-fn select_rollup(
-    memo: &CandidateMemo,
-    queries: usize,
-    entries: &[QueryWorkloadEntry],
-    data: &DataWorkload,
-) -> (Vec<Rc<OperatorNode>>, f64, f64) {
-    let builds = |node: &Rc<OperatorNode>| OperatorNode::reachable(node).iter().any(is_build);
-    let separate: BTreeMap<usize, usize> = (0..queries)
-        .map(|q| {
-            own_choices(memo, q, |c| {
-                c.origin == CandidateOrigin::Pass1 && builds(&c.node)
-            })
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| panic!("Q{} has a summary candidate", q + 1))
-        })
-        .collect();
-    let mut plans = vec![(
-        "separate".to_string(),
-        compose_memo_plan(memo, queries, &separate),
-    )];
-    for (state, group) in memo.groups.iter().enumerate() {
-        if !is_build(&group.node) || group.queries.len() < queries {
-            continue;
-        }
-        let reading: Option<BTreeMap<usize, usize>> = (0..queries)
-            .map(|q| {
-                own_choices(memo, q, |c| {
-                    c.children.iter().any(|child| child.0 as usize == state)
-                })
-                .into_iter()
-                .next()
-            })
-            .collect();
-        if let Some(choice) = reading {
-            plans.push((
-                format!("shared{state}"),
-                compose_memo_plan(memo, queries, &choice),
-            ));
-        }
-    }
-    assert!(
-        plans.len() > 1,
-        "a plan in which every query reads one build"
-    );
-    let named: Vec<(&str, Vec<QueryRoot>)> = plans
-        .iter()
-        .map(|(name, roots)| {
-            (
-                name.as_str(),
-                roots.iter().cloned().map(QueryRoot::Operator).collect(),
-            )
-        })
-        .collect();
-    let (physical, selection) = select_among(&named, entries, data);
-    let selected = physical
-        .iter()
-        .find(|plan| plan.id == selection.selected)
-        .expect("the selected plan");
-    let roots = plans
-        .iter()
-        .find(|(name, _)| *name == selected.from_logical)
-        .map(|(_, roots)| roots.clone())
-        .unwrap();
-    let shared = plans[1..]
-        .iter()
-        .map(|(name, _)| cheapest_of(&selection, name))
-        .fold(f64::INFINITY, f64::min);
-    (roots, cheapest_of(&selection, "separate"), shared)
-}
-
-/// The summary builds and rollups (regrouping merges) `roots` read, each
-/// once.
-fn builds_and_rollups(roots: &[Rc<OperatorNode>]) -> (usize, usize) {
-    let mut seen = std::collections::HashSet::new();
-    let (mut builds, mut rollups) = (0, 0);
-    for node in roots.iter().flat_map(OperatorNode::reachable) {
-        if !seen.insert(Rc::as_ptr(&node)) {
-            continue;
-        }
-        match node.asap() {
-            _ if is_build(&node) => builds += 1,
-            Some(ASAPOp::SummaryMerge {
-                group_by: Some(_), ..
-            }) => rollups += 1,
-            _ => {}
-        }
-    }
-    (builds, rollups)
 }
 
 /// Distinct users by (region, service) and by service, both at relative

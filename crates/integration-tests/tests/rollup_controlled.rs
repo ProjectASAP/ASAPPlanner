@@ -1,8 +1,7 @@
 //! Controlled plans for the viewer's actual distinct-count rollup workload.
+use asap_integration_tests::planning::{builds_and_rollups, expanded_memo, select_rollup};
 use asap_logical_asap_optimization::{
-    asap_aware_cse::{
-        rollup_candidates, rollup_pass2_candidates, sharing_candidates, with_shared_candidates,
-    },
+    asap_aware_cse::{rollup_candidates, rollup_pass2_candidates},
     per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
     },
@@ -79,8 +78,20 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
             .into_iter()
             .map(|(_, r)| r)
             .collect();
-        let sharing = sharing_candidates(&roots);
-        let roots = with_shared_candidates(&roots, &sharing, &vec![true; sharing.len()]);
+        // Identical sub-DAGs made one node, as the memo's groups are.
+        let roots: Vec<_> = asap_types::ir::cse::share_common_sub_dags(
+            roots
+                .iter()
+                .enumerate()
+                .map(|(id, root)| match root {
+                    QueryRoot::Operator(node) => (id, Rc::clone(node)),
+                    QueryRoot::Scalar(_) => panic!("operator root"),
+                })
+                .collect(),
+        )
+        .into_iter()
+        .map(|(_, node)| QueryRoot::Operator(node))
+        .collect();
         let mut variants = vec![("separate", roots.clone())];
         if algorithm.is_some() {
             let rules = rollup_candidates(&roots);
@@ -212,4 +223,11 @@ fn production_distinct_rollup_finds_shared_kmv() {
         rollup,
         "production search must select the cheaper legal rollup"
     );
+    // The same shape without a timed search: among fixed plans of the memo
+    // (a KMV per query, or both reading one KMV state group), plan
+    // selection with the built-in models picks one build and one rollup.
+    let memo = expanded_memo(fixture().1.into_iter().enumerate().collect(), &entries);
+    let (selected, separate, shared) = select_rollup(&memo, 2, &entries, data);
+    assert!(shared < separate, "{shared} vs {separate}");
+    assert_eq!(builds_and_rollups(&selected), (1, 1));
 }

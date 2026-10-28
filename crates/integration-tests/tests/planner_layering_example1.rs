@@ -29,8 +29,7 @@ fn pipeline() -> Run {
 // a production workload search or an exhaustive memo archive.
 fn rule_fixture(workload: &asap_types::workload::PlanningWorkload) -> Run {
     use asap_logical_asap_optimization::asap_aware_cse::{
-        pane_candidates, sharing_candidates, window_composition_pass2_candidates,
-        with_shared_candidates,
+        pane_candidates, window_composition_pass2_candidates,
     };
     use asap_logical_asap_optimization::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
@@ -74,26 +73,15 @@ fn rule_fixture(workload: &asap_types::workload::PlanningWorkload) -> Run {
                 .into_iter()
                 .map(|candidate| candidate.roots.unwrap()),
         );
+        // Each window form alone and with its identical input shared. The
+        // memo shares an identical range selector whole, never its scan
+        // alone; that variant reads the same rows twice and is dominated.
         for window in windows {
-            let sharing = sharing_candidates(&window);
-            computations.push(window.clone());
-            let scans: Vec<_> = sharing
-                .iter()
-                .map(|candidate| {
-                    matches!(candidate.nodes[0].non_asap(), Some(NonASAPOp::Scan { .. }))
-                })
-                .collect();
-            if scans.iter().any(|&share| share) {
-                computations.push(with_shared_candidates(&window, &sharing, &scans));
-            }
-            if sharing.iter().any(|candidate| {
-                !matches!(candidate.nodes[0].non_asap(), Some(NonASAPOp::Scan { .. }))
-            }) {
-                computations.push(with_shared_candidates(
-                    &window,
-                    &sharing,
-                    &vec![true; sharing.len()],
-                ));
+            let shared = share_identical(&window);
+            let sharing = distinct_nodes(&shared) < distinct_nodes(&window);
+            computations.push(window);
+            if sharing {
+                computations.push(shared);
             }
         }
     }
