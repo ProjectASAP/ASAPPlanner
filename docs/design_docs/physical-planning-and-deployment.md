@@ -59,8 +59,9 @@ decided by a `MaterializationAssignment`, as the layer contract below states.
    view's refresh is one compiled DAG (the precompute DAG) and the query run
    another, joined by the views. It does not see raw ingestion, panes,
    storage or stored-state readout.
-4. **Backend** binds and executes the timed DAG. A query-time summary requires
-   the deployment to supply the state's raw input as a query-time source.
+4. **Backend** executes the compiled DAGs, serving raw data and stored views
+   through its `DataStore`. A query-time summary requires the deployment to
+   serve the state's raw input to the query run.
 
 ### Candidate generation and deployment selection
 
@@ -74,14 +75,14 @@ Query semantics + accuracy and freshness requirements
                     ↓ Planner
 Supported Physical DAG candidates + typed inputs/outputs + requirements
                     ↓ backend
-Binding feasibility + runtime statistics + resource limits + ERP
-                    ↓ backend deployment compiler
-Selected PrecomputePlan + QueryPlan + MaterializedViews
+Feasibility + runtime statistics + resource limits + ERP
+                    ↓ backend deployment
+Selected plan: view refresh DAGs + query DAGs + MaterializedViews
 ```
 
 Planner owns operators, dependencies, sharing, and each candidate's
 materialization frontier. The backend rejects candidates it cannot realize and
-costs feasible candidates over a comparable workload and time horizon. It binds
+costs feasible candidates over a comparable workload and time horizon. It runs
 the selected candidate; it does not lower the logical computation again, exchange
 operators, or move an operator across the selected frontier. A missing quote is
 not a zero-cost implementation. ERP evidence cannot authorize an illegal rewrite.
@@ -132,8 +133,8 @@ not independently configured in deployment metadata. Unsupported or unresolved
 semantics cannot be treated as compatible.
 
 Logical planning defines the semantics; physical compilation realizes them as
-operators and typed boundaries. Deployment binds concrete readers and state
-records that satisfy those requirements. A stored summary definition records or
+operators and input slots. Deployment serves, through its `DataStore`, raw
+data and stored states that satisfy those requirements. A stored summary definition records or
 references the relevant semantics for compatibility checks. Matching a definition
 alone does not establish actual window coverage, revision compatibility or
 readiness; those require runtime checks. Physical location, encoding, scheduling
@@ -188,8 +189,8 @@ KLLBuild(k=200)
 
 3. Physical DAGs
 
-Precompute DAG:
-TableSlot<latency> → TimeRange(1m)
+Precompute DAG (the pane view's refresh):
+RawDataSlot<latency> → TimeRange(1m)
         ↓
 NativeKllBuild(k=200)
         ↓
@@ -217,7 +218,7 @@ run KLL build over each complete 1-minute input pane
 store as latency-kll-1m/<window>
 
 Query:
-resolve five latency-kll-1m states
+read_materialized_view resolves five latency-kll-1m states
         ↓
 execute query Physical DAG
         ↓
@@ -310,8 +311,8 @@ collapses two layers: Stage 2 materialization (#509) owns maintenance, and
 ### Precompute Physical DAG
 
 ```text
-TableSlot<latency>(
-    bounded = true
+RawDataSlot<latency>(
+    read_raw_data(TimeSeries { latency })
 )
         ↓
 TimeRange(1m)
@@ -329,9 +330,9 @@ through its `DataStore` (§4).
 ### Query Physical DAG
 
 ```text
-MaterializedViewSlot<KllState>(
+MaterializedViewSlot<KllState> × 5 (pane i, i = 0..4)(
     k = 200,
-    coverage = requested aligned 5m
+    read_materialized_view(pane_i, (T - i·1m - 1m, T - i·1m])
 )
         ↓
 NativeKllMerge(k=200)
@@ -643,10 +644,10 @@ Physical:
 
 Deployment:
     "Read OTLP here, store panes here,
-     and bind these five panes for this aligned query."
+     and serve these five panes for this aligned query."
 ```
 
-The deployment engine executes the bound Physical DAGs through ASAPPlanner's
+The deployment engine executes the instantiated Physical DAGs through ASAPPlanner's
 shared physical operator implementation library, `asap-executor`, and
 its DAG runtime. The merge executes once per run for both consumers. Execution
 does not introduce additional planning decisions.
