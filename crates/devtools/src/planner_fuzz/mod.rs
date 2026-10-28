@@ -47,6 +47,7 @@ use asap_plan_selection::pass::Stage1ToStage3Search;
 use asap_plan_selection::{select_plan, PlanSelectionSettings, PlanningModels, SearchAlgorithm};
 use asap_planner::PlannerExecutorCompileCheck;
 use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::sketch::SketchAlgorithm;
 use asap_types::ir::QueryRoot;
 use asap_types::workload::{
     DataArrival, DataWorkload, PlanningWorkload, QueryLanguage, QueryWorkload, RepeatingEntry,
@@ -134,6 +135,11 @@ pub struct FuzzWorkload {
     /// `false`).
     #[serde(default)]
     pub query_time_results_retained: bool,
+    /// The only sketch families the deployment builds; `None` for every
+    /// family the executor builds. A witness plans `W` with one family to
+    /// have the planner size that family's build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sketch_families: Option<Vec<SketchAlgorithm>>,
 }
 
 impl FuzzWorkload {
@@ -197,7 +203,16 @@ impl FuzzWorkload {
     /// The `--deployment-capabilities` this workload plans with.
     pub fn deployment(&self) -> DeploymentCapabilities {
         DeploymentCapabilities {
-            supported_summaries: Some(asap_executor::supported_summary_families()),
+            supported_summaries: Some(
+                asap_executor::supported_summary_families()
+                    .into_iter()
+                    .filter(|supported| {
+                        self.sketch_families
+                            .as_ref()
+                            .is_none_or(|only| only.contains(&supported.family))
+                    })
+                    .collect(),
+            ),
             raw_data_retained: self.raw_data_retained,
             query_time_results_retained: self.query_time_results_retained,
         }
@@ -284,6 +299,7 @@ pub fn read_seed_file(path: &std::path::Path) -> Result<FuzzWorkload, String> {
         tables: tables.as_array().cloned().unwrap_or_default(),
         raw_data_retained: true,
         query_time_results_retained: false,
+        sketch_families: None,
     })
 }
 
