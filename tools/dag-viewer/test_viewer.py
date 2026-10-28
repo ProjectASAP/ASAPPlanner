@@ -1107,6 +1107,23 @@ class AppTests(unittest.TestCase):
         roots, _ = self.enumerated_roots(doc, "E1")
         self.assertEqual(roots, {first: ["q2"], second: ["q1"]})
 
+    def test_a_root_group_shared_by_two_queries_is_both_queries_root(self):
+        """One root group answering q1 and q2: its root is the root of both,
+        and highlighting q2 keeps it bright."""
+        doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
+        groups = {g["id"]: g for g in doc["memo"]["steps"][1]["groups"]}
+        groups[3]["roots_of"], groups[7]["roots_of"] = [0, 1], []
+        choice = doc["memo"]["enumeration"]["choices"][0]
+        choice["dag"]["roots"] = choice["dag"]["roots"][:1]
+        root = choice["dag"]["roots"][0]["Operator"]
+        js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
+        js.eval("__els.enumRows.__on.click({ target: { closest() { return { dataset: { id: 'E1' } }; } } })")
+        roots = {e["data"]["nodeId"]: e["data"]["rootFor"] for e in self.ev(js, "__rendered.cy1") if e["data"].get("rootFor")}
+        self.assertEqual(roots, {root: ["q1", "q2"]})
+        js.eval("__els.queryPick.__on.change({ target: { value: 'q2' } })")
+        self.assertNotIn(f"n{root}", self.ev(js, "__dimmed.cy1"))
+        self.assertNotIn("not matched", self.text(js, "lane1-meta"))
+
     def test_enumerated_roots_without_the_steps_memo_name_no_query(self):
         doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
         doc["memo"]["steps"] = doc["memo"]["steps"][:1]

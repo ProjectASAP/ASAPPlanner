@@ -209,14 +209,15 @@
 
   // Draw enumerated DAG `id` of `memo.enumeration` (enumeration.js) in
   // lane 1; the document has no physical plan for it.
-  function showEnumerated(id, dag, description, rootNames) {
+  function showEnumerated(id, dag, description, perQueryDag) {
     current = { logical: null, physical: null };
     $('pick1').value = '';
     $('pick2').value = '';
-    // Its roots are its root groups, named by the queries each answers when known.
-    render(1, dag, false, null, rootNames || dag.roots.map((_, k) => `root group #${k + 1}`));
+    // Its roots are its root groups; drawn per query when they map to queries.
+    if (perQueryDag) render(1, perQueryDag, false, null);
+    else render(1, dag, false, null, dag.roots.map((_, k) => `root group #${k + 1}`));
     $('lane1-meta').innerHTML = `enumerated DAG <b>${esc(id)}</b> · ${esc(description)} · ${dag.nodes.length} nodes` +
-      (rootNames ? '' : ' · roots not matched to queries (the enumerated step’s memo is not in the document)');
+      (perQueryDag ? '' : ' · roots not matched to queries');
     clearLane(2, 'no physical plan for an enumerated DAG');
     renderRanking();
   }
