@@ -195,6 +195,7 @@ fn planner_unit_frequency_update_binds_as_a_value_frequency_build() -> Result<()
         materialization: Default::default(),
         output_schema: (*state).clone(),
         guarantee: None,
+        retention_ms: None,
     };
     let build = compile_node(&node, std::slice::from_ref(&input))?;
     let batch = Batch::try_new(

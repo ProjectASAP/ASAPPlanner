@@ -14,6 +14,9 @@ pub use schema::error::SchemaDerivationError;
 pub mod canonicalize;
 pub mod cse;
 pub mod flat;
+/// What a runtime keeps for a physical ASAP DAG: its materialized views and
+/// raw-data retention, derived from the DAG.
+pub mod materialized_view;
 /// Physical ASAP DAG: the flattened operators plus execution timing.
 pub mod physical_export;
 pub use properties::timing::{

@@ -46,10 +46,36 @@ pub use asap_plan_selection::pass::{
 
 mod installable;
 pub use installable::{
-    installable_plan_of, plan_installable, InstallablePlan, InstallablePlanError, InstalledQuery,
+    installable_plan_of, plan_installable, InstallablePlan, InstallablePlanError,
     PlannerExecutorCompileCheck, PredictedNodeUsage, PredictedQueryUsage, PredictedUsage,
-    SelectedPlanReport, StoredCoverage, StoredOutput, StoredOutputBuild, StoredOutputInputs,
+    SelectedPlanReport, INSTALLABLE_PLAN_WIRE_VERSION,
 };
+
+/// Helpers for a runtime's correctness tests (feature `test-support`).
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use std::collections::HashMap;
+
+    use crate::{InstallablePlan, InstallablePlanError};
+
+    /// For correctness tests only, never for installing: `plan` with
+    /// nothing materialized, the same operators, summaries and parameters
+    /// with every node at query time, and the same query texts. A runtime's
+    /// test compares its installed plan's answers with the executor running
+    /// this one over raw data samples. Validates `plan` first.
+    pub fn query_time_reference(
+        plan: &InstallablePlan,
+    ) -> Result<InstallablePlan, InstallablePlanError> {
+        plan.validate()?;
+        let dag = plan.dag.with_every_node_at_query_time()?;
+        InstallablePlan::of_dag(
+            dag,
+            plan.query_texts.clone(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+    }
+}
 
 // What a deployment runtime needs to build a `UserInput` and read an
 // `InstallablePlan`, so it depends on this crate and `asap-executor` alone.
@@ -63,9 +89,11 @@ pub use asap_plan_selection::{
     MeasuredOperationCosts, NodePriceSource, OperatorCost, OperatorKind, PlanSelectionSettings,
     RejectionCause, ResourceSpeed, ResourceUnitCost, SearchReport, SummaryOperation,
 };
-pub use asap_types::ir::physical_export::{
-    PhysicalASAPDAG, PhysicalASAPDAGDocument, PhysicalASAPNodeId, RawDataSampleWindow,
+pub use asap_types::ir::materialized_view::{
+    InstallableDagError, MaterializedView, MaterializedViewInputs, MaterializedViewRefresh,
+    RawDataRetention, RawDataWindow, ViewCoverage,
 };
+pub use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 pub use asap_types::ir::properties::summary_coverage::{ColumnIdentity, Constraint, SelectionBox};
 pub use asap_types::ir::properties::ExecutionTiming;
 pub use asap_types::ir::schema::{SketchAlgorithm, SketchParams, StatisticKind};
@@ -230,7 +258,7 @@ pub enum PlanError {
     #[error(transparent)]
     Optimize(OptimizeError),
     /// The selected plan cannot be installed ([`plan_installable`]): an
-    /// unsupported raw-data-sample window or stored output (unsatisfiable
+    /// unsupported raw-data window or materialized view (unsatisfiable
     /// request), or an internal bug; see [`InstallablePlanError`].
     #[error("installable plan: {0}")]
     Installable(InstallablePlanError),

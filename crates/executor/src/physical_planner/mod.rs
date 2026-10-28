@@ -39,7 +39,7 @@ fn invalid(message: impl Into<String>) -> Error {
 pub mod precompute;
 // The executor's PromQL row encoding and the timing frontier are internals:
 // a deployment runtime binds raw data at each `Scan` through a
-// `TableProvider` and reads the stored outputs from the installable plan. The Planner's own
+// `TableProvider` and derives the materialized views from the installable plan. The Planner's own
 // tests reach them with the `test-support` feature.
 #[cfg(feature = "test-support")]
 pub mod promql_rows;
@@ -1664,6 +1664,7 @@ mod compilation_deadline_tests {
                 materialization: Materialization::NotMaterialized,
                 output_schema: schema.clone(),
                 guarantee: None,
+                retention_ms: None,
             })
             .collect();
         let deadline = Instant::now() + Duration::from_millis(1);

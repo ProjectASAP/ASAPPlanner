@@ -46,6 +46,7 @@ fn sorted_scan(schema: &Schema, identity: &Source) -> PhysicalASAPDAG {
         materialization: Default::default(),
         output_schema: schema.clone(),
         guarantee: None,
+        retention_ms: None,
     };
     PhysicalASAPDAG {
         nodes: vec![

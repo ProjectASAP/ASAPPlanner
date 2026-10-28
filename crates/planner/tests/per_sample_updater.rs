@@ -1,4 +1,4 @@
-//! A runtime that ingests sample by sample builds a stored pane's states
+//! A runtime that ingests sample by sample refreshes a materialized pane's states
 //! with `StateColumnUpdater`, the code the plan's `SummaryAgg` runs on a
 //! batch (issue #762): the same states as the executor's pane build.
 
@@ -13,8 +13,8 @@ use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::summary_kernels::exact::ExactAccumulator;
 use asap_executor::StateColumnUpdater;
 use asap_planner::{
-    plan_installable, DeploymentCapabilities, FrontendInput, PlanningModels, PlanningWorkload,
-    UserInput,
+    plan_installable, test_support::query_time_reference, DeploymentCapabilities, FrontendInput,
+    PlanningModels, PlanningWorkload, UserInput,
 };
 use futures::StreamExt;
 
@@ -25,7 +25,7 @@ use time_series::{series_identity, series_labels, time_series_tables, RawDataSam
 const EVALUATION_MS: i64 = 3_600_000;
 
 #[tokio::test]
-async fn per_sample_updates_build_the_stored_pane_the_plan_builds() {
+async fn per_sample_updates_build_the_materialized_pane_the_plan_refreshes() {
     // What the user writes: the 5-minute rate of a counter, every minute,
     // exactly, over 1,000 series sampled every 15 s.
     let workload: PlanningWorkload = serde_json::from_str(
@@ -43,31 +43,28 @@ async fn per_sample_updates_build_the_stored_pane_the_plan_builds() {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    // The installable plan: the selected DAG and its stored outputs.
+    // The installable plan: the selected DAG and its materialized views.
     let plan = plan_installable(UserInput::new(
         &workload,
         FrontendInput::Promql { histograms: None },
         PlanningModels::builtin().with_deployment_capabilities(&capabilities),
     ))
     .await
-    .unwrap();
-    let dag = &plan.dag.dag;
-    // The newest stored pane and its window at this evaluation.
-    let output = plan
-        .stored_outputs
+    .unwrap()
+    .0;
+    let dag = &plan.dag;
+    // The newest pane view and its window at this evaluation.
+    let views = plan.materialized_views().unwrap();
+    let output = views
         .iter()
-        .max_by_key(|output| {
-            output.inputs.raw_data_sample_windows[0]
-                .bounds_ms(EVALUATION_MS)
-                .1
-        })
+        .max_by_key(|output| output.inputs.raw_data_windows[0].bounds_ms(EVALUATION_MS).1)
         .unwrap();
-    let (start_ms, end_ms) = output.inputs.raw_data_sample_windows[0].bounds_ms(EVALUATION_MS);
+    let (start_ms, end_ms) = output.inputs.raw_data_windows[0].bounds_ms(EVALUATION_MS);
     // Five one-minute panes, the newest (59 min, 60 min].
-    assert_eq!(plan.stored_outputs.len(), 5);
+    assert_eq!(views.len(), 5);
     assert_eq!((start_ms, end_ms), (3_540_000, 3_600_000));
-    // The stored node's summary family, as the plan declares it: the
-    // `SummaryAgg` at or below the stored node.
+    // The view node's summary family, as the plan declares it: the
+    // `SummaryAgg` at or below the view node.
     let family = {
         let mut id = output.node_id;
         loop {
@@ -195,7 +192,7 @@ async fn per_sample_updates_build_the_stored_pane_the_plan_builds() {
     assert_eq!(per_sample, from_dag);
 }
 
-/// Run `ids` of `dag` with the stored states `inputs` bound at their nodes
+/// Run `ids` of `dag` with the view states `inputs` bound at their nodes
 /// and the raw `samples` at its `Scan`s, in `scope`: each id's answer rows
 /// as (series labels, value), sorted.
 async fn answers(
@@ -205,7 +202,7 @@ async fn answers(
     ids: &[u64],
     scope: Scope,
 ) -> Vec<Vec<(BTreeMap<String, String>, f64)>> {
-    // Which nodes are bound stored states; each one's schema is its DAG node's.
+    // Which nodes are bound view states; each one's schema is its DAG node's.
     let boundaries: BTreeSet<u64> = inputs.keys().copied().collect();
     // The executor's plan for `ids`, cut at the bound inputs.
     let compiled = compile(dag, &boundaries, ids).unwrap();
@@ -246,7 +243,7 @@ async fn answers(
     results
 }
 
-/// A runtime builds every stored pane sample by sample, installs each as a
+/// A runtime builds every materialized pane sample by sample, installs each as a
 /// batch with `Batch::try_from_columns` (no DAG run), and answers the query
 /// from them: the same answers as the plan's query-time reference over the
 /// raw data samples.
@@ -279,8 +276,9 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
         PlanningModels::builtin().with_deployment_capabilities(&capabilities),
     ))
     .await
-    .unwrap();
-    let dag = &plan.dag.dag;
+    .unwrap()
+    .0;
+    let dag = &plan.dag;
     // What the runtime received: 3 series, a counter sample every 15 s over
     // the hour (one series resets), the last at the evaluation time.
     let samples: Vec<RawDataSample> = ["a", "b", "c"]
@@ -304,12 +302,12 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
             })
         })
         .collect();
-    // Every stored pane, built sample by sample and installed as a batch.
+    // Every materialized pane, built sample by sample and installed as a batch.
     let mut panes = BTreeMap::new();
-    for output in &plan.stored_outputs {
+    for output in &plan.materialized_views().unwrap() {
         // The pane's window, `(start_ms, end_ms]`, at this evaluation.
-        let (start_ms, end_ms) = output.inputs.raw_data_sample_windows[0].bounds_ms(EVALUATION_MS);
-        // The stored node's family and output schema, from the plan.
+        let (start_ms, end_ms) = output.inputs.raw_data_windows[0].bounds_ms(EVALUATION_MS);
+        // The view node's family and output schema, from the plan.
         let node = dag.nodes.iter().find(|n| n.id == output.node_id).unwrap();
         let mut id = output.node_id;
         let family = loop {
@@ -347,7 +345,7 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
         }
         // ... sealed at pane close: one rate record per series.
         let states = Arc::new(updater.seal());
-        // The pane's columns, in the stored node's schema: the pane end as
+        // The pane's columns, in the view node's schema: the pane end as
         // its time, each series' state, and its identity.
         let schema = Arc::new(node.output_schema.clone());
         let groups = identities.len();
@@ -387,18 +385,14 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
         evaluation_time_ms: EVALUATION_MS,
         revision: 1,
     };
-    let roots: Vec<u64> = plan.queries.iter().map(|q| q.root_node_id as u64).collect();
+    let roots: Vec<u64> = plan.dag.roots.iter().map(|&r| r as u64).collect();
     // The query's answers from the installed panes.
     let from_panes = answers(dag, panes, &samples, &roots, query.clone()).await;
     // The plan's query-time reference over the raw data samples.
-    let reference = plan.query_time_reference().unwrap();
-    let reference_roots: Vec<u64> = reference
-        .queries
-        .iter()
-        .map(|q| q.root_node_id as u64)
-        .collect();
+    let reference = query_time_reference(&plan).unwrap();
+    let reference_roots: Vec<u64> = reference.dag.roots.iter().map(|&r| r as u64).collect();
     let expected = answers(
-        &reference.dag.dag,
+        &reference.dag,
         BTreeMap::new(),
         &samples,
         &reference_roots,

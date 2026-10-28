@@ -78,6 +78,7 @@ fn node(id: usize, payload: Payload, output: Schema) -> PhysicalASAPDAGNode {
         materialization: Materialization::NotMaterialized,
         output_schema: output,
         guarantee: None,
+        retention_ms: None,
     }
 }
 

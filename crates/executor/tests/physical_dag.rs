@@ -519,6 +519,7 @@ fn bind_physical_asap_dag_before_execution() {
         materialization: Default::default(),
         output_schema: (*schema).clone(),
         guarantee: None,
+        retention_ms: None,
     };
     let mut dag = PhysicalASAPDAG {
         nodes: vec![
@@ -668,6 +669,7 @@ fn source_batches_must_match_the_bound_schema() {
             materialization: Default::default(),
             output_schema: (*expected).clone(),
             guarantee: None,
+            retention_ms: None,
         }],
         edges: vec![],
         roots: vec![0],
@@ -752,6 +754,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         output_state: ExecutionDataState::QUERY_ROWS,
         materialization: Default::default(),
         guarantee: None,
+        retention_ms: None,
     };
     let edge =
         |producer, consumer, role, schema: &asap_executor::values::SchemaRef| PhysicalASAPDAGEdge {
@@ -1231,6 +1234,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
         materialization: Default::default(),
         output_schema: (*input).clone(),
         guarantee: None,
+        retention_ms: None,
     };
     let sort = compile_node(
         &node(
@@ -1318,6 +1322,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
             output_state: ExecutionDataState::QUERY_ROWS,
             materialization: Default::default(),
             guarantee: None,
+            retention_ms: None,
             payload: PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::Join {
                 kind: JoinKind::Semi,
                 pred: planner_types::ir::Predicate(planner_types::ir::ScalarExpr::Compare {
@@ -1432,6 +1437,7 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
         output_state: ExecutionDataState::INGESTION_ROWS,
         materialization: Default::default(),
         guarantee: None,
+        retention_ms: None,
         payload: PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::BinaryOp {
             operator: BinaryOperator {
                 kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub),

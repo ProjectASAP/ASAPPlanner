@@ -78,6 +78,7 @@ fn plan(
         materialization: Default::default(),
         output_schema: (**schema).clone(),
         guarantee: None,
+        retention_ms: None,
     };
     let edge = |producer, consumer| PhysicalASAPDAGEdge {
         producer,
@@ -514,6 +515,7 @@ fn windowed_plan(shift_ms: Option<i64>) -> PhysicalASAPDAG {
         materialization: Default::default(),
         output_schema: schema.clone(),
         guarantee: None,
+        retention_ms: None,
     };
     let edge = |producer, consumer| PhysicalASAPDAGEdge {
         producer,

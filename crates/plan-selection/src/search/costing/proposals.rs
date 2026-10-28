@@ -168,6 +168,7 @@ impl TemplateCatalog {
             materialization: Materialization::NotMaterialized,
             output_schema: node.schema.clone(),
             guarantee: node.guarantee.clone(),
+            retention_ms: None,
         });
         self.children.push(children);
         self.lookbacks.push(lookback);

@@ -3,8 +3,8 @@
 //! `plan_installable` and run with the Planner's executor: the exact plan
 //! compiles and answers each city's top hosts with their counts, the same
 //! rows PromQL `topk by (city)` answers over the same data, and the plan
-//! Stage 3 selects under an approximate target installs (each stored
-//! output it keeps builds).
+//! Stage 3 selects under an approximate target installs (each materialized
+//! view it keeps refreshes).
 #![cfg(all(feature = "sql", feature = "promql"))]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,8 +15,8 @@ use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::sources::{BindingDataSources, DataSources, MemorySource};
 use asap_executor::values::{Batch, Value};
 use asap_planner::{
-    plan_installable, FrontendInput, InstallablePlan, PlanningModels, PlanningWorkload, SqlCatalog,
-    UserInput,
+    plan_installable, test_support::query_time_reference, FrontendInput, InstallablePlan,
+    PlanningModels, PlanningWorkload, SqlCatalog, UserInput,
 };
 use asap_types::ir::operator::Source as DataSource;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
@@ -94,6 +94,7 @@ async fn plan_sql(queries: &[&str], accuracy: &str) -> InstallablePlan {
     ))
     .await
     .expect("plan_installable plans the SQL workload")
+    .0
 }
 
 async fn plan_promql(query: &str) -> InstallablePlan {
@@ -104,6 +105,7 @@ async fn plan_promql(query: &str) -> InstallablePlan {
     ))
     .await
     .expect("plan_installable plans the PromQL workload")
+    .0
 }
 
 /// Rows per `(city, host)` in the last 5 minutes. `nyc` has seven hosts
@@ -200,7 +202,6 @@ fn ranked_rows(batches: &[Batch], ranked: &str) -> BTreeSet<(String, String, i64
 fn run_sql(plan: &InstallablePlan, query: usize) -> Vec<Batch> {
     let reference = plan
         .dag
-        .dag
         .with_every_node_at_query_time()
         .expect("the plan runs at query time");
     let schema = reference
@@ -261,9 +262,9 @@ fn run_promql(plan: &InstallablePlan) -> Vec<Batch> {
             value: 1.0,
         })
         .collect();
-    let reference = plan.query_time_reference().unwrap();
-    let dag = &reference.dag.dag;
-    let roots = [reference.queries[0].root_node_id as u64];
+    let reference = query_time_reference(plan).unwrap();
+    let dag = &reference.dag;
+    let roots = [reference.dag.roots[0] as u64];
     let compiled = compile(dag, &BTreeSet::new(), &roots).expect("the executor compiles the plan");
     // The samples bound at the plan's `Scan` of `metrics`.
     let data_sources = BindingDataSources {
@@ -346,8 +347,8 @@ async fn an_exact_sql_top_5_answers_its_hosts() {
 }
 
 /// The issue's two queries under ε 0.01, δ 0.001: the plan Stage 3 selects
-/// installs, so the executor builds every stored output it keeps; its
-/// compile check rejects a plan whose stored output it cannot build as it
+/// installs, so the executor refreshes every materialized view it keeps; its
+/// compile check rejects a plan whose view it cannot refresh as it
 /// rejects one whose query run it cannot compile.
 #[tokio::test]
 async fn the_selected_approximate_plan_installs_and_compiles() {
@@ -361,7 +362,7 @@ async fn the_selected_approximate_plan_installs_and_compiles() {
 /// count sketch at ingestion time, which the executor cannot build either,
 /// is rejected like the same plan building it at query time, not selected.
 #[tokio::test]
-async fn a_plan_whose_stored_output_does_not_build_is_rejected() {
+async fn a_plan_whose_materialized_view_does_not_refresh_is_rejected() {
     let with_rn =
         TOP_5_HOSTS_PER_CITY.replace("SELECT city, host, c FROM", "SELECT city, host, c, rn FROM");
     let catalog = SqlCatalog::new().with_table("metrics", metrics_schema());

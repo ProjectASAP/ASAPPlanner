@@ -83,6 +83,7 @@ fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> CompiledPhys
         materialization: Default::default(),
         output_schema: (*schema).clone(),
         guarantee: None,
+        retention_ms: None,
     };
     let operator = compile_node(&node, &[schema.clone(), schema.clone()]).unwrap();
     CompiledPhysicalDAG::from_operators(
@@ -415,6 +416,7 @@ fn stored_series_evaluations_support_filters_and_sets() {
                             value_schema.clone()
                         },
                         guarantee: None,
+                        retention_ms: None,
                     })
                     .collect::<Vec<_>>();
             let edges = [

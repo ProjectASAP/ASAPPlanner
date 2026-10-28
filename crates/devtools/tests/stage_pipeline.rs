@@ -7,7 +7,7 @@ use asap_devtools::planner_layering_examples::example1;
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages};
 use asap_plan_selection::RejectionCause;
 use asap_types::ir::flat::FlatDag;
-use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPDAGDocument};
+use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::QueryRoot;
 use asap_types::workload::PlanningWorkload;
 
@@ -136,7 +136,7 @@ fn example1_document_preserves_workload_and_validates_archived_plans() {
         assert!(candidate.get("cost").is_none(), "Stage 2 has no cost");
         let dag: PhysicalASAPDAG = serde_json::from_value(candidate["dag"].clone()).unwrap();
         assert_eq!(dag.roots.len(), queries);
-        PhysicalASAPDAGDocument::new(dag).validate().unwrap();
+        dag.validate().unwrap();
     }
 
     let selection = &document["stage3_plan_selection"];
@@ -485,7 +485,7 @@ fn default_search_and_installation_validate_the_nine_query_workload() {
     let models = asap_plan_selection::PlanningModels::builtin()
         .with_plan_selection(&settings)
         .with_deployment_capabilities(&capabilities);
-    let plan = tokio::runtime::Builder::new_current_thread()
+    let (plan, report) = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap()
         .block_on(asap_planner::plan_installable(
@@ -497,12 +497,12 @@ fn default_search_and_installation_validate_the_nine_query_workload() {
         ))
         .unwrap();
     plan.validate().unwrap();
-    assert_eq!(plan.queries.len(), queries);
+    assert_eq!(plan.query_texts.len(), queries);
     assert_eq!(
         selection["accepted"][selected].as_array().unwrap().len(),
         queries
     );
-    let report = plan.selection.as_ref().unwrap();
+    let report = report.unwrap();
     assert!(report.queries_accepted_without_guarantee.is_empty());
     assert_eq!(
         report.search.algorithm,
@@ -976,7 +976,10 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
     let selection = &no_raw["stage3_plan_selection"];
     let selected = selection["selected"].as_str().unwrap();
     assert!(selection["costs"][selected].is_object());
-    assert!(!selection["stored_outputs"].as_array().unwrap().is_empty());
+    assert!(!selection["materialized_views"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 
     let (status, stderr) = failure(&[
         "--exhaustive",
@@ -1342,13 +1345,13 @@ fn workload_set_index_and_files_validate() {
 /// `tables.json` next to it, deployment capabilities, cost model and
 /// accuracy guarantee mode (`accuracy_guarantees`, ignored when absent).
 /// Candidate-search examples validate the selected DAG, query coverage, and
-/// stored-output linkage without depending on a particular timed-search ID.
+/// materialized-view linkage without depending on a particular timed-search ID.
 /// Each document carries its
-/// data workload as the file declares it and the selected plan's stored
-/// outputs as `plan_installable` gives them, each mapped to a node of the
-/// selected Stage 2 candidate.
+/// data workload as the file declares it and the selected plan's
+/// materialized views as `plan_installable`'s plan derives them, each mapped
+/// to a node of the selected Stage 2 candidate.
 #[test]
-fn workload_examples_preserve_data_and_valid_stored_outputs() {
+fn workload_examples_preserve_data_and_valid_materialized_views() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/dag-viewer");
     let examples: Value =
         serde_json::from_str(&std::fs::read_to_string(root.join("examples.json")).unwrap())
@@ -1461,15 +1464,15 @@ fn check_candidate_example(document: Value, _committed: Value, example: &Value) 
         }
     }
     assert!(
-        selection.get("stored_outputs_error").is_none(),
+        selection.get("materialized_views_error").is_none(),
         "{selection}"
     );
     let nodes: HashSet<_> = dag.nodes.iter().map(|node| node.id as u64).collect();
-    for output in selection["stored_outputs"].as_array().unwrap() {
-        assert!(nodes.contains(&output["stage2_node_id"].as_u64().unwrap()));
+    for view in selection["materialized_views"].as_array().unwrap() {
+        assert!(nodes.contains(&view["stage2_node_id"].as_u64().unwrap()));
         assert!(
-            output["installed_position"].as_u64().unwrap()
-                < output["installed_count"].as_u64().unwrap()
+            view["installed_position"].as_u64().unwrap()
+                < view["installed_count"].as_u64().unwrap()
         );
     }
     let report = &selection["search"]["candidate_connections"];
@@ -1496,9 +1499,9 @@ fn promql_queries_carry_their_sampled_data_workload() {
             "b": {"series_count": 1000, "metric_type": null, "sample_interval": 30000, "stream_norms": null, "max_distinct_per_evaluation": null, "rows_held": 60000},
         })
     );
-    // Nothing is stored: every query computes at query time.
+    // No materialized view: every query computes at query time.
     assert_eq!(
-        document["stage3_plan_selection"]["stored_outputs"],
+        document["stage3_plan_selection"]["materialized_views"],
         serde_json::json!([])
     );
 }
@@ -1773,7 +1776,7 @@ fn scans_projecting_different_labels_are_shared() {
         asap_plan_selection::PlanningModels::builtin(),
     )
     .unwrap();
-    let installed =
+    let (installed, _) =
         asap_planner::installable_plan_of(&physical.roots, Some(&offered), &entries).unwrap();
     installed.validate().unwrap();
     installed.check_compiles().unwrap();

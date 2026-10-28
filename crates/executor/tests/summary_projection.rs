@@ -74,6 +74,7 @@ fn summary_projection_survives_recovery() {
                     planner_types::physical::Medium::Memory,
                 ),
                 guarantee: None,
+                retention_ms: None,
             },
             PhysicalASAPDAGNode {
                 id: 1,
@@ -94,6 +95,7 @@ fn summary_projection_survives_recovery() {
                     planner_types::physical::Medium::Memory,
                 ),
                 guarantee: None,
+                retention_ms: None,
             },
         ],
         edges: vec![PhysicalASAPDAGEdge {
@@ -200,6 +202,7 @@ fn summary_merge_without_inputs_is_rejected() {
             output_state: ExecutionDataState::INGESTION_SUMMARY,
             materialization: Default::default(),
             guarantee: None,
+            retention_ms: None,
         }],
         edges: vec![],
         roots: vec![0],

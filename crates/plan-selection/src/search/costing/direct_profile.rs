@@ -234,6 +234,7 @@ fn prepare_profile(
                     materialization: configuration.materialization,
                     output_schema: node.schema.clone(),
                     guarantee: node.guarantee.clone(),
+                    retention_ms: None,
                 }
             }),
         );

@@ -31,8 +31,6 @@ use crate::ir::properties::timing::{
 use crate::ir::schema::{FieldDataType, Schema};
 use crate::physical::materialization::Materialization;
 
-pub const PHYSICAL_ASAP_DAG_WIRE_VERSION: u32 = 10;
-
 /// A node's operator, with each child replaced by its node id.
 pub type PhysicalASAPOperatorPayload = Operator<NodeId>;
 
@@ -79,6 +77,15 @@ pub struct PhysicalASAPDAGNode {
     pub materialization: Materialization,
     pub output_schema: Schema,
     pub guarantee: Option<AccuracyGuarantee>,
+    /// For a materialized view (a node whose materialization keeps its
+    /// output across evaluations), how far back from the newest evaluation
+    /// time its output must stay available once refreshed; `None` on every
+    /// other node, and on a view of a DAG exported before installation
+    /// sets it ([`PhysicalASAPDAG::set_materialized_view_retention`]). A
+    /// node field rather than part of [`Materialization`], because Stage 2
+    /// enumerates materializations before Stage 3 knows retention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -110,16 +117,6 @@ pub struct PhysicalASAPDAG {
     pub scalar_roots: Vec<(usize, ScalarExpr<PhysicalASAPNodeId>)>,
 }
 
-/// Versioned transport envelope for a physical ASAP DAG.
-///
-/// Process boundaries exchange this envelope and call [`Self::validate`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PhysicalASAPDAGDocument {
-    pub schema_version: u32,
-    pub dag: PhysicalASAPDAG,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PhysicalASAPDAGValidationError {
     #[error(
@@ -135,8 +132,8 @@ pub enum PhysicalASAPDAGValidationError {
         producer: PhysicalASAPNodeId,
         consumer: PhysicalASAPNodeId,
     },
-    #[error("unsupported physical ASAP DAG schema version {0}")]
-    UnsupportedVersion(u32),
+    #[error("node {0:?} has a retention_ms but is not a materialized view")]
+    RetentionOnNonView(PhysicalASAPNodeId),
     #[error("duplicate physical ASAP node id {0:?}")]
     DuplicateNodeId(PhysicalASAPNodeId),
     #[error("physical ASAP DAG root {0:?} does not name a node")]
@@ -169,60 +166,6 @@ pub enum PhysicalASAPDAGValidationError {
         "summary aggregate node {node:?} declares grouping inconsistent with its sketch state"
     )]
     SummaryGroupingMismatch { node: PhysicalASAPNodeId },
-}
-
-impl PhysicalASAPDAGDocument {
-    pub fn new(dag: PhysicalASAPDAG) -> Self {
-        Self {
-            schema_version: PHYSICAL_ASAP_DAG_WIRE_VERSION,
-            dag,
-        }
-    }
-
-    pub fn validate(&self) -> Result<(), PhysicalASAPDAGValidationError> {
-        if self.schema_version != PHYSICAL_ASAP_DAG_WIRE_VERSION {
-            return Err(PhysicalASAPDAGValidationError::UnsupportedVersion(
-                self.schema_version,
-            ));
-        }
-        self.dag.validate()
-    }
-}
-
-/// A window of raw data samples the DAG reads: at evaluation time `T`, the
-/// samples in `(T - end_offset_ms - width_ms, T - end_offset_ms]` that the
-/// `Scan` `scan_node_id` selects, kept by the `TimeRange`
-/// `time_range_node_id`. The shape is `TimeRange(width) <-
-/// TimeShift(offset)* <- Scan`, with no `TimeShift`, `TimeRange` or
-/// subquery above the `TimeRange`, so the window depends on `T` alone. For
-/// an instant selector `width_ms` is its lookback. Raw data is bound at the
-/// `Scan`, by its source, not at either node.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RawDataSampleWindow {
-    /// The `TimeRange` node that keeps the window's rows.
-    pub time_range_node_id: PhysicalASAPNodeId,
-    /// Width of the window, from the `TimeRange`.
-    pub width_ms: i64,
-    /// How long before the evaluation time the window ends: the sum of the
-    /// offset `TimeShift`s between the `TimeRange` and the `Scan`.
-    pub end_offset_ms: i64,
-    /// The `Scan` below, whose source and label matchers select the samples.
-    pub scan_node_id: PhysicalASAPNodeId,
-}
-
-impl RawDataSampleWindow {
-    /// How far back from the evaluation time the window reaches:
-    /// `end_offset_ms + width_ms`.
-    pub fn reach_ms(&self) -> u64 {
-        u64::try_from(self.end_offset_ms.saturating_add(self.width_ms)).unwrap_or(0)
-    }
-
-    /// `(start, end]` of the window at evaluation time `evaluation_time_ms`.
-    pub fn bounds_ms(&self, evaluation_time_ms: i64) -> (i64, i64) {
-        let end = evaluation_time_ms - self.end_offset_ms;
-        (end - self.width_ms, end)
-    }
 }
 
 /// Which rows of a `Scan` its readers read, back from an evaluation time `T`
@@ -294,7 +237,7 @@ impl ScanWindow {
 /// Why [`PhysicalASAPDAG::with_every_node_at_query_time`] failed.
 #[derive(Debug, Error)]
 pub enum ReferencePlanError {
-    /// Bad input: the document is not a valid physical ASAP DAG.
+    /// Bad input: the DAG is not a valid physical ASAP DAG.
     #[error("invalid physical ASAP DAG: {0}")]
     InvalidDag(#[from] PhysicalASAPDAGValidationError),
     /// Bad input: the plan cannot run at query time (a data-state rule of
@@ -493,6 +436,9 @@ impl PhysicalASAPDAG {
                         materialization: node.materialization,
                     },
                 );
+            }
+            if node.retention_ms.is_some() && !node.materialization.is_materialized_view() {
+                return Err(PhysicalASAPDAGValidationError::RetentionOnNonView(node.id));
             }
             if let Operator::ASAP(ASAPOp::SummaryAgg {
                 family, grouping, ..
@@ -807,6 +753,7 @@ pub fn compile_physical_asap_workload_with_node_ids_before(
             materialization: flat_node.materialization,
             output_schema: flat_node.schema,
             guarantee: flat_node.guarantee,
+            retention_ms: None,
         });
     }
     let dag = PhysicalASAPDAG {

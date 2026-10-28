@@ -35,8 +35,12 @@ default = ["promql", "sql", "metricsql"]
 promql = ["dep:asap-frontend-promql"]
 sql = ["dep:asap-frontend-sql"]
 metricsql = ["dep:asap-frontend-metricsql"]
+# `test_support::query_time_reference`, for a runtime's correctness tests.
+test-support = []
 
 [dev-dependencies]
+# The tests compare installed plans with `test_support::query_time_reference`.
+asap-planner = { path = ".", features = ["test-support"] }
 asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
 # The SQL frontend plans through DataFusion, which is async; `e2e_plan` is
 # therefore async and its tests need a runtime.

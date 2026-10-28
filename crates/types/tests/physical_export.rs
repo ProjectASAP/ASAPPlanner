@@ -1,7 +1,7 @@
 //! A timed plan exports as a PhysicalASAPDAG that keeps timing.
 use asap_types::ir::operator::{Reduction, Source};
 use asap_types::ir::physical_export::{
-    compile_physical_asap_dag, compile_physical_asap_workload, PhysicalASAPDAGDocument,
+    compile_physical_asap_dag, compile_physical_asap_workload, PhysicalASAPDAG,
     PhysicalASAPDAGValidationError,
 };
 use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
@@ -59,8 +59,7 @@ fn timed_at_ingestion() -> Rc<OperatorNode> {
 fn timed_plan_exports_with_timing() {
     let timed = timed_at_ingestion();
     let dag = compile_physical_asap_dag(&timed).unwrap();
-    let document = PhysicalASAPDAGDocument::new(dag.clone());
-    document.validate().unwrap();
+    dag.validate().unwrap();
 
     let timings: Vec<_> = dag.nodes.iter().map(|n| n.output_state.timing).collect();
     assert_eq!(
@@ -83,9 +82,9 @@ fn timed_plan_exports_with_timing() {
     // Timing keeps what the summary covers.
     assert!(timed.children()[0].coverage().is_some());
 
-    let decoded: PhysicalASAPDAGDocument =
-        serde_json::from_str(&serde_json::to_string(&document).unwrap()).unwrap();
-    assert_eq!(decoded, document);
+    let decoded: PhysicalASAPDAG =
+        serde_json::from_str(&serde_json::to_string(&dag).unwrap()).unwrap();
+    assert_eq!(decoded, dag);
 }
 
 /// A query-time producer cannot feed an ingestion-time consumer.
@@ -179,10 +178,9 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
     let (position, expr) = &dag.scalar_roots[0];
     assert_eq!(*position, 0);
     assert_eq!(expr.operator_refs(), vec![&dag.roots[0]]);
-    let document = PhysicalASAPDAGDocument::new(dag.clone());
-    let decoded: PhysicalASAPDAGDocument =
-        serde_json::from_str(&serde_json::to_string(&document).unwrap()).unwrap();
-    assert_eq!(decoded, document);
+    let decoded: PhysicalASAPDAG =
+        serde_json::from_str(&serde_json::to_string(&dag).unwrap()).unwrap();
+    assert_eq!(decoded, dag);
 
     // A scalar-only batch is valid: its referenced nodes are reachable.
     let mut scalar_only = dag.clone();
@@ -436,20 +434,42 @@ fn exports_summary_over_summary_as_typed_precompute_edges() {
         })
     ));
 
-    let document = PhysicalASAPDAGDocument::new(dag);
-    let decoded: PhysicalASAPDAGDocument =
-        serde_json::from_str(&serde_json::to_string(&document).unwrap()).unwrap();
-    assert_eq!(decoded, document);
+    let decoded: PhysicalASAPDAG =
+        serde_json::from_str(&serde_json::to_string(&dag).unwrap()).unwrap();
+    assert_eq!(decoded, dag);
     decoded.validate().unwrap();
-    let mut old_version = document.clone();
-    old_version.schema_version = 1;
-    assert_eq!(
-        old_version.validate(),
-        Err(PhysicalASAPDAGValidationError::UnsupportedVersion(1))
-    );
-    let mut unknown = serde_json::to_value(&document).unwrap();
+    let mut unknown = serde_json::to_value(&dag).unwrap();
     unknown["unexpected"] = serde_json::json!(true);
-    assert!(serde_json::from_value::<PhysicalASAPDAGDocument>(unknown).is_err());
+    assert!(serde_json::from_value::<PhysicalASAPDAG>(unknown).is_err());
+}
+
+/// `retention_ms` is accepted on a materialized view (a node kept across
+/// evaluations), survives a round trip, and is rejected on any other node.
+#[test]
+fn retention_is_only_on_materialized_views() {
+    let mut dag = compile_physical_asap_dag(&timed_at_ingestion()).unwrap();
+    let view = dag
+        .nodes
+        .iter()
+        .position(|node| node.materialization.is_materialized_view())
+        .expect("a node built at ingestion");
+    let other = dag
+        .nodes
+        .iter()
+        .position(|node| !node.materialization.is_materialized_view())
+        .expect("a query-time node");
+    dag.nodes[view].retention_ms = Some(60_000);
+    dag.validate().unwrap();
+    let decoded: PhysicalASAPDAG =
+        serde_json::from_str(&serde_json::to_string(&dag).unwrap()).unwrap();
+    assert_eq!(decoded, dag);
+    dag.nodes[other].retention_ms = Some(60_000);
+    assert_eq!(
+        dag.validate(),
+        Err(PhysicalASAPDAGValidationError::RetentionOnNonView(
+            dag.nodes[other].id
+        ))
+    );
 }
 
 /// Node-id-keyed bindings serialize in numeric id order.
@@ -503,15 +523,16 @@ fn every_node_at_query_time_keeps_the_operators_and_stores_nothing() {
 /// A window 600,000 ms wide ending 300,000 ms before T = 3,600,000 covers
 /// `(2,700,000, 3,300,000]`, and reaches 900,000 ms back.
 #[test]
-fn a_raw_data_sample_window_ends_its_offset_before_the_evaluation() {
-    let window = asap_types::ir::physical_export::RawDataSampleWindow {
-        time_range_node_id: 1,
+fn a_raw_data_window_ends_its_offset_before_the_evaluation() {
+    let window = asap_types::ir::materialized_view::RawDataWindow {
+        source: Source::TimeSeries {
+            metric: "latency".into(),
+        },
         width_ms: 600_000,
         end_offset_ms: 300_000,
-        scan_node_id: 0,
     };
     assert_eq!(window.bounds_ms(3_600_000), (2_700_000, 3_300_000));
-    assert_eq!(window.reach_ms(), 900_000);
+    assert_eq!(window.lookback_ms(), 900_000);
 }
 
 /// `TimeRange(Range, width_ms)` over `shift` (if any) over `scan`, untimed.
@@ -656,6 +677,7 @@ fn high_fan_in_edges_preserve_multiplicity_without_order_dependence() {
             materialization: Materialization::NotMaterialized,
             output_schema: schema.clone(),
             guarantee: None,
+            retention_ms: None,
         })
         .collect();
     let inputs: Vec<_> = (0..count).chain([0, 0]).collect();
@@ -669,6 +691,7 @@ fn high_fan_in_edges_preserve_multiplicity_without_order_dependence() {
         materialization: Materialization::NotMaterialized,
         output_schema: schema.clone(),
         guarantee: None,
+        retention_ms: None,
     });
     let mut dag = PhysicalASAPDAG {
         nodes,
