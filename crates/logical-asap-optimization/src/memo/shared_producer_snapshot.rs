@@ -1,6 +1,9 @@
 //! Pins the candidates the shared-producer cases generate, recorded before
 //! they moved onto one generation path: each workload's expanded memo
 //! (groups, candidates, their origins and children) hashes to a fixed value.
+//! The top-k pins were re-recorded when equal keyless results became one
+//! group: the readers' shared `sum_over_time` is now one group, not one per
+//! reader.
 use super::candidates::{try_populate_pass1, CandidateMemo, CandidateOrigin};
 use super::state_configurations::PaneWidthDomain;
 use super::state_groups::expand_concrete_summary_state_groups_in_domain;
@@ -112,7 +115,7 @@ fn top_k_reuse_candidates_are_unchanged() {
         .iter()
         .flatten()
         .any(|candidate| candidate.origin == CandidateOrigin::TopKReuse));
-    assert_eq!(fingerprint(&memo), (313, 16940643818053118362));
+    assert_eq!(fingerprint(&memo), (69, 14825718632741491576));
 }
 
 /// Quantile readers of one input at different sizes.
@@ -161,5 +164,5 @@ fn several_top_k_sets_are_unchanged() {
         ],
         60_000,
     );
-    assert_eq!(fingerprint(&memo), (994, 9213568444657927922));
+    assert_eq!(fingerprint(&memo), (504, 3265274154981812875));
 }

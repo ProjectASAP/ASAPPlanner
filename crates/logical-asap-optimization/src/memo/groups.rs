@@ -848,9 +848,9 @@ mod tests {
 
     /// `q0.9 / q0.5` beside a plain `q0.9`: each of the ratio's quantile
     /// groups offers every sketch for the whole budget and for half of it,
-    /// since its query has two inputs that may be approximate; the plain
-    /// query's quantile group (its own: its unkeyed window is not shared)
-    /// offers only the whole budget. A ratio of quantiles carries no
+    /// since its query has two inputs that may be approximate. The plain
+    /// query's quantile is the numerator's group: equal per-series quantiles
+    /// return the same rows, so they are one group with both readers. A ratio of quantiles carries no
     /// guarantee, so composition does not split its budget: the
     /// whole-budget candidate is the exhaustive search's sizing, and the
     /// half-budget one, larger, is never the cheaper valid one.
@@ -875,12 +875,12 @@ mod tests {
                 .collect();
             assert_eq!(shares, vec![1, 2, 1, 2]);
         }
-        let plain = group_of_kind(&memo, 1, "Aggregate");
-        let plain_shares: Vec<usize> = sketch_shares(&memo, plain)
-            .into_iter()
-            .map(|(_, share)| share)
-            .collect();
-        assert_eq!(plain_shares, vec![1, 1]);
+        let plain = memo
+            .groups
+            .iter()
+            .position(|group| group.roots_of == vec![1])
+            .unwrap();
+        assert_eq!(plain, operand);
         let whole_kll = &sketch_shares(&memo, operand)[0];
         assert_eq!(whole_kll.1, 1);
         assert_eq!(

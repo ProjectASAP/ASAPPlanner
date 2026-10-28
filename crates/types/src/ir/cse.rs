@@ -35,18 +35,15 @@
 //! ## Legality
 //!
 //! Structural equality is necessary but not sufficient. A non-ASAP node is
-//! only ever *returned* as a match for another when its output has a provable
-//! unique key (`Schema::has_unique_key()`): a producer's output can only be
-//! shared across consumers when its row identity is stable across reads, so
-//! a `without(..)` grouping, a `Concat`/`SetOp` that
-//! drops its keys, … is always inserted fresh even when it is structurally
-//! identical to something already interned. A `Scan` is the exception: equal
-//! scans read the same source rows, so every reader of one shared scan reads
-//! the rows it would have read alone, a SQL table's keyless rows included.
-//! Global scalar reductions are also shareable: their single result has stable
-//! identity even though the schema does not declare the empty unique key.
-//! Equal windows directly over scans and exact TopK retaining explicit series
-//! identity also preserve the identity of their selected rows.
+//! only ever *returned* as a match for another when every execution over the
+//! same input rows returns the same output rows
+//! ([`NonASAPOp::returns_same_rows_for_same_input_rows`]). Equal nodes are
+//! interned children first, so two equal nodes read one input, and one copy
+//! returns each reader the rows it would have computed alone. A unique key
+//! is not needed: equal per-series quantiles without a provable key are one
+//! node. An operator that picks rows by input order alone (an unordered
+//! `LIMIT`) is always inserted fresh, because two copies may return
+//! different rows.
 //! An ASAP node (summary state and its evaluations) has no such gate: equal
 //! operator, schema and guarantee make it shareable, exactly as post-ASAP
 //! sharing decided before this IR.
@@ -216,33 +213,9 @@ impl InternTable {
         // for something else; it still occupies a fresh slot in the bucket
         // (harmless: later scans require legality of the new node too).
         let reusable = node.is_asap()
-            || node.schema.has_unique_key()
-            || matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }))
-            // Equal windows over one scan preserve its row identities, even
-            // for keyless SQL tables. Consumers can share that window's rows.
-            || matches!(node.non_asap(), Some(NonASAPOp::TimeRange { child, .. })
-                if matches!(child.non_asap(), Some(NonASAPOp::Scan { .. })))
-            // Exact PromQL TopK retains each selected series' identity. The
-            // ranked projection can drop the timestamp part of the input key,
-            // but identical selections still return the same series rows.
-            || (node.result_kind == crate::ir::OperatorResultKind::InstantVector
-                && node.schema.fields.iter().any(|field| field.name == crate::ir::schema::PROMQL_SERIES_IDENTITY)
-                && matches!(node.non_asap(), Some(NonASAPOp::Aggregate { measures, .. })
-                    if matches!(measures.as_slice(), [crate::ir::operator::AggIntent::TopK { .. }])))
-            || matches!(node.non_asap(), Some(NonASAPOp::Aggregate {
-                reduction: crate::ir::operator::Reduction::Reduce(keys), measures, ..
-            }) if !keys.is_without() && keys.is_empty() && measures.iter().all(|measure| matches!(measure,
-                crate::ir::operator::AggIntent::Count { .. }
-                | crate::ir::operator::AggIntent::Sum { .. }
-                | crate::ir::operator::AggIntent::Min { .. }
-                | crate::ir::operator::AggIntent::Max { .. }
-                | crate::ir::operator::AggIntent::Avg { .. }
-                | crate::ir::operator::AggIntent::StdDev { .. }
-                | crate::ir::operator::AggIntent::Variance { .. }
-                | crate::ir::operator::AggIntent::PearsonCorr { .. }
-                | crate::ir::operator::AggIntent::Quantile { .. }
-                | crate::ir::operator::AggIntent::Cardinality { .. }
-            )));
+            || node
+                .non_asap()
+                .is_some_and(NonASAPOp::returns_same_rows_for_same_input_rows);
         let bucket = self.buckets.entry(hash).or_default();
         if reusable {
             if let Some(existing) = bucket
@@ -592,8 +565,8 @@ mod tests {
             "the vector read by scalar(v) is a child and must be interned"
         );
         assert!(
-            !Rc::ptr_eq(&ra, &rb),
-            "the scalar bridge itself has no unique key and stays separate"
+            Rc::ptr_eq(&ra, &rb),
+            "the scalar bridge has no unique key but returns the same rows"
         );
     }
 
@@ -732,18 +705,20 @@ mod tests {
         );
     }
 
+    /// `DISTINCT` (every column) returns the same rows each time; a `Dedup`
+    /// on some columns keeps an unspecified row per key.
     #[test]
-    fn dedup_gates_sharing_the_same_as_aggregate() {
-        // `Dedup { cols }` adds `cols` as a unique key, so two identical
-        // `Dedup`s merge even though their keyless `Scan`s could not.
-        let dedup = || {
+    fn dedup_shares_only_on_every_column() {
+        let dedup = |cols: Vec<usize>| {
             node(NonASAPOp::Dedup {
-                cols: vec![1],
+                cols,
                 child: scan(),
             })
         };
-        let (ra, rb) = two_roots(dedup(), dedup());
+        let (ra, rb) = two_roots(dedup(vec![]), dedup(vec![]));
         assert!(Rc::ptr_eq(&ra, &rb));
+        let (ra, rb) = two_roots(dedup(vec![1]), dedup(vec![1]));
+        assert!(!Rc::ptr_eq(&ra, &rb));
     }
 
     /// `LIMIT 10` without an order may return any 10 rows, so two copies may
@@ -762,8 +737,33 @@ mod tests {
         assert!(!Rc::ptr_eq(&ra, &rb));
     }
 
+    /// A `LIMIT` over a `Sort` keeps the first rows of a fixed order.
     #[test]
-    fn group_keys_gate_still_prevented_when_partition_by_without_used() {
+    fn ordered_limits_are_shared() {
+        let limit = || {
+            node(NonASAPOp::Limit {
+                n: Some(10),
+                offset: 0,
+                partition_by: GroupKeys::default(),
+                child: node(NonASAPOp::Sort {
+                    keys: vec![crate::ir::scalar::SortKey {
+                        expr: ScalarExpr::column(2),
+                        ascending: false,
+                        nulls_first: false,
+                    }],
+                    partition_by: GroupKeys::default(),
+                    child: scan(),
+                }),
+            })
+        };
+        let (ra, rb) = two_roots(limit(), limit());
+        assert!(Rc::ptr_eq(&ra, &rb));
+    }
+
+    /// `count without (service)` has no provable unique key, but it computes
+    /// the same rows from the same input, so equal copies are one node.
+    #[test]
+    fn without_grouping_is_shared() {
         let without_agg = || {
             node(NonASAPOp::Aggregate {
                 reduction: Reduction::Reduce(GroupKeys::without(vec![0])),
@@ -779,7 +779,7 @@ mod tests {
         let a = without_agg();
         assert!(!a.schema.has_unique_key());
         let (ra, rb) = two_roots(a, without_agg());
-        assert!(!Rc::ptr_eq(&ra, &rb));
+        assert!(Rc::ptr_eq(&ra, &rb));
     }
 
     #[test]
@@ -804,14 +804,20 @@ mod tests {
         let (done, completion) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             fn keyed_diamond() -> Rc<OperatorNode> {
-                // BinaryOp over a keyless scan has no unique key at any level,
-                // so none of the 24 levels is shareable; the `Dedup` on top is.
+                // An unordered `Limit` at each of the 24 levels is never
+                // shared, so comparing the `Dedup` on top walks the diamond.
                 let mut current = scan();
                 for _ in 0..24 {
-                    current = compare(Rc::clone(&current), current);
+                    let limited = node(NonASAPOp::Limit {
+                        n: Some(10),
+                        offset: 0,
+                        partition_by: GroupKeys::default(),
+                        child: current,
+                    });
+                    current = compare(Rc::clone(&limited), limited);
                 }
                 node(NonASAPOp::Dedup {
-                    cols: vec![1],
+                    cols: vec![],
                     child: current,
                 })
             }

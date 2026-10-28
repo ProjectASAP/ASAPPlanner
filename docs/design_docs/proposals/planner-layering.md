@@ -286,14 +286,18 @@ lists `LogicalMemo::from_roots` with Pass 1. `LogicalMemo::from_roots` runs
 `share_common_sub_dags` (`crates/types/src/ir/cse.rs`) over the frontends'
 roots and numbers the shared nodes as groups. Two structurally equal nodes
 become one group only when sharing them is legal, that is, when every reader
-of the shared node reads the rows it would read alone:
+of the shared node reads the rows it would read alone. Equal nodes are
+interned children first, so they always read one input, and a node is legal
+to share when every execution over the same input rows returns the same
+output rows (`NonASAPOp::returns_same_rows_for_same_input_rows`). A unique
+key is not needed.
 
 | Equal nodes | Share one group |
 |---|---|
 | ASAP nodes (summary states and their evaluations) | Always (equal operator, schema and guarantee) |
-| `Scan`s | Always: they read the same source rows |
-| Windows directly over a scan, global scalar reductions, exact top-k keeping the series identity | Always: their rows keep a stable identity |
-| Any other non-ASAP node | Only when its output schema has a provable unique key (`Schema::has_unique_key`) |
+| Non-ASAP nodes that compute their output from the input rows' values: scans, windows, filters, projections, aggregates (exact top-k included), joins, binary operators, `limitk` | Always |
+| A `Sort` keeps tied rows in input order (a stable sort); a `Limit` over a `Sort` and an exact top-k rank with that order | Always: the tie order counts as fixed |
+| A `Limit` or offset not over a `Sort`, a `Dedup` on some but not all columns, a window function that reads row positions (`ROW_NUMBER`, `LAG`, `FIRST_VALUE`, a `ROWS` frame) without an `ORDER BY` | Never: they pick rows by input order alone, so two copies may return different rows |
 
 Equal nodes that may not share stay separate groups, also within one query.
 They may still read one shared child group.
