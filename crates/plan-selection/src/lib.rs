@@ -4972,21 +4972,24 @@ fn keeps_every_value(measure: &AggIntent) -> bool {
 }
 
 /// Update operations per input row and bytes per state, from the sketch's
-/// parameters and `input_rows` (the rows one state folds), modelled on what
-/// `asap_sketchlib` allocates:
-/// - Count-Min / Count-Sketch: `depth × width` 8-byte counters, plus a
-///   24-byte entry per heap slot for the top-k variants;
+/// parameters and `input_rows` (the rows one state folds). The bytes are
+/// `asap_sketchlib`'s `estimated_memory_bytes` for the type the executor
+/// builds (Count-Min and Count Sketch over `f64` counters), given what the
+/// state is assumed to hold:
+/// - a Count-Min / Count Sketch top-k heap full of keys of
+///   [`ASSUMED_HEAP_KEY_BYTES`]; each UnivMon layer's heap full of keys of
+///   [`ASSUMED_VALUE_KEY_BYTES`];
+/// - DDSketch and KMV: the rows the state folds, at least one (any number
+///   when unknown), each a distinct item for KMV; a DDSketch's values span
+///   [`DDSKETCH_ASSUMED_VALUE_RANGE`] and fill its negative store too
+///   unless proven non-negative.
+///
+/// Two families are priced without the library's estimate:
 /// - KLL: its fixed bytes ([`kll_fixed_bytes`]: the struct and its level
 ///   array) plus the 8-byte item array as `asap_sketchlib` grows it for the
 ///   rows the state folds, at most its full capacity ([`kll_buffer_items`]);
-/// - DDSketch: its struct and, per bucket store it fills, 8-byte counts in
-///   the 128-bin chunks the library grows a store by
-///   ([`ddsketch_state_bytes`]);
-/// - HLL: one 1-byte register per bucket, `2^precision`;
-/// - KMV: its `k` smallest 64-bit hashes (Theta, which candidate generation
-///   does not offer because `asap_sketchlib` has no Theta sketch, likewise);
-/// - UnivMon: per layer, a `rows × cols` Count-Sketch of 8-byte counters and
-///   a heap of `heap_size` 24-byte entries.
+/// - Theta, which candidate generation does not offer because
+///   `asap_sketchlib` has no Theta sketch: its `k` 64-bit hashes.
 ///
 /// An exact accumulator's state is the executor's per-group state,
 /// [`EXACT_ACCUMULATOR_STATE_BYTES`] for every kind.
@@ -5004,7 +5007,8 @@ fn summary_shape(family: &FieldDataType, input_rows: StateInputRows) -> (f64, u6
 }
 
 /// What one summary state's bytes depend on besides its parameters (only
-/// a DDSketch's and a KLL's do): the input rows it folds and the sign of their values.
+/// a KLL's, a DDSketch's and a KMV's do): the input rows it folds and the
+/// sign of their values.
 /// The rows are whatever its producer emits (raw data samples, rates, sums),
 /// not a summary sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -5031,30 +5035,77 @@ impl StateInputRows {
 /// size the measured table interpolates between
 /// ([`cost::measured`]).
 fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, u64) {
+    use asap_sketchlib::{
+        Classic, CountMinF64, CountMinSketchWithHeap, CountSketch, CountSketchWithHeap, DataInput,
+        DdSketch, HyperLogLog, Kmv, RegularPath, UnivMon, Vector2D,
+    };
+    let heap_key = DataInput::Bytes(&[0; ASSUMED_HEAP_KEY_BYTES]);
+    let rows = input_rows.rows_per_state.map_or(usize::MAX, |rows| {
+        usize::try_from(rows.max(1)).unwrap_or(usize::MAX)
+    });
     match params {
-        SketchParams::Cms { width, depth } | SketchParams::CountSketch { width, depth } => {
-            (f64::from(*depth), 8 * u64::from(*width) * u64::from(*depth))
-        }
+        SketchParams::Cms { width, depth } => (
+            f64::from(*depth),
+            CountMinF64::estimated_memory_bytes(*depth as usize, *width as usize) as u64,
+        ),
+        SketchParams::CountSketch { width, depth } => (
+            f64::from(*depth),
+            CountSketch::<Vector2D<f64>, RegularPath>::estimated_memory_bytes(
+                *depth as usize,
+                *width as usize,
+            ) as u64,
+        ),
         SketchParams::CmsWithHeap {
-            width,
-            depth,
-            heap_size,
-        }
-        | SketchParams::CountSketchWithHeap {
             width,
             depth,
             heap_size,
         } => (
             f64::from(*depth) + 1.0,
-            8 * u64::from(*width) * u64::from(*depth) + 24 * u64::from(*heap_size),
+            CountMinSketchWithHeap::<Vector2D<f64>, RegularPath>::estimated_memory_bytes(
+                *depth as usize,
+                *width as usize,
+                *heap_size as usize,
+                &heap_key,
+            ) as u64,
+        ),
+        SketchParams::CountSketchWithHeap {
+            width,
+            depth,
+            heap_size,
+        } => (
+            f64::from(*depth) + 1.0,
+            CountSketchWithHeap::<Vector2D<f64>, RegularPath>::estimated_memory_bytes(
+                *depth as usize,
+                *width as usize,
+                *heap_size as usize,
+                &heap_key,
+            ) as u64,
         ),
         SketchParams::Kll { k, .. } => (
             1.0,
             kll_fixed_bytes() + 8 * kll_buffer_items(*k, input_rows),
         ),
-        SketchParams::DDSketch { alpha } => (1.0, ddsketch_state_bytes(*alpha, input_rows)),
-        SketchParams::Hll { precision, .. } => (1.0, 1u64 << (*precision).min(63)),
-        SketchParams::Kmv { k, .. } | SketchParams::Theta { k } => (1.0, 8 * u64::from(*k)),
+        // The executor builds no DDSketch outside α in (0, 1), where
+        // sketchlib's estimate panics: priced as an empty one.
+        SketchParams::DDSketch { alpha } if !(*alpha > 0.0 && *alpha < 1.0) => {
+            (1.0, std::mem::size_of::<DdSketch>() as u64)
+        }
+        SketchParams::DDSketch { alpha } => (
+            1.0,
+            DdSketch::estimated_memory_bytes(
+                *alpha,
+                rows,
+                1.0,
+                DDSKETCH_ASSUMED_VALUE_RANGE,
+                !input_rows.non_negative,
+            ) as u64,
+        ),
+        SketchParams::Hll { precision, .. } => (
+            1.0,
+            HyperLogLog::<Classic>::estimated_memory_bytes(usize::from(*precision)) as u64,
+        ),
+        SketchParams::Kmv { k, .. } => (1.0, Kmv::estimated_memory_bytes(*k as usize, rows) as u64),
+        SketchParams::Theta { k } => (1.0, 8 * u64::from(*k)),
         SketchParams::UnivMon {
             heap_size,
             sketch_rows,
@@ -5063,9 +5114,13 @@ fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, u64)
             ..
         } => (
             univmon_expected_layers(*layers) * (f64::from(*sketch_rows) + 1.0),
-            u64::from(*layers)
-                * (8 * u64::from(*sketch_rows) * u64::from(*sketch_cols)
-                    + 24 * u64::from(*heap_size)),
+            UnivMon::estimated_memory_bytes(
+                *heap_size as usize,
+                *sketch_rows as usize,
+                *sketch_cols as usize,
+                usize::from(*layers),
+                &DataInput::Bytes(&[0; ASSUMED_VALUE_KEY_BYTES]),
+            ) as u64,
         ),
     }
 }
@@ -5123,6 +5178,20 @@ fn kll_buffer_items(k: u32, input_rows: StateInputRows) -> u64 {
     }
 }
 
+/// Bytes of the key one Count-Min / Count Sketch top-k heap slot holds: an
+/// assumption, since the workload declares no label sizes. Such a key is a
+/// label set in the executor's tuple-key encoding, a tag byte and a 4-byte
+/// length before each value; this assumes three labels of 16 bytes, the
+/// size [`row_bytes`] gives a string.
+const ASSUMED_HEAP_KEY_BYTES: usize = 3 * (1 + 4 + 16);
+
+/// Bytes of the key one UnivMon heap slot holds: an assumption, since the
+/// workload declares no label sizes. UnivMon counts the values of one
+/// column, the executor keys each by its type tag and bytes, and a label
+/// value is assumed to be 16 bytes, the size [`row_bytes`] gives a string.
+/// A sample value's key owns no bytes, so this bounds it too.
+const ASSUMED_VALUE_KEY_BYTES: usize = 1 + 16;
+
 /// Layers a UnivMon row updates in expectation. `asap_sketchlib` updates
 /// layers `0..=b`, with bottom layer `b` the index of the first zero among
 /// hash bits `1..layers`, capped at `layers - 1`; so it reaches layer `j`
@@ -5132,63 +5201,12 @@ fn univmon_expected_layers(layers: u8) -> f64 {
     2.0 - 2f64.powi(1 - i32::from(layers.max(1)))
 }
 
-/// Ratio of the largest to the smallest positive value a DDSketch is assumed
-/// to see: nine decades, e.g. latencies from 1 ns to 1 s. An assumption, not
-/// workload evidence: the data workload declares no value range.
+/// Ratio of the largest to the smallest value magnitude a DDSketch is
+/// assumed to see: nine decades, e.g. latencies from 1 ns to 1 s, priced as
+/// magnitudes in `[1, 1e9]` (its bins depend on the ratio alone). An
+/// assumption, not workload evidence: the data workload declares no value
+/// range.
 const DDSKETCH_ASSUMED_VALUE_RANGE: f64 = 1e9;
-
-/// Bins `asap_sketchlib`'s DDSketch grows a bucket store by
-/// (`GROW_CHUNK`): a store's first value allocates this many around its
-/// bin, and a value past either end adds at least this many more.
-const DDSKETCH_GROW_CHUNK_BINS: u64 = 128;
-
-/// Bytes of one `asap_sketchlib` DDSketch with relative accuracy `alpha`
-/// over `input_rows`: its struct (144 bytes), plus 8 bytes per allocated bin
-/// of each bucket store its values can fill. The library allocates a store
-/// at the first value of its sign (a value too small to index goes to a
-/// zero count, in no store), so one store is charged when the values are
-/// proven non-negative or a state folds at most one row, and two
-/// otherwise. A store allocates one 128-bin chunk around its
-/// first value, then 128-bin chunks on each side as values reach past
-/// it: `128 · (1 + 2 · ⌈(spanned − 128)⁺ / 256⌉)` bins, where `spanned`
-/// is the bins its values can touch, at most one per value and at most
-/// [`ddsketch_bins`] over the assumed value range. E.g. 1,168 bytes for ten
-/// non-negative values at α = 0.05, and 3,216 for many over nine decades.
-fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
-    let range_bins = ddsketch_bins(alpha);
-    let spanned = input_rows
-        .rows_per_state
-        .map_or(range_bins, |rows| range_bins.min(rows.max(1)));
-    let side_chunks = spanned
-        .saturating_sub(DDSKETCH_GROW_CHUNK_BINS)
-        .div_ceil(2 * DDSKETCH_GROW_CHUNK_BINS);
-    let store_bytes = 8 * DDSKETCH_GROW_CHUNK_BINS * (1 + 2 * side_chunks);
-    let at_most_one_row = input_rows.rows_per_state.is_some_and(|rows| rows <= 1);
-    let stores = if input_rows.non_negative || at_most_one_row {
-        1
-    } else {
-        2
-    };
-    std::mem::size_of::<asap_sketchlib::sketches::DdSketch>() as u64 + stores * store_bytes
-}
-
-/// Bins a DDSketch with relative accuracy `alpha` touches, assuming its
-/// values span nine decades ([`DDSKETCH_ASSUMED_VALUE_RANGE`] = 1e9): its
-/// bins grow geometrically by `gamma = (1 + alpha) / (1 - alpha)`, so
-/// `ceil(ln(1e9) / ln(gamma))`, e.g. 1,037 bins at α = 0.01. The count is
-/// proportional to the decades spanned, so values over three decades would
-/// need a third of these bins and over twelve decades four thirds.
-/// `asap_sketchlib`'s store has no bin limit; the cap is the bins spanning
-/// every value it can index.
-fn ddsketch_bins(alpha: f64) -> u64 {
-    let log_gamma = ((1.0 + alpha) / (1.0 - alpha)).ln();
-    let (min, max) = asap_sketchlib::sketches::ddsketch::ddsketch_indexable_bounds(alpha);
-    let indexable = (max.ln() - min.ln()) / log_gamma;
-    (DDSKETCH_ASSUMED_VALUE_RANGE.ln() / log_gamma)
-        .min(indexable)
-        .ceil()
-        .max(1.0) as u64
-}
 
 #[cfg(test)]
 mod tests {
@@ -7648,101 +7666,63 @@ mod tests {
         assert_eq!(asap_types::ir::schema::EXACT_ACCUMULATOR_STATE_BYTES, 56);
     }
 
-    /// A DDSketch is sized for values over nine decades: 1,037 bins at
-    /// α = 0.01, allocated as 1,152 (nine 128-bin chunks) of 8 bytes per
-    /// store, both stores for samples of unknown sign.
-    #[test]
-    fn ddsketch_bins_span_nine_decades() {
-        assert_eq!(ddsketch_bins(0.01), 1_037);
-        assert_eq!(
-            summary_shape(
-                &FieldDataType::Sketch(
-                    SketchKind::new(
-                        SketchAlgorithm::DDSketch,
-                        SketchParams::DDSketch { alpha: 0.01 }
-                    ),
-                    GroupingStrategy::default(),
-                ),
-                StateInputRows::UNKNOWN
-            )
-            .1,
-            144 + 2 * 8 * 1_152
-        );
-    }
-
-    /// The bytes `asap_sketchlib`'s DDSketch holds after adding `values`:
-    /// its struct and the 8-byte counts of both bucket stores.
+    /// The bytes `asap_sketchlib`'s DDSketch holds after adding `values`.
     fn library_ddsketch_bytes(alpha: f64, values: &[f64]) -> u64 {
         let mut sketch = asap_sketchlib::sketches::DdSketch::new(alpha);
         for value in values {
             sketch.add(value);
         }
-        let bins = sketch.positive_store_counts().len() + sketch.negative_store_counts().len();
-        (std::mem::size_of::<asap_sketchlib::sketches::DdSketch>() + 8 * bins) as u64
+        sketch.memory_bytes() as u64
     }
 
-    /// The DDSketch state the model prices is what `asap_sketchlib`
-    /// allocates: one 128-bin chunk per store for a few samples, more for
-    /// samples spanning more bins, no negative store for values declared
-    /// non-negative, and one store for one row of either sign. A state
-    /// assumed to fold no row is charged one store, as for one row.
+    /// A DDSketch is priced for what `asap_sketchlib` can hold after its
+    /// rows: at least what it holds for a few samples, for samples of either
+    /// sign, and for many samples over nine decades; a store less for values
+    /// declared non-negative. Many rows are priced as unknown ones.
     #[test]
-    fn ddsketch_state_bytes_match_the_library() {
+    fn ddsketch_state_bytes_bound_the_library() {
         let alpha = 0.05;
+        let priced = |rows_per_state, non_negative| {
+            sketch_shape(
+                &SketchParams::DDSketch { alpha },
+                StateInputRows {
+                    rows_per_state,
+                    non_negative,
+                },
+            )
+            .1
+        };
         // Ten Pareto(2) samples (scale 1), one 1 s pane of a 10 Hz series.
         let pareto: Vec<f64> = (0..10)
             .map(|i| (1.0 - (f64::from(i) + 0.5) / 10.0).powf(-0.5))
             .collect();
-        let non_negative = |rows_per_state| StateInputRows {
-            rows_per_state,
-            non_negative: true,
-        };
-        assert_eq!(library_ddsketch_bytes(alpha, &pareto), 1_168);
-        assert_eq!(ddsketch_state_bytes(alpha, non_negative(Some(10))), 1_168);
-        // One row fills at most one store, whatever its sign: the library
-        // allocates a store at the first value of its sign.
-        let signed_rows = |rows_per_state| StateInputRows {
-            rows_per_state: Some(rows_per_state),
-            non_negative: false,
-        };
-        for value in [-2.0, 2.0] {
-            assert_eq!(
-                ddsketch_state_bytes(alpha, signed_rows(1)),
-                library_ddsketch_bytes(alpha, &[value])
+        let signed: Vec<f64> = pareto.iter().map(|v| -v).chain(pareto.clone()).collect();
+        let decades: Vec<f64> = (0..10_000)
+            .map(|i| 10f64.powf(9.0 * f64::from((i * 7_919) % 10_000) / 10_000.0))
+            .collect();
+        let signed_decades: Vec<f64> = decades
+            .iter()
+            .enumerate()
+            .map(|(i, v)| if i % 2 == 0 { -v } else { *v })
+            .collect();
+        for (values, non_negative) in [
+            (&pareto[..], true),
+            (&[-2.0][..], false),
+            (&[2.0][..], false),
+            (&[-2.0, 2.0][..], false),
+            (&signed[..], false),
+            (&decades[..], true),
+            (&signed_decades[..], false),
+        ] {
+            let rows = Some(values.len() as u64);
+            assert!(
+                library_ddsketch_bytes(alpha, values) <= priced(rows, non_negative),
+                "{} values, non-negative: {non_negative}",
+                values.len()
             );
         }
-        // Two rows, one of each sign, fill both stores.
-        assert_eq!(
-            ddsketch_state_bytes(alpha, signed_rows(2)),
-            library_ddsketch_bytes(alpha, &[-2.0, 2.0])
-        );
-        // Signed values fill both stores.
-        let signed: Vec<f64> = pareto.iter().map(|v| -v).chain(pareto.clone()).collect();
-        let signed_rows = StateInputRows {
-            rows_per_state: Some(20),
-            non_negative: false,
-        };
-        assert_eq!(
-            library_ddsketch_bytes(alpha, &signed),
-            ddsketch_state_bytes(alpha, signed_rows)
-        );
-        // Many samples over the assumed nine decades, the first at the
-        // bottom or at the middle of the range: the range's 208 bins, in
-        // three 128-bin chunks.
-        let decades: Vec<f64> = (0..10_000)
-            .map(|i| 10f64.powf(-4.5 + 9.0 * f64::from((i * 7_919) % 10_000) / 10_000.0))
-            .collect();
-        let middle_first: Vec<f64> = [1.0].into_iter().chain(decades.clone()).collect();
-        assert_eq!(
-            ddsketch_state_bytes(alpha, non_negative(Some(10_000))),
-            3_216
-        );
-        assert_eq!(library_ddsketch_bytes(alpha, &decades), 3_216);
-        assert_eq!(library_ddsketch_bytes(alpha, &middle_first), 3_216);
-        assert_eq!(
-            ddsketch_state_bytes(alpha, non_negative(None)),
-            ddsketch_state_bytes(alpha, non_negative(Some(10_000)))
-        );
+        assert!(priced(Some(10_000), true) < priced(Some(10_000), false));
+        assert_eq!(priced(Some(10_000), false), priced(None, false));
     }
 
     /// DDSketch state grows as its relative accuracy α tightens.
@@ -7773,9 +7753,12 @@ mod tests {
     }
 
     /// Every sketch family's state is sized from its parameters, as
-    /// `asap_sketchlib` allocates it.
+    /// `asap_sketchlib` allocates it: an HLL's registers, a KMV's `k`
+    /// hashes once it has seen `k` distinct items, and a UnivMon's layers
+    /// once keys of the assumed size have churned through every heap.
     #[test]
     fn summary_state_is_sized_from_sketch_params() {
+        use asap_sketchlib::DataInput;
         let bytes = |algorithm, params| {
             summary_shape(
                 &FieldDataType::Sketch(
@@ -7794,8 +7777,12 @@ mod tests {
                     relative_error: None
                 }
             ),
-            1 << 14
+            asap_sketchlib::HyperLogLog::<asap_sketchlib::Classic>::new().memory_bytes() as u64
         );
+        let mut kmv: asap_sketchlib::Kmv = asap_sketchlib::Kmv::new(1_000);
+        for i in 0..2_000u64 {
+            kmv.update(&DataInput::U64(i));
+        }
         assert_eq!(
             bytes(
                 SketchAlgorithm::Kmv,
@@ -7804,20 +7791,26 @@ mod tests {
                     relative_error: None
                 }
             ),
-            8 * 1_000
+            kmv.memory_bytes() as u64
         );
+        let mut univmon = asap_sketchlib::UnivMon::new(8, 3, 64, 2);
+        for i in 0..10_000u64 {
+            let mut key = [0; ASSUMED_VALUE_KEY_BYTES];
+            key[..8].copy_from_slice(&i.to_le_bytes());
+            univmon.update_weighted(&DataInput::Bytes(&key), 1);
+        }
         assert_eq!(
             bytes(
                 SketchAlgorithm::UnivMon,
                 SketchParams::UnivMon {
-                    heap_size: 256,
-                    sketch_rows: 5,
-                    sketch_cols: 1_024,
-                    layers: 16,
+                    heap_size: 8,
+                    sketch_rows: 3,
+                    sketch_cols: 64,
+                    layers: 2,
                     distinct_failure_probability: None,
                 }
             ),
-            16 * (8 * 5 * 1_024 + 24 * 256)
+            univmon.memory_bytes() as u64
         );
     }
 
@@ -7897,6 +7890,289 @@ mod tests {
         // DDSketch's does; unknown samples fill the full capacity.
         assert_eq!(model_bytes(Some(0)), 872);
         assert_eq!(model_bytes(None), 744 + 8 * 1_206);
+    }
+
+    /// Plan selection prices each state the executor builds per group at
+    /// what the executor charges for it (#947). Each family is built
+    /// through the executor's factory and fed `n` rows shaped as the
+    /// pricing assumes: signed values over [`DDSKETCH_ASSUMED_VALUE_RANGE`],
+    /// label values of [`ASSUMED_VALUE_KEY_BYTES`] keys for UnivMon, or
+    /// keyed rows whose tuple keys are [`ASSUMED_HEAP_KEY_BYTES`] long. The
+    /// heap families' shapes are dominated by their heaps. The charge is
+    /// the sketch's bytes plus the accumulator's own fields, named per
+    /// family. It equals the priced bytes where `asap_sketchlib`'s estimate
+    /// is exact (Count-Min, Count Sketch, HLL, KMV at `n` distinct items) and
+    /// for KLL up to `k` rows. For DDSketch, the heap sketches and UnivMon
+    /// the price bounds it, by at most 1.5 times once the state is full;
+    /// UnivMon's price also bounds the bytes its sketch holds.
+    /// KLL past `k` rows is checked only loosely: the planner's formula
+    /// leaves out the compaction scratch space, a known gap until a
+    /// sketchlib estimate without the CDF cache can price KLL.
+    ///
+    /// HydraCms is left out: plan selection prices an independent Count-Min
+    /// per group, the executor one shared grid, so the two agree only at
+    /// about 79 groups for a 5 × 32 grid of 64 × 3 cells (a follow-up).
+    #[test]
+    fn state_bytes_bound_the_executors_charge() {
+        use asap_executor::factory::create_planner_accumulator;
+        use asap_executor::summary_kernels::univmon::UnivMonAccumulator;
+        use asap_executor::summary_kernels::weighted_frequency::WeightedFrequency;
+        use asap_executor::summary_kernels::HllSketchAccumulator;
+        use asap_executor::values::Value;
+        use asap_types::ir::scalar::expr_ir::ColumnRef;
+        use asap_types::ir::schema::{
+            NonNegativeWeightProof, SummaryInputExpr, SummaryUpdate, WeightDomain,
+        };
+        use std::mem::{align_of, size_of};
+        use SketchAlgorithm as A;
+        /// How the priced bytes relate to the sketch's.
+        enum Priced {
+            Exact,
+            /// Exact up to `k` rows; past them at most the formula's
+            /// missing compaction scratch space over it.
+            Kll {
+                k: u32,
+            },
+            /// At least, and at most 1.5 times once the state is full.
+            Bound,
+        }
+        /// The rows a family is fed.
+        enum Rows {
+            /// Signed values over the assumed range.
+            Values,
+            /// One label value a row, as Pass 1 feeds UnivMon a column.
+            Labels,
+            /// A label set and a weight a row.
+            Keyed,
+        }
+        // (family, parameters, rows fed, how it is priced, the
+        // accumulator's own fields, rows at which the state is full: four
+        // times the heap for the heap sketches, so each heap churns).
+        //
+        // The accumulators' own fields, beside the sketch each wraps:
+        // Count-Min / Count Sketch's width, depth and capacity, padded to
+        // the struct's alignment; HLL's precision tag; UnivMon's two key
+        // bounds.
+        let weighted_frequency_shape =
+            (3 * size_of::<usize>()).next_multiple_of(align_of::<WeightedFrequency>());
+        let hll_precision_tag = size_of::<HllSketchAccumulator>()
+            - size_of::<asap_sketchlib::HyperLogLog<asap_sketchlib::Classic>>();
+        let univmon_key_bounds = 2 * size_of::<usize>();
+        let families = [
+            (
+                A::Kll,
+                SketchParams::Kll {
+                    k: 200,
+                    failure_probability: None,
+                },
+                Rows::Values,
+                Priced::Kll { k: 200 },
+                0,
+                10_000,
+            ),
+            (
+                A::DDSketch,
+                SketchParams::DDSketch { alpha: 0.01 },
+                Rows::Values,
+                Priced::Bound,
+                0,
+                10_000,
+            ),
+            (
+                A::Cms,
+                SketchParams::Cms {
+                    width: 1_024,
+                    depth: 5,
+                },
+                Rows::Keyed,
+                Priced::Exact,
+                0,
+                10_000,
+            ),
+            (
+                A::CountSketch,
+                SketchParams::CountSketch {
+                    width: 1_024,
+                    depth: 5,
+                },
+                Rows::Keyed,
+                Priced::Exact,
+                weighted_frequency_shape,
+                10_000,
+            ),
+            (
+                A::CmsWithHeap,
+                SketchParams::CmsWithHeap {
+                    width: 16,
+                    depth: 1,
+                    heap_size: 256,
+                },
+                Rows::Keyed,
+                Priced::Bound,
+                weighted_frequency_shape,
+                1_024,
+            ),
+            (
+                A::CountSketchWithHeap,
+                SketchParams::CountSketchWithHeap {
+                    width: 16,
+                    depth: 1,
+                    heap_size: 256,
+                },
+                Rows::Keyed,
+                Priced::Bound,
+                weighted_frequency_shape,
+                1_024,
+            ),
+            (
+                A::Hll,
+                SketchParams::Hll {
+                    precision: 12,
+                    relative_error: None,
+                },
+                Rows::Values,
+                Priced::Exact,
+                hll_precision_tag,
+                10_000,
+            ),
+            (
+                A::Kmv,
+                SketchParams::Kmv {
+                    k: 1_024,
+                    relative_error: None,
+                },
+                Rows::Values,
+                Priced::Exact,
+                0,
+                10_000,
+            ),
+            // Its top layer sees one row in eight: 4 096 labels fill and
+            // churn every layer's heap.
+            (
+                A::UnivMon,
+                SketchParams::UnivMon {
+                    heap_size: 256,
+                    sketch_rows: 1,
+                    sketch_cols: 16,
+                    layers: 4,
+                    distinct_failure_probability: None,
+                },
+                Rows::Labels,
+                Priced::Bound,
+                univmon_key_bounds,
+                4_096,
+            ),
+        ];
+        let value = SummaryUpdate::column(ColumnRef::SampleValue);
+        let item = Some(SummaryInputExpr::Column(ColumnRef::Named("item".into())));
+        let keyed = SummaryUpdate {
+            item: item.clone(),
+            ..value.clone()
+        };
+        let labeled = SummaryUpdate {
+            item,
+            weight: SummaryInputExpr::Constant(1.0),
+            weight_domain: WeightDomain::NonNegative {
+                proof: NonNegativeWeightProof::UnitCount,
+            },
+        };
+        // A 16-byte label value: its key has the assumed size.
+        let label = |i: u32| format!("{i:016}");
+        assert_eq!(
+            Value::Utf8(label(0).into()).key().unwrap().len(),
+            ASSUMED_VALUE_KEY_BYTES
+        );
+        // Three 16-byte labels: a tuple key of the assumed size.
+        let labels = |i: u32| {
+            [
+                label(i),
+                "service-frontend".to_string(),
+                "region-us-east-1".to_string(),
+            ]
+        };
+        let key = asap_sketchlib::TupleKey::new(
+            labels(0)
+                .into_iter()
+                .map(asap_sketchlib::KeyColumn::String)
+                .collect(),
+        );
+        assert_eq!(key.to_bytes().unwrap().len(), ASSUMED_HEAP_KEY_BYTES);
+        for (algorithm, params, rows, priced_as, fields, full) in &families {
+            for n in [1, 100, *full] {
+                let family = FieldDataType::Sketch(
+                    SketchKind::new(algorithm.clone(), params.clone()),
+                    GroupingStrategy::default(),
+                );
+                let input = match rows {
+                    Rows::Values => &value,
+                    Rows::Labels => &labeled,
+                    Rows::Keyed => &keyed,
+                };
+                let mut updater =
+                    create_planner_accumulator(&family, input, &GroupingStrategy::default())
+                        .unwrap();
+                for i in 0..n {
+                    match rows {
+                        // Distinct magnitudes over the assumed range, in a
+                        // scrambled order, alternating in sign.
+                        Rows::Values => {
+                            let at = f64::from(i * 7_919 % n) / f64::from(n);
+                            let magnitude = DDSKETCH_ASSUMED_VALUE_RANGE.powf(at);
+                            let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+                            updater.update_single(sign * magnitude, 0).unwrap();
+                        }
+                        Rows::Labels => updater
+                            .update_value(&Value::Utf8(label(i).into()), 0)
+                            .unwrap(),
+                        Rows::Keyed => updater.update_keyed(&labels(i), 1.0, 0).unwrap(),
+                    }
+                }
+                let state = updater.into_accumulator();
+                let charged = state.approx_memory_bytes();
+                let priced = fields
+                    + sketch_shape(
+                        params,
+                        StateInputRows {
+                            rows_per_state: Some(u64::from(n)),
+                            non_negative: false,
+                        },
+                    )
+                    .1 as usize;
+                let context = format!("{algorithm:?} after {n} rows: {priced} priced");
+                match priced_as {
+                    Priced::Exact => assert_eq!(charged, priced, "{context}"),
+                    Priced::Kll { k } if n <= *k => assert_eq!(charged, priced, "{context}"),
+                    // sketchlib bounds KLL's compaction scratch space at
+                    // 2 (k - 1) items.
+                    Priced::Kll { k } => assert!(
+                        charged <= priced + 8 * 2 * (*k as usize - 1),
+                        "{context}, {charged} charged"
+                    ),
+                    Priced::Bound => {
+                        assert!(charged <= priced, "{context}, {charged} charged");
+                        if n == *full {
+                            assert!(
+                                priced as f64 <= 1.5 * charged as f64,
+                                "{context}, {charged} charged"
+                            );
+                        }
+                    }
+                }
+                // UnivMon charges sketchlib's estimate itself, since its
+                // `memory_bytes` walks the heaps: the sketch holds no more.
+                // The estimate is a heap whose digest index has grown once
+                // more under churn, which the test's labels do not reach: a
+                // full heap holds about two thirds of it (1.52 times less
+                // here), so this bound is 1.6 times rather than 1.5.
+                if let Some(univmon) = state.as_any().downcast_ref::<UnivMonAccumulator>() {
+                    let held = fields + univmon.sketch().memory_bytes();
+                    assert!(held <= charged, "{context}, {held} held");
+                    if n == *full {
+                        assert!(priced as f64 <= 1.6 * held as f64, "{context}, {held} held");
+                    }
+                }
+            }
+        }
     }
 
     /// A UnivMon row updates layers `0..=b`, where its bottom layer `b` is

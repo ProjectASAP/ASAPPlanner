@@ -30,10 +30,11 @@ A new sketch that Pass 1 can offer for an intent.
    it from `DefaultAccuracyModel`'s `local_guarantee`, by inverting the same
    sizing formulas. Without a guarantee, every candidate that uses it is
    rejected.
-5. **Cost.** Give it a state size and per-operation CPU in
-   `crates/plan-selection/src/lib.rs` (and accept its parameters in
-   `crates/plan-selection/src/cost/measured.rs` if deployments
-   measure it).
+5. **Cost.** Give it a state size (the library's `estimated_memory_bytes`
+   for the type the executor builds; KLL keeps the planner's own formula)
+   and per-operation CPU in `sketch_shape`
+   (`crates/plan-selection/src/lib.rs`), and accept its parameters in
+   `crates/plan-selection/src/cost/measured.rs` if deployments measure it.
 6. **Executor.** Wrap the `asap_sketchlib` implementation in
    `crates/executor/src/summary_kernels/` and register it in
    `factory.rs` and `capability.rs`. Gaps in the library are fixed upstream,

@@ -443,6 +443,7 @@ dependencies = [
 name = "asap-plan-selection"
 version = "0.1.0"
 dependencies = [
+ "asap-executor",
  "asap-frontend-promql",
  "asap-logical-asap-optimization",
  "asap-physical-asap-optimization",
