@@ -116,6 +116,27 @@ To run it, see [RUNNING.md](RUNNING.md).
   and solver status. Historical documents may also contain a legacy memo-plan
   view of shared units. Rendering that archived format does not enable a second
   planner implementation; new documents use the candidate-connection report.
+- **Memo**, when the document has a `memo` section: the memo after each
+  step, one tab per step (`Stage 0`, `Stage 1, Pass 1`, `Stage 1, Pass 2`,
+  concrete states; a step production did not run is not there), opening on
+  the last. Each memo group is a box `G<id> · <label>` with its candidate
+  count (`745 candidates (64 listed)` when the document lists only some) and
+  the queries it is the root of; its implementation candidates sit inside
+  it, bordered by origin (Pass1, SharedBuild, SummaryResult, SummaryInput,
+  Panes, Rollup, TopKReuse, WidenedScans), with a double border and
+  `✚ new` when the step added them. An edge goes from each candidate to
+  each child group it reads (at Stage 0, which has no candidates, from the
+  group). Readers sit above what they read. A group listing more than 12
+  candidates is drawn as one node per origin with its count (`360 Panes`);
+  clicking a count lists them, clicking the group folds them back. On the
+  last tab the selected plan's candidates (`selected_choice`) are filled
+  green with `✓ selected`, and so are the edges they read along. The header
+  counts the step's groups and candidates and what it added over the
+  previous step. Clicking a candidate shows its own nodes in the details,
+  down to the nodes of the child groups it reads; clicking a group shows
+  its node, its child and parent groups, queries and counts per origin.
+  The **highlight query** menu also dims the groups that query does not
+  reach. Documents without `memo` show no Memo panel.
 - **Details**: click a node for its operator, the queries reaching it, timing, materialization,
   output schema, guarantee and Stage 3 cost; click an edge for its schema
   and data state.
@@ -377,6 +398,12 @@ sections are still shown. If a check fails, it shows the problems instead.
   `memo.enumeration`. `enumeration.test.mjs`: its Node tests, over
   `test-fixtures/memo-enumeration-small.json` (a hand-written priced memo
   for Example 1).
+- `memo.js`: the Memo view: checks of `memo.steps` and
+  `memo.selected_choice`, the per-step diff, a step's elements with preset
+  positions, a candidate's own nodes (DOM-free), and the panel that draws
+  them. `memo.test.mjs`: its Node tests, over the hand-written
+  `test-fixtures/memo-small.json` (a three-step memo over Example 1's two
+  queries) and the committed planner memo example when present.
 - `node-style.js`: the operator-kind table (`KIND_CATEGORY_JSON`, checked
   against the IR by `crates/devtools/tests/viewer_contract.rs`) and the
   node groups.
@@ -423,11 +450,11 @@ From `tools/dag-viewer`:
 python3 -m unittest test_viewer test_server
 ```
 
-`stages.js` also has Node tests, which load the elements into the vendored
+`stages.js` and `memo.js` also have Node tests, which load the elements into the vendored
 cytoscape (headless), from the repository root:
 
 ```bash
-node --test tools/dag-viewer/stages.test.mjs tools/dag-viewer/enumeration.test.mjs
+node --test tools/dag-viewer/stages.test.mjs tools/dag-viewer/enumeration.test.mjs tools/dag-viewer/memo.test.mjs
 ```
 
 The JavaScript runs in V8 through `py_mini_racer` (`pip install
