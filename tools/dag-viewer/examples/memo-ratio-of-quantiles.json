@@ -63243,7 +63243,7 @@
               ]
             },
             "id": 2,
-            "label": "Aggregate",
+            "label": "Aggregate quantile(q=0.5)",
             "parents": [
               3
             ],
@@ -63851,7 +63851,7 @@
               ]
             },
             "id": 4,
-            "label": "Aggregate",
+            "label": "Aggregate quantile(q=0.9)",
             "parents": [
               5
             ],
@@ -64866,7 +64866,7 @@
               ]
             },
             "id": 6,
-            "label": "Aggregate",
+            "label": "Aggregate avg()",
             "parents": [],
             "queries": [
               0
@@ -65805,7 +65805,7 @@
                   2
                 ],
                 "index": 0,
-                "label": "Aggregate",
+                "label": "Aggregate quantile(q=0.5)",
                 "origin": "pass1"
               },
               {
@@ -68904,7 +68904,7 @@
               ]
             },
             "id": 2,
-            "label": "Aggregate",
+            "label": "Aggregate quantile(q=0.5)",
             "parents": [
               3
             ],
@@ -69861,7 +69861,7 @@
                   4
                 ],
                 "index": 0,
-                "label": "Aggregate",
+                "label": "Aggregate quantile(q=0.9)",
                 "origin": "pass1"
               },
               {
@@ -72960,7 +72960,7 @@
               ]
             },
             "id": 4,
-            "label": "Aggregate",
+            "label": "Aggregate quantile(q=0.9)",
             "parents": [
               5
             ],
@@ -75398,7 +75398,7 @@
               ]
             },
             "id": 6,
-            "label": "Aggregate",
+            "label": "Aggregate avg()",
             "parents": [],
             "queries": [
               0
@@ -76338,7 +76338,7 @@
                   2
                 ],
                 "index": 0,
-                "label": "Aggregate",
+                "label": "Aggregate quantile(q=0.5)",
                 "origin": "pass1"
               },
               {
@@ -107975,7 +107975,7 @@
               ]
             },
             "id": 2,
-            "label": "Aggregate",
+            "label": "Aggregate quantile(q=0.5)",
             "parents": [
               3
             ],
@@ -108933,7 +108933,7 @@
                   4
                 ],
                 "index": 0,
-                "label": "Aggregate",
+                "label": "Aggregate quantile(q=0.9)",
                 "origin": "pass1"
               },
               {
@@ -140570,7 +140570,7 @@
               ]
             },
             "id": 4,
-            "label": "Aggregate",
+            "label": "Aggregate quantile(q=0.9)",
             "parents": [
               5
             ],
@@ -143008,7 +143008,7 @@
               ]
             },
             "id": 6,
-            "label": "Aggregate",
+            "label": "Aggregate avg()",
             "parents": [],
             "queries": [
               0
@@ -144294,7 +144294,7 @@
                   2
                 ],
                 "index": 0,
-                "label": "Aggregate",
+                "label": "Aggregate quantile(q=0.5)",
                 "origin": "pass1"
               },
               {
@@ -175931,7 +175931,7 @@
               ]
             },
             "id": 2,
-            "label": "Aggregate",
+            "label": "Aggregate quantile(q=0.5)",
             "parents": [
               3
             ],
@@ -176890,7 +176890,7 @@
                   4
                 ],
                 "index": 0,
-                "label": "Aggregate",
+                "label": "Aggregate quantile(q=0.9)",
                 "origin": "pass1"
               },
               {
@@ -208527,7 +208527,7 @@
               ]
             },
             "id": 4,
-            "label": "Aggregate",
+            "label": "Aggregate quantile(q=0.9)",
             "parents": [
               5
             ],
@@ -212851,7 +212851,7 @@
               ]
             },
             "id": 6,
-            "label": "Aggregate",
+            "label": "Aggregate avg()",
             "parents": [],
             "queries": [
               0
@@ -380815,7 +380815,7 @@
         "calibration_scope": "not_required",
         "catalog_exhausted": false,
         "catalog_scope": "Pass 1, local panes, shared summary/pane states, exact and sketch rollups, compatible TopK ranking reuse, and scan widening; finite capacity, pane-width, horizon, materialization and execution-scope configurations",
-        "certified_query_cuts": 23,
+        "certified_query_cuts": 22,
         "compatible_connections": 9594,
         "direct_cost_best_validated_cost": null,
         "direct_cost_fallback_reasons": [
@@ -380832,22 +380832,22 @@
           "shared_producer_choices_retained": 0
         },
         "early_query_pruning_examples": [],
-        "early_query_pruning_ms": 0.017963,
+        "early_query_pruning_ms": 0.016875,
         "evaluation_complete": false,
         "full_catalog_completed": false,
-        "full_planning_ms": 25073.291577,
+        "full_planning_ms": 25118.286811,
         "groups": 354,
         "immediate_candidates": 5166,
         "independent_components": 1,
-        "inventory_construction_ms": 434.136735,
+        "inventory_construction_ms": 657.100107,
         "inventory_pane_width_domain": "Expanding { max_parts: 64 }",
         "joint_price_solve_calls": 0,
-        "local_candidate_generation_ms": 0.278148,
+        "local_candidate_generation_ms": 0.285385,
         "logical_candidates": 1738,
         "lower_bound": null,
         "max_refinements": 128,
-        "memo_expansion_ms": 654.923696,
-        "model_construction_ms": 240.387735,
+        "memo_expansion_ms": 939.9990129999999,
+        "model_construction_ms": 298.499568,
         "objective": "monetary_cost",
         "output_references": 1,
         "pane_width_rounds": [
@@ -380862,30 +380862,30 @@
         "peak_milp_constraints": 31547,
         "peak_milp_variables": 21948,
         "physical_configurations": 6175,
-        "refinements": 29,
+        "refinements": 28,
         "relative_gap": null,
         "rounded_down_cost_bounds": 0,
-        "search_and_validation_ms": 28954.829214999998,
+        "search_and_validation_ms": 28483.715270999997,
         "seed_fallback_reason": null,
-        "seed_planning_ms": 5006.4394170000005,
+        "seed_planning_ms": 5015.112728,
         "seed_selected": false,
-        "solve_calls": 35,
-        "solver_ms": 23765.567426,
+        "solve_calls": 34,
+        "solver_ms": 23292.61746,
         "status": "time_or_evaluation_limit_with_validated_incumbent",
         "stored_supplier_ids": 6172,
         "structurally_removed_candidates": 3785,
         "structurally_removed_connections": 5862,
         "supplier_sets": 3782,
         "time_limit_ms": 30000,
-        "validation_ms": 53.39020800000001,
+        "validation_ms": 56.773236999999995,
         "validation_rejection_counts": {
-          "no_accuracy_guarantee": 23
+          "no_accuracy_guarantee": 22
         },
         "validation_rejection_examples": [
           "no_accuracy_guarantee: q0: the output has no guarantee, and the deployment has no evidence for it, so it cannot meet target AccuracyTarget { accuracy_metric: None, max_error: 0.01, failure_probability: Some(0.001), accuracy_scope: WholeResult }"
         ]
       },
-      "candidates_checked": 29,
+      "candidates_checked": 28,
       "incumbent_cost": 2.407114219349679e-6,
       "runner_up_cost_per_second": null
     },

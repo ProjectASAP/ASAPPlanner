@@ -283,7 +283,7 @@ const USAGE: &str =
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
 [--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search candidate-connections] [--milp-time-limit-s <f64>] [--max-displayed <n>] \
-[--no-memo | [--max-memo-candidates <n>] [--memo-enumeration-limit <n>] [--max-enumerated <n>]] --out <file>\n\
+[--no-memo] [--max-memo-candidates <n>] [--memo-enumeration-limit <n>] [--max-enumerated <n>] --out <file>\n\
 --search candidate-connections is the default search.";
 
 /// Default evaluator-assignment budget for an exhaustive archive run.
@@ -1745,6 +1745,24 @@ fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
                 match key.as_str() {
                     "schema" | "input_schema" | "output_schema" | "predicates" | "cols" => {}
                     "query" => details.push(compact(field)),
+                    // An aggregate's measures, e.g. `quantile(q=0.5)`.
+                    "measures" => {
+                        for measure in field.as_array().into_iter().flatten() {
+                            let Some(kind) = measure.get("kind").and_then(Value::as_str) else {
+                                continue;
+                            };
+                            let params: Vec<_> = measure
+                                .as_object()
+                                .into_iter()
+                                .flatten()
+                                .filter(|(key, value)| {
+                                    *key != "kind" && (value.is_number() || value.is_string())
+                                })
+                                .map(|(key, value)| format!("{key}={value}"))
+                                .collect();
+                            details.push(format!("{kind}({})", params.join(", ")));
+                        }
+                    }
                     "range" | "window" => details.push(format!("{key}={field}")),
                     _ => find_details(field, details, depth + 1),
                 }

@@ -126,7 +126,8 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         archive.memo_steps = progress.memo_steps.map(|(_, steps)| steps);
         return result;
     }
-    // Each round's memo steps, with its selected plan's namespaced ID.
+    // Each round's memo steps, with its selected plan's namespaced ID; the
+    // archive keeps the last round's for a search that ends without a plan.
     let mut memo_rounds = Vec::new();
     let mut record_round =
         |archive: &mut CandidateArchive, progress: &mut DomainProgress, namespace: &str| {
@@ -1233,7 +1234,12 @@ fn selected_memo_choice(
                 })
             })
         };
-        let &(group, index) = options.iter().find(reads).unwrap_or(&options[0]);
+        let &(group, index) = options.iter().find(reads).ok_or_else(|| {
+            format!(
+                "selected candidate {} reads groups none of its memo candidates read",
+                id.0
+            )
+        })?;
         if let Some(previous) = choice.insert(group, index) {
             if previous != index {
                 return Err(format!(
@@ -1242,6 +1248,24 @@ fn selected_memo_choice(
                 ));
             }
         }
+    }
+    // Every group the chosen candidates need, from the query roots, is chosen.
+    let mut pending: Vec<_> = (0..memo.groups.len())
+        .filter(|&group| !memo.groups[group].roots_of.is_empty())
+        .map(|group| MemoGroupId(group as u32))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(group) = pending.pop() {
+        if !seen.insert(group) {
+            continue;
+        }
+        let index = choice.get(&group).ok_or_else(|| {
+            format!(
+                "the selected plan uses group {} but no candidate of it is selected",
+                group.0
+            )
+        })?;
+        pending.extend(&memo.candidates[group.0 as usize][*index].children);
     }
     Ok(choice)
 }

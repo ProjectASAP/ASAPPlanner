@@ -11,8 +11,10 @@
 //! that differ only in what recomposing guarantees re-derives compose equal
 //! DAGs. Composing checks only that a choice composes; input contracts,
 //! accuracy at the roots, Stage 2 legality and Stage 3 cost stay with the
-//! validator and the later stages. The memo must be acyclic, as every memo
-//! step builds it.
+//! validator and the later stages. The memo's groups are acyclic, as every
+//! memo step builds them, but candidates may read each other (a rollup of
+//! a finer grouping whose candidate reads the coarser one): a choice taking
+//! such candidates together composes no DAG and is not enumerated.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
@@ -75,9 +77,6 @@ pub fn enumerate(memo: &CandidateMemo, limit: usize) -> MemoEnumeration {
         let group = loop {
             match pending.pop() {
                 None => {
-                    if cyclic(memo, choice) {
-                        return true;
-                    }
                     if choices.len() == limit {
                         return false;
                     }
@@ -89,6 +88,15 @@ pub fn enumerate(memo: &CandidateMemo, limit: usize) -> MemoEnumeration {
             }
         };
         for (index, candidate) in memo.candidates[group.0 as usize].iter().enumerate() {
+            // A candidate reading a group that already reads this one closes
+            // a cycle; every edge is checked as its group is chosen.
+            if candidate
+                .children
+                .iter()
+                .any(|&child| reaches(memo, choice, child, group))
+            {
+                continue;
+            }
             choice.insert(group, index);
             let mut next = pending.clone();
             next.extend(candidate.children.iter().rev());
@@ -183,40 +191,22 @@ pub fn compose(
         .collect())
 }
 
-/// Whether the candidates `choice` names read each other in a cycle.
-fn cyclic(memo: &CandidateMemo, choice: &MemoChoice) -> bool {
-    // Groups whose reads are all checked, and those on the current path.
-    fn reaches_path(
-        memo: &CandidateMemo,
-        choice: &MemoChoice,
-        group: MemoGroupId,
-        finished: &mut HashSet<MemoGroupId>,
-        path: &mut HashSet<MemoGroupId>,
-    ) -> bool {
-        if finished.contains(&group) {
-            return false;
-        }
-        if !path.insert(group) {
+/// Whether `from` is `to` or reads it through the candidates `choice` names.
+fn reaches(memo: &CandidateMemo, choice: &MemoChoice, from: MemoGroupId, to: MemoGroupId) -> bool {
+    let mut pending = vec![from];
+    let mut seen = HashSet::new();
+    while let Some(group) = pending.pop() {
+        if group == to {
             return true;
         }
-        let Some(&index) = choice.get(&group) else {
-            path.remove(&group);
-            finished.insert(group);
-            return false;
-        };
-        for &child in &memo.candidates[group.0 as usize][index].children {
-            if reaches_path(memo, choice, child, finished, path) {
-                return true;
-            }
+        if !seen.insert(group) {
+            continue;
         }
-        path.remove(&group);
-        finished.insert(group);
-        false
+        if let Some(&index) = choice.get(&group) {
+            pending.extend(&memo.candidates[group.0 as usize][index].children);
+        }
     }
-    let (mut finished, mut path) = (HashSet::new(), HashSet::new());
-    choice
-        .keys()
-        .any(|&group| reaches_path(memo, choice, group, &mut finished, &mut path))
+    false
 }
 
 fn root_groups(memo: &CandidateMemo) -> impl DoubleEndedIterator<Item = MemoGroupId> + '_ {
