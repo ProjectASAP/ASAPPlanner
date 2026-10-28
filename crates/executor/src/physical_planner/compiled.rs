@@ -1,11 +1,11 @@
 //! Reader-independent physical computation and checked deployment instantiation.
 use super::*;
-use crate::sources::{BindingDataSources, Scan, SlotWindow};
+use crate::sources::{BindingDataSources, Scan};
 
 #[derive(Clone)]
 #[cfg_attr(any(test, feature = "test-support"), derive(serde::Serialize))]
 enum Node {
-    /// A view slot: data bound by node id at run time, with this schema.
+    /// A materialized view slot: data bound by node id at run time, with this schema.
     Input(SchemaRef),
     /// A table slot: a `Scan` leaf, bound by its `Source`.
     Table(TableSlot),
@@ -24,9 +24,8 @@ pub(super) struct TableSlot {
     pub(super) schema: SchemaRef,
     /// The `Scan`'s predicates, compiled over `schema`.
     pub(super) predicates: Vec<crate::expressions::CompiledExpression>,
-    /// The union of the range windows above the `Scan`; `None` when some
-    /// reader reads it outside a window.
-    pub(super) window: Option<SlotWindow>,
+    /// The rows its readers read ([`PhysicalASAPDAG::scan_window`]).
+    pub(super) window: ScanWindow,
 }
 
 /// Selected native operators and input slots. Rebinding never repeats lowering.
@@ -39,8 +38,8 @@ pub struct CompiledPhysicalDAG {
     roots: Vec<NodeId>,
     /// The window of each node that reads one range window directly (an
     /// expanded pane reading `TimeRange(w)` over its shifts), for when the
-    /// node is a view slot.
-    view_windows: BTreeMap<NodeId, SlotWindow>,
+    /// node is a materialized view slot.
+    materialized_view_windows: BTreeMap<NodeId, ScanWindow>,
 }
 
 impl CompiledPhysicalDAG {
@@ -135,7 +134,7 @@ impl CompiledPhysicalDAG {
         Self {
             nodes: BTreeMap::new(),
             roots,
-            view_windows: BTreeMap::new(),
+            materialized_view_windows: BTreeMap::new(),
         }
     }
     pub(super) fn add_input(&mut self, id: NodeId, schema: SchemaRef) -> Result<(), Error> {
@@ -144,8 +143,8 @@ impl CompiledPhysicalDAG {
     pub(super) fn add_table(&mut self, id: NodeId, slot: TableSlot) -> Result<(), Error> {
         self.insert(id, Node::Table(slot))
     }
-    pub(super) fn set_view_window(&mut self, id: NodeId, window: SlotWindow) {
-        self.view_windows.insert(id, window);
+    pub(super) fn set_materialized_view_window(&mut self, id: NodeId, window: ScanWindow) {
+        self.materialized_view_windows.insert(id, window);
     }
     pub(super) fn add(
         &mut self,
@@ -225,7 +224,7 @@ impl CompiledPhysicalDAG {
         matches!(self.nodes.get(&id), Some(Node::Operator { .. }))
     }
     /// Keep the already-lowered operators reachable from `roots`, replacing
-    /// each node in `boundaries` by a view slot (a table slot stays one).
+    /// each node in `boundaries` by a materialized view slot (a table slot stays one).
     /// Nothing is lowered again.
     pub(super) fn cut(
         &self,
@@ -249,8 +248,8 @@ impl CompiledPhysicalDAG {
             if let Node::Operator { inputs, .. } = &node {
                 pending.extend(inputs);
             }
-            if let Some(&window) = self.view_windows.get(&id) {
-                result.view_windows.insert(id, window);
+            if let Some(&window) = self.materialized_view_windows.get(&id) {
+                result.materialized_view_windows.insert(id, window);
             }
             result.nodes.insert(id, node);
         }
@@ -279,7 +278,7 @@ impl CompiledPhysicalDAG {
     }
     /// Bind every input slot and validate before any provider is read: a
     /// table slot to the provider of its `Source` in `data_sources.tables`,
-    /// a view slot to its node's provider in `data_sources.views`. Each
+    /// a materialized view slot to its node's provider in `data_sources.materialized_views`. Each
     /// provider must contain its slot's columns and declare `Bounded`.
     /// Opens no reader; each slot becomes a `Scan` that requests its rows
     /// when the run starts.
@@ -292,13 +291,16 @@ impl CompiledPhysicalDAG {
             match node {
                 Node::Input(schema) => {
                     let provider = data_sources
-                        .views
+                        .materialized_views
                         .get(&id)
                         .ok_or_else(|| invalid(format!("missing physical input {id}")))?;
-                    let scan = Scan::view(
+                    let scan = Scan::materialized_view(
                         provider.clone(),
                         schema.clone(),
-                        self.view_windows.get(&id).copied(),
+                        self.materialized_view_windows
+                            .get(&id)
+                            .copied()
+                            .unwrap_or(ScanWindow::Unbounded),
                     )
                     .map_err(|error| at_slot(id, error))?;
                     dag.add(id, vec![], scan)?;
@@ -323,12 +325,12 @@ impl CompiledPhysicalDAG {
             }
         }
         if let Some(id) = data_sources
-            .views
+            .materialized_views
             .keys()
             .find(|id| !matches!(self.nodes.get(id), Some(Node::Input(_))))
         {
             return Err(invalid(format!(
-                "view binding {id} names no view slot of this DAG"
+                "materialized view binding {id} names no materialized view slot of this DAG"
             )));
         }
         dag.validate(&self.roots)?;

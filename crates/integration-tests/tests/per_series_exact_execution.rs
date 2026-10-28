@@ -1,27 +1,34 @@
 //! Exact per-series range reductions over raw data samples execute natively
 //! (issue #770): exact `quantile/sum/avg/min/max/count_over_time` reduces
 //! each series' samples in the window with a per-entity `Aggregate`, which
-//! the executor compiles and runs. The window's rows come from
-//! `RawDataSampleSelector`, as a runtime feeds them.
+//! the executor compiles and runs. The samples are bound at the plan's
+//! `Scan`, as a runtime binds them, and its `TimeRange` keeps the window.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
-use asap_executor::physical_planner::{compile_candidate, frontier_from_timing, promql_rows};
-use asap_executor::runtime::Scope;
-use asap_executor::values::Value;
-use asap_executor::{series_labels_of_output_row, RawDataSample, RawDataSampleSelector};
+use asap_executor::physical_planner::{compile, promql_rows};
+use asap_executor::runtime::{Limits, RunContext, Scope};
+use asap_executor::sources::{BindingDataSources, MemorySource};
+use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_types::ir::operator::Reduction;
-use asap_types::ir::physical_export::{
-    compile_physical_asap_dag, PhysicalASAPOperatorPayload, RawDataSampleWindow,
-};
+use asap_types::ir::operator::{Reduction, Source};
+use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPOperatorPayload};
 use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::schema::{Schema, PROMQL_SERIES_IDENTITY};
 use asap_types::ir::{
     apply_materialization_timings, MaterializationAssignment, NonASAPOp, OperatorNode, TimingMemo,
 };
+use futures::{executor::block_on, StreamExt};
 
-mod physical_common;
+/// One raw data sample: every label of its series, its time and value.
+#[derive(Clone)]
+struct RawDataSample {
+    labels: BTreeMap<String, String>,
+    timestamp_ms: i64,
+    value: f64,
+}
 
 /// Evaluation time; every query's window is `(240 s, 300 s]`.
 const EVALUATION_MS: i64 = 300_000;
@@ -70,9 +77,23 @@ fn series(instance: &str, values: &[f64]) -> Vec<RawDataSample> {
         .collect()
 }
 
-/// Run `query`'s exact per-entity plan at query time over `samples`, fed
-/// through the window's `RawDataSampleSelector`: each answered series'
-/// `instance` and value.
+/// The labels of an answer row, from the output schema's label columns:
+/// its series identity's labels and every other non-empty text column.
+fn series_labels(schema: &Schema, row: &[Value]) -> BTreeMap<String, String> {
+    let mut labels = BTreeMap::new();
+    for (field, cell) in schema.fields.iter().zip(row) {
+        let Value::Utf8(text) = cell else { continue };
+        if field.name == PROMQL_SERIES_IDENTITY {
+            labels.extend(promql_rows::decode_series_identity(text).unwrap());
+        } else if !text.is_empty() {
+            labels.insert(field.name.clone(), text.to_string());
+        }
+    }
+    labels
+}
+
+/// Run `query`'s exact per-entity plan at query time over `samples`, bound
+/// at its `Scan` of `x`: each answered series' `instance` and value.
 fn execute(query: &str, samples: &[RawDataSample]) -> Vec<(String, f64)> {
     let timed = apply_materialization_timings(
         &per_entity_plan(query),
@@ -92,48 +113,53 @@ fn execute(query: &str, samples: &[RawDataSample]) -> Vec<(String, f64)> {
         };
         node
     };
-    let range = node(|payload| {
-        matches!(
-            payload,
-            PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::TimeRange { .. })
-        )
-    });
     let scan = node(|payload| {
         matches!(
             payload,
             PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { .. })
         )
     });
-    let window = RawDataSampleWindow {
-        time_range_node_id: range.id,
-        width_ms: 60_000,
-        end_offset_ms: 0,
-        scan_node_id: scan.id,
-    };
-    let rows = RawDataSampleSelector::new(&dag, &window)
-        .unwrap()
-        .window_batch(EVALUATION_MS, samples)
+    // The runtime's `x` provider over every sample it received.
+    let schema = Arc::new(scan.output_schema.clone());
+    let rows = samples
+        .iter()
+        .map(|s| promql_rows::series_row(&schema, &s.labels, s.timestamp_ms, s.value).unwrap())
+        .collect();
+    let batch = Batch::try_new(schema.clone(), rows).unwrap();
+    let mut data_sources = BindingDataSources::default();
+    data_sources
+        .tables
+        .register(
+            Source::TimeSeries { metric: "x".into() },
+            Arc::new(MemorySource::new(schema, vec![batch]).unwrap()),
+        )
         .unwrap();
-    let compiled = compile_candidate(
-        &dag,
-        &BTreeSet::from([range.id as u64]),
-        &[dag.roots[0] as u64],
-        &frontier_from_timing(&dag).unwrap(),
-    )
-    .unwrap();
-    let result = physical_common::execute(
-        &compiled.query,
-        BTreeMap::from([(range.id as u64, rows)]),
+    let roots = [dag.roots[0] as u64];
+    let bound = compile(&dag, &BTreeSet::new(), &roots)
+        .unwrap()
+        .instantiate(&data_sources)
+        .unwrap();
+    let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: EVALUATION_MS,
             revision: 1,
         },
-    );
-    let mut answers: Vec<(String, f64)> = result[0]
+        Limits::default(),
+    )
+    .unwrap();
+    let batches: Vec<Batch> = block_on(async {
+        let mut output = bound.execute(&roots, context).unwrap().remove(0);
+        let mut batches = Vec::new();
+        while let Some(batch) = output.next().await {
+            batches.push((*batch.unwrap()).clone());
+        }
+        batches
+    });
+    let mut answers: Vec<(String, f64)> = batches
         .iter()
         .flat_map(|batch| {
             batch.to_rows().into_iter().map(|row| {
-                let labels = series_labels_of_output_row(batch.schema(), &row).unwrap();
+                let labels = series_labels(batch.schema(), &row);
                 assert!(!labels.contains_key("__name__"), "{labels:?}");
                 let value = row.iter().find_map(|v| match v {
                     Value::Float64(v) => Some(*v),

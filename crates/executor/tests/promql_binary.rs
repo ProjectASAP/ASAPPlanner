@@ -116,7 +116,7 @@ fn evaluate_with(
         })
         .collect();
     let data_sources = BindingDataSources {
-        views: sources,
+        materialized_views: sources,
         ..Default::default()
     };
     let bound = physical_dag.instantiate(&data_sources)?;
@@ -214,7 +214,7 @@ fn scalar_broadcast_and_bool_comparison_are_distinct() {
             ),
         ]);
         let data_sources = BindingDataSources {
-            views: sources,
+            materialized_views: sources,
             ..Default::default()
         };
         let bound = physical_dag.instantiate(&data_sources).unwrap();
@@ -272,7 +272,7 @@ fn binary_obeys_memory_and_cancellation() {
             })
             .collect();
         let data_sources = BindingDataSources {
-            views: sources,
+            materialized_views: sources,
             ..Default::default()
         };
         let bound = physical_dag.instantiate(&data_sources).unwrap();
@@ -476,7 +476,7 @@ fn stored_series_evaluations_support_filters_and_sets() {
                 })
                 .collect();
             let data_sources = BindingDataSources {
-                views: sources,
+                materialized_views: sources,
                 ..Default::default()
             };
             let bound = physical_dag.instantiate(&data_sources).unwrap();

@@ -11,14 +11,15 @@ use asap_executor::planner::ir::physical_export::PhysicalASAPOperatorPayload as 
 use asap_executor::planner::ir::ASAPOp;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::summary_kernels::exact::ExactAccumulator;
-use asap_executor::{
-    series_labels_of_output_row, RawDataSample, RawDataSampleSelector, StateColumnUpdater,
-};
+use asap_executor::StateColumnUpdater;
 use asap_planner::{
     plan_installable, DeploymentCapabilities, FrontendInput, PlanningModels, PlanningWorkload,
     UserInput,
 };
 use futures::StreamExt;
+
+mod time_series;
+use time_series::{series_identity, series_labels, time_series_tables, RawDataSample};
 
 /// The evaluation time: the end of an hour.
 const EVALUATION_MS: i64 = 3_600_000;
@@ -113,16 +114,11 @@ async fn per_sample_updates_build_the_stored_pane_the_plan_builds() {
         })
         .collect();
 
-    // The executor's pane build: the pane's input batch through the plan.
-    let selector =
-        RawDataSampleSelector::new(dag, &output.inputs.raw_data_sample_windows[0]).unwrap();
-    let input = selector.window_batch(end_ms, &samples).unwrap();
-    let window = output.inputs.raw_data_sample_windows[0].time_range_node_id as u64;
-    let compiled = compile(dag, &BTreeSet::from([window]), &[output.node_id as u64]).unwrap();
-    let source: Arc<dyn TableProvider> =
-        Arc::new(MemorySource::new(input.schema().clone(), vec![input]).unwrap());
+    // The executor's pane build: the samples bound at the plan's `Scan`,
+    // its `TimeRange` keeping the pane's window.
+    let compiled = compile(dag, &BTreeSet::new(), &[output.node_id as u64]).unwrap();
     let data_sources = BindingDataSources {
-        views: BTreeMap::from([(window, source)]),
+        tables: time_series_tables(dag, &samples),
         ..Default::default()
     };
     let build = compiled.instantiate(&data_sources).unwrap();
@@ -159,7 +155,7 @@ async fn per_sample_updates_build_the_stored_pane_the_plan_builds() {
             };
             let exact = state.as_any().downcast_ref::<ExactAccumulator>().unwrap();
             (
-                series_labels_of_output_row(pane.schema(), row).unwrap(),
+                series_labels(pane.schema(), row),
                 serde_json::to_string(exact).unwrap(),
             )
         })
@@ -199,15 +195,17 @@ async fn per_sample_updates_build_the_stored_pane_the_plan_builds() {
     assert_eq!(per_sample, from_dag);
 }
 
-/// Run `ids` of `dag` with `inputs` bound at their nodes, in `scope`: each
-/// id's answer rows as (series labels, value), sorted.
+/// Run `ids` of `dag` with the stored states `inputs` bound at their nodes
+/// and the raw `samples` at its `Scan`s, in `scope`: each id's answer rows
+/// as (series labels, value), sorted.
 async fn answers(
     dag: &asap_planner::PhysicalASAPDAG,
     inputs: BTreeMap<u64, asap_executor::values::Batch>,
+    samples: &[RawDataSample],
     ids: &[u64],
     scope: Scope,
 ) -> Vec<Vec<(BTreeMap<String, String>, f64)>> {
-    // Which nodes are bound inputs; each one's schema is its DAG node's.
+    // Which nodes are bound stored states; each one's schema is its DAG node's.
     let boundaries: BTreeSet<u64> = inputs.keys().copied().collect();
     // The executor's plan for `ids`, cut at the bound inputs.
     let compiled = compile(dag, &boundaries, ids).unwrap();
@@ -220,8 +218,8 @@ async fn answers(
         })
         .collect();
     let data_sources = BindingDataSources {
-        views: sources,
-        ..Default::default()
+        tables: time_series_tables(dag, samples),
+        materialized_views: sources,
     };
     let instance = compiled.instantiate(&data_sources).unwrap();
     let context = RunContext::new(scope, Limits::default()).unwrap();
@@ -231,7 +229,7 @@ async fn answers(
         while let Some(batch) = output.next().await {
             let batch = batch.unwrap();
             for row in &batch.to_rows() {
-                let labels = series_labels_of_output_row(batch.schema(), row).unwrap();
+                let labels = series_labels(batch.schema(), row);
                 let value = row
                     .iter()
                     .find_map(|v| match v {
@@ -256,7 +254,6 @@ async fn answers(
 async fn panes_installed_from_per_sample_states_answer_the_query() {
     use asap_executor::arrow::array::{DictionaryArray, TimestampMillisecondArray, UInt32Array};
     use asap_executor::arrow::datatypes::UInt32Type;
-    use asap_executor::series_identity;
     use asap_executor::values::{Batch, BatchColumn};
     use std::sync::Arc;
     // What the user writes: the 5-minute rate of a counter, every minute,
@@ -340,7 +337,7 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
                 None => {
                     let group = updater.add_group().unwrap();
                     group_of_series.insert(sample.labels.clone(), group);
-                    identities.push(series_identity(&sample.labels).unwrap());
+                    identities.push(series_identity(&sample.labels));
                     group
                 }
             };
@@ -392,27 +389,22 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
     };
     let roots: Vec<u64> = plan.queries.iter().map(|q| q.root_node_id as u64).collect();
     // The query's answers from the installed panes.
-    let from_panes = answers(dag, panes, &roots, query.clone()).await;
+    let from_panes = answers(dag, panes, &samples, &roots, query.clone()).await;
     // The plan's query-time reference over the raw data samples.
     let reference = plan.query_time_reference().unwrap();
-    let raw = reference
-        .query_time_raw_windows
-        .iter()
-        .map(|window| {
-            let selector = RawDataSampleSelector::new(&reference.dag.dag, window).unwrap();
-            let (_, end_ms) = window.bounds_ms(EVALUATION_MS);
-            (
-                window.time_range_node_id as u64,
-                selector.window_batch(end_ms, &samples).unwrap(),
-            )
-        })
-        .collect();
     let reference_roots: Vec<u64> = reference
         .queries
         .iter()
         .map(|q| q.root_node_id as u64)
         .collect();
-    let expected = answers(&reference.dag.dag, raw, &reference_roots, query).await;
+    let expected = answers(
+        &reference.dag.dag,
+        BTreeMap::new(),
+        &samples,
+        &reference_roots,
+        query,
+    )
+    .await;
     // One rate per series, equal to the reference.
     assert_eq!(from_panes[0].len(), 3);
     assert_eq!(from_panes, expected);

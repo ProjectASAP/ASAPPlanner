@@ -11,7 +11,7 @@ use std::sync::Arc;
 use asap_executor::physical_planner::compile;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, Value};
-use asap_executor::{series_labels_of_output_row, RawDataSample, RawDataSampleSelector};
+mod time_series;
 use asap_planner::{
     plan_installable, DeploymentCapabilities, ExecutorCompileCheck, FrontendInput, InstallablePlan,
     InstallablePlanError, OperatorKind, OptimizationInput, OptimizationPass, OptimizeError,
@@ -29,6 +29,7 @@ use futures::{executor::block_on, StreamExt};
 use std::collections::HashMap;
 use std::ops::Bound;
 use std::rc::Rc;
+use time_series::{series_labels, time_series_tables, RawDataSample};
 
 /// Example 4b's evaluation time: the end of the 60-minute window.
 const EVALUATION_MS: i64 = 3_600_000;
@@ -95,30 +96,34 @@ fn remote_write_samples() -> Vec<RawDataSample> {
     samples
 }
 
-/// Compile `ids` of `dag` over `inputs` and run them in `scope`, as a
-/// runtime does with the executor: each id's output batches.
+/// Compile `ids` of `dag` over the stored states `views` (by node id) and
+/// run them in `scope` over the raw `samples`, as a runtime does with the
+/// executor: each id's output batches.
 fn run(
     dag: &PhysicalASAPDAG,
-    inputs: BTreeMap<u64, Batch>,
+    views: BTreeMap<u64, Batch>,
+    samples: &[RawDataSample],
     ids: &[u64],
     scope: Scope,
 ) -> Vec<Vec<Batch>> {
-    // Which nodes are bound inputs; each one's schema is its DAG node's.
-    let boundaries: BTreeSet<u64> = inputs.keys().copied().collect();
-    // The executor's plan for `ids`, cut at the bound inputs.
+    // The materialized views the run reads; each one's schema is its DAG node's.
+    let boundaries: BTreeSet<u64> = views.keys().copied().collect();
+    // The executor's plan for `ids`, cut at the views; every `Scan` it
+    // reaches is a table slot.
     let compiled = compile(dag, &boundaries, ids).expect("the executor compiles the plan");
-    // Each bound input as an in-memory source of its rows.
-    let sources = inputs
+    // Each view as an in-memory provider of its states.
+    let views = views
         .into_iter()
         .map(|(id, batch)| {
             let source = MemorySource::new(batch.schema().clone(), vec![batch]).unwrap();
             (id, Arc::new(source) as Arc<dyn TableProvider>)
         })
         .collect();
-    // The plan bound to its sources, ready to run.
+    // The plan bound to its data: raw samples at the `Scan`s by metric, and
+    // the views by node id.
     let data_sources = BindingDataSources {
-        views: sources,
-        ..Default::default()
+        tables: time_series_tables(dag, samples),
+        materialized_views: views,
     };
     let instance = compiled.instantiate(&data_sources).unwrap();
     block_on(async {
@@ -147,7 +152,7 @@ fn answers(batches: &[Batch]) -> Vec<Answer> {
         .iter()
         .flat_map(|batch| {
             batch.to_rows().into_iter().map(|row| {
-                let labels = series_labels_of_output_row(batch.schema(), &row).unwrap();
+                let labels = series_labels(batch.schema(), &row);
                 let value = row.iter().find_map(|v| match v {
                     Value::Float64(v) => Some(*v),
                     _ => None,
@@ -368,30 +373,14 @@ fn run_data_plane_on(
             .expect("a stored output reads something");
         let key = state_key(output, built_for_ms);
         if !store.contains_key(&key) {
-            // The build's sources: each raw-data-sample window's rows, and each
-            // stored input's state.
+            // The build's stored inputs; its raw data is bound at its `Scan`s.
             let mut sources = BTreeMap::new();
-            for window in &output.inputs.raw_data_sample_windows {
-                // Prepared once per window: routes by metric, applies the Scan.
-                let selector = RawDataSampleSelector::new(dag, window).unwrap();
-                // Only the samples of the selector's metric reach it.
-                let routed: Vec<RawDataSample> = samples
-                    .iter()
-                    .filter(|s| s.labels["__name__"] == selector.metric())
-                    .cloned()
-                    .collect();
-                let (_, end_ms) = window.bounds_ms(built_for_ms);
-                sources.insert(
-                    window.time_range_node_id as u64,
-                    selector.window_batch(end_ms, &routed).unwrap(),
-                );
-            }
             for id in &output.inputs.stored_outputs {
                 sources.insert(*id as u64, built[&(*id as u64)].0.clone());
             }
             // The run that builds it: an ingestion run over its data's span
-            // once its inputs are complete, or the query run of this
-            // evaluation.
+            // once its inputs are complete (each window ends at the run's
+            // end), or the query run of this evaluation.
             let scope = match output.built_at {
                 StoredOutputBuild::IngestionRun => Scope::Ingestion {
                     window_start_ms: span.0,
@@ -404,7 +393,7 @@ fn run_data_plane_on(
                 },
             };
             // The batches that run built, in one batch, as the store keeps it.
-            let batches = run(dag, sources, &[output.node_id as u64], scope).remove(0);
+            let batches = run(dag, sources, samples, &[output.node_id as u64], scope).remove(0);
             let schema = batches[0].schema().clone();
             let state_rows = batches.iter().flat_map(|b| b.to_rows().to_vec()).collect();
             store.insert(
@@ -444,54 +433,42 @@ fn run_data_plane_on(
             ),
         }
     }
-    // Raw data samples read at query time, other than through stored outputs.
-    for window in &installed.query_time_raw_windows {
-        // The window's selector and its end at this evaluation.
-        let selector = RawDataSampleSelector::new(dag, window).unwrap();
-        let (_, end_ms) = window.bounds_ms(evaluation_ms);
-        inputs.insert(
-            window.time_range_node_id as u64,
-            selector.window_batch(end_ms, samples).unwrap(),
-        );
-    }
     // The query evaluation, which reads the stored states.
     let query = Scope::Query {
         evaluation_time_ms: evaluation_ms,
         revision: 1,
     };
     // Each query's answers: (series labels, value) per series.
-    let answers_per_query = run(dag, inputs, &query_roots(&installed), query.clone())
-        .iter()
-        .map(|batches| answers(batches))
-        .collect();
+    let answers_per_query = run(
+        dag,
+        inputs,
+        samples,
+        &query_roots(&installed),
+        query.clone(),
+    )
+    .iter()
+    .map(|batches| answers(batches))
+    .collect();
     // The store drops each state whose data starts more than its retention
     // before this evaluation.
     store.retain(|_, state| state.start_ms >= evaluation_ms - state.retention_ms as i64);
 
-    // The correctness reference: nothing stored, every window fed raw
-    // samples at query time.
+    // The correctness reference: nothing stored, every window read from
+    // the raw samples at query time.
     let reference = installed.query_time_reference().unwrap();
     // The reference's DAG.
     let reference_dag = &reference.dag.dag;
-    // Each query-time window's input rows, keyed by its TimeRange.
-    let raw: BTreeMap<u64, Batch> = reference
-        .query_time_raw_windows
-        .iter()
-        .map(|window| {
-            // The window's selector and its end at this evaluation.
-            let selector = RawDataSampleSelector::new(reference_dag, window).unwrap();
-            let (_, end_ms) = window.bounds_ms(evaluation_ms);
-            (
-                window.time_range_node_id as u64,
-                selector.window_batch(end_ms, samples).unwrap(),
-            )
-        })
-        .collect();
     // The reference's answers, which the installed plan's must equal.
-    let reference_answers_per_query = run(reference_dag, raw, &query_roots(&reference), query)
-        .iter()
-        .map(|batches| answers(batches))
-        .collect();
+    let reference_answers_per_query = run(
+        reference_dag,
+        BTreeMap::new(),
+        samples,
+        &query_roots(&reference),
+        query,
+    )
+    .iter()
+    .map(|batches| answers(batches))
+    .collect();
     DataPlaneRun {
         answers_per_query,
         reference_answers_per_query,
@@ -905,16 +882,49 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
         sample("latency_ms", "a", EVALUATION_MS - 100, 10.0),
         sample("latency_ms", "b", EVALUATION_MS - 200, 100.0),
     ];
-    let selector = RawDataSampleSelector::new(dag, window).unwrap();
-    let rows = selector.window_batch(EVALUATION_MS, &samples).unwrap();
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
         revision: 1,
     };
-    let inputs = BTreeMap::from([(window.time_range_node_id as u64, rows)]);
-    let answered = answers(&run(dag, inputs, &query_roots(&plan), query)[0]);
+    let answered = answers(&run(dag, BTreeMap::new(), &samples, &query_roots(&plan), query)[0]);
     assert_eq!(answered.len(), 1);
     assert_eq!(answered[0].1, 110.0);
+}
+
+// The compile check compiles a plan's time-series windows: an instant
+// selector whose samples are not Float64 (so no stale marker can be told
+// apart) has no native window, and the check rejects the plan.
+#[test]
+fn the_compile_check_rejects_a_time_series_window_the_executor_cannot_run() {
+    use asap_types::ir::operator::Source;
+    use asap_types::ir::schema::{DataType, Field, Schema};
+    use asap_types::ir::{NonASAPOp, Operator, TimeRangeKind};
+    let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::TimeSeries {
+            metric: "latency_ms".into(),
+        },
+        predicates: vec![],
+        schema: Schema::with_time_index(
+            vec![
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("value", DataType::Int64, false),
+                Field::plain("instance", DataType::Utf8, false),
+            ],
+            0,
+            vec![],
+        ),
+    }))
+    .unwrap();
+    let instant = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+        range: std::time::Duration::from_secs(1),
+        kind: TimeRangeKind::Instant,
+        child: scan,
+    }))
+    .unwrap();
+    let error = PlannerExecutorCompileCheck
+        .compiles(&[QueryRoot::Operator(instant)])
+        .unwrap_err();
+    assert!(error.contains("Float64"), "{error}");
 }
 
 /// A deployment that keeps raw data samples and query-time results across

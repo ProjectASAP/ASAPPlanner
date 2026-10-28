@@ -143,7 +143,7 @@ fn summary_projection_survives_recovery() {
     )
     .unwrap();
     let data_sources = BindingDataSources {
-        views: BTreeMap::from([(
+        materialized_views: BTreeMap::from([(
             0,
             Arc::new(MemorySource::new(schema, vec![batch]).unwrap()) as Arc<dyn TableProvider>,
         )]),

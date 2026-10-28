@@ -152,7 +152,7 @@ fn assert_weighted_binding(algorithm: SketchAlgorithm) {
         )
         .unwrap();
         let data_sources = BindingDataSources {
-            views: BTreeMap::from([(rate_id as u64, source)]),
+            materialized_views: BTreeMap::from([(rate_id as u64, source)]),
             ..Default::default()
         };
         let physical_dag = compiled.instantiate(&data_sources).unwrap();
@@ -400,7 +400,7 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
                     MemorySource::new(raw_schema.clone(), vec![raw_batch.clone()]).unwrap(),
                 ) as Arc<dyn TableProvider>;
                 let data_sources = BindingDataSources {
-                    views: BTreeMap::from([(raw.id as u64, source)]),
+                    materialized_views: BTreeMap::from([(raw.id as u64, source)]),
                     ..Default::default()
                 };
                 let physical_dag = raw_compiled.instantiate(&data_sources).unwrap();
@@ -500,7 +500,7 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
                     Arc::new(MemorySource::new(schema.clone(), vec![batch.clone()]).unwrap())
                         as Arc<dyn TableProvider>;
                 let data_sources = BindingDataSources {
-                    views: BTreeMap::from([(input_id as u64, source)]),
+                    materialized_views: BTreeMap::from([(input_id as u64, source)]),
                     ..Default::default()
                 };
                 let physical_dag = compiled.instantiate(&data_sources).unwrap();
@@ -652,7 +652,7 @@ fn maintained_rate_heap_compiles_fixed_window_precompute() {
             let source = Arc::new(MemorySource::new(input.schema().clone(), vec![input]).unwrap())
                 as Arc<dyn TableProvider>;
             let data_sources = BindingDataSources {
-                views: BTreeMap::from([(id, source)]),
+                materialized_views: BTreeMap::from([(id, source)]),
                 ..Default::default()
             };
             let physical_dag = plan.instantiate(&data_sources).unwrap();

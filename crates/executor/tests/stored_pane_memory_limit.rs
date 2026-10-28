@@ -294,11 +294,11 @@ impl asap_executor::sources::TableProvider for StoredPanes {
     }
 }
 
-// A view slot's states are the store's whatever provider returns them: the
+// A materialized view slot's states are the store's whatever provider returns them: the
 // merge over twelve stored panes from a deployment's own provider fits the
 // 32 MiB limit, as it does over `Operator::source`.
 #[test]
-fn a_view_providers_states_are_not_charged_to_the_run() {
+fn a_materialized_view_providers_states_are_not_charged_to_the_run() {
     use asap_executor::physical_planner::CompiledPhysicalDAG;
     use asap_executor::sources::{BindingDataSources, TableProvider};
     use std::collections::BTreeMap;
@@ -311,7 +311,7 @@ fn a_view_providers_states_are_not_charged_to_the_run() {
     )
     .unwrap();
     let data_sources = BindingDataSources {
-        views: BTreeMap::from([(
+        materialized_views: BTreeMap::from([(
             0,
             Arc::new(StoredPanes { schema, pane }) as Arc<dyn TableProvider>,
         )]),

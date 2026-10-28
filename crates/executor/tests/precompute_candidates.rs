@@ -68,7 +68,7 @@ fn run(plan: &CompiledPhysicalDAG, inputs: BTreeMap<u64, Batch>, scope: Scope) -
         })
         .collect();
     let data_sources = BindingDataSources {
-        views: sources,
+        materialized_views: sources,
         ..Default::default()
     };
     let dag = plan.instantiate(&data_sources).unwrap();
@@ -300,7 +300,10 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         let inputs = if let Some(precompute) = &candidate.precompute {
             let source = MemorySource::new(batch.schema().clone(), vec![batch.clone()]).unwrap();
             let data_sources = BindingDataSources {
-                views: BTreeMap::from([(state_id, Arc::new(source) as Arc<dyn TableProvider>)]),
+                materialized_views: BTreeMap::from([(
+                    state_id,
+                    Arc::new(source) as Arc<dyn TableProvider>,
+                )]),
                 ..Default::default()
             };
             let invalid = precompute.instantiate(&data_sources).unwrap();

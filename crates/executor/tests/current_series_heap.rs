@@ -44,7 +44,7 @@ fn schema() -> Arc<Schema> {
 fn run(program: &CompiledPhysicalDAG, data: Batch, end: i64) -> Result<Vec<Batch>, String> {
     let input_id = program.input_slots().next().unwrap().0;
     let data_sources = BindingDataSources {
-        views: BTreeMap::from([(
+        materialized_views: BTreeMap::from([(
             input_id,
             Arc::new(MemorySource::new(data.schema().clone(), vec![data]).unwrap())
                 as Arc<dyn TableProvider>,
@@ -249,7 +249,7 @@ fn current_series_observes_resource_limits() {
     for cancelled in [false, true] {
         let data = input(&[("one", 50_000, 1.)]);
         let data_sources = BindingDataSources {
-            views: BTreeMap::from([(
+            materialized_views: BTreeMap::from([(
                 0,
                 Arc::new(MemorySource::new(data.schema().clone(), vec![data]).unwrap())
                     as Arc<dyn TableProvider>,

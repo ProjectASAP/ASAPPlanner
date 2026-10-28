@@ -5,13 +5,17 @@
 //! The runtime writes the returned [`InstallablePlan`] as its plan file and
 //! executes its DAG with the executor, as given (#509 Assumption 8). It
 //! needs three things from it: the DAG to install (`dag`), the summaries to
-//! store (`stored_outputs`), and where raw data samples go (each stored output's
-//! `inputs.raw_data_sample_windows` and `query_time_raw_windows`, fed with
-//! `asap_executor::RawDataSampleSelector` for a time-series `Scan` or
-//! `asap_executor::TableRowSelector` for a SQL table `Scan`). How the Planner represents the
-//! plan internally (e.g. a tumbling-pane chain, which the stage export keeps
-//! for costing and display) is not the runtime's concern: the installable
-//! DAG has every chain expanded into the panes the executor runs.
+//! store (`stored_outputs`), and which raw data it reads, and how far back
+//! (each stored output's `inputs.raw_data_sample_windows` and
+//! `query_time_raw_windows`). Raw data is bound only at the DAG's `Scan`s,
+//! by their `Source`: the runtime implements one
+//! `asap_executor::sources::TableProvider` per time series (a table `(ts,
+//! value, *labels)` over the samples it buffers) or SQL table, and the
+//! DAG's own `TimeRange`s apply each window, an instant selector's lookback
+//! and Prometheus stale markers. How the Planner represents the plan
+//! internally (e.g. a tumbling-pane chain, which the stage export keeps for
+//! costing and display) is not the runtime's concern: the installable DAG
+//! has every chain expanded into the panes the executor runs.
 //!
 //! ## Building a stored output
 //!
@@ -21,15 +25,17 @@
 //! (sealed) and each stored input is built. It compiles the DAG with the
 //! executor for that output's node, with each input bound in
 //! `asap_executor::sources::BindingDataSources`: a stored input at its own
-//! node id in `views` (a `TableProvider` over its stored state), and a
-//! raw-data-sample window at its `time_range_node_id` in `views` too, with a
-//! provider over the rows `RawDataSampleSelector::window_batch` or
-//! `TableRowSelector::window_batch` returns. Binding raw windows at the
-//! `TimeRange` is transitional (removed by #969, which binds raw data only
-//! at a `Scan`, by its `Source` in `tables`). It runs the build in an ingestion run
+//! node id in `materialized_views` (a `TableProvider` over its stored state), and raw
+//! data by `Source` in `tables`. It runs the build in an ingestion run
 //! (`StoredOutputBuild::IngestionRun`) or in the query run of the
 //! evaluation that first needs it (`StoredOutputBuild::QueryRun`), stores
 //! the result, and binds it the same way wherever the DAG reads that node.
+//! An ingestion run over `(window_start_ms, window_end_ms]` builds the
+//! window ending at `window_end_ms`: each `TimeRange(w)` keeps
+//! `(window_end_ms - w, window_end_ms]`, so a runtime builds a window
+//! `(start, end]` of `raw_data_sample_windows`
+//! (`RawDataSampleWindow::bounds_ms` at the evaluation it is built for) in
+//! the run over `(start, end]`.
 //! A query run binds the stored outputs it reaches from the queries' roots
 //! without passing another stored output; an output only other stored
 //! outputs read is read through them.
@@ -88,8 +94,8 @@ pub struct InstallablePlan {
     /// the stored outputs it is built from), with its coverage and inputs.
     pub stored_outputs: Vec<StoredOutput>,
     /// Every window of raw data samples read at query time other than one a
-    /// stored output's build reads, in node order: the runtime feeds each
-    /// its samples when a query evaluates.
+    /// stored output's build reads, in node order: the raw data a query
+    /// run reads through the `Scan`s it binds.
     pub query_time_raw_windows: Vec<RawDataSampleWindow>,
     /// Stage 3's record of the selected plan, for reporting only; `None` for
     /// [`InstallablePlan::query_time_reference`] and for a pass
@@ -184,7 +190,7 @@ pub enum StoredOutputBuild {
     /// output for a selection it has not been built for yet, the runtime
     /// runs the node in a query run over its inputs, keeps the result, and
     /// binds it like an output built at ingestion. Its raw-data-sample windows
-    /// are fed only through this build, so they are not listed in
+    /// are read only through this build, so they are not listed in
     /// `query_time_raw_windows`.
     QueryRun,
 }
@@ -506,11 +512,12 @@ fn check_installation_deadline(deadline: Option<Instant>) -> Result<(), Installa
 
 impl InstallablePlan {
     /// Whether the Planner's executor compiles this plan as a runtime runs
-    /// it: each stored output's build over its raw-data-sample windows and stored
-    /// inputs, then the query run over the stored outputs it reads, the
-    /// query-time raw-data-sample windows and the table `Scan`s it reads
-    /// outside them (bound to the runtime's data sources). `Err` holds the
-    /// executor's error.
+    /// it: each stored output's build over its stored inputs and the
+    /// `Scan`s it reads (bound to the runtime's data sources), then the
+    /// query run over the stored outputs it reads and the `Scan`s it reads
+    /// outside them. The DAG's own `TimeRange`s are compiled, so a window
+    /// the executor cannot run fails here. `Err` holds the executor's
+    /// error.
     pub fn check_compiles(&self) -> Result<(), String> {
         self.check_compiles_before(None)
             .map_err(|error| error.to_string())
@@ -534,12 +541,12 @@ impl InstallablePlan {
         // of the whole plan once; every other over the nodes below it.
         for (position, output) in self.stored_outputs.iter().enumerate() {
             check_compile_deadline(deadline)?;
+            // Raw data is bound at each `Scan`, a table slot `compile` makes.
             let inputs = output
                 .inputs
-                .raw_data_sample_windows
+                .stored_outputs
                 .iter()
-                .map(|window| window.time_range_node_id)
-                .chain(output.inputs.stored_outputs.iter().copied())
+                .copied()
                 .map(boundary)
                 .collect::<Result<BTreeSet<_>, _>>()?;
             let sub_dag;
@@ -556,15 +563,10 @@ impl InstallablePlan {
                 .map_err(|error| map_executor_compile_error(error, "stored output"))?;
         }
         // The query run reads the stored outputs it reaches from the roots
-        // without passing another, the query-time windows, and the table
-        // `Scan`s it reaches outside them, which the runtime binds to its
-        // data sources (a SQL table read whole or through a filter).
+        // without passing another, and the `Scan`s it reaches outside them,
+        // table slots the runtime binds to its data sources (a time
+        // series, or a SQL table read whole or through a window).
         let roots: Vec<PhysicalASAPNodeId> = self.queries.iter().map(|q| q.root_node_id).collect();
-        let windows: HashSet<PhysicalASAPNodeId> = self
-            .query_time_raw_windows
-            .iter()
-            .map(|window| window.time_range_node_id)
-            .collect();
         let mut read = Vec::new();
         let mut pending = roots.clone();
         let mut seen = HashSet::new();
@@ -573,18 +575,7 @@ impl InstallablePlan {
             if !seen.insert(id) {
                 continue;
             }
-            // A table `Scan` is bound to a data source; `compile` checks
-            // that its predicates compile over its schema.
-            if stored.contains(&id)
-                || windows.contains(&id)
-                || matches!(
-                    indexed.relational(id),
-                    Some(NonASAPOp::Scan {
-                        source: asap_types::ir::operator::Source::Table { .. },
-                        ..
-                    })
-                )
-            {
+            if stored.contains(&id) {
                 read.push(id);
             } else {
                 pending.extend(indexed.inputs.get(&id).into_iter().flatten().copied());
@@ -1288,13 +1279,8 @@ fn executor_builds(
     };
     #[cfg(test)]
     tests::COMPILED_NODES.with(|count| count.set(count.get() + below.nodes.len()));
-    let bound = inputs
-        .raw_data_sample_windows
-        .iter()
-        .map(|window| window.time_range_node_id)
-        .chain(inputs.stored_outputs.iter().copied())
-        .map(|id| id as u64)
-        .collect();
+    // Raw data is bound at each `Scan`, a table slot `compile` makes.
+    let bound = inputs.stored_outputs.iter().map(|&id| id as u64).collect();
     compile_before(below, &bound, &[node as u64], deadline)
         .map(|_| ())
         .map_err(|error| match error {

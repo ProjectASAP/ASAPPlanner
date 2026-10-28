@@ -175,7 +175,7 @@ pub fn is_population_schema(schema: &SchemaRef) -> bool {
 
 /// Compile a complete selected precompute sub-DAG. Inputs are already-computed
 /// state boundaries; the deployment supplies groups, panes and states, never operations.
-/// Every frontier, a raw-data `Scan` included, is a view slot bound by node
+/// Every frontier, a raw-data `Scan` included, is a materialized view slot bound by node
 /// id in `BindingDataSources::views` (not a table slot bound by `Source`, as
 /// in [`super::compile`]), and no slot has a derived window: its request's
 /// `time_range_ms` is `None`.
