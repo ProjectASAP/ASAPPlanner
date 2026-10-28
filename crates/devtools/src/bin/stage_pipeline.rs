@@ -80,15 +80,16 @@
 //     candidates checked and those discarded with why), and
 //     `rejected_by_cause` counts the rejections by cause (every candidate's
 //     under `--exhaustive`; the recorded ones under the default search).
-//     `stored_outputs` are the selected plan's stored outputs as
-//     `plan_installable` gives them (`installable_plan_of`: each output's
-//     installed node id, `built_at`, `coverage` with its `definition_id` and
-//     `selection`, `inputs` and `retention_ms`), each with the node of the
+//     `materialized_views` are the selected plan's materialized views as
+//     `plan_installable`'s plan derives them (`installable_plan_of`, then
+//     `InstallablePlan::materialized_views`: each view's installed node id,
+//     `refresh`, `coverage` with its `definition_id` and `selection`,
+//     `inputs` and `retention_ms`), each with the node of the
 //     selected Stage 2 candidate it is installed from (`stage2_node_id`), its
 //     position among that node's installed nodes (`installed_position`, a
 //     pane chain's panes newest first) and their number
 //     (`installed_count`); empty without a selection, with
-//     `stored_outputs_error` when the plan is not installable. When selection
+//     `materialized_views_error` when the plan is not installable. When selection
 //     fails, `selected` is null, with the rejections (and under
 //     `search_rejected` the search's own, which name no candidate: e.g. a
 //     query whose every own candidate was discarded), or with `error` for
@@ -308,7 +309,7 @@ fn document_of(
                 "error": format!("Pass 1: {error}"),
             },
             "stage2_physical_asap_optimization": { "candidates": [], "pruned": [] },
-            "stage3_plan_selection": { "costs": {}, "selected": null, "rejected": [], "stored_outputs": [] },
+            "stage3_plan_selection": { "costs": {}, "selected": null, "rejected": [], "materialized_views": [] },
         })),
         Err(error @ PlanningStagesError::Validation(_)) => Err(error.to_string().into()),
     }
@@ -935,14 +936,14 @@ fn stage_pipeline(
         |id| every_physical.contains(id),
     );
     match &run.stage3_plan_selection {
-        Ok(selection) => match stored_outputs_json(selection, entries) {
-            Ok(stored) => stage3["stored_outputs"] = Value::Array(stored),
+        Ok(selection) => match materialized_views_json(selection, entries) {
+            Ok(views) => stage3["materialized_views"] = Value::Array(views),
             Err(error) => {
-                stage3["stored_outputs"] = json!([]);
-                stage3["stored_outputs_error"] = json!(error);
+                stage3["materialized_views"] = json!([]);
+                stage3["materialized_views_error"] = json!(error);
             }
         },
-        Err(_) => stage3["stored_outputs"] = json!([]),
+        Err(_) => stage3["materialized_views"] = json!([]),
     }
     json!({
         "format": "asap-stage-pipeline/v1",
@@ -1026,22 +1027,23 @@ fn round_robin<'a, C: PartialEq>(
     .flatten()
 }
 
-/// The selected plan's stored outputs, as [`installable_plan_of`] (what
-/// `plan_installable` returns) gives them: each output's node id in the
-/// installable DAG, `built_at`, `coverage`, `inputs` and `retention_ms`,
+/// The selected plan's materialized views, as the plan
+/// [`installable_plan_of`] (what `plan_installable` returns) derives them:
+/// each view's node id in the installable DAG, `refresh`, `coverage`,
+/// `inputs` and `retention_ms`,
 /// plus the node of the selected Stage 2 candidate it is installed from
 /// (`stage2_node_id`, null when Stage 3 recorded no cost to map it by), its
 /// position among that node's installed nodes (`installed_position`: a
 /// pane chain's panes, newest first) and their number (`installed_count`).
-fn stored_outputs_json(
+fn materialized_views_json(
     selection: &Selection,
     entries: &[QueryWorkloadEntry],
 ) -> Result<Vec<Value>, String> {
-    let plan = installable_plan_of(&selection.plan, Some(selection), entries)
+    let (plan, report) = installable_plan_of(&selection.plan, Some(selection), entries)
         .map_err(|e| e.to_string())?;
+    let views = plan.materialized_views().map_err(|e| e.to_string())?;
     let mut stage2_of = std::collections::HashMap::new();
-    for node in plan
-        .selection
+    for node in report
         .iter()
         .filter_map(|report| report.predicted_usage.as_ref())
         .flat_map(|usage| &usage.per_node)
@@ -1053,11 +1055,11 @@ fn stored_outputs_json(
             );
         }
     }
-    plan.stored_outputs
+    views
         .iter()
-        .map(|output| {
-            let mut value = serde_json::to_value(output).map_err(|e| e.to_string())?;
-            let (stage2_node_id, position, count) = match stage2_of.get(&output.node_id) {
+        .map(|view| {
+            let mut value = serde_json::to_value(view).map_err(|e| e.to_string())?;
+            let (stage2_node_id, position, count) = match stage2_of.get(&view.node_id) {
                 Some((id, position, count)) => (json!(id), json!(position), json!(count)),
                 None => (Value::Null, Value::Null, Value::Null),
             };

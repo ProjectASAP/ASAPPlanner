@@ -271,7 +271,7 @@ function validateStagePipeline(doc) {
   if (errors.length) return errors;
   const selectionErrors = validateSelection(stage3, physicalById);
   if (selectionErrors.length) return selectionErrors;
-  return validateStoredOutputs(stage3, physicalById).concat(validateMemoPlan((stage3.search || {}).memo_plan, doc.workload.queries.length));
+  return validateMaterializedViews(stage3, physicalById).concat(validateMemoPlan((stage3.search || {}).memo_plan, doc.workload.queries.length));
 }
 
 // A query's accuracy target (`AccuracyTarget` JSON: `accuracy_metric`,
@@ -755,30 +755,30 @@ function validateDataWorkload(dataWorkload) {
     .map(([name]) => `${at}.sources.${name} must be an object`);
 }
 
-const STORED_OUTPUT_BUILDS = ['ingestion_run', 'query_run'];
+const VIEW_REFRESHES = ['at_ingestion', 'on_first_read'];
 
-// The selected plan's stored outputs (`stage3_plan_selection.stored_outputs`,
+// The selected plan's materialized views (`stage3_plan_selection.materialized_views`,
 // from the installable plan): each names its installed node, how it is
-// built, its coverage's definition and its retention, and the node of the
+// refreshed, its coverage's definition and its retention, and the node of the
 // selected Stage 2 candidate it is installed from (or null). Absent in older
 // documents; empty without a selection.
-function validateStoredOutputs(selection, physicalById) {
-  const stored = selection.stored_outputs;
-  if (stored === undefined) return [];
-  const at = 'stage3_plan_selection.stored_outputs';
-  if (!Array.isArray(stored)) return [`${at} must be an array`];
-  if (selection.selected === null && stored.length) return [`${at} must be empty without a selected plan`];
+function validateMaterializedViews(selection, physicalById) {
+  const views = selection.materialized_views;
+  if (views === undefined) return [];
+  const at = 'stage3_plan_selection.materialized_views';
+  if (!Array.isArray(views)) return [`${at} must be an array`];
+  if (selection.selected === null && views.length) return [`${at} must be empty without a selected plan`];
   const selected = selection.selected === null ? null : physicalById.get(selection.selected);
   const nodeIds = new Set(selected ? selected.dag.nodes.map((node) => node.id) : []);
   const errors = [];
-  stored.forEach((output, index) => {
+  views.forEach((output, index) => {
     const where = `${at}[${index}]`;
     if (!output || typeof output !== 'object') { errors.push(`${where} must be an object`); return; }
     if (typeof output.node_id !== 'number') errors.push(`${where}: node_id must be a number`);
-    if (!STORED_OUTPUT_BUILDS.includes(output.built_at)) errors.push(`${where}: built_at must be one of ${STORED_OUTPUT_BUILDS.join(', ')}`);
+    if (!VIEW_REFRESHES.includes(output.refresh)) errors.push(`${where}: refresh must be one of ${VIEW_REFRESHES.join(', ')}`);
     if (!output.coverage || typeof output.coverage.definition_id !== 'string') errors.push(`${where}: coverage.definition_id must be a string`);
-    if (!output.inputs || !Array.isArray(output.inputs.raw_sample_windows) || !Array.isArray(output.inputs.stored_outputs)) {
-      errors.push(`${where}: inputs needs raw_sample_windows and stored_outputs arrays`);
+    if (!output.inputs || !Array.isArray(output.inputs.raw_data_windows) || !Array.isArray(output.inputs.materialized_views)) {
+      errors.push(`${where}: inputs needs raw_data_windows and materialized_views arrays`);
     }
     if (!(typeof output.retention_ms === 'number' && output.retention_ms >= 0)) errors.push(`${where}: retention_ms must be a non-negative number`);
     if (output.stage2_node_id !== null && output.stage2_node_id !== undefined && !nodeIds.has(output.stage2_node_id)) {
@@ -840,20 +840,20 @@ function physicalReaders(dag, nodeId, queryIds) {
   return (stageQueryReach(stageDag(dag, true)).get(nodeId) || []).map((index) => queryIds[index] || `query #${index + 1}`);
 }
 
-// The selected plan's stored outputs as table rows: the coverage's
+// The selected plan's materialized views as table rows: the coverage's
 // definition, the Stage 2 node's operator and summary parameters, its pane
-// (a pane chain's panes, newest first), how and when it is built, its
+// (a pane chain's panes, newest first), how and when it is refreshed, its
 // retention, the Stage 3 cost of its Stage 2 node and the queries that read
 // it. Empty without a selection.
-function storedOutputRows(doc) {
+function materializedViewRows(doc) {
   const selection = doc.stage3_plan_selection || {};
-  const stored = Array.isArray(selection.stored_outputs) ? selection.stored_outputs : [];
+  const views = Array.isArray(selection.materialized_views) ? selection.materialized_views : [];
   const candidate = ((doc.stage2_physical_asap_optimization || {}).candidates || []).find((c) => c.id === selection.selected);
   if (!candidate) return [];
   const queryIds = doc.workload.queries.map((q) => q.id);
   const nodes = new Map(candidate.dag.nodes.map((node) => [node.id, node]));
   const perNode = ((selection.costs || {})[selection.selected] || {}).per_node || {};
-  return stored.map((output) => {
+  return views.map((output) => {
     const node = nodes.get(output.stage2_node_id);
     const [kind, body] = node ? stageOperatorParts(node.payload) : ['—', {}];
     const summary = kind === 'SummaryAgg' || kind === 'PaneChain' ? summaryFamilyText(body.family) : '';
@@ -866,11 +866,11 @@ function storedOutputRows(doc) {
       definition: output.coverage.definition_id,
       kind: summary ? `${kind} · ${summary}` : kind,
       pane,
-      builtAt: output.built_at === 'ingestion_run' ? 'ingestion run' : 'query run (kept across evaluations)',
-      inputs: `${output.inputs.raw_sample_windows.length} raw-sample window(s)` +
-        (output.inputs.stored_outputs.length ? `, stored ${output.inputs.stored_outputs.join(', ')}` : ''),
+      refresh: output.refresh === 'at_ingestion' ? 'at ingestion' : 'on first read (kept across evaluations)',
+      inputs: `${output.inputs.raw_data_windows.length} raw-data window(s)` +
+        (output.inputs.materialized_views.length ? `, views ${output.inputs.materialized_views.join(', ')}` : ''),
       retention: durationText(output.retention_ms),
-      window: output.inputs.raw_sample_windows.map((w) => `t−${durationText(w.end_offset_ms + w.width_ms)} … ${w.end_offset_ms ? `t−${durationText(w.end_offset_ms)}` : 't'}`).join(', ') || '—',
+      window: output.inputs.raw_data_windows.map((w) => `t−${durationText(w.end_offset_ms + w.width_ms)} … ${w.end_offset_ms ? `t−${durationText(w.end_offset_ms)}` : 't'}`).join(', ') || '—',
       position: output.installed_position,
       cost: cost ? cost.detail || '' : '',
       readBy: node ? physicalReaders(candidate.dag, output.stage2_node_id, queryIds) : [],
@@ -878,13 +878,13 @@ function storedOutputRows(doc) {
   });
 }
 
-// The selected plan's stored outputs grouped by the Stage 2 node they are
+// The selected plan's materialized views grouped by the Stage 2 node they are
 // installed from: one group per pane chain (its panes, newest first, with
 // "count × width"), one per other node. Each group has its Stage 2 node,
-// definition(s), kind, how it is built, its retention (a range when the
+// definition(s), kind, how it is refreshed, its retention (a range when the
 // panes differ), the Stage 3 cost and the queries that read it.
-function storedOutputGroups(doc) {
-  const rows = storedOutputRows(doc);
+function materializedViewGroups(doc) {
+  const rows = materializedViewRows(doc);
   const candidate = ((doc.stage2_physical_asap_optimization || {}).candidates || []).find((c) => c.id === (doc.stage3_plan_selection || {}).selected);
   const nodes = new Map(candidate ? candidate.dag.nodes.map((node) => [node.id, node]) : []);
   const groups = [];
@@ -907,7 +907,7 @@ function storedOutputGroups(doc) {
       definition: joined(panes.map((p) => p.definition)),
       kind: first.kind,
       panesText: kind === 'PaneChain' ? `${body.pane_count} × ${durationText(body.pane_width_ms)}` : '—',
-      builtAt: joined(panes.map((p) => p.builtAt)),
+      refresh: joined(panes.map((p) => p.refresh)),
       retention: new Set(retention).size === 1 ? retention[0] : `${retention[0]} … ${retention[retention.length - 1]}`,
       cost: first.cost,
       readBy: first.readBy,

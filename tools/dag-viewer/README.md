@@ -80,16 +80,16 @@ To run it, see [RUNNING.md](RUNNING.md).
   that query's root does not reach. Clicking a node dims everything but
   what it reads and what reads it, directly or through other nodes; clicking
   the background goes back to the query's highlight.
-- **Stored outputs** under the Stage 2 lane: the selected plan's stored
-  outputs as `plan_installable` gives them, one row per Stage 2 node: its
+- **Materialized views** under the Stage 2 lane: the selected plan's
+  materialized views as `plan_installable` gives them, one row per Stage 2 node: its
   coverage definition, operator and summary parameters, panes (`30 × 20 s`
-  for a pane chain), how it is built, its retention, the Stage 3 cost and the
+  for a pane chain), how it is refreshed, its retention, the Stage 3 cost and the
   queries that read it. A chain's row lists its installed panes (node id,
   pane, window, retention) under **installed**. Clicking a row selects its
   node in the Stage 2 lane. Stage 3 predicts no
   per-node state size, so the table has none. The lane's header also shows
   the shown candidate's Stage 3 usage.
-- **Search summary**, under the stored outputs: candidate-connection reports
+- **Search summary**, under the materialized views: candidate-connection reports
   show the incumbent cost, available lower bound and gap, refinement count,
   and solver status. Historical documents may also contain a legacy memo-plan
   view of shared units. Rendering that archived format does not enable a second
@@ -206,11 +206,13 @@ are ignored, `stage_pipeline`'s default.
     "rejected": [{ "id": "P2", "cause": "costlier", "reason": "..." }],
     "search_rejected": [{ "id": "P5", "cause": "accuracy_target_missed", "reason": "..." }],
     "rejected_by_cause": { "raw_data_not_retained": 533, "costlier": 12 },
-    "stored_outputs": [{ "node_id": 2, "built_at": "ingestion_run",
-                         "coverage": { "definition_id": "98f2b35a…", "selection": ["..."] },
-                         "inputs": { "raw_sample_windows": ["..."], "stored_outputs": [] },
-                         "retention_ms": 600000,
-                         "stage2_node_id": 1, "installed_position": 0, "installed_count": 30 }],
+    "materialized_views": [{ "node_id": 2, "refresh": "at_ingestion",
+                             "coverage": { "definition_id": "98f2b35a…", "selection": ["..."] },
+                             "inputs": { "raw_data_windows": [{ "source": { "TimeSeries": { "metric": "data" } },
+                                                                "end_offset_ms": 0, "width_ms": 20000 }],
+                                         "materialized_views": [] },
+                             "retention_ms": 600000,
+                             "stage2_node_id": 1, "installed_position": 0, "installed_count": 30 }],
     "search": { "candidates_checked": 206, "components": [{ "queries": [0, 1], "candidates_checked": 204, "selected": "P61-m19" }],
                 "queries": [{ "candidates_checked": 3, "discarded": [{ "choice": [[4, 0]], "cause": "no_accuracy_guarantee", "reason": "..." }] }],
                 "searched_as_one": null, "raw_scan_assignments_skipped": 0, "raw_scan_candidates_skipped": 0,
@@ -299,15 +301,15 @@ are ignored, `stage_pipeline`'s default.
   label hierarchies and per-label cardinalities are not declarable there,
   so the page shows none. Each query's `recurrence` and `predictability` are
   its workload entry's own JSON.
-- `stored_outputs` are the selected plan's stored outputs from
+- `materialized_views` are the selected plan's materialized views from
   `installable_plan_of` (what `plan_installable` returns): the node id in
-  the installable DAG (pane chains expanded into panes), `built_at`
-  (`ingestion_run` or `query_run`), `coverage`, `inputs` and
+  the installable DAG (pane chains expanded into panes), `refresh`
+  (`at_ingestion` or `on_first_read`), `coverage`, `inputs` and
   `retention_ms`. `stage2_node_id` is the node of the selected Stage 2
   candidate it is installed from (null when Stage 3 recorded no cost to map
   it by), `installed_position` its position among that node's installed
   nodes (a pane chain's panes, newest first) and `installed_count` their
-  number. Empty without a selection; `stored_outputs_error` says why when
+  number. Empty without a selection; `materialized_views_error` says why when
   the plan is not installable.
 - `rejected_by_cause` counts the rejections by cause: every candidate's
   under `--exhaustive`, the recorded ones under the default search.
@@ -320,7 +322,7 @@ are ignored, `stage_pipeline`'s default.
 
 The viewer checks the document before showing it: one root per query, node,
 edge and root references, `scalar_roots` positions, `from_logical`, the Stage 3 ids, costs and
-`per_node` keys, the data workload's shape, and each stored output's fields
+`per_node` keys, the data workload's shape, and each materialized view's fields
 and `stage2_node_id`. Documents written before these sections are still
 shown. If a check fails, it shows the problems instead.
 
@@ -346,7 +348,7 @@ shown. If a check fails, it shows the problems instead.
   `examples/planner-layering-example1.json` and workload-01 of each
   ASAPQuery set and the six sharing examples. Historical snapshots retain
   their original plans; `crates/devtools/tests/stage_pipeline.rs` checks input
-  consistency and newly generated plan validity and stored-output linkage.
+  consistency and newly generated plan validity and materialized-view linkage.
   Timed searches are not required to reproduce snapshot IDs or prove optimality.
   `server.py --regenerate` rewrites the snapshots.
   An entry's `accuracy_guarantees` (`ignored` when absent) says whether it

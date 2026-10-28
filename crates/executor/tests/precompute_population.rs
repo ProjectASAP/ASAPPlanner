@@ -67,6 +67,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                 ),
                 output_schema: state_schema.clone(),
                 guarantee: None,
+                retention_ms: None,
             },
             PhysicalASAPDAGNode {
                 id: 1,
@@ -77,6 +78,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                 materialization: Default::default(),
                 output_schema: value_schema.clone(),
                 guarantee: None,
+                retention_ms: None,
             },
             PhysicalASAPDAGNode {
                 id: 2,
@@ -97,6 +99,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                 materialization: Default::default(),
                 output_schema: value_schema.clone(),
                 guarantee: None,
+                retention_ms: None,
             },
             PhysicalASAPDAGNode {
                 id: 3,
@@ -117,6 +120,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                 ),
                 output_schema: state_schema.clone(),
                 guarantee: None,
+                retention_ms: None,
             },
         ];
         let edges = [
@@ -295,6 +299,7 @@ fn try_state_dag(
         ),
         output_schema: logical_schema(family.clone()),
         guarantee: None,
+        retention_ms: None,
     }];
     if merge {
         nodes.push(PhysicalASAPDAGNode {
@@ -317,6 +322,7 @@ fn try_state_dag(
         materialization: Default::default(),
         output_schema: logical_schema(FieldDataType::Plain(DataType::Float64)),
         guarantee: None,
+        retention_ms: None,
     });
     if let Some(target) = target {
         nodes.push(PhysicalASAPDAGNode {
@@ -335,6 +341,7 @@ fn try_state_dag(
             ),
             output_schema: logical_schema(target),
             guarantee: None,
+            retention_ms: None,
         });
     }
     let edges = (1..nodes.len())

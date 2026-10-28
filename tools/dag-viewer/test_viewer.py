@@ -88,15 +88,15 @@ class ValidationTests(unittest.TestCase):
     def test_example1_is_valid(self):
         self.assertEqual(self.validate(self.doc), [])
 
-    def test_a_workload_example_with_stored_outputs_is_valid(self):
+    def test_a_workload_example_with_materialized_views_is_valid(self):
         doc = seed862()
-        self.assertTrue(doc["stage3_plan_selection"]["stored_outputs"])
+        self.assertTrue(doc["stage3_plan_selection"]["materialized_views"])
         self.assertEqual(self.validate(doc), [])
 
     def test_documents_without_the_new_sections_are_still_valid(self):
         doc = seed862()
         del doc["workload"]["data_workload"]
-        del doc["stage3_plan_selection"]["stored_outputs"]
+        del doc["stage3_plan_selection"]["materialized_views"]
         del doc["accuracy_guarantees"]
         self.assertEqual(self.validate(doc), [])
 
@@ -107,20 +107,20 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(self.validate(dict(self.doc, accuracy_guarantees="off")),
                          ['accuracy_guarantees must be "ignored" or "enforced"'])
 
-    def test_data_workload_and_stored_output_violations_are_reported(self):
-        stored = lambda d: d["stage3_plan_selection"]["stored_outputs"]
+    def test_data_workload_and_materialized_view_violations_are_reported(self):
+        stored = lambda d: d["stage3_plan_selection"]["materialized_views"]
         cases = {
             "data workload not an object": lambda d: d["workload"].update(data_workload=[]),
             "sources not an object": lambda d: d["workload"]["data_workload"].update(sources=[]),
             "source facts not an object": lambda d: d["workload"]["data_workload"]["sources"].update(data=3),
-            "stored outputs not an array": lambda d: d["stage3_plan_selection"].update(stored_outputs={}),
+            "materialized views not an array": lambda d: d["stage3_plan_selection"].update(materialized_views={}),
             "node id": lambda d: stored(d)[0].update(node_id="2"),
-            "built at": lambda d: stored(d)[0].update(built_at="later"),
+            "refresh": lambda d: stored(d)[0].update(refresh="later"),
             "definition id": lambda d: stored(d)[0]["coverage"].pop("definition_id"),
-            "inputs": lambda d: stored(d)[0]["inputs"].pop("raw_sample_windows"),
+            "inputs": lambda d: stored(d)[0]["inputs"].pop("raw_data_windows"),
             "retention": lambda d: stored(d)[0].update(retention_ms=-1),
             "stage 2 node": lambda d: stored(d)[0].update(stage2_node_id=99999),
-            "stored without a selection": lambda d: d["stage3_plan_selection"].update(selected=None, rejected=[], costs={}),
+            "views without a selection": lambda d: d["stage3_plan_selection"].update(selected=None, rejected=[], costs={}),
         }
         for name, mutate in cases.items():
             with self.subTest(name):
@@ -527,7 +527,7 @@ class BinaryOperatorTests(unittest.TestCase):
 
 @unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
 class WorkloadViewTests(unittest.TestCase):
-    """The data workload panel, the stored outputs table, the search header
+    """The data workload panel, the materialized views table, the search header
     and the workload-set rows, from the committed seed-862 example."""
 
     def setUp(self):
@@ -564,15 +564,15 @@ class WorkloadViewTests(unittest.TestCase):
         self.assertEqual(rows["http"]["distinctValuesPerLabelSet"], "(service, endpoint) 625")
         self.assertEqual(rows["other"]["distinctValuesPerLabelSet"], "—")
 
-    def test_stored_output_rows_map_to_stage2_nodes_and_their_readers(self):
-        rows = self.js.call("storedOutputRows", self.doc)
-        stored = self.doc["stage3_plan_selection"]["stored_outputs"]
+    def test_materialized_view_rows_map_to_stage2_nodes_and_their_readers(self):
+        rows = self.js.call("materializedViewRows", self.doc)
+        stored = self.doc["stage3_plan_selection"]["materialized_views"]
         self.assertEqual(len(rows), len(stored))
         first = rows[0]
         self.assertEqual(first["definition"], stored[0]["coverage"]["definition_id"])
         self.assertTrue(first["kind"].startswith("PaneChain · "), first["kind"])
         self.assertRegex(first["pane"], r"^pane 1 of \d+ \(newest first\), ")
-        self.assertEqual(first["builtAt"], "ingestion run")
+        self.assertEqual(first["refresh"], "at ingestion")
         self.assertTrue(all(r["stage2NodeId"] is not None and r["readBy"] for r in rows))
         # q1 and q2 share one pane chain of exact sums.
         self.assertEqual(first["readBy"], ["q1", "q2"])
@@ -715,14 +715,14 @@ class PanesAndPathsTests(unittest.TestCase):
             self.assertIn(f"n{root}", kept)
         self.assertNotIn(f"n{self.dag['roots'][8]}", kept)  # q9 reads another metric
 
-    def test_stored_outputs_group_by_pane_chain(self):
-        groups = self.js.call("storedOutputGroups", self.doc)
+    def test_materialized_views_group_by_pane_chain(self):
+        groups = self.js.call("materializedViewGroups", self.doc)
         self.assertEqual(len(groups), 6)
-        self.assertEqual(sum(len(g["panes"]) for g in groups), len(self.doc["stage3_plan_selection"]["stored_outputs"]))
+        self.assertEqual(sum(len(g["panes"]) for g in groups), len(self.doc["stage3_plan_selection"]["materialized_views"]))
         first = groups[0]
         self.assertEqual(first["stage2NodeId"], self.chain["id"])
         self.assertEqual(first["panesText"], "30 × 20 s")
-        self.assertEqual((first["builtAt"], first["retention"]), ("ingestion run", "10 min"))
+        self.assertEqual((first["refresh"], first["retention"]), ("at ingestion", "10 min"))
         self.assertEqual(first["readBy"], ["q1", "q2"])
         self.assertEqual(first["panes"][0]["window"], "t−20 s … t")
         self.assertEqual(first["panes"][1]["window"], "t−40 s … t−20 s")
@@ -971,13 +971,13 @@ class AppTests(unittest.TestCase):
         self.assertFalse(js.eval("window.StageViewer.showDocument({ format: 'nope' }, 'bad')"))
         self.assertIn("Could not load", js.eval("__els.queries.innerHTML"))
 
-    def test_a_workload_document_fills_the_data_workload_and_stored_outputs(self):
+    def test_a_workload_document_fills_the_data_workload_and_materialized_views(self):
         js = self.page("?doc=s.json", {"s.json": SEED862.read_text()})
         self.assertIn("data_total", self.text(js, "dataSources"))
         self.assertIn("ingesting", js.eval("__els.dataArrival.textContent"))
         self.assertIn("raw data not retained", js.eval("__els.deployment.textContent"))
-        stored = len(seed862()["stage3_plan_selection"]["stored_outputs"])
-        self.assertIn(f"{stored} stored outputs", self.text(js, "stored-meta"))
+        stored = len(seed862()["stage3_plan_selection"]["materialized_views"])
+        self.assertIn(f"{stored} materialized views", self.text(js, "views-meta"))
         self.assertIn("every 20 s · predictable", self.text(js, "queries"))
         self.assertIn("Stage 3 usage: CPU", self.text(js, "lane2-meta"))
 
@@ -998,11 +998,11 @@ class AppTests(unittest.TestCase):
         self.assertIn("no server", js.eval("__els.setsServer.textContent"))
         self.assertIn("Random mixed · seed-862 (10)", js.eval("__els.setPick.innerHTML"))
 
-    def test_stored_outputs_table_has_one_row_per_pane_chain(self):
+    def test_materialized_views_table_has_one_row_per_pane_chain(self):
         js = self.page("?doc=s.json", {"s.json": SEED862.read_text()})
-        self.assertEqual(js.eval("(__els.storedOutputs.innerHTML.match(/data-node=/g) || []).length"), 6)
-        self.assertIn("300 stored outputs in 6 groups", self.text(js, "stored-meta"))
-        self.assertIn("30 × 20 s", self.text(js, "storedOutputs"))
+        self.assertEqual(js.eval("(__els.materializedViews.innerHTML.match(/data-node=/g) || []).length"), 6)
+        self.assertIn("300 materialized views in 6 groups", self.text(js, "views-meta"))
+        self.assertIn("30 × 20 s", self.text(js, "materializedViews"))
 
     def test_picking_a_query_dims_what_it_does_not_reach(self):
         js = self.page("?doc=s.json", {"s.json": SEED862.read_text()})

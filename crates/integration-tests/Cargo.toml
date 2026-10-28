@@ -14,7 +14,7 @@ asap-plan-selection = { path = "../plan-selection" }
 [dev-dependencies]
 asap-devtools = { path = "../devtools" }
 # The tests plan PromQL and SQL workloads through the facade.
-asap-planner = { path = "../planner", features = ["promql", "sql"] }
+asap-planner = { path = "../planner", features = ["promql", "sql", "test-support"] }
 asap_sketchlib = { workspace = true }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

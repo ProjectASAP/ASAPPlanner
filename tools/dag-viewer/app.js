@@ -282,7 +282,7 @@
       clearLane(2, 'no candidates');
       renderRanking();
     }
-    renderStoredOutputs();
+    renderMaterializedViews();
     renderMemoSearch();
   }
 
@@ -307,35 +307,35 @@
       : '<span class="status">No source declared.</span>';
   }
 
-  // The selected plan's stored outputs, one row per Stage 2 node (a pane
+  // The selected plan's materialized views, one row per Stage 2 node (a pane
   // chain's panes listed inside its row); a row selects its Stage 2 node.
-  function renderStoredOutputs() {
+  function renderMaterializedViews() {
     const selection = doc.stage3_plan_selection;
     if (!selection.selected) {
-      $('stored-meta').textContent = 'no plan selected';
-      $('storedOutputs').innerHTML = '';
+      $('views-meta').textContent = 'no plan selected';
+      $('materializedViews').innerHTML = '';
       return;
     }
-    if (selection.stored_outputs === undefined) {
-      $('stored-meta').textContent = 'this document has no stored outputs section; write it again with the current stage_pipeline';
-      $('storedOutputs').innerHTML = '';
+    if (selection.materialized_views === undefined) {
+      $('views-meta').textContent = 'this document has no materialized views section; write it again with the current stage_pipeline';
+      $('materializedViews').innerHTML = '';
       return;
     }
-    const groups = storedOutputGroups(doc);
+    const groups = materializedViewGroups(doc);
     const count = groups.reduce((n, g) => n + g.panes.length, 0);
-    $('stored-meta').innerHTML = selection.stored_outputs_error
-      ? `<span class="error">no installable plan: ${esc(selection.stored_outputs_error)}</span>`
-      : `<b>${count}</b> stored output${count === 1 ? '' : 's'} in <b>${groups.length}</b> group${groups.length === 1 ? '' : 's'} of <b>${esc(selection.selected)}</b>` +
+    $('views-meta').innerHTML = selection.materialized_views_error
+      ? `<span class="error">no installable plan: ${esc(selection.materialized_views_error)}</span>`
+      : `<b>${count}</b> materialized view${count === 1 ? '' : 's'} in <b>${groups.length}</b> group${groups.length === 1 ? '' : 's'} of <b>${esc(selection.selected)}</b>` +
         (count ? '' : ': nothing is kept across evaluations; every query computes at query time');
     const panes = (g) => (g.panes.length > 1
       ? `<details><summary>${esc(g.panes.length)} installed nodes</summary><ul>${g.panes.map((p) => `<li>node ${esc(p.nodeId)} · ${esc(p.pane)} · window ${esc(p.window)} · kept ${esc(p.retention)}</li>`).join('')}</ul></details>`
       : `node ${esc(g.panes[0].nodeId)} · window ${esc(g.panes[0].window)}`);
-    $('storedOutputs').innerHTML = groups.length ? table(
-      ['Stage 2 node', 'definition', 'kind', 'panes', 'built at', 'retention', 'installed', 'Stage 3 cost', 'read by'],
+    $('materializedViews').innerHTML = groups.length ? table(
+      ['Stage 2 node', 'definition', 'kind', 'panes', 'refresh', 'retention', 'installed', 'Stage 3 cost', 'read by'],
       groups.map((g) => `<tr class="clickable" tabindex="0" data-node="${g.stage2NodeId === null ? '' : esc(g.stage2NodeId)}"><td>${g.stage2NodeId === null ? '—' : esc(g.stage2NodeId)}</td>` +
-        `<td class="wrap">${esc(g.definition)}</td><td class="wrap">${esc(g.kind)}</td><td>${esc(g.panesText)}</td><td>${esc(g.builtAt)}</td>` +
+        `<td class="wrap">${esc(g.definition)}</td><td class="wrap">${esc(g.kind)}</td><td>${esc(g.panesText)}</td><td>${esc(g.refresh)}</td>` +
         `<td>${esc(g.retention)}</td><td class="wrap">${panes(g)}</td><td class="wrap">${esc(g.cost)}</td><td class="wrap">${esc(g.readBy.join(', ') || '—')}</td></tr>`).join('')) : '';
-    $('storedOutputs').querySelectorAll('tr.clickable').forEach((tr) => {
+    $('materializedViews').querySelectorAll('tr.clickable').forEach((tr) => {
       const pick = (e) => { if (e && e.target && e.target.closest && e.target.closest('details')) return; if (tr.dataset.node !== '') selectStage2Node(Number(tr.dataset.node)); };
       tr.addEventListener('click', pick);
       tr.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });

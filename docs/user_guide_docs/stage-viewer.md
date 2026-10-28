@@ -226,17 +226,17 @@ and how many instances it keeps, for example `summary: CmsWithHeap · depth 7
 
 Drag to pan and scroll to zoom.
 
-### Stored outputs
+### Materialized views
 
-Under the Stage 2 lane, what a deployment runtime would store for the
+Under the Stage 2 lane, what a deployment runtime would materialize for the
 selected plan, as `plan_installable` reports it: one row per Stage 2 node,
 with its coverage definition (equal for two nodes that compute the same
 thing), its operator and summary parameters, its panes (`30 × 20 s` for a
-pane chain), whether it is built at ingestion or at query time and kept,
+pane chain), whether it is refreshed at ingestion or on first read and kept,
 how long it is kept, the Stage 3 cost of its Stage 2 node, and the queries
 that read it. Open **installed nodes** in a pane chain's row for each pane
 the runtime installs: its node id, its window and how long it is kept. Click a row to select its node in the Stage 2
-lane. A plan that computes everything at query time has no stored outputs.
+lane. A plan that computes everything at query time has no materialized views.
 
 ### Details
 

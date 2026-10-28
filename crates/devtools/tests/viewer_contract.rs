@@ -321,23 +321,27 @@ fn wire_name<T: serde::Serialize>(value: T) -> String {
         .to_owned()
 }
 
-/// The viewer knows every `StoredOutputBuild` (`stored_outputs[].built_at`)
-/// and every Stage 3 `RejectionCause`, and splits the causes into failed
-/// checks and losses as `RejectionCause::failed_a_check` does.
+/// The viewer knows every `MaterializedViewRefresh`
+/// (`materialized_views[].refresh`) and every Stage 3 `RejectionCause`, and
+/// splits the causes into failed checks and losses as
+/// `RejectionCause::failed_a_check` does.
 #[test]
-fn viewer_knows_every_stored_output_build_and_rejection_cause() {
+fn viewer_knows_every_view_refresh_and_rejection_cause() {
     use asap_plan_selection::RejectionCause as C;
-    use asap_planner::StoredOutputBuild as B;
-    let builds = [B::IngestionRun, B::QueryRun];
-    for build in builds {
+    use asap_planner::MaterializedViewRefresh as R;
+    let refreshes = [R::AtIngestion, R::OnFirstRead];
+    for refresh in refreshes {
         // A new variant fails to compile here until it is listed above.
-        match build {
-            B::IngestionRun | B::QueryRun => {}
+        match refresh {
+            R::AtIngestion | R::OnFirstRead => {}
         }
     }
     assert_eq!(
-        stages_js_strings("const STORED_OUTPUT_BUILDS = ["),
-        builds.into_iter().map(wire_name).collect::<BTreeSet<_>>()
+        stages_js_strings("const VIEW_REFRESHES = ["),
+        refreshes
+            .into_iter()
+            .map(wire_name)
+            .collect::<BTreeSet<_>>()
     );
 
     let causes = [

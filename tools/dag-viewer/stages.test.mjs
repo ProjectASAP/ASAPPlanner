@@ -1,5 +1,5 @@
 // Node tests of stages.js (no DOM): pane-chain expansion, the queries that
-// reach each node, the highlighted neighborhoods and the grouped stored
+// reach each node, the highlighted neighborhoods and the grouped materialized
 // outputs, over the committed seed-862 workload example; the elements load
 // into the vendored cytoscape (headless), which refuses duplicate ids and
 // edges to missing nodes. Run from the repository root:
@@ -97,10 +97,10 @@ test('a query keeps its own nodes and a node its neighborhood', () => {
   assert.ok(!around.has(`n${dag.roots[8]}`));
 });
 
-test('stored outputs group by pane chain', () => {
-  const groups = call('storedOutputGroups', doc);
+test('materialized views group by pane chain', () => {
+  const groups = call('materializedViewGroups', doc);
   assert.equal(groups.length, 6);
-  assert.equal(groups.reduce((n, g) => n + g.panes.length, 0), doc.stage3_plan_selection.stored_outputs.length);
+  assert.equal(groups.reduce((n, g) => n + g.panes.length, 0), doc.stage3_plan_selection.materialized_views.length);
   assert.equal(groups[0].panesText, `${body.pane_count} × 20 s`);
 });
 

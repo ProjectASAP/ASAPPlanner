@@ -171,8 +171,9 @@ computed, not which physical operators execute it. Planning builds and shares
 [`asap_types::ir::physical_export::compile_physical_asap_dag`](../../../crates/types/src/ir/physical_export.rs)
 converts a selected, timed tree into a `PhysicalASAPDAG` with stable node IDs
 and typed edges (`compile_physical_asap_workload` does the same for a batch,
-with one root per query), and `PhysicalASAPDAGDocument` is its versioned wire
-envelope (`schema_version` = `PHYSICAL_ASAP_DAG_WIRE_VERSION`).
+with one root per query). The plan file a runtime installs,
+`asap_planner::InstallablePlan`, carries the selected DAG with the query
+texts, versioned as a whole by `wire_version` (`INSTALLABLE_PLAN_WIRE_VERSION`).
 Physical compilation consumes `PhysicalASAPDAG` and produces a separate
 physical DAG.
 

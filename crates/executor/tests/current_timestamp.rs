@@ -69,6 +69,7 @@ fn scan_plan(predicates: Vec<Predicate<usize>>) -> PhysicalASAPDAG {
             materialization: Default::default(),
             output_schema: schema(),
             guarantee: None,
+            retention_ms: None,
         }],
         edges: vec![],
         roots: vec![0],

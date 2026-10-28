@@ -468,6 +468,7 @@ dependencies = [
  "asap-logical-asap-optimization",
  "asap-physical-asap-optimization",
  "asap-plan-selection",
+ "asap-planner",
  "asap-types",
  "futures",
  "serde",

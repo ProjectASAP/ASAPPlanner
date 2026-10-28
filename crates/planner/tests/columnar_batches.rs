@@ -46,12 +46,12 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
     )
     .unwrap();
     // The deployment keeps no raw data samples, so every pane is built at
-    // ingestion and stored.
+    // ingestion and materialized.
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    // The installable plan: the selected DAG and its stored KLL panes.
+    // The installable plan: the selected DAG and its materialized KLL panes.
     // Pane width is chosen by the optimizer.
     let plan = plan_installable(UserInput::new(
         &workload,
@@ -59,19 +59,16 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
         PlanningModels::builtin().with_deployment_capabilities(&capabilities),
     ))
     .await
-    .unwrap();
-    // The newest pane: its node, and the raw-data-sample window it reads.
-    let output = plan
-        .stored_outputs
+    .unwrap()
+    .0;
+    // The newest pane: its node, and the raw-data window it reads.
+    let views = plan.materialized_views().unwrap();
+    let output = views
         .iter()
-        .max_by_key(|output| {
-            output.inputs.raw_data_sample_windows[0]
-                .bounds_ms(EVALUATION_MS)
-                .1
-        })
+        .max_by_key(|output| output.inputs.raw_data_windows[0].bounds_ms(EVALUATION_MS).1)
         .unwrap();
     // The pane's window at this evaluation, `(start_ms, end_ms]`.
-    let (start_ms, end_ms) = output.inputs.raw_data_sample_windows[0].bounds_ms(EVALUATION_MS);
+    let (start_ms, end_ms) = output.inputs.raw_data_windows[0].bounds_ms(EVALUATION_MS);
     // Feed both series within the selected pane, whose width is an optimizer
     // decision. Keep distinct millisecond timestamps even for very fine panes.
     let width_ms = end_ms - start_ms;
@@ -93,7 +90,6 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
         .collect();
     // The rows the plan's `Scan` of `latency_ms` reads.
     let schema = plan
-        .dag
         .dag
         .nodes
         .iter()
@@ -137,7 +133,7 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
 
     // The executor's pane build over the `latency_ms` provider bound at
     // the `Scan`; its `TimeRange` keeps the pane's window.
-    let compiled = compile(&plan.dag.dag, &BTreeSet::new(), &[output.node_id as u64]).unwrap();
+    let compiled = compile(&plan.dag, &BTreeSet::new(), &[output.node_id as u64]).unwrap();
     let mut tables = DataSources::default();
     tables
         .register(

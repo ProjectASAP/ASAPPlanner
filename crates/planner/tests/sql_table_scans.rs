@@ -16,8 +16,8 @@ use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::sources::{BindingDataSources, DataSources, MemorySource, TableProvider};
 use asap_executor::values::{Batch, Value};
 use asap_planner::{
-    plan_installable, DeploymentCapabilities, FrontendInput, InstallablePlan, PlanningModels,
-    PlanningWorkload, SqlCatalog, StoredOutputBuild, UserInput,
+    plan_installable, DeploymentCapabilities, FrontendInput, InstallablePlan,
+    MaterializedViewRefresh, PlanningModels, PlanningWorkload, SqlCatalog, UserInput,
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
@@ -124,6 +124,7 @@ async fn plan_for(
     ))
     .await
     .expect("plan_installable plans a SQL workload over a table")
+    .0
 }
 
 /// Rows over the 20 minutes before the evaluation: one per second, service
@@ -156,7 +157,6 @@ fn run(plan: &InstallablePlan) -> (Vec<FieldDataType>, Vec<Vec<Value>>) {
 /// [`run`] for query `query` of `plan`.
 fn run_query(plan: &InstallablePlan, query: usize) -> (Vec<FieldDataType>, Vec<Vec<Value>>) {
     let reference = plan
-        .dag
         .dag
         .with_every_node_at_query_time()
         .expect("the plan runs at query time");
@@ -240,8 +240,8 @@ fn shown(value: &Value) -> String {
 
 /// The planned output type of query 0's root.
 fn planned_output(plan: &InstallablePlan) -> Vec<FieldDataType> {
-    let root = plan.queries[0].root_node_id;
-    let node = plan.dag.dag.nodes.iter().find(|n| n.id == root).unwrap();
+    let root = plan.dag.roots[0];
+    let node = plan.dag.nodes.iter().find(|n| n.id == root).unwrap();
     node.output_schema
         .fields
         .iter()
@@ -264,7 +264,7 @@ fn expected_distinct_users() -> BTreeMap<String, String> {
 #[tokio::test]
 async fn a_distinct_count_over_an_int64_id_in_a_now_window_runs_from_a_sketch() {
     let plan = plan(DISTINCT_USERS_LAST_5_MINUTES, APPROXIMATE).await;
-    let selected = format!("{:?}", plan.dag.dag.nodes);
+    let selected = format!("{:?}", plan.dag.nodes);
     assert!(
         selected.contains("SummaryAgg"),
         "a distinct-count sketch answers it: {selected}"
@@ -376,7 +376,7 @@ async fn an_exact_global_sql_percentile_of_no_row_is_null() {
 async fn distinct_counts_over_5_and_15_minute_windows_run_from_panes() {
     let fifteen = DISTINCT_USERS_LAST_5_MINUTES.replace("5 minutes", "15 minutes");
     let plan = plan_all(&[DISTINCT_USERS_LAST_5_MINUTES, &fifteen], APPROXIMATE).await;
-    let selected = format!("{:?}", plan.dag.dag.nodes);
+    let selected = format!("{:?}", plan.dag.nodes);
     assert!(selected.contains("TimeShift"), "panes: {selected}");
     assert_eq!(by_key(run_query(&plan, 0).1), expected_distinct_users());
     // The last 15 minutes (i >= 300): every user `i % 50` of each service
@@ -398,7 +398,7 @@ async fn row_counts_over_5_and_15_minute_windows_read_each_row_once() {
                 WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service";
     let fifteen = five.replace("5 minutes", "15 minutes");
     let plan = plan_all(&[five, &fifteen], EXACT).await;
-    let selected = format!("{:?}", plan.dag.dag.nodes);
+    let selected = format!("{:?}", plan.dag.nodes);
     assert!(selected.contains("TimeShift"), "panes: {selected}");
     for (query, rows_per_service) in [(0, 100), (1, 300)] {
         let expected: BTreeMap<String, String> = (0..3)
@@ -459,13 +459,14 @@ fn run_bound(
 }
 
 /// The data plane of `plan` at [`EVALUATION_MS`] over the table rows
-/// [`rows`], as a runtime runs it: every stored output built once, in the
-/// plan's order, from the table bound at its `Scan`s and its stored
-/// inputs, in an ingestion run over its data's span (or the query run, for
-/// one built there); then every query answered from the stored outputs it
+/// [`rows`], as a runtime runs it: every materialized view refreshed once,
+/// in the plan's order, from the table bound at its `Scan`s and the views
+/// it reads, in an ingestion run over its data's span (or the query run,
+/// for one refreshed there); then every query answered from the views it
 /// reaches. The answer rows of each query.
 fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
-    let dag = &plan.dag.dag;
+    let dag = &plan.dag;
+    let views = plan.materialized_views().unwrap();
     // The table's rows in the schema the plan's scans read.
     let schema = dag
         .nodes
@@ -478,46 +479,45 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
         })
         .expect("the plan scans the table");
     let table = Batch::try_new(schema, rows()).unwrap();
-    // Each stored output's state, by node id, with its data's span.
+    // Each view's state, by node id, with its data's span.
     let mut built: BTreeMap<u64, (Batch, (i64, i64))> = BTreeMap::new();
-    for output in &plan.stored_outputs {
-        let span = output
+    for view in &views {
+        let span = view
             .inputs
-            .raw_data_sample_windows
+            .raw_data_windows
             .iter()
             .map(|window| window.bounds_ms(EVALUATION_MS))
             .chain(
-                output
-                    .inputs
-                    .stored_outputs
+                view.inputs
+                    .materialized_views
                     .iter()
                     .map(|id| built[&(*id as u64)].1),
             )
             .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
-            .expect("a stored output reads something");
+            .expect("a materialized view reads something");
         let mut sources = BTreeMap::new();
-        for id in &output.inputs.stored_outputs {
+        for id in &view.inputs.materialized_views {
             sources.insert(*id as u64, built[&(*id as u64)].0.clone());
         }
-        let scope = match output.built_at {
-            StoredOutputBuild::IngestionRun => Scope::Ingestion {
+        let scope = match view.refresh {
+            MaterializedViewRefresh::AtIngestion => Scope::Ingestion {
                 window_start_ms: span.0,
                 window_end_ms: span.1,
                 revision: 1,
             },
-            StoredOutputBuild::QueryRun => Scope::Query {
+            MaterializedViewRefresh::OnFirstRead => Scope::Query {
                 evaluation_time_ms: EVALUATION_MS,
                 revision: 1,
             },
         };
-        let batches = run_bound(dag, sources, &table, &[output.node_id as u64], scope).remove(0);
+        let batches = run_bound(dag, sources, &table, &[view.node_id as u64], scope).remove(0);
         let state_rows = batches.iter().flat_map(|b| b.to_rows()).collect();
         let state = Batch::try_new(batches[0].schema().clone(), state_rows).unwrap();
-        built.insert(output.node_id as u64, (state, span));
+        built.insert(view.node_id as u64, (state, span));
     }
-    // The query run reads the stored outputs it reaches without passing
-    // another one, and the windows it reads at query time.
-    let roots: Vec<u64> = plan.queries.iter().map(|q| q.root_node_id as u64).collect();
+    // The query run reads the views it reaches without passing another
+    // one, and the windows it reads at query time.
+    let roots: Vec<u64> = plan.dag.roots.iter().map(|&root| root as u64).collect();
     let mut inputs = BTreeMap::new();
     let mut pending = roots.clone();
     let mut seen = std::collections::BTreeSet::new();
@@ -555,19 +555,19 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
 async fn ingestion_time_panes_built_from_table_rows_answer_exactly() {
     let fifteen = DISTINCT_USERS_LAST_5_MINUTES.replace("5 minutes", "15 minutes");
     let plan = plan_without_raw_data(&[DISTINCT_USERS_LAST_5_MINUTES, &fifteen], APPROXIMATE).await;
+    let views = plan.materialized_views().unwrap();
     assert!(
-        plan.stored_outputs
+        views
             .iter()
-            .any(|o| o.built_at == StoredOutputBuild::IngestionRun
-                && !o.inputs.raw_data_sample_windows.is_empty()),
+            .any(|v| v.refresh == MaterializedViewRefresh::AtIngestion
+                && !v.inputs.raw_data_windows.is_empty()),
         "panes built at ingestion time from table rows: {:?}",
-        plan.stored_outputs
+        views
     );
     // Older panes read windows that end before the evaluation.
-    assert!(plan
-        .stored_outputs
+    assert!(views
         .iter()
-        .flat_map(|o| &o.inputs.raw_data_sample_windows)
+        .flat_map(|v| &v.inputs.raw_data_windows)
         .any(|w| w.end_offset_ms > 0));
     let answers = run_data_plane(&plan);
     assert_eq!(by_key(answers[0].clone()), expected_distinct_users());
@@ -586,7 +586,7 @@ async fn ingestion_time_row_counts_read_each_table_row_once() {
     let fifteen = five.replace("5 minutes", "15 minutes");
     let plan = plan_without_raw_data(&[five, &fifteen], EXACT).await;
     assert!(
-        plan.query_time_raw_windows.is_empty(),
+        plan.raw_data_retention().unwrap().is_empty(),
         "no raw data at query time"
     );
     let answers = run_data_plane(&plan);
@@ -612,16 +612,17 @@ async fn a_window_equal_to_its_interval_is_built_at_ingestion_time_from_table_ro
         five_minutes_ms,
     )
     .await;
+    let views = plan.materialized_views().unwrap();
     assert!(
-        plan.stored_outputs
+        views
             .iter()
-            .any(|o| o.built_at == StoredOutputBuild::IngestionRun
-                && !o.inputs.raw_data_sample_windows.is_empty()),
+            .any(|v| v.refresh == MaterializedViewRefresh::AtIngestion
+                && !v.inputs.raw_data_windows.is_empty()),
         "built at ingestion time from table rows: {:?}",
-        plan.stored_outputs
+        views
     );
     assert!(
-        plan.query_time_raw_windows.is_empty(),
+        plan.raw_data_retention().unwrap().is_empty(),
         "no raw data at query time"
     );
     assert_eq!(
@@ -633,7 +634,7 @@ async fn a_window_equal_to_its_interval_is_built_at_ingestion_time_from_table_ro
                      WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service";
     let plan = plan_without_raw_data_every(&[row_count], EXACT, five_minutes_ms).await;
     assert!(
-        plan.query_time_raw_windows.is_empty(),
+        plan.raw_data_retention().unwrap().is_empty(),
         "no raw data at query time"
     );
     let expected: BTreeMap<String, String> = (0..3)
@@ -684,7 +685,7 @@ async fn a_table_provider_is_asked_for_the_query_window() {
     )
     .await;
     // The plan with every node at query time: it reads the table at the Scan.
-    let reference = plan.dag.dag.with_every_node_at_query_time().unwrap();
+    let reference = plan.dag.with_every_node_at_query_time().unwrap();
     // The schema the plan's Scan reads.
     let schema = reference
         .nodes

@@ -389,6 +389,7 @@ fn global_extrema_bind_with_planner_derived_schema() {
             materialization: Default::default(),
             output_schema: (*output).clone(),
             guarantee: None,
+            retention_ms: None,
         };
         let operator = compile_node(&node, std::slice::from_ref(&input))
             .expect("global extremum should bind to its Planner schema");
@@ -940,6 +941,7 @@ fn planner_node(
                 .collect(),
         ),
         guarantee: None,
+        retention_ms: None,
     }
 }
 
@@ -1186,6 +1188,7 @@ fn exact_aggregate_node(
         materialization: Default::default(),
         output_schema: (*schema(&[(name, dtype, false)])).clone(),
         guarantee: None,
+        retention_ms: None,
     }
 }
 

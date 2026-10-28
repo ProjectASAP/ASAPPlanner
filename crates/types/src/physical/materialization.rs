@@ -45,4 +45,13 @@ impl Materialization {
             | Self::MatAtQueryKeptAcrossEvaluations(_) => ExecutionTiming::QueryTime,
         }
     }
+
+    /// Whether a node of this materialization is a materialized view: its
+    /// output is kept across evaluations.
+    pub fn is_materialized_view(self) -> bool {
+        matches!(
+            self,
+            Self::MatAtIngestion(_) | Self::MatAtQueryKeptAcrossEvaluations(_)
+        )
+    }
 }

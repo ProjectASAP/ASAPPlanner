@@ -206,6 +206,7 @@ pub(in crate::search) fn apply(
                     materialization: configuration.materialization,
                     output_schema: template.schema.clone(),
                     guarantee: template.guarantee.clone(),
+                    retention_ms: None,
                 })
             })
             .collect();
@@ -433,6 +434,7 @@ impl ConcreteRows {
                 materialization: Materialization::NotMaterialized,
                 output_schema: node.schema.clone(),
                 guarantee: node.guarantee.clone(),
+                retention_ms: None,
             });
             result.children.push(children);
             Some(id)

@@ -14,10 +14,10 @@ use asap_executor::values::{Batch, Value};
 mod time_series;
 use asap_planner::{
     plan_installable, DeploymentCapabilities, ExecutorCompileCheck, FrontendInput, InstallablePlan,
-    InstallablePlanError, OperatorKind, OptimizationInput, OptimizationPass, OptimizeError,
-    PhysicalASAPDAG, PlanOutput, PlanSelectionSettings, PlannerExecutorCompileCheck,
-    PlanningModels, PlanningWorkload, SelectionBox, Stage1ToStage3Pass, StoredOutput,
-    StoredOutputBuild, UserInput,
+    InstallablePlanError, MaterializedView, MaterializedViewRefresh, OperatorKind,
+    OptimizationInput, OptimizationPass, OptimizeError, PhysicalASAPDAG, PlanOutput,
+    PlanSelectionSettings, PlannerExecutorCompileCheck, PlanningModels, PlanningWorkload,
+    SelectedPlanReport, SelectionBox, Stage1ToStage3Pass, UserInput,
 };
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::ir::{
@@ -200,6 +200,25 @@ async fn plan_json_for(
     workload: PlanningWorkload,
     capabilities: &DeploymentCapabilities,
 ) -> String {
+    serde_json::to_string(&plan_with_report_for(workload, capabilities).await.0).unwrap()
+}
+
+/// The plan [`plan_json`] writes for `queries`, and Stage 3's report of the
+/// selection it made (which the plan file does not carry).
+async fn planned_with_report(queries: &[&str]) -> (InstallablePlan, Option<SelectedPlanReport>) {
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    plan_with_report_for(workload(queries), &capabilities).await
+}
+
+/// The one Planner call for `workload` on a deployment with `capabilities`:
+/// the selected plan, ready to install, and Stage 3's report.
+async fn plan_with_report_for(
+    workload: PlanningWorkload,
+    capabilities: &DeploymentCapabilities,
+) -> (InstallablePlan, Option<SelectedPlanReport>) {
     // The deployment's Stage 3 prices, from its JSON file: cost model 1.
     let settings: PlanSelectionSettings = serde_json::from_str(
         r#"{"cost_model": {"usage_over_time": {
@@ -215,15 +234,13 @@ async fn plan_json_for(
         .with_deployment_capabilities(capabilities)
         .with_plan_selection(&settings);
     // The one Planner call: the selected plan, ready to install.
-    let plan = plan_installable(UserInput::new(
+    plan_installable(UserInput::new(
         &workload,
         FrontendInput::Promql { histograms: None },
         models,
     ))
     .await
-    .unwrap();
-    // `plan.json`, as the control plane writes it.
-    serde_json::to_string(&plan).unwrap()
+    .unwrap()
 }
 
 /// What one data-plane evaluation of a plan file returned.
@@ -232,39 +249,39 @@ struct DataPlaneRun {
     answers_per_query: Vec<Vec<Answer>>,
     /// Per query, the query-time reference's answers.
     reference_answers_per_query: Vec<Vec<Answer>>,
-    /// How many stored outputs this evaluation built (ingestion or query
-    /// runs); the others it read came from the store.
+    /// How many materialized views this evaluation refreshed (ingestion or
+    /// query runs); the others it read came from the store.
     outputs_built: usize,
 }
 
-/// One summary state this test stores: its built state, and how long to
-/// keep it.
+/// One summary state this test stores: its refreshed state, and how long
+/// to keep it.
 struct StoredState {
-    /// The built state, bound at every stored output with its key.
+    /// The refreshed state, bound at every materialized view with its key.
     state: Batch,
     /// When the data it summarizes starts, in Unix milliseconds.
     start_ms: i64,
     /// How far back from the newest evaluation it is kept: the largest
-    /// `retention_ms` among the stored outputs it served.
+    /// `retention_ms` among the views it served.
     retention_ms: u64,
 }
 
 /// This stand-in runtime's summary store, by [`state_key`].
 type SummaryStore = BTreeMap<String, StoredState>;
 
-/// The key of `output`'s state at evaluation `evaluation_ms`, as a summary
+/// The key of `view`'s state at evaluation `evaluation_ms`, as a summary
 /// store keys instances: its definition id and its selection made
-/// concrete (relative time made absolute). An output whose selection
+/// concrete (relative time made absolute). A view whose selection
 /// names no time (its definition reads a window relative to the
 /// evaluation, e.g. an instant selector) is keyed by the evaluation too.
-fn state_key(output: &StoredOutput, evaluation_ms: i64) -> String {
+fn state_key(view: &MaterializedView, evaluation_ms: i64) -> String {
     use std::ops::Bound;
     let absolute = |bound: &Bound<i64>| match bound {
         Bound::Included(at) => Bound::Included(evaluation_ms + at),
         Bound::Excluded(at) => Bound::Excluded(evaluation_ms + at),
         Bound::Unbounded => Bound::Unbounded,
     };
-    let mut selection = output.coverage.selection.clone();
+    let mut selection = view.coverage.selection.clone();
     let timed = selection.iter().any(|b| b.relative_time.is_some());
     for selection_box in &mut selection {
         selection_box.relative_time = selection_box
@@ -273,7 +290,7 @@ fn state_key(output: &StoredOutput, evaluation_ms: i64) -> String {
             .map(|(lower, upper)| (absolute(lower), absolute(upper)));
     }
     serde_json::json!({
-        "definition_id": output.coverage.definition_id,
+        "definition_id": view.coverage.definition_id,
         "selection": selection,
         "evaluation_ms": (!timed).then_some(evaluation_ms),
     })
@@ -282,16 +299,13 @@ fn state_key(output: &StoredOutput, evaluation_ms: i64) -> String {
 
 /// The node that answers each query of `plan`, in workload order.
 fn query_roots(plan: &InstallablePlan) -> Vec<u64> {
-    plan.queries
-        .iter()
-        .map(|query| query.root_node_id as u64)
-        .collect()
+    plan.dag.roots.iter().map(|&root| root as u64).collect()
 }
 
 /// The data plane at evaluation time `evaluation_ms`: from `plan_json`,
-/// `samples` and the states earlier evaluations left in `store`, build each
-/// stored output the store lacks once, in the plan's order, from its
-/// raw-data-sample windows and stored inputs; answer every query; drop the
+/// `samples` and the states earlier evaluations left in `store`, refresh each
+/// materialized view the store lacks once, in the plan's order, from its
+/// raw-data windows and the views it reads; answer every query; drop the
 /// states past their retention; and answer the queries again with the
 /// query-time reference.
 fn run_data_plane(
@@ -309,8 +323,8 @@ fn run_data_plane(
     )
 }
 
-/// When this stand-in runtime builds a stored output an ingestion run
-/// builds from raw data samples.
+/// When this stand-in runtime refreshes a materialized view an ingestion
+/// run refreshes from raw data samples.
 #[derive(Clone, Copy)]
 enum IngestionBuilds {
     /// For each evaluation, over windows ending at that evaluation.
@@ -322,7 +336,7 @@ enum IngestionBuilds {
     Tumbling,
 }
 
-/// [`run_data_plane`] with ingestion-run outputs built as `ingestion` says.
+/// [`run_data_plane`] with at-ingestion views refreshed as `ingestion` says.
 fn run_data_plane_on(
     plan_json: &str,
     samples: &[RawDataSample],
@@ -334,66 +348,66 @@ fn run_data_plane_on(
     let installed: InstallablePlan = serde_json::from_str(plan_json).unwrap();
     installed.validate().unwrap();
     // The DAG the executor runs.
-    let dag = &installed.dag.dag;
+    let dag = &installed.dag;
+    let views = installed.materialized_views().unwrap();
     // Every input of the query run, keyed by the node it is bound to.
     let mut inputs = BTreeMap::new();
-    // How many stored outputs this evaluation builds.
+    // How many materialized views this evaluation refreshes.
     let mut outputs_built = 0;
-    // Each stored output's state and the time span of its data at this
+    // Each view's state and the time span of its data at this
     // evaluation, `(start_ms, end_ms]`, by node id.
     let mut built: BTreeMap<u64, (Batch, (i64, i64))> = BTreeMap::new();
-    for output in &installed.stored_outputs {
+    for view in &views {
         // The evaluation its windows end at: this one, or for a tumbling
-        // ingestion build the newest point of its grid at or before it.
-        let built_for_ms = match (ingestion, output.built_at) {
-            (IngestionBuilds::Tumbling, StoredOutputBuild::IngestionRun) => output
+        // at-ingestion view the newest point of its grid at or before it.
+        let built_for_ms = match (ingestion, view.refresh) {
+            (IngestionBuilds::Tumbling, MaterializedViewRefresh::AtIngestion) => view
                 .inputs
-                .raw_data_sample_windows
+                .raw_data_windows
                 .first()
                 .map_or(evaluation_ms, |window| {
                     evaluation_ms - evaluation_ms.rem_euclid(window.width_ms)
                 }),
             _ => evaluation_ms,
         };
-        // The span of the data it summarizes: its windows' and stored
-        // inputs' spans together.
-        let span = output
+        // The span of the data it summarizes: its windows' and the views'
+        // it reads spans together.
+        let span = view
             .inputs
-            .raw_data_sample_windows
+            .raw_data_windows
             .iter()
             .map(|window| window.bounds_ms(built_for_ms))
             .chain(
-                output
-                    .inputs
-                    .stored_outputs
+                view.inputs
+                    .materialized_views
                     .iter()
                     .map(|id| built[&(*id as u64)].1),
             )
             .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
-            .expect("a stored output reads something");
-        let key = state_key(output, built_for_ms);
+            .expect("a materialized view reads something");
+        let key = state_key(view, built_for_ms);
         if !store.contains_key(&key) {
-            // The build's stored inputs; its raw data is bound at its `Scan`s.
+            // The views its refresh reads; its raw data is bound at its `Scan`s.
             let mut sources = BTreeMap::new();
-            for id in &output.inputs.stored_outputs {
+            for id in &view.inputs.materialized_views {
                 sources.insert(*id as u64, built[&(*id as u64)].0.clone());
             }
-            // The run that builds it: an ingestion run over its data's span
+            // The run that refreshes it: an ingestion run over its data's span
             // once its inputs are complete (each window ends at the run's
             // end), or the query run of this evaluation.
-            let scope = match output.built_at {
-                StoredOutputBuild::IngestionRun => Scope::Ingestion {
+            let scope = match view.refresh {
+                MaterializedViewRefresh::AtIngestion => Scope::Ingestion {
                     window_start_ms: span.0,
                     window_end_ms: span.1,
                     revision: 1,
                 },
-                StoredOutputBuild::QueryRun => Scope::Query {
+                MaterializedViewRefresh::OnFirstRead => Scope::Query {
                     evaluation_time_ms: evaluation_ms,
                     revision: 1,
                 },
             };
-            // The batches that run built, in one batch, as the store keeps it.
-            let batches = run(dag, sources, samples, &[output.node_id as u64], scope).remove(0);
+            // The batches that run produced, in one batch, as the store keeps it.
+            let batches = run(dag, sources, samples, &[view.node_id as u64], scope).remove(0);
             let schema = batches[0].schema().clone();
             let state_rows = batches.iter().flat_map(|b| b.to_rows().to_vec()).collect();
             store.insert(
@@ -401,20 +415,20 @@ fn run_data_plane_on(
                 StoredState {
                     state: Batch::try_new(schema, state_rows).unwrap(),
                     start_ms: span.0,
-                    retention_ms: output.retention_ms,
+                    retention_ms: view.retention_ms,
                 },
             );
             outputs_built += 1;
         }
-        // One stored state serves every output with its key, so it is kept
+        // One stored state serves every view with its key, so it is kept
         // for the largest retention any of them requires.
         let stored = store.get_mut(&key).unwrap();
-        stored.retention_ms = stored.retention_ms.max(output.retention_ms);
-        built.insert(output.node_id as u64, (stored.state.clone(), span));
+        stored.retention_ms = stored.retention_ms.max(view.retention_ms);
+        built.insert(view.node_id as u64, (stored.state.clone(), span));
     }
-    // The query run reads the stored outputs it reaches from the queries'
-    // roots without passing another stored output; those below are read
-    // only through the outputs built from them.
+    // The query run reads the views it reaches from the queries' roots
+    // without passing another view; those below are read only through the
+    // views refreshed from them.
     let mut pending = query_roots(&installed);
     let mut seen = std::collections::BTreeSet::new();
     while let Some(id) = pending.pop() {
@@ -455,9 +469,9 @@ fn run_data_plane_on(
 
     // The correctness reference: nothing stored, every window read from
     // the raw samples at query time.
-    let reference = installed.query_time_reference().unwrap();
+    let reference = asap_planner::test_support::query_time_reference(&installed).unwrap();
     // The reference's DAG.
-    let reference_dag = &reference.dag.dag;
+    let reference_dag = &reference.dag;
     // The reference's answers, which the installed plan's must equal.
     let reference_answers_per_query = run(
         reference_dag,
@@ -477,7 +491,7 @@ fn run_data_plane_on(
 }
 
 /// #509 Example 4b, as a runtime runs it: one `plan_installable` call,
-/// `plan.json`, then each stored pane built in an ingestion run and merged
+/// `plan.json`, then each pane view refreshed in an ingestion run and merged
 /// in the query run. One p99 per series, read from the hour's oldest pane,
 /// equal to the query-time reference; the other metric is not read.
 #[tokio::test]
@@ -490,8 +504,9 @@ async fn a_runtime_installs_and_runs_the_plan_from_one_facade_call() {
         &mut SummaryStore::new(),
     );
     let installed: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
-    assert!(!installed.stored_outputs.is_empty());
-    assert_eq!(run.outputs_built, installed.stored_outputs.len());
+    let views = installed.materialized_views().unwrap();
+    assert!(!views.is_empty());
+    assert_eq!(run.outputs_built, views.len());
     // The p99 of the hour comes from its oldest pane, pane 5.
     assert_answers_from_pane(&run.answers_per_query[0], 5);
     assert_eq!(run.answers_per_query[0][0].0["instance"], "a");
@@ -505,12 +520,15 @@ async fn a_runtime_installs_and_runs_the_plan_from_one_facade_call() {
 /// one latency per query, each node naming the installed nodes that run it.
 #[tokio::test]
 async fn the_plan_carries_stage3s_predicted_usage() {
-    let plan: InstallablePlan =
-        serde_json::from_str(&plan_json(&["quantile_over_time(0.99, latency_ms[60m])"]).await)
-            .unwrap();
-    assert!(!plan.stored_outputs.is_empty(), "a pane-only plan");
-    assert!(plan.query_time_raw_windows.is_empty(), "a pane-only plan");
-    let selection = plan.selection.as_ref().expect("Stage 3's report");
+    let (plan, selection) =
+        planned_with_report(&["quantile_over_time(0.99, latency_ms[60m])"]).await;
+    let views = plan.materialized_views().unwrap();
+    assert!(!views.is_empty(), "a pane-only plan");
+    assert!(
+        plan.raw_data_retention().unwrap().is_empty(),
+        "a pane-only plan"
+    );
+    let selection = selection.as_ref().expect("Stage 3's report");
     let usage = selection.predicted_usage.as_ref().expect("predicted usage");
     let node_costs: f64 = usage
         .per_node
@@ -538,7 +556,7 @@ async fn the_plan_carries_stage3s_predicted_usage() {
     assert!(usage.peak_memory_bytes > 0);
     // Each prediction names the installed nodes that run it: the pane
     // chain its selected panes, the query's root its own node.
-    let installed: BTreeSet<_> = plan.dag.dag.nodes.iter().map(|node| node.id).collect();
+    let installed: BTreeSet<_> = plan.dag.nodes.iter().map(|node| node.id).collect();
     for node in &usage.per_node {
         assert!(
             node.installed_node_ids
@@ -552,17 +570,13 @@ async fn the_plan_carries_stage3s_predicted_usage() {
         .iter()
         .find(|node| node.operator == OperatorKind::PaneChain)
         .unwrap();
-    assert_eq!(
-        chain.installed_node_ids.len(),
-        plan.stored_outputs.len(),
-        "{chain:?}"
-    );
-    let stored: BTreeSet<_> = plan.stored_outputs.iter().map(|o| o.node_id).collect();
+    assert_eq!(chain.installed_node_ids.len(), views.len(), "{chain:?}");
+    let view_ids: BTreeSet<_> = views.iter().map(|v| v.node_id).collect();
     assert!(chain
         .installed_node_ids
         .iter()
-        .all(|id| stored.contains(id)));
-    let root = plan.queries[0].root_node_id;
+        .all(|id| view_ids.contains(id)));
+    let root = plan.dag.roots[0];
     assert!(usage
         .per_node
         .iter()
@@ -589,7 +603,7 @@ async fn label_matchers_select_the_series_a_pane_reads() {
 }
 
 /// The p99 over the last hour and over the hour before the last 10
-/// minutes may share selected pane windows. The runtime builds each distinct
+/// minutes may share selected pane windows. The runtime refreshes each distinct
 /// state key once, independent of the optimizer's pane widths. Both answers
 /// equal the reference.
 #[tokio::test]
@@ -601,9 +615,10 @@ async fn an_hour_and_its_offset_twin_both_equal_the_reference() {
     .await;
     let installed: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
     let distinct_states: BTreeSet<_> = installed
-        .stored_outputs
+        .materialized_views()
+        .unwrap()
         .iter()
-        .map(|output| state_key(output, EVALUATION_MS))
+        .map(|view| state_key(view, EVALUATION_MS))
         .collect();
     assert!(!distinct_states.is_empty());
     let run = run_data_plane(
@@ -640,7 +655,7 @@ async fn queries_at_one_nonzero_phase_read_panes_anchored_at_the_epoch() {
 
 /// Copies of `sum by (job) (sum_over_time(m[10m]))`, each every 20 s, copy
 /// `q` at phase `phases_ms[q]`, over 6 ingesting series of `m` sampled
-/// every second. Run by a runtime that builds each ingestion pane once, on
+/// every second. Run by a runtime that refreshes each ingestion pane once, on
 /// the grid of its width anchored at the epoch, each answers as the
 /// query-time reference at its own evaluation.
 async fn assert_phased_copies_answer_as_reference(phases_ms: &[i64]) {
@@ -662,19 +677,19 @@ async fn assert_phased_copies_answer_as_reference(phases_ms: &[i64]) {
         entries.join(",")
     ))
     .unwrap();
-    // A deployment that keeps no raw data samples: the windows are stored.
+    // A deployment that keeps no raw data samples: the windows are views.
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
     let plan_json = plan_json_for(workload, &capabilities).await;
     let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
+    let views = plan.materialized_views().unwrap();
     assert!(
-        plan.stored_outputs
+        views
             .iter()
-            .any(|output| output.built_at == StoredOutputBuild::IngestionRun),
-        "{:#?}",
-        plan.stored_outputs
+            .any(|view| view.refresh == MaterializedViewRefresh::AtIngestion),
+        "{views:#?}"
     );
     // Samples of `m`, `job` a (instances 1-3) and b (4-6), every second
     // from 11 minutes before the first evaluation to 10 s after it; each
@@ -760,7 +775,7 @@ const RANK_ERROR_1_PERCENT: &str = r#"{"accuracy": {"accuracy_metric": "rank", "
 /// Plans `query` with `demand` and `requirements` over 6 ingesting series of `m` sampled every
 /// second, for a deployment that keeps no raw data, and runs it at
 /// `EVALUATION_MS` plus each of `evaluation_offsets_ms` on a runtime that
-/// builds each ingestion state once, on the epoch grid of its width. The
+/// refreshes each ingestion state once, on the epoch grid of its width. The
 /// plan keeps state at ingestion time and reads no raw data at query time;
 /// every answer equals the query-time reference.
 async fn assert_answers_as_reference_without_raw_data(
@@ -783,15 +798,15 @@ async fn assert_answers_as_reference_without_raw_data(
     };
     let plan_json = plan_json_for(workload, &capabilities).await;
     let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
+    let views = plan.materialized_views().unwrap();
     assert!(
-        plan.stored_outputs
+        views
             .iter()
-            .any(|output| output.built_at == StoredOutputBuild::IngestionRun),
-        "{:#?}",
-        plan.stored_outputs
+            .any(|view| view.refresh == MaterializedViewRefresh::AtIngestion),
+        "{views:#?}"
     );
     assert!(
-        plan.query_time_raw_windows.is_empty(),
+        plan.raw_data_retention().unwrap().is_empty(),
         "no raw data at query time"
     );
     // Samples of `m`, `job` a (instances 1-3) and b (4-6), every second
@@ -840,21 +855,21 @@ async fn assert_answers_as_reference_without_raw_data(
 async fn a_plan_file_of_another_version_or_tampered_is_refused() {
     let plan_json = plan_json(&["quantile_over_time(0.99, latency_ms[60m])"]).await;
     let mut other_version: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
-    other_version.dag.schema_version += 1;
+    other_version.wire_version += 1;
     assert!(matches!(
         other_version.validate(),
-        Err(InstallablePlanError::InvalidDag(_))
+        Err(InstallablePlanError::UnsupportedWireVersion(_))
     ));
     let mut tampered: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
-    tampered.queries.clear();
+    tampered.query_texts.clear();
     assert!(matches!(
-        tampered.query_time_reference(),
+        asap_planner::test_support::query_time_reference(&tampered),
         Err(InstallablePlanError::QueriesDoNotMatchRoots { .. })
     ));
     let mut missing_node: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
-    missing_node.dag.dag.nodes.remove(0);
+    missing_node.dag.nodes.remove(0);
     assert!(matches!(
-        missing_node.query_time_reference(),
+        asap_planner::test_support::query_time_reference(&missing_node),
         Err(InstallablePlanError::InvalidDag(_))
     ));
 }
@@ -871,12 +886,17 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
         PlanningModels::builtin(),
     ))
     .await
-    .unwrap();
-    let dag = &plan.dag.dag;
-    let [window] = plan.query_time_raw_windows.as_slice() else {
-        panic!("{:?}", plan.query_time_raw_windows);
-    };
-    assert_eq!(window.width_ms, 1_000);
+    .unwrap()
+    .0;
+    let dag = &plan.dag;
+    let [retention] = plan
+        .raw_data_retention()
+        .unwrap()
+        .try_into()
+        .unwrap_or_else(|r: Vec<_>| {
+            panic!("{r:?}");
+        });
+    assert_eq!(retention.lookback_ms, Some(1_000));
     let samples = [
         sample("latency_ms", "a", EVALUATION_MS - 900, 1.0),
         sample("latency_ms", "a", EVALUATION_MS - 100, 10.0),
@@ -931,10 +951,11 @@ fn the_compile_check_rejects_a_time_series_window_the_executor_cannot_run() {
 /// evaluations (#509 Example 4's B3), with a dashboard panel
 /// (`max_over_time(latency_ms[5m])` every minute over 1M series sampled
 /// every 1.5 s, answered as the last hour at 1-minute steps): Stage 3
-/// keeps five 1-minute panes built at query time, and feeds their ranges
-/// only through those builds, so no window is listed twice. The first evaluation, with an empty
-/// store, builds all five in its query run; the next, a minute later,
-/// reuses the four still in its window and builds only the newest. Each
+/// keeps five 1-minute panes refreshed at query time, and keeps raw data
+/// for refreshing the oldest pane at the oldest step (5 min + 1 h). The first
+/// evaluation, with an empty store, refreshes all five in its query run; the
+/// next, a minute later, reuses the four still in its window and refreshes
+/// only the newest. Each
 /// evaluation's answers (each series' newest-pane maximum) equal the
 /// reference.
 #[tokio::test]
@@ -956,21 +977,28 @@ async fn query_time_results_kept_across_evaluations_are_built_in_query_runs() {
     .unwrap();
     let plan_json = plan_json_for(workload, &capabilities).await;
     let installed: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
-    assert_eq!(installed.stored_outputs.len(), 5);
-    assert!(installed
-        .stored_outputs
+    let views = installed.materialized_views().unwrap();
+    assert_eq!(views.len(), 5);
+    assert!(views
         .iter()
-        .all(|o| o.built_at == StoredOutputBuild::QueryRun
-            && o.inputs.raw_data_sample_windows[0].width_ms == 60_000));
-    let pane_ranges: BTreeSet<_> = installed
-        .stored_outputs
+        .all(|v| v.refresh == MaterializedViewRefresh::OnFirstRead
+            && v.inputs.raw_data_windows[0].width_ms == 60_000));
+    // Raw data is kept for refreshing the oldest pane at the oldest step:
+    // the five panes' 5 minutes plus the hour of steps, as long as the panes
+    // themselves are kept.
+    let pane_lookback_ms = views
         .iter()
-        .map(|o| o.inputs.raw_data_sample_windows[0].time_range_node_id)
-        .collect();
-    assert!(installed
-        .query_time_raw_windows
-        .iter()
-        .all(|w| !pane_ranges.contains(&w.time_range_node_id)));
+        .flat_map(|v| &v.inputs.raw_data_windows)
+        .map(|w| w.lookback_ms())
+        .max();
+    assert_eq!(pane_lookback_ms, Some(300_000));
+    assert!(views.iter().all(|v| v.retention_ms == 3_900_000));
+    let retention = installed.raw_data_retention().unwrap();
+    assert_eq!(
+        retention.iter().map(|r| r.lookback_ms).collect::<Vec<_>>(),
+        vec![Some(3_900_000)],
+        "{retention:?}"
+    );
     // The pane cache the data plane keeps across evaluations.
     let mut store = SummaryStore::new();
     let first = run_data_plane(
@@ -1013,8 +1041,11 @@ async fn an_exact_per_series_quantile_runs_from_raw_data_samples() {
     .unwrap();
     let plan_json = plan_json_for(workload, &DeploymentCapabilities::default()).await;
     let installed: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
-    assert!(installed.stored_outputs.is_empty(), "the exact plan");
-    assert_eq!(installed.query_time_raw_windows.len(), 1);
+    assert!(
+        installed.materialized_views().unwrap().is_empty(),
+        "the exact plan"
+    );
+    assert_eq!(installed.raw_data_retention().unwrap().len(), 1);
     // Ten samples per series in the window, one every 10 s, and one before it.
     let mut samples = Vec::new();
     for (instance, region, value) in [
@@ -1084,7 +1115,6 @@ fn relative_workload(queries: &[&str]) -> PlanningWorkload {
 /// The DDSketch α of every sketch `plan` builds; panics on any other sketch.
 fn ddsketch_alphas(plan: &InstallablePlan) -> Vec<f64> {
     plan.dag
-        .dag
         .nodes
         .iter()
         .filter_map(|node| match &node.payload {
@@ -1131,7 +1161,10 @@ async fn a_ratio_of_two_quantiles_runs_from_ddsketches_within_its_relative_targe
     };
     let plan_json = plan_json_for(relative_workload(&[query]), &capabilities).await;
     let installed: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
-    assert!(installed.query_time_raw_windows.is_empty(), "no raw scan");
+    assert!(
+        installed.raw_data_retention().unwrap().is_empty(),
+        "no raw scan"
+    );
     let alphas = ddsketch_alphas(&installed);
     assert!(!alphas.is_empty(), "DDSketch states");
     let share = 1.0 - 1.05f64.powf(-0.5);
@@ -1183,7 +1216,10 @@ async fn a_quantile_shared_with_a_ratio_is_sized_for_the_ratio() {
     )
     .await;
     let installed: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
-    assert!(installed.query_time_raw_windows.is_empty(), "no raw scan");
+    assert!(
+        installed.raw_data_retention().unwrap().is_empty(),
+        "no raw scan"
+    );
     let share = 1.0 - 1.05f64.powf(-0.5);
     for alpha in ddsketch_alphas(&installed) {
         assert!(alpha <= share + 1e-12, "α {alpha} > {share}");
@@ -1197,7 +1233,7 @@ async fn a_quantile_shared_with_a_ratio_is_sized_for_the_ratio() {
     assert_eq!(run.answers_per_query, run.reference_answers_per_query);
 }
 
-// ── Stored outputs built from stored outputs (issue #781) ──────────────────
+// ── Materialized views refreshed from materialized views (issue #781) ──────────────────
 
 /// Stage 1 to Stage 3, then every node `store` names stored as it says,
 /// the others as Stage 2 chose, and the plan timed again: how a test makes
@@ -1322,7 +1358,7 @@ async fn forced_plan_json(
         PlanningModels::builtin().with_deployment_capabilities(capabilities),
     );
     input.pass = Some(&pass);
-    serde_json::to_string(&plan_installable(input).await.unwrap()).unwrap()
+    serde_json::to_string(&plan_installable(input).await.unwrap().0).unwrap()
 }
 
 /// Samples of `m` for six series, `job` a (instances 1, 2, 3) and b (4, 5,
@@ -1357,11 +1393,11 @@ fn relative_time(from_ms: i64, to_ms: i64) -> Vec<SelectionBox> {
 }
 
 /// A per-group maximum and a per-group sum (`max by (job)` and
-/// `sum by (job, instance)`), both built at ingestion from one stored
+/// `sum by (job, instance)`), both refreshed at ingestion from one stored
 /// per-series sum: Stage 1 shares the per-series sums the two queries read
 /// (over scans that project other labels). The per-series sum is listed
 /// first, then each group output, which reads only it, with its time
-/// selection under a definition of its own; built in that order from
+/// selection under a definition of its own; refreshed in that order from
 /// stored inputs, they answer as the query-time reference. (A coarse sum
 /// in place of the maximum rolls up from the fine sum instead:
 /// [`a_coarse_sum_rolls_up_from_the_stored_fine_sum`].)
@@ -1381,15 +1417,16 @@ async fn group_outputs_from_one_stored_per_series_sum_are_listed_and_built() {
     )
     .await;
     let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
-    let [per_series, sums @ ..] = plan.stored_outputs.as_slice() else {
-        panic!("{:#?}", plan.stored_outputs);
+    let views = plan.materialized_views().unwrap();
+    let [per_series, sums @ ..] = views.as_slice() else {
+        panic!("{:#?}", views);
     };
-    assert_eq!(sums.len(), 2, "{:#?}", plan.stored_outputs);
-    assert!(per_series.inputs.stored_outputs.is_empty());
-    assert_eq!(per_series.inputs.raw_data_sample_windows.len(), 1);
+    assert_eq!(sums.len(), 2, "{:#?}", views);
+    assert!(per_series.inputs.materialized_views.is_empty());
+    assert_eq!(per_series.inputs.raw_data_windows.len(), 1);
     for sum in sums {
-        assert_eq!(sum.inputs.stored_outputs, [per_series.node_id]);
-        assert!(sum.inputs.raw_data_sample_windows.is_empty());
+        assert_eq!(sum.inputs.materialized_views, [per_series.node_id]);
+        assert!(sum.inputs.raw_data_windows.is_empty());
         assert_ne!(
             sum.coverage.definition_id,
             per_series.coverage.definition_id
@@ -1399,12 +1436,12 @@ async fn group_outputs_from_one_stored_per_series_sum_are_listed_and_built() {
         sums[0].coverage.definition_id,
         sums[1].coverage.definition_id
     );
-    for output in &plan.stored_outputs {
-        assert_eq!(output.built_at, StoredOutputBuild::IngestionRun);
+    for output in &views {
+        assert_eq!(output.refresh, MaterializedViewRefresh::AtIngestion);
         assert_eq!(output.coverage.selection, relative_time(-60_000, 0));
         assert_eq!(output.retention_ms, 60_000);
     }
-    assert!(plan.query_time_raw_windows.is_empty());
+    assert!(plan.raw_data_retention().unwrap().is_empty());
     let run = run_data_plane(
         &plan_json,
         &job_samples(),
@@ -1438,12 +1475,13 @@ async fn a_coarse_sum_rolls_up_from_the_stored_fine_sum() {
     )
     .await;
     let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
-    let [first, rolled_up] = plan.stored_outputs.as_slice() else {
-        panic!("{:#?}", plan.stored_outputs);
+    let views = plan.materialized_views().unwrap();
+    let [first, rolled_up] = views.as_slice() else {
+        panic!("{:#?}", views);
     };
-    assert!(first.inputs.stored_outputs.is_empty());
-    assert_eq!(rolled_up.inputs.stored_outputs, [first.node_id]);
-    assert!(rolled_up.inputs.raw_data_sample_windows.is_empty());
+    assert!(first.inputs.materialized_views.is_empty());
+    assert_eq!(rolled_up.inputs.materialized_views, [first.node_id]);
+    assert!(rolled_up.inputs.raw_data_windows.is_empty());
     let run = run_data_plane(
         &plan_json,
         &job_samples(),
@@ -1456,7 +1494,7 @@ async fn a_coarse_sum_rolls_up_from_the_stored_fine_sum() {
     assert_eq!(run.answers_per_query, run.reference_answers_per_query);
 }
 
-/// A maximum across series (`max by (job)`) built at ingestion from the
+/// A maximum across series (`max by (job)`) refreshed at ingestion from the
 /// stored per-series maxima, which the per-series query reads too: listed
 /// after them with their time selection, under a definition of its own.
 #[tokio::test]
@@ -1475,14 +1513,15 @@ async fn a_summary_across_series_from_per_series_summaries_is_listed_and_built()
     )
     .await;
     let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
-    let [per_series, across] = plan.stored_outputs.as_slice() else {
-        panic!("{:#?}", plan.stored_outputs);
+    let views = plan.materialized_views().unwrap();
+    let [per_series, across] = views.as_slice() else {
+        panic!("{:#?}", views);
     };
-    assert!(per_series.inputs.stored_outputs.is_empty());
-    assert_eq!(across.inputs.stored_outputs, [per_series.node_id]);
-    assert!(across.inputs.raw_data_sample_windows.is_empty());
+    assert!(per_series.inputs.materialized_views.is_empty());
+    assert_eq!(across.inputs.materialized_views, [per_series.node_id]);
+    assert!(across.inputs.raw_data_windows.is_empty());
     for output in [per_series, across] {
-        assert_eq!(output.built_at, StoredOutputBuild::IngestionRun);
+        assert_eq!(output.refresh, MaterializedViewRefresh::AtIngestion);
         assert_eq!(output.coverage.selection, relative_time(-60_000, 0));
     }
     assert_ne!(
@@ -1504,10 +1543,10 @@ async fn a_summary_across_series_from_per_series_summaries_is_listed_and_built()
 /// A dashboard's 5-minute max over the last hour at 1-minute steps (#509
 /// Example 4's B3) keeps five 1-minute panes; with its merge kept too, the
 /// merge is listed after the panes it reads, with their definition and the
-/// union of their times, built in the query run and kept for its window
+/// union of their times, refreshed in the query run and kept for its window
 /// plus the hour of steps; its panes are kept at least that long. Built
 /// from the stored panes it answers as the reference, and a minute later
-/// only the newest pane and the new merge are built.
+/// only the newest pane and the new merge are refreshed.
 #[tokio::test]
 async fn a_kept_sliding_window_merge_is_listed_and_built() {
     let capabilities = DeploymentCapabilities {
@@ -1529,14 +1568,15 @@ async fn a_kept_sliding_window_merge_is_listed_and_built() {
     facts.sample_interval = Some(asap_types::workload::DurationMs(1_000));
     let plan_json = forced_plan_json(&workload, &capabilities, merges_kept).await;
     let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
-    let (merge, panes) = plan.stored_outputs.split_last().unwrap();
+    let views = plan.materialized_views().unwrap();
+    let (merge, panes) = views.split_last().unwrap();
     assert_eq!(panes.len(), 5);
     assert_eq!(
-        merge.inputs.stored_outputs,
+        merge.inputs.materialized_views,
         panes.iter().map(|pane| pane.node_id).collect::<Vec<_>>()
     );
-    assert!(merge.inputs.raw_data_sample_windows.is_empty());
-    assert_eq!(merge.built_at, StoredOutputBuild::QueryRun);
+    assert!(merge.inputs.raw_data_windows.is_empty());
+    assert_eq!(merge.refresh, MaterializedViewRefresh::OnFirstRead);
     assert_eq!(merge.coverage.selection, relative_time(-300_000, 0));
     assert_eq!(merge.retention_ms, 300_000 + 3_600_000);
     for (i, pane) in panes.iter().enumerate() {
@@ -1570,10 +1610,11 @@ async fn panes_of_an_hour_share_one_definition_with_distinct_times() {
     let plan: InstallablePlan =
         serde_json::from_str(&plan_json(&["quantile_over_time(0.99, latency_ms[60m])"]).await)
             .unwrap();
-    assert!(!plan.stored_outputs.is_empty());
-    let mut panes: Vec<&StoredOutput> = plan.stored_outputs.iter().collect();
-    panes.sort_by_key(|o| o.inputs.raw_data_sample_windows[0].end_offset_ms);
-    let width_ms = panes[0].inputs.raw_data_sample_windows[0].width_ms;
+    let views = plan.materialized_views().unwrap();
+    assert!(!views.is_empty());
+    let mut panes: Vec<&MaterializedView> = views.iter().collect();
+    panes.sort_by_key(|o| o.inputs.raw_data_windows[0].end_offset_ms);
+    let width_ms = panes[0].inputs.raw_data_windows[0].width_ms;
     assert!(width_ms > 0);
     assert_eq!(
         width_ms * panes.len() as i64,
@@ -1582,14 +1623,14 @@ async fn panes_of_an_hour_share_one_definition_with_distinct_times() {
     );
     for (i, pane) in panes.iter().enumerate() {
         let i = i as i64;
-        let [window] = pane.inputs.raw_data_sample_windows.as_slice() else {
+        let [window] = pane.inputs.raw_data_windows.as_slice() else {
             panic!("{pane:?}");
         };
         assert_eq!(
             (window.width_ms, window.end_offset_ms),
             (width_ms, i * width_ms)
         );
-        assert!(pane.inputs.stored_outputs.is_empty());
+        assert!(pane.inputs.materialized_views.is_empty());
         assert_eq!(pane.coverage.definition_id, panes[0].coverage.definition_id);
         assert_eq!(
             pane.coverage.selection,
@@ -1736,7 +1777,9 @@ fn p99_avg_workload(values_non_negative: bool) -> PlanningWorkload {
 }
 
 /// [`p99_avg_workload`] planned for a deployment that keeps no raw data samples.
-async fn plan_p99_avg(values_non_negative: bool) -> Result<InstallablePlan, String> {
+async fn plan_p99_avg(
+    values_non_negative: bool,
+) -> Result<(InstallablePlan, Option<SelectedPlanReport>), String> {
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
@@ -1759,28 +1802,28 @@ async fn plan_p99_avg(values_non_negative: bool) -> Result<InstallablePlan, Stri
 /// 5% of the exact averages.
 #[tokio::test]
 async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_through_avg() {
-    let plan = plan_p99_avg(true).await.expect("a valid plan");
-    let selection = plan.selection.as_ref().expect("Stage 3's report");
+    let (plan, selection) = plan_p99_avg(true).await.expect("a valid plan");
+    let selection = selection.as_ref().expect("Stage 3's report");
+    let views = plan.materialized_views().unwrap();
     // Its id depends on what the search enumerates: without raw data the
     // search builds only the plans that scan nothing at query time.
     assert!(!selection.selected_candidate_id.is_empty());
-    assert!(!plan.stored_outputs.is_empty(), "panes built at ingestion");
+    assert!(!views.is_empty(), "panes built at ingestion");
     assert_eq!(
         stored_definitions(&plan, "DDSketch").len(),
         1,
         "one DDSketch"
     );
     assert!(
-        plan.query_time_raw_windows.is_empty(),
+        plan.raw_data_retention().unwrap().is_empty(),
         "no raw samples read"
     );
     // The query's guarantee, with `data`'s declared sign and its 1,000
     // series bound as Stage 3 binds them: a relative error of at most 0.05
     // at failure probability at most 0.3 (DDSketch's bound is
     // deterministic).
-    let root = plan.queries[0].root_node_id;
+    let root = plan.dag.roots[0];
     let guarantee = plan
-        .dag
         .dag
         .nodes
         .iter()
@@ -2065,10 +2108,9 @@ async fn ignoring_accuracy_guarantees_selects_a_sketch_plan_that_runs() {
     let settings: PlanSelectionSettings =
         serde_json::from_str(r#"{"ignore_accuracy_guarantees": true}"#).unwrap();
     assert!(settings.ignore_accuracy_guarantees);
-    let installed = plan(settings).await.expect("a sketch plan is selected");
+    let (installed, report) = plan(settings).await.expect("a sketch plan is selected");
     // A per-series KLL or DDSketch plan.
     let families: Vec<String> = installed
-        .dag
         .dag
         .nodes
         .iter()
@@ -2093,7 +2135,7 @@ async fn ignoring_accuracy_guarantees_selects_a_sketch_plan_that_runs() {
         "{families:?}"
     );
     // The report marks the query's output as accepted without a guarantee.
-    let report = installed.selection.as_ref().expect("Stage 3's report");
+    let report = report.as_ref().expect("Stage 3's report");
     assert_eq!(report.queries_accepted_without_guarantee, vec![0]);
     // It runs, equal to its query-time reference ...
     let plan_json = serde_json::to_string(&installed).unwrap();
@@ -2139,7 +2181,7 @@ async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
         ignore_accuracy_guarantees: true,
         ..PlanSelectionSettings::default()
     };
-    let plan = plan_installable(UserInput::new(
+    let (plan, report) = plan_installable(UserInput::new(
         &p99_avg_workload(false),
         FrontendInput::Promql { histograms: None },
         PlanningModels::builtin()
@@ -2148,10 +2190,10 @@ async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
     ))
     .await
     .expect("a plan is selected");
-    let report = plan.selection.as_ref().expect("Stage 3's report");
+    let report = report.as_ref().expect("Stage 3's report");
     assert_eq!(report.queries_accepted_without_guarantee, vec![0]);
     assert!(
-        plan.query_time_raw_windows.is_empty(),
+        plan.raw_data_retention().unwrap().is_empty(),
         "no raw samples read"
     );
 }
@@ -2162,7 +2204,7 @@ async fn plan_p99(
     outer: &str,
     values_non_negative: bool,
     ignore_accuracy: bool,
-) -> InstallablePlan {
+) -> (InstallablePlan, Option<SelectedPlanReport>) {
     let mut json = serde_json::to_value(p99_avg_workload(values_non_negative)).unwrap();
     json["query_workload"]["repeating_queries"][0]["query"] =
         format!("{outer} by (region, service, job) (quantile_over_time(0.99, data[100s]))").into();
@@ -2295,8 +2337,9 @@ fn assert_p99s_within_alpha(
 /// of the exact average of PromQL's interpolated p99s.
 #[tokio::test]
 async fn a_ddsketch_over_a_gauge_reporting_zero_runs_within_alpha() {
-    let plan = plan_p99("avg", true, false).await;
-    assert!(!plan.stored_outputs.is_empty(), "panes built at ingestion");
+    let (plan, _) = plan_p99("avg", true, false).await;
+    let views = plan.materialized_views().unwrap();
+    assert!(!views.is_empty(), "panes built at ingestion");
     let (samples, per_group) = data_samples(8, 4, 20_000, |s, step| {
         (s + 1) as f64 * [0.0, 0.0, 3.0, 5.0][step as usize]
     });
@@ -2319,19 +2362,17 @@ async fn a_ddsketch_over_a_gauge_reporting_zero_runs_within_alpha() {
 /// negative.
 #[tokio::test]
 async fn a_ddsketch_over_signed_samples_runs_within_alpha() {
-    let plan = plan_p99("max", false, true).await;
+    let (plan, report) = plan_p99("max", false, true).await;
+    let views = plan.materialized_views().unwrap();
     assert!(
         !stored_definitions(&plan, "DDSketch").is_empty(),
         "exercise signed DDS state"
     );
     assert_eq!(
-        plan.selection
-            .as_ref()
-            .unwrap()
-            .queries_accepted_without_guarantee,
+        report.as_ref().unwrap().queries_accepted_without_guarantee,
         vec![0]
     );
-    assert!(!plan.stored_outputs.is_empty(), "panes built at ingestion");
+    assert!(!views.is_empty(), "panes built at ingestion");
     let max = |p99s: &[f64]| p99s.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     // Series 0..4 cross zero; series 4..8 are all negative.
     let (samples, per_group) = data_samples(8, 1_100, 100, |s, step| {
@@ -2418,11 +2459,12 @@ async fn ignoring_guarantees_counter_topk_plans_compile_and_answer_exactly() {
                 .with_plan_selection(&settings),
         ))
         .await
-        .unwrap_or_else(|error| panic!("{function}: {error}"));
+        .unwrap_or_else(|error| panic!("{function}: {error}"))
+        .0;
         // An exact plan: no heap over the per-job sums, which have one row
         // per job.
         assert!(
-            !plan.dag.dag.nodes.iter().any(|node| matches!(
+            !plan.dag.nodes.iter().any(|node| matches!(
                 &node.payload,
                 asap_executor::planner::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
                     ASAPOp::SummaryAgg {
@@ -2479,7 +2521,7 @@ async fn check_compiles_reports_the_executors_error() {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    let mut plan = plan_installable(UserInput::new(
+    let (mut plan, _) = plan_installable(UserInput::new(
         &counter_topk_workload("rate"),
         FrontendInput::Promql { histograms: None },
         PlanningModels::builtin().with_deployment_capabilities(&capabilities),
@@ -2487,9 +2529,8 @@ async fn check_compiles_reports_the_executors_error() {
     .await
     .unwrap();
     plan.check_compiles().unwrap();
-    let root = plan.queries[0].root_node_id;
+    let root = plan.dag.roots[0];
     let node = plan
-        .dag
         .dag
         .nodes
         .iter_mut()
@@ -2537,24 +2578,24 @@ async fn jointly_planned(queries: &[&str], accuracy: &str) -> String {
     plan_json_for(workload, &capabilities).await
 }
 
-/// The definition ids of `plan`'s stored outputs whose node's payload
+/// The definition ids of `plan`'s materialized views whose node's payload
 /// mentions `family` (e.g. `"DDSketch"`, `"Sum"`).
-fn stored_definitions<'a>(plan: &'a InstallablePlan, family: &str) -> BTreeSet<&'a str> {
-    plan.stored_outputs
+fn stored_definitions(plan: &InstallablePlan, family: &str) -> BTreeSet<String> {
+    plan.materialized_views()
+        .unwrap()
         .iter()
-        .filter(|output| {
+        .filter(|view| {
             let node = plan
-                .dag
                 .dag
                 .nodes
                 .iter()
-                .find(|n| n.id == output.node_id)
+                .find(|n| n.id == view.node_id)
                 .unwrap();
             serde_json::to_string(&node.payload)
                 .unwrap()
                 .contains(family)
         })
-        .map(|output| output.coverage.definition_id.as_str())
+        .map(|view| view.coverage.definition_id.clone())
         .collect()
 }
 
@@ -2724,30 +2765,27 @@ async fn plan_ignoring_guarantees(
         models,
     ))
     .await
+    .map(|(plan, _)| plan)
     .map_err(|e| e.to_string())
 }
 
 /// The heap sketch `plan` builds: its algorithm and width.
 fn heap_of(plan: &InstallablePlan) -> Option<(SketchAlgorithm, u32)> {
-    plan.dag
-        .dag
-        .nodes
-        .iter()
-        .find_map(|node| match &node.payload {
-            asap_executor::planner::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
-                ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. },
-            ) => match family {
-                FieldDataType::Sketch(kind, _) => match kind.params() {
-                    SketchParams::CmsWithHeap { width, .. }
-                    | SketchParams::CountSketchWithHeap { width, .. } => {
-                        Some((kind.algorithm().clone(), *width))
-                    }
-                    _ => None,
-                },
+    plan.dag.nodes.iter().find_map(|node| match &node.payload {
+        asap_executor::planner::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
+            ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. },
+        ) => match family {
+            FieldDataType::Sketch(kind, _) => match kind.params() {
+                SketchParams::CmsWithHeap { width, .. }
+                | SketchParams::CountSketchWithHeap { width, .. } => {
+                    Some((kind.algorithm().clone(), *width))
+                }
                 _ => None,
             },
             _ => None,
-        })
+        },
+        _ => None,
+    })
 }
 
 /// The heap of `algorithm`'s point-error bound on an item of a partition
