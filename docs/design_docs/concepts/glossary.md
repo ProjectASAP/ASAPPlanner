@@ -32,9 +32,13 @@ Maintained state, exact or approximate, that can answer some query intent more e
 
 A concrete execution and deployment choice: runtime topology of data lifecycle stages, placement of computation, transmission, storage. Physical plans are owned by downstream systems.
 
+## Materialized view
+
+A node of the physical DAG whose output is kept across evaluations (`MatAtIngestion` or `MatAtQueryKeptAcrossEvaluations`), with how long it is kept (`retention_ms` on the node). A `MatAtQuery` node is not a view: its output is discarded after one evaluation. Code: `MaterializedView`, `PhysicalASAPDAG::materialized_views`.
+
 ## Raw data sample
 
-One timestamped value of a time series as it arrives, such as one Prometheus Remote Write sample. Raw data samples are the rows a time-series scan reads. Code names them with `raw_data_sample`, e.g. `RawDataSampleWindow`, `WeightDomain::RawDataSamplesOfMetric`, `raw_data_samples_of_metric`.
+One timestamped value of a time series as it arrives, such as one Prometheus Remote Write sample. Raw data samples are the rows a time-series scan reads. Code names them with `raw_data_sample`, e.g. `WeightDomain::RawDataSamplesOfMetric`, `raw_data_samples_of_metric`.
 
 ## Summary sample
 
