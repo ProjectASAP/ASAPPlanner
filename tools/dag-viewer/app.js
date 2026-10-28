@@ -53,10 +53,11 @@
   // The query whose path the lanes highlight ('' for none).
   let highlightedQuery = '';
 
-  function render(i, dag, physical, costPerNode) {
+  // `ids` names the queries of `dag.roots` in order (default: the workload's).
+  function render(i, dag, physical, costPerNode, ids = queryIds) {
     if (cys[i]) cys[i].destroy();
-    drawn[i] = { dag, physical, costPerNode };
-    const elements = stageLaneElements(dag, { physical, costPerNode, queryIds, expandedChains: [...expandedOf(dag)] })
+    drawn[i] = { dag, physical, costPerNode, ids };
+    const elements = stageLaneElements(dag, { physical, costPerNode, queryIds: ids, expandedChains: [...expandedOf(dag)] })
       .map((el) => ({ data: el.data, classes: [el.classes, el.data.rootFor && el.data.rootFor.length ? 'root' : ''].join(' ').trim() }));
     laneElements[i] = elements;
     const cy = cytoscape({
@@ -72,7 +73,7 @@
     dim(i, queryKeep(i));
   }
 
-  function redraw(i) { const d = drawn[i]; render(i, d.dag, d.physical, d.costPerNode); }
+  function redraw(i) { const d = drawn[i]; render(i, d.dag, d.physical, d.costPerNode, d.ids); }
 
   // A PaneChain expands into its panes; a pane collapses its chain; any
   // other node is shown and its upstream and downstream highlighted.
@@ -179,6 +180,7 @@
   // Choose Stage 1 candidate `id`: show its physical plan when it has one;
   // a pruned or uncomposed candidate has none, so Stage 2 is cleared.
   function selectLogical(id) {
+    pressEnumeratedRow(null);
     const physical = doc.stage2_physical_asap_optimization.candidates.find((p) => p.from_logical === id);
     if (physical) { selectPhysical(physical.id); return; }
     showLogical(id);
@@ -205,7 +207,23 @@
     }
   }
 
+  // Draw enumerated DAG `id` of `memo.enumeration` (enumeration.js) in
+  // lane 1; the document has no physical plan for it.
+  function showEnumerated(id, dag, description, perQueryDag) {
+    current = { logical: null, physical: null };
+    $('pick1').value = '';
+    $('pick2').value = '';
+    // Its roots are its root groups; drawn per query when they map to queries.
+    if (perQueryDag) render(1, perQueryDag, false, null);
+    else render(1, dag, false, null, dag.roots.map((_, k) => `root group #${k + 1}`));
+    $('lane1-meta').innerHTML = `enumerated DAG <b>${esc(id)}</b> · ${esc(description)} · ${dag.nodes.length} nodes` +
+      (perQueryDag ? '' : ' · roots not matched to queries');
+    clearLane(2, 'no physical plan for an enumerated DAG');
+    renderRanking();
+  }
+
   function selectPhysical(id) {
+    pressEnumeratedRow(null);
     current.physical = id;
     $('pick2').value = id;
     const c = physicalById.get(id);
@@ -230,7 +248,7 @@
 
   // Show one stage document; `source` names it, `story` explains it.
   function showDocument(data, source, story) {
-    const errors = validateStagePipeline(data);
+    const errors = validateStagePipeline(data).concat(validateMemoEnumeration(data));
     if (errors.length) throw new Error(errors.slice(0, 3).join('; '));
     doc = data;
     current = { logical: null, physical: null };
@@ -284,6 +302,7 @@
     }
     renderMaterializedViews();
     renderMemoSearch();
+    renderEnumeration(doc, showEnumerated);
   }
 
   const table = (head, body) => `<table><thead><tr>${head.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>`;
