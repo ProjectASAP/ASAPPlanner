@@ -58,9 +58,14 @@ function validateMemoEnumeration(doc) {
     if (!enumerationIsObject(entry)) return;
     const where = `${at}.choices[${index}]`;
     if (!isMemoChoice(entry.choice)) errors.push(`${where}.choice must map group ids to candidate indices`);
-    // One root per root group, which need not be one per query.
-    const roots = entry.dag && Array.isArray(entry.dag.roots) ? entry.dag.roots.length : 0;
-    errors.push(...validateLogicalDag(entry.dag, where, roots));
+    // A choice that does not compose has no DAG but its error.
+    if (entry.dag === null) {
+      if (typeof entry.error !== 'string') errors.push(`${where}: needs a dag or an error`);
+    } else {
+      // One root per root group, which need not be one per query.
+      const roots = entry.dag && Array.isArray(entry.dag.roots) ? entry.dag.roots.length : 0;
+      errors.push(...validateLogicalDag(entry.dag, where, roots));
+    }
     ['budget_share_1', 'selected'].forEach((field) => {
       if (typeof entry[field] !== 'boolean') errors.push(`${where}.${field} must be true or false`);
     });
@@ -139,7 +144,8 @@ function enumerationView(doc) {
         ? changes.map((c) => (c.index === null ? `G${c.group} not read`
           : `G${c.group} → #${c.index}${c.label ? ` ${c.label}` : ''}${c.origin ? ` (${c.origin})` : ''}`)).join(' · ')
         : 'the selected choice',
-      nodes: entry.dag.nodes.length,
+      nodes: entry.dag ? entry.dag.nodes.length : null,
+      error: entry.dag ? null : entry.error,
       budgetShare1: entry.budget_share_1,
       selected: entry.selected,
       priced: 'valid' in entry,
@@ -185,9 +191,9 @@ function enumerationRowHtml(row, pressed) {
     row.budgetShare1 ? '' : '<span class="chip">budget share &lt; 1</span>',
   ].join('');
   const cost = row.cost === null ? (row.priced ? '—' : '') : String(Number(row.cost.toPrecision(4)));
-  return `<li><button type="button" data-id="${esc(row.id)}" aria-pressed="${row.id === pressed}"${row.cheaper ? ' class="cheaper"' : ''}>` +
+  return `<li><button type="button" data-id="${esc(row.id)}" aria-pressed="${row.id === pressed}"${row.cheaper ? ' class="cheaper"' : ''}${row.error ? ' disabled' : ''}>` +
     `<span class="pid">${esc(row.id)}</span><span class="plabel">${esc(row.text)}</span><span class="ptotal">${cost}</span>` +
-    `<span class="pstatus">${chips}${row.rejection ? `<span>${esc(row.rejection.replace(/_/g, ' '))}</span>` : ''}<span>${row.nodes} nodes</span></span></button></li>`;
+    `<span class="pstatus">${chips}${row.rejection ? `<span>${esc(row.rejection.replace(/_/g, ' '))}</span>` : ''}${row.error ? `<span class="error">does not compose: ${esc(row.error)}</span>` : `<span>${row.nodes} nodes</span>`}</span></button></li>`;
 }
 
 // Mark row `id` (null: none) as the one the Stage 1 lane draws.
@@ -218,6 +224,7 @@ function renderEnumeration(doc, draw) {
     const button = event.target && event.target.closest ? event.target.closest('button[data-id]') : null;
     if (!button || !state.view) return;
     const choice = state.doc.memo.enumeration.choices.find((c) => c.id === button.dataset.id);
+    if (!choice.dag) return;
     const row = state.view.rows.find((r) => r.id === button.dataset.id);
     state.draw(choice.id, choice.dag, row.text,
       enumeratedDagPerQuery(choice.dag, state.view.rootQueries, state.doc.workload.queries.length));

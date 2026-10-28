@@ -116,6 +116,17 @@ test('a row names the groups whose candidate differs from the selected choice, w
   assert.ok(rows.every((r) => !r.priced && r.cost === null && !r.cheaper));
 });
 
+test('a choice that does not compose has its error instead of a DAG and is not clickable', () => {
+  const doc = unpriced();
+  doc.memo.enumeration.choices[3].dag = null;
+  assert.ok(call('validateMemoEnumeration', doc).some((e) => e.includes('choices[3]: needs a dag or an error')));
+  doc.memo.enumeration.choices[3].error = 'cycle';
+  assert.deepEqual(call('validateMemoEnumeration', doc), []);
+  const row = call('enumerationView', doc).rows[3];
+  assert.equal(row.error, 'cycle');
+  assert.match(context.enumerationRowHtml(row, null), /disabled>.*does not compose: cycle/);
+});
+
 test('without the step in memo.steps a row names only the candidate index', () => {
   const doc = unpriced();
   doc.memo.steps = [];
