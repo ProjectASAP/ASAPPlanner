@@ -1303,4 +1303,161 @@ mod tests {
         assert_eq!(metrics.ingestion_pane_chains, 0);
         assert_eq!(metrics.ingestion_scans, 2);
     }
+
+    // A query-time scan, its window and the exact build over it are priced
+    // from the window's rows at the slowest query rate: positive bounds that
+    // never exceed the evaluated plan's cost.
+    #[test]
+    fn query_time_scans_and_builds_have_certified_bounds() {
+        let target = AccuracyTarget::exact();
+        let roots_with_ids = vec![(
+            0usize,
+            QueryRoot::Operator(lower_promql("sum_over_time(latency[5m])", target.clone())),
+        )];
+        let memo = try_populate_pass1(
+            LogicalMemo::from_roots(&roots_with_ids),
+            &generate_per_computation_candidates(roots_with_ids).unwrap(),
+        )
+        .unwrap();
+        let root_group = memo
+            .groups
+            .iter()
+            .position(|group| group.roots_of.contains(&0))
+            .unwrap();
+        let candidate = memo.candidates[root_group]
+            .iter()
+            .find(|candidate| {
+                OperatorNode::reachable(&candidate.node).iter().any(|node| {
+                    matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(..), child, .. })
+                        if matches!(child.non_asap(), Some(NonASAPOp::TimeRange { .. })))
+                })
+            })
+            .unwrap();
+        let mut configured = CandidateConfigurationInventory {
+            inventory: CandidateInventory {
+                graph: CandidateDependencyGraph::default(),
+                templates: Vec::new(),
+                group_candidates: Vec::new(),
+            },
+            configurations: Vec::new(),
+        };
+        fn intern(
+            node: &Rc<OperatorNode>,
+            configured: &mut CandidateConfigurationInventory,
+        ) -> usize {
+            let mut inputs = Vec::new();
+            node.operator.map_children(|child| {
+                inputs.push(intern(child, configured));
+                Rc::clone(child)
+            });
+            let id = configured.inventory.templates.len();
+            configured.configurations.push(CandidateConfiguration {
+                source_candidate: PhysicalCandidateId(id),
+                timing: ExecutionTiming::QueryTime,
+                materialization: Materialization::NotMaterialized,
+            });
+            configured.inventory.templates.push(Some(Rc::clone(node)));
+            configured
+                .inventory
+                .graph
+                .candidates
+                .push(PhysicalCandidate {
+                    group: MemoGroupId(id as u32),
+                    local_cost: 0.0,
+                    producer_requirements: inputs
+                        .into_iter()
+                        .map(|input| ProducerRequirement {
+                            compatible_producers: vec![PhysicalCandidateId(input)].into(),
+                        })
+                        .collect(),
+                });
+            id
+        }
+        let root = intern(&candidate.node, &mut configured);
+        configured
+            .inventory
+            .graph
+            .query_roots
+            .push(QueryRootCandidates {
+                compatible_candidates: vec![PhysicalCandidateId(root)],
+            });
+        let roots = vec![QueryRoot::Operator(Rc::clone(&candidate.node))];
+        let entries = vec![entry_with(
+            target,
+            QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(10_000))),
+        )];
+        let data = DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1000.0,
+            },
+            sources: [(
+                "latency".into(),
+                SourceFacts {
+                    series_count: Some(2),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let models = PlanningModels::builtin();
+        let context = CandidatePlanningContext {
+            deadline: None,
+            refine_materialization: false,
+            original_roots: &roots,
+            entries: &entries,
+            data: &data,
+            models,
+            calibration: CalibrationFit::default(),
+            seed_separate_plans: false,
+        };
+        apply(&mut configured, &context).unwrap();
+        let bound_of = |matches: fn(&OperatorNode) -> bool| {
+            configured
+                .inventory
+                .templates
+                .iter()
+                .zip(&configured.inventory.graph.candidates)
+                .find(|(template, _)| matches(template.as_ref().unwrap()))
+                .unwrap()
+                .1
+                .local_cost
+        };
+        let scan = bound_of(|node| matches!(node.non_asap(), Some(NonASAPOp::Scan { .. })));
+        let range = bound_of(|node| matches!(node.non_asap(), Some(NonASAPOp::TimeRange { .. })));
+        let build = bound_of(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })));
+        // 300 s × 1000 rows/s, every 10 s: 30000 rows read per second.
+        assert!(
+            scan > 0.0 && range > 0.0 && build > 0.0,
+            "{scan} {range} {build}"
+        );
+        let selected = solve_candidate_proposal(&configured.inventory.graph, &[], None)
+            .unwrap()
+            .unwrap()
+            .selected;
+        let modes: Vec<_> = configured
+            .configurations
+            .iter()
+            .map(|config| Some(config.materialization))
+            .collect();
+        let physical = materialize_selected_candidates(
+            &configured.inventory,
+            &selected,
+            &modes,
+            &roots,
+            &entries,
+            &data,
+            models.deployment_capabilities,
+        )
+        .unwrap();
+        let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
+        selector.offer(&physical.physical).unwrap();
+        let (result, _) = selector.finish().unwrap();
+        let cost = result.costs[&result.selected].cost_per_second.unwrap();
+        assert!(
+            selected.modeled_cost > 0.0 && selected.modeled_cost <= cost * (1.0 + 1e-9),
+            "bound {} against cost {cost}",
+            selected.modeled_cost
+        );
+    }
 }
