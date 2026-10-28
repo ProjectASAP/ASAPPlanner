@@ -983,31 +983,35 @@ mod tests {
         assert!(expanded.memo.topological_order().is_some());
     }
 
-    // Rollup readers preserve original outputs while referencing explicit finer
-    // producers through ordinary child-group dependencies.
+    // Rollup readers preserve original outputs while referencing the finer
+    // query's finalized values through an ordinary child-group dependency:
+    // the finer query's own result group, whose result is those values.
     #[test]
     fn exact_rollup_exposes_shared_finalized_values() {
         let original = workload(&[
             ("sum by (job) (m)", 0.01),
             ("sum by (job, instance) (m)", 0.01),
         ]);
-        let expanded = expand_concrete_summary_state_groups(original.clone()).unwrap();
-        let rollups: Vec<_> = expanded
-            .memo
+        let expanded = expand_concrete_summary_state_groups(original).unwrap();
+        let memo = &expanded.memo;
+        let fine = memo
+            .groups
+            .iter()
+            .position(|group| group.roots_of == [1])
+            .unwrap();
+        assert!(memo.candidates[fine].iter().all(|candidate| matches!(
+            candidate.node.asap(),
+            Some(ASAPOp::FinalizeExactAccumulator { .. })
+        )));
+        assert!(memo
             .candidates
             .iter()
-            .flatten()
-            .filter(|candidate| candidate.origin == CandidateOrigin::Rollup)
-            .collect();
-        assert!(!rollups.is_empty());
-        assert!(expanded.memo.groups.iter().enumerate().any(|(id, group)| id
-            >= original.groups.len()
-            && matches!(
-                group.node.asap(),
-                Some(ASAPOp::FinalizeExactAccumulator { .. })
-            )
-            && group.parents.len() >= 2));
-        assert!(expanded.memo.topological_order().is_some());
+            .enumerate()
+            .filter(|(group, _)| *group != fine)
+            .flat_map(|(_, candidates)| candidates)
+            .any(|candidate| candidate.origin == CandidateOrigin::Rollup
+                && candidate.children.contains(&MemoGroupId(fine as u32))));
+        assert!(memo.topological_order().is_some());
     }
 
     // Sketch rollup exposes the resized finer state through an ordinary group
