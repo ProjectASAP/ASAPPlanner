@@ -44,6 +44,49 @@ function stageLogicalChildren(body) {
   return ids;
 }
 
+// `value` (an operator body field that is not a child field) with every
+// operator node id its scalar expressions read replaced by `f(id)`.
+function stageMapScalarRefs(value, f) {
+  if (Array.isArray(value)) return value.map((inner) => stageMapScalarRefs(inner, f));
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).map(([field, inner]) => [field,
+    STAGE_SCALAR_REF_FIELDS.includes(field) && typeof inner === 'number' ? f(inner) : stageMapScalarRefs(inner, f)]));
+}
+
+// A logical operator with every node id it reads (those stageLogicalChildren
+// lists) replaced by `f(id)`.
+function stageMapLogicalChildren(operator, f) {
+  const [outer, inner] = Object.entries(operator)[0];
+  if (!inner || typeof inner !== 'object') return operator;
+  const [kind, body] = Object.entries(inner)[0];
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return operator;
+  const mapped = Object.fromEntries(Object.entries(body).map(([field, value]) => {
+    if (!STAGE_CHILD_FIELDS.includes(field)) return [field, stageMapScalarRefs(value, f)];
+    const id = (v) => (typeof v === 'number' ? f(v) : v);
+    return [field, Array.isArray(value) ? value.map(id) : id(value)];
+  }));
+  return { [outer]: { [kind]: mapped } };
+}
+
+// The flat DAG below `roots` (indices into `table`, the memo section's
+// `memo.nodes`): the nodes they reach, renumbered from 0 in table order (so
+// children still come before parents), with one operator root per entry of
+// `roots`. `tableIds[i]` is node i's index in the table.
+function memoNodeDag(table, roots) {
+  const reached = new Set();
+  const pending = [...roots];
+  while (pending.length) {
+    const id = pending.pop();
+    if (reached.has(id) || !table[id]) continue;
+    reached.add(id);
+    pending.push(...stageLogicalChildren(stageOperatorParts(table[id].operator)[1]));
+  }
+  const tableIds = [...reached].sort((a, b) => a - b);
+  const local = new Map(tableIds.map((id, i) => [id, i]));
+  const nodes = tableIds.map((id) => ({ ...table[id], operator: stageMapLogicalChildren(table[id].operator, (child) => local.get(child)) }));
+  return { nodes, roots: roots.map((id) => ({ Operator: local.get(id) })), tableIds };
+}
+
 // A scalar expression as short text: `time()`, `scalar(#3)` (node 3),
 // literals as their value; other forms by name.
 function stageScalarText(expr) {

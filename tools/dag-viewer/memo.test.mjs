@@ -50,7 +50,11 @@ test('memo violations are reported', () => {
   assert.match(broken((m) => { m.steps[1].groups[3].candidates[0].group_of_node = { '1.5': 2 }; }), /group_of_node must map/);
   assert.match(broken((m) => { delete m.steps[1].groups[3].candidates[0].label; }), /needs a label/);
   assert.match(broken((m) => { m.steps[1].groups[3].candidates[0].group_of_node = { 0: 4 }; }), /group_of_node must map/);
-  assert.match(broken((m) => { m.steps[1].groups[3].candidates[0].dag.nodes[3].operator.NonASAP.Aggregate.child = 7; }), /reads missing node 7/);
+  assert.match(broken((m) => { m.nodes.find((n) => n.operator.NonASAP && n.operator.NonASAP.Aggregate).operator.NonASAP.Aggregate.child = 99; }), /memo.nodes: node \d+ reads missing node 99/);
+  assert.match(broken((m) => { delete m.nodes; }), /memo.nodes must be an array/);
+  assert.match(broken((m) => { m.steps[1].groups[3].node = 99; }), /G3: node must index memo.nodes/);
+  assert.match(broken((m) => { m.steps[1].groups[3].candidates[0].node = -1; }), /candidates\[0\]: node must index memo.nodes/);
+  assert.match(broken((m) => { m.steps[1].groups[3].candidates[0].group_of_node = { 99: 2 }; }), /group_of_node must map/);
   assert.match(broken((m) => { m.selected_choice = { 9: 0 }; }), /9 is not a group of the last step/);
   assert.match(broken((m) => { m.selected_choice = { 5: 3 }; }), /G5 has no candidate 3/);
   assert.match(broken((m) => { m.selected_choice = null; }), /without selected_choice_unavailable/);
@@ -149,7 +153,7 @@ test('a collapsed count marks only the selected candidate\'s edges', () => {
   // Another listed Panes candidate of G2 reads G1 instead of G6.
   const other = memo.steps[2].groups[2].candidates.find((c) => c.index === 3);
   other.children = [1];
-  other.group_of_node = { 1: 1 };
+  other.group_of_node = { [memo.steps[2].groups.find((g) => g.id === 1).node]: 1 };
   const elements = call('memoStepElements', memo, 2, {});
   assert.match(byId(elements, 'g2opanes>g6').classes, /chosen/);
   assert.equal(byId(elements, 'g2opanes>g1').classes, '');
@@ -177,14 +181,35 @@ test('highlighting a query dims the groups it does not reach', () => {
 test("a candidate's own nodes stop at its child groups' nodes", () => {
   const memo = fixture();
   const accumulator = memo.steps[1].groups[3].candidates[1];
-  const { own, reads } = call('memoCandidateOwnNodes', accumulator);
+  const { own, reads } = call('memoCandidateOwnNodes', memo.nodes, accumulator);
   assert.deepEqual(own.map((n) => n.lines[0]), ['FinalizeExactAccumulator', 'SummaryAgg']);
-  assert.deepEqual(reads, [{ node: 3, group: 2 }]);
-  const cms = call('memoCandidateOwnNodes', memo.steps[1].groups[5].candidates[1]);
+  assert.deepEqual(reads, [{ node: Number(Object.keys(accumulator.group_of_node)[0]), group: 2 }]);
+  const cms = call('memoCandidateOwnNodes', memo.nodes, memo.steps[1].groups[5].candidates[1]);
   assert.deepEqual(cms.own.map((n) => n.lines[0]), ['Project', 'SummaryEstimate', 'SummaryAgg']);
   assert.deepEqual(cms.reads.map((r) => r.group), [1]);
   // A group with no child group reads nothing: its whole dag is its own.
-  assert.deepEqual(call('memoCandidateOwnNodes', memo.steps[1].groups[0].candidates[0]).own.map((n) => n.lines[0]), ['Scan']);
+  assert.deepEqual(call('memoCandidateOwnNodes', memo.nodes, memo.steps[1].groups[0].candidates[0]).own.map((n) => n.lines[0]), ['Scan']);
+});
+
+test('a node shared by groups is stored once, and memoNodeDag rebuilds each DAG from the table', () => {
+  const memo = fixture();
+  const keys = memo.nodes.map((n) => JSON.stringify(n));
+  assert.equal(new Set(keys).size, keys.length);
+  // Every step's scan group names the same table node.
+  const scans = memo.steps.map((s) => s.groups.find((g) => g.id === 0).node);
+  assert.equal(new Set(scans).size, 1);
+  // The DAG below the Pass 1 accumulator candidate: its own two nodes over
+  // the DAG of the node it reads from G2, renumbered from 0 with children
+  // before parents.
+  const candidate = memo.steps[1].groups[3].candidates[1];
+  const dag = call('memoNodeDag', memo.nodes, [candidate.node]);
+  const below = call('memoNodeDag', memo.nodes, [Number(Object.keys(candidate.group_of_node)[0])]);
+  assert.equal(dag.nodes.length, below.nodes.length + 2);
+  assert.deepEqual(dag.roots, [{ Operator: dag.nodes.length - 1 }]);
+  assert.deepEqual(call('validateLogicalDag', dag, 'dag', 1), []);
+  dag.nodes.forEach((node, id) => {
+    call('stageLogicalChildren', call('stageOperatorParts', node.operator)[1]).forEach((child) => assert.ok(child < id));
+  });
 });
 
 // The planner's real memo for #1005's example, written by stage_pipeline
@@ -206,4 +231,9 @@ test('the real example: 7 groups at Stage 0, 19 candidates after Pass 1, G2 Pane
   assert.deepEqual(g2.sort(), ['10 Pass1', '336 Panes', '345 SharedBuild']);
   assert.equal(nodesOf(elements).filter((e) => e.data.kind === 'group').length, 354);
   assert.ok(cytoscape(elements).nodes().length > 354);
+  // A candidate's boundary node is its child group's own table node.
+  memo.steps.forEach((step) => {
+    const nodeOf = new Map(step.groups.map((g) => [g.id, g.node]));
+    step.groups.forEach((g) => g.candidates.forEach((c) => Object.entries(c.group_of_node).forEach(([node, group]) => assert.equal(Number(node), nodeOf.get(group)))));
+  });
 });

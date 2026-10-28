@@ -363,29 +363,36 @@ are ignored, `stage_pipeline`'s default.
 - When Pass 1 fails, Stage 1 has `error` and no candidates. When selection
   fails, `selected` is null, with the rejections or with `error`.
 - `memo` (left out with `--no-memo`) is the memo the search built, from
-  the planning round whose plan was selected: `steps`, one per memo step
+  the planning round whose plan was selected: `nodes`, one node table for
+  the whole section (each distinct logical node once, as in a flat logical
+  DAG: children are indices into the table and come before their parents;
+  `memoNodeDag` in `stages.js` rebuilds the flat DAG below any of them);
+  `steps`, one per memo step
   (`stage0`, `pass1`, `pass2`: local window composition, `concrete_states`:
   the Pass 2 memo rules and the concrete summary-state groups), each with
   its groups (`id`, `label`, `children`, `parents`, `queries`, `roots_of`,
-  `dag`) and their candidates (`candidate_count`,
+  `node`, the group's node in `nodes`) and their candidates (`candidate_count`,
   `candidate_count_by_origin`, `candidates_capped`, and the first
   `--max-memo-candidates`, default 64, under `candidates`: `index`,
   `implements`, `children`, `origin`, `budget_share`, `added`, `label`,
-  `dag`, `group_of_node`); `selected_choice`, the selected plan's
+  `node`, and `group_of_node`: the `nodes` indices below it that are a
+  child group's node, to that group's id); `selected_choice`, the selected plan's
   candidate index per group of the last step (null with
   `selected_choice_unavailable` when it has none); and `enumeration`: each
   step's number of candidate DAGs up to `--memo-enumeration-limit` (default
   1000) under `per_step`, and the first `--max-enumerated` (default 200)
   `choices` of `step` (the last step enumerated completely within that
-  many, else the last step), each composed into its `dag`. The page does
-  not draw it yet. `examples/memo-ratio-of-quantiles.json` has one.
+  many, else the last step), each composed into its `roots` (indices into
+  `nodes`, one per root group; null with `error` when it does not compose).
+  `examples/memo-ratio-of-quantiles.json` has one (2.9 MB, about 2.2 MB of
+  it the node table's 1,099 nodes).
 
 The viewer checks the document before showing it: one root per query, node,
 edge and root references, `scalar_roots` positions, `from_logical`, the Stage 3 ids, costs and
 `per_node` keys, the data workload's shape, and each materialized view's fields
 and `stage2_node_id`, and, when present, `memo.enumeration`: per-step
-counts, the listed choices' ids, group → candidate maps, DAGs (one root per
-root group) and the optional pricing fields. Documents written before these
+counts, the listed choices' ids, group → candidate maps, `roots` (one per
+root group, each a `memo.nodes` index) and the optional pricing fields. Documents written before these
 sections are still shown. If a check fails, it shows the problems instead.
 
 ## Files
@@ -398,7 +405,7 @@ sections are still shown. If a check fails, it shows the problems instead.
   `memo.enumeration`. `enumeration.test.mjs`: its Node tests, over
   `test-fixtures/memo-enumeration-small.json` (a hand-written priced memo
   for Example 1).
-- `memo.js`: the Memo view: checks of `memo.steps` and
+- `memo.js`: the Memo view: checks of `memo.nodes`, `memo.steps` and
   `memo.selected_choice`, the per-step diff, a step's elements with preset
   positions, a candidate's own nodes (DOM-free), and the panel that draws
   them. `memo.test.mjs`: its Node tests, over the hand-written

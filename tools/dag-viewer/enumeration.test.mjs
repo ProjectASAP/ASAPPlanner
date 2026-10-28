@@ -45,8 +45,8 @@ test('each broken field of memo.enumeration is reported', () => {
     'duplicate id E1': (d) => { d.memo.enumeration.choices[1].id = 'E1'; },
     '5 choices listed but per_step.pass1 counts 4': (d) => { d.memo.enumeration.choices.push({ ...d.memo.enumeration.choices[0], id: 'E5' }); },
     'choices[0].choice must map group ids to candidate indices': (d) => { d.memo.enumeration.choices[0].choice = { G7: 0 }; },
-    'choices[0]: node 1 reads missing node 42': (d) => { Object.values(d.memo.enumeration.choices[0].dag.nodes[1].operator)[0].TimeRange.child = 42; },
-    'choices[0]: dag needs nodes and roots': (d) => { delete d.memo.enumeration.choices[0].dag; },
+    'choices[0].roots must index memo.nodes': (d) => { d.memo.enumeration.choices[0].roots = [d.memo.nodes.length]; },
+    'choices[1].roots must index memo.nodes': (d) => { delete d.memo.enumeration.choices[1].roots; },
     'choices[0].budget_share_1 must be true or false': (d) => { delete d.memo.enumeration.choices[0].budget_share_1; },
     'choices[0].cheaper_than_selected must be true or false': (d) => { d.memo.enumeration.choices[0].cheaper_than_selected = 1; },
     'choices[0].cost_per_second must be a number or null': (d) => { d.memo.enumeration.choices[0].cost_per_second = 'cheap'; },
@@ -118,8 +118,8 @@ test('a row names the groups whose candidate differs from the selected choice, w
 
 test('a choice that does not compose has its error instead of a DAG and is not clickable', () => {
   const doc = unpriced();
-  doc.memo.enumeration.choices[3].dag = null;
-  assert.ok(call('validateMemoEnumeration', doc).some((e) => e.includes('choices[3]: needs a dag or an error')));
+  doc.memo.enumeration.choices[3].roots = null;
+  assert.ok(call('validateMemoEnumeration', doc).some((e) => e.includes('choices[3]: needs roots or an error')));
   doc.memo.enumeration.choices[3].error = 'cycle';
   assert.deepEqual(call('validateMemoEnumeration', doc), []);
   const row = call('enumerationView', doc).rows[3];

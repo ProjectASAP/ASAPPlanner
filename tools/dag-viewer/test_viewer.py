@@ -1089,13 +1089,17 @@ class AppTests(unittest.TestCase):
         e3 = doc["memo"]["enumeration"]["choices"][2]
         js.eval("__els.enumRows.__on.click({ target: { closest() { return { dataset: { id: 'E3' } }; } } })")
         drawn = [e for e in self.ev(js, "__rendered.cy1") if "source" not in e["data"]]
-        self.assertEqual(len(drawn), len(e3["dag"]["nodes"]))
+        self.assertEqual(len(drawn), len(self.memo_node_dag(js, doc, e3["roots"])["nodes"]))
         self.assertIn("enumerated DAG E3", self.text(js, "lane1-meta"))
         self.assertIn("no physical plan for an enumerated DAG", js.eval("__els['lane2-meta'].textContent"))
         self.assertIn('data-id="E3" aria-pressed="true"', js.eval("__els.enumRows.innerHTML"))
         # Choosing a Stage 1 candidate again releases the row.
         js.eval("__els.pick1.__on.change({ target: { value: 'L2' } })")
         self.assertNotIn('aria-pressed="true"', js.eval("__els.enumRows.innerHTML"))
+
+    def memo_node_dag(self, js, doc, roots):
+        """The page's `memoNodeDag` over the document's node table."""
+        return json.loads(js.eval(f"JSON.stringify(memoNodeDag({json.dumps(doc['memo']['nodes'])}, {json.dumps(roots)}))"))
 
     def enumerated_roots(self, doc, choice_id):
         js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
@@ -1109,9 +1113,10 @@ class AppTests(unittest.TestCase):
         doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
         groups = {g["id"]: g for g in doc["memo"]["steps"][1]["groups"]}
         groups[3]["roots_of"], groups[7]["roots_of"] = [1], [0]
-        dag = doc["memo"]["enumeration"]["choices"][0]["dag"]
-        first, second = (r["Operator"] for r in dag["roots"])
         roots, _ = self.enumerated_roots(doc, "E1")
+        js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
+        dag = self.memo_node_dag(js, doc, doc["memo"]["enumeration"]["choices"][0]["roots"])
+        first, second = (r["Operator"] for r in dag["roots"])
         self.assertEqual(roots, {first: ["q2"], second: ["q1"]})
 
     def test_a_root_group_shared_by_two_queries_is_both_queries_root(self):
@@ -1121,9 +1126,9 @@ class AppTests(unittest.TestCase):
         groups = {g["id"]: g for g in doc["memo"]["steps"][1]["groups"]}
         groups[3]["roots_of"], groups[7]["roots_of"] = [0, 1], []
         choice = doc["memo"]["enumeration"]["choices"][0]
-        choice["dag"]["roots"] = choice["dag"]["roots"][:1]
-        root = choice["dag"]["roots"][0]["Operator"]
+        choice["roots"] = choice["roots"][:1]
         js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
+        root = self.memo_node_dag(js, doc, choice["roots"])["roots"][0]["Operator"]
         js.eval("__els.enumRows.__on.click({ target: { closest() { return { dataset: { id: 'E1' } }; } } })")
         roots = {e["data"]["nodeId"]: e["data"]["rootFor"] for e in self.ev(js, "__rendered.cy1") if e["data"].get("rootFor")}
         self.assertEqual(roots, {root: ["q1", "q2"]})
@@ -1161,7 +1166,7 @@ class AppTests(unittest.TestCase):
         js.eval(f"__els.enumRows.__on.click({{ target: {{ closest() {{ return {{ dataset: {{ id: {json.dumps(choice['id'])} }} }}; }} }} }})")
         after = self.ev(js, "__rendered.cy1")
         self.assertNotEqual(after, before)
-        self.assertEqual(len([e for e in after if "source" not in e["data"]]), len(choice["dag"]["nodes"]))
+        self.assertEqual(len([e for e in after if "source" not in e["data"]]), len(self.memo_node_dag(js, doc, choice["roots"])["nodes"]))
         self.assertEqual([e["data"]["rootFor"] for e in after if e["data"].get("rootFor")], [[doc["workload"]["queries"][0]["id"]]])
         self.assertIn(f"enumerated DAG {choice['id']}", self.text(js, "lane1-meta"))
         self.assertIn("no physical plan for an enumerated DAG", js.eval("__els['lane2-meta'].textContent"))
@@ -1227,7 +1232,11 @@ class AppTests(unittest.TestCase):
         self.assertIn("chosen for this group", details)
         self.assertIn("Project", details)
         self.assertIn("SummaryEstimate", details)
-        self.assertIn("Reads G1 (node 1).", details)
+        memo = json.loads(MEMO_SMALL.read_text())["memo"]
+        g5 = next(g for g in memo["steps"][-1]["groups"] if g["id"] == 5)
+        boundary = next(c for c in g5["candidates"] if c["index"] == 1)["group_of_node"]
+        self.assertEqual(list(boundary.values()), [1])
+        self.assertIn(f"Reads G1 (node {next(iter(boundary))}).", details)
         self.assertNotIn("node 0</code>", js.eval("__els.details.innerHTML"))
 
     def test_highlighting_a_query_dims_the_memo_groups_it_does_not_reach(self):
