@@ -75,7 +75,7 @@ Supported Physical DAG candidates + typed inputs/outputs + requirements
                     ↓ backend
 Binding feasibility + runtime statistics + resource limits + ERP
                     ↓ backend deployment compiler
-Selected PrecomputePlan + QueryPlan + StoredOutputReferences
+Selected PrecomputePlan + QueryPlan + MaterializedViews
 ```
 
 Planner owns operators, dependencies, sharing, and each candidate's
@@ -446,15 +446,13 @@ supports persisting every scalar/result-output frontier.
 This section defines the interface between the Planner's output, the
 executor, and a deployment runtime.
 
-> **Status:** this is the target interface. The code on `main` differs in
-> four places:
-> - raw data is bound through `RawSource` (here `TableProvider`) without a
->   scan request, or through `RawDataSampleSelector` / `TableRowSelector`
->   at the `TimeRange` node;
-> - a boundary carries an `InputContract` instead of the node's schema;
-> - a materialized view is bound as an arbitrary source operator;
-> - `InstallablePlan` also carries fields derived from its DAG
->   (`stored_outputs`, `query_time_raw_windows`) and a `selection` report.
+> **Status:** implemented on `main`. Known limits:
+> - `precompute::compile` composes fragments, so its `Scan` frontiers are
+>   materialized view slots bound by node id, with no derived window.
+> - A materialized view slot gets a window only when the view reads one range
+>   `TimeRange` directly, as an expanded pane does.
+> - Stage 3 prices raw data by each scan's window lookback. It does not add
+>   the readers' range-evaluation span. The plan file's raw retention does.
 
 ### Layers and ownership
 
@@ -470,16 +468,27 @@ executor, and a deployment runtime.
 
 ```rust
 pub struct InstallablePlan {
-    pub wire_version: u32,            // versions the whole plan file
-    pub dag: PhysicalASAPDAG,         // a materialized-view node carries its retention_ms
+    pub wire_version: u32,            // INSTALLABLE_PLAN_WIRE_VERSION; versions the whole file
+    pub dag: PhysicalASAPDAG,         // materialized-view and query-time Scan nodes carry retention_ms
     pub query_texts: Vec<String>,     // query i is answered by dag.roots[i]
 }
 impl InstallablePlan {
+    /// Reads `wire_version` before the rest, so an older file is refused by version.
+    pub fn from_json(text: &str) -> Result<Self, InstallablePlanError>;
     /// Every materialized view, in dependency order: its node, refresh mode
     /// (at ingestion, or on first read and kept), coverage, inputs and retention.
-    pub fn materialized_views(&self) -> Vec<MaterializedView>;
+    pub fn materialized_views(&self) -> Result<Vec<MaterializedView>, InstallablePlanError>;
+    /// Per raw-data `Source` read at query time: how far back raw data must be kept.
+    pub fn raw_data_retention(&self) -> Result<Vec<RawDataRetention>, InstallablePlanError>;
+}
+pub struct RawDataRetention {
+    pub source: Source,
+    pub lookback_ms: Option<u64>,     // None = unbounded
 }
 ```
+
+Both derivations are methods on `PhysicalASAPDAG` in `asap-types`, so a
+runtime needs no dependency on the planner crate.
 
 A **materialized view** is a node whose output is kept across evaluations
 (`MatAtIngestion` or `MatAtQueryKeptAcrossEvaluations`). A `MatAtQuery` node is
@@ -487,6 +496,22 @@ not a view: its output is discarded after one evaluation. Everything a runtime
 needs that the DAG determines is derived from the DAG, so the plan file has no
 second copy to keep consistent. Stage 3's selection report is returned beside
 the plan, not inside it.
+
+**Retention.** Installation writes `retention_ms` on two kinds of node:
+
+- **Materialized view:** how long the view's output must stay available after
+  it is built.
+- **Query-time `Scan`:** how far back raw data must be kept. This is the
+  scan's window lookback (`end_offset + width`, from `scan_window`) plus the
+  longest range-evaluation span of the queries reading it. It is never less
+  than the retention of a view refreshed on first read from that scan.
+
+`raw_data_retention()` is the per-source maximum over these scans. Example: for
+`max_over_time(m[5m])` evaluated over the last hour, raw `m` is kept 65
+minutes, because refreshing the pane for the oldest step reads that far back.
+A pane chain kept across evaluations counts as all its panes. Reusing a pane is
+optional for a runtime, and a restart or an older step rebuilds older panes
+from raw data.
 
 ### Input slots and compilation
 
@@ -547,6 +572,12 @@ impl CompiledPhysicalDAG {
 }
 ```
 
+A materialized view slot is not re-filtered, so its provider returns exactly
+the states the run reads: those whose pane ends in `time_range_ms`. When
+`time_range_ms` is `None`, it returns every state bound for this run. The
+executor treats these states as held by the store, so they do not count
+against the run's memory limit.
+
 `instantiate` checks that every slot has exactly one binding. It also checks
 that each provider's schema contains the slot's columns and that each
 provider is bounded. It then constructs the runnable DAG without lowering
@@ -561,6 +592,7 @@ carries the run's scope: an ingestion window, or a query evaluation time `T`.
   - a range window `TimeRange(w)` over shifts summing to `s` keeps rows with time in `(T - s - w, T - s]`;
   - an instant window keeps each series' latest row in its lookback, and a series whose latest sample is a Prometheus stale marker has no row;
   - an ordinary `NaN` sample is kept.
+- In an ingestion run over `(window_start, window_end]`, each `TimeRange(w)` keeps `(window_end - w, window_end]`. A windowed table slot asks for `(window_start, window_end]`. A view refreshed at ingestion whose raw windows end at different offsets cannot be built in one run, so installation refuses it.
 - A provider never implements PromQL or SQL semantics. The compile check compiles these operators, so a plan whose window the executor cannot run is rejected before it is installed.
 
 ### Running example
@@ -570,9 +602,9 @@ over `Source::TimeSeries { metric: "latency" }`:
 
 ```text
 Install (once):
-    views     = plan.materialized_views()        // [pane node, refresh = at ingestion]
-    refresh   = compile(dag, {}, [pane])          // Scan → TimeRange(1m) → NativeKllBuild(k=200)
-    query     = compile(dag, {pane}, [p50, p99])  // materialized view slot → NativeKllMerge → NativeP50, NativeP99
+    views     = plan.materialized_views()?       // [pane nodes, refresh = at ingestion, retention]
+    refresh   = compile(dag, {}, [pane_0])        // Scan → TimeRange(1m) → NativeKllBuild(k=200)
+    query     = compile(dag, {pane_0..pane_4}, [p50, p99])  // 5 materialized view slots → NativeKllMerge → NativeP50, NativeP99
 
 Each complete pane (12:04, 12:05]:
     refresh.instantiate(&BindingDataSources { tables: { latency → time-series provider } })
@@ -580,13 +612,12 @@ Each complete pane (12:04, 12:05]:
     store the KllState in the summary store under the view's coverage
 
 Query at T = 12:05 over (12:00, 12:05]:
-    query.instantiate(&BindingDataSources { materialized_views: { pane → summary-store provider } })
-        the materialized view slot asks for time_range_ms = (12:00, 12:05]
-        ├── latency-kll-1m/(12:00,12:01]
-        ├── latency-kll-1m/(12:01,12:02]
-        ├── latency-kll-1m/(12:02,12:03]
-        ├── latency-kll-1m/(12:03,12:04]
-        └── latency-kll-1m/(12:04,12:05]
+    the installed DAG has the chain expanded: five pane views, pane i under TimeShift(i·1m)
+    query.instantiate(&BindingDataSources { materialized_views: { pane_i → summary-store provider } })
+        pane_0 asks for (12:04, 12:05] → latency-kll-1m/(12:04,12:05]
+        pane_1 asks for (12:03, 12:04] → latency-kll-1m/(12:03,12:04]
+        …
+        pane_4 asks for (12:00, 12:01] → latency-kll-1m/(12:00,12:01]
     NativeKllMerge executes once for both readouts → p50, p99
 ```
 
