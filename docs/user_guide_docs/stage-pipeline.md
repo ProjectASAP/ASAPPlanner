@@ -82,6 +82,8 @@ for workload, source-fact, and SQL examples.
 | `--max-displayed 64` | Limit candidates shown in the document; this is not a search budget. |
 | `--exhaustive --max-combinations 10000` | Archive evaluated plans and rejections using the same engine, with an assignment budget. This does not guarantee enumeration of all candidates before a time or assignment limit. Do not combine with `--search`. |
 | `--plan-selection-settings settings.json` | Load selection settings instead of `--cost-model`, cluster flags, or `--measured-operation-costs`. |
+| `--no-memo` | Leave out the `memo` section (the memo after each step and the enumerated candidate DAGs), for a smaller document. |
+| `--price-enumerated 50` | Cost the first 50 enumerated candidate DAGs through Stage 2 and Stage 3, and flag any cheaper than the selected plan. Off by default. |
 
 For inline queries, supply the data facts needed for pricing: for example,
 `--series-count` and `--sample-interval-ms`, or `--rows-per-second`.
