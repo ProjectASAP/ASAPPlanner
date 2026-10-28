@@ -153,7 +153,7 @@ fn execute(
         Arc::new(MemorySource::new(schema, vec![batch]).unwrap()) as Arc<dyn TableProvider>,
     )]);
     let data_sources = BindingDataSources {
-        views: sources,
+        materialized_views: sources,
         ..Default::default()
     };
     let physical_dag = program.instantiate(&data_sources).unwrap();

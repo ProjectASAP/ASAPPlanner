@@ -15,7 +15,7 @@ use planner_types::ir::operator::{
 };
 use planner_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
-    PhysicalASAPOperatorPayload as Payload,
+    PhysicalASAPOperatorPayload as Payload, ScanWindow,
 };
 use planner_types::ir::scalar::{ColumnRef, CompareOpKind};
 use planner_types::ir::schema::{
@@ -38,8 +38,8 @@ fn invalid(message: impl Into<String>) -> Error {
 
 pub mod precompute;
 // The executor's PromQL row encoding and the timing frontier are internals:
-// a deployment runtime feeds samples with `crate::RawDataSampleSelector`
-// and reads the stored outputs from the installable plan. The Planner's own
+// a deployment runtime binds raw data at each `Scan` through a
+// `TableProvider` and reads the stored outputs from the installable plan. The Planner's own
 // tests reach them with the `test-support` feature.
 #[cfg(feature = "test-support")]
 pub mod promql_rows;
@@ -63,9 +63,9 @@ mod row_values;
 /// Compile computation without opening or retaining deployment readers.
 /// Every reachable `Scan` leaf is a table slot, bound by its `Source`; its
 /// predicates must compile over its schema. `boundaries` are the other nodes
-/// cut out as view slots, bound by node id, each with its `output_schema` in
+/// cut out as materialized view slots, bound by node id, each with its `output_schema` in
 /// `dag`. ([`precompute::compile`] differs: its frontiers, a `Scan`
-/// included, are view slots bound by node id, with no derived window.)
+/// included, are materialized view slots bound by node id, with no derived window.)
 pub fn compile(
     dag: &PhysicalASAPDAG,
     boundaries: &BTreeSet<NodeId>,
@@ -190,13 +190,6 @@ fn compile_internal(
             }
         }
     }
-    // Each compiled node's readers in this DAG: a boundary reads nothing.
-    let mut readers = BTreeMap::<NodeId, Vec<NodeId>>::new();
-    for &id in ordered.iter().filter(|id| !boundaries.contains(id)) {
-        for &input in dependencies.get(&id).into_iter().flatten() {
-            readers.entry(input).or_default().push(id);
-        }
-    }
     let mut physical_dag = CompiledPhysicalDAG::new(roots.to_vec());
     for id in ordered {
         check_compile_deadline(deadline)?;
@@ -204,8 +197,8 @@ fn compile_internal(
         let auxiliary = helper_id(id, 0)?;
         let output = Arc::new(node.output_schema.clone());
         crate::values::validate_schema(&output)?;
-        if let Some(window) = view_window(id, &nodes, &dependencies)? {
-            physical_dag.set_view_window(id, window);
+        if let Some(window) = materialized_view_window(dag, id, &nodes, &dependencies) {
+            physical_dag.set_materialized_view_window(id, window);
         }
         if let Payload::NonASAP(NonASAPOp::Scan {
             source,
@@ -229,9 +222,12 @@ fn compile_internal(
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| invalid(format!("scan {id}: {error}")))?;
+            // The rows its readers read; a compile root reads them all.
             let window = match output.time_index {
-                Some(_) => table_slot_window(id, roots, &nodes, &readers)?,
-                None => None,
+                Some(_) if !roots.contains(&id) => {
+                    dag.scan_window(id as PhysicalASAPNodeId, &Default::default())
+                }
+                _ => ScanWindow::Unbounded,
             };
             physical_dag.add_table(
                 id,
@@ -640,10 +636,9 @@ fn compile_internal(
                     continue;
                 }
             }
-            // A SQL table's trailing window (and a tumbling pane's shift
-            // under it) runs as a filter on the table's time column against
-            // the evaluation time.
-            if let Some(operator) = table_time_operator(id, &nodes, &dependencies, &schemas)
+            // A window over a table or a time series (and a tumbling pane's
+            // shift under it) runs natively on the time column.
+            if let Some(operator) = time_window_operator(id, dag, &nodes, &dependencies, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?
             {
                 physical_dag.add(id, inputs, operator.with_output_schema(output)?)?;
@@ -685,50 +680,44 @@ fn built_from_relation(state: &OperatorNode) -> bool {
     }
 }
 
-/// The native operator of `id` when it is a range `TimeRange` or a
-/// `TimeShift` over a SQL table's rows (a table `Scan` below any stacked
-/// `TimeShift`s), `None` for any other node.
+/// The native operator of `id` when it is a `TimeRange` or a `TimeShift`
+/// over a `Scan` (below any stacked `TimeShift`s), of a SQL table or a time
+/// series; `None` for any other node.
 ///
 /// A `TimeRange(w)` over shifts summing to `s` keeps the rows whose time
-/// column lies in `(T - s - w, T - s]` at evaluation time `T`, the window a
-/// PromQL range selector reads: a filter on the time column against `now()`.
-/// A `TimeShift` only moves the window its `TimeRange` reads (the range
-/// above applies its offset), so it passes the rows through; a shift is
-/// meaningful only under a range, the shape Pass 2's tumbling panes build.
-/// An `@` anchor has no table lowering, so a shift with one gets `None`
-/// and the node fails compilation.
-fn table_time_operator(
+/// column lies in `(T - s - w, T - s]` at evaluation time `T`
+/// ([`PhysicalASAPDAG::time_range_window`]), the window a PromQL selector
+/// and a SQL filter against `now()` read; an ingestion run builds the
+/// window ending at its `window_end_ms` ([`Operator::time_range`]). Over a
+/// time series a stale marker is not a row, and an instant window keeps
+/// each series' (each label set's) latest row. A `TimeShift` only moves
+/// the window its `TimeRange` reads (the range above applies its offset),
+/// so it passes the rows through; a shift is meaningful only under a
+/// range, the shape the frontends and Pass 2's tumbling panes build. An
+/// `@` anchor has no lowering, so a range or shift over one gets `None` and
+/// the node fails compilation; an instant window over a table is refused.
+fn time_window_operator(
     id: NodeId,
+    dag: &PhysicalASAPDAG,
     nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
     dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
     input_schemas: &[SchemaRef],
 ) -> Result<Option<Operator>, Error> {
-    // The shifts' total offset below `id` (`id` included), and whether the
-    // first node below them is a table `Scan`.
     let below = match &nodes[&id].payload {
-        Payload::NonASAP(NonASAPOp::TimeRange {
-            kind: TimeRangeKind::Range,
-            ..
-        }) => first_input(id, dependencies),
+        Payload::NonASAP(NonASAPOp::TimeRange { .. }) => first_input(id, dependencies),
         Payload::NonASAP(NonASAPOp::TimeShift { .. }) => Some(id),
         _ => return Ok(None),
     };
-    let Some((offset_ms, below)) = below_shifts(below, nodes, dependencies)? else {
+    let Some(below) = node_below_shifts(below, nodes, dependencies) else {
         return Ok(None);
     };
-    if !matches!(
-        &nodes[&below].payload,
-        Payload::NonASAP(NonASAPOp::Scan {
-            source: planner_types::ir::operator::Source::Table { .. },
-            ..
-        })
-    ) {
+    let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &nodes[&below].payload else {
         return Ok(None);
-    }
+    };
     let [input] = input_schemas else {
-        return Err(invalid("a table time range or shift reads one input"));
+        return Err(invalid("a time range or shift over a Scan reads one input"));
     };
-    let Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) = &nodes[&id].payload else {
+    let Payload::NonASAP(NonASAPOp::TimeRange { kind, .. }) = &nodes[&id].payload else {
         // A shift passes its rows through.
         let columns = input
             .fields
@@ -738,139 +727,93 @@ fn table_time_operator(
             .collect();
         return Operator::project(input.clone(), columns).map(Some);
     };
+    let ScanWindow::Within {
+        end_offset_ms,
+        width_ms,
+    } = dag.time_range_window(id as PhysicalASAPNodeId)
+    else {
+        return Ok(None);
+    };
     let time = input
         .time_index
-        .ok_or_else(|| invalid("a table time range needs the table's time column"))?;
-    let start_back_ms =
-        crate::sources::SlotWindow::new(offset_ms, width_ms(range)?)?.start_before_ms;
-    // `now() - back`, as SQL timestamp arithmetic.
-    let now_minus = |back_ms: i64| -> Result<ScalarExpr, Error> {
-        let nanos = back_ms
-            .checked_mul(1_000_000)
-            .ok_or_else(|| invalid("window overflows Int64 nanoseconds"))?;
-        Ok(ScalarExpr::Arithmetic {
-            op: planner_types::ir::scalar::ArithmeticOpKind::Sub,
-            left: Box::new(ScalarExpr::CurrentTimestamp),
-            right: Box::new(ScalarExpr::Literal(
-                planner_types::ir::scalar::ScalarValue::Interval {
-                    months: 0,
-                    days: 0,
-                    nanos,
-                },
-            )),
-            semantics: planner_types::ir::scalar::ExprSemantics::Sql,
-        })
+        .ok_or_else(|| invalid("a time range needs its source's time column"))?;
+    let (sample_value, latest_per_series) = match (source, kind) {
+        (planner_types::ir::operator::Source::Table { .. }, TimeRangeKind::Range) => (None, None),
+        (planner_types::ir::operator::Source::Table { .. }, TimeRangeKind::Instant) => {
+            return Err(invalid("an instant window over a SQL table is unsupported"))
+        }
+        (planner_types::ir::operator::Source::TimeSeries { .. }, kind) => {
+            let value = named_column(input, &ColumnRef::SampleValue)?;
+            // A series is its label set: every column but its time and value.
+            let series = (*kind == TimeRangeKind::Instant).then(|| {
+                (0..input.fields.len())
+                    .filter(|&column| column != value && column != time)
+                    .collect()
+            });
+            (Some(value), series)
+        }
     };
-    let compare = |op, back_ms| -> Result<ScalarExpr, Error> {
-        Ok(ScalarExpr::Compare {
-            left: Box::new(ScalarExpr::Column(time)),
-            op,
-            right: Box::new(now_minus(back_ms)?),
-            semantics: planner_types::ir::scalar::ExprSemantics::Sql,
-        })
-    };
-    let window = ScalarExpr::BoolAnd(vec![
-        compare(CompareOpKind::Gt, start_back_ms)?,
-        compare(CompareOpKind::Le, offset_ms)?,
-    ]);
-    let predicate = crate::expressions::CompiledExpression::compile(&window, input)?;
-    Operator::filter(input.clone(), Expression::planner(predicate)).map(Some)
+    Operator::time_range(
+        input.clone(),
+        time,
+        end_offset_ms,
+        width_ms,
+        sample_value,
+        latest_per_series,
+    )
+    .map(Some)
 }
 
 fn first_input(id: NodeId, dependencies: &BTreeMap<NodeId, Vec<NodeId>>) -> Option<NodeId> {
     dependencies.get(&id).and_then(|d| d.first()).copied()
 }
 
-fn width_ms(range: &std::time::Duration) -> Result<i64, Error> {
-    i64::try_from(range.as_millis()).map_err(|_| invalid("window width overflows Int64"))
-}
-
-/// The total offset of the `TimeShift`s at and below `start` and the first
-/// node below them; `None` when `start` is `None`, a shift has an `@`
-/// anchor, or a shift lacks its child.
-fn below_shifts(
+/// The first node at or below `start` that is not a `TimeShift`; `None`
+/// when `start` is `None`, a shift has an `@` anchor, or a shift lacks its
+/// child.
+fn node_below_shifts(
     start: Option<NodeId>,
     nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
     dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
-) -> Result<Option<(i64, NodeId)>, Error> {
-    let mut offset_ms = 0i64;
+) -> Option<NodeId> {
     let mut below = start;
     while let Some(node) = below {
         let Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) = &nodes[&node].payload else {
-            return Ok(Some((offset_ms, node)));
+            return Some(node);
         };
         if shift.at.is_some() {
-            return Ok(None);
+            return None;
         }
-        offset_ms = offset_ms
-            .checked_add(shift.offset_ms)
-            .ok_or_else(|| invalid("window offset overflows Int64"))?;
         below = first_input(node, dependencies);
     }
-    Ok(None)
+    None
 }
 
-/// The window of a view slot at `id`: that of the range `TimeRange` (over
-/// shifts without an `@` anchor) `id` reads as its only input, as an
+/// The window of a materialized view slot at `id`: that of the range `TimeRange` `id`
+/// reads as its only input ([`PhysicalASAPDAG::time_range_window`]), as an
 /// expanded pane reads its range. `None` for any other node (an instant
-/// `TimeRange` included), whose window is not derived.
-fn view_window(
+/// `TimeRange`, or one over an `@` anchor, included), whose window is not
+/// derived.
+fn materialized_view_window(
+    dag: &PhysicalASAPDAG,
     id: NodeId,
     nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
     dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
-) -> Result<Option<crate::sources::SlotWindow>, Error> {
+) -> Option<ScanWindow> {
     let [input] = dependencies.get(&id).map_or(&[][..], Vec::as_slice) else {
-        return Ok(None);
+        return None;
     };
     let Payload::NonASAP(NonASAPOp::TimeRange {
-        range,
         kind: TimeRangeKind::Range,
         ..
     }) = &nodes[input].payload
     else {
-        return Ok(None);
+        return None;
     };
-    match below_shifts(first_input(*input, dependencies), nodes, dependencies)? {
-        Some((offset_ms, _)) => {
-            crate::sources::SlotWindow::new(offset_ms, width_ms(range)?).map(Some)
-        }
-        None => Ok(None),
+    match dag.time_range_window(*input as PhysicalASAPNodeId) {
+        ScanWindow::Unbounded => None,
+        window => Some(window),
     }
-}
-
-/// The union of the range windows the `Scan` `scan` is read through: each
-/// reader path of `TimeShift`s (without an `@` anchor) up to a `TimeRange`
-/// adds that range's window. `None` when any reader reads it otherwise, or
-/// a root reads it or one of those shifts.
-fn table_slot_window(
-    scan: NodeId,
-    roots: &[NodeId],
-    nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
-    readers: &BTreeMap<NodeId, Vec<NodeId>>,
-) -> Result<Option<crate::sources::SlotWindow>, Error> {
-    let mut window: Option<crate::sources::SlotWindow> = None;
-    let mut pending = vec![(scan, 0i64)];
-    while let Some((id, offset_ms)) = pending.pop() {
-        if roots.contains(&id) {
-            return Ok(None);
-        }
-        for &reader in readers.get(&id).into_iter().flatten() {
-            match &nodes[&reader].payload {
-                Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) if shift.at.is_none() => {
-                    let offset_ms = offset_ms
-                        .checked_add(shift.offset_ms)
-                        .ok_or_else(|| invalid("window offset overflows Int64"))?;
-                    pending.push((reader, offset_ms));
-                }
-                Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
-                    let range = crate::sources::SlotWindow::new(offset_ms, width_ms(range)?)?;
-                    window = Some(window.map_or(range, |window| window.union(range)));
-                }
-                _ => return Ok(None),
-            }
-        }
-    }
-    Ok(window)
 }
 
 /// The first node at or below `node` that is not a `TimeShift`, following

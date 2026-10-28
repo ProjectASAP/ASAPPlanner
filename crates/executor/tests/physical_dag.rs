@@ -40,7 +40,7 @@ fn bind<'a>(
     data_sources: &'a BindingDataSources,
     roots: &[u64],
 ) -> Result<PhysicalDAG<'a, Batch, SchemaRef>, asap_executor::Error> {
-    let boundaries = data_sources.views.keys().copied().collect();
+    let boundaries = data_sources.materialized_views.keys().copied().collect();
     asap_executor::physical_planner::compile(dag, &boundaries, roots)?.instantiate(data_sources)
 }
 
@@ -575,7 +575,7 @@ fn bind_physical_asap_dag_before_execution() {
         )])
     };
     let data_sources = BindingDataSources {
-        views: sources(),
+        materialized_views: sources(),
         ..Default::default()
     };
     let native = bind(&dag, &data_sources, &[1]).unwrap();
@@ -678,7 +678,7 @@ fn source_batches_must_match_the_bound_schema() {
         starts: starts.clone(),
     }) as Arc<dyn TableProvider>;
     let data_sources = BindingDataSources {
-        views: BTreeMap::from([(0, source)]),
+        materialized_views: BTreeMap::from([(0, source)]),
         ..Default::default()
     };
     let native = bind(&plan, &data_sources, &[0]).unwrap();
@@ -891,7 +891,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
             ),
         ]);
         let data_sources = BindingDataSources {
-            views: sources,
+            materialized_views: sources,
             ..Default::default()
         };
         let native = bind(&dag, &data_sources, &[4]).unwrap();
@@ -1280,7 +1280,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
     .unwrap();
     let source = Arc::new(MemorySource::new(input, vec![batch]).unwrap()) as Arc<dyn TableProvider>;
     let data_sources = BindingDataSources {
-        views: [(0, source)].into(),
+        materialized_views: [(0, source)].into(),
         ..Default::default()
     };
     let physical = compiled.instantiate(&data_sources).unwrap();
@@ -1379,7 +1379,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
             })
             .collect::<BTreeMap<_, _>>();
             let data_sources = BindingDataSources {
-                views: sources,
+                materialized_views: sources,
                 ..Default::default()
             };
             let bound = dag.instantiate(&data_sources).unwrap();
@@ -1487,7 +1487,7 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
             })
             .collect::<BTreeMap<_, _>>();
         let data_sources = BindingDataSources {
-            views: sources,
+            materialized_views: sources,
             ..Default::default()
         };
         let dag = program.instantiate(&data_sources).unwrap();

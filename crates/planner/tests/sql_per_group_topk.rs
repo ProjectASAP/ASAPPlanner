@@ -12,9 +12,8 @@ use std::sync::Arc;
 
 use asap_executor::physical_planner::compile;
 use asap_executor::runtime::{Limits, RunContext, Scope};
-use asap_executor::sources::{BindingDataSources, DataSources, MemorySource, TableProvider};
+use asap_executor::sources::{BindingDataSources, DataSources, MemorySource};
 use asap_executor::values::{Batch, Value};
-use asap_executor::{RawDataSample, RawDataSampleSelector};
 use asap_planner::{
     plan_installable, FrontendInput, InstallablePlan, PlanningModels, PlanningWorkload, SqlCatalog,
     UserInput,
@@ -24,6 +23,9 @@ use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::NonASAPOp;
 use futures::{executor::block_on, StreamExt};
+
+mod time_series;
+use time_series::{time_series_tables, RawDataSample};
 
 /// The evaluation time of every run.
 const EVALUATION_MS: i64 = 1_800_000_000_000;
@@ -261,31 +263,11 @@ fn run_promql(plan: &InstallablePlan) -> Vec<Batch> {
         .collect();
     let reference = plan.query_time_reference().unwrap();
     let dag = &reference.dag.dag;
-    let inputs: BTreeMap<u64, Batch> = reference
-        .query_time_raw_windows
-        .iter()
-        .map(|window| {
-            let selector = RawDataSampleSelector::new(dag, window).unwrap();
-            let (_, end_ms) = window.bounds_ms(EVALUATION_MS);
-            (
-                window.time_range_node_id as u64,
-                selector.window_batch(end_ms, &samples).unwrap(),
-            )
-        })
-        .collect();
-    // Which nodes are bound inputs; each one's schema is its DAG node's.
-    let boundaries: BTreeSet<u64> = inputs.keys().copied().collect();
     let roots = [reference.queries[0].root_node_id as u64];
-    let compiled = compile(dag, &boundaries, &roots).expect("the executor compiles the plan");
-    let sources = inputs
-        .into_iter()
-        .map(|(id, batch)| {
-            let source = MemorySource::new(batch.schema().clone(), vec![batch]).unwrap();
-            (id, Arc::new(source) as Arc<dyn TableProvider>)
-        })
-        .collect();
+    let compiled = compile(dag, &BTreeSet::new(), &roots).expect("the executor compiles the plan");
+    // The samples bound at the plan's `Scan` of `metrics`.
     let data_sources = BindingDataSources {
-        views: sources,
+        tables: time_series_tables(dag, &samples),
         ..Default::default()
     };
     let instance = compiled.instantiate(&data_sources).unwrap();

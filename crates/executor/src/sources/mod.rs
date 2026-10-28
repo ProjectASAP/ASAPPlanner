@@ -10,6 +10,7 @@ use crate::{
 };
 use futures::{stream, StreamExt};
 use planner_types::ir::operator::Source;
+use planner_types::ir::physical_export::ScanWindow;
 use planner_types::ir::schema::DataType;
 use planner_types::ir::ScalarExpr;
 use std::collections::BTreeMap;
@@ -34,9 +35,9 @@ pub trait TableProvider {
     ///
     /// For a table slot `request` is a hint: the executor re-applies its
     /// time range, predicates and projection, so a provider may ignore any
-    /// field. A view slot is not re-filtered: its provider returns exactly
+    /// field. A materialized view slot is not re-filtered: its provider returns exactly
     /// the states the run reads, selected by `request.time_range_ms` (see
-    /// [`ScanRequest::time_range_ms`]). The executor treats a view's states
+    /// [`ScanRequest::time_range_ms`]). The executor treats a materialized view's states
     /// as held by the store, so a run is not charged for them.
     fn scan(
         &self,
@@ -48,21 +49,24 @@ pub trait TableProvider {
 /// What a slot reads in one run.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScanRequest<'a> {
-    /// `(start, end]` in milliseconds, in a query run at evaluation time `T`.
-    /// A `TimeRange(w)` over `TimeShift`s summing to `s` reads `(T - s - w,
-    /// T - s]`.
+    /// `(start, end]` in milliseconds. In a query run at evaluation time
+    /// `T`, a `TimeRange(w)` over `TimeShift`s summing to `s` reads
+    /// `(T - s - w, T - s]`.
     ///
-    /// - Table slot: the smallest range covering the range windows above
-    ///   the `Scan`, on the slot's time column; `None` when the `Scan` is
-    ///   read outside a range window. The executor re-applies it.
-    /// - View slot: the window of the one range `TimeRange` the view reads
-    ///   directly, as an expanded pane does; the provider returns the
-    ///   states whose pane ends in `(start, end]`. `None` when the window
-    ///   is not derivable from the DAG: the provider returns every state
-    ///   bound for this run, as a bound source did before.
-    ///
-    /// `None` in every ingestion run (until ingestion windows are defined
-    /// for slots): a table slot reads, and re-filters, as before.
+    /// - Table slot, query run: the smallest range covering every window
+    ///   its readers read (`PhysicalASAPDAG::scan_window`), on the slot's
+    ///   time column; `None` when a reader reads the `Scan` outside a
+    ///   window. The executor re-applies it.
+    /// - Table slot, ingestion run: the run's `(window_start_ms,
+    ///   window_end_ms]` when the `Scan` is read through windows, else
+    ///   `None`. Each `TimeRange(w)` then keeps `(window_end_ms - w,
+    ///   window_end_ms]`, whatever the shifts below it, so the run's window
+    ///   is the window it builds.
+    /// - Materialized view slot, query run: the window of the one range `TimeRange` the
+    ///   view reads directly, as an expanded pane does; the provider
+    ///   returns the states whose pane ends in `(start, end]`. `None` when
+    ///   the window is not derivable from the DAG, and in an ingestion run:
+    ///   the provider returns every state bound for this run.
     pub time_range_ms: Option<(i64, i64)>,
     /// The slot's columns, as indices into the provider's schema, in the
     /// slot's order.
@@ -103,56 +107,19 @@ impl DataSources {
 }
 
 /// The data a compiled DAG's input slots read in one instantiation: a table
-/// slot by its `Scan`'s `Source`, a view slot by its node id.
-///
-/// Transitional (removed by #969): a runtime binds the raw-window rows
-/// `RawDataSampleSelector` or `TableRowSelector` produced at a `TimeRange`
-/// node, cut out as a slot, through `views` too, with a provider over the
-/// given batches (e.g. [`MemorySource`]).
+/// slot by its `Scan`'s `Source`, a materialized view slot by its
+/// node id. Raw data (a
+/// SQL table, or a time series as `(ts, value, *labels)`) is bound only at
+/// `Scan`s, through `tables`; the DAG's own `TimeRange`s apply windows,
+/// instant lookback and stale markers.
 #[derive(Default)]
 pub struct BindingDataSources {
     /// Source → provider, as a catalog: one provider per table or metric,
     /// however many `Scan`s read it.
     pub tables: DataSources,
-    /// View slot (node id) → provider of the view's stored states.
-    pub views: BTreeMap<NodeId, Arc<dyn TableProvider>>,
-}
-
-/// The time range a slot reads at time `T`: `(T - start_before_ms, T -
-/// end_before_ms]`, the union of the range windows above it (each
-/// `TimeRange(w)` over shifts summing to `s` reads `(T - s - w, T - s]`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(any(test, feature = "test-support"), derive(serde::Serialize))]
-pub(crate) struct SlotWindow {
-    pub(crate) start_before_ms: i64,
-    pub(crate) end_before_ms: i64,
-}
-impl SlotWindow {
-    /// The window of a `TimeRange` of `width_ms` over shifts summing to `offset_ms`.
-    pub(crate) fn new(offset_ms: i64, width_ms: i64) -> Result<Self, Error> {
-        Ok(Self {
-            start_before_ms: offset_ms
-                .checked_add(width_ms)
-                .ok_or_else(|| Error::Invalid("window overflows Int64".into()))?,
-            end_before_ms: offset_ms,
-        })
-    }
-    /// The smallest window holding both.
-    pub(crate) fn union(self, other: Self) -> Self {
-        Self {
-            start_before_ms: self.start_before_ms.max(other.start_before_ms),
-            end_before_ms: self.end_before_ms.min(other.end_before_ms),
-        }
-    }
-    /// `(start, end]` at time `t_ms`.
-    fn at(self, t_ms: i64) -> Result<(i64, i64), Error> {
-        let overflow = || Error::Invalid("window overflows Int64".into());
-        Ok((
-            t_ms.checked_sub(self.start_before_ms)
-                .ok_or_else(overflow)?,
-            t_ms.checked_sub(self.end_before_ms).ok_or_else(overflow)?,
-        ))
-    }
+    /// Materialized view (its slot's node id) → provider of the
+    /// materialized view's stored states.
+    pub materialized_views: BTreeMap<NodeId, Arc<dyn TableProvider>>,
 }
 
 /// A `Scan` predicate compiled over the scan's rows `output`; bad input when
@@ -205,9 +172,9 @@ pub(crate) struct Scan {
     predicates: Vec<CompiledExpression>,
     /// `predicates` as the provider receives them.
     predicate_hints: Vec<ScalarExpr<()>>,
-    window: Option<SlotWindow>,
-    /// A table slot re-applies its requested time range; a view's
-    /// provider selects its panes, which the executor cannot check.
+    window: ScanWindow,
+    /// A table slot re-applies its requested time range; a materialized
+    /// view's provider selects its panes, which the executor cannot check.
     reapplies_time_range: bool,
 }
 impl Scan {
@@ -217,9 +184,9 @@ impl Scan {
         provider: Arc<dyn TableProvider>,
         output: SchemaRef,
         predicates: Vec<CompiledExpression>,
-        window: Option<SlotWindow>,
+        window: ScanWindow,
     ) -> Result<Self, Error> {
-        let mut scan = Self::view(provider, output, window)?;
+        let mut scan = Self::materialized_view(provider, output, window)?;
         scan.predicate_hints = predicates
             .iter()
             .map(|predicate| predicate.expression().clone())
@@ -228,12 +195,12 @@ impl Scan {
         scan.reapplies_time_range = true;
         Ok(scan)
     }
-    /// A view slot over `provider`, which must contain `output`'s columns
+    /// A materialized view slot over `provider`, which must contain `output`'s columns
     /// and declare `Bounded`.
-    pub(crate) fn view(
+    pub(crate) fn materialized_view(
         provider: Arc<dyn TableProvider>,
         output: SchemaRef,
-        window: Option<SlotWindow>,
+        window: ScanWindow,
     ) -> Result<Self, Error> {
         let projection = projection(&provider.schema(), &output)?;
         if provider.boundedness() != crate::plan::Boundedness::Bounded {
@@ -250,15 +217,19 @@ impl Scan {
         })
     }
     /// The time range this run reads (see [`ScanRequest::time_range_ms`]).
-    fn time_range_ms(&self, context: &RunContext) -> Result<Option<(i64, i64)>, Error> {
-        let Some(window) = self.window else {
-            return Ok(None);
-        };
+    fn time_range_ms(&self, context: &RunContext) -> Option<(i64, i64)> {
         match context.scope {
             Scope::Query {
                 evaluation_time_ms, ..
-            } => window.at(evaluation_time_ms).map(Some),
-            Scope::Ingestion { .. } => Ok(None),
+            } => self.window.bounds_ms(evaluation_time_ms),
+            // A table slot read through windows reads the rows of the
+            // window the run builds; a materialized view's states are those bound.
+            Scope::Ingestion {
+                window_start_ms,
+                window_end_ms,
+                ..
+            } => (self.reapplies_time_range && self.window != ScanWindow::Unbounded)
+                .then_some((window_start_ms, window_end_ms)),
         }
     }
     /// `batch` in the slot's schema: projected when it is in the provider's
@@ -328,7 +299,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                 false => std::borrow::Cow::Borrowed(predicate),
             })
             .collect();
-        let time_range_ms = self.time_range_ms(&context)?;
+        let time_range_ms = self.time_range_ms(&context);
         let time_filter = match time_range_ms {
             Some(range) if self.reapplies_time_range => Some((
                 self.output
@@ -361,7 +332,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                 }
                 let batch = self.to_output(batch?, &provider_schema)?;
                 if !self.reapplies_time_range {
-                    // A view's states are the store's, read by this run.
+                    // A materialized view's states are the store's, read by this run.
                     batch.mark_states_held_outside_run();
                 }
                 if predicates.is_empty() && time_filter.is_none() {

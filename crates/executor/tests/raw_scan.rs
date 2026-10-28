@@ -828,12 +828,12 @@ fn a_provider_with_an_extra_column_gives_the_same_answer() {
     }
 }
 
-// A view slot bound through `BindingDataSources.views` (the sort over the
+// A materialized view slot bound through `BindingDataSources.materialized_views` (the sort over the
 // range, as an expanded pane over its range) is asked for its window,
 // `(T - 5m, T]` or `(T - 15m, T - 10m]` under a 10-minute shift, and its
 // rows are the answer's.
 #[test]
-fn a_view_provider_is_asked_for_the_window_it_covers() {
+fn a_materialized_view_provider_is_asked_for_the_window_it_covers() {
     let schema = Arc::new(requests_schema());
     for (shift_ms, expected) in [
         (None, (T_MS - 5 * MINUTE_MS, T_MS)),
@@ -852,7 +852,7 @@ fn a_view_provider_is_asked_for_the_window_it_covers() {
         .unwrap();
         let (provider, requests, _) = recording(stored, false);
         let data_sources = BindingDataSources {
-            views: [(3, provider as Arc<dyn TableProvider>)].into(),
+            materialized_views: [(3, provider as Arc<dyn TableProvider>)].into(),
             ..Default::default()
         };
         assert_eq!(

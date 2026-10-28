@@ -108,6 +108,20 @@ impl TryFrom<UncheckedOperator> for Operator {
                 )?
             }
             Kind::Filter(expression) => Operator::filter(input(0)?, expression)?,
+            Kind::TimeRange {
+                time,
+                end_offset_ms,
+                width_ms,
+                sample_value,
+                latest_per_series,
+            } => Operator::time_range(
+                input(0)?,
+                time,
+                end_offset_ms,
+                width_ms,
+                sample_value,
+                latest_per_series,
+            )?,
             Kind::Limit { n, offset, groups } => Operator::limit(input(0)?, n, offset, groups)?,
             Kind::Sort { keys, groups } => Operator::sort(input(0)?, keys, groups)?,
             Kind::Window {

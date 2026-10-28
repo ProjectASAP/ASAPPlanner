@@ -212,7 +212,7 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
             })
             .collect();
         let data_sources = BindingDataSources {
-            views: incomplete,
+            materialized_views: incomplete,
             ..Default::default()
         };
         assert!(compiled.instantiate(&data_sources).is_err());
@@ -291,7 +291,7 @@ fn panes_reject_parameters_schema_and_missing_binding() {
     )
     .unwrap();
     let data_sources = BindingDataSources {
-        views: BTreeMap::new(),
+        materialized_views: BTreeMap::new(),
         ..Default::default()
     };
     assert!(compiled.instantiate(&data_sources).is_err());
@@ -302,7 +302,7 @@ fn panes_reject_parameters_schema_and_missing_binding() {
     )
     .unwrap();
     let data_sources = BindingDataSources {
-        views: BTreeMap::from([(0, Arc::new(source) as Arc<dyn TableProvider>)]),
+        materialized_views: BTreeMap::from([(0, Arc::new(source) as Arc<dyn TableProvider>)]),
         ..Default::default()
     };
     assert!(compiled.instantiate(&data_sources).is_err());

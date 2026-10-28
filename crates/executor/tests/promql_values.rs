@@ -45,7 +45,7 @@ fn run_inputs(
         })
         .collect::<BTreeMap<_, _>>();
     let data_sources = BindingDataSources {
-        views: sources,
+        materialized_views: sources,
         ..Default::default()
     };
     let bound = dag.instantiate(&data_sources).unwrap();
@@ -273,7 +273,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
             starts: starts.clone(),
         };
         let data_sources = BindingDataSources {
-            views: BTreeMap::from([(0, Arc::new(source) as Arc<dyn TableProvider>)]),
+            materialized_views: BTreeMap::from([(0, Arc::new(source) as Arc<dyn TableProvider>)]),
             ..Default::default()
         };
         let bound = dag.instantiate(&data_sources).unwrap();

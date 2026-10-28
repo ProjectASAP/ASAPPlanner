@@ -108,18 +108,21 @@ There is no spill or partitioned parallel execution in this implementation.
 ## Physical compilation and deployment inputs
 
 `physical_planner::compile` accepts a Planner `PhysicalASAPDAG`, the boundary
-nodes to cut out as view slots and output roots. Every `Scan` leaf is a table
+nodes to cut out as materialized view slots and output roots. Every `Scan` leaf is a table
 slot. Each input slot has its node's `output_schema`. It returns a reusable `CompiledPhysicalDAG`
 containing selected native operators and no live readers. Compilation validates
 schemas, input ordering, sharing and boundedness before deployment source access.
 
 A deployment calls `CompiledPhysicalDAG::instantiate` with a
 `BindingDataSources`: a `TableProvider` per `Source` for table slots and one per
-view slot's node id. This checks that each provider contains its slot's columns
+materialized view slot's node id. This checks that each provider contains its slot's columns
 and declares `Boundedness::Bounded`, and constructs the runnable DAG without
 repeating logical lowering. Each slot asks its provider for the run's
 `ScanRequest` (time range, projection, predicates); for a table slot the
-request is a hint, and the executor re-applies all three. The DAG executes through
+request is a hint, and the executor re-applies all three. A time series is a
+table `(ts, value, *labels)` bound like a SQL table: the DAG's own `TimeRange`
+keeps each window, an instant selector's latest sample per series, and drops
+Prometheus stale markers. The DAG executes through
 the shared runtime with independent per-run state. Window coverage, revision and
 maintenance-policy admission remain deployment/planning contracts; this compiler
 does not discover storage or silently change a selected maintenance strategy.

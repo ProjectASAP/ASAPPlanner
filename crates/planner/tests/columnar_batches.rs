@@ -1,24 +1,30 @@
 //! A runtime's samples reach the executor as Arrow columns (issue #762):
-//! the planner-layering #509 Example 4b plan, one pane fed through its
-//! `RawDataSampleSelector` and built by the executor, read through the public
+//! the planner-layering #509 Example 4b plan, one pane built by the
+//! executor from a time-series provider whose batch the runtime built as
+//! Arrow columns, each series' identity stored once, through the public
 //! batch API only.
 
-use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
+use asap_executor::sources::{BindingDataSources, DataSources, MemorySource};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use arrow::array::{AsArray, Float64Array};
+use arrow::array::{DictionaryArray, Float64Array, TimestampMillisecondArray};
 use arrow::datatypes::UInt32Type;
 use asap_executor::physical_planner::compile;
+use asap_executor::planner::ir::operator::Source;
+use asap_executor::planner::ir::physical_export::PhysicalASAPOperatorPayload as Payload;
 use asap_executor::planner::ir::schema::PROMQL_SERIES_IDENTITY;
+use asap_executor::planner::ir::NonASAPOp;
 use asap_executor::runtime::{Limits, RunContext, Scope};
-use asap_executor::values::Batch;
-use asap_executor::{RawDataSample, RawDataSampleSelector};
+use asap_executor::values::{Batch, BatchColumn};
 use asap_planner::{
     plan_installable, DeploymentCapabilities, FrontendInput, PlanningModels, PlanningWorkload,
     UserInput,
 };
 use futures::StreamExt;
+
+mod time_series;
+use time_series::{series_identity, RawDataSample};
 
 /// Example 4b's evaluation time: the end of the 60-minute window.
 const EVALUATION_MS: i64 = 3_600_000;
@@ -85,48 +91,65 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
             })
         })
         .collect();
-    // The pane's Scan and TimeRange, prepared once for the window.
-    let selector =
-        RawDataSampleSelector::new(&plan.dag.dag, &output.inputs.raw_data_sample_windows[0])
-            .unwrap();
-    // The pane's input: both series' samples as Arrow columns.
-    let input: Batch = selector.window_batch(end_ms, &samples).unwrap();
+    // The rows the plan's `Scan` of `latency_ms` reads.
+    let schema = plan
+        .dag
+        .dag
+        .nodes
+        .iter()
+        .find_map(|node| match &node.payload {
+            Payload::NonASAP(NonASAPOp::Scan { schema, .. }) => Some(Arc::new(schema.clone())),
+            _ => None,
+        })
+        .unwrap();
+    // The runtime's batch of both series' samples as Arrow columns: the
+    // series identity and each label a dictionary holding each series'
+    // value once, one u32 key per sample.
+    let columns = schema
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            if Some(index) == schema.time_index {
+                BatchColumn::Plain(Arc::new(TimestampMillisecondArray::from_iter_values(
+                    samples.iter().map(|s| s.timestamp_ms),
+                )))
+            } else if field.name == "value" {
+                BatchColumn::Plain(Arc::new(Float64Array::from_iter_values(
+                    samples.iter().map(|s| s.value),
+                )))
+            } else {
+                let cells: Vec<String> = samples
+                    .iter()
+                    .map(|s| match field.name.as_str() {
+                        PROMQL_SERIES_IDENTITY => series_identity(&s.labels),
+                        label => s.labels.get(label).cloned().unwrap_or_default(),
+                    })
+                    .collect();
+                let texts: DictionaryArray<UInt32Type> = cells.iter().map(String::as_str).collect();
+                assert!(texts.values().len() <= 2, "one entry per series");
+                BatchColumn::Plain(Arc::new(texts))
+            }
+        })
+        .collect();
+    let input = Batch::try_from_columns(schema.clone(), columns).unwrap();
     assert_eq!(input.num_rows(), expected_rows);
-    // The series identity column: one u32 key per sample into a dictionary
-    // holding each series' identity once.
-    let identity_column = input
-        .schema()
-        .fields
-        .iter()
-        .position(|field| field.name == PROMQL_SERIES_IDENTITY)
-        .unwrap();
-    let identities = input.column(identity_column).as_dictionary::<UInt32Type>();
-    assert_eq!(identities.keys().len(), expected_rows);
-    assert_eq!(identities.values().len(), 2);
-    // The sample values: a plain Float64 array.
-    let value_column = input
-        .schema()
-        .fields
-        .iter()
-        .position(|field| field.name == "value")
-        .unwrap();
-    let values: &Float64Array = input.column(value_column).as_primitive();
-    assert_eq!(values.value(0), 1.0);
 
-    // The executor's pane build, cut at the pane's TimeRange.
-    let window = output.inputs.raw_data_sample_windows[0].time_range_node_id as u64;
-    let compiled = compile(
-        &plan.dag.dag,
-        &BTreeSet::from([window]),
-        &[output.node_id as u64],
-    )
-    .unwrap();
-    // The input bound as an in-memory source.
-    let source: Arc<dyn TableProvider> =
-        Arc::new(MemorySource::new(input.schema().clone(), vec![input]).unwrap());
+    // The executor's pane build over the `latency_ms` provider bound at
+    // the `Scan`; its `TimeRange` keeps the pane's window.
+    let compiled = compile(&plan.dag.dag, &BTreeSet::new(), &[output.node_id as u64]).unwrap();
+    let mut tables = DataSources::default();
+    tables
+        .register(
+            Source::TimeSeries {
+                metric: "latency_ms".into(),
+            },
+            Arc::new(MemorySource::new(schema, vec![input]).unwrap()),
+        )
+        .unwrap();
     // The build, ready to run in the pane's ingestion window.
     let data_sources = BindingDataSources {
-        views: BTreeMap::from([(window, source)]),
+        tables,
         ..Default::default()
     };
     let build = compiled.instantiate(&data_sources).unwrap();

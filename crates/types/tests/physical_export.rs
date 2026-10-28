@@ -514,6 +514,123 @@ fn a_raw_data_sample_window_ends_its_offset_before_the_evaluation() {
     assert_eq!(window.reach_ms(), 900_000);
 }
 
+/// `TimeRange(Range, width_ms)` over `shift` (if any) over `scan`, untimed.
+fn window_over(
+    scan: &Rc<OperatorNode>,
+    width_ms: u64,
+    shift: Option<asap_types::ir::operator::TimeShift>,
+) -> Rc<OperatorNode> {
+    let child = match shift {
+        Some(shift) => OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
+            shift,
+            child: Rc::clone(scan),
+        }))
+        .unwrap(),
+        None => Rc::clone(scan),
+    };
+    OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+        range: std::time::Duration::from_millis(width_ms),
+        kind: asap_types::ir::TimeRangeKind::Range,
+        child,
+    }))
+    .unwrap()
+}
+
+/// The exported DAG of `roots`, all at query time, and its one `Scan`'s id.
+fn exported_with_scan(
+    roots: Vec<Rc<OperatorNode>>,
+) -> (
+    asap_types::ir::physical_export::PhysicalASAPDAG,
+    asap_types::ir::physical_export::PhysicalASAPNodeId,
+) {
+    // One timing memo, so the roots keep sharing their `Scan`.
+    let mut memo = TimingMemo::new();
+    let timed: Vec<_> = roots
+        .into_iter()
+        .map(|root| {
+            apply_materialization_timings(&root, &MaterializationAssignment::default(), &mut memo)
+                .unwrap()
+        })
+        .map(QueryRoot::Operator)
+        .collect();
+    let dag = compile_physical_asap_workload(&timed).unwrap();
+    let scans: Vec<_> = dag
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.payload, Operator::NonASAP(NonASAPOp::Scan { .. })))
+        .map(|node| node.id)
+        .collect();
+    assert_eq!(scans.len(), 1, "one shared Scan");
+    (dag, scans[0])
+}
+
+/// A time-series `Scan` of `m` with a time index.
+fn series_scan() -> Rc<OperatorNode> {
+    OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::TimeSeries { metric: "m".into() },
+        predicates: vec![],
+        schema: Schema::with_time_index(
+            vec![
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("value", DataType::Float64, false),
+            ],
+            0,
+            vec![],
+        ),
+    }))
+    .unwrap()
+}
+
+// A `Scan` read by `m[5m]` and by `m[1h] offset 10m` is read over `(T - 70m,
+// T]`, the union of `(T - 5m, T]` and `(T - 70m, T - 10m]`.
+#[test]
+fn a_scan_window_is_the_union_of_its_readers_windows() {
+    use asap_types::ir::physical_export::ScanWindow;
+    let minute_ms = 60_000;
+    let scan = series_scan();
+    let offset = asap_types::ir::operator::TimeShift {
+        offset_ms: 10 * minute_ms as i64,
+        at: None,
+    };
+    let (dag, scan_id) = exported_with_scan(vec![
+        window_over(&scan, 5 * minute_ms, None),
+        window_over(&scan, 60 * minute_ms, Some(offset)),
+    ]);
+    let window = dag.scan_window(scan_id, &Default::default());
+    assert_eq!(
+        window,
+        ScanWindow::Within {
+            end_offset_ms: 0,
+            width_ms: 70 * minute_ms as i64,
+        }
+    );
+    assert_eq!(window.lookback_ms(), Some(70 * minute_ms));
+    assert_eq!(
+        window.bounds_ms(100 * minute_ms as i64),
+        Some((30 * 60_000, 100 * 60_000))
+    );
+}
+
+// A window under an `@` anchor is not a fixed span back from the evaluation
+// time, so the `Scan` it reads is read over an unbounded window.
+#[test]
+fn a_scan_read_under_an_at_anchor_has_an_unbounded_window() {
+    use asap_types::ir::physical_export::ScanWindow;
+    let scan = series_scan();
+    let anchored = asap_types::ir::operator::TimeShift {
+        offset_ms: 0,
+        at: Some(asap_types::ir::operator::AtModifier::Timestamp(1_000)),
+    };
+    let (dag, scan_id) = exported_with_scan(vec![
+        window_over(&scan, 300_000, None),
+        window_over(&scan, 300_000, Some(anchored)),
+    ]);
+    assert_eq!(
+        dag.scan_window(scan_id, &Default::default()),
+        ScanWindow::Unbounded
+    );
+}
+
 /// High-fan-in merge/concat validation is independent of wire edge order and
 /// preserves repeated input occurrences, rather than treating edges as a set.
 #[test]

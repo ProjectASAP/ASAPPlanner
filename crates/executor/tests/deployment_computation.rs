@@ -175,7 +175,7 @@ fn execute_relabeled(
         })
         .collect();
     let data_sources = BindingDataSources {
-        views: sources,
+        materialized_views: sources,
         ..Default::default()
     };
     let physical_dag = program
@@ -827,7 +827,7 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
         .collect();
     let batch = Batch::try_new(schema.clone(), vec![row]).unwrap();
     let data_sources = BindingDataSources {
-        views: BTreeMap::from([(
+        materialized_views: BTreeMap::from([(
             state.id as u64,
             Arc::new(MemorySource::new(schema, vec![batch]).unwrap()) as Arc<dyn TableProvider>,
         )]),

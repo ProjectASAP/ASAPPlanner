@@ -224,7 +224,7 @@ fn try_run(
     operators.insert(300, (vec![merged], read));
     let compiled = CompiledPhysicalDAG::from_operators(contracts, operators, vec![300]).unwrap();
     let data_sources = BindingDataSources {
-        views: sources,
+        materialized_views: sources,
         ..Default::default()
     };
     let dag = compiled.instantiate(&data_sources).unwrap();

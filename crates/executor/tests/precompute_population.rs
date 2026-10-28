@@ -215,7 +215,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                     as Arc<dyn TableProvider>,
             )]);
             let data_sources = BindingDataSources {
-                views: sources,
+                materialized_views: sources,
                 ..Default::default()
             };
             let physical_dag = program.instantiate(&data_sources).unwrap();
@@ -382,7 +382,7 @@ fn native_run(
         .collect();
     let input = Batch::try_new(precompute::population_schema(family), rows)?;
     let data_sources = BindingDataSources {
-        views: BTreeMap::from([(
+        materialized_views: BTreeMap::from([(
             0,
             Arc::new(MemorySource::new(input.schema().clone(), vec![input])?)
                 as Arc<dyn TableProvider>,

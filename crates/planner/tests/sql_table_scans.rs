@@ -4,8 +4,8 @@
 //! `now()` is the evaluation time, `COUNT(DISTINCT)` over an `Int64` id
 //! column answers with the type the Planner gives it, from a distinct-count
 //! sketch or exactly. A plan that keeps panes at ingestion time runs as a
-//! runtime runs it: each pane built in an ingestion run from the table rows
-//! of its window (`TableRowSelector`), the queries answered from the panes.
+//! runtime runs it: each pane built in an ingestion run over its window from
+//! the table bound at the plan's `Scan`, the queries answered from the panes.
 #![cfg(feature = "sql")]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,7 +15,6 @@ use asap_executor::physical_planner::compile;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::sources::{BindingDataSources, DataSources, MemorySource, TableProvider};
 use asap_executor::values::{Batch, Value};
-use asap_executor::TableRowSelector;
 use asap_planner::{
     plan_installable, DeploymentCapabilities, FrontendInput, InstallablePlan, PlanningModels,
     PlanningWorkload, SqlCatalog, StoredOutputBuild, UserInput,
@@ -410,10 +409,12 @@ async fn row_counts_over_5_and_15_minute_windows_read_each_row_once() {
 }
 
 /// Runs `ids` of `dag` in `scope` with each of `inputs` bound to the node
-/// its key names: the batches of each id's output.
+/// its key names and `table` bound as `http`: the batches of each id's
+/// output.
 fn run_bound(
     dag: &asap_types::ir::physical_export::PhysicalASAPDAG,
     inputs: BTreeMap<u64, Batch>,
+    table: &Batch,
     ids: &[u64],
     scope: Scope,
 ) -> Vec<Vec<Batch>> {
@@ -429,9 +430,18 @@ fn run_bound(
             (id, Arc::new(source) as Arc<dyn TableProvider>)
         })
         .collect();
+    let mut tables = DataSources::default();
+    tables
+        .register(
+            Source::Table {
+                table_ref: "http".into(),
+            },
+            Arc::new(MemorySource::new(table.schema().clone(), vec![table.clone()]).unwrap()),
+        )
+        .unwrap();
     let data_sources = BindingDataSources {
-        views: sources,
-        ..Default::default()
+        tables,
+        materialized_views: sources,
     };
     let instance = compiled.instantiate(&data_sources).unwrap();
     block_on(async {
@@ -450,10 +460,10 @@ fn run_bound(
 
 /// The data plane of `plan` at [`EVALUATION_MS`] over the table rows
 /// [`rows`], as a runtime runs it: every stored output built once, in the
-/// plan's order, from the table rows of its windows ([`TableRowSelector`])
-/// and its stored inputs, in an ingestion run over its data's span (or the
-/// query run, for one built there); then every query answered from the
-/// stored outputs it reaches. The answer rows of each query.
+/// plan's order, from the table bound at its `Scan`s and its stored
+/// inputs, in an ingestion run over its data's span (or the query run, for
+/// one built there); then every query answered from the stored outputs it
+/// reaches. The answer rows of each query.
 fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
     let dag = &plan.dag.dag;
     // The table's rows in the schema the plan's scans read.
@@ -468,12 +478,6 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
         })
         .expect("the plan scans the table");
     let table = Batch::try_new(schema, rows()).unwrap();
-    // Each window's input rows at its end.
-    let window_rows = |window: &asap_planner::RawDataSampleWindow, end_ms: i64| {
-        let selector = TableRowSelector::new(dag, window).unwrap();
-        assert_eq!(selector.table(), "http");
-        selector.window_batch(end_ms, &table).unwrap()
-    };
     // Each stored output's state, by node id, with its data's span.
     let mut built: BTreeMap<u64, (Batch, (i64, i64))> = BTreeMap::new();
     for output in &plan.stored_outputs {
@@ -492,13 +496,6 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
             .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
             .expect("a stored output reads something");
         let mut sources = BTreeMap::new();
-        for window in &output.inputs.raw_data_sample_windows {
-            let (_, end_ms) = window.bounds_ms(EVALUATION_MS);
-            sources.insert(
-                window.time_range_node_id as u64,
-                window_rows(window, end_ms),
-            );
-        }
         for id in &output.inputs.stored_outputs {
             sources.insert(*id as u64, built[&(*id as u64)].0.clone());
         }
@@ -513,7 +510,7 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
                 revision: 1,
             },
         };
-        let batches = run_bound(dag, sources, &[output.node_id as u64], scope).remove(0);
+        let batches = run_bound(dag, sources, &table, &[output.node_id as u64], scope).remove(0);
         let state_rows = batches.iter().flat_map(|b| b.to_rows()).collect();
         let state = Batch::try_new(batches[0].schema().clone(), state_rows).unwrap();
         built.insert(output.node_id as u64, (state, span));
@@ -540,18 +537,11 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
             ),
         }
     }
-    for window in &plan.query_time_raw_windows {
-        let (_, end_ms) = window.bounds_ms(EVALUATION_MS);
-        inputs.insert(
-            window.time_range_node_id as u64,
-            window_rows(window, end_ms),
-        );
-    }
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
         revision: 1,
     };
-    run_bound(dag, inputs, &roots, query)
+    run_bound(dag, inputs, &table, &roots, query)
         .iter()
         .map(|batches| batches.iter().flat_map(|b| b.to_rows()).collect())
         .collect()

@@ -5,13 +5,17 @@
 //! The runtime writes the returned [`InstallablePlan`] as its plan file and
 //! executes its DAG with the executor, as given (#509 Assumption 8). It
 //! needs three things from it: the DAG to install (`dag`), the summaries to
-//! store (`stored_outputs`), and where raw data samples go (each stored output's
-//! `inputs.raw_data_sample_windows` and `query_time_raw_windows`, fed with
-//! `asap_executor::RawDataSampleSelector` for a time-series `Scan` or
-//! `asap_executor::TableRowSelector` for a SQL table `Scan`). How the Planner represents the
-//! plan internally (e.g. a tumbling-pane chain, which the stage export keeps
-//! for costing and display) is not the runtime's concern: the installable
-//! DAG has every chain expanded into the panes the executor runs.
+//! store (`stored_outputs`), and which raw data it reads, and how far back
+//! (each stored output's `inputs.raw_data_sample_windows` and
+//! `query_time_raw_windows`). Raw data is bound only at the DAG's `Scan`s,
+//! by their `Source`: the runtime implements one
+//! `asap_executor::sources::TableProvider` per time series (a table `(ts,
+//! value, *labels)` over the samples it buffers) or SQL table, and the
+//! DAG's own `TimeRange`s apply each window, an instant selector's lookback
+//! and Prometheus stale markers. How the Planner represents the plan
+//! internally (e.g. a tumbling-pane chain, which the stage export keeps for
+//! costing and display) is not the runtime's concern: the installable DAG
+//! has every chain expanded into the panes the executor runs.
 //!
 //! ## Building a stored output
 //!
@@ -21,15 +25,20 @@
 //! (sealed) and each stored input is built. It compiles the DAG with the
 //! executor for that output's node, with each input bound in
 //! `asap_executor::sources::BindingDataSources`: a stored input at its own
-//! node id in `views` (a `TableProvider` over its stored state), and a
-//! raw-data-sample window at its `time_range_node_id` in `views` too, with a
-//! provider over the rows `RawDataSampleSelector::window_batch` or
-//! `TableRowSelector::window_batch` returns. Binding raw windows at the
-//! `TimeRange` is transitional (removed by #969, which binds raw data only
-//! at a `Scan`, by its `Source` in `tables`). It runs the build in an ingestion run
+//! node id in `materialized_views` (a `TableProvider` over its stored state), and raw
+//! data by `Source` in `tables`. It runs the build in an ingestion run
 //! (`StoredOutputBuild::IngestionRun`) or in the query run of the
 //! evaluation that first needs it (`StoredOutputBuild::QueryRun`), stores
 //! the result, and binds it the same way wherever the DAG reads that node.
+//! An ingestion run over `(window_start_ms, window_end_ms]` builds the
+//! windows ending at `window_end_ms`: each `TimeRange(w)` keeps
+//! `(window_end_ms - w, window_end_ms]`, whatever the shifts below it, so
+//! a runtime builds a window `(start, end]` of `raw_data_sample_windows`
+//! (`RawDataSampleWindow::bounds_ms` at the evaluation it is built for) in
+//! the run over `(start, end]`. An output built in an ingestion run
+//! therefore reads windows that all end at one offset before the
+//! evaluation; a plan with one that does not is refused
+//! ([`InstallablePlanError::IngestionBuildReadsWindowsOfDifferentOffsets`]).
 //! A query run binds the stored outputs it reaches from the queries' roots
 //! without passing another stored output; an output only other stored
 //! outputs read is read through them.
@@ -88,8 +97,8 @@ pub struct InstallablePlan {
     /// the stored outputs it is built from), with its coverage and inputs.
     pub stored_outputs: Vec<StoredOutput>,
     /// Every window of raw data samples read at query time other than one a
-    /// stored output's build reads, in node order: the runtime feeds each
-    /// its samples when a query evaluates.
+    /// stored output's build reads, in node order: the raw data a query
+    /// run reads through the `Scan`s it binds.
     pub query_time_raw_windows: Vec<RawDataSampleWindow>,
     /// Stage 3's record of the selected plan, for reporting only; `None` for
     /// [`InstallablePlan::query_time_reference`] and for a pass
@@ -184,7 +193,7 @@ pub enum StoredOutputBuild {
     /// output for a selection it has not been built for yet, the runtime
     /// runs the node in a query run over its inputs, keeps the result, and
     /// binds it like an output built at ingestion. Its raw-data-sample windows
-    /// are fed only through this build, so they are not listed in
+    /// are read only through this build, so they are not listed in
     /// `query_time_raw_windows`.
     QueryRun,
 }
@@ -347,6 +356,21 @@ pub enum InstallablePlanError {
         time_range_node_id: PhysicalASAPNodeId,
         reason: &'static str,
     },
+    /// Unsatisfiable request: stored output `node_id` is built in an
+    /// ingestion run but reads raw-data-sample windows that end at
+    /// different offsets before the evaluation (`end_offsets_ms`). An
+    /// ingestion run builds the windows ending at its `window_end_ms`
+    /// (each `TimeRange(w)` keeps `(window_end_ms - w, window_end_ms]`),
+    /// so no one run builds them all; a runtime cannot build this plan.
+    #[error(
+        "stored output {node_id} is built in an ingestion run from raw windows ending at \
+         different offsets {end_offsets_ms:?} ms before the evaluation, which no one \
+         ingestion run builds"
+    )]
+    IngestionBuildReadsWindowsOfDifferentOffsets {
+        node_id: PhysicalASAPNodeId,
+        end_offsets_ms: Vec<i64>,
+    },
 }
 
 impl From<ReferencePlanError> for InstallablePlanError {
@@ -466,6 +490,9 @@ impl ExecutorCompileCheck for PlannerExecutorCompileCheck {
             // selection accept a plan that final installation must reject.
             Err(
                 error @ (InstallablePlanError::UnsupportedRawDataSampleWindow { .. }
+                | InstallablePlanError::IngestionBuildReadsWindowsOfDifferentOffsets {
+                    ..
+                }
                 | InstallablePlanError::StoredOutputReadsUnwindowedSource { .. }
                 | InstallablePlanError::StoredOutputWithoutCoverage { .. }),
             ) => {
@@ -506,11 +533,12 @@ fn check_installation_deadline(deadline: Option<Instant>) -> Result<(), Installa
 
 impl InstallablePlan {
     /// Whether the Planner's executor compiles this plan as a runtime runs
-    /// it: each stored output's build over its raw-data-sample windows and stored
-    /// inputs, then the query run over the stored outputs it reads, the
-    /// query-time raw-data-sample windows and the table `Scan`s it reads
-    /// outside them (bound to the runtime's data sources). `Err` holds the
-    /// executor's error.
+    /// it: each stored output's build over its stored inputs and the
+    /// `Scan`s it reads (bound to the runtime's data sources), then the
+    /// query run over the stored outputs it reads and the `Scan`s it reads
+    /// outside them. The DAG's own `TimeRange`s are compiled, so a window
+    /// the executor cannot run fails here. `Err` holds the executor's
+    /// error.
     pub fn check_compiles(&self) -> Result<(), String> {
         self.check_compiles_before(None)
             .map_err(|error| error.to_string())
@@ -534,12 +562,12 @@ impl InstallablePlan {
         // of the whole plan once; every other over the nodes below it.
         for (position, output) in self.stored_outputs.iter().enumerate() {
             check_compile_deadline(deadline)?;
+            // Raw data is bound at each `Scan`, a table slot `compile` makes.
             let inputs = output
                 .inputs
-                .raw_data_sample_windows
+                .stored_outputs
                 .iter()
-                .map(|window| window.time_range_node_id)
-                .chain(output.inputs.stored_outputs.iter().copied())
+                .copied()
                 .map(boundary)
                 .collect::<Result<BTreeSet<_>, _>>()?;
             let sub_dag;
@@ -556,15 +584,10 @@ impl InstallablePlan {
                 .map_err(|error| map_executor_compile_error(error, "stored output"))?;
         }
         // The query run reads the stored outputs it reaches from the roots
-        // without passing another, the query-time windows, and the table
-        // `Scan`s it reaches outside them, which the runtime binds to its
-        // data sources (a SQL table read whole or through a filter).
+        // without passing another, and the `Scan`s it reaches outside them,
+        // table slots the runtime binds to its data sources (a time
+        // series, or a SQL table read whole or through a window).
         let roots: Vec<PhysicalASAPNodeId> = self.queries.iter().map(|q| q.root_node_id).collect();
-        let windows: HashSet<PhysicalASAPNodeId> = self
-            .query_time_raw_windows
-            .iter()
-            .map(|window| window.time_range_node_id)
-            .collect();
         let mut read = Vec::new();
         let mut pending = roots.clone();
         let mut seen = HashSet::new();
@@ -573,18 +596,7 @@ impl InstallablePlan {
             if !seen.insert(id) {
                 continue;
             }
-            // A table `Scan` is bound to a data source; `compile` checks
-            // that its predicates compile over its schema.
-            if stored.contains(&id)
-                || windows.contains(&id)
-                || matches!(
-                    indexed.relational(id),
-                    Some(NonASAPOp::Scan {
-                        source: asap_types::ir::operator::Source::Table { .. },
-                        ..
-                    })
-                )
-            {
+            if stored.contains(&id) {
                 read.push(id);
             } else {
                 pending.extend(indexed.inputs.get(&id).into_iter().flatten().copied());
@@ -1116,6 +1128,23 @@ fn runtime_inputs_of_before(
         check_installation_deadline(deadline)?;
         let node = indexed.nodes[&id];
         let inputs = indexed.inputs_of_stored(id, &stored)?;
+        if matches!(node.materialization, Materialization::MatAtIngestion(_)) {
+            let mut end_offsets_ms: Vec<i64> = inputs
+                .raw_data_sample_windows
+                .iter()
+                .map(|window| window.end_offset_ms)
+                .collect();
+            end_offsets_ms.sort_unstable();
+            end_offsets_ms.dedup();
+            if end_offsets_ms.len() > 1 {
+                return Err(
+                    InstallablePlanError::IngestionBuildReadsWindowsOfDifferentOffsets {
+                        node_id: id,
+                        end_offsets_ms,
+                    },
+                );
+            }
+        }
         let coverage = coverage_of(id, &inputs, &ir, &coverage_by_node).map_err(|error| {
             InstallablePlanError::StoredOutputWithoutCoverage {
                 node_id: id,
@@ -1288,13 +1317,8 @@ fn executor_builds(
     };
     #[cfg(test)]
     tests::COMPILED_NODES.with(|count| count.set(count.get() + below.nodes.len()));
-    let bound = inputs
-        .raw_data_sample_windows
-        .iter()
-        .map(|window| window.time_range_node_id)
-        .chain(inputs.stored_outputs.iter().copied())
-        .map(|id| id as u64)
-        .collect();
+    // Raw data is bound at each `Scan`, a table slot `compile` makes.
+    let bound = inputs.stored_outputs.iter().map(|&id| id as u64).collect();
     compile_before(below, &bound, &[node as u64], deadline)
         .map(|_| ())
         .map_err(|error| match error {
@@ -1752,6 +1776,84 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(300_000, 0)]
         );
+    }
+
+    // A summary stored at ingestion time over a window ending at the
+    // evaluation and one ending a minute before it cannot be built in one
+    // ingestion run, so the plan is refused, not built wrong.
+    #[test]
+    fn an_ingestion_build_of_windows_at_different_offsets_is_refused() {
+        use asap_types::ir::operator::operator_properties::TimeShift;
+        use asap_types::ir::operator::{Reduction, Source};
+        use asap_types::ir::physical_export::compile_physical_asap_dag;
+        use asap_types::ir::scalar::ColumnRef;
+        use asap_types::ir::schema::{
+            DataType, ExactKind, ExactParams, Field, FieldDataType, Schema, SummaryUpdate,
+        };
+        use asap_types::ir::{
+            apply_materialization_timings, OperatorNode, TimeRangeKind, TimingMemo,
+        };
+        use asap_types::physical::Medium;
+        use std::time::Duration;
+        let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::TimeSeries {
+                metric: "latency_ms".into(),
+            },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                ],
+                0,
+                vec![],
+            ),
+        }))
+        .unwrap();
+        // A one-minute window ending `offset_ms` before the evaluation.
+        let window = |offset_ms: i64| {
+            let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
+                shift: TimeShift {
+                    offset_ms,
+                    at: None,
+                },
+                child: Rc::clone(&scan),
+            }))
+            .unwrap();
+            OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+                range: Duration::from_secs(60),
+                kind: TimeRangeKind::Range,
+                child: shifted,
+            }))
+            .unwrap()
+        };
+        // One sum over both windows' rows.
+        let both = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Concat {
+            children: vec![window(0), window(60_000)],
+            discriminator_unique_key: None,
+        }))
+        .unwrap();
+        let merged = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+            child: both,
+            family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            input: SummaryUpdate::column(ColumnRef::Named("value".into())),
+            reduction: Reduction::by(vec![]),
+            grouping: Default::default(),
+            filter: None,
+        }))
+        .unwrap();
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&merged, Materialization::MatAtIngestion(Medium::Memory));
+        let timed =
+            apply_materialization_timings(&merged, &assignment, &mut TimingMemo::new()).unwrap();
+        let dag = compile_physical_asap_dag(&timed).unwrap();
+        match runtime_inputs_of(&dag, &HashMap::new(), &HashMap::new()) {
+            Err(InstallablePlanError::IngestionBuildReadsWindowsOfDifferentOffsets {
+                end_offsets_ms,
+                ..
+            }) => assert_eq!(end_offsets_ms, [0, 60_000]),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// Unrestricted summaries become the executor's families; a caller's

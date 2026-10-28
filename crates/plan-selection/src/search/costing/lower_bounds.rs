@@ -350,7 +350,7 @@ impl ConcreteRows {
                     node,
                     &views,
                     (1, 1.0),
-                    None,
+                    asap_types::ir::physical_export::ScanWindow::Unbounded,
                     1,
                     None,
                     context.data,
@@ -565,7 +565,7 @@ fn certified_price<'a>(
                     query_rate_floor
                 },
             ),
-            None,
+            asap_types::ir::physical_export::ScanWindow::Unbounded,
             retained,
             maintained_window,
             context.data,

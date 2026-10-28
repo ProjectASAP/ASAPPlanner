@@ -25,7 +25,7 @@ pub fn execute(
         })
         .collect();
     let data_sources = BindingDataSources {
-        views: sources,
+        materialized_views: sources,
         ..Default::default()
     };
     let dag = plan.instantiate(&data_sources).unwrap();

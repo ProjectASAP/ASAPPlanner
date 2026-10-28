@@ -33,6 +33,7 @@ mod series_window;
 mod sort;
 mod source;
 mod summary;
+mod time_range;
 mod unchecked;
 pub(crate) mod vector_binary;
 pub(crate) mod vector_window;
@@ -114,6 +115,16 @@ enum Kind {
     },
     Project(Vec<Expression>),
     Filter(Expression),
+    /// A `TimeRange` over a `Scan` ([`Operator::time_range`]).
+    TimeRange {
+        time: usize,
+        end_offset_ms: i64,
+        width_ms: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sample_value: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        latest_per_series: Option<Vec<usize>>,
+    },
     Limit {
         n: u64,
         offset: u64,
@@ -339,6 +350,10 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
                 | Kind::SummaryMerge { .. }
                 | Kind::VectorToScalar { .. }
                 | Kind::Absent { .. }
+                | Kind::TimeRange {
+                    latest_per_series: Some(_),
+                    ..
+                }
         )
     }
     fn properties(&self, inputs: &[PlanProperties]) -> PlanProperties {
@@ -382,6 +397,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             Kind::SeriesHistogramQuantile { .. } => "SeriesHistogramQuantile",
             Kind::Project(_) => "Project",
             Kind::Filter(_) => "Filter",
+            Kind::TimeRange { .. } => "TimeRange",
             Kind::Limit { .. } => "Limit",
             Kind::Sort { .. } => "Sort",
             Kind::Aggregate { .. } => "Aggregate",
@@ -444,6 +460,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             | Kind::SeriesHistogramQuantile { .. }
             | Kind::SeriesRelabel { .. } => series_labels::execute(self, inputs, context),
             Kind::Filter(_) => filter::execute(self, inputs, context),
+            Kind::TimeRange { .. } => time_range::execute(self, inputs, context),
             Kind::Limit { .. } => limit::execute(self, inputs, context),
             Kind::Sort { .. } => sort::execute(self, inputs, context),
             Kind::Window { .. } | Kind::Aggregate { .. } => {
