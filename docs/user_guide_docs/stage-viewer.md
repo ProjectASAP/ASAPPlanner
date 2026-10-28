@@ -180,9 +180,10 @@ was accepted in, e.g. `q1: metric not set; accepted rank (Kll)`.
 Each label names the choice per query, for example `Q1 exact (Sum acc, Rate
 acc) · Q2 CMS+heap`, what Pass 2 shares or splits into panes, for example
 `shared Scan (Q1, Q2)` or `Kll for Q1 in 5 × 1m panes`, and, for physical
-plans, what is materialized: `ingestion time: Kll ×5 panes` for state
-maintained as data arrives, `query time, shared: Count acc` for a node built
-once per evaluation and read by several queries.
+plans, what is materialized: `ingestion time: Kll for Q1, 5 × 1m panes` for
+a pane chain maintained as data arrives (its state, readers and panes),
+`query time, shared: Count acc` for a node built once per evaluation and read
+by several queries.
 
 Click a plan to show it in the three lanes. For workloads with many plans,
 the document may carry only the first ones in enumeration order, plus the

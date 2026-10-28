@@ -145,5 +145,19 @@
     "search": "candidate-connections",
     "file": "examples/memo-rollupheavy-t11-service-endpoint-5m.json",
     "story": "Sketch rollup: W-RollupHeavy template 11, distinct users over 5 min by (service, endpoint) and by (service); the coarser grouping merges the finer one's KMV states, sized for both."
+  },
+  {
+    "id": "memo-ratio-of-quantiles",
+    "name": "Ratio of quantiles (memo after each step)",
+    "workload": "memo-examples/promql/ratio-of-quantiles-5m.json",
+    "deployment_capabilities": {
+      "raw_data_retained": true,
+      "query_time_results_retained": false
+    },
+    "cost_model": "aws-fargate-us-east-1",
+    "accuracy_guarantees": "enforced",
+    "search": "candidate-connections",
+    "file": "examples/memo-ratio-of-quantiles.json",
+    "story": "The memo through the stages: avg by (job) (quantile_over_time(0.5, data[5m]) / quantile_over_time(0.5, data[5m]) + quantile_over_time(0.9, data[5m])) every minute, within ε = 0.01, δ = 0.001. The two equal quantiles share one group (each series' identity is a unique key); Pass 1 offers 7 candidates for each quantile group (49 candidate DAGs), Pass 2 adds pane candidates, and concrete state groups add one group per pane chain. The document's memo section lists each step's groups and candidates, the selected plan's choice and the enumerated candidate DAGs."
   }
 ]

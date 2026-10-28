@@ -1,6 +1,8 @@
 //! Driver integration for the explicit, bounded candidate-connection search.
 use crate::{CostModel, PlanningModels, SelectionError, Stage1ToStage3Search};
-use asap_logical_asap_optimization::memo::LogicalMemo;
+use asap_logical_asap_optimization::memo::candidates::CandidateMemo;
+use asap_logical_asap_optimization::memo::enumeration::MemoChoice;
+use asap_logical_asap_optimization::memo::{LogicalMemo, MemoGroupId};
 use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
@@ -19,6 +21,8 @@ pub(crate) struct CandidateArchive {
     pub logical: Vec<crate::search::pipeline::LogicalCandidate>,
     pub physical: Vec<asap_physical_asap_optimization::PhysicalWorkloadPlan>,
     pub pruned: Vec<crate::search::pipeline::PrunedCandidate>,
+    /// The memo steps of the round whose plan was selected, else the last round's.
+    pub memo_steps: Option<crate::search::pipeline::MemoSteps>,
 }
 
 // The driver reports price search and lexicographic/Pareto search uniformly,
@@ -52,6 +56,13 @@ struct DomainProgress {
     refinements: usize,
     report: Option<crate::CandidateConnectionReport>,
     local_memo: Option<asap_logical_asap_optimization::memo::candidates::CandidateMemo>,
+    /// The memo after Stage 0 and after Pass 1, kept with `local_memo`.
+    pass1_steps: Option<(
+        asap_logical_asap_optimization::memo::candidates::CandidateMemo,
+        asap_logical_asap_optimization::memo::candidates::CandidateMemo,
+    )>,
+    /// This round's memo steps, with its selected plan's ID when it has one.
+    memo_steps: Option<(Option<String>, crate::search::pipeline::MemoSteps)>,
     previous_domain:
         Option<asap_logical_asap_optimization::memo::state_configurations::PaneWidthDomain>,
 }
@@ -102,16 +113,29 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         && total_ms as f64 - prior_ms >= 1_000.0
         && search.max_evaluations.unwrap_or(128) >= 4;
     if !seed_enabled {
-        return search_domain(
+        let mut progress = DomainProgress::default();
+        let result = search_domain(
             initial,
             context,
             search,
             local_candidate_generation_ms,
             archive,
             PaneWidthDomain::Complete,
-            &mut DomainProgress::default(),
+            &mut progress,
         );
+        archive.memo_steps = progress.memo_steps.map(|(_, steps)| steps);
+        return result;
     }
+    // Each round's memo steps, with its selected plan's namespaced ID; the
+    // archive keeps the last round's for a search that ends without a plan.
+    let mut memo_rounds = Vec::new();
+    let mut record_round =
+        |archive: &mut CandidateArchive, progress: &mut DomainProgress, namespace: &str| {
+            if let Some((plan, steps)) = progress.memo_steps.take() {
+                archive.memo_steps = Some(steps.clone());
+                memo_rounds.push((plan.map(|id| format!("{namespace}{id}")), steps));
+            }
+        };
     let seed_ms = (((total_ms as f64 - prior_ms) / 4.0) as u64).min(5_000);
     let mut seed_progress = DomainProgress::default();
     let mut seed_archive = CandidateArchive::default();
@@ -129,6 +153,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         &mut seed_progress,
     )
     .map(|plan| namespace_round(plan, "seed-"));
+    record_round(archive, &mut seed_progress, "seed-");
     let seed_elapsed = started.elapsed();
     if seed.is_err() && !seed_progress.budget_stopped && !seed_progress.infeasible {
         return seed;
@@ -137,6 +162,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
     let full_started = Instant::now();
     let mut full_progress = DomainProgress {
         local_memo: seed_progress.local_memo.take(),
+        pass1_steps: seed_progress.pass1_steps.take(),
         previous_domain: seed_progress.previous_domain,
         ..Default::default()
     };
@@ -199,6 +225,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         let complete = domain == PaneWidthDomain::Complete;
         let mut round_progress = DomainProgress {
             local_memo: full_progress.local_memo.take(),
+            pass1_steps: full_progress.pass1_steps.take(),
             previous_domain: full_progress.previous_domain,
             ..Default::default()
         };
@@ -224,7 +251,13 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
             &mut round_progress,
         )
         .map(|plan| namespace_round(plan, &format!("pane-round-{}-", rounds.len() - 1)));
+        record_round(
+            archive,
+            &mut round_progress,
+            &format!("pane-round-{}-", rounds.len() - 1),
+        );
         full_progress.local_memo = round_progress.local_memo.take();
+        full_progress.pass1_steps = round_progress.pass1_steps.take();
         full_progress.previous_domain = round_progress.previous_domain;
         full_progress.refinements += round_progress.refinements;
         completed_full_domain = complete && round_progress.catalog_completed;
@@ -412,6 +445,20 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
     }
     result.0.search.candidates_checked =
         (seed_progress.refinements + full_progress.refinements) as u64;
+    // A record only: a plan whose round recorded no memo keeps the last one,
+    // marked as not the selected plan's.
+    match memo_rounds
+        .into_iter()
+        .find(|(plan, _)| plan.as_ref() == Some(&result.1.id))
+    {
+        Some((_, steps)) => archive.memo_steps = Some(steps),
+        None => {
+            if let Some(steps) = &mut archive.memo_steps {
+                steps.selected_choice =
+                    Err("the selected plan's planning round is not recorded".into());
+            }
+        }
+    }
     Ok(result)
 }
 
@@ -818,6 +865,10 @@ fn search_domain<Id: Clone>(
     let mut memo = match progress.local_memo.take() {
         Some(memo) => memo,
         None => {
+            let stage0 = CandidateMemo {
+                candidates: vec![Vec::new(); initial.groups.len()],
+                groups: initial.groups.clone(),
+            };
             let mut memo = try_populate_pass1(
                 initial,
                 &pruned.as_ref().expect("first round pruned").inventory,
@@ -830,6 +881,7 @@ fn search_domain<Id: Clone>(
                 Instant::now().checked_add(remaining()),
             )
             .map_err(|error| unsupported(&error))?;
+            progress.pass1_steps = Some((stage0, memo.clone()));
             memo
         }
     };
@@ -858,16 +910,31 @@ fn search_domain<Id: Clone>(
             unsupported(&error.to_string())
         })?
         .memo;
+    progress.memo_steps = progress.pass1_steps.as_ref().map(|(stage0, pass1)| {
+        (
+            None,
+            crate::search::pipeline::MemoSteps {
+                stage0: stage0.clone(),
+                pass1: pass1.clone(),
+                pass2: progress.local_memo.clone().expect("kept above"),
+                concrete_states: memo.clone(),
+                selected_choice: Err("no plan was selected".into()),
+            },
+        )
+    });
     let memo_expansion_ms = started.elapsed().as_secs_f64() * 1000.0;
     check_budget("memo rule expansion", progress)?;
     let groups = memo.groups.len();
     let logical_candidates = memo.candidates.iter().map(Vec::len).sum();
     let started = Instant::now();
-    let source = build_candidate_inventory_before(&memo, &output_groups, |_| Ok(0.0), deadline)
-        .map_err(|error| {
-            progress.budget_stopped = matches!(error, CandidateInventoryError::DeadlineExceeded(_));
-            unsupported(&error.to_string())
-        })?;
+    let (source, memo_candidate_roots) =
+        build_candidate_inventory_before(&memo, &output_groups, |_| Ok(0.0), deadline).map_err(
+            |error| {
+                progress.budget_stopped =
+                    matches!(error, CandidateInventoryError::DeadlineExceeded(_));
+                unsupported(&error.to_string())
+            },
+        )?;
     let immediate_candidates = source.graph.candidates.len();
 
     let mut configured = enumerate_candidate_configurations_before(
@@ -1106,9 +1173,101 @@ fn search_domain<Id: Clone>(
         .ok_or_else(|| unsupported("validated plan has no selected graph"))?;
     let logical = selected_logical_roots(&configured, selected, &roots)
         .map_err(|error| unsupported(&error))?;
+    if let Some((plan, steps)) = &mut progress.memo_steps {
+        *plan = Some(physical.id.clone());
+        steps.selected_choice = selected_memo_choice(
+            &steps.concrete_states,
+            &source,
+            &memo_candidate_roots,
+            &configured,
+            selected,
+        );
+    }
     selection.search.candidates_checked = result.refinements as u64;
     selection.search.candidate_connections = Some(report);
     Ok((selection, physical, logical))
+}
+
+/// The selected plan's memo candidate for each group it uses: the memo
+/// candidate whose root each selected candidate is. Factoring may give several
+/// memo candidates of a group one root (identical terminal readers of
+/// different inputs); the one reading the selected producers' groups is taken.
+fn selected_memo_choice(
+    memo: &CandidateMemo,
+    source: &crate::search::candidates::inventory::CandidateInventory,
+    memo_candidate_roots: &[Vec<crate::search::candidates::graph::PhysicalCandidateId>],
+    configured: &crate::search::candidates::configurations::CandidateConfigurationInventory,
+    selected: &crate::search::candidates::graph::SelectedCandidateGraph,
+) -> Result<MemoChoice, String> {
+    use std::collections::HashMap;
+    let mut memo_candidates_of = HashMap::<_, Vec<(MemoGroupId, usize)>>::new();
+    for (group, roots) in memo_candidate_roots.iter().enumerate() {
+        for (index, &root) in roots.iter().enumerate() {
+            memo_candidates_of
+                .entry(root)
+                .or_default()
+                .push((MemoGroupId(group as u32), index));
+        }
+    }
+    let source_of = |id: crate::search::candidates::graph::PhysicalCandidateId| {
+        configured.configurations[id.0].source_candidate
+    };
+    let mut producer_groups = HashMap::<_, Vec<MemoGroupId>>::new();
+    for connection in &selected.connections {
+        producer_groups
+            .entry(connection.consumer)
+            .or_default()
+            .push(source.graph.candidates[source_of(connection.producer).0].group);
+    }
+    let mut choice = MemoChoice::new();
+    for &id in &selected.selected_candidates {
+        let Some(options) = memo_candidates_of.get(&source_of(id)) else {
+            continue; // a candidate's private node
+        };
+        let reads = |&&(group, index): &&(MemoGroupId, usize)| {
+            producer_groups.get(&id).is_none_or(|read| {
+                read.iter().all(|&child| {
+                    child == group
+                        || memo.candidates[group.0 as usize][index]
+                            .children
+                            .contains(&child)
+                })
+            })
+        };
+        let &(group, index) = options.iter().find(reads).ok_or_else(|| {
+            format!(
+                "selected candidate {} reads groups none of its memo candidates read",
+                id.0
+            )
+        })?;
+        if let Some(previous) = choice.insert(group, index) {
+            if previous != index {
+                return Err(format!(
+                    "the selected plan implements group {} with two candidates, {previous} and {index}",
+                    group.0
+                ));
+            }
+        }
+    }
+    // Every group the chosen candidates need, from the query roots, is chosen.
+    let mut pending: Vec<_> = (0..memo.groups.len())
+        .filter(|&group| !memo.groups[group].roots_of.is_empty())
+        .map(|group| MemoGroupId(group as u32))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(group) = pending.pop() {
+        if !seen.insert(group) {
+            continue;
+        }
+        let index = choice.get(&group).ok_or_else(|| {
+            format!(
+                "the selected plan uses group {} but no candidate of it is selected",
+                group.0
+            )
+        })?;
+        pending.extend(&memo.candidates[group.0 as usize][*index].children);
+    }
+    Ok(choice)
 }
 
 fn selected_logical_roots(

@@ -7,7 +7,7 @@ use asap_logical_asap_optimization::per_computation_candidates::PerComputationCa
 pub use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_plan_selection::pass::{run_stage1_to_stage3_with, Stage1ToStage3Search};
-pub use asap_plan_selection::pass::{LogicalCandidate, PrunedCandidate};
+pub use asap_plan_selection::pass::{LogicalCandidate, MemoSteps, PrunedCandidate};
 use asap_plan_selection::PlanningModels;
 use asap_plan_selection::{Selection, SelectionError};
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
@@ -29,6 +29,8 @@ pub struct PlanningStagesRun {
     pub stage2_physical_asap_optimization: Vec<PhysicalWorkloadPlan>,
     pub stage2_pruned: Vec<PrunedCandidate>,
     pub stage3_plan_selection: Result<Selection, SelectionError>,
+    /// The memo after each step and the selected plan's choice over it.
+    pub memo_steps: Option<MemoSteps>,
 }
 
 /// Lower a PromQL workload, each series' identity as a column (the row
@@ -205,6 +207,7 @@ pub fn run_search_over(
         },
         stage2_pruned: run.stage2_pruned,
         stage3_plan_selection: run.stage3_plan_selection,
+        memo_steps: run.memo_steps,
     })
 }
 

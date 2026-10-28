@@ -1362,7 +1362,7 @@ fn workload_examples_preserve_data_and_valid_materialized_views() {
         .iter()
         .filter(|e| e.get("workload").is_some())
         .collect();
-    assert_eq!(workload_examples.len(), 9);
+    assert_eq!(workload_examples.len(), 10);
     // Each production search has a wall-clock budget. Bound fixture
     // concurrency so this acceptance test does not starve its own solvers.
     for batch in workload_examples.chunks(2) {
@@ -2204,5 +2204,174 @@ fn a_classic_histogram_quantile_gets_a_selected_plan() {
         ]);
         let selection = &document["stage3_plan_selection"];
         assert!(selection["selected"].is_string(), "{query}: {selection}");
+    }
+}
+
+/// The issue's example workload (#1003): one ratio of per-series quantiles,
+/// every minute, ε = 0.01, δ = 0.001.
+const MEMO_RATIO_OF_QUANTILES: &str =
+    "../../tools/dag-viewer/memo-examples/promql/ratio-of-quantiles-5m.json";
+
+/// The `memo` section: the memo after each step, the selected choice and
+/// the enumeration, on the issue's example.
+#[test]
+fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
+    let out = std::env::temp_dir().join(format!(
+        "stage_pipeline_{}_memo_ratio.json",
+        std::process::id()
+    ));
+    let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args(["--workload", MEMO_RATIO_OF_QUANTILES, "--out"])
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let document: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    std::fs::remove_file(out).unwrap();
+    let memo = &document["memo"];
+    let steps = memo["steps"].as_array().unwrap();
+    let names: Vec<_> = steps.iter().map(|s| s["step"].as_str().unwrap()).collect();
+    assert_eq!(names, ["stage0", "pass1", "pass2", "concrete_states"]);
+    let candidates = |step: &Value| -> u64 {
+        step["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["candidate_count"].as_u64().unwrap())
+            .sum()
+    };
+    // The PromQL frontend gives each series its identity as a column, so the
+    // two `quantile_over_time(0.5, data[5m])` have a unique key and share one
+    // group: 7 groups (scan, range, two quantile groups, ratio, sum, avg),
+    // 7 + 7 + 5 Pass 1 candidates, 7 × 7 candidate DAGs.
+    assert_eq!(steps[0]["groups"].as_array().unwrap().len(), 7);
+    assert_eq!(candidates(&steps[0]), 0);
+    assert_eq!(steps[1]["groups"].as_array().unwrap().len(), 7);
+    assert_eq!(candidates(&steps[1]), 19);
+    let per_step = &memo["enumeration"]["per_step"];
+    assert_eq!(
+        per_step["stage0"],
+        serde_json::json!({"count": 1, "complete": true})
+    );
+    assert_eq!(
+        per_step["pass1"],
+        serde_json::json!({"count": 49, "complete": true})
+    );
+    // The listed step is the last one enumerated completely within 200
+    // choices (Stage 0 has no candidates to choose), else the last step.
+    let listed = ["pass1", "pass2", "concrete_states"]
+        .into_iter()
+        .rfind(|step| {
+            per_step[step]["complete"] == true && per_step[step]["count"].as_u64().unwrap() <= 200
+        })
+        .unwrap_or("concrete_states");
+    assert_eq!(memo["enumeration"]["step"], listed);
+    if listed != "concrete_states" {
+        assert_eq!(
+            memo["enumeration"]["choices"].as_array().unwrap().len() as u64,
+            per_step[listed]["count"].as_u64().unwrap()
+        );
+    }
+    // Every group's DAG and every listed candidate's DAG is a valid FlatDag,
+    // and each boundary names one of the candidate's child groups.
+    for step in steps {
+        for group in step["groups"].as_array().unwrap() {
+            validated_dag(&group["dag"], 1);
+            for candidate in group["candidates"].as_array().unwrap() {
+                validated_dag(&candidate["dag"], 1);
+                let children = candidate["children"].as_array().unwrap();
+                for child in candidate["group_of_node"].as_object().unwrap().values() {
+                    assert!(children.contains(child));
+                }
+            }
+        }
+    }
+    // Every candidate of the selected choice exists in the last step.
+    let last = steps.last().unwrap()["groups"].as_array().unwrap();
+    let choice = memo["selected_choice"].as_object().unwrap();
+    assert!(!choice.is_empty());
+    for (group, index) in choice {
+        let group = &last[group.parse::<usize>().unwrap()];
+        assert!(index.as_u64().unwrap() < group["candidate_count"].as_u64().unwrap());
+    }
+    let enumeration = &memo["enumeration"];
+    let choices = enumeration["choices"].as_array().unwrap();
+    assert!(!choices.is_empty() && choices.len() <= 200);
+    for choice in choices {
+        validated_dag(&choice["dag"], 1);
+        // Pricing is off without `--price-enumerated`.
+        assert!(choice.get("valid").is_none());
+    }
+    assert_eq!(enumeration["priced"], Value::Null);
+    // `--no-memo` leaves the section out.
+    let out = std::env::temp_dir().join(format!(
+        "stage_pipeline_{}_no_memo_ratio.json",
+        std::process::id()
+    ));
+    let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args(["--workload", MEMO_RATIO_OF_QUANTILES, "--no-memo", "--out"])
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let document: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    std::fs::remove_file(out).unwrap();
+    assert!(document.get("memo").is_none());
+}
+
+/// Composing the selected choice over the last step's memo gives the
+/// selected plan's Stage 1 DAG, on the issue's example and #509 Example 1.
+/// Stage 1's DAG is rebuilt from the candidates' operator implementations
+/// (`implement_candidate_operators`: an exact top-k becomes
+/// `Project(Limit(Sort))`), so the composed query DAGs are compared after
+/// the same implementation.
+#[test]
+fn composed_selected_choice_is_the_selected_stage1_dag() {
+    use asap_devtools::planning_stages::run_default_search_over;
+    use asap_logical_asap_optimization::memo::enumeration::compose;
+    use asap_logical_asap_optimization::per_computation_candidates::recompose_guarantees;
+    use asap_types::ir::flat::flatten;
+    let ratio: PlanningWorkload =
+        serde_json::from_str(&std::fs::read_to_string(MEMO_RATIO_OF_QUANTILES).unwrap()).unwrap();
+    for workload in [ratio, example1()] {
+        let roots = lower_promql_roots(&workload).unwrap();
+        let entries: Vec<_> = workload.query_workload.entries().collect();
+        let data = workload.data_workload.clone().unwrap_or_default();
+        let run = run_default_search_over(
+            roots,
+            &entries,
+            &data,
+            asap_plan_selection::PlanningModels::builtin(),
+        )
+        .unwrap();
+        let steps = run.memo_steps.as_ref().unwrap();
+        let choice = steps.selected_choice.as_ref().unwrap();
+        let memo = &steps.concrete_states;
+        let composed = compose(memo, choice).unwrap();
+        let composed: Vec<_> = (0..entries.len())
+            .map(|query| {
+                let (_, node) = composed
+                    .iter()
+                    .find(|(group, _)| memo.groups[group.0 as usize].roots_of.contains(&query))
+                    .unwrap();
+                QueryRoot::Operator(
+                    asap_physical_asap_optimization::implement_candidate_operators(node, &[])
+                        .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        // As reconstruction does, over the implemented operators.
+        let composed = recompose_guarantees(&composed).unwrap();
+        let [selected] = &run.stage1_logical_asap_optimization[..] else {
+            panic!("the default search keeps the selected Stage 1 candidate")
+        };
+        let selected = selected.roots.as_ref().unwrap();
+        assert_eq!(composed.len(), selected.len());
+        for (composed, selected) in composed.into_iter().zip(selected) {
+            assert_eq!(
+                serde_json::to_value(flatten(&[composed]).0).unwrap(),
+                serde_json::to_value(flatten(std::slice::from_ref(selected)).0).unwrap()
+            );
+        }
     }
 }

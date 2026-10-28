@@ -6,6 +6,8 @@
 
 use std::rc::Rc;
 
+use asap_logical_asap_optimization::memo::candidates::CandidateMemo;
+use asap_logical_asap_optimization::memo::enumeration::MemoChoice;
 use asap_logical_asap_optimization::memo::LogicalMemo;
 
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
@@ -36,6 +38,24 @@ pub struct LogicalCandidate {
     pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
     /// For a Pass 2 candidate: what it changed of its Pass 1 candidate.
     pub pass2: Option<Pass2Candidate>,
+}
+
+/// The memo after each step of the planning round whose plan was selected
+/// (or of the last round when none was), as the search built it.
+#[derive(Debug, Clone)]
+pub struct MemoSteps {
+    /// After hash-consing the frontends' roots: groups, no candidates.
+    pub stage0: CandidateMemo,
+    /// After Pass 1 (per-computation candidates, then accuracy-scoped sizes).
+    pub pass1: CandidateMemo,
+    /// After local window composition (pane candidates).
+    pub pass2: CandidateMemo,
+    /// After concrete summary-state group expansion: the memo the search
+    /// selects from.
+    pub concrete_states: CandidateMemo,
+    /// The selected plan's candidate for each group of `concrete_states` it
+    /// uses, or why there is none.
+    pub selected_choice: Result<MemoChoice, String>,
 }
 
 /// A composed logical candidate that physical ASAP-aware optimization could
@@ -78,6 +98,9 @@ pub struct Stage1ToStage3Run<Id> {
     /// implements, with its roots as Stage 1 composed them (before Stage 3
     /// sized them): what Stage 2 implemented.
     pub stage1_selected: Option<LogicalCandidate>,
+    /// The memo after each step, and the selected plan's choice over it;
+    /// `None` when the search built no memo.
+    pub memo_steps: Option<MemoSteps>,
 }
 
 impl<Id> Stage1ToStage3Run<Id> {
@@ -236,6 +259,7 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
     run.stage1_logical_asap_optimization = archive.logical;
     run.stage2_physical_asap_optimization = archive.physical;
     run.stage2_pruned = archive.pruned;
+    run.memo_steps = archive.memo_steps;
     run
 }
 
@@ -280,6 +304,7 @@ fn memo_run<Id: Clone + std::fmt::Debug>(
                 roots: Ok(roots),
                 pass2: None,
             }),
+        memo_steps: None,
     }
 }
 

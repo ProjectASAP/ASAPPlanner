@@ -28,6 +28,12 @@ EXAMPLE1 = HERE / "examples" / "planner-layering-example1.json"
 # workload-01 (nine repeating PromQL queries), planned with the default
 # search as the MVP deployment; its selected plan keeps panes at ingestion.
 SEED862 = HERE / "examples" / "random-mixed-seed-862-workload-01.json"
+# A hand-written priced `memo` section for Example 1: four enumerated
+# Pass 1 DAGs, E2 selected, E3 cheaper than it, E4 invalid.
+MEMO_ENUMERATION = HERE / "test-fixtures" / "memo-enumeration-small.json"
+# stage_pipeline's memo example (#1003): the ratio of quantiles, with its
+# Pass 1 memo enumerated (49 = 7 × 7 candidate DAGs).
+MEMO_RATIO = HERE / "examples" / "memo-ratio-of-quantiles.json"
 # A hand-written `memo` section over example1's two queries (memo.js tests).
 MEMO_SMALL = HERE / "test-fixtures" / "memo-small.json"
 # The planner's memo for #1005's ratio-of-quantiles query, written by stage_pipeline.
@@ -766,7 +772,7 @@ class PageTests(unittest.TestCase):
     def test_every_element_the_scripts_use_is_on_the_page(self):
         page = (HERE / "index.html").read_text()
         ids = set(re.findall(r'id="([^"]+)"', page))
-        for script in ("app.js", "editor.js", "memo.js"):
+        for script in ("app.js", "editor.js", "enumeration.js", "memo.js"):
             used = set(re.findall(r"\$\('([^']+)'\)", (HERE / script).read_text()))
             with self.subTest(script):
                 self.assertLessEqual(used, ids)
@@ -829,7 +835,7 @@ class PageTests(unittest.TestCase):
         """Each memo-search example is planned with `--search candidate-connections`
         from a file under memo-examples/, and server.py passes the search."""
         examples = [e for e in json.loads((HERE / "examples.json").read_text()) if "search" in e]
-        self.assertEqual(len(examples), 6)
+        self.assertEqual(len(examples), 7)
         for example in examples:
             with self.subTest(example["id"]):
                 self.assertTrue(example["workload"].startswith("memo-examples/"))
@@ -888,7 +894,7 @@ class AppTests(unittest.TestCase):
     def page(self, search="", files=None, hash_=""):
         js = py_mini_racer.MiniRacer()
         js.eval(STUB_DOM)
-        for name in ("node-style.js", "stages.js", "memo.js"):
+        for name in ("node-style.js", "stages.js", "enumeration.js", "memo.js"):
             js.eval((HERE / name).read_text())
         for url, text in (files or {}).items():
             js.eval(f"__files[{json.dumps(url)}] = {json.dumps(text)};")
@@ -1062,6 +1068,109 @@ class AppTests(unittest.TestCase):
         self.assertNotIn(scan["data"]["id"], self.ev(js, "__dimmed.cy2"))
         js.eval("__taps['cy2 background']({ target: { isNode: false } })")
         self.assertEqual(js.eval("__dimmed.cy2.length"), 0)
+
+    def test_a_document_without_memo_hides_the_enumerated_dags(self):
+        js = self.page("?doc=e1.json", {"e1.json": EXAMPLE1.read_text()})
+        self.assertTrue(js.eval("__els.enumPanel.hidden"))
+        self.assertEqual(js.eval("__els.enumRows.innerHTML"), "")
+
+    def test_clicking_an_enumerated_dag_draws_it_in_the_stage1_lane(self):
+        """The panel lists the enumerated choices; a click draws the
+        choice's composed DAG in lane 1 and clears lane 2."""
+        doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
+        js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
+        self.assertFalse(js.eval("__els.enumPanel.hidden"))
+        meta = js.eval("__els['enum-meta'].textContent")
+        self.assertIn("Pass 1: 4", meta)
+        self.assertIn("1 cheaper than the selected plan", meta)
+        rows = js.eval("__els.enumRows.innerHTML")
+        self.assertEqual(rows.count("<li>"), 4)
+        self.assertIn('data-id="E3" aria-pressed="false" class="cheaper"', rows)
+        e3 = doc["memo"]["enumeration"]["choices"][2]
+        js.eval("__els.enumRows.__on.click({ target: { closest() { return { dataset: { id: 'E3' } }; } } })")
+        drawn = [e for e in self.ev(js, "__rendered.cy1") if "source" not in e["data"]]
+        self.assertEqual(len(drawn), len(e3["dag"]["nodes"]))
+        self.assertIn("enumerated DAG E3", self.text(js, "lane1-meta"))
+        self.assertIn("no physical plan for an enumerated DAG", js.eval("__els['lane2-meta'].textContent"))
+        self.assertIn('data-id="E3" aria-pressed="true"', js.eval("__els.enumRows.innerHTML"))
+        # Choosing a Stage 1 candidate again releases the row.
+        js.eval("__els.pick1.__on.change({ target: { value: 'L2' } })")
+        self.assertNotIn('aria-pressed="true"', js.eval("__els.enumRows.innerHTML"))
+
+    def enumerated_roots(self, doc, choice_id):
+        js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
+        js.eval(f"__els.enumRows.__on.click({{ target: {{ closest() {{ return {{ dataset: {{ id: {json.dumps(choice_id)} }} }}; }} }} }})")
+        roots = {e["data"]["nodeId"]: e["data"]["rootFor"] for e in self.ev(js, "__rendered.cy1") if e["data"].get("rootFor")}
+        return roots, self.text(js, "lane1-meta")
+
+    def test_enumerated_roots_are_named_by_their_root_groups_queries(self):
+        """Roots come in increasing root-group id, not query order: with G3
+        the root of q2 and G7 the root of q1, the first root is q2's."""
+        doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
+        groups = {g["id"]: g for g in doc["memo"]["steps"][1]["groups"]}
+        groups[3]["roots_of"], groups[7]["roots_of"] = [1], [0]
+        dag = doc["memo"]["enumeration"]["choices"][0]["dag"]
+        first, second = (r["Operator"] for r in dag["roots"])
+        roots, _ = self.enumerated_roots(doc, "E1")
+        self.assertEqual(roots, {first: ["q2"], second: ["q1"]})
+
+    def test_a_root_group_shared_by_two_queries_is_both_queries_root(self):
+        """One root group answering q1 and q2: its root is the root of both,
+        and highlighting q2 keeps it bright."""
+        doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
+        groups = {g["id"]: g for g in doc["memo"]["steps"][1]["groups"]}
+        groups[3]["roots_of"], groups[7]["roots_of"] = [0, 1], []
+        choice = doc["memo"]["enumeration"]["choices"][0]
+        choice["dag"]["roots"] = choice["dag"]["roots"][:1]
+        root = choice["dag"]["roots"][0]["Operator"]
+        js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
+        js.eval("__els.enumRows.__on.click({ target: { closest() { return { dataset: { id: 'E1' } }; } } })")
+        roots = {e["data"]["nodeId"]: e["data"]["rootFor"] for e in self.ev(js, "__rendered.cy1") if e["data"].get("rootFor")}
+        self.assertEqual(roots, {root: ["q1", "q2"]})
+        js.eval("__els.queryPick.__on.change({ target: { value: 'q2' } })")
+        self.assertNotIn(f"n{root}", self.ev(js, "__dimmed.cy1"))
+        self.assertNotIn("not matched", self.text(js, "lane1-meta"))
+
+    def test_enumerated_roots_without_the_steps_memo_name_no_query(self):
+        doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
+        doc["memo"]["steps"] = doc["memo"]["steps"][:1]
+        # The selected choice names groups of the dropped steps, which the
+        # Memo view's checks reject.
+        doc["memo"]["selected_choice"] = None
+        doc["memo"]["selected_choice_unavailable"] = "steps dropped by the test"
+        roots, meta = self.enumerated_roots(doc, "E1")
+        self.assertEqual(sorted(roots.values()), [["root group #1"], ["root group #2"]])
+        self.assertIn("roots not matched to queries", meta)
+
+    def test_the_ratio_of_quantiles_example_lists_its_pass1_dags_and_draws_one(self):
+        """On stage_pipeline's own example the panel counts 49 Pass 1 DAGs,
+        lists them all, and a click redraws the Stage 1 lane with that DAG
+        and clears Stage 2."""
+        doc = json.loads(MEMO_RATIO.read_text())
+        js = self.page("?doc=m.json", {"m.json": json.dumps(doc)})
+        self.assertFalse(js.eval("__els.enumPanel.hidden"))
+        meta = js.eval("__els['enum-meta'].textContent")
+        self.assertIn("Pass 1: 49", meta)
+        self.assertIn("listed: all 49 Pass 1 DAGs", meta)
+        # The selected choice is over the last step (concrete states), not Pass 1.
+        self.assertIn("over the concrete states memo", meta)
+        self.assertNotIn("✓ selected", js.eval("__els.enumRows.innerHTML"))
+        self.assertEqual(js.eval("__els.enumRows.innerHTML").count("<li>"), 49)
+        before = self.ev(js, "__rendered.cy1")
+        choice = doc["memo"]["enumeration"]["choices"][1]
+        js.eval(f"__els.enumRows.__on.click({{ target: {{ closest() {{ return {{ dataset: {{ id: {json.dumps(choice['id'])} }} }}; }} }} }})")
+        after = self.ev(js, "__rendered.cy1")
+        self.assertNotEqual(after, before)
+        self.assertEqual(len([e for e in after if "source" not in e["data"]]), len(choice["dag"]["nodes"]))
+        self.assertEqual([e["data"]["rootFor"] for e in after if e["data"].get("rootFor")], [[doc["workload"]["queries"][0]["id"]]])
+        self.assertIn(f"enumerated DAG {choice['id']}", self.text(js, "lane1-meta"))
+        self.assertIn("no physical plan for an enumerated DAG", js.eval("__els['lane2-meta'].textContent"))
+
+    def test_a_broken_enumeration_refuses_the_document(self):
+        doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
+        doc["memo"]["enumeration"]["limit"] = 0
+        js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
+        self.assertIn("limit must be a positive integer", js.eval("__els.queries.innerHTML"))
 
     def test_an_invalid_document_shows_an_error(self):
         js = self.page("?doc=bad.json", {"bad.json": json.dumps({"format": "nope"})})

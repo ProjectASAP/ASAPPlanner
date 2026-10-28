@@ -321,103 +321,29 @@ pub mod planning {
             .memo
     }
 
-    /// One plan of `memo`'s first `queries` queries: each group a query
-    /// needs implemented by its candidate `choice[group]` (an index), or by
-    /// its first candidate, each child group composed once and shared by
-    /// every candidate that reads it.
+    /// One plan of `memo`'s first `queries` queries (`memo::enumeration::compose`):
+    /// each query's first root group's DAG, every group `choice` does not
+    /// name implemented by its first candidate.
     pub fn compose_memo_plan(
         memo: &asap_logical_asap_optimization::memo::candidates::CandidateMemo,
         queries: usize,
         choice: &std::collections::BTreeMap<usize, usize>,
     ) -> Vec<Rc<OperatorNode>> {
-        fn compose(
-            memo: &asap_logical_asap_optimization::memo::candidates::CandidateMemo,
-            group: usize,
-            choice: &std::collections::BTreeMap<usize, usize>,
-            done: &mut std::collections::HashMap<usize, Rc<OperatorNode>>,
-        ) -> Rc<OperatorNode> {
-            if let Some(found) = done.get(&group) {
-                return Rc::clone(found);
-            }
-            let candidate = &memo.candidates[group][choice.get(&group).copied().unwrap_or(0)];
-            let replacements: Vec<_> = candidate
-                .children
-                .iter()
-                .map(|child| {
-                    let child = child.0 as usize;
-                    (
-                        Rc::clone(&memo.groups[child].node),
-                        compose(memo, child, choice, done),
-                    )
-                })
-                .collect();
-            // As plan reconstruction does, every child group's node must be
-            // a node of the candidate, or the child would not be composed.
-            let own_nodes: std::collections::HashSet<_> = OperatorNode::reachable(&candidate.node)
-                .iter()
-                .map(Rc::as_ptr)
-                .collect();
-            for (old, _) in &replacements {
-                assert!(
-                    own_nodes.contains(&Rc::as_ptr(old)),
-                    "group {group}: declared input group has no canonical node boundary"
-                );
-            }
-            let composed = with_nodes_replaced(&candidate.node, &replacements);
-            done.insert(group, Rc::clone(&composed));
-            composed
-        }
-        let mut done = std::collections::HashMap::new();
+        use asap_logical_asap_optimization::memo::{enumeration::compose, MemoGroupId};
+        let choice = choice
+            .iter()
+            .map(|(&group, &index)| (MemoGroupId(group as u32), index))
+            .collect();
+        let roots = compose(memo, &choice).expect("the choice composes");
         (0..queries)
             .map(|query| {
-                let root = memo
-                    .groups
+                let (_, root) = roots
                     .iter()
-                    .position(|group| group.roots_of.contains(&query))
+                    .find(|(group, _)| memo.groups[group.0 as usize].roots_of.contains(&query))
                     .expect("the query's root group");
-                compose(memo, root, choice, &mut done)
+                Rc::clone(root)
             })
             .collect()
-    }
-
-    /// `root` with every node in `replacements` (by identity) replaced by
-    /// its replacement; the nodes above are rebuilt, shared ones once.
-    pub fn with_nodes_replaced(
-        root: &Rc<OperatorNode>,
-        replacements: &[(Rc<OperatorNode>, Rc<OperatorNode>)],
-    ) -> Rc<OperatorNode> {
-        fn walk(
-            node: &Rc<OperatorNode>,
-            replacements: &[(Rc<OperatorNode>, Rc<OperatorNode>)],
-            done: &mut std::collections::HashMap<*const OperatorNode, Rc<OperatorNode>>,
-        ) -> Rc<OperatorNode> {
-            if let Some((_, new)) = replacements.iter().find(|(old, _)| Rc::ptr_eq(old, node)) {
-                return Rc::clone(new);
-            }
-            if let Some(found) = done.get(&Rc::as_ptr(node)) {
-                return Rc::clone(found);
-            }
-            let children: std::collections::HashMap<_, _> = node
-                .children()
-                .into_iter()
-                .map(|child| (Rc::as_ptr(child), walk(child, replacements, done)))
-                .collect();
-            let out = if node
-                .children()
-                .into_iter()
-                .all(|old| Rc::ptr_eq(old, &children[&Rc::as_ptr(old)]))
-            {
-                Rc::clone(node)
-            } else {
-                Rc::new(
-                    node.with_new_children(|old| Rc::clone(&children[&Rc::as_ptr(old)]))
-                        .expect("same-schema children"),
-                )
-            };
-            done.insert(Rc::as_ptr(node), Rc::clone(&out));
-            out
-        }
-        walk(root, replacements, &mut Default::default())
     }
 
     /// Stage 2 and plan selection over fixed workload plans, without a timed
@@ -722,6 +648,7 @@ pub mod planning {
             stage3_selected: Some(selected),
             stage1_selected: Some(selected_logical),
             stage3_plan_selection: Ok(selection),
+            memo_steps: None,
         }
     }
 }
