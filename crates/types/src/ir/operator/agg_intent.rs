@@ -663,36 +663,6 @@ pub mod topk {
     }
 }
 
-/// Two instances of this aggregation can be merged
-/// (`agg(A ∪ B) = combine(agg(A), agg(B))`). `Avg` / `StdDev` / `Variance`
-/// and correlation need richer partial state than a single value, so
-/// their finalized values are not mergeable.
-pub fn agg_is_mergeable(op: &AggIntent) -> bool {
-    !matches!(
-        op,
-        AggIntent::Avg { .. }
-            | AggIntent::StdDev { .. }
-            | AggIntent::Variance { .. }
-            | AggIntent::PearsonCorr { .. }
-    )
-}
-
-/// Whether this op implies `exact_required` — no sketch benefit. The exact
-/// intents include `Sum / Count / Avg / Min / Max` and correlation.
-pub fn agg_is_exact(op: &AggIntent) -> bool {
-    matches!(
-        op,
-        AggIntent::Sum { .. }
-            | AggIntent::Count { .. }
-            | AggIntent::Avg { .. }
-            | AggIntent::Min { .. }
-            | AggIntent::Max { .. }
-            | AggIntent::PearsonCorr { .. }
-            | AggIntent::Group
-            | AggIntent::CountValues { .. }
-    )
-}
-
 /// Whether the executor reduces each series' raw data samples exactly for an
 /// `Aggregate` of `op` with `Reduction::PerEntity` (a PromQL
 /// `quantile/sum/avg/min/max/count/distinct/l2/entropy_over_time` over raw
@@ -711,24 +681,6 @@ pub fn agg_has_exact_per_entity_kernel(op: &AggIntent) -> bool {
             | AggIntent::FrequencyL2 { .. }
             | AggIntent::FrequencyEntropy { .. }
     )
-}
-
-/// Accuracy parameter as a fractional ε (`0.0` for exact ops), unpacked from
-/// the typed `AccuracyTarget` on Quantile / Cardinality / Count / TopK.
-pub fn agg_accuracy(op: &AggIntent) -> f64 {
-    match op {
-        AggIntent::Quantile { accuracy, .. }
-        | AggIntent::Cardinality { accuracy, .. }
-        | AggIntent::FrequencyL2 { accuracy, .. }
-        | AggIntent::FrequencyEntropy { accuracy, .. }
-        | AggIntent::Count { accuracy }
-        | AggIntent::TopK { accuracy, .. } => accuracy_target_to_f64(accuracy),
-        _ => 0.0,
-    }
-}
-
-fn accuracy_target_to_f64(t: &AccuracyTarget) -> f64 {
-    t.max_error
 }
 
 /// Default `Cardinality` intent over the sample value — HLL standard error at
@@ -758,13 +710,11 @@ mod tests {
         Field::plain(name, dtype, false)
     }
 
-    // Correlation exposes both dependencies but cannot merge final scalar results.
+    // Correlation exposes both dependencies and round-trips through serde.
     #[test]
     fn pearson_corr_contract() {
         let intent = AggIntent::PearsonCorr { left: 2, right: 5 };
         assert_eq!(intent.input_cols(), vec![2, 5]);
-        assert!(agg_is_exact(&intent));
-        assert!(!agg_is_mergeable(&intent));
         let output = intent.output_column(&c("x", DataType::Float64));
         assert_eq!(output.dtype, DataType::Float64);
         assert!(output.nullable);
@@ -782,10 +732,6 @@ mod tests {
             accuracy: AccuracyTarget::max_error(0.01),
         };
         assert_eq!(intent.input_cols(), vec![2, 5]);
-        assert!(!agg_is_exact(&intent));
-        // HLL/Theta/KMV states combine, unlike `Avg`'s finalized value.
-        assert!(agg_is_mergeable(&intent));
-        assert_eq!(agg_accuracy(&intent), 0.01);
         let output = intent.output_column(&c("x", DataType::Float64));
         assert_eq!(output.name, "cardinality");
         assert_eq!(output.dtype, DataType::Int64);
@@ -828,18 +774,6 @@ mod tests {
                 .dtype,
             FieldDataType::Plain(DataType::Int64)
         ));
-    }
-
-    #[test]
-    fn mergeability_and_exactness() {
-        assert!(agg_is_mergeable(&AggIntent::Sum { col: None }));
-        assert!(!agg_is_mergeable(&AggIntent::Avg { col: None }));
-        assert!(!agg_is_mergeable(&AggIntent::StdDev {
-            col: None,
-            population: false
-        }));
-        assert!(agg_is_exact(&AggIntent::Min { col: None }));
-        assert!(!agg_is_exact(&default_cardinality()));
     }
 
     #[test]
