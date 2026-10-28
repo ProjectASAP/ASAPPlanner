@@ -19,9 +19,6 @@ use planner_layering_common::*;
 // Fixed algorithm/window fixtures keep numerical evaluator checks independent
 // of a time-bounded production search's archived incumbents.
 fn run_a() -> Run {
-    use asap_logical_asap_optimization::asap_aware_cse::{
-        sharing_candidates, with_shared_candidates,
-    };
     use asap_logical_asap_optimization::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
     };
@@ -59,13 +56,8 @@ fn run_a() -> Run {
             .into_iter()
             .map(|(_, root)| root)
             .collect();
-        let sharing = sharing_candidates(&whole);
         computations.push(whole.clone());
-        computations.push(with_shared_candidates(
-            &whole,
-            &sharing,
-            &vec![true; sharing.len()],
-        ));
+        computations.push(share_identical(&whole));
     }
     run_explicit_candidates(
         &workload,
