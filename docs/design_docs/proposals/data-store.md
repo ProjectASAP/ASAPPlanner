@@ -258,6 +258,17 @@ ingestion run that built pane `(12:04, 12:05]` read its input with
   whose `Scan` frontiers are bound by node id, and some tests cut at a
   `TimeRange`. Either keep a crate-internal or `test-support` node-id binding
   for them, or give each such boundary a `MaterializedView`.
+- **Group predicates on a view read.** `MaterializedViewRequest` has no
+  predicates: the view's own selection is part of `view.coverage`, and a
+  query's filter over the view is a `Filter` operator above the slot, run by
+  the executor. For example, a KLL view grouped by `service`, reused by a
+  query for `service = "api"` under `Filter(service = "api")`. The store then
+  decodes every group's state and the executor drops all but one, which can
+  be costly for large states such as KLL or CMS. A possible extension pushes
+  a group-column-only `Filter` directly above the slot into the request as a
+  hint, as `RawDataRequest::predicates` is: the store may return only the
+  matching groups, each still complete and exact, and the executor still
+  runs the `Filter`. Add it only after measuring the decode cost.
 
 ## 7. Migration
 
