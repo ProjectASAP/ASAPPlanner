@@ -189,18 +189,18 @@ impl PhysicalASAPDAGDocument {
     }
 }
 
-/// A window of raw data samples a deployment runtime feeds the DAG: at
-/// evaluation time `T`, the samples in `(T - end_offset_ms -
-/// width_ms, T - end_offset_ms]` that the `Scan`
-/// `scan_node_id` selects, bound as the input rows of the `TimeRange`
+/// A window of raw data samples the DAG reads: at evaluation time `T`, the
+/// samples in `(T - end_offset_ms - width_ms, T - end_offset_ms]` that the
+/// `Scan` `scan_node_id` selects, kept by the `TimeRange`
 /// `time_range_node_id`. The shape is `TimeRange(width) <-
 /// TimeShift(offset)* <- Scan`, with no `TimeShift`, `TimeRange` or
 /// subquery above the `TimeRange`, so the window depends on `T` alone. For
-/// an instant selector `width_ms` is its lookback.
+/// an instant selector `width_ms` is its lookback. Raw data is bound at the
+/// `Scan`, by its source, not at either node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawDataSampleWindow {
-    /// The `TimeRange` node the window's input rows are bound to.
+    /// The `TimeRange` node that keeps the window's rows.
     pub time_range_node_id: PhysicalASAPNodeId,
     /// Width of the window, from the `TimeRange`.
     pub width_ms: i64,
@@ -222,6 +222,72 @@ impl RawDataSampleWindow {
     pub fn bounds_ms(&self, evaluation_time_ms: i64) -> (i64, i64) {
         let end = evaluation_time_ms - self.end_offset_ms;
         (end - self.width_ms, end)
+    }
+}
+
+/// Which rows of a `Scan` its readers read, back from an evaluation time `T`
+/// ([`PhysicalASAPDAG::scan_window`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScanWindow {
+    /// The rows with time in `(T - end_offset_ms - width_ms, T -
+    /// end_offset_ms]`.
+    Within { end_offset_ms: i64, width_ms: i64 },
+    /// Rows at any time.
+    Unbounded,
+}
+
+impl ScanWindow {
+    /// The smallest window holding both.
+    pub fn union(self, other: Self) -> Self {
+        let (
+            Self::Within {
+                end_offset_ms: a_end,
+                width_ms: a_width,
+            },
+            Self::Within {
+                end_offset_ms: b_end,
+                width_ms: b_width,
+            },
+        ) = (self, other)
+        else {
+            return Self::Unbounded;
+        };
+        let end_offset_ms = a_end.min(b_end);
+        let start_back_ms = a_end
+            .saturating_add(a_width)
+            .max(b_end.saturating_add(b_width));
+        Self::Within {
+            end_offset_ms,
+            width_ms: start_back_ms.saturating_sub(end_offset_ms),
+        }
+    }
+
+    /// How far back from `T` the oldest row read lies, `end_offset_ms +
+    /// width_ms` (0 for a window ending after `T` that reaches no further
+    /// back); `None` when unbounded.
+    pub fn lookback_ms(self) -> Option<u64> {
+        match self {
+            Self::Within {
+                end_offset_ms,
+                width_ms,
+            } => Some(u64::try_from(end_offset_ms.saturating_add(width_ms)).unwrap_or(0)),
+            Self::Unbounded => None,
+        }
+    }
+
+    /// `(start, end]` at evaluation time `evaluation_time_ms`; `None` when
+    /// unbounded.
+    pub fn bounds_ms(self, evaluation_time_ms: i64) -> Option<(i64, i64)> {
+        match self {
+            Self::Within {
+                end_offset_ms,
+                width_ms,
+            } => {
+                let end = evaluation_time_ms.saturating_sub(end_offset_ms);
+                Some((end.saturating_sub(width_ms), end))
+            }
+            Self::Unbounded => None,
+        }
     }
 }
 
@@ -289,6 +355,98 @@ impl PhysicalASAPDAG {
             }
         }
         Ok(rebuilt)
+    }
+
+    /// The rows of the `Scan` `scan` its readers read, back from the
+    /// evaluation time `T`: the union of each reader's window. A reader
+    /// reaches the `Scan` through `TimeShift`s without an `@` anchor
+    /// (offsets summing to `s`) and is
+    /// - a `TimeRange(w)`, range or instant: `(T - s - w, T - s]`;
+    /// - a `PaneChain` of `n` panes of width `w`: its whole window `(T - s -
+    ///   n·w, T - s]`, or only its newest pane `(T - s - w, T - s]` for a
+    ///   chain in `kept_chains` (kept across evaluations, so each
+    ///   evaluation builds one pane).
+    ///
+    /// `Unbounded` when a root, any other reader, or a shift with an `@`
+    /// anchor reads the `Scan` or one of those shifts, or nothing reads it.
+    pub fn scan_window(
+        &self,
+        scan: PhysicalASAPNodeId,
+        kept_chains: &HashSet<PhysicalASAPNodeId>,
+    ) -> ScanWindow {
+        let payload = |id: PhysicalASAPNodeId| {
+            self.nodes
+                .iter()
+                .find(|node| node.id == id)
+                .map(|node| &node.payload)
+        };
+        let mut window: Option<ScanWindow> = None;
+        let mut pending = vec![(scan, 0i64)];
+        while let Some((id, end_offset_ms)) = pending.pop() {
+            if self.roots.contains(&id) {
+                return ScanWindow::Unbounded;
+            }
+            for edge in self.edges.iter().filter(|edge| edge.producer == id) {
+                let width_ms = match payload(edge.consumer) {
+                    Some(Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }))
+                        if shift.at.is_none() =>
+                    {
+                        pending
+                            .push((edge.consumer, end_offset_ms.saturating_add(shift.offset_ms)));
+                        continue;
+                    }
+                    Some(Operator::NonASAP(NonASAPOp::TimeRange { range, .. })) => {
+                        range.as_millis()
+                    }
+                    Some(Operator::ASAP(ASAPOp::PaneChain { pane_width_ms, .. }))
+                        if kept_chains.contains(&edge.consumer) =>
+                    {
+                        u128::from(*pane_width_ms)
+                    }
+                    Some(Operator::ASAP(ASAPOp::PaneChain {
+                        pane_width_ms,
+                        pane_count,
+                        ..
+                    })) => u128::from(*pane_width_ms) * u128::from(*pane_count),
+                    _ => return ScanWindow::Unbounded,
+                };
+                let read = ScanWindow::Within {
+                    end_offset_ms,
+                    width_ms: i64::try_from(width_ms).unwrap_or(i64::MAX),
+                };
+                window = Some(window.map_or(read, |window| window.union(read)));
+            }
+        }
+        window.unwrap_or(ScanWindow::Unbounded)
+    }
+
+    /// The rows the `TimeRange` `time_range` keeps, back from the
+    /// evaluation time `T`: `(T - s - w, T - s]` for a `TimeRange(w)` over
+    /// `TimeShift`s whose offsets sum to `s`, the window
+    /// [`Self::scan_window`] counts for it. `Unbounded` when one of those
+    /// shifts has an `@` anchor, or `time_range` is not a `TimeRange`.
+    pub fn time_range_window(&self, time_range: PhysicalASAPNodeId) -> ScanWindow {
+        let node = |id: PhysicalASAPNodeId| self.nodes.iter().find(|node| node.id == id);
+        let Some(Operator::NonASAP(NonASAPOp::TimeRange { range, child, .. })) =
+            node(time_range).map(|node| &node.payload)
+        else {
+            return ScanWindow::Unbounded;
+        };
+        let mut end_offset_ms = 0i64;
+        let mut below = node(*child);
+        while let Some(Operator::NonASAP(NonASAPOp::TimeShift { shift, child })) =
+            below.map(|node| &node.payload)
+        {
+            if shift.at.is_some() {
+                return ScanWindow::Unbounded;
+            }
+            end_offset_ms = end_offset_ms.saturating_add(shift.offset_ms);
+            below = node(*child);
+        }
+        ScanWindow::Within {
+            end_offset_ms,
+            width_ms: i64::try_from(range.as_millis()).unwrap_or(i64::MAX),
+        }
     }
 
     /// The IR this DAG exports, one root per query in batch order, every
