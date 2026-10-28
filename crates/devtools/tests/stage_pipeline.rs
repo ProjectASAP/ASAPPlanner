@@ -2272,15 +2272,23 @@ fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
             per_step[listed]["count"].as_u64().unwrap()
         );
     }
-    // Every group's DAG and every listed candidate's DAG is a valid FlatDag,
-    // and each boundary names one of the candidate's child groups.
+    // The node table is a valid FlatDag (children before parents) holding
+    // each node once; every group's and listed candidate's `node` names a
+    // node of it, and each boundary names a node and one of the candidate's
+    // child groups.
+    let nodes = memo["nodes"].as_array().unwrap();
+    validated_dag(&serde_json::json!({ "nodes": nodes, "roots": [] }), 0);
+    let distinct: HashSet<String> = nodes.iter().map(Value::to_string).collect();
+    assert_eq!(distinct.len(), nodes.len());
+    let in_table = |id: &Value| (id.as_u64().unwrap() as usize) < nodes.len();
     for step in steps {
         for group in step["groups"].as_array().unwrap() {
-            validated_dag(&group["dag"], 1);
+            assert!(in_table(&group["node"]) && group.get("dag").is_none());
             for candidate in group["candidates"].as_array().unwrap() {
-                validated_dag(&candidate["dag"], 1);
+                assert!(in_table(&candidate["node"]) && candidate.get("dag").is_none());
                 let children = candidate["children"].as_array().unwrap();
-                for child in candidate["group_of_node"].as_object().unwrap().values() {
+                for (node, child) in candidate["group_of_node"].as_object().unwrap() {
+                    assert!(node.parse::<usize>().unwrap() < nodes.len());
                     assert!(children.contains(child));
                 }
             }
@@ -2298,7 +2306,8 @@ fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
     let choices = enumeration["choices"].as_array().unwrap();
     assert!(!choices.is_empty() && choices.len() <= 200);
     for choice in choices {
-        validated_dag(&choice["dag"], 1);
+        let roots = choice["roots"].as_array().unwrap();
+        assert!(!roots.is_empty() && roots.iter().all(in_table));
         // Pricing is off without `--price-enumerated`.
         assert!(choice.get("valid").is_none());
     }

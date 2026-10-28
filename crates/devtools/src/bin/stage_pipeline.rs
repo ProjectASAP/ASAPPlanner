@@ -108,7 +108,10 @@
 //     shown candidate's `cpu_core_seconds_per_second` is their sum: report
 //     only, as `plan_installable`'s predicted usage names them.
 // `memo` (unless `--no-memo`) is the memo the search built, from the
-// planning round whose plan was selected (`MemoSteps`): `steps`, one per
+// planning round whose plan was selected (`MemoSteps`): `nodes`, one node
+// table for the whole section (`MemoNodes`: each distinct node once, matched
+// by its serialized JSON, children as indices into the table and before
+// their parents); `steps`, one per
 // memo step in pipeline order (`stage0`: the frontends' DAG hash-consed,
 // groups without candidates; `pass1`: Pass 1's candidates, with the
 // accuracy-scoped sizes; `pass2`: local window composition's pane
@@ -116,14 +119,15 @@
 // summary inputs, top-k reuse, finer aggregates, rollups, summary results,
 // state configurations) and the concrete summary-state groups, the memo the
 // search selects from). Each step lists its groups (`id`, `label`,
-// `children`, `parents`, `queries`, `roots_of`, the group's `dag`) and their
+// `children`, `parents`, `queries`, `roots_of`, the group's `node` in
+// `nodes`) and their
 // candidates (`candidate_count`, `candidate_count_by_origin`, and the first
 // `--max-memo-candidates` (default 64) under `candidates`, with
 // `candidates_capped`): each with its `index` in the group, `implements`,
 // `children`, `origin` (`CandidateOrigin` in snake case), `budget_share`,
 // `added` (not in the group at the step before), a one-line `label`, its
-// `dag` (its node and everything below) and `group_of_node` (the `dag`
-// nodes that are a child group's node, to that group's id).
+// `node` in `nodes` and `group_of_node` (the `nodes` indices below it that
+// are a child group's node, to that group's id).
 // `selected_choice` maps each group of the last step the selected plan uses
 // (by id, as a string) to its candidate's index; it is null, with
 // `selected_choice_unavailable` saying why, when the plan cannot be read as
@@ -132,8 +136,9 @@
 // (default 1000) under `per_step` (`count`, `complete`; Stage 0 counts its
 // one DAG), and lists the first `--max-enumerated` (default 200) `choices`
 // of `step`: the last step enumerated completely within that many, else
-// the last step. Each choice has its `id` (`E1`, ...), `choice`, `dag`
-// (`memo::enumeration::compose`; null with `error` when it does not
+// the last step. Each choice has its `id` (`E1`, ...), `choice`, `roots`
+// (`memo::enumeration::compose`'s roots, one per root group, as indices
+// into `nodes`; null with `error` when it does not
 // compose), `budget_share_1` (every chosen candidate sized for the whole
 // budget) and `selected` (it is `selected_choice`). With
 // `--price-enumerated <n>` (off by default), each of the first `n` listed
@@ -251,7 +256,7 @@
 // `time_index` that is not a column index is an error).
 
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_devtools::candidate_labels::{candidate_labels, computation_label, query_of_each_target};
@@ -278,7 +283,8 @@ use asap_plan_selection::{
     SearchAlgorithm, Selection, SelectionError, Stage1ToStage3Search,
 };
 use asap_planner::{installable_plan_of, PlannerExecutorCompileCheck};
-use asap_types::ir::flat::{flatten, FlatDag};
+use asap_types::ir::flat::{flatten, FlatDag, FlatNode, NodeId};
+use asap_types::ir::operator::node::OperatorNode;
 use asap_types::ir::properties::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
 use asap_types::ir::QueryRoot;
 use asap_types::workload::{
@@ -1534,6 +1540,7 @@ fn memo_json(steps: &MemoSteps, caps: &MemoCaps, pricing: &Pricing<'_>) -> Value
             &steps.concrete_states,
         ),
     ];
+    let mut table = MemoNodes::default();
     let mut previous: Option<&CandidateMemo> = None;
     let mut json_steps = Vec::new();
     let mut per_step = serde_json::Map::new();
@@ -1543,7 +1550,7 @@ fn memo_json(steps: &MemoSteps, caps: &MemoCaps, pricing: &Pricing<'_>) -> Value
         json_steps.push(json!({
             "step": step,
             "title": title,
-            "groups": memo_groups_json(memo, previous, caps.candidates_per_group),
+            "groups": memo_groups_json(&mut table, memo, previous, caps.candidates_per_group),
         }));
         previous = Some(memo);
         if step == "stage0" {
@@ -1589,14 +1596,11 @@ fn memo_json(steps: &MemoSteps, caps: &MemoCaps, pricing: &Pricing<'_>) -> Value
             });
             match compose(memo, choice) {
                 Ok(roots) => {
-                    let roots: Vec<_> = roots
-                        .into_iter()
-                        .map(|(_, node)| QueryRoot::Operator(node))
-                        .collect();
-                    entry["dag"] = json!(export(&roots));
+                    let roots: Vec<_> = roots.into_iter().map(|(_, node)| node).collect();
+                    entry["roots"] = json!(table.add(&roots).0);
                 }
                 Err(error) => {
-                    entry["dag"] = Value::Null;
+                    entry["roots"] = Value::Null;
                     entry["error"] = json!(error.to_string());
                 }
             }
@@ -1618,6 +1622,7 @@ fn memo_json(steps: &MemoSteps, caps: &MemoCaps, pricing: &Pricing<'_>) -> Value
         })
     });
     let mut memo = json!({
+        "nodes": table.nodes,
         "steps": json_steps,
         "selected_choice": selected.map_or(Value::Null, choice_json),
         "enumeration": {
@@ -1644,10 +1649,53 @@ fn choice_json(choice: &MemoChoice) -> Value {
     )
 }
 
-/// `memo`'s groups, each with its first `max_candidates` candidates; a
-/// candidate is `added` when `previous` (the memo at the step before) has no
-/// candidate of that group with the same node and children.
+/// The `memo` section's node table (`memo.nodes`): each distinct node once,
+/// children before parents, its children as indices into the table. Nodes
+/// are matched by their serialized JSON (children included), since the
+/// steps rebuild equal nodes as different `Rc`s.
+#[derive(Default)]
+struct MemoNodes {
+    nodes: Vec<FlatNode>,
+    index_of: HashMap<String, NodeId>,
+}
+
+impl MemoNodes {
+    /// Adds `roots` and every node below them. Returns each root's index
+    /// and, for each node of that DAG, the original node and its index.
+    fn add(
+        &mut self,
+        roots: &[Rc<OperatorNode>],
+    ) -> (Vec<NodeId>, Vec<(Rc<OperatorNode>, NodeId)>) {
+        let roots: Vec<_> = roots.iter().cloned().map(QueryRoot::Operator).collect();
+        let (dag, originals) = flatten(&roots);
+        let mut index_in_table: Vec<NodeId> = Vec::with_capacity(dag.nodes.len());
+        for mut node in dag.nodes {
+            node.operator = node.operator.map_children(|&child| index_in_table[child]);
+            let key = serde_json::to_string(&node).expect("a flat node serializes");
+            let index = *self.index_of.entry(key).or_insert_with(|| {
+                self.nodes.push(node);
+                self.nodes.len() - 1
+            });
+            index_in_table.push(index);
+        }
+        let roots = dag
+            .roots
+            .iter()
+            .map(|root| match root {
+                QueryRoot::Operator(id) => index_in_table[*id],
+                QueryRoot::Scalar(_) => unreachable!("memo DAGs have operator roots"),
+            })
+            .collect();
+        (roots, originals.into_iter().zip(index_in_table).collect())
+    }
+}
+
+/// `memo`'s groups, each with its first `max_candidates` candidates, their
+/// nodes added to `table`; a candidate is `added` when `previous` (the memo
+/// at the step before) has no candidate of that group with the same node and
+/// children.
 fn memo_groups_json(
+    table: &mut MemoNodes,
     memo: &CandidateMemo,
     previous: Option<&CandidateMemo>,
     max_candidates: usize,
@@ -1658,7 +1706,7 @@ fn memo_groups_json(
         .zip(&memo.candidates)
         .enumerate()
         .map(|(id, (group, candidates))| {
-            let (dag, _) = flatten(&[QueryRoot::Operator(group.node.clone())]);
+            let node = table.add(std::slice::from_ref(&group.node)).0[0];
             let mut by_origin = serde_json::Map::new();
             for candidate in candidates {
                 let count = by_origin
@@ -1674,11 +1722,10 @@ fn memo_groups_json(
                 .take(max_candidates)
                 .enumerate()
                 .map(|(index, candidate)| {
-                    let (dag, originals) = flatten(&[QueryRoot::Operator(candidate.node.clone())]);
+                    let (roots, originals) = table.add(std::slice::from_ref(&candidate.node));
                     let group_of_node: serde_json::Map<_, _> = originals
                         .iter()
-                        .enumerate()
-                        .filter_map(|(node, original)| {
+                        .filter_map(|(original, node)| {
                             candidate
                                 .children
                                 .iter()
@@ -1698,20 +1745,20 @@ fn memo_groups_json(
                             Rc::ptr_eq(&before.node, &candidate.node)
                                 && before.children == candidate.children
                         }),
-                        "label": candidate_node_label(&dag, &group_of_node),
-                        "dag": dag,
+                        "label": candidate_node_label(&table.nodes, roots[0], &group_of_node),
+                        "node": roots[0],
                         "group_of_node": group_of_node,
                     })
                 })
                 .collect();
             json!({
                 "id": id,
-                "label": node_label(&dag.nodes[dag.nodes.len() - 1]),
+                "label": node_label(&table.nodes[node]),
                 "children": ids(&group.children),
                 "parents": ids(&group.parents),
                 "queries": group.queries,
                 "roots_of": group.roots_of,
-                "dag": dag,
+                "node": node,
                 "candidate_count": candidates.len(),
                 "candidate_count_by_origin": by_origin,
                 "candidates_capped": listed.len() < candidates.len(),
@@ -1738,19 +1785,20 @@ fn origin_name(origin: &CandidateOrigin) -> String {
 
 /// A candidate's own nodes (those above its child groups' nodes), root
 /// first, as `node_label`s joined by " ← ".
-fn candidate_node_label(dag: &FlatDag, group_of_node: &serde_json::Map<String, Value>) -> String {
-    let Some(QueryRoot::Operator(root)) = dag.roots.first() else {
-        return String::new();
-    };
+fn candidate_node_label(
+    nodes: &[FlatNode],
+    root: NodeId,
+    group_of_node: &serde_json::Map<String, Value>,
+) -> String {
     let mut labels = Vec::new();
-    let mut pending = vec![*root];
+    let mut pending = vec![root];
     let mut seen = HashSet::new();
     while let Some(id) = pending.pop() {
         if group_of_node.contains_key(&id.to_string()) || !seen.insert(id) {
             continue;
         }
-        labels.push(node_label(&dag.nodes[id]));
-        pending.extend(dag.nodes[id].operator.children().into_iter().rev().copied());
+        labels.push(node_label(&nodes[id]));
+        pending.extend(nodes[id].operator.children().into_iter().rev().copied());
     }
     labels.join(" ← ")
 }
@@ -1863,6 +1911,61 @@ fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
 mod tests {
     use super::*;
     use asap_devtools::planning_stages::run_planning_stages;
+
+    /// A node two DAGs share is stored once in the memo's node table, even
+    /// when each DAG built it as its own `Rc`, and each DAG rebuilt from the
+    /// table equals its own `FlatDag` export.
+    #[test]
+    fn memo_node_table_stores_a_shared_node_once() {
+        let root = |query: &str| {
+            let workload = query_batch(
+                QueryLanguage::PromQL,
+                &[query.into()],
+                AccuracyTarget::exact(),
+                15_000,
+            );
+            match lower_promql_roots(&workload).unwrap().remove(0) {
+                QueryRoot::Operator(node) => node,
+                QueryRoot::Scalar(_) => unreachable!(),
+            }
+        };
+        let (sum, max) = (root("sum(m)"), root("max(m)"));
+        let mut table = MemoNodes::default();
+        let (sum_root, _) = table.add(std::slice::from_ref(&sum));
+        let after_sum = table.nodes.len();
+        let (max_root, _) = table.add(std::slice::from_ref(&max));
+        // `max(m)` adds only its own aggregate: the scan is already there.
+        assert_eq!(table.nodes.len(), after_sum + 1);
+        // The DAG below `root`, renumbered in table order.
+        let rebuilt = |root: NodeId| {
+            let mut reached = BTreeSet::new();
+            let mut pending = vec![root];
+            while let Some(id) = pending.pop() {
+                if reached.insert(id) {
+                    pending.extend(table.nodes[id].operator.children().into_iter().copied());
+                }
+            }
+            let local: HashMap<_, _> = reached.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+            let nodes: Vec<_> = reached
+                .iter()
+                .map(|&id| {
+                    let mut node = table.nodes[id].clone();
+                    node.operator = node.operator.map_children(|child| local[child]);
+                    node
+                })
+                .collect();
+            FlatDag {
+                nodes,
+                roots: vec![QueryRoot::Operator(local[&root])],
+            }
+        };
+        for (node, root) in [(sum, sum_root[0]), (max, max_root[0])] {
+            assert_eq!(
+                serde_json::to_value(rebuilt(root)).unwrap(),
+                serde_json::to_value(export(&[QueryRoot::Operator(node)])).unwrap()
+            );
+        }
+    }
 
     /// The exhaustive search's default `--max-combinations` is 10^4.
     #[test]

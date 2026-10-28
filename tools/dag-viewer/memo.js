@@ -6,13 +6,16 @@
 // them headless); the controller draws them on the page. `memo.enumeration`
 // is not read here.
 //
-// The section, per step: `{step, title, groups: [{id, label, children,
-// parents, queries, roots_of, dag, candidate_count,
-// candidate_count_by_origin, candidates_capped, candidates: [{index,
-// implements, children, origin, budget_share, added, label, dag,
-// group_of_node}]}]}`; `selected_choice` maps a group id (string) of the
-// last step to the selected plan's candidate index, or is null with
-// `selected_choice_unavailable` saying why.
+// The section: `nodes`, the node table every step shares (each distinct
+// logical node once, children as indices into the table; memoNodeDag in
+// stages.js rebuilds the flat DAG below any of them), and, per step:
+// `{step, title, groups: [{id, label, children, parents, queries, roots_of,
+// node, candidate_count, candidate_count_by_origin, candidates_capped,
+// candidates: [{index, implements, children, origin, budget_share, added,
+// label, node, group_of_node}]}]}`, where `node` is a table index and
+// `group_of_node` maps table indices to child groups; `selected_choice`
+// maps a group id (string) of the last step to the selected plan's
+// candidate index, or is null with `selected_choice_unavailable` saying why.
 
 // Memo steps in pipeline order; a step production does not run is omitted.
 const MEMO_STEPS = ['stage0', 'pass1', 'pass2', 'concrete_states'];
@@ -36,13 +39,8 @@ const MEMO_COLLAPSE_ABOVE = 12;
 
 const memoIsIndexList = (ids) => Array.isArray(ids) && ids.every((id) => Number.isInteger(id) && id >= 0);
 
-// A group's or candidate's `dag` (a flat logical DAG with its own roots):
-// the stage DAG checks, with as many roots as it has.
-function memoDagErrors(dag, where) {
-  if (!dag || !Array.isArray(dag.nodes) || !Array.isArray(dag.roots)) return [`${where}: dag needs nodes and roots`];
-  if (dag.nodes.length === 0) return [`${where}: dag has no nodes`];
-  return validateLogicalDag(dag, where, dag.roots.length);
-}
+// Whether `id` is an index into the node table `nodes`.
+const memoIsNode = (nodes, id) => Number.isInteger(id) && id >= 0 && id < nodes.length;
 
 // The checks of `memo.steps` and `memo.selected_choice` against the format
 // above, as messages ([] when it holds or the document has no memo).
@@ -51,7 +49,8 @@ function validateMemo(memo, queryCount) {
   if (memo === undefined) return [];
   if (!memo || typeof memo !== 'object' || Array.isArray(memo)) return ['memo must be an object'];
   if (!Array.isArray(memo.steps) || memo.steps.length === 0) return ['memo.steps must be a non-empty array'];
-  const errors = [];
+  if (!Array.isArray(memo.nodes)) return ['memo.nodes must be an array (a memo section written before the node table: regenerate the document with stage_pipeline)'];
+  const errors = validateLogicalDag({ nodes: memo.nodes, roots: [] }, 'memo.nodes', 0);
   let previous = -1;
   memo.steps.forEach((step, s) => {
     const at = `memo.steps[${s}]`;
@@ -76,7 +75,7 @@ function validateMemo(memo, queryCount) {
       if (!names(group.children) || !names(group.parents)) errors.push(`${where}: children and parents must name groups of the step`);
       if (!memoIsIndexList(group.queries) || !memoIsIndexList(group.roots_of)
         || ![...group.queries, ...group.roots_of].every((q) => q < queryCount)) errors.push(`${where}: queries and roots_of must name workload queries`);
-      errors.push(...memoDagErrors(group.dag, where));
+      if (!memoIsNode(memo.nodes, group.node)) errors.push(`${where}: node must index memo.nodes`);
       if (!Array.isArray(group.candidates)) { errors.push(`${where}: candidates must be an array`); return; }
       const count = group.candidate_count;
       if (!Number.isInteger(count) || count < group.candidates.length) errors.push(`${where}: candidate_count must count at least the listed candidates`);
@@ -97,11 +96,10 @@ function validateMemo(memo, queryCount) {
         if (typeof candidate.label !== 'string' || typeof candidate.budget_share !== 'number') errors.push(`${cw}: needs a label and a numeric budget_share`);
         if (!names(candidate.children)) errors.push(`${cw}: children must name groups of the step`);
         if (typeof candidate.added !== 'boolean') errors.push(`${cw}: added must be a boolean`);
-        errors.push(...memoDagErrors(candidate.dag, cw));
+        if (!memoIsNode(memo.nodes, candidate.node)) errors.push(`${cw}: node must index memo.nodes`);
         const boundaries = candidate.group_of_node;
-        const nodes = candidate.dag && Array.isArray(candidate.dag.nodes) ? candidate.dag.nodes.length : 0;
-        if (!boundaries || typeof boundaries !== 'object' || Object.entries(boundaries).some(([node, child]) => !(/^\d+$/.test(node) && Number(node) < nodes)
-          || !(Array.isArray(candidate.children) && candidate.children.includes(child)))) errors.push(`${cw}: group_of_node must map its dag's nodes to its child groups`);
+        if (!boundaries || typeof boundaries !== 'object' || Object.entries(boundaries).some(([node, child]) => !(/^\d+$/.test(node) && memoIsNode(memo.nodes, Number(node)))
+          || !(Array.isArray(candidate.children) && candidate.children.includes(child)))) errors.push(`${cw}: group_of_node must map memo.nodes indices to its child groups`);
       });
     });
   });
@@ -155,32 +153,26 @@ function memoClip(text, n) {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
-// The node a FlatDag stands for: its first operator root, else its last node.
-function memoDagTop(dag) {
-  const root = dag.roots.find((r) => r && 'Operator' in r);
-  return root ? root.Operator : dag.nodes.length - 1;
-}
-
 // A candidate's own nodes: its node and what it reads, down to (not
-// through) the nodes `group_of_node` names as a child group's node. Returns
-// `own` (node indices, top first, each with its display lines) and `reads`
-// (the boundary nodes reached, with their group).
-function memoCandidateOwnNodes(candidate) {
-  const dag = candidate.dag;
+// through) the nodes `group_of_node` names as a child group's node, in the
+// node table `nodes` (`memo.nodes`). Returns `own` (table indices, top
+// first, each with its display lines) and `reads` (the boundary nodes
+// reached, with their group).
+function memoCandidateOwnNodes(nodes, candidate) {
   const boundaries = candidate.group_of_node || {};
   const own = [];
   const reads = [];
   const seen = new Set();
-  const stack = [memoDagTop(dag)];
+  const stack = [candidate.node];
   while (stack.length) {
     const id = stack.pop();
     if (seen.has(id)) continue;
     seen.add(id);
     if (String(id) in boundaries) { reads.push({ node: id, group: boundaries[String(id)] }); continue; }
-    const node = dag.nodes[id];
+    const node = nodes[id];
     const [, body] = stageOperatorParts(node.operator);
     const children = stageLogicalChildren(body);
-    const input = children.length ? dag.nodes[children[0]] : null;
+    const input = children.length ? nodes[children[0]] : null;
     own.push({ node: id, lines: stageNodeLines(node.operator, input && input.schema) });
     children.slice().reverse().forEach((child) => stack.push(child));
   }
@@ -470,19 +462,18 @@ function memoViewController() {
   }
 
   function showGroup(group) {
-    const top = memoDagTop(group.dag);
     const origins = Object.entries(group.candidate_count_by_origin).map(([o, n]) => `${n} ${MEMO_ORIGINS[o].name}`).join(', ');
     $('details').innerHTML = `<h3>Memo group G${esc(group.id)} <span class="eyebrow">${esc(memo.steps[stepIndex].title)}</span></h3>${kv([
-      ['label', group.label], ['node', stageNodeLines(group.dag.nodes[top].operator).join(' · ')],
+      ['label', group.label], ['node', stageNodeLines(memo.nodes[group.node].operator).join(' · ')],
       ['reads', groupList(group.children)], ['read by', groupList(group.parents)],
       ['queries reaching it', queryList(group.queries)], ['root of', queryList(group.roots_of)],
       ['candidates', `${group.candidate_count}${group.candidates_capped ? ` (${group.candidates.length} listed)` : ''}${origins ? `: ${origins}` : ''}`],
       ['selected plan', selectedText(group)],
-    ])}<details><summary>Group DAG (JSON)</summary><pre>${esc(JSON.stringify(group.dag, null, 2))}</pre></details>`;
+    ])}<details><summary>Group DAG (JSON)</summary><pre>${esc(JSON.stringify(memoNodeDag(memo.nodes, [group.node]), null, 2))}</pre></details>`;
   }
 
   function showCandidate(group, candidate) {
-    const { own, reads } = memoCandidateOwnNodes(candidate);
+    const { own, reads } = memoCandidateOwnNodes(memo.nodes, candidate);
     const choice = memo.selected_choice;
     const selected = stepIndex === memo.steps.length - 1 && choice && choice[String(group.id)] === candidate.index;
     $('details').innerHTML = `<h3>Candidate #${esc(candidate.index)} of G${esc(group.id)} <span class="eyebrow">${esc(memo.steps[stepIndex].title)}</span></h3>${kv([
@@ -492,7 +483,7 @@ function memoViewController() {
       ['selected plan', selected ? 'chosen for this group' : 'no'],
     ])}<div><div class="eyebrow">own nodes (top first)</div>${nodeList(own)}</div>
       <div class="hint">${reads.length ? `Reads ${reads.map((r) => `G${r.group} (node ${r.node})`).join(', ')}.` : 'Reads no other group.'}</div>
-      <details><summary>Candidate DAG (JSON)</summary><pre>${esc(JSON.stringify(candidate.dag, null, 2))}</pre></details>`;
+      <details><summary>Candidate DAG (JSON)</summary><pre>${esc(JSON.stringify(memoNodeDag(memo.nodes, [candidate.node]), null, 2))}</pre></details>`;
   }
 
   function selectStep(i) {

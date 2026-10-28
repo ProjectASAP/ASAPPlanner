@@ -1,10 +1,11 @@
 // The Enumerated DAGs panel: `memo.enumeration` of an asap-stage-pipeline/v1
 // document, the complete candidate DAGs the memo stands for, as `stage_pipeline`
-// enumerated and composed them. The document holds each listed choice's DAG,
-// so the page composes nothing: a clicked row's `dag` is drawn in the Stage 1
+// enumerated and composed them. The document holds each listed choice's DAG
+// as its `roots` in the memo's node table (`memo.nodes`), so the page
+// composes nothing: a clicked row's DAG (memoNodeDag) is drawn in the Stage 1
 // lane by app.js. The checks and the rows are DOM-free (enumeration.test.mjs);
-// renderEnumeration fills the panel. Reads validateLogicalDag and uniqueIds
-// from stages.js.
+// renderEnumeration fills the panel. Reads memoNodeDag and uniqueIds from
+// stages.js.
 
 // Memo steps in pipeline order, with the names the header uses.
 const MEMO_STEP_NAMES = { stage0: 'Stage 0', pass1: 'Pass 1', pass2: 'Pass 2', concrete_states: 'concrete states' };
@@ -58,13 +59,14 @@ function validateMemoEnumeration(doc) {
     if (!enumerationIsObject(entry)) return;
     const where = `${at}.choices[${index}]`;
     if (!isMemoChoice(entry.choice)) errors.push(`${where}.choice must map group ids to candidate indices`);
-    // A choice that does not compose has no DAG but its error.
-    if (entry.dag === null) {
-      if (typeof entry.error !== 'string' || !entry.error) errors.push(`${where}: needs a dag or an error`);
-    } else {
-      // One root per root group, which need not be one per query.
-      const roots = entry.dag && Array.isArray(entry.dag.roots) ? entry.dag.roots.length : 0;
-      errors.push(...validateLogicalDag(entry.dag, where, roots));
+    // A choice that does not compose has no DAG but its error. Otherwise one
+    // root per root group (which need not be one per query), each an index
+    // into memo.nodes.
+    if (entry.roots === null) {
+      if (typeof entry.error !== 'string' || !entry.error) errors.push(`${where}: needs roots or an error`);
+    } else if (!Array.isArray(entry.roots) || entry.roots.length === 0
+      || !entry.roots.every((id) => Number.isInteger(id) && id >= 0 && Array.isArray(memo.nodes) && id < memo.nodes.length)) {
+      errors.push(`${where}.roots must index memo.nodes`);
     }
     ['budget_share_1', 'selected'].forEach((field) => {
       if (typeof entry[field] !== 'boolean') errors.push(`${where}.${field} must be true or false`);
@@ -144,8 +146,8 @@ function enumerationView(doc) {
         ? changes.map((c) => (c.index === null ? `G${c.group} not read`
           : `G${c.group} → #${c.index}${c.label ? ` ${c.label}` : ''}${c.origin ? ` (${c.origin})` : ''}`)).join(' · ')
         : 'the selected choice',
-      nodes: entry.dag ? entry.dag.nodes.length : null,
-      error: entry.dag ? null : entry.error,
+      nodes: entry.roots ? memoNodeDag(memo.nodes, entry.roots).nodes.length : null,
+      error: entry.roots ? null : entry.error,
       budgetShare1: entry.budget_share_1,
       selected: entry.selected,
       priced: 'valid' in entry,
@@ -224,10 +226,11 @@ function renderEnumeration(doc, draw) {
     const button = event.target && event.target.closest ? event.target.closest('button[data-id]') : null;
     if (!button || !state.view) return;
     const choice = state.doc.memo.enumeration.choices.find((c) => c.id === button.dataset.id);
-    if (!choice.dag) return;
+    if (!choice.roots) return;
     const row = state.view.rows.find((r) => r.id === button.dataset.id);
-    state.draw(choice.id, choice.dag, row.text,
-      enumeratedDagPerQuery(choice.dag, state.view.rootQueries, state.doc.workload.queries.length));
+    const dag = memoNodeDag(state.doc.memo.nodes, choice.roots);
+    state.draw(choice.id, dag, row.text,
+      enumeratedDagPerQuery(dag, state.view.rootQueries, state.doc.workload.queries.length));
     pressEnumeratedRow(choice.id);
   });
 }
