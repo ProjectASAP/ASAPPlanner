@@ -4,7 +4,6 @@
 //! the compiler checks that no internal is used (CI runs
 //! `cargo check -p asap-planner --tests --locked` on its own for that).
 
-use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -107,25 +106,26 @@ fn run(
     scope: Scope,
 ) -> Vec<Vec<Batch>> {
     // The materialized views the run reads; each one's schema is its DAG node's.
-    let boundaries: BTreeSet<u64> = views.keys().copied().collect();
-    // The executor's plan for `ids`, cut at the views; every `Scan` it
-    // reaches is a table slot.
-    let compiled = compile(dag, &boundaries, ids).expect("the executor compiles the plan");
-    // Each view as an in-memory provider of its states.
-    let views = views
-        .into_iter()
-        .map(|(id, batch)| {
-            let source = MemorySource::new(batch.schema().clone(), vec![batch]).unwrap();
-            (id, Arc::new(source) as Arc<dyn TableProvider>)
-        })
-        .collect();
-    // The plan bound to its data: raw samples at the `Scan`s by metric, and
-    // the views by node id.
-    let data_sources = BindingDataSources {
-        tables: time_series_tables(dag, samples),
-        materialized_views: views,
+    let read: Vec<MaterializedView> = if views.is_empty() {
+        Vec::new()
+    } else {
+        dag.materialized_views()
+            .unwrap()
+            .into_iter()
+            .filter(|view| views.contains_key(&(view.node_id as u64)))
+            .collect()
     };
-    let instance = compiled.instantiate(&data_sources).unwrap();
+    assert_eq!(read.len(), views.len(), "every bound state is a view's");
+    // The executor's plan for `ids`, reading the views; every `Scan` it
+    // reaches is a raw data slot.
+    let compiled = compile(dag, &read, ids).expect("the executor compiles the plan");
+    // The plan's data in one store: raw samples at the `Scan`s by metric,
+    // and each view's states by node id.
+    let mut store = time_series_tables(dag, samples);
+    for (id, batch) in views {
+        store = store.with_materialized_view(id as _, vec![batch]).unwrap();
+    }
+    let instance = compiled.instantiate(Arc::new(store)).unwrap();
     block_on(async {
         // The run's scope (ingestion window or query time) and limits.
         let context = RunContext::new(scope, Limits::default()).unwrap();
@@ -399,11 +399,9 @@ fn run_data_plane_on(
                 MaterializedViewRefresh::AtIngestion => Scope::Ingestion {
                     window_start_ms: span.0,
                     window_end_ms: span.1,
-                    revision: 1,
                 },
                 MaterializedViewRefresh::OnFirstRead => Scope::Query {
                     evaluation_time_ms: evaluation_ms,
-                    revision: 1,
                 },
             };
             // The batches that run produced, in one batch, as the store keeps it.
@@ -450,7 +448,6 @@ fn run_data_plane_on(
     // The query evaluation, which reads the stored states.
     let query = Scope::Query {
         evaluation_time_ms: evaluation_ms,
-        revision: 1,
     };
     // Each query's answers: (series labels, value) per series.
     let answers_per_query = run(
@@ -904,7 +901,6 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
     ];
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
-        revision: 1,
     };
     let answered = answers(&run(dag, BTreeMap::new(), &samples, &query_roots(&plan), query)[0]);
     assert_eq!(answered.len(), 1);

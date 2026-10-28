@@ -183,7 +183,6 @@ pub(crate) mod harness {
     pub(crate) fn query(time_ms: i64) -> Scope {
         Scope::Query {
             evaluation_time_ms: time_ms,
-            revision: 1,
         }
     }
 

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use asap_executor::physical_planner::compile;
 use asap_executor::runtime::{Limits, RunContext, Scope};
-use asap_executor::sources::{BindingDataSources, DataSources, MemorySource};
+use asap_executor::sources::InMemoryDataStore;
 use asap_executor::values::{Batch, Value};
 use asap_planner::{
     plan_installable, test_support::query_time_reference, FrontendInput, InstallablePlan,
@@ -226,22 +226,18 @@ fn run_sql(plan: &InstallablePlan, query: usize) -> Vec<Batch> {
         })
         .collect();
     let batch = Batch::try_new(schema.clone(), rows).unwrap();
-    let mut sources = DataSources::default();
-    sources
-        .register(
+    let store = InMemoryDataStore::default()
+        .with_raw_data(
             DataSource::Table {
                 table_ref: "metrics".into(),
             },
-            Arc::new(MemorySource::new(schema, vec![batch]).unwrap()),
+            schema,
+            vec![batch],
         )
         .unwrap();
     let roots = [reference.roots[query] as u64];
-    let data_sources = BindingDataSources {
-        tables: sources,
-        ..Default::default()
-    };
-    let bound = compile(&reference, &BTreeSet::new(), &roots)
-        .and_then(|compiled| compiled.instantiate(&data_sources))
+    let bound = compile(&reference, &[], &roots)
+        .and_then(|compiled| compiled.instantiate(Arc::new(store)))
         .expect("the plan binds to the table");
     let batches = collect(bound.execute(&roots, query_scope()).unwrap().remove(0));
     batches
@@ -265,13 +261,11 @@ fn run_promql(plan: &InstallablePlan) -> Vec<Batch> {
     let reference = query_time_reference(plan).unwrap();
     let dag = &reference.dag;
     let roots = [reference.dag.roots[0] as u64];
-    let compiled = compile(dag, &BTreeSet::new(), &roots).expect("the executor compiles the plan");
+    let compiled = compile(dag, &[], &roots).expect("the executor compiles the plan");
     // The samples bound at the plan's `Scan` of `metrics`.
-    let data_sources = BindingDataSources {
-        tables: time_series_tables(dag, &samples),
-        ..Default::default()
-    };
-    let instance = compiled.instantiate(&data_sources).unwrap();
+    let instance = compiled
+        .instantiate(Arc::new(time_series_tables(dag, &samples)))
+        .unwrap();
     let batches = collect(
         instance
             .execute(compiled.roots(), query_scope())
@@ -285,7 +279,6 @@ fn query_scope() -> RunContext {
     RunContext::new(
         Scope::Query {
             evaluation_time_ms: EVALUATION_MS,
-            revision: 1,
         },
         Limits::default(),
     )

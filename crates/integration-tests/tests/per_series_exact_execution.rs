@@ -4,13 +4,13 @@
 //! the executor compiles and runs. The samples are bound at the plan's
 //! `Scan`, as a runtime binds them, and its `TimeRange` keeps the window.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use asap_executor::physical_planner::{compile, promql_rows};
 use asap_executor::runtime::{Limits, RunContext, Scope};
-use asap_executor::sources::{BindingDataSources, MemorySource};
+use asap_executor::sources::InMemoryDataStore;
 use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::ir::operator::{Reduction, Source};
@@ -126,23 +126,21 @@ fn execute(query: &str, samples: &[RawDataSample]) -> Vec<(String, f64)> {
         .map(|s| promql_rows::series_row(&schema, &s.labels, s.timestamp_ms, s.value).unwrap())
         .collect();
     let batch = Batch::try_new(schema.clone(), rows).unwrap();
-    let mut data_sources = BindingDataSources::default();
-    data_sources
-        .tables
-        .register(
+    let store = InMemoryDataStore::default()
+        .with_raw_data(
             Source::TimeSeries { metric: "x".into() },
-            Arc::new(MemorySource::new(schema, vec![batch]).unwrap()),
+            schema,
+            vec![batch],
         )
         .unwrap();
     let roots = [dag.roots[0] as u64];
-    let bound = compile(&dag, &BTreeSet::new(), &roots)
+    let bound = compile(&dag, &[], &roots)
         .unwrap()
-        .instantiate(&data_sources)
+        .instantiate(Arc::new(store))
         .unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: EVALUATION_MS,
-            revision: 1,
         },
         Limits::default(),
     )

@@ -4,11 +4,10 @@
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::sync::Arc;
 
-use asap_executor::physical_planner::{compile_candidate, frontier_from_timing, promql_rows};
+use asap_executor::physical_planner::{compile, promql_rows};
 use asap_executor::runtime::Scope;
-use asap_executor::values::{Batch, Value};
+use asap_executor::values::Value;
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::explicit_local_candidates;
 use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPOperatorPayload};
@@ -44,7 +43,7 @@ fn execute(candidate: &Rc<OperatorNode>) -> Vec<f64> {
     )
     .unwrap();
     let dag = compile_physical_asap_dag(&timed).unwrap();
-    let raw: BTreeMap<u64, _> = dag
+    let ranges = dag
         .nodes
         .iter()
         .filter(|node| {
@@ -53,38 +52,25 @@ fn execute(candidate: &Rc<OperatorNode>) -> Vec<f64> {
                 PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::TimeRange { .. })
             )
         })
-        .map(|node| (node.id as u64, Arc::new(node.output_schema.clone())))
-        .collect();
-    assert_eq!(raw.len(), 1, "one range selector");
-    let frontier = frontier_from_timing(&dag).unwrap();
-    let compiled = compile_candidate(
-        &dag,
-        &raw.keys().copied().collect(),
-        &[dag.roots[0] as u64],
-        &frontier,
-    )
-    .unwrap();
-    assert!(compiled.precompute.is_none());
+        .count();
+    assert_eq!(ranges, 1, "one range selector");
+    // The whole plan runs at query time over the raw samples.
+    let compiled = compile(&dag, &[], &[dag.roots[0] as u64]).unwrap();
     let labels = BTreeMap::from([("__name__".to_string(), "flows_src_ip".to_string())]);
-    let inputs = raw
-        .iter()
-        .map(|(id, schema)| {
-            let rows = SAMPLES
-                .iter()
-                .enumerate()
-                .map(|(i, value)| {
-                    promql_rows::series_row(schema, &labels, 290_000 + i as i64, *value).unwrap()
-                })
-                .collect();
-            (*id, Batch::try_new(schema.clone(), rows).unwrap())
-        })
-        .collect();
+    let store = physical_common::raw_data_store(&dag, |_, schema| {
+        SAMPLES
+            .iter()
+            .enumerate()
+            .map(|(i, value)| {
+                promql_rows::series_row(schema, &labels, 290_000 + i as i64, *value).unwrap()
+            })
+            .collect()
+    });
     let result = physical_common::execute(
-        &compiled.query,
-        inputs,
+        &compiled,
+        store,
         Scope::Query {
             evaluation_time_ms: EVALUATION_MS,
-            revision: 1,
         },
     );
     result[0]

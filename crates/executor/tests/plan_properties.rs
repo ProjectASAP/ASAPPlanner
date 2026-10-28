@@ -1,12 +1,13 @@
-//! Finite-input requirements are validated before source execution.
+//! A blocking parent over a raw data slot is finite, and binding it opens no reader.
 use asap_executor::{
     physical_planner::compile,
     plan::{Boundedness, Emission},
     runtime::{Limits, OutputStream, RunContext, Scope},
-    sources::{BindingDataSources, ScanRequest, TableProvider},
-    values::{Batch, SchemaRef},
+    sources::{DataStore, MaterializedViewRequest, RawDataRequest},
+    values::Batch,
     Error,
 };
+use planner_types::ir::materialized_view::MaterializedView;
 use planner_types::ir::operator::{GroupKeys, Source};
 use planner_types::ir::physical_export::{
     EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
@@ -15,26 +16,31 @@ use planner_types::ir::physical_export::{
 use planner_types::ir::properties::ExecutionDataState;
 use planner_types::ir::schema::{DataType, FieldDataType, Schema};
 use planner_types::ir::NonASAPOp;
-use std::collections::BTreeSet;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-struct DeclaredSource {
-    schema: SchemaRef,
-    boundedness: Boundedness,
+/// A store of empty raw data that counts the reads it opens.
+struct CountingStore {
     opens: Arc<AtomicUsize>,
 }
-impl TableProvider for DeclaredSource {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-    fn boundedness(&self) -> Boundedness {
-        self.boundedness
-    }
-    fn scan(&self, _: &ScanRequest, _: RunContext) -> Result<OutputStream<'_, Batch>, Error> {
+impl DataStore for CountingStore {
+    fn read_raw_data(
+        &self,
+        _: &Source,
+        _: &RawDataRequest,
+        _: RunContext,
+    ) -> Result<OutputStream<'_, Batch>, Error> {
         self.opens.fetch_add(1, Ordering::SeqCst);
         Ok(Box::pin(futures::stream::empty()))
+    }
+    fn read_materialized_view(
+        &self,
+        view: &MaterializedView,
+        _: &MaterializedViewRequest,
+        _: RunContext,
+    ) -> Result<OutputStream<'_, Batch>, Error> {
+        Err(Error::Invalid(format!("no view {}", view.node_id)))
     }
 }
 /// `Sort(Scan(t))` over `schema`.
@@ -84,65 +90,42 @@ fn sorted_scan(schema: &Schema, identity: &Source) -> PhysicalASAPDAG {
         scalar_roots: vec![],
     }
 }
-// A blocking parent over a table slot runs only over a provider that
-// declares Bounded; an unknown or unbounded one is rejected at
-// instantiation, without opening a reader.
+// A blocking parent over a raw data slot is Bounded and emits after its
+// input: the `Scan` reads a finite request. Instantiation opens no reader;
+// the run opens it once.
 #[test]
-fn blocking_inputs_require_an_explicit_finite_source() {
+fn blocking_inputs_over_a_raw_data_slot_are_finite() {
     let logical = Schema::new(vec![planner_types::ir::schema::Field::plain(
         "v",
         DataType::Int64,
         false,
     )]);
-    let schema = Arc::new(logical.clone());
     let identity = Source::Table {
         table_ref: "t".into(),
     };
-    let compiled = compile(&sorted_scan(&logical, &identity), &BTreeSet::new(), &[1]).unwrap();
-    for boundedness in [
-        Boundedness::Unknown,
-        Boundedness::Unbounded,
-        Boundedness::Bounded,
-    ] {
-        let opens = Arc::new(AtomicUsize::new(0));
-        let mut data_sources = BindingDataSources::default();
-        data_sources
-            .tables
-            .register(
-                identity.clone(),
-                Arc::new(DeclaredSource {
-                    schema: schema.clone(),
-                    boundedness,
-                    opens: opens.clone(),
-                }),
-            )
-            .unwrap();
-        let run = RunContext::new(
-            Scope::Query {
-                evaluation_time_ms: 0,
-                revision: 0,
-            },
-            Limits::default(),
-        )
+    let compiled = compile(&sorted_scan(&logical, &identity), &[], &[1]).unwrap();
+    let opens = Arc::new(AtomicUsize::new(0));
+    let dag = compiled
+        .instantiate(Arc::new(CountingStore {
+            opens: opens.clone(),
+        }))
         .unwrap();
-        match compiled.instantiate(&data_sources) {
-            Ok(dag) => {
-                assert_eq!(boundedness, Boundedness::Bounded);
-                let properties = dag.properties(&[1]).unwrap();
-                assert_eq!(properties[&1].emission, Emission::AfterInput);
-                assert_eq!(properties[&1].boundedness, Boundedness::Bounded);
-                assert!(dag.execute(&[1], run).is_ok());
-            }
-            Err(error) => {
-                assert_ne!(boundedness, Boundedness::Bounded);
-                assert!(
-                    error.to_string().contains("does not declare Bounded"),
-                    "{error}"
-                );
-            }
-        }
-        assert_eq!(opens.load(Ordering::SeqCst), 0);
-    }
+    let properties = dag.properties(&[1]).unwrap();
+    assert_eq!(properties[&1].emission, Emission::AfterInput);
+    assert_eq!(properties[&1].boundedness, Boundedness::Bounded);
+    assert_eq!(opens.load(Ordering::SeqCst), 0);
+    let run = RunContext::new(
+        Scope::Query {
+            evaluation_time_ms: 0,
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    let rows: Vec<_> = futures::executor::block_on(futures::StreamExt::collect::<Vec<_>>(
+        dag.execute(&[1], run).unwrap().remove(0),
+    ));
+    assert!(rows.iter().all(Result::is_ok));
+    assert_eq!(opens.load(Ordering::SeqCst), 1);
 }
 
 /// A KLL kernel accepts `k` only up to the 26 602 `asap_sketchlib` caps it at.

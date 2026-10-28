@@ -1,5 +1,5 @@
 //! Acceptance tests use the library directly, without either backend engine.
-use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
+use asap_executor::sources::InMemoryDataStore;
 use asap_executor::{
     operators::{Expression, Operator, Reduction, SortKey},
     plan::PhysicalDAG,
@@ -7,6 +7,7 @@ use asap_executor::{
     values::{Batch, SchemaRef, Value},
 };
 use futures::{executor::block_on, StreamExt};
+use planner_types::ir::operator::Source;
 use planner_types::ir::physical_export::{
     EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
     PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
@@ -33,15 +34,41 @@ fn schema(fields: &[(&str, DataType, bool)]) -> SchemaRef {
         time_index: None,
     })
 }
-/// `dag` compiled with the views of `data_sources` cut out as slots, and
-/// bound to `data_sources`.
-fn bind<'a>(
+/// `dag` compiled and bound to `store`.
+fn bind(
     dag: &PhysicalASAPDAG,
-    data_sources: &'a BindingDataSources,
+    store: InMemoryDataStore,
     roots: &[u64],
-) -> Result<PhysicalDAG<'a, Batch, SchemaRef>, asap_executor::Error> {
-    let boundaries = data_sources.materialized_views.keys().copied().collect();
-    asap_executor::physical_planner::compile(dag, &boundaries, roots)?.instantiate(data_sources)
+) -> Result<PhysicalDAG<'static, Batch, SchemaRef>, asap_executor::Error> {
+    asap_executor::physical_planner::compile(dag, &[], roots)?.instantiate(Arc::new(store))
+}
+/// A `Scan` of table `table` in `schema`.
+fn scan(table: &str, schema: &SchemaRef) -> PhysicalASAPOperatorPayload {
+    PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan {
+        source: Source::Table {
+            table_ref: table.into(),
+        },
+        predicates: vec![],
+        schema: (**schema).clone(),
+    })
+}
+/// `rows` in `schema`, bound as the rows of table `table`.
+fn with_table(
+    store: InMemoryDataStore,
+    table: &str,
+    schema: &SchemaRef,
+    rows: Vec<Vec<Value>>,
+) -> InMemoryDataStore {
+    let batch = Batch::try_new(schema.clone(), rows).unwrap();
+    store
+        .with_raw_data(
+            Source::Table {
+                table_ref: table.into(),
+            },
+            schema.clone(),
+            vec![batch],
+        )
+        .unwrap()
 }
 
 fn run(dag: &PhysicalDAG<'_, Batch, SchemaRef>, root: u64, scope: Scope) -> Vec<Vec<Value>> {
@@ -66,7 +93,6 @@ fn run(dag: &PhysicalDAG<'_, Batch, SchemaRef>, root: u64, scope: Scope) -> Vec<
 fn query() -> Scope {
     Scope::Query {
         evaluation_time_ms: 1000,
-        revision: 2,
     }
 }
 fn floats(rows: &[Vec<Value>], column: usize) -> Vec<f64> {
@@ -174,7 +200,6 @@ fn summary_construction_merge_and_evaluation_at_both_phases() {
         Scope::Ingestion {
             window_start_ms: 0,
             window_end_ms: 1000,
-            revision: 2,
         },
     ] {
         assert_eq!(floats(&run(&dag, 4, scope), 0), vec![420.]);
@@ -362,7 +387,6 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
             Scope::Ingestion {
                 window_start_ms: 0,
                 window_end_ms: 1000,
-                revision: 1,
             },
         )
     };
@@ -510,7 +534,6 @@ fn exact_state_and_family_validation() {
 fn bind_physical_asap_dag_before_execution() {
     use planner_types::ir::properties::ExecutionDataState;
     use planner_types::ir::scalar::{ArithmeticOpKind, ScalarValue};
-    use std::collections::BTreeMap;
     let schema = schema(&[("value", DataType::Float64, false)]);
     let node = |id, payload| PhysicalASAPDAGNode {
         id,
@@ -563,33 +586,29 @@ fn bind_physical_asap_dag_before_execution() {
         roots: vec![1],
         scalar_roots: vec![],
     };
-    let sources = || -> BTreeMap<u64, Arc<dyn TableProvider>> {
-        BTreeMap::from([(
-            0,
-            Arc::new(
-                MemorySource::new(
-                    schema.clone(),
-                    vec![Batch::try_new(schema.clone(), vec![vec![Value::Float64(1.)]]).unwrap()],
-                )
-                .unwrap(),
-            ) as Arc<dyn TableProvider>,
-        )])
+    // The same plan over a table scan reads the deployment's raw rows.
+    let mut scanned = dag.clone();
+    scanned.nodes[0].payload = scan("values", &schema);
+    let data = || {
+        with_table(
+            Default::default(),
+            "values",
+            &schema,
+            vec![vec![Value::Float64(1.)]],
+        )
     };
-    let data_sources = BindingDataSources {
-        materialized_views: sources(),
-        ..Default::default()
-    };
-    let native = bind(&dag, &data_sources, &[1]).unwrap();
+    let native = bind(&scanned, data(), &[1]).unwrap();
     assert_eq!(floats(&run(&native, 1, query()), 0), vec![3.]);
     // A literal `Values` source needs no deployment input.
-    let no_data = BindingDataSources::default();
-    let literal = bind(&dag, &no_data, &[1]).unwrap();
+    let literal = bind(&dag, Default::default(), &[1]).unwrap();
     assert_eq!(floats(&run(&literal, 1, query()), 0), vec![3.]);
     dag.nodes[1].payload = PhysicalASAPOperatorPayload::ASAP(ASAPOp::Extension {
         child: 0,
         name: "unsupported".into(),
     });
-    assert!(bind(&dag, &data_sources, &[1]).is_err());
+    assert!(bind(&dag, Default::default(), &[1]).is_err());
+    scanned.nodes[1].payload = dag.nodes[1].payload.clone();
+    assert!(bind(&scanned, data(), &[1]).is_err());
 }
 
 // A completed empty population has an exact zero count, with integer output.
@@ -622,76 +641,6 @@ fn empty_exact_count_is_an_integer_state_evaluation() {
     dag.add(1, vec![0], build).unwrap();
     dag.add(2, vec![1], read).unwrap();
     assert!(matches!(run(&dag, 2, query())[0][0], Value::Int64(0)));
-}
-
-// A deployment source cannot pass a different row shape to bound expressions.
-#[test]
-fn source_batches_must_match_the_bound_schema() {
-    use asap_executor::{plan::Boundedness, runtime, sources::ScanRequest};
-    use planner_types::ir::properties::ExecutionDataState;
-    use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    struct WrongSource {
-        schema: SchemaRef,
-        starts: Arc<AtomicUsize>,
-    }
-    impl TableProvider for WrongSource {
-        fn boundedness(&self) -> Boundedness {
-            Boundedness::Bounded
-        }
-        fn schema(&self) -> SchemaRef {
-            self.schema.clone()
-        }
-        fn scan(
-            &self,
-            _: &ScanRequest,
-            _: RunContext,
-        ) -> Result<runtime::OutputStream<'_, Batch>, asap_executor::Error> {
-            self.starts.fetch_add(1, Ordering::SeqCst);
-            Ok(
-                futures::stream::once(async { Batch::try_new(schema(&[]), vec![vec![]]) })
-                    .boxed_local(),
-            )
-        }
-    }
-    let expected = schema(&[("value", DataType::Float64, false)]);
-    let starts = Arc::new(AtomicUsize::new(0));
-    let plan = PhysicalASAPDAG {
-        nodes: vec![PhysicalASAPDAGNode {
-            id: 0,
-            payload: PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Values {
-                rows: vec![vec![planner_types::ir::ScalarExpr::Literal(
-                    planner_types::ir::scalar::ScalarValue::Float64(1.),
-                )]],
-                schema: (*expected).clone(),
-            }),
-            output_state: ExecutionDataState::QUERY_ROWS,
-            materialization: Default::default(),
-            output_schema: (*expected).clone(),
-            guarantee: None,
-            retention_ms: None,
-        }],
-        edges: vec![],
-        roots: vec![0],
-        scalar_roots: vec![],
-    };
-    let source = Arc::new(WrongSource {
-        schema: expected,
-        starts: starts.clone(),
-    }) as Arc<dyn TableProvider>;
-    let data_sources = BindingDataSources {
-        materialized_views: BTreeMap::from([(0, source)]),
-        ..Default::default()
-    };
-    let native = bind(&plan, &data_sources, &[0]).unwrap();
-    assert_eq!(starts.load(Ordering::SeqCst), 0);
-    let context = RunContext::new(query(), Limits::default()).unwrap();
-    let mut output = native.execute(&[0], context).unwrap().remove(0);
-    assert!(matches!(
-        block_on(output.next()),
-        Some(Err(asap_executor::Error::AtNode { node: 0, .. }))
-    ));
-    assert_eq!(starts.load(Ordering::SeqCst), 1);
 }
 
 // Float extrema have the same NaN behavior as the exact summary kernels.
@@ -740,7 +689,6 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
 
     use planner_types::ir::operator::{GroupKeys, JoinKind};
     use planner_types::ir::scalar::CompareOpKind;
-    use std::collections::BTreeMap;
     let rows_schema = schema(&[
         ("group", DataType::Utf8, false),
         ("key", DataType::Utf8, false),
@@ -769,26 +717,8 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
     let groups = GroupKeys::by(vec![0]);
     let dag = PhysicalASAPDAG {
         nodes: vec![
-            node(
-                0,
-                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Values {
-                    rows: vec![vec![planner_types::ir::ScalarExpr::Literal(
-                        planner_types::ir::scalar::ScalarValue::Float64(0.),
-                    )]],
-                    schema: (*rows_schema).clone(),
-                }),
-                &rows_schema,
-            ),
-            node(
-                1,
-                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Values {
-                    rows: vec![vec![planner_types::ir::ScalarExpr::Literal(
-                        planner_types::ir::scalar::ScalarValue::Float64(0.),
-                    )]],
-                    schema: (*keys_schema).clone(),
-                }),
-                &keys_schema,
-            ),
+            node(0, scan("rows", &rows_schema), &rows_schema),
+            node(1, scan("keys", &keys_schema), &keys_schema),
             node(
                 2,
                 PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::Join {
@@ -846,7 +776,6 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
             Scope::Ingestion {
                 window_start_ms: 0,
                 window_end_ms: 1000,
-                revision: 2,
             },
         ),
     ] {
@@ -858,46 +787,24 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         for edge in &mut dag.edges {
             edge.data_state.timing = phase;
         }
-        let sources: BTreeMap<u64, Arc<dyn TableProvider>> = BTreeMap::from([
-            (
-                0,
-                Arc::new(
-                    MemorySource::new(
-                        rows_schema.clone(),
-                        vec![Batch::try_new(
-                            rows_schema.clone(),
-                            vec![
-                                vec![text("a"), text("x"), Value::Float64(8.)],
-                                vec![text("a"), text("y"), Value::Float64(9.)],
-                                vec![text("b"), text("x"), Value::Float64(2.)],
-                                vec![text("b"), text("z"), Value::Float64(99.)],
-                            ],
-                        )
-                        .unwrap()],
-                    )
-                    .unwrap(),
-                ) as Arc<dyn TableProvider>,
-            ),
-            (
-                1,
-                Arc::new(
-                    MemorySource::new(
-                        keys_schema.clone(),
-                        vec![Batch::try_new(
-                            keys_schema.clone(),
-                            vec![vec![text("x")], vec![text("y")]],
-                        )
-                        .unwrap()],
-                    )
-                    .unwrap(),
-                ) as Arc<dyn TableProvider>,
-            ),
-        ]);
-        let data_sources = BindingDataSources {
-            materialized_views: sources,
-            ..Default::default()
-        };
-        let native = bind(&dag, &data_sources, &[4]).unwrap();
+        let store = with_table(
+            Default::default(),
+            "rows",
+            &rows_schema,
+            vec![
+                vec![text("a"), text("x"), Value::Float64(8.)],
+                vec![text("a"), text("y"), Value::Float64(9.)],
+                vec![text("b"), text("x"), Value::Float64(2.)],
+                vec![text("b"), text("z"), Value::Float64(99.)],
+            ],
+        );
+        let store = with_table(
+            store,
+            "keys",
+            &keys_schema,
+            vec![vec![text("x")], vec![text("y")]],
+        );
+        let native = bind(&dag, store, &[4]).unwrap();
         let mut scores = floats(&run(&native, 4, scope), 2);
         scores.sort_by(f64::total_cmp);
         assert_eq!(scores, vec![2., 9.]);
@@ -1175,7 +1082,6 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
         Scope::Ingestion {
             window_start_ms: 0,
             window_end_ms: 60_000,
-            revision: 2,
         },
         query(),
     ] {
@@ -1196,8 +1102,6 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
 // The grouped temporal reducer's sample schema must survive physical Sort/Limit binding.
 #[test]
 fn grouped_temporal_schema_compiles_and_executes_topk() {
-    use asap_executor::physical_planner::{compile_node, CompiledPhysicalDAG};
-    use planner_types::ir::physical_export::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
     use planner_types::ir::properties::ExecutionDataState;
 
     use planner_types::ir::operator::{AggIntent, GroupKeys, Reduction as IrReduction};
@@ -1227,67 +1131,67 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
             })
             .collect::<Vec<_>>(),
     );
-    let node = |id, operation| PhysicalASAPDAGNode {
+    let node = |id, payload| PhysicalASAPDAGNode {
         id,
-        payload: PhysicalASAPOperatorPayload::NonASAP(operation),
+        payload,
         output_state: ExecutionDataState::QUERY_ROWS,
         materialization: Default::default(),
         output_schema: (*input).clone(),
         guarantee: None,
         retention_ms: None,
     };
-    let sort = compile_node(
-        &node(
-            1,
-            NonASAPOp::Sort {
-                keys: vec![planner_types::ir::SortKey {
-                    expr: planner_types::ir::ScalarExpr::Column(1),
-                    ascending: false,
-                    nulls_first: false,
-                }],
-                partition_by: GroupKeys::none(),
-                child: 0,
-            },
-        ),
-        std::slice::from_ref(&input),
-    )
-    .unwrap();
-    let limit = compile_node(
-        &node(
-            2,
-            NonASAPOp::Limit {
-                n: Some(1),
-                offset: 0,
-                partition_by: GroupKeys::none(),
-                child: 1,
-            },
-        ),
-        std::slice::from_ref(&input),
-    )
-    .unwrap();
-    let compiled = CompiledPhysicalDAG::from_operators(
-        [(0, input.clone())].into(),
-        [(1, (vec![0], sort)), (2, (vec![1], limit))].into(),
-        vec![2],
-    )
-    .unwrap();
+    let edge = |producer, consumer| PhysicalASAPDAGEdge {
+        producer,
+        consumer,
+        role: EdgeRole::Input,
+        intermediate_schema: (*input).clone(),
+        data_state: ExecutionDataState::QUERY_ROWS,
+        grouping: GroupingEdgeCompatibility::NotApplicable,
+        window: WindowEdgeCompatibility::NotApplicable,
+    };
+    let dag = PhysicalASAPDAG {
+        nodes: vec![
+            node(0, scan("grouped", &input)),
+            node(
+                1,
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Sort {
+                    keys: vec![planner_types::ir::SortKey {
+                        expr: planner_types::ir::ScalarExpr::Column(1),
+                        ascending: false,
+                        nulls_first: false,
+                    }],
+                    partition_by: GroupKeys::none(),
+                    child: 0,
+                }),
+            ),
+            node(
+                2,
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Limit {
+                    n: Some(1),
+                    offset: 0,
+                    partition_by: GroupKeys::none(),
+                    child: 1,
+                }),
+            ),
+        ],
+        edges: vec![edge(0, 1), edge(1, 2)],
+        roots: vec![2],
+        scalar_roots: vec![],
+    };
+    let compiled = asap_executor::physical_planner::compile(&dag, &[], &[2]).unwrap();
     assert_eq!(compiled.row_source(2), Some(0));
     assert_eq!(compiled.operator_name(2), Some("Limit"));
     let expected = vec![Value::Utf8("api".into()), Value::Float64(9.)];
-    let batch = Batch::try_new(
-        input.clone(),
+    let store = with_table(
+        Default::default(),
+        "grouped",
+        &input,
         vec![
             vec![Value::Utf8("worker".into()), Value::Float64(2.)],
             expected.clone(),
         ],
-    )
-    .unwrap();
-    let source = Arc::new(MemorySource::new(input, vec![batch]).unwrap()) as Arc<dyn TableProvider>;
-    let data_sources = BindingDataSources {
-        materialized_views: [(0, source)].into(),
-        ..Default::default()
-    };
-    let physical = compiled.instantiate(&data_sources).unwrap();
+    );
+    let physical = compiled.instantiate(Arc::new(store)).unwrap();
     let mut stream = physical
         .execute(&[2], RunContext::new(query(), Limits::default()).unwrap())
         .unwrap()
@@ -1313,7 +1217,6 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
 
     use planner_types::ir::operator::JoinKind;
     use planner_types::ir::scalar::CompareOpKind;
-    use std::collections::BTreeMap;
     let schema = schema(&[("key", DataType::Utf8, false)]);
     for certified in [false, true] {
         let node = PhysicalASAPDAGNode {
@@ -1335,40 +1238,14 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
                 right: 1,
             }),
         };
-        let dag = CompiledPhysicalDAG::from_operators(
-            [(0, schema.clone()), (1, schema.clone())].into(),
-            [(
-                2,
-                (
-                    vec![0, 1],
-                    if certified {
-                        Operator::certified_semi_join(schema.clone(), schema.clone(), vec![(0, 0)])
-                            .unwrap()
-                    } else {
-                        compile_node(&node, &[schema.clone(), schema.clone()]).unwrap()
-                    },
-                ),
-            )]
-            .into(),
-            vec![2],
-        )
-        .unwrap();
-        assert_eq!(
-            dag.certified_pruning_keys(2),
-            certified.then_some(&[(0, 0)][..])
-        );
-        for complete in [false, true] {
-            let sources = [
-                vec!["a"],
-                if complete {
-                    vec!["a"]
-                } else {
-                    vec!["a", "missing"]
-                },
-            ]
-            .into_iter()
-            .enumerate()
-            .map(|(i, keys)| {
+        let join = if certified {
+            Operator::certified_semi_join(schema.clone(), schema.clone(), vec![(0, 0)]).unwrap()
+        } else {
+            compile_node(&node, &[schema.clone(), schema.clone()]).unwrap()
+        };
+        // Each side is a leaf holding its keys.
+        let plan = |left: Vec<&str>, right: Vec<&str>| {
+            let source = |keys: Vec<&str>| {
                 let batch = Batch::try_new(
                     schema.clone(),
                     keys.into_iter()
@@ -1376,18 +1253,35 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
                         .collect(),
                 )
                 .unwrap();
-                (
-                    i as u64,
-                    Arc::new(MemorySource::new(schema.clone(), vec![batch]).unwrap())
-                        as Arc<dyn TableProvider>,
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-            let data_sources = BindingDataSources {
-                materialized_views: sources,
-                ..Default::default()
+                Operator::source(schema.clone(), vec![batch]).unwrap()
             };
-            let bound = dag.instantiate(&data_sources).unwrap();
+            CompiledPhysicalDAG::from_operators(
+                [
+                    (0, (vec![], source(left))),
+                    (1, (vec![], source(right))),
+                    (2, (vec![0, 1], join.clone())),
+                ]
+                .into(),
+                vec![2],
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            plan(vec![], vec![]).certified_pruning_keys(2),
+            certified.then_some(&[(0, 0)][..])
+        );
+        for complete in [false, true] {
+            let dag = plan(
+                vec!["a"],
+                if complete {
+                    vec!["a"]
+                } else {
+                    vec!["a", "missing"]
+                },
+            );
+            let bound = dag
+                .instantiate(Arc::new(InMemoryDataStore::default()))
+                .unwrap();
             let result = block_on(async {
                 let mut stream = bound
                     .execute(
@@ -1425,7 +1319,6 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
 
     use planner_types::ir::operator::BinaryOpKind;
     use planner_types::ir::scalar::ArithmeticOpKind;
-    use std::collections::BTreeMap;
     let input = schema(&[
         ("population", DataType::Utf8, false),
         ("time", DataType::Timestamp, false),
@@ -1450,19 +1343,7 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
             rhs: 1,
         }),
     };
-    let program = CompiledPhysicalDAG::from_operators(
-        [(0, input.clone()), (1, input.clone())].into(),
-        [(
-            2,
-            (
-                vec![0, 1],
-                compile_node(&node, &[input.clone(), input.clone()]).unwrap(),
-            ),
-        )]
-        .into(),
-        vec![2],
-    )
-    .unwrap();
+    let binary = compile_node(&node, &[input.clone(), input.clone()]).unwrap();
     for (right, expected) in [
         (vec![("b", 2, 3.), ("a", 1, 2.)], Some(vec![8., 17.])),
         (vec![("b", 2, 3.)], None),
@@ -1470,7 +1351,8 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
         (vec![("a", 2, 2.), ("b", 1, 3.)], None),
         (vec![("a", 1, f64::NAN), ("b", 2, 3.)], None),
     ] {
-        let sources = [vec![("a", 1, 10.), ("b", 2, 20.)], right]
+        // Each side is a leaf holding its `(population, time, value)` rows.
+        let mut operators = [vec![("a", 1, 10.), ("b", 2, 20.)], right]
             .into_iter()
             .enumerate()
             .map(|(i, rows)| {
@@ -1487,16 +1369,18 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
                 let batch = Batch::try_new(input.clone(), rows).unwrap();
                 (
                     i as u64,
-                    Arc::new(MemorySource::new(input.clone(), vec![batch]).unwrap())
-                        as Arc<dyn TableProvider>,
+                    (
+                        vec![],
+                        Operator::source(input.clone(), vec![batch]).unwrap(),
+                    ),
                 )
             })
-            .collect::<BTreeMap<_, _>>();
-        let data_sources = BindingDataSources {
-            materialized_views: sources,
-            ..Default::default()
-        };
-        let dag = program.instantiate(&data_sources).unwrap();
+            .collect::<std::collections::BTreeMap<_, _>>();
+        operators.insert(2, (vec![0, 1], binary.clone()));
+        let program = CompiledPhysicalDAG::from_operators(operators, vec![2]).unwrap();
+        let dag = program
+            .instantiate(Arc::new(InMemoryDataStore::default()))
+            .unwrap();
         let result = block_on(async {
             let mut stream = dag
                 .execute(

@@ -4,12 +4,14 @@
 //! `PaneChain`, expanded into the panes the executor runs.
 mod physical_common;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use asap_executor::physical_planner::test_support::views_at;
 use asap_executor::physical_planner::{compile, promql_rows, CompiledPhysicalDAG};
 use asap_executor::runtime::Scope;
+use asap_executor::sources::InMemoryDataStore;
 use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::{explicit_local_candidates, explicit_summary_candidate};
@@ -165,8 +167,6 @@ fn samples(phase_ms: i64) -> Vec<RawDataSample> {
 
 struct Exported {
     dag: PhysicalASAPDAG,
-    /// Each raw `TimeRange` input with the pane it reads (0 = most recent).
-    ranges: Vec<(u64, i64)>,
     /// Each `SummaryAgg` node with its pane.
     builds: Vec<(u64, i64)>,
 }
@@ -180,22 +180,15 @@ fn export(root: &Rc<OperatorNode>, assignment: &MaterializationAssignment) -> Ex
             _ => 0,
         }
     };
-    let (mut ranges, mut builds) = (vec![], vec![]);
+    let mut builds = vec![];
     for node in &compiled.dag.nodes {
         let logical = compiled.node_ids.operator_node(node.id).unwrap();
-        match &logical.operator {
-            Operator::NonASAP(NonASAPOp::TimeRange { .. }) => {
-                ranges.push((node.id as u64, pane(logical)))
-            }
-            Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) => {
-                builds.push((node.id as u64, pane(child)))
-            }
-            _ => {}
+        if let Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) = &logical.operator {
+            builds.push((node.id as u64, pane(child)));
         }
     }
     Exported {
         dag: compiled.dag,
-        ranges,
         builds,
     }
 }
@@ -211,38 +204,25 @@ fn schema_of(dag: &PhysicalASAPDAG, id: u64) -> Arc<Schema> {
     )
 }
 
-/// Raw rows for each `TimeRange` input. A deployment supplies pane `i` with
-/// the samples in `[T - (i+1)·w, T - i·w)`; a single build reads all samples.
-fn raw_inputs(exported: &Exported, samples: &[RawDataSample]) -> BTreeMap<u64, Batch> {
-    exported
-        .ranges
-        .iter()
-        .map(|&(id, pane)| {
-            let schema = schema_of(&exported.dag, id);
-            let end = EVALUATION_MS - pane * PANE_MS;
-            let start = if exported.ranges.len() == 1 {
-                0
-            } else {
-                end - PANE_MS
-            };
-            let rows = samples
-                .iter()
-                .filter(|(_, ts, _)| (start..end).contains(ts))
-                .map(|&(series, ts, value)| {
-                    let labels = BTreeMap::from([
-                        ("__name__".to_string(), "m".to_string()),
-                        ("series".to_string(), series.to_string()),
-                    ]);
-                    promql_rows::series_row(&schema, &labels, ts, value).unwrap()
-                })
-                .collect();
-            (id, Batch::try_new(schema, rows).unwrap())
-        })
-        .collect()
+/// A store holding every sample as raw data at the `Scan` of `m`; each
+/// `TimeRange` keeps its own window of them.
+fn raw_store(dag: &PhysicalASAPDAG, samples: &[RawDataSample]) -> InMemoryDataStore {
+    physical_common::raw_data_store(dag, |_, schema| {
+        samples
+            .iter()
+            .map(|&(series, ts, value)| {
+                let labels = BTreeMap::from([
+                    ("__name__".to_string(), "m".to_string()),
+                    ("series".to_string(), series.to_string()),
+                ]);
+                promql_rows::series_row(schema, &labels, ts, value).unwrap()
+            })
+            .collect()
+    })
 }
 
-fn run(plan: &CompiledPhysicalDAG, inputs: BTreeMap<u64, Batch>, scope: Scope) -> Vec<Vec<Value>> {
-    let mut rows: Vec<Vec<Value>> = physical_common::execute(plan, inputs, scope)
+fn run(plan: &CompiledPhysicalDAG, store: InMemoryDataStore, scope: Scope) -> Vec<Vec<Value>> {
+    let mut rows: Vec<Vec<Value>> = physical_common::execute(plan, store, scope)
         .remove(0)
         .iter()
         .flat_map(|batch| batch.to_rows().to_vec())
@@ -264,41 +244,23 @@ fn has_timestamp(row: &[Value], ms: i64) -> bool {
 fn query_scope() -> Scope {
     Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
-        revision: 1,
     }
-}
-
-fn boundaries(inputs: &BTreeMap<u64, Batch>) -> BTreeSet<u64> {
-    inputs.keys().copied().collect()
 }
 
 /// Compile `root` with everything at query time (Pattern B2: panes rebuilt
 /// from raw rows at query time).
 fn compile_at_query_time(
     root: &Rc<OperatorNode>,
-    samples: &[RawDataSample],
-) -> Result<Exported, String> {
+) -> Result<(Exported, CompiledPhysicalDAG), String> {
     let exported = export(root, &MaterializationAssignment::default());
-    let inputs = raw_inputs(&exported, samples);
-    compile(
-        &exported.dag,
-        &boundaries(&inputs),
-        &[exported.dag.roots[0] as u64],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(exported)
+    let plan =
+        compile(&exported.dag, &[], &[exported.dag.roots[0] as u64]).map_err(|e| e.to_string())?;
+    Ok((exported, plan))
 }
 
 fn execute(root: &Rc<OperatorNode>, samples: &[RawDataSample]) -> Vec<Vec<Value>> {
-    let exported = compile_at_query_time(root, samples).unwrap();
-    let inputs = raw_inputs(&exported, samples);
-    let plan = compile(
-        &exported.dag,
-        &boundaries(&inputs),
-        &[exported.dag.roots[0] as u64],
-    )
-    .unwrap();
-    run(&plan, inputs, query_scope())
+    let (exported, plan) = compile_at_query_time(root).unwrap();
+    run(&plan, raw_store(&exported.dag, samples), query_scope())
 }
 
 /// Build the panes in ingestion runs (stored `MatAtIngestion`, each with its
@@ -349,35 +311,32 @@ fn execute_retained_as(
     assignment: &MaterializationAssignment,
     samples: &[RawDataSample],
 ) -> Vec<Vec<Value>> {
-    let exported = export(root, assignment);
-    let inputs = raw_inputs(&exported, samples);
-    let mut retained = BTreeMap::new();
+    let mut exported = export(root, assignment);
+    let builds: Vec<u64> = exported.builds.iter().map(|&(build, _)| build).collect();
+    let views = views_at(&mut exported.dag, &builds).unwrap();
+    // Each pane's ingestion run refreshes its view from the raw samples.
+    let mut store = InMemoryDataStore::default();
     for &(build, pane) in &exported.builds {
-        let range = exported.ranges.iter().find(|r| r.1 == pane).unwrap().0;
-        let plan = compile(&exported.dag, &BTreeSet::from([range]), &[build]).unwrap();
+        let plan = compile(&exported.dag, &[], &[build]).unwrap();
         let end = EVALUATION_MS - pane * PANE_MS;
         let rows = run(
             &plan,
-            BTreeMap::from([(range, inputs[&range].clone())]),
+            raw_store(&exported.dag, samples),
             Scope::Ingestion {
                 window_start_ms: end - PANE_MS,
                 window_end_ms: end,
-                revision: 1,
             },
         );
         assert!(rows.iter().all(|row| has_timestamp(row, end)));
-        retained.insert(
-            build,
-            Batch::try_new(schema_of(&exported.dag, build), rows).unwrap(),
-        );
+        store = store
+            .with_materialized_view(
+                build as usize,
+                vec![Batch::try_new(schema_of(&exported.dag, build), rows).unwrap()],
+            )
+            .unwrap();
     }
-    let plan = compile(
-        &exported.dag,
-        &retained.keys().copied().collect(),
-        &[exported.dag.roots[0] as u64],
-    )
-    .unwrap();
-    run(&plan, retained, query_scope())
+    let plan = compile(&exported.dag, &views, &[exported.dag.roots[0] as u64]).unwrap();
+    run(&plan, store, query_scope())
 }
 
 fn values(rows: &[Vec<Value>]) -> Vec<f64> {
@@ -425,9 +384,7 @@ fn assert_pane_merge_matches_single_build(
         expected,
         "the planner's pane chain, maintained at ingestion time"
     );
-    let unexpanded = compile_at_query_time(&planned, samples)
-        .err()
-        .unwrap_or_default();
+    let unexpanded = compile_at_query_time(&planned).err().unwrap_or_default();
     assert!(unexpanded.contains("PaneChain"), "{unexpanded}");
     result
 }
@@ -439,7 +396,8 @@ fn exact_sum_over_tumbling_panes_matches_single_build() {
     let sums = assert_pane_merge_matches_single_build(
         "sum_over_time(m[5m])",
         AccuracyTarget::exact(),
-        &samples(0),
+        // 1 ms past each step: the window `(0, 5m]` holds all 20 samples.
+        &samples(1),
     );
     assert_eq!(sums, vec![210., 2210.]);
 }
@@ -495,37 +453,12 @@ fn exact_increase_off_the_pane_boundaries_matches_single_build() {
 /// sample, as values.
 fn whole_build_values_at(query: &str, evaluation_ms: i64, samples: &[RawDataSample]) -> Vec<f64> {
     let root = single_build(query, AccuracyTarget::exact());
-    let exported = export(&root, &MaterializationAssignment::default());
-    let inputs: BTreeMap<u64, Batch> = exported
-        .ranges
-        .iter()
-        .map(|&(id, _)| {
-            let schema = schema_of(&exported.dag, id);
-            let rows = samples
-                .iter()
-                .map(|&(series, ts, value)| {
-                    let labels = BTreeMap::from([
-                        ("__name__".to_string(), "m".to_string()),
-                        ("series".to_string(), series.to_string()),
-                    ]);
-                    promql_rows::series_row(&schema, &labels, ts, value).unwrap()
-                })
-                .collect();
-            (id, Batch::try_new(schema, rows).unwrap())
-        })
-        .collect();
-    let plan = compile(
-        &exported.dag,
-        &boundaries(&inputs),
-        &[exported.dag.roots[0] as u64],
-    )
-    .unwrap();
+    let (exported, plan) = compile_at_query_time(&root).unwrap();
     values(&run(
         &plan,
-        inputs,
+        raw_store(&exported.dag, samples),
         Scope::Query {
             evaluation_time_ms: evaluation_ms,
-            revision: 1,
         },
     ))
 }
@@ -707,9 +640,7 @@ fn panes_at(root: &Rc<OperatorNode>, panes: &[(i64, i64)]) -> Result<Rc<Operator
 fn counter_panes_with_a_gap_or_an_overlap_are_rejected() {
     let single = single_build("rate(m[5m])", AccuracyTarget::exact());
     let gapped = panes_at(&single, &[(0, 1), (2, 1)]).unwrap();
-    let error = compile_at_query_time(&gapped, &samples(0))
-        .err()
-        .unwrap_or_default();
+    let error = compile_at_query_time(&gapped).err().unwrap_or_default();
     assert!(error.contains("ambiguous logical windows"), "{error}");
     let overlap = panes_at(&single, &[(0, 2), (1, 2)])
         .err()
@@ -778,58 +709,19 @@ fn newest_panes_of_a_shared_chain_match_a_separate_chain() {
     }
 }
 
-/// Runs `root` at query time at `evaluation_ms`, each raw `TimeRange` fed
-/// the samples of its own window: `[T - s - w, T - s)` for a range of
+/// Runs `root` at query time at `evaluation_ms` over every sample; each
+/// `TimeRange` keeps its own window `(T - s - w, T - s]` for a range of
 /// width `w` over a shift of `s` (none for an unshifted range).
 fn execute_ranges_at_their_windows(
     root: &Rc<OperatorNode>,
     samples: &[RawDataSample],
     evaluation_ms: i64,
 ) -> Vec<Vec<Value>> {
-    let timed = apply_materialization_timings(
-        root,
-        &MaterializationAssignment::default(),
-        &mut TimingMemo::new(),
-    )
-    .unwrap();
-    let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
-    let mut inputs = BTreeMap::new();
-    for node in &compiled.dag.nodes {
-        let logical = compiled.node_ids.operator_node(node.id).unwrap();
-        let Operator::NonASAP(NonASAPOp::TimeRange { range, child, .. }) = &logical.operator else {
-            continue;
-        };
-        let back = match child.non_asap() {
-            Some(NonASAPOp::TimeShift { shift, .. }) => shift.offset_ms,
-            _ => 0,
-        };
-        let end = evaluation_ms - back;
-        let start = end - range.as_millis() as i64;
-        let schema = schema_of(&compiled.dag, node.id as u64);
-        let rows = samples
-            .iter()
-            .filter(|(_, ts, _)| (start..end).contains(ts))
-            .map(|&(series, ts, value)| {
-                let labels = BTreeMap::from([
-                    ("__name__".to_string(), "m".to_string()),
-                    ("series".to_string(), series.to_string()),
-                ]);
-                promql_rows::series_row(&schema, &labels, ts, value).unwrap()
-            })
-            .collect();
-        inputs.insert(node.id as u64, Batch::try_new(schema, rows).unwrap());
-    }
-    let plan = compile(
-        &compiled.dag,
-        &boundaries(&inputs),
-        &[compiled.dag.roots[0] as u64],
-    )
-    .unwrap();
+    let (exported, plan) = compile_at_query_time(root).unwrap();
     let scope = Scope::Query {
         evaluation_time_ms: evaluation_ms,
-        revision: 1,
     };
-    run(&plan, inputs, scope)
+    run(&plan, raw_store(&exported.dag, samples), scope)
 }
 
 /// A 5-min quantile every 30 s (10 × 30-s panes) and a 5-min quantile

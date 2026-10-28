@@ -1,25 +1,22 @@
 //! Planner-selected PromQL computation compiles from the timed DAG alone;
-//! the deployment supplies only raw rows at the ingestion frontier.
-use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
+//! the deployment supplies only raw rows at its time-series scans.
+use asap_executor::sources::InMemoryDataStore;
 mod common;
 use asap_executor::{
-    physical_planner::{compile, promql_rows},
+    physical_planner::{compile, promql_rows, test_support::views_at},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
 use common::{compile_physical_asap_dag, computation_candidates, selected_dag};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::maintained_population::PopulationStatistic;
+use planner_types::ir::operator::Source;
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use planner_types::ir::properties::AccuracyTarget;
 use planner_types::ir::schema::*;
 use planner_types::ir::ASAPOp;
 use planner_types::workload::*;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    rc::Rc,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 
 fn lower(query: &str) -> Rc<planner_types::ir::OperatorNode> {
     lower_with(query, AccuracyTarget::exact())
@@ -73,36 +70,25 @@ fn population_dag(
     compile_physical_asap_dag(&selected).unwrap()
 }
 
-/// Raw scan nodes are the frontier; everything above them is compiled.
-fn raw_inputs(dag: &PhysicalASAPDAG) -> Vec<(u64, Arc<Schema>, String)> {
-    dag.nodes
-        .iter()
-        .filter_map(|node| match &node.payload {
-            PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::TimeRange {
-                ..
-            }) => {
-                let mut id = node.id;
-                loop {
-                    let n = dag.nodes.iter().find(|n| n.id == id)?;
-                    if let PhysicalASAPOperatorPayload::NonASAP(
-                        planner_types::ir::NonASAPOp::Scan {
-                            source: planner_types::ir::operator::Source::TimeSeries { metric },
-                            ..
-                        },
-                    ) = &n.payload
-                    {
-                        return Some((
-                            node.id as u64,
-                            Arc::new(node.output_schema.clone()),
-                            metric.clone(),
-                        ));
-                    }
-                    id = dag.edges.iter().find(|e| e.consumer == id)?.producer;
-                }
+/// The time-series scans: each metric's raw data slot and its schema.
+fn raw_inputs(dag: &PhysicalASAPDAG) -> Vec<(Source, Arc<Schema>, String)> {
+    let mut inputs: Vec<(Source, Arc<Schema>, String)> = vec![];
+    for node in &dag.nodes {
+        if let PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::Scan {
+            source: source @ Source::TimeSeries { metric },
+            ..
+        }) = &node.payload
+        {
+            if !inputs.iter().any(|(bound, _, _)| bound == source) {
+                inputs.push((
+                    source.clone(),
+                    Arc::new(node.output_schema.clone()),
+                    metric.clone(),
+                ));
             }
-            _ => None,
-        })
-        .collect()
+        }
+    }
+    inputs
 }
 
 type RawDataSample = (&'static str, &'static str, &'static str, i64, f64);
@@ -125,66 +111,50 @@ fn execute_relabeled(
     end: i64,
     relabel: &BTreeMap<&str, (&str, &str)>,
 ) -> Result<Vec<asap_executor::runtime::SharedValue<Batch>>, String> {
-    let inputs = raw_inputs(dag);
-    let program = compile(
-        dag,
-        &inputs.iter().map(|(id, _, _)| *id).collect(),
-        &[dag.roots[0] as u64],
-    )
-    .map_err(|e| e.to_string())?;
-    let sources = inputs
-        .iter()
-        .map(|(id, schema, metric)| {
-            let rows = samples
-                .iter()
-                .filter(|sample| sample.0 == metric)
-                .map(|(name, job, instance, at, value)| {
-                    let (name, instance) =
-                        relabel.get(instance).copied().unwrap_or((*name, *instance));
-                    let labels = BTreeMap::from([
-                        ("__name__".to_string(), name.to_string()),
-                        ("job".into(), job.to_string()),
-                        ("instance".into(), instance.to_string()),
-                    ]);
-                    if schema
+    let program = compile(dag, &[], &[dag.roots[0] as u64]).map_err(|e| e.to_string())?;
+    let mut store = InMemoryDataStore::default();
+    for (source, schema, metric) in raw_inputs(dag) {
+        let rows = samples
+            .iter()
+            .filter(|sample| sample.0 == metric)
+            .map(|(name, job, instance, at, value)| {
+                let (name, instance) = relabel.get(instance).copied().unwrap_or((*name, *instance));
+                let labels = BTreeMap::from([
+                    ("__name__".to_string(), name.to_string()),
+                    ("job".into(), job.to_string()),
+                    ("instance".into(), instance.to_string()),
+                ]);
+                if schema
+                    .fields
+                    .iter()
+                    .any(|f| f.name == promql_rows::SERIES_IDENTITY_COLUMN)
+                {
+                    promql_rows::series_row(&schema, &labels, *at, *value).unwrap()
+                } else {
+                    schema
                         .fields
                         .iter()
-                        .any(|f| f.name == promql_rows::SERIES_IDENTITY_COLUMN)
-                    {
-                        promql_rows::series_row(schema, &labels, *at, *value).unwrap()
-                    } else {
-                        schema
-                            .fields
-                            .iter()
-                            .enumerate()
-                            .map(|(i, f)| match f.name.as_str() {
-                                _ if Some(i) == schema.time_index => Value::Timestamp(*at),
-                                "value" => Value::Float64(*value),
-                                label => Value::Utf8(labels[label].clone().into()),
-                            })
-                            .collect()
-                    }
-                })
-                .collect();
-            let batch = Batch::try_new(schema.clone(), rows).unwrap();
-            (
-                *id,
-                Arc::new(MemorySource::new(schema.clone(), vec![batch]).unwrap())
-                    as Arc<dyn TableProvider>,
-            )
-        })
-        .collect();
-    let data_sources = BindingDataSources {
-        materialized_views: sources,
-        ..Default::default()
-    };
+                        .enumerate()
+                        .map(|(i, f)| match f.name.as_str() {
+                            _ if Some(i) == schema.time_index => Value::Timestamp(*at),
+                            "value" => Value::Float64(*value),
+                            label => Value::Utf8(labels[label].clone().into()),
+                        })
+                        .collect()
+                }
+            })
+            .collect();
+        let batch = Batch::try_new(schema.clone(), rows).unwrap();
+        store = store
+            .with_raw_data(source, schema, vec![batch])
+            .map_err(|e| e.to_string())?;
+    }
     let physical_dag = program
-        .instantiate(&data_sources)
+        .instantiate(Arc::new(store))
         .map_err(|e| e.to_string())?;
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: end,
-            revision: 0,
         },
         Limits::default(),
     )
@@ -763,7 +733,7 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     use asap_executor::summary_kernels::CountMinSketchAccumulator;
     let accuracy = AccuracyTarget::max_error(0.02);
     let root = lower_with("count(up)", accuracy.clone());
-    let dag = computation_candidates(root)
+    let mut dag = computation_candidates(root)
         .into_iter()
         .find_map(|node| {
             let dag = compile_physical_asap_dag(&node).ok()?;
@@ -804,14 +774,11 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     let SketchParams::Cms { width, depth } = kind.params() else {
         unreachable!()
     };
-    let schema = Arc::new(state.output_schema.clone());
-    let program = compile(
-        &dag,
-        &BTreeSet::from([state.id as u64]),
-        &[dag.roots[0] as u64],
-    )
-    .unwrap();
-    let mut sketch = CountMinSketchAccumulator::new(*depth as usize, *width as usize).unwrap();
+    let (state_id, schema) = (state.id as u64, Arc::new(state.output_schema.clone()));
+    let (width, depth) = (*width, *depth);
+    let views = views_at(&mut dag, &[state_id]).unwrap();
+    let program = compile(&dag, &views, &[dag.roots[0] as u64]).unwrap();
+    let mut sketch = CountMinSketchAccumulator::new(depth as usize, width as usize).unwrap();
     sketch.update("a", 3.0);
     sketch.update("b", 7.0);
     let row = schema
@@ -826,18 +793,13 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
         })
         .collect();
     let batch = Batch::try_new(schema.clone(), vec![row]).unwrap();
-    let data_sources = BindingDataSources {
-        materialized_views: BTreeMap::from([(
-            state.id as u64,
-            Arc::new(MemorySource::new(schema, vec![batch]).unwrap()) as Arc<dyn TableProvider>,
-        )]),
-        ..Default::default()
-    };
-    let physical_dag = program.instantiate(&data_sources).unwrap();
+    let store = InMemoryDataStore::default()
+        .with_materialized_view(state_id as usize, vec![batch])
+        .unwrap();
+    let physical_dag = program.instantiate(Arc::new(store)).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 0,
         },
         Limits::default(),
     )

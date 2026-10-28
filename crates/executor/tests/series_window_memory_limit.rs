@@ -83,7 +83,6 @@ fn a_long_subquery_over_many_series_fails_near_the_memory_limit() {
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 3_600_000,
-            revision: 1,
         },
         Limits {
             max_bytes: LIMIT_BYTES,

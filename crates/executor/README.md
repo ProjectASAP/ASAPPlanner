@@ -39,7 +39,7 @@ let mut plan = PhysicalDAG::default();
 plan.add(0, vec![], source)?;
 plan.add(1, vec![0], negate)?;
 let run = RunContext::new(
-    Scope::Query { evaluation_time_ms: 1000, revision: 1 },
+    Scope::Query { evaluation_time_ms: 1000 },
     Limits::default(),
 )?;
 let mut output = plan.execute(&[1], run)?.remove(0);
@@ -48,10 +48,10 @@ assert!(matches!(batch.to_rows()[0][0], Value::Int64(-7)));
 # Ok::<(), asap_executor::Error>(())
 ```
 
-`physical_planner::compile` accepts a Planner `PhysicalASAPDAG` and the nodes to cut out as input slots.
-The resulting candidate is instantiated with deployment readers after selection. It rejects unsupported operations and
-schema mismatches before starting a source. Implement `sources::TableProvider`
-for deployment data (raw tables and materialized views), including
+`physical_planner::compile` accepts a Planner `PhysicalASAPDAG` and the materialized views it reads.
+The result is instantiated with the deployment's data store. It rejects unsupported operations and
+schema mismatches before starting a source. Implement `sources::DataStore`
+for deployment data (raw data and materialized views), including
 asynchronous I/O; computation operators remain in the library. The public `planner` export identifies the exact Planner types used
 by the crate. The physical compiler currently supports a subset of those types and
 operations; it does not interpret an unknown node as external fallback: a
@@ -79,7 +79,7 @@ See [the design](../../docs/design_docs/physical-planning-and-deployment.md).
 - `runtime`: per-run streams, shared producers, memory reservations and cancellation.
 - `expressions`: scalar evaluation; typed builders and the Planner expression adapter.
 - `operators`: projection, filter, joins, aggregate/window, sort, limit and summary implementations.
-- `sources`: the `TableProvider` data interface, `Scan` and the memory connector.
+- `sources`: the `DataStore` data interface, `Scan` and the in-memory store.
 - `physical_planner`: native operator lowering, typed input slots and checked instantiation.
 - `summary_kernels`: in-memory summary state over `asap_sketchlib` and exact Planner state: merge, typed evaluation and update adapters.
 - `evaluation`: evaluations over merged exact summary states.
@@ -92,12 +92,12 @@ Sketch algorithms and their state encodings belong to `asap_sketchlib`. Wire dec
 frames, edge sampling and storage statistics belong to deployments. Kernels hold one population's
 state; operators own grouping.
 
-A source must declare `Boundedness::Bounded` to feed a blocking operator.
-The default for a custom `TableProvider` is `Unknown`; query or ingestion scope alone
-does not promise that its cursor ends. `PhysicalDAG::properties` validates these
-requirements before any source starts and returns boundedness and emission mode
-for every reachable node. The memory connector declares finite input. Custom
-physical sources expose the same facts through `PhysicalOperator::properties`.
+A source must be `Boundedness::Bounded` to feed a blocking operator. Every
+read of a `DataStore` is bounded: a store returns the rows of one run's
+request and ends. `PhysicalDAG::properties` validates these requirements
+before any source starts and returns boundedness and emission mode for every
+reachable node. Custom physical sources expose the same facts through
+`PhysicalOperator::properties`.
 
 Blocking operators reserve estimated workspace and yield cooperatively during
 row processing and sort merges. Cancellation releases reservations when the
@@ -107,26 +107,30 @@ There is no spill or partitioned parallel execution in this implementation.
 
 ## Physical compilation and deployment inputs
 
-`physical_planner::compile` accepts a Planner `PhysicalASAPDAG`, the boundary
-nodes to cut out as materialized view slots and output roots. Every `Scan` leaf is a table
-slot. Each input slot has its node's `output_schema`. It returns a reusable `CompiledPhysicalDAG`
-containing selected native operators and no live readers. Compilation validates
-schemas, input ordering, sharing and boundedness before deployment source access.
+`physical_planner::compile` accepts a Planner `PhysicalASAPDAG`, the
+materialized views the computation reads (`PhysicalASAPDAG::materialized_views`)
+and output roots. Every `Scan` leaf is a raw data slot and every given view a
+materialized view slot; each has its node's `output_schema`. It returns a
+reusable `CompiledPhysicalDAG` containing selected native operators and no
+live readers. Compilation validates schemas, input ordering, sharing and
+boundedness before deployment source access.
 
-A deployment calls `CompiledPhysicalDAG::instantiate` with a
-`BindingDataSources`: a `TableProvider` per `Source` for table slots and one per
-materialized view slot's node id. This checks that each provider contains its slot's columns
-and declares `Boundedness::Bounded`, and constructs the runnable DAG without
-repeating logical lowering. Each slot asks its provider for the run's
-`ScanRequest` (time range, projection, predicates); for a table slot the
-request is a hint, and the executor re-applies all three. A time series is a
-table `(ts, value, *labels)` bound like a SQL table: the DAG's own `TimeRange`
-keeps each window, an instant selector's latest sample per series, and drops
-Prometheus stale markers. The DAG executes through
-the shared runtime with independent per-run state. Window coverage, revision and
-maintenance-policy admission remain deployment/planning contracts; this compiler
-does not discover storage or silently change a selected maintenance strategy.
+A deployment calls `CompiledPhysicalDAG::instantiate` with one `DataStore`
+handle per run, which presents one consistent state to every read of that
+run. Each raw data slot calls `read_raw_data(source, RawDataRequest)` (time
+range, the slot's schema, predicates); the request is a hint, and the
+executor re-applies its time range and predicates. Each materialized view
+slot calls `read_materialized_view(view, MaterializedViewRequest)` (the time
+range its state summarizes, and the slot's schema); the store returns exactly
+those states, which the executor does not re-filter or charge to the run. A
+time series is a table `(ts, value, *labels)` read like a SQL table: the DAG's
+own `TimeRange` keeps each window, an instant selector's latest sample per
+series, and drops Prometheus stale markers. The DAG executes through the
+shared runtime with independent per-run state. Window coverage and
+maintenance-policy admission remain deployment/planning contracts; this
+compiler does not discover storage or silently change a selected maintenance
+strategy.
 
-Pane construction and geometry belong to deployment. A deployment runs the
-precompute DAG once per pane it constructs and binds the selected pane states to
-query input slots; the query DAG merges and reads them out as computation.
+Pane construction and geometry belong to deployment. A deployment refreshes
+each pane view once per pane and returns the pane states from its store; the
+query DAG merges and reads them out as computation.

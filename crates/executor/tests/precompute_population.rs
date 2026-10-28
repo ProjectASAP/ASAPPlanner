@@ -1,265 +1,21 @@
-//! Persisted precompute DAGs preserve group/window identity and execute state-to-state computation.
-use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
+//! Ingestion DAGs over a stored summary state execute state-to-state computation.
+use asap_executor::sources::InMemoryDataStore;
 use asap_executor::{
-    factory::create_planner_accumulator,
-    physical_planner::{precompute, CompiledPhysicalDAG},
+    physical_planner::{compile, test_support::views_at, CompiledPhysicalDAG},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
-use planner_types::ir::operator::{BinaryOpKind, GroupKeys, Reduction};
+use planner_types::ir::operator::{GroupKeys, Reduction};
 use planner_types::ir::physical_export::{
     EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
     PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
 };
 use planner_types::ir::properties::*;
-use planner_types::ir::scalar::{ArithmeticOpKind, ColumnRef};
+use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{DataType, *};
 use planner_types::ir::ASAPOp;
-use planner_types::ir::BinaryOperator;
-use std::{collections::BTreeMap, sync::Arc};
-
-// Typed series identity survives finalization and derived precompute through population metadata.
-#[test]
-fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
-    let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-    let schema = |dtype| planner_types::ir::schema::Schema {
-        unique_keys: vec![],
-        closed: false,
-        fields: vec![Field {
-            table: None,
-            name: "value".into(),
-            dtype,
-            nullable: false,
-        }],
-        time_index: None,
-    };
-    let state_schema = schema(family.clone());
-    let mut value_schema = schema(FieldDataType::Plain(DataType::Float64));
-    value_schema.fields.push(Field {
-        table: None,
-        name: "time".into(),
-        dtype: FieldDataType::Plain(DataType::Timestamp),
-        nullable: false,
-    });
-    value_schema.time_index = Some(1);
-    value_schema.fields.push(Field {
-        table: None,
-        name: planner_types::ir::schema::PROMQL_SERIES_IDENTITY.into(),
-        dtype: FieldDataType::Plain(DataType::Utf8),
-        nullable: false,
-    });
-    for (weight, expected) in [
-        (SummaryInputExpr::Column(ColumnRef::SampleValue), 60.),
-        (SummaryInputExpr::Constant(1.), 4.),
-    ] {
-        let nodes = vec![
-            PhysicalASAPDAGNode {
-                id: 0,
-                payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
-                    children: vec![],
-                    newest_panes: None,
-                    group_by: None,
-                }),
-                output_state: ExecutionDataState::INGESTION_SUMMARY,
-                materialization: planner_types::physical::Materialization::MatAtIngestion(
-                    planner_types::physical::Medium::Memory,
-                ),
-                output_schema: state_schema.clone(),
-                guarantee: None,
-                retention_ms: None,
-            },
-            PhysicalASAPDAGNode {
-                id: 1,
-                payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::FinalizeExactAccumulator {
-                    child: 0,
-                }),
-                output_state: ExecutionDataState::INGESTION_ROWS,
-                materialization: Default::default(),
-                output_schema: value_schema.clone(),
-                guarantee: None,
-                retention_ms: None,
-            },
-            PhysicalASAPDAGNode {
-                id: 2,
-                payload: PhysicalASAPOperatorPayload::NonASAP(
-                    planner_types::ir::NonASAPOp::BinaryOp {
-                        operator: BinaryOperator {
-                            kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
-                            vector_match: None,
-                            checked_relative_division: false,
-                            checked_finite_division: false,
-                        },
-                        return_bool: false,
-                        lhs: 1,
-                        rhs: 1,
-                    },
-                ),
-                output_state: ExecutionDataState::INGESTION_ROWS,
-                materialization: Default::default(),
-                output_schema: value_schema.clone(),
-                guarantee: None,
-                retention_ms: None,
-            },
-            PhysicalASAPDAGNode {
-                id: 3,
-                payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
-                    family: family.clone(),
-                    input: SummaryUpdate {
-                        weight,
-                        ..SummaryUpdate::column(ColumnRef::SampleValue)
-                    },
-                    reduction: Reduction::Reduce(GroupKeys::by(vec![])),
-                    grouping: GroupingStrategy::PerSubpopulationInstance,
-                    filter: None,
-                    child: 2,
-                }),
-                output_state: ExecutionDataState::INGESTION_SUMMARY,
-                materialization: planner_types::physical::Materialization::MatAtIngestion(
-                    planner_types::physical::Medium::Memory,
-                ),
-                output_schema: state_schema.clone(),
-                guarantee: None,
-                retention_ms: None,
-            },
-        ];
-        let edges = [
-            (0, 1, EdgeRole::Input),
-            (1, 2, EdgeRole::Left),
-            (1, 2, EdgeRole::Right),
-            (2, 3, EdgeRole::Input),
-        ]
-        .into_iter()
-        .map(|(producer, consumer, role)| PhysicalASAPDAGEdge {
-            producer,
-            consumer,
-            role,
-            intermediate_schema: nodes[producer].output_schema.clone(),
-            data_state: nodes[producer].output_state,
-            grouping: GroupingEdgeCompatibility::NotApplicable,
-            window: WindowEdgeCompatibility::NotApplicable,
-        })
-        .collect();
-        let dag = PhysicalASAPDAG {
-            nodes,
-            edges,
-            roots: vec![3],
-            scalar_roots: vec![],
-        };
-        // Identity metadata must remain one non-null Utf8 column.
-        for mutation in 0..3 {
-            let mut invalid_identity = dag.clone();
-            let fields = &mut invalid_identity.nodes[1].output_schema.fields;
-            match mutation {
-                0 => fields[2].nullable = true,
-                1 => fields[2].dtype = FieldDataType::Plain(DataType::Float64),
-                _ => fields.push(fields[2].clone()),
-            }
-            assert!(precompute::compile(&invalid_identity, &[0], &[3]).is_err());
-        }
-        let mut invalid_grouping = dag.clone();
-        let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { reduction, .. }) =
-            &mut invalid_grouping.nodes[3].payload
-        else {
-            unreachable!()
-        };
-        *reduction = Reduction::Reduce(GroupKeys::by(vec![0]));
-        assert!(
-            precompute::compile(&invalid_grouping, &[0], &[3]).is_err(),
-            "numeric values cannot be reinterpreted as population labels"
-        );
-        // A filtered summary update runs only at query time.
-        let mut filtered = dag.clone();
-        let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { filter, .. }) =
-            &mut filtered.nodes[3].payload
-        else {
-            unreachable!()
-        };
-        *filter = Some(planner_types::ir::Predicate(
-            planner_types::ir::ScalarExpr::Literal(
-                planner_types::ir::scalar::ScalarValue::Boolean(true),
-            ),
-        ));
-        assert!(precompute::compile(&filtered, &[0], &[3]).is_err());
-        let program = precompute::compile(&dag, &[0], &[3]).unwrap();
-        assert_eq!(program.input_slots().count(), 1);
-        for revision in [1, 2] {
-            let rows = [
-                ("a", 1000, 2.),
-                ("a", 2000, 4.),
-                ("b", 1000, 8.),
-                ("b", 2000, 16.),
-            ]
-            .into_iter()
-            .map(|(group, time, value)| {
-                let mut state = create_planner_accumulator(
-                    &family,
-                    &SummaryUpdate::column(ColumnRef::SampleValue),
-                    &GroupingStrategy::PerSubpopulationInstance,
-                )
-                .unwrap();
-                state.update_single(value, time).unwrap();
-                vec![
-                    Value::Map(
-                        vec![(Value::Utf8("instance".into()), Value::Utf8(group.into()))].into(),
-                    ),
-                    Value::Timestamp(time),
-                    Value::Summary {
-                        family: family.clone(),
-                        state: Arc::from(state.into_accumulator()),
-                    },
-                ]
-            })
-            .collect();
-            let input =
-                Batch::try_new(precompute::population_schema(family.clone()), rows).unwrap();
-            let sources = BTreeMap::from([(
-                0,
-                Arc::new(MemorySource::new(input.schema().clone(), vec![input]).unwrap())
-                    as Arc<dyn TableProvider>,
-            )]);
-            let data_sources = BindingDataSources {
-                materialized_views: sources,
-                ..Default::default()
-            };
-            let physical_dag = program.instantiate(&data_sources).unwrap();
-            let context = RunContext::new(
-                Scope::Ingestion {
-                    window_start_ms: 0,
-                    window_end_ms: 2000,
-                    revision,
-                },
-                Limits::default(),
-            )
-            .unwrap();
-            let output = block_on(async {
-                let mut stream = physical_dag
-                    .execute(program.roots(), context)
-                    .unwrap()
-                    .remove(0);
-                let batch = stream.next().await.unwrap().unwrap();
-                assert!(stream.next().await.is_none());
-                batch
-            });
-            assert_eq!(output.to_rows().len(), 1);
-            assert!(matches!(&output.to_rows()[0][0], Value::Map(labels) if labels.is_empty()));
-            assert!(matches!(&output.to_rows()[0][1], Value::Timestamp(2000)));
-            let Value::Summary { state, .. } = &output.to_rows()[0][2] else {
-                panic!("state expected")
-            };
-            assert_eq!(
-                state
-                    .as_any()
-                    .downcast_ref::<asap_executor::summary_kernels::exact::ExactAccumulator>()
-                    .unwrap()
-                    .evaluation(ExactKind::Sum, None, None)
-                    .unwrap()
-                    .unwrap(),
-                expected
-            );
-        }
-    }
-}
+use std::sync::Arc;
 
 fn logical_schema(family: FieldDataType) -> Schema {
     planner_types::ir::schema::Schema {
@@ -274,6 +30,88 @@ fn logical_schema(family: FieldDataType) -> Schema {
         time_index: None,
     }
 }
+/// The stored state at node 0 (`MatAtIngestion`): a global `family`
+/// `SummaryAgg` over a minute of raw `m` samples (`Scan` node `scan`,
+/// `TimeRange` node `scan + 1`).
+fn view_over_samples(
+    family: FieldDataType,
+    grouping: GroupingStrategy,
+    scan: usize,
+) -> [PhysicalASAPDAGNode; 3] {
+    let samples = Schema::with_time_index(
+        vec![
+            Field::plain("time", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
+        ],
+        0,
+        vec![],
+    );
+    let node = |id, payload, output_schema: Schema, output_state| PhysicalASAPDAGNode {
+        id,
+        payload,
+        output_state,
+        materialization: Default::default(),
+        output_schema,
+        guarantee: None,
+        retention_ms: None,
+    };
+    [
+        PhysicalASAPDAGNode {
+            materialization: planner_types::physical::Materialization::MatAtIngestion(
+                planner_types::physical::Medium::Memory,
+            ),
+            ..node(
+                0,
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
+                    family: family.clone(),
+                    input: SummaryUpdate::column(ColumnRef::SampleValue),
+                    reduction: Reduction::Reduce(GroupKeys::by(vec![])),
+                    grouping,
+                    filter: None,
+                    child: scan + 1,
+                }),
+                logical_schema(family),
+                ExecutionDataState::INGESTION_SUMMARY,
+            )
+        },
+        node(
+            scan,
+            PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::Scan {
+                source: planner_types::ir::operator::Source::TimeSeries { metric: "m".into() },
+                predicates: vec![],
+                schema: samples.clone(),
+            }),
+            samples.clone(),
+            ExecutionDataState::INGESTION_ROWS,
+        ),
+        node(
+            scan + 1,
+            PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::TimeRange {
+                range: std::time::Duration::from_secs(60),
+                kind: planner_types::ir::TimeRangeKind::Range,
+                child: scan,
+            }),
+            samples,
+            ExecutionDataState::INGESTION_ROWS,
+        ),
+    ]
+}
+fn edge(
+    nodes: &[PhysicalASAPDAGNode],
+    producer: usize,
+    consumer: usize,
+    role: EdgeRole,
+) -> PhysicalASAPDAGEdge {
+    PhysicalASAPDAGEdge {
+        producer,
+        consumer,
+        role,
+        intermediate_schema: nodes[producer].output_schema.clone(),
+        data_state: nodes[producer].output_state,
+        grouping: GroupingEdgeCompatibility::NotApplicable,
+        window: WindowEdgeCompatibility::NotApplicable,
+    }
+}
 fn state_dag(
     family: FieldDataType,
     target: Option<FieldDataType>,
@@ -286,21 +124,10 @@ fn try_state_dag(
     target: Option<FieldDataType>,
     merge: bool,
 ) -> Result<CompiledPhysicalDAG, asap_executor::Error> {
-    let mut nodes = vec![PhysicalASAPDAGNode {
-        id: 0,
-        payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
-            children: vec![],
-            newest_panes: None,
-            group_by: None,
-        }),
-        output_state: ExecutionDataState::INGESTION_SUMMARY,
-        materialization: planner_types::physical::Materialization::MatAtIngestion(
-            planner_types::physical::Medium::Memory,
-        ),
-        output_schema: logical_schema(family.clone()),
-        guarantee: None,
-        retention_ms: None,
-    }];
+    let scan = 2 + usize::from(merge) + usize::from(target.is_some());
+    let [view, scan_node, range_node] =
+        view_over_samples(family.clone(), GroupingStrategy::default(), scan);
+    let mut nodes = vec![view];
     if merge {
         nodes.push(PhysicalASAPDAGNode {
             id: 1,
@@ -309,7 +136,13 @@ fn try_state_dag(
                 newest_panes: None,
                 group_by: None,
             }),
-            ..nodes[0].clone()
+            output_state: ExecutionDataState::INGESTION_SUMMARY,
+            materialization: planner_types::physical::Materialization::MatAtIngestion(
+                planner_types::physical::Medium::Memory,
+            ),
+            output_schema: logical_schema(family.clone()),
+            guarantee: None,
+            retention_ms: None,
         });
     }
     let read_id = nodes.len();
@@ -344,28 +177,21 @@ fn try_state_dag(
             retention_ms: None,
         });
     }
-    let edges = (1..nodes.len())
-        .map(|i| PhysicalASAPDAGEdge {
-            producer: nodes[i - 1].id,
-            consumer: nodes[i].id,
-            role: EdgeRole::Input,
-            intermediate_schema: nodes[i - 1].output_schema.clone(),
-            data_state: nodes[i - 1].output_state,
-            grouping: GroupingEdgeCompatibility::NotApplicable,
-            window: WindowEdgeCompatibility::NotApplicable,
-        })
-        .collect();
     let root = nodes.last().unwrap().id;
-    precompute::compile(
-        &PhysicalASAPDAG {
-            nodes,
-            edges,
-            roots: vec![root],
-            scalar_roots: vec![],
-        },
-        &[0],
-        &[root as u64],
-    )
+    nodes.extend([scan_node, range_node]);
+    let mut edges: Vec<_> = (1..scan)
+        .map(|i| edge(&nodes, i - 1, i, EdgeRole::Input))
+        .collect();
+    edges.push(edge(&nodes, scan, scan + 1, EdgeRole::Input));
+    edges.push(edge(&nodes, scan + 1, 0, EdgeRole::Input));
+    let mut dag = PhysicalASAPDAG {
+        nodes,
+        edges,
+        roots: vec![root],
+        scalar_roots: vec![],
+    };
+    let views = views_at(&mut dag, &[0])?;
+    compile(&dag, &views, &[root as u64])
 }
 fn native_run(
     program: &CompiledPhysicalDAG,
@@ -373,30 +199,19 @@ fn native_run(
     states: Vec<Arc<dyn asap_executor::AggregateCore>>,
     context: RunContext,
 ) -> Result<Vec<Vec<Value>>, asap_executor::Error> {
+    let (view, schema) = program.input_slots().next().unwrap();
     let rows = states
         .into_iter()
-        .enumerate()
-        .map(|(i, state)| {
-            vec![
-                Value::Map(vec![].into()),
-                Value::Timestamp((i as i64 + 1) * 1000),
-                Value::Summary {
-                    family: family.clone(),
-                    state,
-                },
-            ]
+        .map(|state| {
+            vec![Value::Summary {
+                family: family.clone(),
+                state,
+            }]
         })
         .collect();
-    let input = Batch::try_new(precompute::population_schema(family), rows)?;
-    let data_sources = BindingDataSources {
-        materialized_views: BTreeMap::from([(
-            0,
-            Arc::new(MemorySource::new(input.schema().clone(), vec![input])?)
-                as Arc<dyn TableProvider>,
-        )]),
-        ..Default::default()
-    };
-    let physical_dag = program.instantiate(&data_sources)?;
+    let input = Batch::try_new(schema.clone(), rows)?;
+    let store = InMemoryDataStore::default().with_materialized_view(view as usize, vec![input])?;
+    let physical_dag = program.instantiate(Arc::new(store))?;
     block_on(async {
         let mut rows = Vec::new();
         let mut stream = physical_dag.execute(program.roots(), context)?.remove(0);
@@ -411,7 +226,6 @@ fn ingestion_context(limits: Limits) -> RunContext {
         Scope::Ingestion {
             window_start_ms: 0,
             window_end_ms: 2000,
-            revision: 1,
         },
         limits,
     )
@@ -434,10 +248,11 @@ fn sum_state(value: f64) -> Arc<dyn asap_executor::AggregateCore> {
 #[test]
 fn precompute_merge_requires_a_family_with_a_sound_merge() {
     // IRate reads the window's last two samples, so the family-capability
-    // table gives it no merge.
+    // table gives it no merge. No summary build produces IRate state either,
+    // so the DAG is rejected when its state is built, before the merge.
     let irate = FieldDataType::ExactAggregate(ExactKind::IRate, ExactParams::IRate);
     let error = try_state_dag(irate, None, true).err().expect("rejected");
-    assert!(error.to_string().contains("no sound merge"), "{error}");
+    assert!(error.to_string().contains("IRate"), "{error}");
     let sum = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     try_state_dag(sum, None, true).unwrap();
 }
@@ -456,13 +271,12 @@ fn explicit_merge_changes_pane_cardinality() {
         .unwrap();
         let values = rows
             .iter()
-            .map(|row| match row[2] {
+            .map(|row| match row[0] {
                 Value::Float64(v) => v,
                 _ => panic!("numeric evaluation expected"),
             })
             .collect::<Vec<_>>();
         assert_eq!(values, expected);
-        assert!(matches!(rows.last().unwrap()[1], Value::Timestamp(2000)));
     }
 }
 

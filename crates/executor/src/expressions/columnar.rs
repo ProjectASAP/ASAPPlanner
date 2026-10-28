@@ -936,7 +936,6 @@ mod tests {
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 4,
-                revision: 1,
             },
             Limits::default(),
         )

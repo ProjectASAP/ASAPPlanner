@@ -10,11 +10,9 @@ pub enum Scope {
     Ingestion {
         window_start_ms: i64,
         window_end_ms: i64,
-        revision: u64,
     },
     Query {
         evaluation_time_ms: i64,
-        revision: u64,
     },
 }
 #[derive(Clone, Debug)]

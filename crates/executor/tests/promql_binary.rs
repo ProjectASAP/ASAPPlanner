@@ -1,6 +1,7 @@
 //! Binary computation must be fully compiled before deployment binds values.
-use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
+use asap_executor::sources::InMemoryDataStore;
 use asap_executor::{
+    operators::Operator,
     physical_planner::{compile_node, CompiledPhysicalDAG},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, SchemaRef, Value},
@@ -16,10 +17,7 @@ use planner_types::ir::scalar::ArithmeticOpKind;
 use planner_types::ir::schema::{DataType, Field, FieldDataType};
 use planner_types::ir::ASAPOp;
 use planner_types::ir::BinaryOperator;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 fn schema() -> SchemaRef {
     Arc::new(planner_types::ir::schema::Schema {
@@ -58,7 +56,8 @@ fn row(name: &str, job: &str, value: f64) -> Vec<Value> {
         Value::Float64(value),
     ]
 }
-fn program() -> CompiledPhysicalDAG {
+/// Checked division of two label-map vectors.
+fn program() -> Operator {
     program_for(BinaryOperator {
         kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
         vector_match: None,
@@ -66,10 +65,12 @@ fn program() -> CompiledPhysicalDAG {
         checked_finite_division: false,
     })
 }
-fn program_for(operator: BinaryOperator) -> CompiledPhysicalDAG {
+fn program_for(operator: BinaryOperator) -> Operator {
     program_for_bool(operator, false)
 }
-fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> CompiledPhysicalDAG {
+/// The operator the Planner's `BinaryOp` node over two label-map vectors
+/// compiles to.
+fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> Operator {
     let schema = schema();
     let node = PhysicalASAPDAGNode {
         id: 2,
@@ -85,13 +86,23 @@ fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> CompiledPhys
         guarantee: None,
         retention_ms: None,
     };
-    let operator = compile_node(&node, &[schema.clone(), schema.clone()]).unwrap();
-    CompiledPhysicalDAG::from_operators(
-        BTreeMap::from([(0, schema.clone()), (1, schema)]),
-        BTreeMap::from([(2, (vec![0, 1], operator))]),
-        vec![2],
+    compile_node(&node, &[schema.clone(), schema]).unwrap()
+}
+/// `binary` (node 2) over the sources `left` (node 0) and `right` (node 1),
+/// bound to a store with no data: the sources hold their rows.
+fn over_sources(binary: Operator, left: Batch, right: Batch) -> Arc<CompiledPhysicalDAG> {
+    let source = |batch: Batch| Operator::source(batch.schema().clone(), vec![batch]).unwrap();
+    Arc::new(
+        CompiledPhysicalDAG::from_operators(
+            BTreeMap::from([
+                (0, (vec![], source(left))),
+                (1, (vec![], source(right))),
+                (2, (vec![0, 1], binary)),
+            ]),
+            vec![2],
+        )
+        .unwrap(),
     )
-    .unwrap()
 }
 fn evaluate(
     left: Vec<Vec<Value>>,
@@ -100,31 +111,19 @@ fn evaluate(
     evaluate_with(program(), left, right)
 }
 fn evaluate_with(
-    physical_dag: CompiledPhysicalDAG,
+    binary: Operator,
     left: Vec<Vec<Value>>,
     right: Vec<Vec<Value>>,
 ) -> Result<Vec<Vec<Value>>, asap_executor::Error> {
-    let sources = [left, right]
-        .into_iter()
-        .enumerate()
-        .map(|(id, rows)| {
-            let batch = Batch::try_new(schema(), rows).unwrap();
-            (
-                id as u64,
-                Arc::new(MemorySource::new(schema(), vec![batch]).unwrap())
-                    as Arc<dyn TableProvider>,
-            )
-        })
-        .collect();
-    let data_sources = BindingDataSources {
-        materialized_views: sources,
-        ..Default::default()
-    };
-    let bound = physical_dag.instantiate(&data_sources)?;
+    let physical_dag = over_sources(
+        binary,
+        Batch::try_new(schema(), left).unwrap(),
+        Batch::try_new(schema(), right).unwrap(),
+    );
+    let bound = physical_dag.instantiate(Arc::new(InMemoryDataStore::default()))?;
     let ctx = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 1,
-            revision: 0,
         },
         Limits::default(),
     )?;
@@ -171,8 +170,13 @@ fn scalar_broadcast_and_bool_comparison_are_distinct() {
     use asap_executor::physical_planner::promql_values;
     use planner_types::ir::scalar::CompareOpKind;
     for return_bool in [false, true] {
-        let physical_dag = promql_values::compile_binary(
-            &asap_executor::expressions::binary::BinaryOperator::from_logical(
+        let scalar = promql_values::scalar_schema();
+        let vector = promql_values::vector_schema();
+        // `2 < v` (a scalar left of a vector), as PromQL lowers it.
+        let binary = Operator::vector_binary(
+            scalar.clone(),
+            vector.clone(),
+            asap_executor::expressions::binary::BinaryOperator::from_logical(
                 &BinaryOperator {
                     kind: BinaryOpKind::Compare(CompareOpKind::Lt),
                     vector_match: None,
@@ -182,47 +186,23 @@ fn scalar_broadcast_and_bool_comparison_are_distinct() {
                 return_bool,
             ),
             return_bool,
-            true,
-            false,
         )
         .unwrap();
-        let scalar = promql_values::scalar_schema();
-        let vector = promql_values::vector_schema();
-        let sources = BTreeMap::from([
-            (
-                0,
-                Arc::new(
-                    MemorySource::new(
-                        scalar.clone(),
-                        vec![Batch::try_new(scalar, vec![vec![Value::Float64(2.)]]).unwrap()],
-                    )
-                    .unwrap(),
-                ) as Arc<dyn TableProvider>,
-            ),
-            (
-                1,
-                Arc::new(
-                    MemorySource::new(
-                        vector.clone(),
-                        vec![Batch::try_new(
-                            vector,
-                            vec![row("requests", "api", 4.), row("requests", "worker", 1.)],
-                        )
-                        .unwrap()],
-                    )
-                    .unwrap(),
-                ) as Arc<dyn TableProvider>,
-            ),
-        ]);
-        let data_sources = BindingDataSources {
-            materialized_views: sources,
-            ..Default::default()
-        };
-        let bound = physical_dag.instantiate(&data_sources).unwrap();
+        let physical_dag = over_sources(
+            binary,
+            Batch::try_new(scalar, vec![vec![Value::Float64(2.)]]).unwrap(),
+            Batch::try_new(
+                vector,
+                vec![row("requests", "api", 4.), row("requests", "worker", 1.)],
+            )
+            .unwrap(),
+        );
+        let bound = physical_dag
+            .instantiate(Arc::new(InMemoryDataStore::default()))
+            .unwrap();
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 1,
-                revision: 0,
             },
             Limits::default(),
         )
@@ -257,30 +237,14 @@ fn scalar_broadcast_and_bool_comparison_are_distinct() {
 #[test]
 fn binary_obeys_memory_and_cancellation() {
     for cancel in [false, true] {
-        let physical_dag = program();
-        let sources = (0..2)
-            .map(|id| {
-                (
-                    id,
-                    Arc::new(
-                        MemorySource::new(
-                            schema(),
-                            vec![Batch::try_new(schema(), vec![row("x", "api", 1.)]).unwrap()],
-                        )
-                        .unwrap(),
-                    ) as Arc<dyn TableProvider>,
-                )
-            })
-            .collect();
-        let data_sources = BindingDataSources {
-            materialized_views: sources,
-            ..Default::default()
-        };
-        let bound = physical_dag.instantiate(&data_sources).unwrap();
+        let input = || Batch::try_new(schema(), vec![row("x", "api", 1.)]).unwrap();
+        let physical_dag = over_sources(program(), input(), input());
+        let bound = physical_dag
+            .instantiate(Arc::new(InMemoryDataStore::default()))
+            .unwrap();
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 1,
-                revision: 0,
             },
             Limits {
                 max_bytes: if cancel { 10000 } else { 1 },
@@ -335,11 +299,33 @@ fn label_map_bool_comparison_drops_the_name() {
     assert!(matches!(row[1], Value::Float64(v) if v == 1.));
 }
 
+/// Raw samples of a series: identity, time and value.
+fn sample_schema() -> planner_types::ir::schema::Schema {
+    planner_types::ir::schema::Schema::with_time_index(
+        vec![
+            Field::plain(
+                planner_types::ir::schema::PROMQL_SERIES_IDENTITY,
+                DataType::Utf8,
+                false,
+            ),
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
+        ],
+        1,
+        vec![],
+    )
+}
+
 // Stored temporal evaluations drop metric names before filter comparisons and set matching.
 #[test]
 fn stored_series_evaluations_support_filters_and_sets() {
-    use asap_executor::{physical_planner::compile, summary_kernels::exact::ExactAccumulator};
+    use asap_executor::{
+        physical_planner::{compile, test_support::views_at},
+        summary_kernels::exact::ExactAccumulator,
+    };
+    use planner_types::ir::operator::{GroupKeys, Reduction, Source};
     use planner_types::ir::properties::*;
+    use planner_types::ir::scalar::ColumnRef;
     use planner_types::ir::schema::*;
 
     use planner_types::ir::operator::PromQLVectorSetOpKind;
@@ -377,16 +363,37 @@ fn stored_series_evaluations_support_filters_and_sets() {
             BinaryOpKind::Set(PromQLVectorSetOpKind::And),
             BinaryOpKind::Set(PromQLVectorSetOpKind::Or),
         ] {
+            // Nodes 0 and 1 are the stored states, per series, of a minute of
+            // samples (`Scan` node 5, `TimeRange` node 6).
             let nodes =
-                (0..5)
+                (0..7)
                     .map(|id| PhysicalASAPDAGNode {
                         id,
                         payload: match id {
-                            0 | 1 => PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
-                                children: vec![],
-                                newest_panes: None,
-                                group_by: None,
+                            0 | 1 => PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
+                                child: 6,
+                                family: family.clone(),
+                                input: SummaryUpdate::column(ColumnRef::SampleValue),
+                                reduction: Reduction::Reduce(GroupKeys::by(vec![0])),
+                                grouping: GroupingStrategy::PerSubpopulationInstance,
+                                filter: None,
                             }),
+                            5 => PhysicalASAPOperatorPayload::NonASAP(
+                                planner_types::ir::NonASAPOp::Scan {
+                                    source: Source::TimeSeries {
+                                        metric: "requests".into(),
+                                    },
+                                    schema: sample_schema(),
+                                    predicates: vec![],
+                                },
+                            ),
+                            6 => PhysicalASAPOperatorPayload::NonASAP(
+                                planner_types::ir::NonASAPOp::TimeRange {
+                                    range: Duration::from_secs(60),
+                                    kind: planner_types::ir::TimeRangeKind::Range,
+                                    child: 5,
+                                },
+                            ),
                             2 | 3 => PhysicalASAPOperatorPayload::ASAP(
                                 ASAPOp::FinalizeExactAccumulator { child: id - 2 },
                             ),
@@ -404,22 +411,25 @@ fn stored_series_evaluations_support_filters_and_sets() {
                                 },
                             ),
                         },
-                        output_state: if id < 2 {
-                            ExecutionDataState::INGESTION_SUMMARY
-                        } else {
-                            ExecutionDataState::QUERY_ROWS
+                        output_state: match id {
+                            0 | 1 => ExecutionDataState::INGESTION_SUMMARY,
+                            5 | 6 => ExecutionDataState::QUERY_ROWS,
+                            _ => ExecutionDataState::QUERY_ROWS,
                         },
                         materialization: Default::default(),
-                        output_schema: if id < 2 {
-                            (*state_schema).clone()
-                        } else {
-                            value_schema.clone()
+                        output_schema: match id {
+                            0 | 1 => (*state_schema).clone(),
+                            5 | 6 => sample_schema(),
+                            _ => value_schema.clone(),
                         },
                         guarantee: None,
                         retention_ms: None,
                     })
                     .collect::<Vec<_>>();
             let edges = [
+                (5, 6, EdgeRole::Input),
+                (6, 0, EdgeRole::Input),
+                (6, 1, EdgeRole::Input),
                 (0, 2, EdgeRole::Input),
                 (1, 3, EdgeRole::Input),
                 (2, 4, EdgeRole::Left),
@@ -436,56 +446,44 @@ fn stored_series_evaluations_support_filters_and_sets() {
                 window: WindowEdgeCompatibility::NotApplicable,
             })
             .collect();
-            let dag = PhysicalASAPDAG {
+            let mut dag = PhysicalASAPDAG {
                 nodes,
                 edges,
                 roots: vec![4],
                 scalar_roots: vec![],
             };
-            let physical_dag = compile(&dag, &BTreeSet::from([0, 1]), &[4]).unwrap();
-            let sources = [(0, "a", 6.), (1, "b", 2.)]
-                .into_iter()
-                .map(|(id, name, value)| {
-                    let mut state = ExactAccumulator::new(family.clone(), false).unwrap();
-                    if exact_kind == ExactKind::Count {
-                        for _ in 0..value as usize {
-                            state.update(None, 1.0, 0);
-                        }
-                    } else {
-                        state.update(None, value, 0);
+            let views = views_at(&mut dag, &[0, 1]).unwrap();
+            let physical_dag = compile(&dag, &views, &[4]).unwrap();
+            let mut store = InMemoryDataStore::default();
+            for (id, name, value) in [(0, "a", 6.), (1, "b", 2.)] {
+                let mut state = ExactAccumulator::new(family.clone(), false).unwrap();
+                if exact_kind == ExactKind::Count {
+                    for _ in 0..value as usize {
+                        state.update(None, 1.0, 0);
                     }
-                    let identity = serde_json::to_string(&BTreeMap::from([
-                        ("__name__", name),
-                        ("job", "api"),
-                    ]))
-                    .unwrap();
-                    let batch = Batch::try_new(
-                        state_schema.clone(),
-                        vec![vec![
-                            Value::Utf8(identity.into()),
-                            Value::Summary {
-                                family: family.clone(),
-                                state: Arc::new(state),
-                            },
-                        ]],
-                    )
-                    .unwrap();
-                    (
-                        id,
-                        Arc::new(MemorySource::new(state_schema.clone(), vec![batch]).unwrap())
-                            as Arc<dyn TableProvider>,
-                    )
-                })
-                .collect();
-            let data_sources = BindingDataSources {
-                materialized_views: sources,
-                ..Default::default()
-            };
-            let bound = physical_dag.instantiate(&data_sources).unwrap();
+                } else {
+                    state.update(None, value, 0);
+                }
+                let identity =
+                    serde_json::to_string(&BTreeMap::from([("__name__", name), ("job", "api")]))
+                        .unwrap();
+                let batch = Batch::try_new(
+                    state_schema.clone(),
+                    vec![vec![
+                        Value::Utf8(identity.into()),
+                        Value::Summary {
+                            family: family.clone(),
+                            state: Arc::new(state),
+                        },
+                    ]],
+                )
+                .unwrap();
+                store = store.with_materialized_view(id, vec![batch]).unwrap();
+            }
+            let bound = physical_dag.instantiate(Arc::new(store)).unwrap();
             let context = RunContext::new(
                 Scope::Query {
                     evaluation_time_ms: 1,
-                    revision: 0,
                 },
                 Limits::default(),
             )

@@ -1,10 +1,10 @@
 //! Opaque state travels through a retained physical projection without scalar decoding.
-use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
+use asap_executor::sources::InMemoryDataStore;
 use asap_executor::{
     expressions::Expression,
     factory::create_planner_accumulator,
     operators::Operator,
-    physical_planner::compile,
+    physical_planner::{compile, test_support::views_at},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
@@ -16,12 +16,60 @@ use planner_types::ir::physical_export::{
 use planner_types::ir::properties::*;
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{DataType, *};
-use planner_types::ir::ASAPOp;
 use planner_types::ir::NonASAPOp;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use planner_types::ir::{ASAPOp, TimeRangeKind};
+use std::{sync::Arc, time::Duration};
+
+/// The raw samples a stored summary is built from: `ts`, `value` and
+/// `service` rows.
+fn sample_schema() -> planner_types::ir::schema::Schema {
+    planner_types::ir::schema::Schema::with_time_index(
+        vec![
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
+            Field::plain("service", DataType::Utf8, false),
+        ],
+        0,
+        vec![],
+    )
+}
+
+/// A `Scan` of the raw samples.
+fn scan() -> NonASAPOp<usize> {
+    NonASAPOp::Scan {
+        source: planner_types::ir::operator::Source::TimeSeries {
+            metric: "requests".into(),
+        },
+        schema: sample_schema(),
+        predicates: vec![],
+    }
+}
+
+/// A node over raw samples (`views_at` moves it to ingestion time).
+fn raw_node(id: usize, payload: NonASAPOp<usize>) -> PhysicalASAPDAGNode {
+    PhysicalASAPDAGNode {
+        id,
+        payload: PhysicalASAPOperatorPayload::NonASAP(payload),
+        output_schema: sample_schema(),
+        output_state: ExecutionDataState::QUERY_ROWS,
+        materialization: Default::default(),
+        guarantee: None,
+        retention_ms: None,
+    }
+}
+
+/// An edge carrying raw samples.
+fn raw_edge(producer: usize, consumer: usize) -> PhysicalASAPDAGEdge {
+    PhysicalASAPDAGEdge {
+        producer,
+        consumer,
+        role: EdgeRole::Input,
+        intermediate_schema: sample_schema(),
+        data_state: ExecutionDataState::QUERY_ROWS,
+        grouping: GroupingEdgeCompatibility::NotApplicable,
+        window: WindowEdgeCompatibility::NotApplicable,
+    }
+}
 
 // A projection over a summary may reorder/rename its columns; recovery must retain
 // the family and pass through the same immutable state, without decoding the payload.
@@ -63,19 +111,31 @@ fn summary_projection_survives_recovery() {
         nodes: vec![
             PhysicalASAPDAGNode {
                 id: 0,
-                payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
-                    children: vec![],
-                    newest_panes: None,
-                    group_by: None,
+                payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
+                    child: 3,
+                    family: family.clone(),
+                    input: SummaryUpdate::column(ColumnRef::SampleValue),
+                    reduction: planner_types::ir::operator::Reduction::Reduce(
+                        planner_types::ir::operator::GroupKeys::by(vec![2]),
+                    ),
+                    grouping: GroupingStrategy::PerSubpopulationInstance,
+                    filter: None,
                 }),
                 output_schema: (*schema).clone(),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
-                materialization: planner_types::physical::Materialization::MatAtIngestion(
-                    planner_types::physical::Medium::Memory,
-                ),
+                materialization: Default::default(),
                 guarantee: None,
                 retention_ms: None,
             },
+            raw_node(2, scan()),
+            raw_node(
+                3,
+                NonASAPOp::TimeRange {
+                    range: Duration::from_secs(60),
+                    kind: TimeRangeKind::Range,
+                    child: 2,
+                },
+            ),
             PhysicalASAPDAGNode {
                 id: 1,
                 payload: PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Project {
@@ -91,26 +151,30 @@ fn summary_projection_survives_recovery() {
                 }),
                 output_schema: output.clone(),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
-                materialization: planner_types::physical::Materialization::MatAtIngestion(
-                    planner_types::physical::Medium::Memory,
-                ),
+                materialization: Default::default(),
                 guarantee: None,
                 retention_ms: None,
             },
         ],
-        edges: vec![PhysicalASAPDAGEdge {
-            producer: 0,
-            consumer: 1,
-            role: EdgeRole::Input,
-            intermediate_schema: (*schema).clone(),
-            data_state: ExecutionDataState::INGESTION_SUMMARY,
-            grouping: GroupingEdgeCompatibility::NotApplicable,
-            window: WindowEdgeCompatibility::NotApplicable,
-        }],
+        edges: vec![
+            raw_edge(2, 3),
+            raw_edge(3, 0),
+            PhysicalASAPDAGEdge {
+                producer: 0,
+                consumer: 1,
+                role: EdgeRole::Input,
+                intermediate_schema: (*schema).clone(),
+                data_state: ExecutionDataState::INGESTION_SUMMARY,
+                grouping: GroupingEdgeCompatibility::NotApplicable,
+                window: WindowEdgeCompatibility::NotApplicable,
+            },
+        ],
         roots: vec![1],
         scalar_roots: vec![],
     };
-    let program = compile(&dag, &BTreeSet::from([0]), &[1]).unwrap();
+    let mut dag = dag;
+    let views = views_at(&mut dag, &[0]).unwrap();
+    let program = compile(&dag, &views, &[1]).unwrap();
     assert!(Operator::project(
         schema.clone(),
         vec![("invalid".into(), Expression::Column(2))]
@@ -144,18 +208,13 @@ fn summary_projection_survives_recovery() {
         ]],
     )
     .unwrap();
-    let data_sources = BindingDataSources {
-        materialized_views: BTreeMap::from([(
-            0,
-            Arc::new(MemorySource::new(schema, vec![batch]).unwrap()) as Arc<dyn TableProvider>,
-        )]),
-        ..Default::default()
-    };
-    let physical_dag = program.instantiate(&data_sources).unwrap();
+    let store = InMemoryDataStore::default()
+        .with_materialized_view(0, vec![batch])
+        .unwrap();
+    let physical_dag = program.instantiate(Arc::new(store)).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 1,
-            revision: 1,
         },
         Limits::default(),
     )
@@ -208,9 +267,7 @@ fn summary_merge_without_inputs_is_rejected() {
         roots: vec![0],
         scalar_roots: vec![],
     };
-    let error = compile(&dag, &BTreeSet::new(), &[0])
-        .err()
-        .expect("rejected");
+    let error = compile(&dag, &[], &[0]).err().expect("rejected");
     assert!(
         error.to_string().contains("summary merge requires inputs"),
         "{error}"

@@ -1,5 +1,5 @@
 //! Spatial heap weights come from a fresh instant vector, never sample history.
-use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
+use asap_executor::sources::InMemoryDataStore;
 mod common;
 use asap_executor::{
     operators::Operator,
@@ -15,10 +15,7 @@ use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use planner_types::ir::properties::AccuracyTarget;
 use planner_types::ir::schema::{DataType, *};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 fn schema() -> Arc<Schema> {
     Arc::new(planner_types::ir::schema::Schema {
@@ -41,21 +38,15 @@ fn schema() -> Arc<Schema> {
         time_index: Some(0),
     })
 }
-fn run(program: &CompiledPhysicalDAG, data: Batch, end: i64) -> Result<Vec<Batch>, String> {
-    let input_id = program.input_slots().next().unwrap().0;
-    let data_sources = BindingDataSources {
-        materialized_views: BTreeMap::from([(
-            input_id,
-            Arc::new(MemorySource::new(data.schema().clone(), vec![data]).unwrap())
-                as Arc<dyn TableProvider>,
-        )]),
-        ..Default::default()
-    };
-    let dag = program.instantiate(&data_sources).unwrap();
+fn run(
+    program: &CompiledPhysicalDAG,
+    store: InMemoryDataStore,
+    end: i64,
+) -> Result<Vec<Batch>, String> {
+    let dag = program.instantiate(Arc::new(store)).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: end,
-            revision: 0,
         },
         Limits::default(),
     )
@@ -68,6 +59,14 @@ fn run(program: &CompiledPhysicalDAG, data: Batch, end: i64) -> Result<Vec<Batch
         }
         Ok(batches)
     })
+}
+/// `data` as a leaf holding its rows.
+fn source(data: Batch) -> Operator {
+    Operator::source(data.schema().clone(), vec![data]).unwrap()
+}
+/// Run a plan whose leaves hold their rows.
+fn run_operators(program: &CompiledPhysicalDAG, end: i64) -> Result<Vec<Batch>, String> {
+    run(program, InMemoryDataStore::default(), end)
 }
 fn input(samples: &[(&str, i64, f64)]) -> Batch {
     let schema = schema();
@@ -88,16 +87,18 @@ fn input(samples: &[(&str, i64, f64)]) -> Batch {
         .collect();
     Batch::try_new(schema, rows).unwrap()
 }
-fn snapshot_plan() -> CompiledPhysicalDAG {
+fn snapshot_plan(data: Batch) -> CompiledPhysicalDAG {
     CompiledPhysicalDAG::from_operators(
-        BTreeMap::from([(0, schema())]),
-        BTreeMap::from([(
-            1,
+        BTreeMap::from([
+            (0, (vec![], source(data))),
             (
-                vec![0],
-                Operator::current_series(schema(), 3, 0, 1, 60_000).unwrap(),
+                1,
+                (
+                    vec![0],
+                    Operator::current_series(schema(), 3, 0, 1, 60_000).unwrap(),
+                ),
             ),
-        )]),
+        ]),
         vec![1],
     )
     .unwrap()
@@ -107,10 +108,8 @@ fn snapshot_plan() -> CompiledPhysicalDAG {
 // survive even when every series has the same projected `job` value.
 #[test]
 fn latest_snapshot_replaces_decreases_expires_and_retains_full_identity() {
-    let plan = snapshot_plan();
-    let batches = run(
-        &plan,
-        input(&[
+    let batches = run_operators(
+        &snapshot_plan(input(&[
             ("decrease", 10_000, 100.),
             ("decrease", 50_000, 1.),
             ("steady", 40_000, 20.),
@@ -118,7 +117,7 @@ fn latest_snapshot_replaces_decreases_expires_and_retains_full_identity() {
             ("stale", 20_000, 500.),
             ("stale", 55_000, f64::from_bits(0x7ff0_0000_0000_0002)),
             ("future", 60_001, 2_000.),
-        ]),
+        ])),
         60_000,
     )
     .unwrap();
@@ -143,13 +142,14 @@ fn latest_snapshot_replaces_decreases_expires_and_retains_full_identity() {
         values,
         BTreeMap::from([("decrease".into(), 1.), ("steady".into(), 20.)])
     );
-    assert!(run(&plan, input(&[("steady", 40_000, 20.)]), 100_000)
-        .unwrap()
-        .iter()
-        .all(|batch| batch.to_rows().is_empty()));
-    assert!(run(
-        &plan,
-        input(&[("conflict", 50_000, 1.), ("conflict", 50_000, 2.)]),
+    assert!(
+        run_operators(&snapshot_plan(input(&[("steady", 40_000, 20.)])), 100_000)
+            .unwrap()
+            .iter()
+            .all(|batch| batch.to_rows().is_empty())
+    );
+    assert!(run_operators(
+        &snapshot_plan(input(&[("conflict", 50_000, 1.), ("conflict", 50_000, 2.)])),
         60_000
     )
     .is_err());
@@ -193,22 +193,24 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
             time_index: None,
         });
         let read = Operator::keyed_evaluation(build.schema(), 1, 1, output).unwrap();
-        let plan = CompiledPhysicalDAG::from_operators(
-            BTreeMap::from([(0, schema())]),
-            BTreeMap::from([
-                (
-                    1,
+        let plan = |data: Batch| {
+            CompiledPhysicalDAG::from_operators(
+                BTreeMap::from([
+                    (0, (vec![], source(data))),
                     (
-                        vec![0],
-                        Operator::current_series(schema(), 3, 0, 1, 60_000).unwrap(),
+                        1,
+                        (
+                            vec![0],
+                            Operator::current_series(schema(), 3, 0, 1, 60_000).unwrap(),
+                        ),
                     ),
-                ),
-                (2, (vec![1], build)),
-                (3, (vec![2], read)),
-            ]),
-            vec![3],
-        )
-        .unwrap();
+                    (2, (vec![1], build.clone())),
+                    (3, (vec![2], read.clone())),
+                ]),
+                vec![3],
+            )
+            .unwrap()
+        };
         for (samples, end, winner, score) in [
             (
                 vec![("a", 10_000, 100.), ("a", 50_000, 1.), ("b", 50_000, 20.)],
@@ -223,7 +225,7 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
                 3.,
             ),
         ] {
-            let batches = run(&plan, input(&samples), end).unwrap();
+            let batches = run_operators(&plan(input(&samples)), end).unwrap();
             let rows = batches
                 .iter()
                 .flat_map(|batch| batch.to_rows())
@@ -245,22 +247,14 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
 #[test]
 fn current_series_observes_resource_limits() {
     use asap_executor::Error;
-    let plan = snapshot_plan();
     for cancelled in [false, true] {
-        let data = input(&[("one", 50_000, 1.)]);
-        let data_sources = BindingDataSources {
-            materialized_views: BTreeMap::from([(
-                0,
-                Arc::new(MemorySource::new(data.schema().clone(), vec![data]).unwrap())
-                    as Arc<dyn TableProvider>,
-            )]),
-            ..Default::default()
-        };
-        let dag = plan.instantiate(&data_sources).unwrap();
+        let plan = snapshot_plan(input(&[("one", 50_000, 1.)]));
+        let dag = plan
+            .instantiate(Arc::new(InMemoryDataStore::default()))
+            .unwrap();
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 60_000,
-                revision: 0,
             },
             Limits {
                 max_bytes: if cancelled { 1 << 20 } else { 1 },
@@ -305,7 +299,8 @@ fn identity_encoding_is_lossless_and_rejects_noncanonical_inputs() {
 }
 
 // A hand-built population fixture over the lowered `topk` (no planner pass
-// offers one yet) compiles to native operators with dynamic series identity.
+// offers one yet) compiles to native operators with dynamic series identity
+// and ranks the raw samples bound at its scan.
 #[test]
 fn population_fixture_compiles_with_dynamic_identity() {
     use asap_executor::physical_planner::{compile, promql_rows::with_series_identity};
@@ -335,26 +330,8 @@ fn population_fixture_compiles_with_dynamic_identity() {
     let original = asap_frontend_promql::lower_promql_workload(&workload)
         .unwrap()
         .remove(0);
-    let open_root = Rc::new(original.clone());
     let topk =
         planner_types::ir::operator::maintained_population::PopulationStatistic::TopK { k: 1 };
-    let open_selected = asap_logical_asap_optimization::test_support::population_over_selector(
-        &open_root,
-        topk.clone(),
-        &["job"],
-    );
-    let snapshot_program =
-        asap_executor::physical_planner::promql_rows::compile_current_series_evaluation(
-            &open_selected,
-        )
-        .unwrap();
-    let encoded = String::from_utf8(serde_json::to_vec(&snapshot_program).unwrap()).unwrap();
-    assert!(
-        !encoded.contains("CurrentSeries"),
-        "maintained input must not be rebuilt"
-    );
-    assert!(encoded.contains("Sort") && encoded.contains("Limit"));
-    assert_eq!(snapshot_program.input_slots().count(), 1);
     let root = Rc::new(with_series_identity(&original).unwrap());
     let selected = asap_logical_asap_optimization::test_support::population_over_selector(
         &root,
@@ -362,25 +339,18 @@ fn population_fixture_compiles_with_dynamic_identity() {
         &["job"],
     );
     let logical = compile_physical_asap_dag(&selected).unwrap();
-    let raw = logical
+    let (source, raw_schema) = logical
         .nodes
         .iter()
-        .find(|node| {
-            matches!(
-                node.payload,
-                PhysicalASAPOperatorPayload::NonASAP(
-                    planner_types::ir::NonASAPOp::TimeRange { .. }
-                )
-            )
+        .find_map(|node| match &node.payload {
+            PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::Scan {
+                source,
+                ..
+            }) => Some((source.clone(), Arc::new(node.output_schema.clone()))),
+            _ => None,
         })
         .unwrap();
-    let raw_schema = Arc::new(raw.output_schema.clone());
-    let physical = compile(
-        &logical,
-        &BTreeSet::from([raw.id as u64]),
-        &[logical.roots[0] as u64],
-    )
-    .unwrap();
+    let physical = compile(&logical, &[], &[logical.roots[0] as u64]).unwrap();
     let bytes = String::from_utf8(serde_json::to_vec(&physical).unwrap()).unwrap();
     assert!(bytes.contains("CurrentSeries"));
     assert!(bytes.contains("Sort"));
@@ -400,7 +370,14 @@ fn population_fixture_compiles_with_dynamic_identity() {
             .unwrap()
         })
         .collect();
-    let batches = run(&physical, Batch::try_new(raw_schema, rows).unwrap(), 60_000).unwrap();
+    let store = InMemoryDataStore::default()
+        .with_raw_data(
+            source,
+            raw_schema.clone(),
+            vec![Batch::try_new(raw_schema, rows).unwrap()],
+        )
+        .unwrap();
+    let batches = run(&physical, store, 60_000).unwrap();
     let rows = batches
         .iter()
         .flat_map(|batch| batch.to_rows())

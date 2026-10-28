@@ -109,12 +109,10 @@ mod tests {
         for scope in [
             Scope::Query {
                 evaluation_time_ms: 20,
-                revision: 1,
             },
             Scope::Ingestion {
                 window_start_ms: 10,
                 window_end_ms: 20,
-                revision: 1,
             },
         ] {
             let batch = Batch::try_new(schema.clone(), vec![vec![Value::Float64(7.)]]).unwrap();
@@ -152,7 +150,6 @@ mod tests {
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 0,
-                revision: 0,
             },
             Limits::default(),
         )
@@ -175,7 +172,6 @@ mod tests {
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 0,
-                revision: 0,
             },
             Limits {
                 max_bytes: bytes,
@@ -204,7 +200,6 @@ mod tests {
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 0,
-                revision: 0,
             },
             Limits::default(),
         )

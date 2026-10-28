@@ -1,126 +1,26 @@
-//! Data access. A deployment implements [`TableProvider`] for raw data and for
-//! materialized views; the executor's `Scan` owns the Planner's time-range,
-//! predicate and projection semantics over what a provider returns.
+//! Data access. A deployment implements [`DataStore`]: raw data by the
+//! `Source` a `Scan` names, and stored materialized views by their
+//! [`MaterializedView`]. The executor's `Scan` owns the Planner's time-range
+//! and predicate semantics over the raw rows a store returns.
 use crate::{
     expressions::CompiledExpression,
-    plan::{NodeId, PhysicalOperator},
+    plan::PhysicalOperator,
     runtime::{Input, OutputStream, RunContext, Scope},
     values::{Batch, SchemaRef},
     Error,
 };
 use futures::{stream, StreamExt};
+use planner_types::ir::materialized_view::MaterializedView;
 use planner_types::ir::operator::Source;
 use planner_types::ir::physical_export::ScanWindow;
 use planner_types::ir::schema::DataType;
 use planner_types::ir::ScalarExpr;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// A table a deployment binds to an input slot: raw data (a SQL table, a
-/// time series as `(ts, value, *labels)`) or a materialized view's stored
-/// states. Metadata must be stable for the lifetime of the binding. Each scan
-/// opens an independent cursor; connectors must honor cancellation and bound
-/// their own I/O buffers. Dropping a cursor must release its resources. A
-/// connector error is never an empty successful scan.
-pub trait TableProvider {
-    /// Contains every column of the slots it is bound to (matched by field
-    /// name, with the same type and nullability); may have more.
-    fn schema(&self) -> SchemaRef;
-    /// Declare a finite snapshot/window explicitly; execution scope alone does not bound a cursor.
-    fn boundedness(&self) -> crate::plan::Boundedness {
-        crate::plan::Boundedness::Unknown
-    }
-    /// Rows for one run, in [`Self::schema`] or in its `projection` columns
-    /// when the provider applies it.
-    ///
-    /// For a table slot `request` is a hint: the executor re-applies its
-    /// time range, predicates and projection, so a provider may ignore any
-    /// field. A materialized view slot is not re-filtered: its provider returns exactly
-    /// the states the run reads, selected by `request.time_range_ms` (see
-    /// [`ScanRequest::time_range_ms`]). The executor treats a materialized view's states
-    /// as held by the store, so a run is not charged for them.
-    fn scan(
-        &self,
-        request: &ScanRequest,
-        context: RunContext,
-    ) -> Result<OutputStream<'_, Batch>, Error>;
-}
-
-/// What a slot reads in one run.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ScanRequest<'a> {
-    /// `(start, end]` in milliseconds. In a query run at evaluation time
-    /// `T`, a `TimeRange(w)` over `TimeShift`s summing to `s` reads
-    /// `(T - s - w, T - s]`.
-    ///
-    /// - Table slot, query run: the smallest range covering every window
-    ///   its readers read (`PhysicalASAPDAG::scan_window`), on the slot's
-    ///   time column; `None` when a reader reads the `Scan` outside a
-    ///   window. The executor re-applies it.
-    /// - Table slot, ingestion run: the run's `(window_start_ms,
-    ///   window_end_ms]` when the `Scan` is read through windows, else
-    ///   `None`. Each `TimeRange(w)` then keeps `(window_end_ms - w,
-    ///   window_end_ms]`, whatever the shifts below it, so the run's window
-    ///   is the window it builds.
-    /// - Materialized view slot, query run: the window of the one range `TimeRange` the
-    ///   view reads directly, as an expanded pane does; the provider
-    ///   returns the states whose pane ends in `(start, end]`. `None` when
-    ///   the window is not derivable from the DAG, and in an ingestion run:
-    ///   the provider returns every state bound for this run.
-    pub time_range_ms: Option<(i64, i64)>,
-    /// The slot's columns, as indices into the provider's schema, in the
-    /// slot's order.
-    pub projection: Option<&'a [usize]>,
-    /// A table slot's `Scan` predicates, over the slot's schema (after
-    /// `projection`: column `i` is provider column `projection[i]`). They
-    /// may read `now()`, the run's evaluation time, and read no other
-    /// operator (`ScalarExpr<()>`). A hint only: the executor re-applies
-    /// every predicate.
-    pub predicates: &'a [ScalarExpr<()>],
-}
-
-/// Explicit source identities; no implicit network discovery or fallback.
-#[derive(Default)]
-pub struct DataSources {
-    sources: Vec<(Source, Arc<dyn TableProvider>)>,
-}
-impl DataSources {
-    pub fn register(
-        &mut self,
-        identity: Source,
-        source: Arc<dyn TableProvider>,
-    ) -> Result<(), Error> {
-        if self.sources.iter().any(|(key, _)| key == &identity) {
-            return Err(Error::Invalid("duplicate data source".into()));
-        }
-        crate::values::validate_schema(&source.schema())?;
-        self.sources.push((identity, source));
-        Ok(())
-    }
-    /// The provider registered for `identity`.
-    pub(crate) fn provider(&self, identity: &Source) -> Option<&Arc<dyn TableProvider>> {
-        self.sources
-            .iter()
-            .find(|(key, _)| key == identity)
-            .map(|(_, provider)| provider)
-    }
-}
-
-/// The data a compiled DAG's input slots read in one instantiation: a table
-/// slot by its `Scan`'s `Source`, a materialized view slot by its
-/// node id. Raw data (a
-/// SQL table, or a time series as `(ts, value, *labels)`) is bound only at
-/// `Scan`s, through `tables`; the DAG's own `TimeRange`s apply windows,
-/// instant lookback and stale markers.
-#[derive(Default)]
-pub struct BindingDataSources {
-    /// Source → provider, as a catalog: one provider per table or metric,
-    /// however many `Scan`s read it.
-    pub tables: DataSources,
-    /// Materialized view (its slot's node id) → provider of the
-    /// materialized view's stored states.
-    pub materialized_views: BTreeMap<NodeId, Arc<dyn TableProvider>>,
-}
+mod data_store;
+pub use data_store::{DataStore, MaterializedViewRequest, RawDataRequest};
+mod memory;
+pub use memory::InMemoryDataStore;
 
 /// A `Scan` predicate compiled over the scan's rows `output`; bad input when
 /// it is not boolean or the executor cannot evaluate it.
@@ -135,113 +35,85 @@ pub(crate) fn compile_scan_predicate(
     Ok(predicate)
 }
 
-/// Each of `output`'s columns' index in `provider`'s schema, matched by
-/// name; bad input when one is missing or has another type or nullability.
-fn projection(provider: &SchemaRef, output: &SchemaRef) -> Result<Vec<usize>, Error> {
-    output
-        .fields
-        .iter()
-        .map(|field| {
-            let index = provider
-                .fields
-                .iter()
-                .position(|candidate| candidate.name == field.name)
-                .ok_or_else(|| {
-                    Error::Invalid(format!("provider schema lacks column {}", field.name))
-                })?;
-            let candidate = &provider.fields[index];
-            if candidate.dtype != field.dtype || candidate.nullable != field.nullable {
-                return Err(Error::Invalid(format!(
-                    "provider column {} differs in type from the slot's schema",
-                    field.name
-                )));
-            }
-            Ok(index)
-        })
-        .collect()
+/// What a `Scan` reads, and how.
+enum ScanInput {
+    /// A raw data slot: re-applies its time range and predicates.
+    RawData {
+        source: Source,
+        /// Compiled over the slot's schema.
+        predicates: Vec<CompiledExpression>,
+        /// `predicates` as the store receives them.
+        predicate_hints: Vec<ScalarExpr<()>>,
+        /// The rows its readers read.
+        window: ScanWindow,
+    },
+    /// A materialized view slot: exact, never re-filtered; its states are
+    /// the store's.
+    MaterializedView {
+        view: MaterializedView,
+        /// The data its state summarizes, back from the evaluation time;
+        /// always `Within`.
+        window: ScanWindow,
+    },
 }
 
-/// An input slot bound to its provider: reads the provider with this run's
-/// [`ScanRequest`] and returns the slot's rows in the slot's schema.
+/// An input slot bound to a [`DataStore`]: reads it with this run's request
+/// and returns the slot's rows in the slot's schema.
 pub(crate) struct Scan {
-    provider: Arc<dyn TableProvider>,
+    store: Arc<dyn DataStore>,
     output: SchemaRef,
-    /// Each output column's index in the provider's schema.
-    projection: Vec<usize>,
-    /// A table slot's predicates, compiled over `output`; none for a view.
-    predicates: Vec<CompiledExpression>,
-    /// `predicates` as the provider receives them.
-    predicate_hints: Vec<ScalarExpr<()>>,
-    window: ScanWindow,
-    /// A table slot re-applies its requested time range; a materialized
-    /// view's provider selects its panes, which the executor cannot check.
-    reapplies_time_range: bool,
+    input: ScanInput,
 }
 impl Scan {
-    /// A table slot over `provider`, which must contain `output`'s columns
-    /// and declare `Bounded`.
-    pub(crate) fn table(
-        provider: Arc<dyn TableProvider>,
+    /// A raw data slot reading `source`.
+    pub(crate) fn raw_data(
+        store: Arc<dyn DataStore>,
+        source: Source,
         output: SchemaRef,
         predicates: Vec<CompiledExpression>,
         window: ScanWindow,
-    ) -> Result<Self, Error> {
-        let mut scan = Self::materialized_view(provider, output, window)?;
-        scan.predicate_hints = predicates
+    ) -> Self {
+        let predicate_hints = predicates
             .iter()
             .map(|predicate| predicate.expression().clone())
             .collect();
-        scan.predicates = predicates;
-        scan.reapplies_time_range = true;
-        Ok(scan)
+        Self {
+            store,
+            output,
+            input: ScanInput::RawData {
+                source,
+                predicates,
+                predicate_hints,
+                window,
+            },
+        }
     }
-    /// A materialized view slot over `provider`, which must contain `output`'s columns
-    /// and declare `Bounded`.
+    /// A materialized view slot reading `view`, whose state summarizes
+    /// `window`; bad input when the window is unbounded.
     pub(crate) fn materialized_view(
-        provider: Arc<dyn TableProvider>,
+        store: Arc<dyn DataStore>,
+        view: MaterializedView,
         output: SchemaRef,
         window: ScanWindow,
     ) -> Result<Self, Error> {
-        let projection = projection(&provider.schema(), &output)?;
-        if provider.boundedness() != crate::plan::Boundedness::Bounded {
-            return Err(Error::Invalid("provider does not declare Bounded".into()));
+        if window == ScanWindow::Unbounded {
+            return Err(Error::Invalid(format!(
+                "materialized view {} summarizes an unbounded window",
+                view.node_id
+            )));
         }
         Ok(Self {
-            provider,
+            store,
             output,
-            projection,
-            predicates: vec![],
-            predicate_hints: vec![],
-            window,
-            reapplies_time_range: false,
+            input: ScanInput::MaterializedView { view, window },
         })
     }
-    /// The time range this run reads (see [`ScanRequest::time_range_ms`]).
-    fn time_range_ms(&self, context: &RunContext) -> Option<(i64, i64)> {
-        match context.scope {
-            Scope::Query {
-                evaluation_time_ms, ..
-            } => self.window.bounds_ms(evaluation_time_ms),
-            // A table slot read through windows reads the rows of the
-            // window the run builds; a materialized view's states are those bound.
-            Scope::Ingestion {
-                window_start_ms,
-                window_end_ms,
-                ..
-            } => (self.reapplies_time_range && self.window != ScanWindow::Unbounded)
-                .then_some((window_start_ms, window_end_ms)),
-        }
-    }
-    /// `batch` in the slot's schema: projected when it is in the provider's
-    /// schema, relabeled when the provider already projected it.
-    fn to_output(&self, batch: Batch, provider: &SchemaRef) -> Result<Batch, Error> {
+    /// `batch` in the slot's schema; bad input when its columns differ.
+    fn to_output(&self, batch: Batch) -> Result<Batch, Error> {
         if batch.schema() == &self.output {
             return Ok(batch);
         }
-        if batch.schema() == provider {
-            return batch.project(self.output.clone(), &self.projection);
-        }
-        let projected =
+        let same_columns =
             batch.schema().fields.len() == self.output.fields.len()
                 && batch.schema().fields.iter().zip(&self.output.fields).all(
                     |(actual, expected)| {
@@ -250,9 +122,9 @@ impl Scan {
                             && actual.nullable == expected.nullable
                     },
                 );
-        if !projected {
+        if !same_columns {
             return Err(Error::Invalid(
-                "provider returned a batch in neither its schema nor the slot's".into(),
+                "data store returned a batch in another schema than the slot's".into(),
             ));
         }
         let columns: Vec<usize> = (0..self.output.fields.len()).collect();
@@ -262,7 +134,7 @@ impl Scan {
 impl PhysicalOperator<Batch, SchemaRef> for Scan {
     fn properties(&self, _: &[crate::plan::PlanProperties]) -> crate::plan::PlanProperties {
         crate::plan::PlanProperties {
-            boundedness: self.provider.boundedness(),
+            boundedness: crate::plan::Boundedness::Bounded,
             emission: crate::plan::Emission::Incremental,
         }
     }
@@ -290,38 +162,50 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
         if context.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        // `now()` in the predicates is this run's evaluation time.
-        let predicates: Vec<std::borrow::Cow<'_, CompiledExpression>> = self
-            .predicates
-            .iter()
-            .map(|predicate| match predicate.reads_current_timestamp() {
-                true => std::borrow::Cow::Owned(predicate.at_evaluation_time(&context)),
-                false => std::borrow::Cow::Borrowed(predicate),
-            })
-            .collect();
-        let time_range_ms = self.time_range_ms(&context);
-        let time_filter = match time_range_ms {
-            Some(range) if self.reapplies_time_range => Some((
-                self.output
-                    .time_index
-                    .ok_or_else(|| Error::Invalid("windowed Scan lacks a time column".into()))?,
-                range,
-            )),
-            _ => None,
+        match &self.input {
+            ScanInput::RawData {
+                source,
+                predicates,
+                predicate_hints,
+                window,
+            } => self.start_raw_data(source, predicates, predicate_hints, *window, context),
+            ScanInput::MaterializedView { view, window } => {
+                self.start_materialized_view(view, *window, context)
+            }
+        }
+    }
+}
+impl Scan {
+    fn start_materialized_view<'a>(
+        &'a self,
+        view: &'a MaterializedView,
+        window: ScanWindow,
+        context: RunContext,
+    ) -> Result<OutputStream<'a, Batch>, Error> {
+        // A query run reads the window back from its evaluation time; an
+        // ingestion run builds the windows ending at its end.
+        let at_ms = match context.scope {
+            Scope::Query { evaluation_time_ms } => evaluation_time_ms,
+            Scope::Ingestion { window_end_ms, .. } => match window {
+                ScanWindow::Within { end_offset_ms, .. } => {
+                    window_end_ms.saturating_add(end_offset_ms)
+                }
+                ScanWindow::Unbounded => window_end_ms,
+            },
         };
-        let provider_schema = self.provider.schema();
-        // Opening is lazy: validation and construction of a run perform no I/O.
+        let time_range_ms = window
+            .bounds_ms(at_ms)
+            .ok_or_else(|| Error::Invalid("unbounded materialized view window".into()))?;
         let opening = context.clone();
         let stream = stream::once(async move {
             if opening.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            let request = ScanRequest {
+            let request = MaterializedViewRequest {
                 time_range_ms,
-                projection: Some(&self.projection),
-                predicates: &self.predicate_hints,
+                schema: &self.output,
             };
-            self.provider.scan(&request, opening)
+            self.store.read_materialized_view(view, &request, opening)
         });
         use futures::TryStreamExt;
         Ok(stream
@@ -330,11 +214,68 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                 if context.is_cancelled() {
                     return Err(Error::Cancelled);
                 }
-                let batch = self.to_output(batch?, &provider_schema)?;
-                if !self.reapplies_time_range {
-                    // A materialized view's states are the store's, read by this run.
-                    batch.mark_states_held_outside_run();
+                let batch = self.to_output(batch?)?;
+                // A materialized view's states are the store's, read by this run.
+                batch.mark_states_held_outside_run();
+                Ok(batch)
+            })
+            .boxed_local())
+    }
+    fn start_raw_data<'a>(
+        &'a self,
+        source: &'a Source,
+        predicates: &'a [CompiledExpression],
+        predicate_hints: &'a [ScalarExpr<()>],
+        window: ScanWindow,
+        context: RunContext,
+    ) -> Result<OutputStream<'a, Batch>, Error> {
+        // `now()` in the predicates is this run's evaluation time.
+        let predicates: Vec<std::borrow::Cow<'_, CompiledExpression>> = predicates
+            .iter()
+            .map(|predicate| match predicate.reads_current_timestamp() {
+                true => std::borrow::Cow::Owned(predicate.at_evaluation_time(&context)),
+                false => std::borrow::Cow::Borrowed(predicate),
+            })
+            .collect();
+        let time_range_ms = match context.scope {
+            Scope::Query { evaluation_time_ms } => window.bounds_ms(evaluation_time_ms),
+            // A slot read through windows reads the rows of the window the
+            // run builds.
+            Scope::Ingestion {
+                window_start_ms,
+                window_end_ms,
+            } => (window != ScanWindow::Unbounded).then_some((window_start_ms, window_end_ms)),
+        };
+        let time_filter = match time_range_ms {
+            Some(range) => Some((
+                self.output
+                    .time_index
+                    .ok_or_else(|| Error::Invalid("windowed Scan lacks a time column".into()))?,
+                range,
+            )),
+            None => None,
+        };
+        // Opening is lazy: validation and construction of a run perform no I/O.
+        let opening = context.clone();
+        let stream = stream::once(async move {
+            if opening.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let request = RawDataRequest {
+                time_range_ms,
+                schema: &self.output,
+                predicates: predicate_hints,
+            };
+            self.store.read_raw_data(source, &request, opening)
+        });
+        use futures::TryStreamExt;
+        Ok(stream
+            .try_flatten()
+            .map(move |batch| {
+                if context.is_cancelled() {
+                    return Err(Error::Cancelled);
                 }
+                let batch = self.to_output(batch?)?;
                 if predicates.is_empty() && time_filter.is_none() {
                     return Ok(batch);
                 }
@@ -348,7 +289,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                         .ok_or(Error::MemoryLimit)?,
                 )?;
                 let mut batch = batch;
-                // The requested time range, whether or not the provider applied it.
+                // The requested time range, whether or not the store applied it.
                 if let Some((time, (start_ms, end_ms))) = time_filter {
                     let times = batch
                         .column(time)
@@ -391,6 +332,3 @@ fn keep_rows(batch: Batch, keep: &arrow::array::BooleanArray) -> Result<Batch, E
     }
     batch.filter(keep)
 }
-
-mod memory;
-pub use memory::MemorySource;

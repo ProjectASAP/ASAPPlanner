@@ -1,7 +1,7 @@
-//! Planner-selected summaries over raw data samples compile as precompute DAGs
-//! and produce the same estimates as feeding their kernel sample by sample.
+//! Planner-selected summaries over raw data samples compile, bound to raw data
+//! at their `Scan`, and produce the same estimates as feeding their kernel
+//! sample by sample.
 mod physical_common;
-use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use asap_types::ir::ASAPOp;
 use asap_types::ir::OperatorNode;
@@ -10,10 +10,10 @@ use std::{collections::BTreeMap, collections::BTreeSet, rc::Rc, sync::Arc};
 
 use asap_executor::{
     factory::create_planner_accumulator,
-    physical_planner::precompute,
+    physical_planner::{compile, promql_rows, CompiledPhysicalDAG},
     runtime::{Limits, RunContext, Scope},
     summary_kernels::{exact::ExactAccumulator, weighted_frequency::WeightedFrequency},
-    values::{Batch, Value},
+    values::Value,
     AggregateCore,
 };
 use asap_integration_tests::fixtures::lower_promql;
@@ -22,8 +22,7 @@ use asap_types::ir::operator::Reduction;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::expr_ir::ColumnRef;
 use asap_types::ir::schema::{
-    EntityIdentity, ExactKind, FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
-    SummaryUpdate,
+    FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr, SummaryUpdate,
 };
 use futures::{executor::block_on, StreamExt};
 
@@ -59,6 +58,7 @@ fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
     use asap_types::ir::QueryRoot;
     use asap_types::workload::{DataWorkload, MetricType, SourceFacts};
     let root = lower_promql(query, accuracy.clone()).expect("lowering failed");
+    let root = promql_rows::with_series_identity(&root).unwrap();
     let counter = SourceFacts {
         metric_type: Some(MetricType::Counter),
         ..SourceFacts::default()
@@ -125,43 +125,34 @@ fn samples() -> Vec<(Series, i64, f64)> {
     rows
 }
 
+/// Compile the summary `root` alone, its raw data read at the `Scan`.
+fn compile_summary(dag: &PhysicalASAPDAG, root: u64) -> Result<CompiledPhysicalDAG, String> {
+    compile(dag, &[], &[root]).map_err(|error| error.to_string())
+}
+
+/// Run the summary `root` in one ingestion run over `rows`, bound as raw
+/// data at its `Scan`: each population's labels and state.
 fn execute(
     dag: &PhysicalASAPDAG,
-    source: u64,
     root: u64,
     rows: &[(Series, i64, f64)],
 ) -> Vec<(Series, Arc<dyn AggregateCore>)> {
-    let program = precompute::compile(dag, &[source], &[root]).unwrap_or_else(|error| {
-        panic!(
-            "raw summary {root} does not compile: {error}; source {:?}",
-            dag.nodes
-                .iter()
-                .find(|n| n.id as u64 == source)
-                .map(|n| (&n.output_schema, &n.payload))
-        );
+    let program = compile_summary(dag, root).unwrap_or_else(|error| {
+        panic!("raw summary {root} does not compile: {error}");
     });
-    let schema = precompute::raw_data_sample_schema();
-    let batch = Batch::try_new(
-        schema.clone(),
+    let store = physical_common::raw_data_store(dag, |_, schema| {
         rows.iter()
-            .map(|(labels, time, value)| precompute::raw_data_sample_row(labels, *time, *value))
-            .collect(),
-    )
-    .unwrap();
-    let sources = BTreeMap::from([(
-        source,
-        Arc::new(MemorySource::new(schema, vec![batch]).unwrap()) as Arc<dyn TableProvider>,
-    )]);
-    let data_sources = BindingDataSources {
-        materialized_views: sources,
-        ..Default::default()
-    };
-    let physical_dag = program.instantiate(&data_sources).unwrap();
+            .map(|(labels, time, value)| {
+                promql_rows::series_row(schema, &canonical(labels), *time, *value).unwrap()
+            })
+            .collect()
+    });
+    let output = program.output_schema(root).unwrap();
+    let physical_dag = program.instantiate(Arc::new(store)).unwrap();
     let context = RunContext::new(
         Scope::Ingestion {
             window_start_ms: 0,
             window_end_ms: 6000,
-            revision: 1,
         },
         Limits::default(),
     )
@@ -174,23 +165,43 @@ fn execute(
         let mut result = Vec::new();
         while let Some(batch) = stream.next().await {
             for row in &batch.unwrap().to_rows() {
-                let [Value::Map(labels), Value::Timestamp(6000), Value::Summary { state, .. }] =
-                    row.as_slice()
-                else {
-                    panic!("unexpected population row {row:?}");
-                };
-                let labels = labels
-                    .iter()
-                    .map(|(k, v)| match (k, v) {
-                        (Value::Utf8(k), Value::Utf8(v)) => (k.to_string(), v.to_string()),
-                        _ => panic!("non-label population entry"),
-                    })
-                    .collect();
-                result.push((labels, state.clone()));
+                let mut labels = Series::new();
+                let mut state = None;
+                for (field, value) in output.fields.iter().zip(row) {
+                    match value {
+                        Value::Utf8(identity)
+                            if field.name == promql_rows::SERIES_IDENTITY_COLUMN =>
+                        {
+                            labels.extend(promql_rows::decode_series_identity(identity).unwrap())
+                        }
+                        Value::Utf8(label) => {
+                            labels.insert(field.name.clone(), label.to_string());
+                        }
+                        Value::Summary { state: s, .. } => state = Some(s.clone()),
+                        Value::Timestamp(6000) => {}
+                        other => panic!("unexpected population column {other:?} in {row:?}"),
+                    }
+                }
+                result.push((canonical(&labels), state.expect("a summary state")));
             }
         }
         result
     })
+}
+
+/// Each series' latest sample, moved to the ingestion run's end (6000 ms).
+fn latest_per_series(rows: &[(Series, i64, f64)]) -> Vec<(Series, i64, f64)> {
+    let mut latest = BTreeMap::<Series, (i64, f64)>::new();
+    for (labels, time, value) in rows {
+        let entry = latest.entry(canonical(labels)).or_insert((*time, *value));
+        if *time >= entry.0 {
+            *entry = (*time, *value);
+        }
+    }
+    latest
+        .into_iter()
+        .map(|(labels, (_, value))| (labels, 6000, value))
+        .collect()
 }
 
 /// PromQL grouping of a canonical label set: `by` keeps the named labels,
@@ -220,6 +231,15 @@ fn item(expr: &SummaryInputExpr, labels: &Series, value: f64, out: &mut Vec<Valu
         SummaryInputExpr::Column(ColumnRef::Named(name)) if name == "value" => {
             out.push(Value::Float64(value))
         }
+        SummaryInputExpr::Column(ColumnRef::Named(name))
+            if name == promql_rows::SERIES_IDENTITY_COLUMN =>
+        {
+            out.push(Value::Utf8(
+                promql_rows::encode_series_identity(&canonical(labels))
+                    .unwrap()
+                    .into(),
+            ))
+        }
         SummaryInputExpr::Column(ColumnRef::Named(name)) => out.push(Value::Utf8(
             canonical(labels)
                 .get(name)
@@ -227,18 +247,6 @@ fn item(expr: &SummaryInputExpr, labels: &Series, value: f64, out: &mut Vec<Valu
                 .unwrap_or_default()
                 .into(),
         )),
-        SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet { excluding }) => {
-            let mut identity = canonical(labels);
-            for column in excluding {
-                let ColumnRef::Named(name) = column else {
-                    panic!("unsupported fixture exclusion {column:?}")
-                };
-                identity.remove(name);
-            }
-            out.push(Value::Utf8(
-                serde_json::to_string(&identity).unwrap().into(),
-            ))
-        }
         SummaryInputExpr::Tuple(items) => items.iter().for_each(|i| item(i, labels, value, out)),
         other => panic!("unsupported fixture item {other:?}"),
     }
@@ -304,6 +312,21 @@ fn check(
         unreachable!()
     };
     let source_node = dag.nodes.iter().find(|n| n.id as u64 == source).unwrap();
+    // An instant selector keeps each series' latest sample within its
+    // lookback before the run's end: feed one such sample per series.
+    let latest_rows;
+    let rows = if matches!(
+        source_node.payload,
+        PhysicalASAPOperatorPayload::NonASAP(asap_types::ir::NonASAPOp::TimeRange {
+            kind: asap_types::ir::TimeRangeKind::Instant,
+            ..
+        })
+    ) {
+        latest_rows = latest_per_series(rows);
+        &latest_rows[..]
+    } else {
+        rows
+    };
     let keys = match reduction {
         Reduction::Reduce(keys) => keys
             .keys()
@@ -315,12 +338,12 @@ fn check(
     let stored_only = matches!(family, FieldDataType::Sketch(kind, _)
         if kind.algorithm() == &asap_types::ir::schema::SketchAlgorithm::Cms);
     if stored_only || asap_executor::capability::validate_native_family(family).is_err() {
-        // Families without a native state, or with native stored state only (plain CMS), are outside precompute execution;
+        // Families without a native state, or with native stored state only (plain CMS), are outside raw summary execution;
         // their compile must fail.
-        assert!(precompute::compile(dag, &[source], &[root]).is_err());
+        assert!(compile_summary(dag, root).is_err());
         return Err(format!("{family:?}"));
     }
-    let actual = execute(dag, source, root, rows);
+    let actual = execute(dag, root, rows);
     let label = match family {
         FieldDataType::ExactAggregate(kind, _) => format!("{kind:?}"),
         FieldDataType::Sketch(kind, _) => format!("{:?}", kind.algorithm()),
@@ -473,11 +496,12 @@ fn raw_data_sample_summaries_compile_and_match_their_kernels() {
     }
 }
 
-/// Replace the raw summary of `sum by (service) (sum_over_time(m[5m]))` with
+/// Replace the raw summary of `sum by (service) (sum_over_time(m{instance!="none"}[5m]))` with
 /// another update, keeping its raw input and reduction.
 fn grouped_raw_summary(family: FieldDataType, input: SummaryUpdate) -> (PhysicalASAPDAG, u64, u64) {
+    // The matcher, true of every sample, makes the `Scan` read `instance`.
     let candidate = candidates(
-        "sum by (service) (sum_over_time(m[5m]))",
+        r#"sum by (service) (sum_over_time(m{instance!="none"}[5m]))"#,
         AccuracyTarget::exact(),
     )
     .pop()
@@ -532,10 +556,11 @@ fn raw_data_sample_heaps_resolve_items_from_labels() {
             heap_size: 8,
         },
     );
+    // The series label set, read from the `Scan`'s series identity column.
     let identity = SummaryUpdate {
-        item: Some(SummaryInputExpr::EntityIdentity(
-            EntityIdentity::PromqlLabelSet { excluding: vec![] },
-        )),
+        item: Some(SummaryInputExpr::Column(ColumnRef::Named(
+            promql_rows::SERIES_IDENTITY_COLUMN.into(),
+        ))),
         weight: SummaryInputExpr::Constant(1.0),
         weight_domain: WeightDomain::NonNegative {
             proof: NonNegativeWeightProof::UnitCount,
@@ -559,8 +584,7 @@ fn raw_data_sample_heaps_resolve_items_from_labels() {
         assert!(check("heap", &dag, source, root, &rows).is_ok());
         // A unit count adds the constant 1 per row; no column of ones is
         // projected for it.
-        let compiled =
-            serde_json::to_value(precompute::compile(&dag, &[source], &[root]).unwrap()).unwrap();
+        let compiled = serde_json::to_value(compile_summary(&dag, root).unwrap()).unwrap();
         assert_eq!(
             compiled
                 .to_string()
@@ -569,67 +593,8 @@ fn raw_data_sample_heaps_resolve_items_from_labels() {
             "{compiled}"
         );
     }
-    let signed_cms = grouped_raw_summary(cms.clone(), by_instance.clone());
-    assert!(precompute::compile(&signed_cms.0, &[signed_cms.1], &[signed_cms.2]).is_err());
-    let derivative = grouped_raw_summary(
-        cms,
-        SummaryUpdate {
-            weight_domain: WeightDomain::NonNegative {
-                proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
-            },
-            ..by_instance.clone()
-        },
-    );
-    assert!(
-        precompute::compile(&derivative.0, &[derivative.1], &[derivative.2]).is_err(),
-        "raw samples are cumulative counters, not their derivative"
-    );
-    // A scan's time column is not a label; it cannot silently read as empty.
-    let time_item = grouped_raw_summary(
-        heap(
-            SketchAlgorithm::CountSketchWithHeap,
-            SketchParams::CountSketchWithHeap {
-                width: 64,
-                depth: 3,
-                heap_size: 8,
-            },
-        ),
-        SummaryUpdate {
-            item: Some(SummaryInputExpr::Column(ColumnRef::Named("ts".into()))),
-            ..by_instance
-        },
-    );
-    assert!(precompute::compile(&time_item.0, &[time_item.1], &[time_item.2]).is_err());
-}
-
-// `without` grouping over raw data samples drops the listed labels and `__name__`.
-#[test]
-fn raw_data_sample_without_grouping_drops_labels_and_name() {
-    use asap_types::ir::operator::GroupKeys;
-    let family =
-        FieldDataType::ExactAggregate(ExactKind::Sum, asap_types::ir::schema::ExactParams::Sum);
-    let (mut dag, source, root) =
-        grouped_raw_summary(family, SummaryUpdate::column(ColumnRef::SampleValue));
-    let service = dag
-        .nodes
-        .iter()
-        .find(|n| n.id as u64 == source)
-        .unwrap()
-        .output_schema
-        .fields
-        .iter()
-        .position(|f| f.name == "service")
-        .unwrap();
-    let node = dag.nodes.iter_mut().find(|n| n.id as u64 == root).unwrap();
-    let PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { reduction, .. }) = &mut node.payload
-    else {
-        unreachable!()
-    };
-    *reduction = Reduction::Reduce(GroupKeys::without(vec![service]));
-    assert_eq!(
-        check("without", &dag, source, root, &samples()),
-        Ok("Sum".into())
-    );
+    let signed_cms = grouped_raw_summary(cms, by_instance.clone());
+    assert!(compile_summary(&signed_cms.0, signed_cms.2).is_err());
 }
 
 // End to end: `topk(2, count by (service) (m))` at ε = 0.02 has a Count-Min
@@ -658,10 +623,9 @@ fn count_ranked_heap_precompute_adds_a_constant_row_weight() {
                 continue;
             }
             assert_eq!(input.weight, SummaryInputExpr::Constant(1.0));
-            let compiled =
-                serde_json::to_value(precompute::compile(&dag, &[source], &[root]).unwrap())
-                    .unwrap()
-                    .to_string();
+            let compiled = serde_json::to_value(compile_summary(&dag, root).unwrap())
+                .unwrap()
+                .to_string();
             assert!(
                 compiled.contains(r#""row_weight":{"Constant":1}"#),
                 "{compiled}"

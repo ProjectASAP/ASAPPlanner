@@ -98,7 +98,6 @@ fn top_items(build: Operator, input: SchemaRef, batch: Batch) -> Vec<(String, St
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 1,
         },
         Limits::default(),
     )
@@ -305,7 +304,6 @@ fn int64_weight_column_equals_float64_column() {
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 1,
         },
         Limits::default(),
     )
@@ -347,7 +345,6 @@ fn null_weight_adds_nothing() {
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 1,
         },
         Limits::default(),
     )

@@ -1,13 +1,13 @@
 //! A stand-in runtime's raw data samples, bound at the plan's `Scan`s with
-//! public APIs only: one `TableProvider` per time series, a table `(ts,
-//! value, *labels)` over the samples it received. The DAG's own
+//! public APIs only: one raw data table per time series in an
+//! `InMemoryDataStore`, `(ts, value, *labels)` over the samples it received. The DAG's own
 //! `TimeRange`s apply each window, instant lookback and stale marker.
 #![allow(dead_code)] // Each test uses part of it.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use asap_executor::sources::{DataSources, MemorySource};
+use asap_executor::sources::InMemoryDataStore;
 use asap_executor::values::{Batch, Value};
 use asap_types::ir::operator::Source;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
@@ -29,10 +29,10 @@ pub fn series_identity(labels: &BTreeMap<String, String>) -> String {
     serde_json::to_string(labels).unwrap()
 }
 
-/// The deployment's catalog for `dag`: each metric its time-series `Scan`s
-/// read, bound to a provider over its samples among `samples` (routed by
-/// `__name__`), with every column those `Scan`s read.
-pub fn time_series_tables(dag: &PhysicalASAPDAG, samples: &[RawDataSample]) -> DataSources {
+/// The deployment's raw data for `dag`: each metric its time-series `Scan`s
+/// read, bound to its samples among `samples` (routed by `__name__`), with
+/// every column those `Scan`s read.
+pub fn time_series_tables(dag: &PhysicalASAPDAG, samples: &[RawDataSample]) -> InMemoryDataStore {
     // Each metric's columns: the union of its Scans' columns, by name.
     let mut schemas: BTreeMap<&str, Schema> = BTreeMap::new();
     for node in &dag.nodes {
@@ -51,7 +51,7 @@ pub fn time_series_tables(dag: &PhysicalASAPDAG, samples: &[RawDataSample]) -> D
             }
         }
     }
-    let mut tables = DataSources::default();
+    let mut tables = InMemoryDataStore::default();
     for (metric, schema) in schemas {
         let schema = Arc::new(schema);
         let rows = samples
@@ -60,12 +60,13 @@ pub fn time_series_tables(dag: &PhysicalASAPDAG, samples: &[RawDataSample]) -> D
             .map(|sample| row(&schema, sample))
             .collect();
         let batch = Batch::try_new(schema.clone(), rows).unwrap();
-        tables
-            .register(
+        tables = tables
+            .with_raw_data(
                 Source::TimeSeries {
                     metric: metric.to_string(),
                 },
-                Arc::new(MemorySource::new(schema, vec![batch]).unwrap()),
+                schema,
+                vec![batch],
             )
             .unwrap();
     }

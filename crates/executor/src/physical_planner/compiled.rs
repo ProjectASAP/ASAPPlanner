@@ -1,25 +1,38 @@
 //! Reader-independent physical computation and checked deployment instantiation.
 use super::*;
-use crate::sources::{BindingDataSources, Scan};
+use crate::sources::{DataStore, Scan};
+use planner_types::ir::materialized_view::MaterializedView;
 
 #[derive(Clone)]
 #[cfg_attr(any(test, feature = "test-support"), derive(serde::Serialize))]
 enum Node {
-    /// A materialized view slot: data bound by node id at run time, with this schema.
-    Input(SchemaRef),
-    /// A table slot: a `Scan` leaf, bound by its `Source`.
-    Table(TableSlot),
+    /// A materialized view slot: the view's stored states, read by its
+    /// `MaterializedView`.
+    MaterializedView(MaterializedViewSlot),
+    /// A raw data slot: a `Scan` leaf, read by its `Source`.
+    RawData(RawDataSlot),
     Operator {
         inputs: Vec<NodeId>,
         operator: Operator,
     },
 }
 
-/// A `Scan` leaf, computed once at compile time: what [`CompiledPhysicalDAG::instantiate`]
-/// turns into a `Scan` over the provider bound to `source`.
+/// A materialized view the compiled DAG reads, computed once at compile time.
 #[derive(Clone)]
 #[cfg_attr(any(test, feature = "test-support"), derive(serde::Serialize))]
-pub(super) struct TableSlot {
+pub(super) struct MaterializedViewSlot {
+    pub(super) view: MaterializedView,
+    /// The view node's schema.
+    pub(super) schema: SchemaRef,
+    /// The data its state summarizes ([`PhysicalASAPDAG::view_window`]).
+    pub(super) window: ScanWindow,
+}
+
+/// A `Scan` leaf, computed once at compile time: what [`CompiledPhysicalDAG::instantiate`]
+/// turns into a `Scan` reading `source` from the run's [`DataStore`].
+#[derive(Clone)]
+#[cfg_attr(any(test, feature = "test-support"), derive(serde::Serialize))]
+pub(super) struct RawDataSlot {
     pub(super) source: planner_types::ir::operator::Source,
     pub(super) schema: SchemaRef,
     /// The `Scan`'s predicates, compiled over `schema`.
@@ -36,94 +49,16 @@ pub(super) struct TableSlot {
 pub struct CompiledPhysicalDAG {
     nodes: BTreeMap<NodeId, Node>,
     roots: Vec<NodeId>,
-    /// The window of each node that reads one range window directly (an
-    /// expanded pane reading `TimeRange(w)` over its shifts), for when the
-    /// node is a materialized view slot.
-    materialized_view_windows: BTreeMap<NodeId, ScanWindow>,
 }
 
 impl CompiledPhysicalDAG {
-    /// Link already-selected physical fragments without lowering operators again.
-    /// Fragment keys and source keys share a namespace; repeated dependency IDs
-    /// therefore remain one producer in the composed DAG.
-    pub fn compose(
-        sources: BTreeMap<NodeId, SchemaRef>,
-        fragments: BTreeMap<NodeId, (Vec<NodeId>, Self)>,
-        roots: Vec<NodeId>,
-    ) -> Result<Self, Error> {
-        if sources.keys().any(|id| fragments.contains_key(id)) {
-            return Err(invalid("physical source and fragment IDs overlap"));
-        }
-        let mut schemas = sources.clone();
-        for (&id, (_, fragment)) in &fragments {
-            fragment.validate()?;
-            let [root] = fragment.roots() else {
-                return Err(invalid("composed fragment requires one root"));
-            };
-            if fragment.input_slots().any(|(id, _)| id == *root) {
-                return Err(invalid("fragment root must be a computed output"));
-            }
-            schemas.insert(id, fragment.output_schema(*root)?);
-        }
-        let mut next = schemas
-            .keys()
-            .next_back()
-            .copied()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| invalid("physical node ID overflow"))?;
-        let mut result = Self::new(roots);
-        for (id, schema) in sources {
-            result.add_input(id, schema)?;
-        }
-        for (id, (inputs, fragment)) in fragments {
-            if inputs.len() != fragment.input_slots().count() {
-                return Err(invalid("physical fragment input arity mismatch"));
-            }
-            let mut mapping = BTreeMap::new();
-            for ((local, expected), global) in fragment.input_slots().zip(inputs) {
-                let actual = schemas
-                    .get(&global)
-                    .ok_or_else(|| invalid("missing physical fragment dependency"))?;
-                if expected != actual {
-                    return Err(invalid("physical fragment dependency schema mismatch"));
-                }
-                mapping.insert(local, global);
-            }
-            mapping.insert(fragment.roots[0], id);
-            for local in fragment.nodes.keys() {
-                if !mapping.contains_key(local) {
-                    mapping.insert(*local, next);
-                    next = next
-                        .checked_add(1)
-                        .ok_or_else(|| invalid("physical node ID overflow"))?;
-                }
-            }
-            for (local, node) in fragment.nodes {
-                if let Node::Operator { inputs, operator } = node {
-                    result.add(
-                        mapping[&local],
-                        inputs.into_iter().map(|input| mapping[&input]).collect(),
-                        operator,
-                    )?;
-                }
-            }
-        }
-        result.validate()?;
-        Ok(result)
-    }
-
-    /// Assemble already-lowered operators and typed external inputs. This is
-    /// useful for engines that compose multiple compiled computation fragments.
+    /// Assemble already-lowered operators; leaves read no data store (for
+    /// example [`Operator::source`] holds its rows).
     pub fn from_operators(
-        inputs: BTreeMap<NodeId, SchemaRef>,
         operators: BTreeMap<NodeId, (Vec<NodeId>, Operator)>,
         roots: Vec<NodeId>,
     ) -> Result<Self, Error> {
         let mut result = Self::new(roots);
-        for (id, schema) in inputs {
-            result.add_input(id, schema)?;
-        }
         for (id, (inputs, operator)) in operators {
             result.add(id, inputs, operator)?;
         }
@@ -134,17 +69,17 @@ impl CompiledPhysicalDAG {
         Self {
             nodes: BTreeMap::new(),
             roots,
-            materialized_view_windows: BTreeMap::new(),
         }
     }
-    pub(super) fn add_input(&mut self, id: NodeId, schema: SchemaRef) -> Result<(), Error> {
-        self.insert(id, Node::Input(schema))
+    pub(super) fn add_materialized_view(
+        &mut self,
+        id: NodeId,
+        slot: MaterializedViewSlot,
+    ) -> Result<(), Error> {
+        self.insert(id, Node::MaterializedView(slot))
     }
-    pub(super) fn add_table(&mut self, id: NodeId, slot: TableSlot) -> Result<(), Error> {
-        self.insert(id, Node::Table(slot))
-    }
-    pub(super) fn set_materialized_view_window(&mut self, id: NodeId, window: ScanWindow) {
-        self.materialized_view_windows.insert(id, window);
+    pub(super) fn add_raw_data(&mut self, id: NodeId, slot: RawDataSlot) -> Result<(), Error> {
+        self.insert(id, Node::RawData(slot))
     }
     pub(super) fn add(
         &mut self,
@@ -164,7 +99,7 @@ impl CompiledPhysicalDAG {
     /// Protocol adapters can retain labels that are outside a closed physical schema.
     pub fn row_source(&self, id: NodeId) -> Option<NodeId> {
         match self.nodes.get(&id)? {
-            Node::Input(_) | Node::Table(_) => Some(id),
+            Node::MaterializedView(_) | Node::RawData(_) => Some(id),
             Node::Operator { inputs, operator } => {
                 let index = operator.row_preserving_input()?;
                 self.row_source(*inputs.get(index)?)
@@ -177,13 +112,13 @@ impl CompiledPhysicalDAG {
     pub fn certified_pruning_keys(&self, id: NodeId) -> Option<&[(usize, usize)]> {
         match self.nodes.get(&id)? {
             Node::Operator { operator, .. } => operator.certified_pruning_keys(),
-            Node::Input(_) | Node::Table(_) => None,
+            Node::MaterializedView(_) | Node::RawData(_) => None,
         }
     }
     pub fn operator_name(&self, id: NodeId) -> Option<&str> {
         match self.nodes.get(&id)? {
-            Node::Input(_) => Some("Input"),
-            Node::Table(_) => Some("Scan"),
+            Node::MaterializedView(_) => Some("MaterializedView"),
+            Node::RawData(_) => Some("Scan"),
             Node::Operator { operator, .. } => Some(operator.name()),
         }
     }
@@ -191,10 +126,11 @@ impl CompiledPhysicalDAG {
     pub fn roots(&self) -> &[NodeId] {
         &self.roots
     }
-    /// Each input slot (table and view) and its schema.
+    /// Each input slot (raw data and materialized view) and its schema.
     pub fn input_slots(&self) -> impl Iterator<Item = (NodeId, &SchemaRef)> {
         self.nodes.iter().filter_map(|(&id, node)| match node {
-            Node::Input(schema) | Node::Table(TableSlot { schema, .. }) => Some((id, schema)),
+            Node::MaterializedView(MaterializedViewSlot { schema, .. })
+            | Node::RawData(RawDataSlot { schema, .. }) => Some((id, schema)),
             Node::Operator { .. } => None,
         })
     }
@@ -205,56 +141,10 @@ impl CompiledPhysicalDAG {
             .get(&id)
             .ok_or_else(|| invalid("missing output"))?
         {
-            Node::Input(schema) | Node::Table(TableSlot { schema, .. }) => Ok(schema.clone()),
+            Node::MaterializedView(MaterializedViewSlot { schema, .. })
+            | Node::RawData(RawDataSlot { schema, .. }) => Ok(schema.clone()),
             Node::Operator { operator, .. } => Ok(operator.output_schema()),
         }
-    }
-    /// Properties of every reachable node, derived in one schema-only pass.
-    pub(super) fn output_properties(&self) -> Result<BTreeMap<NodeId, PlanProperties>, Error> {
-        self.unbound()?.properties(&self.roots)
-    }
-    /// Direct physical dependencies; empty for inputs and unknown IDs.
-    pub(super) fn dependencies(&self, id: NodeId) -> &[NodeId] {
-        match self.nodes.get(&id) {
-            Some(Node::Operator { inputs, .. }) => inputs,
-            _ => &[],
-        }
-    }
-    pub(super) fn is_operator(&self, id: NodeId) -> bool {
-        matches!(self.nodes.get(&id), Some(Node::Operator { .. }))
-    }
-    /// Keep the already-lowered operators reachable from `roots`, replacing
-    /// each node in `boundaries` by a materialized view slot (a table slot stays one).
-    /// Nothing is lowered again.
-    pub(super) fn cut(
-        &self,
-        boundaries: &BTreeSet<NodeId>,
-        roots: &[NodeId],
-    ) -> Result<Self, Error> {
-        let mut result = Self::new(roots.to_vec());
-        let mut pending = roots.to_vec();
-        while let Some(id) = pending.pop() {
-            if result.nodes.contains_key(&id) {
-                continue;
-            }
-            let node = self
-                .nodes
-                .get(&id)
-                .ok_or_else(|| invalid(format!("missing physical node {id}")))?;
-            let node = match (boundaries.contains(&id), node) {
-                (true, Node::Operator { .. }) => Node::Input(self.output_schema(id)?),
-                _ => node.clone(),
-            };
-            if let Node::Operator { inputs, .. } = &node {
-                pending.extend(inputs);
-            }
-            if let Some(&window) = self.materialized_view_windows.get(&id) {
-                result.materialized_view_windows.insert(id, window);
-            }
-            result.nodes.insert(id, node);
-        }
-        result.validate()?;
-        Ok(result)
     }
     /// Validate using schema-only sources. No deployment reader is available.
     pub fn validate(&self) -> Result<(), Error> {
@@ -265,7 +155,8 @@ impl CompiledPhysicalDAG {
         let mut dag = PhysicalDAG::default();
         for (&id, node) in &self.nodes {
             match node {
-                Node::Input(schema) | Node::Table(TableSlot { schema, .. }) => {
+                Node::MaterializedView(MaterializedViewSlot { schema, .. })
+                | Node::RawData(RawDataSlot { schema, .. }) => {
                     dag.add(id, vec![], UnboundInput(schema.clone()))?
                 }
                 Node::Operator { inputs, operator } => {
@@ -276,62 +167,41 @@ impl CompiledPhysicalDAG {
         dag.validate(&self.roots)?;
         Ok(dag)
     }
-    /// Bind every input slot and validate before any provider is read: a
-    /// table slot to the provider of its `Source` in `data_sources.tables`,
-    /// a materialized view slot to its node's provider in `data_sources.materialized_views`. Each
-    /// provider must contain its slot's columns and declare `Bounded`.
-    /// Opens no reader; each slot becomes a `Scan` that requests its rows
-    /// when the run starts.
-    pub fn instantiate<'a>(
+    /// Bind every input slot to `store` and validate. Opens no reader:
+    /// each slot becomes a `Scan` that reads `store` when the run starts, a
+    /// raw data slot by its `Source` and a materialized view slot by its
+    /// `MaterializedView`.
+    pub fn instantiate(
         &self,
-        data_sources: &'a BindingDataSources,
-    ) -> Result<PhysicalDAG<'a, Batch, SchemaRef>, Error> {
+        store: Arc<dyn DataStore>,
+    ) -> Result<PhysicalDAG<'static, Batch, SchemaRef>, Error> {
         let mut dag = PhysicalDAG::default();
         for (&id, node) in &self.nodes {
             match node {
-                Node::Input(schema) => {
-                    let provider = data_sources
-                        .materialized_views
-                        .get(&id)
-                        .ok_or_else(|| invalid(format!("missing physical input {id}")))?;
+                Node::MaterializedView(slot) => {
                     let scan = Scan::materialized_view(
-                        provider.clone(),
-                        schema.clone(),
-                        self.materialized_view_windows
-                            .get(&id)
-                            .copied()
-                            .unwrap_or(ScanWindow::Unbounded),
+                        store.clone(),
+                        slot.view.clone(),
+                        slot.schema.clone(),
+                        slot.window,
                     )
                     .map_err(|error| at_slot(id, error))?;
                     dag.add(id, vec![], scan)?;
                 }
-                Node::Table(slot) => {
-                    let provider = data_sources
-                        .tables
-                        .provider(&slot.source)
-                        .ok_or_else(|| invalid(format!("unbound raw source: {:?}", slot.source)))?;
-                    let scan = Scan::table(
-                        provider.clone(),
+                Node::RawData(slot) => {
+                    let scan = Scan::raw_data(
+                        store.clone(),
+                        slot.source.clone(),
                         slot.schema.clone(),
                         slot.predicates.clone(),
                         slot.window,
-                    )
-                    .map_err(|error| at_slot(id, error))?;
+                    );
                     dag.add(id, vec![], scan)?;
                 }
                 Node::Operator { inputs, operator } => {
                     dag.add(id, inputs.clone(), operator.clone())?;
                 }
             }
-        }
-        if let Some(id) = data_sources
-            .materialized_views
-            .keys()
-            .find(|id| !matches!(self.nodes.get(id), Some(Node::Input(_))))
-        {
-            return Err(invalid(format!(
-                "materialized view binding {id} names no materialized view slot of this DAG"
-            )));
         }
         dag.validate(&self.roots)?;
         Ok(dag)

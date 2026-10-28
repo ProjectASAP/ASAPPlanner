@@ -2,8 +2,7 @@
 //! with `StateColumnUpdater`, the code the plan's `SummaryAgg` runs on a
 //! batch (issue #762): the same states as the executor's pane build.
 
-use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use asap_executor::physical_planner::compile;
@@ -113,17 +112,14 @@ async fn per_sample_updates_build_the_materialized_pane_the_plan_refreshes() {
 
     // The executor's pane build: the samples bound at the plan's `Scan`,
     // its `TimeRange` keeping the pane's window.
-    let compiled = compile(dag, &BTreeSet::new(), &[output.node_id as u64]).unwrap();
-    let data_sources = BindingDataSources {
-        tables: time_series_tables(dag, &samples),
-        ..Default::default()
-    };
-    let build = compiled.instantiate(&data_sources).unwrap();
+    let compiled = compile(dag, &[], &[output.node_id as u64]).unwrap();
+    let build = compiled
+        .instantiate(Arc::new(time_series_tables(dag, &samples)))
+        .unwrap();
     let context = RunContext::new(
         Scope::Ingestion {
             window_start_ms: start_ms,
             window_end_ms: end_ms,
-            revision: 1,
         },
         Limits::default(),
     )
@@ -202,23 +198,23 @@ async fn answers(
     ids: &[u64],
     scope: Scope,
 ) -> Vec<Vec<(BTreeMap<String, String>, f64)>> {
-    // Which nodes are bound view states; each one's schema is its DAG node's.
-    let boundaries: BTreeSet<u64> = inputs.keys().copied().collect();
-    // The executor's plan for `ids`, cut at the bound inputs.
-    let compiled = compile(dag, &boundaries, ids).unwrap();
-    // Each input as an in-memory source.
-    let sources = inputs
+    // The plan's views whose states are bound; each one's schema is its DAG
+    // node's.
+    let views: Vec<_> = dag
+        .materialized_views()
+        .unwrap()
         .into_iter()
-        .map(|(id, batch)| {
-            let source = MemorySource::new(batch.schema().clone(), vec![batch]).unwrap();
-            (id, Arc::new(source) as Arc<dyn TableProvider>)
-        })
+        .filter(|view| inputs.contains_key(&(view.node_id as u64)))
         .collect();
-    let data_sources = BindingDataSources {
-        tables: time_series_tables(dag, samples),
-        materialized_views: sources,
-    };
-    let instance = compiled.instantiate(&data_sources).unwrap();
+    assert_eq!(views.len(), inputs.len());
+    // The executor's plan for `ids`, reading the bound views.
+    let compiled = compile(dag, &views, ids).unwrap();
+    // Each input as a view's states in an in-memory store.
+    let mut store = time_series_tables(dag, samples);
+    for (id, batch) in inputs {
+        store = store.with_materialized_view(id as _, vec![batch]).unwrap();
+    }
+    let instance = compiled.instantiate(Arc::new(store)).unwrap();
     let context = RunContext::new(scope, Limits::default()).unwrap();
     let mut results = Vec::new();
     for mut output in instance.execute(compiled.roots(), context).unwrap() {
@@ -383,7 +379,6 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
     assert_eq!(panes.len(), 5);
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
-        revision: 1,
     };
     let roots: Vec<u64> = plan.dag.roots.iter().map(|&r| r as u64).collect();
     // The query's answers from the installed panes.

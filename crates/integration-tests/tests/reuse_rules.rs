@@ -8,24 +8,22 @@ mod physical_common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
-use std::sync::Arc;
 
 use asap_devtools::planner_layering_examples::{shared_data_workload, SHARED_ROWS_PER_SECOND};
 use asap_executor::physical_planner::{compile, promql_rows};
 use asap_executor::runtime::Scope;
-use asap_executor::values::{Batch, Value};
+use asap_executor::values::Value;
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::{
     cheapest_of, compose_memo_plan, expanded_memo, select_among,
 };
 use asap_logical_asap_optimization::memo::candidates::{CandidateMemo, CandidateOrigin};
 use asap_plan_selection::PlanningModels;
-use asap_types::ir::physical_export::compile_physical_asap_dag_with_node_ids;
+use asap_types::ir::physical_export::compile_physical_asap_dag;
 use asap_types::ir::properties::AccuracyTarget;
-use asap_types::ir::schema::Schema;
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
-    OperatorNode, QueryRoot, TimingMemo,
+    apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, OperatorNode,
+    QueryRoot, TimingMemo,
 };
 use asap_types::physical::Materialization;
 use asap_types::workload::{
@@ -111,10 +109,9 @@ fn samples() -> Vec<(&'static str, &'static str, i64, f64)> {
     rows
 }
 
-/// Execute `root` at query time, every raw `TimeRange` input fed the
-/// `samples` in its window: `(end - range, end]`, where `end` is the
-/// evaluation time moved back by a `TimeShift` directly below (a tumbling
-/// pane's).
+/// Execute `root` at query time over the `samples` bound as raw data at its
+/// `Scan`; each `TimeRange` keeps its own window (a tumbling pane's moved
+/// back by the `TimeShift` below it).
 fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
     let timed = apply_materialization_timings(
         root,
@@ -124,50 +121,26 @@ fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
     .unwrap();
     // Tumbling panes run as their panes, each over its own window.
     let timed = asap_types::ir::operator::pane_chain::expand_pane_chains(&timed).unwrap();
-    let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
-    let dag = compiled.dag;
-    let inputs: BTreeMap<u64, Batch> = dag
-        .nodes
-        .iter()
-        .filter_map(|node| {
-            let Operator::NonASAP(NonASAPOp::TimeRange { range, child, .. }) =
-                &compiled.node_ids.operator_node(node.id).unwrap().operator
-            else {
-                return None;
-            };
-            let back_ms = match child.non_asap() {
-                Some(NonASAPOp::TimeShift { shift, .. }) => shift.offset_ms,
-                _ => 0,
-            };
-            let end = EVALUATION_MS - back_ms;
-            let start = end - range.as_millis() as i64;
-            Some((node, start, end))
-        })
-        .map(|(node, start, end)| {
-            let schema: Arc<Schema> = Arc::new(node.output_schema.clone());
-            let rows = samples()
-                .into_iter()
-                .filter(|&(_, _, ts, _)| start < ts && ts <= end)
-                .map(|(job, series, ts, value)| {
-                    let labels = BTreeMap::from([
-                        ("__name__".to_string(), "m".to_string()),
-                        ("job".to_string(), job.to_string()),
-                        ("series".to_string(), series.to_string()),
-                    ]);
-                    promql_rows::series_row(&schema, &labels, ts, value).unwrap()
-                })
-                .collect();
-            (node.id as u64, Batch::try_new(schema, rows).unwrap())
-        })
-        .collect();
-    let boundaries: BTreeSet<u64> = inputs.keys().copied().collect();
-    let plan = compile(&dag, &boundaries, &[dag.roots[0] as u64]).unwrap();
+    let dag = compile_physical_asap_dag(&timed).unwrap();
+    let store = physical_common::raw_data_store(&dag, |_, schema| {
+        samples()
+            .into_iter()
+            .map(|(job, series, ts, value)| {
+                let labels = BTreeMap::from([
+                    ("__name__".to_string(), "m".to_string()),
+                    ("job".to_string(), job.to_string()),
+                    ("series".to_string(), series.to_string()),
+                ]);
+                promql_rows::series_row(schema, &labels, ts, value).unwrap()
+            })
+            .collect()
+    });
+    let plan = compile(&dag, &[], &[dag.roots[0] as u64]).unwrap();
     let mut rows: Vec<String> = physical_common::execute(
         &plan,
-        inputs,
+        store,
         Scope::Query {
             evaluation_time_ms: EVALUATION_MS,
-            revision: 1,
         },
     )
     .remove(0)

@@ -65,7 +65,6 @@ fn context() -> RunContext {
     RunContext::new(
         Scope::Query {
             evaluation_time_ms: 100,
-            revision: 1,
         },
         Limits {
             max_buffered_batches: 1,
@@ -182,7 +181,6 @@ fn retained_outputs_count_against_budget() {
     let run = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 0,
         },
         Limits {
             max_buffered_batches: 1,

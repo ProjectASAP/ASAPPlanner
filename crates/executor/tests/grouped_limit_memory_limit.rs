@@ -68,7 +68,6 @@ fn many_groups_in_one_batch_fail_near_the_memory_limit() {
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 1,
         },
         Limits {
             max_bytes: LIMIT_BYTES,

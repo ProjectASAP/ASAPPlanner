@@ -12,10 +12,11 @@
 //! each is refreshed from and when ([`InstallablePlan::materialized_views`]),
 //! and how far back each raw-data source is kept for query-time scans
 //! ([`InstallablePlan::raw_data_retention`]). A runtime reads the file with
-//! [`InstallablePlan::from_json`]. Raw data is bound only at the
-//! DAG's `Scan`s, by their `Source`: the runtime implements one
-//! `asap_executor::sources::TableProvider` per time series (a table `(ts,
-//! value, *labels)` over the samples it buffers) or SQL table, and the
+//! [`InstallablePlan::from_json`]. Raw data is read only at the DAG's
+//! `Scan`s, by their `Source`, and a view by its `MaterializedView`: the
+//! runtime implements one `asap_executor::sources::DataStore` over its raw
+//! data (a time series is a table `(ts, value, *labels)` over the samples it
+//! buffers; a SQL table is read as is) and its stored views, and the
 //! DAG's own `TimeRange`s apply each window, an instant selector's lookback
 //! and Prometheus stale markers. How the Planner represents the plan
 //! internally (e.g. a tumbling-pane chain, which the stage export keeps for
@@ -409,7 +410,7 @@ impl InstallablePlan {
 
     /// Whether the Planner's executor compiles this plan as a runtime runs
     /// it: each view's refresh over the views it reads and the `Scan`s it
-    /// reads (bound to the runtime's data sources), then the query run
+    /// reads (from the runtime's data store), then the query run
     /// over the views it reads and the `Scan`s it reads outside them. The
     /// DAG's own `TimeRange`s are compiled, so a window the executor cannot
     /// run fails here. `Err` holds the executor's error, or why the views
@@ -430,28 +431,28 @@ impl InstallablePlan {
     ) -> Result<(), ExecutorCompileError> {
         check_compile_deadline(deadline)?;
         use asap_executor::physical_planner::compile_before;
-        use std::collections::BTreeSet;
         let dag = &self.dag;
         let indexed = IndexedDag::new(dag);
-        let boundary = |id: PhysicalASAPNodeId| -> Result<u64, String> {
-            if !indexed.nodes.contains_key(&id) {
-                return Err(format!("node {id} is not in the plan"));
-            }
-            Ok(id as u64)
+        let views_by_node: HashMap<PhysicalASAPNodeId, &MaterializedView> =
+            views.iter().map(|view| (view.node_id, view)).collect();
+        let view_of = |id: PhysicalASAPNodeId| -> Result<MaterializedView, String> {
+            views_by_node
+                .get(&id)
+                .map(|view| (*view).clone())
+                .ok_or_else(|| format!("node {id} is not a materialized view of the plan"))
         };
-        let view_ids: HashSet<PhysicalASAPNodeId> = views.iter().map(|v| v.node_id).collect();
         // The first refresh in the whole plan, which runs the executor's
         // checks of the whole plan once; every other over the nodes below it.
         for (position, view) in views.iter().enumerate() {
             check_compile_deadline(deadline)?;
-            // Raw data is bound at each `Scan`, a table slot `compile` makes.
+            // Raw data is read at each `Scan`, a raw data slot `compile` makes.
             let inputs = view
                 .inputs
                 .materialized_views
                 .iter()
                 .copied()
-                .map(boundary)
-                .collect::<Result<BTreeSet<_>, _>>()?;
+                .map(&view_of)
+                .collect::<Result<Vec<_>, _>>()?;
             let sub_dag;
             let below = match position {
                 0 => dag,
@@ -466,8 +467,8 @@ impl InstallablePlan {
                 .map_err(|error| map_executor_compile_error(error, "materialized view"))?;
         }
         // The query run reads the views it reaches from the roots without
-        // passing another, and the `Scan`s it reaches outside them, table
-        // slots the runtime binds to its data sources (a time series, or a
+        // passing another, and the `Scan`s it reaches outside them, raw
+        // data slots the runtime's data store reads (a time series, or a
         // SQL table read whole or through a window).
         let mut read = Vec::new();
         let mut pending = dag.roots.clone();
@@ -477,7 +478,7 @@ impl InstallablePlan {
             if !seen.insert(id) {
                 continue;
             }
-            if view_ids.contains(&id) {
+            if views_by_node.contains_key(&id) {
                 read.push(id);
             } else {
                 pending.extend(indexed.inputs.get(&id).into_iter().flatten().copied());
@@ -485,8 +486,8 @@ impl InstallablePlan {
         }
         let inputs = read
             .into_iter()
-            .map(boundary)
-            .collect::<Result<BTreeSet<_>, _>>()?;
+            .map(&view_of)
+            .collect::<Result<Vec<_>, _>>()?;
         let roots: Vec<u64> = dag.roots.iter().map(|&id| id as u64).collect();
         compile_before(dag, &inputs, &roots, deadline)
             .map_err(|error| map_executor_compile_error(error, "query run"))?;
@@ -527,9 +528,11 @@ impl InstallablePlan {
         // executor's checks of the whole plan once; every other over the
         // nodes below it ([`executor_refreshes`]).
         let indexed = IndexedDag::new(&dag);
+        let views_by_node: HashMap<PhysicalASAPNodeId, &MaterializedView> =
+            views.iter().map(|view| (view.node_id, view)).collect();
         for (position, view) in views.iter().enumerate() {
             check_installation_deadline(deadline)?;
-            executor_refreshes(view, &indexed, position == 0, deadline)?;
+            executor_refreshes(view, &views_by_node, &indexed, position == 0, deadline)?;
         }
         check_queries(&dag, &query_texts)?;
         let plan = InstallablePlan {
@@ -687,10 +690,11 @@ fn reader_span_ms_by_node(
 }
 
 /// Whether the executor compiles `view`'s refresh with the views it reads
-/// bound as sources, as a runtime runs it; the executor's reason when it
-/// does not.
+/// (among `views_by_node`) as materialized view slots, as a runtime runs it;
+/// the executor's reason when it does not.
 fn executor_refreshes(
     view: &MaterializedView,
+    views_by_node: &HashMap<PhysicalASAPNodeId, &MaterializedView>,
     indexed: &IndexedDag<'_>,
     in_whole_plan: bool,
     deadline: Option<Instant>,
@@ -708,14 +712,14 @@ fn executor_refreshes(
     };
     #[cfg(test)]
     tests::COMPILED_NODES.with(|count| count.set(count.get() + below.nodes.len()));
-    // Raw data is bound at each `Scan`, a table slot `compile` makes.
-    let bound = view
+    // Raw data is read at each `Scan`, a raw data slot `compile` makes.
+    let read: Vec<MaterializedView> = view
         .inputs
         .materialized_views
         .iter()
-        .map(|&id| id as u64)
+        .filter_map(|id| views_by_node.get(id).map(|read| (*read).clone()))
         .collect();
-    compile_before(below, &bound, &[view.node_id as u64], deadline)
+    compile_before(below, &read, &[view.node_id as u64], deadline)
         .map(|_| ())
         .map_err(|error| match error {
             asap_executor::Error::CompilationDeadlineExceeded => {
@@ -1241,6 +1245,43 @@ mod tests {
         assignment.set(&merged, Materialization::MatAtIngestion(Medium::Memory));
         let timed =
             apply_materialization_timings(&merged, &assignment, &mut TimingMemo::new()).unwrap();
+        let dag = compile_physical_asap_dag(&timed).unwrap();
+        match InstallablePlan::of_dag(dag, vec![String::new()], &HashMap::new(), &HashMap::new()) {
+            Err(InstallablePlanError::Uninstallable(
+                InstallableDagError::IngestionBuildReadsWindowsOfDifferentOffsets {
+                    end_offsets_ms,
+                    ..
+                },
+            )) => assert_eq!(end_offsets_ms, [0, 60_000]),
+            other => panic!("{other:?}"),
+        }
+        // A merge stored at ingestion time over two panes stored at
+        // ingestion time, one a minute older: an ingestion run would read
+        // both panes for the window ending at its end, so it is refused too.
+        let pane = |offset_ms: i64| {
+            OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+                child: window(offset_ms),
+                family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+                input: SummaryUpdate::column(ColumnRef::Named("value".into())),
+                reduction: Reduction::by(vec![]),
+                grouping: Default::default(),
+                filter: None,
+            }))
+            .unwrap()
+        };
+        let panes = [pane(0), pane(60_000)];
+        let merge = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+            children: panes.to_vec(),
+            newest_panes: None,
+            group_by: None,
+        }))
+        .unwrap();
+        let mut assignment = MaterializationAssignment::default();
+        for node in panes.iter().chain([&merge]) {
+            assignment.set(node, Materialization::MatAtIngestion(Medium::Memory));
+        }
+        let timed =
+            apply_materialization_timings(&merge, &assignment, &mut TimingMemo::new()).unwrap();
         let dag = compile_physical_asap_dag(&timed).unwrap();
         match InstallablePlan::of_dag(dag, vec![String::new()], &HashMap::new(), &HashMap::new()) {
             Err(InstallablePlanError::Uninstallable(

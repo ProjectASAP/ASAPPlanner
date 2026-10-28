@@ -1,5 +1,5 @@
 //! A runtime plans a SQL workload over a table with `plan_installable` and
-//! runs it with the Planner's executor, binding the table to a data source:
+//! runs it with the Planner's executor, binding the table in a data store:
 //! the plan compiles with the table's scans (the compile check sees them),
 //! `now()` is the evaluation time, `COUNT(DISTINCT)` over an `Int64` id
 //! column answers with the type the Planner gives it, from a distinct-count
@@ -8,17 +8,20 @@
 //! the table bound at the plan's `Scan`, the queries answered from the panes.
 #![cfg(feature = "sql")]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use asap_executor::physical_planner::compile;
 use asap_executor::runtime::{Limits, RunContext, Scope};
-use asap_executor::sources::{BindingDataSources, DataSources, MemorySource, TableProvider};
+use asap_executor::sources::{
+    DataStore, InMemoryDataStore, MaterializedViewRequest, RawDataRequest,
+};
 use asap_executor::values::{Batch, Value};
 use asap_planner::{
     plan_installable, DeploymentCapabilities, FrontendInput, InstallablePlan,
     MaterializedViewRefresh, PlanningModels, PlanningWorkload, SqlCatalog, UserInput,
 };
+use asap_types::ir::materialized_view::MaterializedView;
 use asap_types::ir::operator::Source;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
@@ -173,27 +176,22 @@ fn run_query(plan: &InstallablePlan, query: usize) -> (Vec<FieldDataType>, Vec<V
         })
         .expect("the plan scans the table");
     let batch = Batch::try_new(schema.clone(), rows()).unwrap();
-    let mut sources = DataSources::default();
-    sources
-        .register(
+    let store = InMemoryDataStore::default()
+        .with_raw_data(
             Source::Table {
                 table_ref: "http".into(),
             },
-            Arc::new(MemorySource::new(schema, vec![batch]).unwrap()),
+            schema,
+            vec![batch],
         )
         .unwrap();
     let roots = [reference.roots[query] as u64];
-    let data_sources = BindingDataSources {
-        tables: sources,
-        ..Default::default()
-    };
-    let bound = compile(&reference, &BTreeSet::new(), &roots)
-        .and_then(|compiled| compiled.instantiate(&data_sources))
+    let bound = compile(&reference, &[], &roots)
+        .and_then(|compiled| compiled.instantiate(Arc::new(store)))
         .expect("the plan binds to the table");
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: EVALUATION_MS,
-            revision: 1,
         },
         Limits::default(),
     )
@@ -418,32 +416,31 @@ fn run_bound(
     ids: &[u64],
     scope: Scope,
 ) -> Vec<Vec<Batch>> {
-    // Which nodes are bound inputs; each one's schema is its DAG node's.
-    let boundaries: BTreeSet<u64> = inputs.keys().copied().collect();
-    // The executor's plan for `ids`, cut at the bound inputs.
-    let compiled = compile(dag, &boundaries, ids).expect("the executor compiles the plan");
-    // Each bound input as an in-memory source of its rows.
-    let sources = inputs
+    // The plan's views whose states are bound; each one's schema is its DAG
+    // node's.
+    let views: Vec<_> = dag
+        .materialized_views()
+        .unwrap()
         .into_iter()
-        .map(|(id, batch)| {
-            let source = MemorySource::new(batch.schema().clone(), vec![batch]).unwrap();
-            (id, Arc::new(source) as Arc<dyn TableProvider>)
-        })
+        .filter(|view| inputs.contains_key(&(view.node_id as u64)))
         .collect();
-    let mut tables = DataSources::default();
-    tables
-        .register(
+    assert_eq!(views.len(), inputs.len());
+    // The executor's plan for `ids`, reading the bound views.
+    let compiled = compile(dag, &views, ids).expect("the executor compiles the plan");
+    // The table and each bound view's states in an in-memory store.
+    let mut store = InMemoryDataStore::default()
+        .with_raw_data(
             Source::Table {
                 table_ref: "http".into(),
             },
-            Arc::new(MemorySource::new(table.schema().clone(), vec![table.clone()]).unwrap()),
+            table.schema().clone(),
+            vec![table.clone()],
         )
         .unwrap();
-    let data_sources = BindingDataSources {
-        tables,
-        materialized_views: sources,
-    };
-    let instance = compiled.instantiate(&data_sources).unwrap();
+    for (id, batch) in inputs {
+        store = store.with_materialized_view(id as _, vec![batch]).unwrap();
+    }
+    let instance = compiled.instantiate(Arc::new(store)).unwrap();
     block_on(async {
         let context = RunContext::new(scope, Limits::default()).unwrap();
         let outputs = instance.execute(compiled.roots(), context).unwrap();
@@ -503,11 +500,9 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
             MaterializedViewRefresh::AtIngestion => Scope::Ingestion {
                 window_start_ms: span.0,
                 window_end_ms: span.1,
-                revision: 1,
             },
             MaterializedViewRefresh::OnFirstRead => Scope::Query {
                 evaluation_time_ms: EVALUATION_MS,
-                revision: 1,
             },
         };
         let batches = run_bound(dag, sources, &table, &[view.node_id as u64], scope).remove(0);
@@ -539,7 +534,6 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
     }
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
-        revision: 1,
     };
     run_bound(dag, inputs, &table, &roots, query)
         .iter()
@@ -646,37 +640,40 @@ async fn a_window_equal_to_its_interval_is_built_at_ingestion_time_from_table_ro
 /// Each run's requested `(start, end]` time range, in order.
 type RequestedTimeRanges = std::sync::Mutex<Vec<Option<(i64, i64)>>>;
 
-/// The `http` table as a provider that records each run's requested time
-/// range and returns every row (it ignores the request).
-struct RecordingTable {
-    rows: MemorySource,
+/// A store whose `http` table records each run's requested time range and
+/// returns every row (it ignores the request).
+struct RecordingStore {
+    rows: InMemoryDataStore,
     requested_time_ranges_ms: Arc<RequestedTimeRanges>,
 }
-impl TableProvider for RecordingTable {
-    fn schema(&self) -> asap_executor::values::SchemaRef {
-        self.rows.schema()
-    }
-    fn boundedness(&self) -> asap_executor::plan::Boundedness {
-        self.rows.boundedness()
-    }
-    fn scan(
+impl DataStore for RecordingStore {
+    fn read_raw_data(
         &self,
-        request: &asap_executor::sources::ScanRequest,
+        source: &Source,
+        request: &RawDataRequest,
         context: RunContext,
     ) -> Result<asap_executor::runtime::OutputStream<'_, Batch>, asap_executor::Error> {
         self.requested_time_ranges_ms
             .lock()
             .unwrap()
             .push(request.time_range_ms);
-        self.rows.scan(request, context)
+        self.rows.read_raw_data(source, request, context)
+    }
+    fn read_materialized_view(
+        &self,
+        view: &MaterializedView,
+        request: &MaterializedViewRequest,
+        context: RunContext,
+    ) -> Result<asap_executor::runtime::OutputStream<'_, Batch>, asap_executor::Error> {
+        self.rows.read_materialized_view(view, request, context)
     }
 }
 
-// The `http` provider of a `ts >= now() - INTERVAL '5 minutes'` query is
+// The store's `http` table of a `ts >= now() - INTERVAL '5 minutes'` query is
 // asked for `(T - 5m, T]` at evaluation time `T`; it returns all 20 minutes
 // of rows, and the answer is the one over the window.
 #[tokio::test]
-async fn a_table_provider_is_asked_for_the_query_window() {
+async fn a_data_store_is_asked_for_the_query_window() {
     // The user's query, planned exactly over the `http` table.
     let plan = plan(
         "SELECT service, COUNT(*) AS value FROM http \
@@ -697,34 +694,28 @@ async fn a_table_provider_is_asked_for_the_query_window() {
             _ => None,
         })
         .unwrap();
-    // Each run's requested time range, as the provider saw it.
+    // Each run's requested time range, as the store saw it.
     let requested_time_ranges_ms = Arc::new(RequestedTimeRanges::default());
-    // The deployment's catalog: `http` → its provider.
-    let mut data_sources = BindingDataSources::default();
-    data_sources
-        .tables
-        .register(
-            Source::Table {
-                table_ref: "http".into(),
-            },
-            Arc::new(RecordingTable {
-                rows: MemorySource::new(
-                    schema.clone(),
-                    vec![Batch::try_new(schema, rows()).unwrap()],
-                )
-                .unwrap(),
-                requested_time_ranges_ms: requested_time_ranges_ms.clone(),
-            }),
-        )
-        .unwrap();
+    // The deployment's store: `http` → its rows, recording each request.
+    let store = RecordingStore {
+        rows: InMemoryDataStore::default()
+            .with_raw_data(
+                Source::Table {
+                    table_ref: "http".into(),
+                },
+                schema.clone(),
+                vec![Batch::try_new(schema, rows()).unwrap()],
+            )
+            .unwrap(),
+        requested_time_ranges_ms: requested_time_ranges_ms.clone(),
+    };
     // Compiled once (no reader opened), then instantiated for this run.
     let roots = [reference.roots[0] as u64];
-    let compiled = compile(&reference, &BTreeSet::new(), &roots).unwrap();
-    let bound = compiled.instantiate(&data_sources).unwrap();
+    let compiled = compile(&reference, &[], &roots).unwrap();
+    let bound = compiled.instantiate(Arc::new(store)).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: EVALUATION_MS,
-            revision: 1,
         },
         Limits::default(),
     )

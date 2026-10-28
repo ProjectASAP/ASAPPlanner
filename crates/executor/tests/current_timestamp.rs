@@ -5,7 +5,7 @@
 use asap_executor::{
     physical_planner::compile,
     runtime::{Limits, RunContext, Scope},
-    sources::{BindingDataSources, DataSources, MemorySource},
+    sources::InMemoryDataStore,
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
@@ -15,7 +15,6 @@ use planner_types::ir::properties::ExecutionDataState;
 use planner_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ExprSemantics, ScalarValue};
 use planner_types::ir::schema::{DataType, Field, Schema};
 use planner_types::ir::{NonASAPOp, Predicate, ScalarExpr};
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 const MINUTE_MS: i64 = 60_000;
@@ -79,7 +78,7 @@ fn scan_plan(predicates: Vec<Predicate<usize>>) -> PhysicalASAPDAG {
 
 /// One row a minute over the 10 minutes up to the evaluation, user = its
 /// minute.
-fn data_sources() -> BindingDataSources {
+fn data_store() -> InMemoryDataStore {
     let schema = Arc::new(schema());
     let rows = (0..=10)
         .map(|minute| {
@@ -90,28 +89,23 @@ fn data_sources() -> BindingDataSources {
         })
         .collect();
     let batch = Batch::try_new(schema.clone(), rows).unwrap();
-    let mut tables = DataSources::default();
-    tables
-        .register(
+    InMemoryDataStore::default()
+        .with_raw_data(
             Source::Table {
                 table_ref: "http".into(),
             },
-            Arc::new(MemorySource::new(schema, vec![batch]).unwrap()),
+            schema,
+            vec![batch],
         )
-        .unwrap();
-    BindingDataSources {
-        tables,
-        ..Default::default()
-    }
+        .unwrap()
 }
 
 /// The users the scan keeps in a run of `scope`.
 fn kept_users(scope: Scope) -> Result<Vec<i64>, String> {
     let dag = scan_plan(vec![last_five_minutes()]);
-    let data_sources = data_sources();
-    let bound = compile(&dag, &BTreeSet::new(), &[0])
+    let bound = compile(&dag, &[], &[0])
         .unwrap()
-        .instantiate(&data_sources)
+        .instantiate(Arc::new(data_store()))
         .unwrap();
     let context = RunContext::new(scope, Limits::default()).unwrap();
     block_on(async {
@@ -136,7 +130,6 @@ fn kept_users(scope: Scope) -> Result<Vec<i64>, String> {
 fn now_is_the_query_evaluation_time() {
     let users = kept_users(Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
-        revision: 1,
     })
     .unwrap();
     // Minutes 5..=10: from five minutes before the evaluation on.
@@ -148,22 +141,20 @@ fn now_has_no_value_in_an_ingestion_run() {
     let error = kept_users(Scope::Ingestion {
         window_start_ms: EVALUATION_MS - MINUTE_MS,
         window_end_ms: EVALUATION_MS,
-        revision: 1,
     })
     .unwrap_err();
     assert!(error.contains("now()"), "{error}");
 }
 
-/// A compile check cuts a plan at its table scans: the plan compiles
-/// without a reader, and a scan predicate the executor cannot evaluate
+/// A plan compiles without a data store, and a scan predicate the executor cannot evaluate
 /// fails there, not at run time.
 #[test]
 fn compiling_a_scan_slot_checks_the_scan_predicates() {
     let dag = scan_plan(vec![last_five_minutes()]);
-    compile(&dag, &BTreeSet::from([0]), &[0]).expect("now() - INTERVAL compiles");
+    compile(&dag, &[], &[0]).expect("now() - INTERVAL compiles");
 
     let not_boolean = scan_plan(vec![Predicate(ScalarExpr::Column(1))]);
-    let Err(error) = compile(&not_boolean, &BTreeSet::from([0]), &[0]) else {
+    let Err(error) = compile(&not_boolean, &[], &[0]) else {
         panic!("a non-boolean scan predicate compiled");
     };
     assert!(error.to_string().contains("scan 0:"), "{error}");
@@ -175,7 +166,7 @@ fn compiling_a_scan_slot_checks_the_scan_predicates() {
 fn compiling_a_scan_slot_checks_the_payload_schema() {
     let mut dag = scan_plan(vec![]);
     dag.nodes[0].output_schema.fields.pop();
-    let Err(error) = compile(&dag, &BTreeSet::from([0]), &[0]) else {
+    let Err(error) = compile(&dag, &[], &[0]) else {
         panic!("a scan slot with two schemas compiled");
     };
     assert!(error.to_string().contains("scan 0:"), "{error}");
