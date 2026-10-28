@@ -6,6 +6,8 @@
 
 /// Logical implementation candidates populated after initial identity construction.
 pub mod candidates;
+/// The candidate DAGs a memo stands for: choices and their composition.
+pub mod enumeration;
 mod groups;
 mod rules;
 #[cfg(test)]
