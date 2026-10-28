@@ -1144,6 +1144,9 @@ class AppTests(unittest.TestCase):
         meta = js.eval("__els['enum-meta'].textContent")
         self.assertIn("Pass 1: 49", meta)
         self.assertIn("listed: all 49 Pass 1 DAGs", meta)
+        # The selected choice is over the last step (concrete states), not Pass 1.
+        self.assertIn("over the concrete states memo", meta)
+        self.assertNotIn("✓ selected", js.eval("__els.enumRows.innerHTML"))
         self.assertEqual(js.eval("__els.enumRows.innerHTML").count("<li>"), 49)
         before = self.ev(js, "__rendered.cy1")
         choice = doc["memo"]["enumeration"]["choices"][1]

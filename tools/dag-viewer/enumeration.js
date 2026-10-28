@@ -60,7 +60,7 @@ function validateMemoEnumeration(doc) {
     if (!isMemoChoice(entry.choice)) errors.push(`${where}.choice must map group ids to candidate indices`);
     // A choice that does not compose has no DAG but its error.
     if (entry.dag === null) {
-      if (typeof entry.error !== 'string') errors.push(`${where}: needs a dag or an error`);
+      if (typeof entry.error !== 'string' || !entry.error) errors.push(`${where}: needs a dag or an error`);
     } else {
       // One root per root group, which need not be one per query.
       const roots = entry.dag && Array.isArray(entry.dag.roots) ? entry.dag.roots.length : 0;
@@ -81,13 +81,13 @@ function validateMemoEnumeration(doc) {
   return errors;
 }
 
-// "343", or "≥ 1000" when the count stopped at the limit.
+// "49", or "≥ 1000" when the count stopped at the limit.
 function enumerationCountText(entry, limit) {
   return entry.complete ? String(entry.count) : `≥ ${limit}`;
 }
 
 // The panel's content, or null for a document without `memo.enumeration`:
-// `counts` ("Stage 0: 1 · Pass 1: 343 · Pass 2: ≥ 1000"), `listing` (what the
+// `counts` ("Stage 0: 1 · Pass 1: 49 · Pass 2: ≥ 1000"), `listing` (what the
 // rows are), `priced` (the pricing summary, "" when not priced), and one row
 // per listed choice. A row's `changes` are the groups whose candidate differs
 // from `selected_choice` (every group of the choice when there is none), each

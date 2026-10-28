@@ -78,8 +78,8 @@ To run it, see [RUNNING.md](RUNNING.md).
   This is display only: the document keeps the chain.
 - **Enumerated DAGs**, between the Stage 0 and Stage 1 lanes, shown only
   when the document has `memo.enumeration`: the complete candidate DAGs the
-  memo stands for. The header counts them after each memo step (`Pass 1:
-  343 · Pass 2: ≥ 1000`; `≥` and the limit when counting stopped), says how
+  memo stands for. The header counts them after each memo step (`Stage 0: 1 ·
+  Pass 1: 49 · Pass 2: ≥ 1000 · concrete states: ≥ 1000`; `≥` and the limit when counting stopped), says how
   many of the enumerated step's DAGs the document lists, and, when they were
   priced, how many are cheaper than the selected plan. Each row names the
   groups whose candidate differs from the selected plan's choice
