@@ -63,12 +63,45 @@ test('each broken field of memo.enumeration is reported', () => {
 
 test('the header counts every step, with ≥ and the limit when the count stopped', () => {
   const view = call('enumerationView', unpriced());
-  assert.equal(view.counts, 'Stage 0: 1 · Pass 1: 4 · Pass 2: ≥ 1000');
-  assert.equal(view.listing, 'Pass 1: all 4 DAGs listed');
+  assert.equal(view.counts, 'Stage 0: 1 · Pass 1: 4');
+  assert.equal(view.listing, 'listed: all 4 Pass 1 DAGs');
   assert.equal(view.priced, '');
   const capped = unpriced();
   capped.memo.enumeration.per_step.pass1 = { count: 1000, complete: false };
-  assert.equal(call('enumerationView', capped).listing, 'Pass 1: first 4 of ≥ 1000 DAGs listed');
+  capped.memo.enumeration.per_step.pass2 = { count: 1000, complete: false };
+  const cappedView = call('enumerationView', capped);
+  assert.equal(cappedView.counts, 'Stage 0: 1 · Pass 1: ≥ 1000 · Pass 2: ≥ 1000');
+  assert.equal(cappedView.listing, 'listed: the first 4 of ≥ 1000 Pass 1 DAGs');
+});
+
+test('choices are sparse: a group either choice leaves out takes candidate 0', () => {
+  const doc = unpriced();
+  doc.memo.selected_choice = { 7: 1 };
+  const choices = doc.memo.enumeration.choices;
+  choices[0].choice = { 3: 0, 7: 0 };
+  delete choices[1].choice[2];
+  choices[2].choice = { 7: 2, 2: 0 };
+  const rows = call('enumerationView', doc).rows;
+  assert.equal(rows[0].text, 'G7 → #0 exact accumulator (pass1)');
+  assert.equal(rows[1].text, 'the selected choice');
+  assert.equal(rows[2].text, 'G7 → #2 CountSketch+heap (pass1)');
+});
+
+test('a group of the selected choice that a DAG does not read is named', () => {
+  const doc = unpriced();
+  doc.memo.selected_choice = { 7: 1, 9: 2 };
+  assert.equal(call('enumerationView', doc).rows[1].text, 'G9 not read');
+});
+
+test('a selected choice over a later step than the enumerated one is flagged', () => {
+  const doc = unpriced();
+  doc.memo.steps.push({ step: 'pass2', title: 'Pass 2', groups: [] });
+  doc.memo.enumeration.per_step.pass2 = { count: 1000, complete: false };
+  doc.memo.selected_choice = { 7: 1, 9: 2 };
+  const view = call('enumerationView', doc);
+  assert.match(view.against, /over the Pass 2 memo/);
+  // Only the row's own groups are compared across steps.
+  assert.equal(view.rows[1].text, 'the selected choice');
 });
 
 test('a row names the groups whose candidate differs from the selected choice, with origin and label', () => {

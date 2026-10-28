@@ -87,7 +87,10 @@ function enumerationCountText(entry, limit) {
 // per listed choice. A row's `changes` are the groups whose candidate differs
 // from `selected_choice` (every group of the choice when there is none), each
 // with the candidate's origin and label when the enumerated step's memo
-// lists that candidate.
+// lists that candidate. Both choices are sparse: a group a choice does not
+// name takes candidate 0. `selected_choice` is over the last memo step; when
+// the enumerated step is an earlier one, only the row's own groups are
+// compared and `against` says the comparison crosses steps.
 function enumerationView(doc) {
   const memo = doc && doc.memo;
   const enumeration = memo && memo.enumeration;
@@ -100,8 +103,8 @@ function enumerationView(doc) {
   const name = memoStepName(enumeration.step);
   const shown = enumeration.choices.length;
   const listing = total.complete && shown === total.count
-    ? `${name}: all ${shown} DAGs listed`
-    : `${name}: first ${shown} of ${enumerationCountText(total, enumeration.limit)} DAGs listed`;
+    ? `listed: all ${shown} ${name} DAGs`
+    : `listed: the first ${shown} of ${enumerationCountText(total, enumeration.limit)} ${name} DAGs`;
   const priced = enumeration.priced
     ? `${enumeration.priced.count} priced · ${enumeration.priced.cheaper_than_selected} cheaper than the selected plan` +
       (enumeration.priced.selected_cost_per_second === null ? '' : ` (${Number(enumeration.priced.selected_cost_per_second.toPrecision(4))})`)
@@ -113,11 +116,19 @@ function enumerationView(doc) {
     const g = step && Array.isArray(step.groups) ? step.groups.find((x) => x && String(x.id) === group) : null;
     return g && Array.isArray(g.candidates) ? g.candidates.find((c) => c && c.index === index) : null;
   };
+  const memoSteps = Array.isArray(memo.steps) ? memo.steps.filter((s) => s && typeof s.step === 'string') : [];
+  const lastStep = memoSteps.length ? memoSteps[memoSteps.length - 1].step : steps[steps.length - 1];
+  const sameStep = enumeration.step === lastStep;
   const rows = enumeration.choices.map((entry) => {
-    const changes = Object.entries(entry.choice)
-      .filter(([group, index]) => !selected || selected[group] !== index)
-      .sort(([a], [b]) => Number(a) - Number(b))
-      .map(([group, index]) => {
+    const groups = new Set(Object.keys(entry.choice));
+    if (selected && sameStep) Object.keys(selected).forEach((group) => groups.add(group));
+    const changes = [...groups]
+      .filter((group) => !selected || (entry.choice[group] ?? 0) !== (selected[group] ?? 0))
+      .sort((a, b) => Number(a) - Number(b))
+      .map((group) => {
+        // A group of the selected choice this DAG does not read.
+        if (!(group in entry.choice)) return { group: Number(group), index: null, origin: null, label: null };
+        const index = entry.choice[group];
         const candidate = candidateOf(group, index);
         return { group: Number(group), index, origin: candidate ? candidate.origin : null, label: candidate ? candidate.label : null };
       });
@@ -125,7 +136,8 @@ function enumerationView(doc) {
       id: entry.id,
       changes,
       text: changes.length
-        ? changes.map((c) => `G${c.group} → #${c.index}${c.label ? ` ${c.label}` : ''}${c.origin ? ` (${c.origin})` : ''}`).join(' · ')
+        ? changes.map((c) => (c.index === null ? `G${c.group} not read`
+          : `G${c.group} → #${c.index}${c.label ? ` ${c.label}` : ''}${c.origin ? ` (${c.origin})` : ''}`)).join(' · ')
         : 'the selected choice',
       nodes: entry.dag.nodes.length,
       budgetShare1: entry.budget_share_1,
@@ -137,8 +149,10 @@ function enumerationView(doc) {
       cheaper: entry.cheaper_than_selected === true,
     };
   });
-  const against = selected ? 'groups whose candidate differs from the selected plan’s choice'
-    : `every group's candidate (no selected choice${memo.selected_choice_unavailable ? `: ${memo.selected_choice_unavailable}` : ''})`;
+  const against = !selected
+    ? `every group's candidate (no selected choice${memo.selected_choice_unavailable ? `: ${memo.selected_choice_unavailable}` : ''})`
+    : sameStep ? 'groups whose candidate differs from the selected plan’s choice'
+      : `groups whose candidate differs from the selected plan’s choice, which is over the ${memoStepName(lastStep)} memo: its group ids and candidate indices may not match ${name}'s, and “selected” is not meaningful`;
   return { counts, listing, priced, against, rows };
 }
 
@@ -150,7 +164,7 @@ function enumerationRowHtml(row, pressed) {
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const chips = [
     row.selected ? '<span class="chip selected">✓ selected</span>' : '',
-    row.cheaper ? '<span class="chip invalid">cheaper than selected</span>' : '',
+    row.cheaper ? '<span class="chip cheaper">cheaper than selected</span>' : '',
     row.priced && row.valid === false ? '<span class="chip invalid">✗ invalid</span>' : '',
     row.priced && row.valid === true && !row.selected && !row.cheaper ? '<span class="chip costlier">valid</span>' : '',
     row.budgetShare1 ? '' : '<span class="chip">budget share &lt; 1</span>',

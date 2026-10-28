@@ -84,13 +84,17 @@ To run it, see [RUNNING.md](RUNNING.md).
   priced, how many are cheaper than the selected plan. Each row names the
   groups whose candidate differs from the selected plan's choice
   (`G7 → #2 CountSketch+heap (pass1)`: group, candidate index, its label and
-  origin when the step's memo lists the candidate), `budget share < 1` when
+  origin when the step's memo lists the candidate; a group a choice does not
+  name takes candidate 0). The selected choice is over the last memo step;
+  when an earlier step was enumerated, the header says so and only each
+  row's own groups are compared. A row also shows `budget share < 1` when
   a chosen candidate shares its budget, and, when priced, its cost and
   validity (`✗ invalid` with the cause). A row cheaper than the selected
   plan is red; the selected choice says `✓ selected`. Clicking a row draws
   its DAG in the Stage 1 lane; the document holds every listed choice's
   composed DAG, so the page composes nothing. Such a DAG has no Stage 2
-  plan, so the Stage 2 lane is cleared.
+  plan, so the Stage 2 lane is cleared. Its roots are its root groups; when
+  there are fewer than queries, the lane labels them `root group #n`.
 - **Highlighting**: the **highlight query** menu dims, in every lane, what
   that query's root does not reach. Clicking a node dims everything but
   what it reads and what reads it, directly or through other nodes; clicking

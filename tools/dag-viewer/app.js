@@ -53,10 +53,11 @@
   // The query whose path the lanes highlight ('' for none).
   let highlightedQuery = '';
 
-  function render(i, dag, physical, costPerNode) {
+  // `ids` names the queries of `dag.roots` in order (default: the workload's).
+  function render(i, dag, physical, costPerNode, ids = queryIds) {
     if (cys[i]) cys[i].destroy();
-    drawn[i] = { dag, physical, costPerNode };
-    const elements = stageLaneElements(dag, { physical, costPerNode, queryIds, expandedChains: [...expandedOf(dag)] })
+    drawn[i] = { dag, physical, costPerNode, ids };
+    const elements = stageLaneElements(dag, { physical, costPerNode, queryIds: ids, expandedChains: [...expandedOf(dag)] })
       .map((el) => ({ data: el.data, classes: [el.classes, el.data.rootFor && el.data.rootFor.length ? 'root' : ''].join(' ').trim() }));
     laneElements[i] = elements;
     const cy = cytoscape({
@@ -72,7 +73,7 @@
     dim(i, queryKeep(i));
   }
 
-  function redraw(i) { const d = drawn[i]; render(i, d.dag, d.physical, d.costPerNode); }
+  function redraw(i) { const d = drawn[i]; render(i, d.dag, d.physical, d.costPerNode, d.ids); }
 
   // A PaneChain expands into its panes; a pane collapses its chain; any
   // other node is shown and its upstream and downstream highlighted.
@@ -164,7 +165,6 @@
   }
 
   function renderRanking() {
-    pressEnumeratedRow(null);
     const pressed = current.physical ? `P:${current.physical}` : `L:${current.logical}`;
     $('rank').innerHTML = rows.map((r) => `<li><button type="button" data-key="${esc(rowKey(r))}" aria-pressed="${rowKey(r) === pressed}"${r.status === 'not kept' ? ' disabled title="the default search did not keep this candidate"' : ''}>
         <span class="pid">${esc(r.id)}</span><span class="plabel">${esc(r.display_name || r.id)}</span>
@@ -180,6 +180,7 @@
   // Choose Stage 1 candidate `id`: show its physical plan when it has one;
   // a pruned or uncomposed candidate has none, so Stage 2 is cleared.
   function selectLogical(id) {
+    pressEnumeratedRow(null);
     const physical = doc.stage2_physical_asap_optimization.candidates.find((p) => p.from_logical === id);
     if (physical) { selectPhysical(physical.id); return; }
     showLogical(id);
@@ -212,13 +213,17 @@
     current = { logical: null, physical: null };
     $('pick1').value = '';
     $('pick2').value = '';
-    render(1, dag, false, null);
-    $('lane1-meta').innerHTML = `enumerated DAG <b>${esc(id)}</b> · ${esc(description)} · ${dag.nodes.length} nodes`;
+    // Its roots are its root groups; they name queries only when there is one per query.
+    const perQuery = dag.roots.length === queryIds.length;
+    render(1, dag, false, null, perQuery ? queryIds : dag.roots.map((_, k) => `root group #${k + 1}`));
+    $('lane1-meta').innerHTML = `enumerated DAG <b>${esc(id)}</b> · ${esc(description)} · ${dag.nodes.length} nodes` +
+      (perQuery ? '' : ` · ${dag.roots.length} root groups for ${queryIds.length} queries: roots not matched to queries`);
     clearLane(2, 'no physical plan for an enumerated DAG');
     renderRanking();
   }
 
   function selectPhysical(id) {
+    pressEnumeratedRow(null);
     current.physical = id;
     $('pick2').value = id;
     const c = physicalById.get(id);

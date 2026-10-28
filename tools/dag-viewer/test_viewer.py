@@ -1075,7 +1075,6 @@ class AppTests(unittest.TestCase):
         self.assertFalse(js.eval("__els.enumPanel.hidden"))
         meta = js.eval("__els['enum-meta'].textContent")
         self.assertIn("Pass 1: 4", meta)
-        self.assertIn("Pass 2: ≥ 1000", meta)
         self.assertIn("1 cheaper than the selected plan", meta)
         rows = js.eval("__els.enumRows.innerHTML")
         self.assertEqual(rows.count("<li>"), 4)
@@ -1090,6 +1089,18 @@ class AppTests(unittest.TestCase):
         # Choosing a Stage 1 candidate again releases the row.
         js.eval("__els.pick1.__on.change({ target: { value: 'L2' } })")
         self.assertNotIn('aria-pressed="true"', js.eval("__els.enumRows.innerHTML"))
+
+    def test_an_enumerated_dag_with_fewer_root_groups_than_queries_names_no_query(self):
+        """Its roots are root groups: with one root for two queries the lane
+        labels the root as a root group, not as a query."""
+        doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
+        choice = doc["memo"]["enumeration"]["choices"][0]
+        choice["dag"]["roots"] = choice["dag"]["roots"][:1]
+        js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
+        js.eval("__els.enumRows.__on.click({ target: { closest() { return { dataset: { id: 'E1' } }; } } })")
+        roots = [e["data"]["rootFor"] for e in self.ev(js, "__rendered.cy1") if e["data"].get("rootFor")]
+        self.assertEqual(roots, [["root group #1"]])
+        self.assertIn("1 root groups for 2 queries", self.text(js, "lane1-meta"))
 
     def test_a_broken_enumeration_refuses_the_document(self):
         doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
