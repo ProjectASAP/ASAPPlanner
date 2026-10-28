@@ -79,7 +79,7 @@ pub(in crate::search) fn estimate_costs(
                 node,
                 &producers,
                 (1, rate),
-                templates.lookbacks[id],
+                crate::trailing_window(templates.lookbacks[id]),
                 1,
                 None,
                 context.data,

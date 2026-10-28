@@ -242,7 +242,7 @@ use asap_types::ir::operator::{
 };
 use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
 use asap_types::ir::physical_export::{
-    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
+    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload, ScanWindow,
 };
 use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric, ExecutionTiming};
 use asap_types::ir::properties::{AccuracyScope, AccuracyTarget};
@@ -1329,7 +1329,7 @@ impl<'a> PlanSelector<'a> {
         let nodes = node_map(&sized.dag);
         let kept_chains = kept_pane_chains(&sized.dag);
         if !self.models.deployment_capabilities.raw_data_retained
-            && raw_data_violation(&sized.dag, &nodes, &kept_chains).is_some()
+            && raw_data_violation(&sized.dag, &kept_chains).is_some()
         {
             return Ok(CalibrationFit::default());
         }
@@ -1401,7 +1401,7 @@ impl<'a> PlanSelector<'a> {
         let nodes = node_map(&sized.dag);
         let kept_chains = kept_pane_chains(&sized.dag);
         if !self.models.deployment_capabilities.raw_data_retained {
-            if let Some(reason) = raw_data_violation(&sized.dag, &nodes, &kept_chains) {
+            if let Some(reason) = raw_data_violation(&sized.dag, &kept_chains) {
                 self.reject(&candidate.id, RejectionCause::RawDataNotRetained, reason);
                 return Ok(());
             }
@@ -3588,18 +3588,25 @@ pub(crate) fn price_each_node<'a>(
                 }
             })
             .collect();
-        let lookback_ms = match (&node.payload, node.output_state.timing) {
+        let scan_window = match (&node.payload, node.output_state.timing) {
             (Payload::NonASAP(NonASAPOp::Scan { .. }), ExecutionTiming::QueryTime) => {
-                let windows = windows_read(dag, nodes, node.id, kept_chains);
-                windows.into_iter().max().or(root_scan_lookback_ms)
+                match dag.scan_window(node.id, kept_chains) {
+                    // Priced as before #955 decides `@` anchors and
+                    // unwindowed readers: the widest window read.
+                    ScanWindow::Unbounded => trailing_window(
+                        widest_window_read_ms(dag, nodes, node.id, kept_chains)
+                            .or(root_scan_lookback_ms),
+                    ),
+                    window => window,
+                }
             }
-            _ => None,
+            _ => ScanWindow::Unbounded,
         };
         let node_priced = price_node(
             node,
             &views,
             multipliers[&node.id],
-            lookback_ms,
+            scan_window,
             retained_panes(node, &retention_ms),
             (node.output_state.timing == ExecutionTiming::IngestionTime)
                 .then(|| maintained_window_ms(node.id, nodes, &producers_of))
@@ -3700,9 +3707,10 @@ pub(crate) struct PricedNode<'a> {
 
 /// Measure and price one node of a physical DAG (one step of
 /// [`price_at_scale`]): `producers` are its producers in edge order,
-/// `rate` its `(multiplier, per_second)` ([`computations`]), `lookback_ms`
-/// the raw data a query-time scan reads ([`query_time_lookback_ms`]; read
-/// only for scans), `retained_pane_count` the panes a pane chain keeps
+/// `rate` its `(multiplier, per_second)` ([`computations`]), `scan_window`
+/// the raw rows a query-time scan reads ([`PhysicalASAPDAG::scan_window`];
+/// read only for scans: it reads `width_ms` of rows and keeps them back to
+/// [`ScanWindow::lookback_ms`]), `retained_pane_count` the panes a pane chain keeps
 /// completed ([`retained_panes`]), and `ingestion_window_ms` the window an
 /// ingestion-time node maintains ([`maintained_window_ms`]).
 #[allow(clippy::too_many_arguments)]
@@ -3710,7 +3718,7 @@ pub(crate) fn price_node<'a>(
     node: &'a asap_types::ir::physical_export::PhysicalASAPDAGNode,
     producers: &[ProducerOutput<'a>],
     rate: (u64, f64),
-    lookback_ms: Option<u64>,
+    scan_window: ScanWindow,
     retained_pane_count: u64,
     ingestion_window_ms: Option<u64>,
     data: &DataWorkload,
@@ -3729,6 +3737,8 @@ pub(crate) fn price_node<'a>(
     let mut held = None;
     let mut maintained = None;
     let mut raw_scan = None;
+    // A query-time scan's raw rows kept ([`ScanWindow::lookback_ms`]).
+    let mut raw_kept_rows = None;
     let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
     let inputs: Vec<EdgeStatistics> = producers.iter().map(|p| p.output).collect();
     let sources: BTreeSet<&str> = match &node.payload {
@@ -3857,18 +3867,37 @@ pub(crate) fn price_node<'a>(
         Payload::NonASAP(operator) => match operator {
             NonASAPOp::Scan { source, .. } => {
                 // At ingestion time, one second of arriving rows; at
-                // query time, the arriving rows of the longest window
-                // read above it, at most the rows the source holds (all
-                // of them without a window).
+                // query time, the arriving rows of the window read above
+                // it, at most the rows the source holds (all of them
+                // without a window).
                 let source = source_name(source);
                 let rows_held = data.sources.get(source).and_then(|facts| facts.rows_held);
+                let window_width_ms = match scan_window {
+                    ScanWindow::Within { width_ms, .. } => {
+                        Some(u64::try_from(width_ms).unwrap_or(0))
+                    }
+                    ScanWindow::Unbounded => None,
+                };
                 let lookback = match ingestion {
                     true => Some(1_000),
-                    false => lookback_ms,
+                    false => window_width_ms,
                 };
-                let by_rate = rows_per_ms
-                    .zip(lookback)
-                    .map(|(rows_per_ms, lookback)| (rows_per_ms * lookback as f64).round() as u64);
+                let by_rate = |lookback: Option<u64>| {
+                    rows_per_ms.zip(lookback).map(|(rows_per_ms, lookback)| {
+                        (rows_per_ms * lookback as f64).round() as u64
+                    })
+                };
+                // The raw rows kept for a query-time scan: back to the
+                // oldest row it reads, `end_offset + width` (an offset
+                // window keeps more than it reads), at most those held.
+                if !ingestion {
+                    let kept_rows = match (by_rate(scan_window.lookback_ms()), rows_held) {
+                        (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
+                        (by_rate, rows_held) => by_rate.or(rows_held),
+                    };
+                    raw_kept_rows = kept_rows.map(|rows| rows.max(1));
+                }
+                let by_rate = by_rate(lookback);
                 let rows = match (ingestion, by_rate, rows_held) {
                     (true, by_rate, _) => by_rate.ok_or_else(|| missing_rate(source))?,
                     (false, Some(by_rate), Some(rows_held)) => by_rate.min(rows_held),
@@ -4340,7 +4369,11 @@ pub(crate) fn price_node<'a>(
     }
     if let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload {
         if !ingestion {
-            raw_scan = Some((source, out.bytes));
+            let kept = match raw_kept_rows {
+                Some(rows) => edge(rows)?.bytes,
+                None => out.bytes,
+            };
+            raw_scan = Some((source, kept));
         }
     }
     // One computation's CPU and scan price times its rate, then the
@@ -4740,17 +4773,25 @@ fn maintained_window_ms(
 }
 
 /// The raw data the query-time scan `scan` reads, in milliseconds back from
-/// the evaluation: the longest window read above it ([`windows_read`]);
-/// `None` without one (the scan reads every row its source holds).
+/// the evaluation: `end_offset_ms + width_ms` of its readers' window
+/// ([`PhysicalASAPDAG::scan_window`], with each chain in `kept_chains`
+/// reading one pane); `None` when that window is unbounded (the scan reads
+/// every row its source holds).
 fn query_time_lookback_ms(
     dag: &PhysicalASAPDAG,
-    nodes: &NodeMap<'_>,
     scan: PhysicalASAPNodeId,
     kept_chains: &HashSet<PhysicalASAPNodeId>,
 ) -> Option<u64> {
-    windows_read(dag, nodes, scan, kept_chains)
-        .into_iter()
-        .max()
+    dag.scan_window(scan, kept_chains).lookback_ms()
+}
+
+/// The window of a scan reading the `lookback_ms` up to the evaluation
+/// (`Unbounded` for `None`).
+pub(crate) fn trailing_window(lookback_ms: Option<u64>) -> ScanWindow {
+    lookback_ms.map_or(ScanWindow::Unbounded, |width_ms| ScanWindow::Within {
+        end_offset_ms: 0,
+        width_ms: i64::try_from(width_ms).unwrap_or(i64::MAX),
+    })
 }
 
 /// The nodes of `dag` by id.
@@ -4788,11 +4829,9 @@ fn kept_pane_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASAPNodeId> {
 /// of `dag` with the window it would read, as a rejection reason (`None`
 /// without one). Raw data samples are then not kept after they arrive, so no
 /// window of them is there to scan at query time: only ingestion-time work
-/// reads raw rows. `nodes` and `kept_chains` are `dag`'s ([`node_map`],
-/// [`kept_pane_chains`]).
+/// reads raw rows. `kept_chains` are `dag`'s ([`kept_pane_chains`]).
 fn raw_data_violation(
     dag: &PhysicalASAPDAG,
-    nodes: &NodeMap<'_>,
     kept_chains: &HashSet<PhysicalASAPNodeId>,
 ) -> Option<String> {
     let scans: Vec<String> = dag
@@ -4802,12 +4841,10 @@ fn raw_data_violation(
             Payload::NonASAP(NonASAPOp::Scan { source, .. })
                 if node.output_state.timing != ExecutionTiming::IngestionTime =>
             {
-                Some(
-                    match query_time_lookback_ms(dag, nodes, node.id, kept_chains) {
-                        Some(lookback) => format!("{lookback} ms of raw {}", source_name(source)),
-                        None => format!("all raw {}", source_name(source)),
-                    },
-                )
+                Some(match query_time_lookback_ms(dag, node.id, kept_chains) {
+                    Some(lookback) => format!("{lookback} ms of raw {}", source_name(source)),
+                    None => format!("all raw {}", source_name(source)),
+                })
             }
             _ => None,
         })
@@ -4851,18 +4888,19 @@ fn per_entity_aggregate_violation(dag: &PhysicalASAPDAG) -> Option<String> {
     })
 }
 
-/// The windows, in milliseconds, read above the scan `scan` at query time:
-/// each range `TimeRange` and `PaneChain` (its whole window, or one pane
-/// for a chain in `kept_chains`, which builds only its newest pane per
-/// evaluation) reached through time shifts, which move a window without
-/// widening it.
-fn windows_read(
+/// The widest window, in milliseconds, read above the scan `scan` at query
+/// time, ignoring readers that read it outside a window and the anchors of
+/// shifts: each range `TimeRange` and `PaneChain` (its whole window, or
+/// one pane for a chain in `kept_chains`) reached through time shifts.
+/// Prices a scan whose [`PhysicalASAPDAG::scan_window`] is unbounded as
+/// Stage 3 did before; #955 decides `@` anchors.
+fn widest_window_read_ms(
     dag: &PhysicalASAPDAG,
-    nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
+    nodes: &NodeMap<'_>,
     scan: PhysicalASAPNodeId,
     kept_chains: &HashSet<PhysicalASAPNodeId>,
-) -> Vec<u64> {
-    let mut windows = Vec::new();
+) -> Option<u64> {
+    let mut widest = None;
     let mut stack = vec![scan];
     let mut seen = HashSet::new();
     while let Some(id) = stack.pop() {
@@ -4870,26 +4908,28 @@ fn windows_read(
             continue;
         }
         for edge in dag.edges.iter().filter(|e| e.producer == id) {
-            match &nodes[&edge.consumer].payload {
-                Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
-                    windows.push(range.as_millis() as u64)
-                }
+            let width_ms = match &nodes[&edge.consumer].payload {
+                Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => range.as_millis() as u64,
                 Payload::ASAP(ASAPOp::PaneChain { pane_width_ms, .. })
                     if kept_chains.contains(&edge.consumer) =>
                 {
-                    windows.push(*pane_width_ms)
+                    *pane_width_ms
                 }
                 Payload::ASAP(ASAPOp::PaneChain {
                     pane_width_ms,
                     pane_count,
                     ..
-                }) => windows.push(pane_width_ms.saturating_mul(u64::from(*pane_count))),
-                Payload::NonASAP(NonASAPOp::TimeShift { .. }) => stack.push(edge.consumer),
-                _ => {}
-            }
+                }) => pane_width_ms.saturating_mul(u64::from(*pane_count)),
+                Payload::NonASAP(NonASAPOp::TimeShift { .. }) => {
+                    stack.push(edge.consumer);
+                    continue;
+                }
+                _ => continue,
+            };
+            widest = widest.max(Some(width_ms));
         }
     }
-    windows
+    widest
 }
 
 /// `input` split as evenly as integers allow into `partitions` parts.
@@ -6580,6 +6620,43 @@ mod tests {
             "{error}"
         );
         assert!(error.to_string().contains("rows_held"), "{error}");
+    }
+
+    // #955 example 1: `rate(m[5m] offset 1h)` at query time reads the 5
+    // minutes `(T - 65m, T - 60m]`, so it scans the samples `rate(m[5m])`
+    // scans but keeps and prices the 65 minutes of raw `m` `rate(m[65m])`
+    // keeps.
+    #[test]
+    fn an_offset_window_at_query_time_keeps_its_whole_raw_lookback() {
+        // The scan's samples read and raw data bytes kept, from its detail.
+        let scan_of = |query: &str| {
+            let dag = exact_dag(&[query], &data());
+            let scan = node_of(&dag, is_scan);
+            let cost = price(
+                &dag,
+                &recurrences(1),
+                &data(),
+                &PlanSelectionSettings::default(),
+            )
+            .unwrap();
+            let detail = &cost.per_node[&scan].detail;
+            let kept_bytes: u64 = detail
+                .split("; keeps ")
+                .find_map(|part| {
+                    part.split(" bytes of raw data on disk")
+                        .next()?
+                        .parse()
+                        .ok()
+                })
+                .unwrap_or_else(|| panic!("no raw data kept: {detail}"));
+            (scanned_samples(&cost, scan), kept_bytes)
+        };
+        let (offset_samples, offset_kept) = scan_of("sum(rate(m[5m] offset 1h))");
+        let (five_minutes_samples, five_minutes_kept) = scan_of("sum(rate(m[5m]))");
+        let (_, sixty_five_minutes_kept) = scan_of("sum(rate(m[65m]))");
+        assert_eq!(offset_samples, five_minutes_samples);
+        assert_eq!(offset_kept, sixty_five_minutes_kept);
+        assert_eq!(offset_kept, 13 * five_minutes_kept);
     }
 
     /// Data at rest is bounded by the rows its source holds: a 5-minute

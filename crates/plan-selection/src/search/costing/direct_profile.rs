@@ -677,7 +677,7 @@ fn price<'a>(
             node,
             &views,
             (1, 1.0),
-            lookbacks[id],
+            crate::trailing_window(lookbacks[id]),
             retained_panes,
             ingestion_window,
             context.data,
