@@ -187,20 +187,23 @@ test("a candidate's own nodes stop at its child groups' nodes", () => {
   assert.deepEqual(call('memoCandidateOwnNodes', memo.steps[1].groups[0].candidates[0]).own.map((n) => n.lines[0]), ['Scan']);
 });
 
-// The planner's real memo for the issue's example (#1003 writes it).
+// The planner's real memo for #1005's example, written by stage_pipeline
+// (#1003). Production shares the two quantile_over_time(0.5, ...) in one
+// group (series identity gives the schema a unique key), so it has 7 groups
+// and 19 Pass 1 candidates where #1005 measured 8 and 26 without it.
 const REAL = new URL('examples/memo-ratio-of-quantiles.json', here);
-test('the real example: 8 groups at Stage 0, 26 candidates after Pass 1, G2 Panes and SharedBuild later', { skip: !existsSync(REAL) }, () => {
+test('the real example: 7 groups at Stage 0, 19 candidates after Pass 1, G2 Panes and SharedBuild counts on the last step', { skip: !existsSync(REAL) }, () => {
   const doc = JSON.parse(readFileSync(REAL, 'utf8'));
   const memo = doc.memo;
   assert.deepEqual(call('validateMemo', memo, doc.workload.queries.length), []);
   const steps = memo.steps.map((s) => s.step);
   const stage0 = call('memoStepElements', memo, steps.indexOf('stage0'), {});
-  assert.equal(nodesOf(stage0).filter((e) => e.data.kind === 'group').length, 8);
-  assert.equal(call('memoStepDiff', memo, steps.indexOf('pass1')).candidates, 26);
-  const later = memo.steps.length - 1;
-  const g2 = call('memoStepElements', memo, later, {}).filter((e) => e.data.parent === 'g2').map((e) => e.data.label.split('\n')[0]);
-  const byOrigin = memo.steps[later].groups.find((g) => g.id === 2).candidate_count_by_origin;
-  assert.ok(byOrigin.panes > 0 && byOrigin.shared_build > 0);
-  assert.ok(g2.includes(`${byOrigin.panes} Panes`) && g2.includes(`${byOrigin.shared_build} SharedBuild`));
-  cytoscape(call('memoStepElements', memo, later, {}));
+  assert.equal(nodesOf(stage0).filter((e) => e.data.kind === 'group').length, 7);
+  assert.equal(call('memoStepDiff', memo, steps.indexOf('pass1')).candidates, 19);
+  const last = memo.steps.length - 1;
+  const elements = call('memoStepElements', memo, last, {});
+  const g2 = elements.filter((e) => e.data.parent === 'g2').map((e) => e.data.label.split('\n')[0]);
+  assert.deepEqual(g2.sort(), ['10 Pass1', '336 Panes', '345 SharedBuild']);
+  assert.equal(nodesOf(elements).filter((e) => e.data.kind === 'group').length, 354);
+  assert.ok(cytoscape(elements).nodes().length > 354);
 });

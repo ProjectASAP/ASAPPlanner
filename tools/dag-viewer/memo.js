@@ -302,7 +302,12 @@ function memoStepElements(memo, s, options) {
     return { group, items, label, width, height, collapsible, collapsed, queries };
   });
 
-  // Rank rows, highest rank on top; a rank wider than rowWidth wraps.
+  // Rank rows, highest rank on top; a rank wider than the row width wraps.
+  // The row width grows with the drawing's area so that a step with
+  // hundreds of groups (one pane-chain group per grid) stays roughly as
+  // wide as it is tall, readable when the panel fits it.
+  const area = boxes.reduce((n, b) => n + (b.width + MEMO_ITEM.groupGap) * (b.height + MEMO_ITEM.rowGap), 0);
+  const rowWidth = Math.max(MEMO_ITEM.rowWidth, Math.sqrt(area) * 1.8);
   const byRank = new Map();
   boxes.forEach((box) => {
     const r = ranks.get(box.group.id);
@@ -324,7 +329,7 @@ function memoStepElements(memo, s, options) {
     };
     let used = 0;
     row.forEach((box) => {
-      if (line.length && used + box.width > MEMO_ITEM.rowWidth) { place(); used = 0; }
+      if (line.length && used + box.width > rowWidth) { place(); used = 0; }
       line.push(box);
       used += box.width + MEMO_ITEM.groupGap;
     });

@@ -1141,24 +1141,22 @@ class AppTests(unittest.TestCase):
 
     @unittest.skipUnless(MEMO_REAL.exists(), "needs the stage_pipeline memo example")
     def test_the_real_memo_example(self):
-        """#1005's acceptance: on the ratio-of-quantiles example, 8 groups
-        on the Stage 0 tab, 26 candidates on the Pass 1 tab, and G2's Panes
-        and SharedBuild counts on the later tab."""
+        """#1005's acceptance on its ratio-of-quantiles example as production
+        plans it (stage_pipeline shares the two equal quantiles, so 7 groups
+        and 19 Pass 1 candidates, not the issue's 8 and 26): the Stage 0 tab,
+        the Pass 1 tab, and G2's Panes and SharedBuild counts on the last tab."""
         doc = json.loads(MEMO_REAL.read_text())
         js = self.page("?doc=r.json", {"r.json": json.dumps(doc)})
         steps = [s["step"] for s in doc["memo"]["steps"]]
         js.eval(f"window.MemoView.selectStep({steps.index('stage0')})")
         groups = [e for e in self.ev(js, "__rendered.cyMemo") if e["data"].get("kind") == "group"]
-        self.assertEqual(len(groups), 8)
+        self.assertEqual(len(groups), 7)
         js.eval(f"window.MemoView.selectStep({steps.index('pass1')})")
-        self.assertIn("· 26 candidates", self.text(js, "memoView-meta"))
+        self.assertIn("7 groups (+0) · 19 candidates (+19)", self.text(js, "memoView-meta"))
         js.eval(f"window.MemoView.selectStep({len(steps) - 1})")
-        g2 = doc["memo"]["steps"][-1]["groups"]
-        by_origin = next(g for g in g2 if g["id"] == 2)["candidate_count_by_origin"]
-        labels = [e["data"]["label"].split("\n")[0] for e in self.ev(js, "__rendered.cyMemo") if e["data"].get("parent") == "g2"]
-        self.assertIn(f"{by_origin['panes']} Panes", labels)
-        self.assertIn(f"{by_origin['shared_build']} SharedBuild", labels)
-
+        labels = sorted(e["data"]["label"].split("\n")[0] for e in self.ev(js, "__rendered.cyMemo") if e["data"].get("parent") == "g2")
+        self.assertEqual(labels, ["10 Pass1", "336 Panes", "345 SharedBuild"])
+        self.assertIn("354 groups", self.text(js, "memoView-meta"))
 
 if __name__ == "__main__":
     unittest.main()
