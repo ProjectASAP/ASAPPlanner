@@ -52,11 +52,11 @@ flowchart LR
     end
 
     subgraph executor["asap-executor (one run at evaluation time T)"]
-        C["compile(dag) → compiled query DAG<br/>instantiate(&BindingDataSources)"]
-        TS["<b>table slot</b><br/>at each Scan, keyed by Source"]
-        VS["<b>materialized view slot</b><br/>knows its MaterializedView,<br/>computes time_range_ms (start, end]"]
-        OPS["PhysicalOperators<br/>re-filter table rows, merge states"]
-        C --> TS & VS
+        subgraph cdag["compiled query DAG"]
+            TS["<b>table slot</b><br/>at each Scan, keyed by Source"]
+            VS["<b>materialized view slot</b><br/>knows its MaterializedView,<br/>computes time_range_ms (start, end]"]
+            OPS["PhysicalOperators<br/>re-filter table rows, merge states"]
+        end
         TS -->|"rows"| OPS
         VS -->|"states, held outside the memory limit"| OPS
     end
@@ -64,27 +64,32 @@ flowchart LR
     subgraph deployment["Deployment (for example ASAPQuery-backend)"]
         subgraph bds["BindingDataSources"]
             DS["<b>tables: DataSources</b><br/>Source → TableProvider"]
-            MVS["<b>materialized_views: MaterializedViewStore</b><br/>read(view, time_range_ms, RunContext)"]
+            MVS["<b>materialized_views: MaterializedViewStore</b>"]
         end
         RAW[("raw data<br/>tables, time series")]
         CAT["<b>Summary catalog</b> (SDS definitions)<br/>Summary Descriptor, Data Descriptor"]
         INST[("<b>Summary instances</b><br/>interval, group values, completeness,<br/>state_reference, status, revision")]
         REF["<b>refresh scheduler</b><br/>AtIngestion: per pane, ingestion run<br/>OnFirstRead: before the query run"]
-        DS --> RAW
-        MVS -->|"1. resolve definition"| CAT
-        MVS -->|"2–5. select by pane end, tile,<br/>check readiness, decode"| INST
-        REF -->|"run refresh DAG over raw data,<br/>publish instance"| INST
-        REF -.->|"reads"| RAW
+        RAW --> DS
+        CAT -->|"1. resolve definition"| MVS
+        INST -->|"2–5. select by pane end, tile,<br/>check readiness, decode"| MVS
+        RAW -->|"refresh DAG over raw data"| REF
+        REF -->|"publish instance"| INST
     end
 
-    IP -->|"install: definition_id + selection"| CAT
-    IP -->|"install: retention_ms, refresh,<br/>raw_data_retention()"| REF
-    IP -->|"dag"| C
-    bds -->|"passed to instantiate"| C
-    TS -->|"TableProvider::scan(ScanRequest)"| DS
-    VS -->|"read(view, time_range_ms, ctx)<br/>ctx carries the store revision"| MVS
-    MVS -.->|"rows: group columns + state column<br/>(no instance identity)"| VS
+    IP -.->|"compile(dag)"| cdag
+    IP -.->|"definition_id + selection"| CAT
+    IP -.->|"retention_ms, refresh,<br/>raw_data_retention()"| REF
+    bds -->|"instantiate(&BindingDataSources)"| cdag
+    DS -->|"TableProvider::scan(ScanRequest)"| TS
+    MVS -->|"read(view, time_range_ms, ctx)<br/>group columns + state column,<br/>no instance identity"| VS
 ```
+
+Arrows point the way data flows, from producer to consumer. An edge label
+names the call that moves the data, and the consumer is the caller: the
+executor calls `scan` and `read`, and the store looks up the catalog and
+instances. Dashed edges happen once, at install; solid edges happen in every
+run. `ctx` carries the one store revision the whole run reads.
 
 The interface between the executor and the deployment is
 `BindingDataSources`: a table read is `TableProvider::scan(ScanRequest)` keyed
