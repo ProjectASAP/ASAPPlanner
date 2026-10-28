@@ -18,9 +18,10 @@ use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 pub struct PricedChoice {
     /// Stage 2 implemented it and Stage 3 accepted one of its physical plans.
     pub valid: bool,
-    /// Why it is not valid: a Stage 3 rejection cause in snake_case (e.g.
-    /// `accuracy_target_missed`, the first rejection of its cheapest physical
-    /// plan), or `compose_failed`, `invalid_structure`, `stage2_failed`.
+    /// Why it is not valid: the Stage 3 rejection cause of its first
+    /// physical plan in snake_case (e.g. `accuracy_target_missed`), or
+    /// `compose_failed`, `invalid_structure`, `stage2_failed`,
+    /// `stage3_failed`.
     pub rejection: Option<String>,
     /// The rejection's one-line reason, with the numbers.
     pub rejection_reason: Option<String>,

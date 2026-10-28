@@ -18,6 +18,12 @@ use asap_types::workload::{
     QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand, RepeatingEntry,
     RepetitionInterval,
 };
+use serde_json::{json, Value};
+use std::process::Command;
+
+/// The issue's workload file: the query every minute, ε = 0.01, δ = 0.001.
+const RATIO_OF_QUANTILES_WORKLOAD: &str =
+    "../../tools/dag-viewer/memo-examples/promql/ratio-of-quantiles-5m.json";
 
 const RATIO_OF_QUANTILES: &str = "avg by (job) (quantile_over_time(0.5, data[5m]) \
      / quantile_over_time(0.5, data[5m]) + quantile_over_time(0.9, data[5m]))";
@@ -156,40 +162,84 @@ fn assert_none_cheaper(priced: &[PricedChoice], baseline: SelectedBaseline) {
     assert!(priced.iter().any(|p| p.valid));
 }
 
-/// With accuracy guarantees ignored (`stage_pipeline`'s default) and
-/// enforced, no Pass 1 choice of `workload` is cheaper than the plan the
-/// default search selects; returns the choices priced each way.
-fn assert_selection_is_cheapest(planned: &Planned) -> [Vec<PricedChoice>; 2] {
-    let deployment = deployment();
-    [false, true].map(|enforce| {
-        let settings = settings(enforce);
-        let models = models(&settings, &deployment);
-        let baseline = selected(planned, models);
-        let priced = price_every_choice(planned, models, baseline);
-        assert_none_cheaper(&priced, baseline);
-        priced
-    })
+/// `stage_pipeline --price-enumerated 200` on `args`' workload: the listed
+/// choices of the enumeration's step, each priced.
+fn priced_document(args: &[&str]) -> Value {
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let out = std::env::temp_dir().join(format!(
+        "stage_pipeline_{}_{call}_priced.json",
+        std::process::id()
+    ));
+    let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args(args)
+        .args(["--price-enumerated", "200", "--out"])
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let document = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    std::fs::remove_file(out).unwrap();
+    document
 }
 
-/// Example 1's Pass 1 memo stands for 3 DAGs (Q2's three candidates); none
-/// is cheaper than the selection.
-#[test]
-fn example1_no_pass1_choice_is_cheaper_than_the_selected_plan() {
-    let [ignored, enforced] = assert_selection_is_cheapest(&planned(&example1(), true));
-    assert_eq!(ignored.len(), 3);
-    // Q2's summary reads miss its 100 ms latency bound or, enforced, have no
-    // accuracy guarantee.
-    assert!(ignored.iter().any(|p| !p.valid));
-    assert_eq!(enforced.iter().filter(|p| p.valid).count(), 1);
+/// Every listed choice is priced; the enumeration of its step is complete,
+/// and no valid choice is cheaper than the selected plan, whose cost is
+/// the one Stage 3 reports. Returns the choices.
+fn assert_no_listed_choice_is_cheaper(document: &Value) -> Vec<Value> {
+    let enumeration = &document["memo"]["enumeration"];
+    let step = enumeration["step"].as_str().unwrap();
+    assert_eq!(enumeration["per_step"][step]["complete"], true);
+    let choices = enumeration["choices"].as_array().unwrap().clone();
+    assert_eq!(
+        enumeration["per_step"][step]["count"].as_u64().unwrap(),
+        choices.len() as u64
+    );
+    let stage3 = &document["stage3_plan_selection"];
+    let selected = &stage3["costs"][stage3["selected"].as_str().unwrap()]["cost_per_second"];
+    assert_eq!(
+        enumeration["priced"],
+        json!({"count": choices.len(), "cheaper_than_selected": 0, "selected_cost_per_second": selected})
+    );
+    for choice in &choices {
+        assert_eq!(choice["cheaper_than_selected"], false, "{}", choice["id"]);
+        if choice["valid"] == true {
+            assert!(choice["cost_per_second"].as_f64().unwrap() >= selected.as_f64().unwrap());
+            assert_eq!(choice["rejection"], Value::Null);
+        } else {
+            assert!(choice["rejection"].is_string(), "{}", choice["id"]);
+        }
+    }
+    assert!(choices.iter().any(|c| c["valid"] == true));
+    choices
 }
 
-/// As `stage_pipeline` lowers it (series identity), the ratio's two
-/// `quantile 0.5` share one group: the Pass 1 memo stands for 5 × 5 DAGs,
-/// and none is cheaper than the selection.
+/// #509 Example 1: its Pass 1 memo (the listed step) stands for 5 DAGs;
+/// Q2's summary reads miss its 100 ms latency bound, and no valid DAG is
+/// cheaper than the selection.
 #[test]
-fn ratio_of_quantiles_no_pass1_choice_is_cheaper_than_the_selected_plan() {
-    let [ignored, _] = assert_selection_is_cheapest(&planned(&ratio_of_quantiles(), true));
-    assert_eq!(ignored.len(), 25);
+fn example1_no_listed_choice_is_cheaper_than_the_selected_plan() {
+    let document = priced_document(&["--example", "planner-layering-1"]);
+    let choices = assert_no_listed_choice_is_cheaper(&document);
+    assert_eq!(document["memo"]["enumeration"]["step"], "pass1");
+    assert_eq!(choices.len(), 5);
+    assert!(choices
+        .iter()
+        .any(|c| c["rejection"] == "latency_bound_exceeded"));
+}
+
+/// The issue's ratio of quantiles as `stage_pipeline` lowers it (series
+/// identity: the two `quantile 0.5` share one group): no listed DAG is
+/// cheaper than the selection, with accuracy guarantees ignored (the
+/// default) or enforced.
+#[test]
+fn ratio_of_quantiles_no_listed_choice_is_cheaper_than_the_selected_plan() {
+    for enforce in [&[][..], &["--enforce-accuracy-guarantees"][..]] {
+        let mut args = vec!["--workload", RATIO_OF_QUANTILES_WORKLOAD];
+        args.extend_from_slice(enforce);
+        let choices = assert_no_listed_choice_is_cheaper(&priced_document(&args));
+        assert!(choices.len() >= 49);
+    }
 }
 
 /// Lowered without series identity, the two `quantile 0.5` stay separate

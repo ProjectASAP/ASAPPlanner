@@ -135,7 +135,16 @@
 // the last step. Each choice has its `id` (`E1`, ...), `choice`, `dag`
 // (`memo::enumeration::compose`; null with `error` when it does not
 // compose), `budget_share_1` (every chosen candidate sized for the whole
-// budget) and `selected` (it is `selected_choice`). `priced` is null.
+// budget) and `selected` (it is `selected_choice`). With
+// `--price-enumerated <n>` (off by default), each of the first `n` listed
+// choices is also run through Stage 2 and Stage 3 as the selected plan is
+// (`memo_pricing::price_choices`, under the run's models): `valid`,
+// `rejection` (a Stage 3 rejection cause, or `compose_failed`,
+// `invalid_structure`, `stage2_failed`) with `rejection_reason`,
+// `cost_per_second` (its cheapest valid physical plan's) and
+// `cheaper_than_selected` (valid and cheaper than the selected plan); and
+// `priced` is `{count, cheaper_than_selected, selected_cost_per_second}`.
+// Without it `priced` is null.
 // `workload.data_workload` is the `DataWorkload` the run planned with, as
 // declared (`--workload`, `--example`) or built from `--sample-interval-ms`
 // (`--promql`); each query also carries its `recurrence` and
@@ -245,6 +254,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::rc::Rc;
 
 use asap_devtools::candidate_labels::{candidate_labels, computation_label, query_of_each_target};
+use asap_devtools::memo_pricing::{price_choices, SelectedBaseline};
 use asap_devtools::planner_layering_examples::{
     example1, example2, pattern_a, pattern_b, PatternARecurrence, SHARED_ROWS_PER_SECOND,
 };
@@ -283,7 +293,7 @@ const USAGE: &str =
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
 [--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search candidate-connections] [--milp-time-limit-s <f64>] [--max-displayed <n>] \
-[--no-memo] [--max-memo-candidates <n>] [--memo-enumeration-limit <n>] [--max-enumerated <n>] --out <file>\n\
+[--no-memo] [--max-memo-candidates <n>] [--memo-enumeration-limit <n>] [--max-enumerated <n>] [--price-enumerated <n>] --out <file>\n\
 --search candidate-connections is the default search.";
 
 /// Default evaluator-assignment budget for an exhaustive archive run.
@@ -382,6 +392,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         candidates_per_group: 64,
         enumeration_limit: 1000,
         enumerated: 200,
+        priced: 0,
     };
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -453,6 +464,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             }
             "--max-enumerated" => {
                 memo_caps.enumerated = value()?.parse().map_err(|e| format!("{e}"))?
+            }
+            "--price-enumerated" => {
+                memo_caps.priced = value()?.parse().map_err(|e| format!("{e}"))?
             }
             "--search" => {
                 search_algorithm = Some(match value()?.as_str() {
@@ -743,7 +757,20 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         .ok()
         .and_then(|run| run.memo_steps.as_ref())
         .filter(|_| write_memo)
-        .map(|steps| memo_json(steps, &memo_caps));
+        .map(|steps| {
+            let pricing = Pricing {
+                stage0_roots: &roots,
+                entries: &entries,
+                data: &data,
+                models,
+                selected: result
+                    .as_ref()
+                    .ok()
+                    .and_then(|run| run.stage3_plan_selection.as_ref().ok())
+                    .map(SelectedBaseline::of),
+            };
+            memo_json(steps, &memo_caps, &pricing)
+        });
     let mut document = document_of(described, &roots, &entries, result, max_displayed)?;
     if let Some(memo) = memo {
         document["memo"] = memo;
@@ -1447,18 +1474,30 @@ fn query_batch(
 }
 
 /// How much of the memo the document writes (`--max-memo-candidates`,
-/// `--memo-enumeration-limit`, `--max-enumerated`).
+/// `--memo-enumeration-limit`, `--max-enumerated`) and how many listed
+/// choices it prices (`--price-enumerated`).
 struct MemoCaps {
     candidates_per_group: usize,
     enumeration_limit: usize,
     enumerated: usize,
+    priced: usize,
+}
+
+/// What pricing an enumerated choice needs: the run's workload, models and
+/// selection.
+struct Pricing<'a> {
+    stage0_roots: &'a [QueryRoot],
+    entries: &'a [QueryWorkloadEntry],
+    data: &'a DataWorkload,
+    models: PlanningModels<'a>,
+    selected: Option<SelectedBaseline>,
 }
 
 /// The document's `memo` section: the memo after each step, the selected
 /// plan's choice over the last step's memo, and the candidate DAGs each
 /// step's memo stands for (`memo::enumeration::enumerate`; each listed
 /// choice composed by `memo::enumeration::compose`).
-fn memo_json(steps: &MemoSteps, caps: &MemoCaps) -> Value {
+fn memo_json(steps: &MemoSteps, caps: &MemoCaps, pricing: &Pricing<'_>) -> Value {
     let named = [
         (
             "stage0",
@@ -1506,8 +1545,19 @@ fn memo_json(steps: &MemoSteps, caps: &MemoCaps) -> Value {
     let last = &steps.concrete_states;
     let (step, memo) = listed.unwrap_or(("concrete_states", last));
     let selected = steps.selected_choice.as_ref().ok();
-    let choices: Vec<_> = enumerate(memo, caps.enumerated)
-        .choices
+    let enumerated = enumerate(memo, caps.enumerated).choices;
+    let priced = (caps.priced > 0).then(|| {
+        price_choices(
+            memo,
+            &enumerated[..caps.priced.min(enumerated.len())],
+            pricing.stage0_roots,
+            pricing.entries,
+            pricing.data,
+            pricing.models,
+            pricing.selected,
+        )
+    });
+    let mut choices: Vec<_> = enumerated
         .iter()
         .enumerate()
         .map(|(index, choice)| {
@@ -1535,6 +1585,20 @@ fn memo_json(steps: &MemoSteps, caps: &MemoCaps) -> Value {
             entry
         })
         .collect();
+    for (entry, priced) in choices.iter_mut().zip(priced.iter().flatten()) {
+        entry["valid"] = json!(priced.valid);
+        entry["rejection"] = json!(priced.rejection);
+        entry["rejection_reason"] = json!(priced.rejection_reason);
+        entry["cost_per_second"] = json!(priced.cost_per_second);
+        entry["cheaper_than_selected"] = json!(priced.cheaper_than_selected);
+    }
+    let priced = priced.map_or(Value::Null, |priced| {
+        json!({
+            "count": priced.len(),
+            "cheaper_than_selected": priced.iter().filter(|p| p.cheaper_than_selected).count(),
+            "selected_cost_per_second": pricing.selected.and_then(|s| s.cost_per_second),
+        })
+    });
     let mut memo = json!({
         "steps": json_steps,
         "selected_choice": selected.map_or(Value::Null, choice_json),
@@ -1543,7 +1607,7 @@ fn memo_json(steps: &MemoSteps, caps: &MemoCaps) -> Value {
             "per_step": per_step,
             "limit": caps.enumeration_limit,
             "choices": choices,
-            "priced": null,
+            "priced": priced,
         },
     });
     if let Err(reason) = &steps.selected_choice {
