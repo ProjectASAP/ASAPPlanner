@@ -11,9 +11,16 @@
 //! statistics ([`StatisticKind`]) one state answers, each with the error of
 //! that readout from a merged state ([`MergedError`]), so one state can
 //! serve every consumer whose statistic it answers.
+//!
+//! A sketch family's row is `asap_sketchlib`'s
+//! ([`SketchFamily::capability`]), read in this table's vocabulary, less the
+//! readouts this stack does not read yet (`NOT_READ_YET`). The planner
+//! writes the rows of the families the library has none for: the exact
+//! accumulators and Theta.
 
 use super::sketch::{ExactKind, GroupingStrategy, HydraKind, SketchAlgorithm, SketchStatistic};
 use crate::ir::schema::FieldDataType;
+use asap_sketchlib::{MergeInputs, SketchFamily, Statistic};
 
 /// What one summary family can do: its row of the family-capability table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,12 +28,58 @@ pub struct FamilyCapability {
     /// How the inputs of a merge of the family's states must relate; `None`
     /// when the family has no sound merge.
     pub merge_inputs: Option<MergeInputRule>,
-    /// Each statistic one state of the family answers, whatever its
-    /// parameters, with the error of that readout from a merged state (read
-    /// only when `merge_inputs` is set). Empty for a family read only as a
-    /// finalized value (exact accumulators, whose merged state is exact) or
-    /// one not listed.
-    pub readouts: &'static [(StatisticKind, MergedError)],
+    /// Where the row's readouts ([`Self::readouts`]) come from.
+    readouts: Readouts,
+}
+
+/// Where a row's readouts come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Readouts {
+    /// `asap_sketchlib`'s row of the family.
+    Sketchlib(SketchFamily),
+    /// The planner's own row, for a family the library has none for.
+    Planner(&'static [(StatisticKind, MergedError)]),
+}
+
+/// Readouts `asap_sketchlib` lists that the planner's table did not list
+/// before it read the library's rows, and that nothing in the planner or
+/// the executor reads yet: the table leaves them out. A readout the
+/// planner's table listed stays even where the executor does not evaluate
+/// it (a per-instance Count-Min's item frequency).
+const NOT_READ_YET: &[(SketchFamily, Statistic)] = &[
+    (SketchFamily::DdSketch, Statistic::Total),
+    (SketchFamily::CountMinWithHeap, Statistic::ItemFrequency),
+    (SketchFamily::CountSketchWithHeap, Statistic::ItemFrequency),
+    (SketchFamily::HydraCountMin, Statistic::Total),
+];
+
+/// `family`'s readouts in `asap_sketchlib`'s table, in this table's
+/// vocabulary: the statistics it has a kind for, less [`NOT_READ_YET`].
+fn sketchlib_readouts(family: SketchFamily) -> impl Iterator<Item = (StatisticKind, MergedError)> {
+    use asap_sketchlib::MergedError as M;
+    family
+        .capability()
+        .readouts
+        .iter()
+        .filter(move |&&(statistic, _)| !NOT_READ_YET.contains(&(family, statistic)))
+        .filter_map(|&(statistic, error)| {
+            let kind = match statistic {
+                Statistic::Total => StatisticKind::Total,
+                Statistic::ItemFrequency => StatisticKind::ItemFrequency,
+                Statistic::Quantile => StatisticKind::Quantile,
+                Statistic::Distinct => StatisticKind::Distinct,
+                Statistic::FrequencyL2 => StatisticKind::FrequencyL2,
+                Statistic::FrequencyEntropy => StatisticKind::FrequencyEntropy,
+                Statistic::TopK => StatisticKind::TopK,
+                _ => return None,
+            };
+            let error = match error {
+                M::Exact => MergedError::Exact,
+                M::AsIfBuiltOverUnion => MergedError::AsIfBuiltOverUnion,
+                M::NoGuarantee => MergedError::Approximate,
+            };
+            Some((kind, error))
+        })
 }
 
 /// The kind of a `SummaryEstimate` statistic, without its arguments: the
@@ -123,6 +176,22 @@ impl FamilyCapability {
         )
     }
 
+    /// Each statistic one state of the family answers, whatever its
+    /// parameters, with the error of that readout from a merged state (read
+    /// only when `merge_inputs` is set). None for a family read only as a
+    /// finalized value (exact accumulators, whose merged state is exact) or
+    /// one not listed.
+    pub fn readouts(&self) -> impl Iterator<Item = (StatisticKind, MergedError)> {
+        let (planner, family) = match self.readouts {
+            Readouts::Planner(readouts) => (readouts, None),
+            Readouts::Sketchlib(family) => (&[][..], Some(family)),
+        };
+        planner
+            .iter()
+            .copied()
+            .chain(family.into_iter().flat_map(sketchlib_readouts))
+    }
+
     /// Whether one state of the family answers `statistic`.
     pub fn answers(&self, statistic: &SketchStatistic) -> bool {
         self.readout(statistic).is_some()
@@ -138,67 +207,48 @@ impl FamilyCapability {
     /// The table entry of `statistic`'s kind: its merged error.
     fn readout(&self, statistic: &SketchStatistic) -> Option<MergedError> {
         let kind = statistic.kind();
-        self.readouts
-            .iter()
+        self.readouts()
             .find(|(answered, _)| *answered == kind)
-            .map(|&(_, error)| error)
+            .map(|(_, error)| error)
+    }
+
+    /// `asap_sketchlib`'s row of `family`.
+    fn of_sketchlib(family: SketchFamily) -> Self {
+        Self {
+            merge_inputs: family.capability().merge.map(|merge| match merge {
+                MergeInputs::Disjoint => MergeInputRule::Disjoint,
+                MergeInputs::MayOverlap => MergeInputRule::MayOverlap,
+            }),
+            readouts: Readouts::Sketchlib(family),
+        }
     }
 
     /// The capability of a per-subpopulation state of `algorithm`, whatever
     /// its parameters: the table row the IR and a deployment's executor
     /// read for that family.
     pub fn of_per_instance_sketch(algorithm: &SketchAlgorithm) -> Self {
-        use MergeInputRule::{Disjoint, MayOverlap};
-        use MergedError::{Approximate, AsIfBuiltOverUnion as Union};
         use SketchAlgorithm as S;
-        use StatisticKind::*;
-        let (merge_inputs, readouts): (_, &'static [(StatisticKind, MergedError)]) = match algorithm
-        {
-            // A quantile sketch answers every rank.
-            S::Kll | S::DDSketch => (Some(Disjoint), &[(Quantile, Union)]),
-            // Linear sketches: counters add, so a merged state's
-            // point counts are the union's. Count-Min's unsigned counters
-            // also give its total; Count Sketch's signed counters do not.
-            S::Cms => (Some(Disjoint), &[(ItemFrequency, Union), (Total, Union)]),
-            S::CountSketch => (Some(Disjoint), &[(ItemFrequency, Union)]),
-            // Top-k reads the heap, which keeps only the heavy
-            // items of its own part: an item heavy over the window
-            // but in no single part is lost.
-            S::CmsWithHeap | S::CountSketchWithHeap => (Some(Disjoint), &[(TopK, Approximate)]),
-            // One frequency vector serves its total and every
-            // moment. L2 reads layer 0's Count Sketch, whose
-            // counters add. The distinct count's bound needs each
-            // layer's heap to keep `min(|S_j|, k)` of the layer's
-            // keys, chosen without reading the next layer's
-            // selection bit; `UnivMon::merge` re-ranks the union of
-            // the parts' heap keys by the merged sketch, which
-            // keeps both, and its top-layer completeness is the
-            // union's. Entropy reads heavy items a part may have
-            // dropped.
-            S::UnivMon => (
-                Some(Disjoint),
-                &[
-                    (Total, Union),
-                    (Distinct, Union),
-                    (FrequencyL2, Union),
-                    (FrequencyEntropy, Approximate),
-                ],
-            ),
-            // HLL's merge keeps each register's maximum, which is
-            // idempotent: an item both inputs saw counts once, so
-            // overlapping inputs merge to the state of their union.
-            // `asap_sketchlib`'s KMV hashes every item with one
-            // shared seed (`CANONICAL_HASH_SEED`), and `KMV::merge`
-            // keeps the k smallest distinct hashes: again the state
-            // of the union.
-            S::Hll | S::Kmv => (Some(MayOverlap), &[(Distinct, Union)]),
+        Self::of_sketchlib(match algorithm {
+            S::Kll => SketchFamily::Kll,
+            S::DDSketch => SketchFamily::DdSketch,
+            S::Cms => SketchFamily::CountMin,
+            S::CountSketch => SketchFamily::CountSketch,
+            S::CmsWithHeap => SketchFamily::CountMinWithHeap,
+            S::CountSketchWithHeap => SketchFamily::CountSketchWithHeap,
+            S::UnivMon => SketchFamily::UnivMon,
+            S::Hll => SketchFamily::Hll,
+            S::Kmv => SketchFamily::Kmv,
             // Theta is not offered, and has no merge.
-            S::Theta => (None, &[(Distinct, Approximate)]),
-        };
-        Self {
-            merge_inputs,
-            readouts,
-        }
+            S::Theta => {
+                return Self {
+                    merge_inputs: None,
+                    readouts: Readouts::Planner(&[(
+                        StatisticKind::Distinct,
+                        MergedError::Approximate,
+                    )]),
+                }
+            }
+        })
     }
 
     /// The capability of `family`. Families not listed have no capability
@@ -206,8 +256,6 @@ impl FamilyCapability {
     pub fn of(family: &FieldDataType) -> Self {
         use ExactKind as E;
         use MergeInputRule::{Disjoint, DisjointInTime, MayOverlap};
-        use MergedError::{Approximate, AsIfBuiltOverUnion as Union};
-        use StatisticKind::*;
         let (merge_inputs, readouts): (_, &'static [(StatisticKind, MergedError)]) = match family {
             FieldDataType::ExactAggregate(kind, _) => match kind {
                 E::Sum | E::Count => (Some(Disjoint), &[]),
@@ -219,17 +267,18 @@ impl FamilyCapability {
                 // pane does not keep across its boundary.
                 E::IRate => (None, &[]),
             },
-            // Hydra answers per subpopulation, as the inner family does.
-            // Over a linear sketch it is a shared grid of linear sketches
-            // whose cells add; over KLL it has no accuracy model, so no
-            // merge.
+            // A Hydra answers per subpopulation from a shared grid of the
+            // inner family's cells. HydraKll merges as sketchlib's row says:
+            // `Hydra::merge` requires the same k and m and otherwise returns
+            // an error (asap_sketchlib #251). Nothing builds one yet: Pass 1
+            // offers no Hydra, and the executor builds only HydraCms
+            // (`create_hydra_cms`).
             FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
-                match kind {
-                    HydraKind::HydraCms | HydraKind::HydraCountSketch => {
-                        (Some(Disjoint), &[(ItemFrequency, Union)])
-                    }
-                    HydraKind::HydraKll => (None, &[(Quantile, Approximate)]),
-                }
+                return Self::of_sketchlib(match kind {
+                    HydraKind::HydraCms => SketchFamily::HydraCountMin,
+                    HydraKind::HydraCountSketch => SketchFamily::HydraCountSketch,
+                    HydraKind::HydraKll => SketchFamily::HydraKll,
+                })
             }
             FieldDataType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance) => {
                 return Self::of_per_instance_sketch(kind.algorithm())
@@ -241,7 +290,7 @@ impl FamilyCapability {
         };
         Self {
             merge_inputs,
-            readouts,
+            readouts: Readouts::Planner(readouts),
         }
     }
 }
@@ -444,7 +493,19 @@ mod tests {
     #[test]
     fn exact_accumulators_answer_no_readout() {
         let sum = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-        assert!(FamilyCapability::of(&sum).readouts.is_empty());
+        assert_eq!(FamilyCapability::of(&sum).readouts().next(), None);
         assert!(!FamilyCapability::of(&sum).answers(&total()));
+    }
+
+    /// Every readout kept out as not read yet is one `asap_sketchlib`
+    /// still lists, so the list holds no stale entry.
+    #[test]
+    fn readouts_not_read_yet_are_listed_by_sketchlib() {
+        for &(family, statistic) in NOT_READ_YET {
+            assert!(
+                family.capability().answers(statistic),
+                "{family:?} {statistic:?}"
+            );
+        }
     }
 }

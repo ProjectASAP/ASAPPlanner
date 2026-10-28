@@ -616,19 +616,12 @@ mod tests {
     /// the candidates of the intents that read it, with no other edit.
     #[test]
     fn a_dropped_readout_drops_the_family() {
-        use asap_types::ir::schema::{MergedError, StatisticKind};
+        // Count Sketch's row is Count-Min's less its total.
         let cms_without_total = |family: &SketchAlgorithm| {
-            let row = FamilyCapability::of_per_instance_sketch(family);
-            match family {
-                SketchAlgorithm::Cms => FamilyCapability {
-                    readouts: &[(
-                        StatisticKind::ItemFrequency,
-                        MergedError::AsIfBuiltOverUnion,
-                    )],
-                    ..row
-                },
-                _ => row,
-            }
+            FamilyCapability::of_per_instance_sketch(match family {
+                SketchAlgorithm::Cms => &SketchAlgorithm::CountSketch,
+                other => other,
+            })
         };
         let count = AggIntent::Count {
             accuracy: AccuracyTarget::max_error(0.01),

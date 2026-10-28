@@ -161,7 +161,7 @@ fn merge(children: Vec<Rc<OperatorNode>>) -> Result<Rc<OperatorNode>, String> {
 #[test]
 fn family_capability_table() {
     use MergeInputRule::{Disjoint, DisjointInTime, MayOverlap};
-    use MergedError::{Approximate, AsIfBuiltOverUnion as Union};
+    use MergedError::{Approximate, AsIfBuiltOverUnion as Union, Exact};
     use StatisticKind::*;
     let (width, depth, heap_size) = (64, 4, 10);
     // (family, how its merge inputs must relate, its readouts).
@@ -216,7 +216,7 @@ fn family_capability_table() {
         (
             sketch(SketchAlgorithm::Cms, SketchParams::Cms { width, depth }),
             Some(Disjoint),
-            vec![(ItemFrequency, Union), (Total, Union)],
+            vec![(ItemFrequency, Union), (Total, Exact)],
         ),
         (
             sketch(
@@ -239,9 +239,9 @@ fn family_capability_table() {
             ),
             Some(Disjoint),
             vec![
-                (Total, Union),
-                (Distinct, Union),
+                (Total, Exact),
                 (FrequencyL2, Union),
+                (Distinct, Union),
                 (FrequencyEntropy, Approximate),
             ],
         ),
@@ -276,8 +276,8 @@ fn family_capability_table() {
             Some(Disjoint),
             vec![(TopK, Approximate)],
         ),
-        // Hydra over a linear sketch is a grid of linear sketches; Hydra
-        // over KLL has no accuracy model and fails closed.
+        // Hydra over a linear sketch is a grid of linear sketches; over KLL,
+        // a grid of KLLs that merge cell by cell with the same k and m.
         (
             hydra(
                 SketchAlgorithm::Cms,
@@ -321,8 +321,8 @@ fn family_capability_table() {
                     shared_buckets: width,
                 },
             ),
-            None,
-            vec![(Quantile, Approximate)],
+            Some(Disjoint),
+            vec![(Quantile, Union)],
         ),
         (FieldDataType::Plain(DataType::Float64), None, vec![]),
         (
@@ -368,7 +368,11 @@ fn family_capability_table() {
     for (family, merge_inputs, readouts) in rows {
         let capability = FamilyCapability::of(&family);
         assert_eq!(capability.merge_inputs, merge_inputs, "{family:?}");
-        assert_eq!(capability.readouts, readouts.as_slice(), "{family:?}");
+        assert_eq!(
+            capability.readouts().collect::<Vec<_>>(),
+            readouts,
+            "{family:?}"
+        );
         for statistic in &statistics {
             let row = readouts
                 .iter()
@@ -391,11 +395,12 @@ fn family_capability_table() {
 }
 
 /// Heap readouts (entropy, top-k) of a merged state are approximate: each
-/// part's heaps keep only that part's heavy items. UnivMon's L2 reads layer
-/// 0's Count Sketch, which adds, and its distinct count's bound holds for
-/// any heap that keeps `min(|S_j|, k)` of a layer's keys, as the merge's
-/// does, so both keep the guarantee of one build over the union. A
-/// statistic the family does not answer has no merged error.
+/// part's heaps keep only that part's heavy items. UnivMon's total adds
+/// exactly. Its L2 reads layer 0's Count Sketch, which adds, and its
+/// distinct count's bound holds for any heap that keeps `min(|S_j|, k)` of
+/// a layer's keys, as the merge's does, so both keep the guarantee of one
+/// build over the union. A statistic the family does not answer has no
+/// merged error.
 #[test]
 fn merged_error_depends_on_the_readout() {
     use SketchStatistic::{Cardinality, FrequencyEntropy, FrequencyL2, TopK};
@@ -415,7 +420,7 @@ fn merged_error_depends_on_the_readout() {
     ));
     for (readout, error) in [
         (FrequencyL2, MergedError::AsIfBuiltOverUnion),
-        (point(), MergedError::AsIfBuiltOverUnion),
+        (point(), MergedError::Exact),
         (Cardinality, MergedError::AsIfBuiltOverUnion),
         (FrequencyEntropy, MergedError::Approximate),
     ] {

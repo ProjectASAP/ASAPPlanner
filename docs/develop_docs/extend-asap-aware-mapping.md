@@ -12,11 +12,15 @@ A new sketch that Pass 1 can offer for an intent.
 
 1. **Type.** Add the variant to `SketchAlgorithm` and its parameters to
    `SketchParams` (`crates/types/src/ir/schema/sketch.rs`).
-2. **Capability.** Add its row to `FamilyCapability::of`
-   (`crates/types/src/ir/schema/family_capability.rs`): which inputs it can
-   merge (`MergeInputRule`) and which statistics it answers (`StatisticKind`,
-   with the merged error). Pass 2's sharing, pane and rollup rules read only
-   this table.
+2. **Capability.** Map it to its `asap_sketchlib` family in
+   `FamilyCapability::of_per_instance_sketch`
+   (`crates/types/src/ir/schema/family_capability.rs`; a Hydra kind maps
+   in `FamilyCapability::of`). Its row, which inputs it can merge and which
+   statistics it answers with the merged error, is the library's capability
+   table (`SketchFamily::capability`); a readout the library lists that
+   nothing here reads yet goes in `NOT_READ_YET`. A family the library has
+   no row for (Theta) keeps a planner row there, as the exact aggregates
+   do. Pass 2's sharing, pane and rollup rules read only this table.
 3. **Offer and size.** Place it in `realization::FAMILY_PREFERENCE`
    (`crates/logical-asap-optimization`): `summary_candidates` offers it, in
    that order, for every intent whose statistic its capability row answers.
