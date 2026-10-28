@@ -163,9 +163,8 @@ async fn lower_sql(workload: &PlanningWorkload) -> Vec<QueryRoot> {
 // Production optimization is tested separately; this is not a Cartesian search.
 fn rule_fixture(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
     use asap_logical_asap_optimization::asap_aware_cse::{
-        capability_sharing_candidates, pane_candidates, sharing_candidates,
-        summary_capability_pass2_candidates, window_composition_pass2_candidates,
-        with_shared_candidates,
+        capability_sharing_candidates, pane_candidates, summary_capability_pass2_candidates,
+        window_composition_pass2_candidates,
     };
     use asap_logical_asap_optimization::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
@@ -216,13 +215,9 @@ fn rule_fixture(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
             .map(|(_, root)| root)
             .collect();
         computations.push(whole.clone());
-        let sharing = sharing_candidates(&whole);
-        if !sharing.is_empty() {
-            computations.push(with_shared_candidates(
-                &whole,
-                &sharing,
-                &vec![true; sharing.len()],
-            ));
+        let shared = share_identical(&whole);
+        if distinct_nodes(&shared) < distinct_nodes(&whole) {
+            computations.push(shared);
         }
         let capabilities = capability_sharing_candidates(&whole);
         computations.extend(
@@ -284,6 +279,72 @@ fn standin_with_distinct_bound(bound: Option<u64>) -> PlanningWorkload {
 fn pipeline_with_distinct_bound(bound: Option<u64>) -> Run {
     let workload = standin_with_distinct_bound(bound);
     rule_fixture(&workload, lower_promql(&workload))
+}
+
+/// Plans composed of the memo's candidates, priced by Stage 2 and plan
+/// selection: every query on its group's first candidate; each query alone
+/// on its own UnivMon; and, per UnivMon state group the memo shares between
+/// queries, those queries reading it.
+fn memo_pipeline() -> Run {
+    use asap_integration_tests::planning::{compose_memo_plan, expanded_memo, own_choices};
+    use asap_logical_asap_optimization::memo::candidates::{
+        CandidateOrigin, ImplementationCandidate,
+    };
+    use asap_types::ir::schema::FieldDataType;
+    use asap_types::ir::{ASAPOp, OperatorNode};
+    let workload = standin_workload();
+    let roots = lower_promql(&workload);
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let memo = expanded_memo(roots.iter().cloned().enumerate().collect(), &entries);
+    let queries = roots.len();
+    let is_univmon = |node: &std::rc::Rc<OperatorNode>| {
+        matches!(node.asap(), Some(ASAPOp::SummaryAgg {
+            family: FieldDataType::Sketch(kind, _), ..
+        }) if *kind.algorithm() == SketchAlgorithm::UnivMon)
+    };
+    // Query `q`'s topmost own group's first candidate `keep` accepts.
+    let own = |q: usize, keep: &dyn Fn(&ImplementationCandidate) -> bool| {
+        own_choices(&memo, q, keep).into_iter().next()
+    };
+    let mut choices = vec![BTreeMap::new()];
+    for q in 0..queries {
+        if let Some(choice) = own(q, &|c| {
+            c.origin == CandidateOrigin::Pass1
+                && OperatorNode::reachable(&c.node).iter().any(is_univmon)
+        }) {
+            choices.push(BTreeMap::from([choice]));
+        }
+    }
+    for (state, group) in memo.groups.iter().enumerate() {
+        if !is_univmon(&group.node) || group.queries.len() < 2 {
+            continue;
+        }
+        let reading: Option<BTreeMap<_, _>> = group
+            .queries
+            .iter()
+            .map(|&q| {
+                own(q, &|c| {
+                    c.children.iter().any(|child| child.0 as usize == state)
+                })
+            })
+            .collect();
+        choices.extend(reading);
+    }
+    let computations = choices
+        .iter()
+        .map(|choice| {
+            compose_memo_plan(&memo, queries, choice)
+                .into_iter()
+                .map(QueryRoot::Operator)
+                .collect()
+        })
+        .collect();
+    run_explicit_candidates(
+        &workload,
+        roots,
+        computations,
+        asap_plan_selection::PlanningModels::builtin(),
+    )
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -488,7 +549,7 @@ fn stage1_logical_asap_optimization_pass1_offers_specialized_entropy_and_l2_summ
 /// The summary-capability rule adds one UnivMon build feeding a distinct-count, an entropy and an L2 estimate.
 #[test]
 fn stage1_logical_asap_optimization_summary_capability_adds_one_univmon_for_all_three() {
-    let run = pipeline();
+    let run = memo_pipeline();
     let shared = run.logical.iter().find(|c| {
         let ums = univmons(c);
         ums.len() == 1 && ums[0].0 == BTreeSet::from([0, 1, 2])
@@ -524,7 +585,7 @@ fn stage1_logical_asap_optimization_summary_capability_adds_pairwise_shared_univ
 /// parameter's largest value among them.
 #[test]
 fn stage1_logical_asap_optimization_shared_univmon_takes_each_parameters_largest_own_size() {
-    let run = pipeline();
+    let run = memo_pipeline();
     let own = |q| match own_univmon(&run, q) {
         SketchParams::UnivMon {
             heap_size,
@@ -598,7 +659,7 @@ fn stage2_physical_asap_optimization_keeps_every_logical_candidate() {
 /// Physical ASAP-aware optimization keeps the shared UnivMon as one build node read by all three queries.
 #[test]
 fn stage2_physical_asap_optimization_keeps_the_shared_univmon_as_one_build() {
-    let run = pipeline();
+    let run = memo_pipeline();
     let mut seen = 0;
     for c in run
         .logical

@@ -299,6 +299,357 @@ pub mod planning {
             })
             .collect()
     }
+    /// Pass 1, local panes for `entries`' recurrences and every Pass 2 rule
+    /// on the seed grids (no query pruning). Rule tests read a group's
+    /// candidates by `CandidateOrigin`.
+    pub fn expanded_memo(
+        roots: Vec<(usize, QueryRoot)>,
+        entries: &[asap_types::workload::QueryWorkloadEntry],
+    ) -> asap_logical_asap_optimization::memo::candidates::CandidateMemo {
+        use asap_logical_asap_optimization::memo::{
+            candidates::try_populate_pass1, state_configurations::PaneWidthDomain,
+            state_groups::expand_concrete_summary_state_groups_in_domain,
+            window_candidates::add_local_window_composition, LogicalMemo,
+        };
+        use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
+        let initial = LogicalMemo::from_roots(&roots);
+        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let mut memo = try_populate_pass1(initial, &inventory).unwrap();
+        add_local_window_composition(&mut memo, entries);
+        expand_concrete_summary_state_groups_in_domain(memo, PaneWidthDomain::SeedGrids)
+            .unwrap()
+            .memo
+    }
+
+    /// One plan of `memo`'s first `queries` queries: each group a query
+    /// needs implemented by its candidate `choice[group]` (an index), or by
+    /// its first candidate, each child group composed once and shared by
+    /// every candidate that reads it.
+    pub fn compose_memo_plan(
+        memo: &asap_logical_asap_optimization::memo::candidates::CandidateMemo,
+        queries: usize,
+        choice: &std::collections::BTreeMap<usize, usize>,
+    ) -> Vec<Rc<OperatorNode>> {
+        fn compose(
+            memo: &asap_logical_asap_optimization::memo::candidates::CandidateMemo,
+            group: usize,
+            choice: &std::collections::BTreeMap<usize, usize>,
+            done: &mut std::collections::HashMap<usize, Rc<OperatorNode>>,
+        ) -> Rc<OperatorNode> {
+            if let Some(found) = done.get(&group) {
+                return Rc::clone(found);
+            }
+            let candidate = &memo.candidates[group][choice.get(&group).copied().unwrap_or(0)];
+            let replacements: Vec<_> = candidate
+                .children
+                .iter()
+                .map(|child| {
+                    let child = child.0 as usize;
+                    (
+                        Rc::clone(&memo.groups[child].node),
+                        compose(memo, child, choice, done),
+                    )
+                })
+                .collect();
+            // As plan reconstruction does, every child group's node must be
+            // a node of the candidate, or the child would not be composed.
+            let own_nodes: std::collections::HashSet<_> = OperatorNode::reachable(&candidate.node)
+                .iter()
+                .map(Rc::as_ptr)
+                .collect();
+            for (old, _) in &replacements {
+                assert!(
+                    own_nodes.contains(&Rc::as_ptr(old)),
+                    "group {group}: declared input group has no canonical node boundary"
+                );
+            }
+            let composed = with_nodes_replaced(&candidate.node, &replacements);
+            done.insert(group, Rc::clone(&composed));
+            composed
+        }
+        let mut done = std::collections::HashMap::new();
+        (0..queries)
+            .map(|query| {
+                let root = memo
+                    .groups
+                    .iter()
+                    .position(|group| group.roots_of.contains(&query))
+                    .expect("the query's root group");
+                compose(memo, root, choice, &mut done)
+            })
+            .collect()
+    }
+
+    /// `root` with every node in `replacements` (by identity) replaced by
+    /// its replacement; the nodes above are rebuilt, shared ones once.
+    pub fn with_nodes_replaced(
+        root: &Rc<OperatorNode>,
+        replacements: &[(Rc<OperatorNode>, Rc<OperatorNode>)],
+    ) -> Rc<OperatorNode> {
+        fn walk(
+            node: &Rc<OperatorNode>,
+            replacements: &[(Rc<OperatorNode>, Rc<OperatorNode>)],
+            done: &mut std::collections::HashMap<*const OperatorNode, Rc<OperatorNode>>,
+        ) -> Rc<OperatorNode> {
+            if let Some((_, new)) = replacements.iter().find(|(old, _)| Rc::ptr_eq(old, node)) {
+                return Rc::clone(new);
+            }
+            if let Some(found) = done.get(&Rc::as_ptr(node)) {
+                return Rc::clone(found);
+            }
+            let children: std::collections::HashMap<_, _> = node
+                .children()
+                .into_iter()
+                .map(|child| (Rc::as_ptr(child), walk(child, replacements, done)))
+                .collect();
+            let out = if node
+                .children()
+                .into_iter()
+                .all(|old| Rc::ptr_eq(old, &children[&Rc::as_ptr(old)]))
+            {
+                Rc::clone(node)
+            } else {
+                Rc::new(
+                    node.with_new_children(|old| Rc::clone(&children[&Rc::as_ptr(old)]))
+                        .expect("same-schema children"),
+                )
+            };
+            done.insert(Rc::as_ptr(node), Rc::clone(&out));
+            out
+        }
+        walk(root, replacements, &mut Default::default())
+    }
+
+    /// Stage 2 and plan selection over fixed workload plans, without a timed
+    /// search: each `(name, roots)` is implemented by Stage 2 (plan ids start
+    /// with `name`), and all are priced together.
+    pub fn select_among(
+        variants: &[(&str, Vec<QueryRoot>)],
+        entries: &[asap_types::workload::QueryWorkloadEntry],
+        data: &DataWorkload,
+    ) -> (
+        Vec<asap_physical_asap_optimization::PhysicalWorkloadPlan>,
+        asap_plan_selection::Selection,
+    ) {
+        let models = asap_plan_selection::PlanningModels::builtin();
+        let mut physical = Vec::new();
+        for (name, roots) in variants {
+            // Composed nodes lose their guarantees; recompose them as
+            // `run_explicit_candidates` does.
+            let roots =
+                asap_logical_asap_optimization::per_computation_candidates::recompose_guarantees(
+                    roots,
+                )
+                .unwrap_or_else(|error| panic!("{name} composes guarantees: {error}"));
+            let mut plans = asap_physical_asap_optimization::optimize_physical_asap(
+                name,
+                &roots,
+                entries,
+                data,
+                models.deployment_capabilities,
+            )
+            .unwrap_or_else(|error| panic!("Stage 2 implements {name}: {error}"));
+            for (index, plan) in plans.iter_mut().enumerate() {
+                plan.id = format!("{name}-{index}");
+            }
+            physical.extend(plans);
+        }
+        let selection = asap_plan_selection::select_plan(&physical, entries, data, models).unwrap();
+        (physical, selection)
+    }
+
+    /// Whether `node` builds a summary.
+    fn is_build(node: &Rc<OperatorNode>) -> bool {
+        matches!(
+            node.asap(),
+            Some(
+                asap_types::ir::ASAPOp::SummaryAgg { .. }
+                    | asap_types::ir::ASAPOp::PaneChain { .. }
+            )
+        )
+    }
+
+    /// `(group, candidate index)` of query `q`'s own groups' (read by `q`
+    /// alone) candidates `keep` accepts; those of the topmost group (the
+    /// fewest child edges below `q`'s root) first.
+    pub fn own_choices(
+        memo: &asap_logical_asap_optimization::memo::candidates::CandidateMemo,
+        q: usize,
+        keep: impl Fn(
+            &asap_logical_asap_optimization::memo::candidates::ImplementationCandidate,
+        ) -> bool,
+    ) -> Vec<(usize, usize)> {
+        let mut found: Vec<_> = memo
+            .candidates
+            .iter()
+            .enumerate()
+            .filter(|(group, _)| memo.groups[*group].queries == [q])
+            .flat_map(|(group, candidates)| {
+                candidates
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| keep(c))
+                    .map(move |(index, _)| (group, index))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        // Group indices don't give the order: Pass 2 appends groups at the
+        // end. Depth from the root does.
+        let mut depth = vec![usize::MAX; memo.groups.len()];
+        let mut pending: std::collections::VecDeque<_> = memo
+            .groups
+            .iter()
+            .enumerate()
+            .filter(|(_, group)| group.roots_of.contains(&q))
+            .map(|(group, _)| (group, 0))
+            .collect();
+        while let Some((group, d)) = pending.pop_front() {
+            if depth[group] <= d {
+                continue;
+            }
+            depth[group] = d;
+            pending.extend(
+                memo.groups[group]
+                    .children
+                    .iter()
+                    .map(|child| (child.0 as usize, d + 1)),
+            );
+        }
+        found.sort_by_key(|(group, _)| depth[*group]);
+        found
+    }
+
+    /// The selected plan's roots among fixed plans of `memo`'s queries, and
+    /// the selection's lowest prices of `separate` and of the `shared` plans:
+    /// - `separate{k}`: each query reads its own summary build, its topmost
+    ///   own group's `k`-th Pass 1 candidate that builds one (the last when
+    ///   it has fewer);
+    /// - `shared{g}`: every query reads the summary state group `g`, its own
+    ///   estimate or a regrouping merge of it, when every query can.
+    pub fn select_rollup(
+        memo: &asap_logical_asap_optimization::memo::candidates::CandidateMemo,
+        queries: usize,
+        entries: &[asap_types::workload::QueryWorkloadEntry],
+        data: &DataWorkload,
+    ) -> (Vec<Rc<OperatorNode>>, f64, f64) {
+        let builds = |node: &Rc<OperatorNode>| OperatorNode::reachable(node).iter().any(is_build);
+        let own_builds: Vec<Vec<(usize, usize)>> = (0..queries)
+            .map(|q| {
+                let found = own_choices(memo, q, |c| {
+                    c.origin
+                        == asap_logical_asap_optimization::memo::candidates::CandidateOrigin::Pass1
+                        && builds(&c.node)
+                });
+                let top = found
+                    .first()
+                    .unwrap_or_else(|| panic!("Q{} has a summary candidate", q + 1))
+                    .0;
+                found
+                    .into_iter()
+                    .filter(|(group, _)| *group == top)
+                    .collect()
+            })
+            .collect();
+        let separate_plans = own_builds.iter().map(Vec::len).max().unwrap_or(0);
+        let mut plans: Vec<(String, Vec<Rc<OperatorNode>>)> = (0..separate_plans)
+            .map(|k| {
+                let choice = own_builds
+                    .iter()
+                    .map(|found| found[k.min(found.len() - 1)])
+                    .collect();
+                (
+                    format!("separate{k}"),
+                    compose_memo_plan(memo, queries, &choice),
+                )
+            })
+            .collect();
+        for (state, group) in memo.groups.iter().enumerate() {
+            if !is_build(&group.node) || group.queries.len() < queries {
+                continue;
+            }
+            let reading: Option<std::collections::BTreeMap<usize, usize>> = (0..queries)
+                .map(|q| {
+                    own_choices(memo, q, |c| {
+                        c.children.iter().any(|child| child.0 as usize == state)
+                    })
+                    .into_iter()
+                    .next()
+                })
+                .collect();
+            if let Some(choice) = reading {
+                plans.push((
+                    format!("shared{state}"),
+                    compose_memo_plan(memo, queries, &choice),
+                ));
+            }
+        }
+        assert!(
+            plans.len() > separate_plans,
+            "a plan in which every query reads one build"
+        );
+        let named: Vec<(&str, Vec<QueryRoot>)> = plans
+            .iter()
+            .map(|(name, roots)| {
+                (
+                    name.as_str(),
+                    roots.iter().cloned().map(QueryRoot::Operator).collect(),
+                )
+            })
+            .collect();
+        let (physical, selection) = select_among(&named, entries, data);
+        let selected = physical
+            .iter()
+            .find(|plan| plan.id == selection.selected)
+            .expect("the selected plan");
+        let roots = plans
+            .iter()
+            .find(|(name, _)| *name == selected.from_logical)
+            .map(|(_, roots)| roots.clone())
+            .unwrap();
+        let cheapest = |plans: &[(String, Vec<Rc<OperatorNode>>)]| {
+            plans
+                .iter()
+                .map(|(name, _)| cheapest_of(&selection, name))
+                .fold(f64::INFINITY, f64::min)
+        };
+        let separate = cheapest(&plans[..separate_plans]);
+        // Every separate plan rejected would make `shared < separate` hold
+        // trivially.
+        assert!(separate.is_finite(), "a valid plan with a build per query");
+        (roots, separate, cheapest(&plans[separate_plans..]))
+    }
+
+    /// The summary builds and rollups (regrouping merges) `roots` read, each
+    /// once.
+    pub fn builds_and_rollups(roots: &[Rc<OperatorNode>]) -> (usize, usize) {
+        let mut seen = std::collections::HashSet::new();
+        let (mut builds, mut rollups) = (0, 0);
+        for node in roots.iter().flat_map(OperatorNode::reachable) {
+            if !seen.insert(Rc::as_ptr(&node)) {
+                continue;
+            }
+            match node.asap() {
+                _ if is_build(&node) => builds += 1,
+                Some(asap_types::ir::ASAPOp::SummaryMerge {
+                    group_by: Some(_), ..
+                }) => rollups += 1,
+                _ => {}
+            }
+        }
+        (builds, rollups)
+    }
+
+    /// The lowest price per second among `selection`'s plans whose id starts
+    /// with `name`.
+    pub fn cheapest_of(selection: &asap_plan_selection::Selection, name: &str) -> f64 {
+        selection
+            .costs
+            .iter()
+            .filter(|(id, _)| id.starts_with(&format!("{name}-")))
+            .filter_map(|(_, cost)| cost.cost_per_second)
+            .fold(f64::INFINITY, f64::min)
+    }
+
     /// Apply sharing rules and Stage 2 to a small explicitly supplied fixture set,
     /// then price it with the production evaluator. No workload product search.
     pub fn explicit_assignment_plans(

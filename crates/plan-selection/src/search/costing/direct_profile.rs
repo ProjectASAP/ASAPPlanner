@@ -2001,12 +2001,8 @@ mod tests {
     // including two equal frequencies whose different phases cannot coalesce.
     #[test]
     fn heterogeneous_shared_sketch_profiles_match_the_real_evaluator() {
-        use asap_logical_asap_optimization::{
-            asap_aware_cse::{sharing_candidates, with_shared_candidates},
-            per_computation_candidates::{
-                compose_logical_candidate, generate_per_computation_candidates,
-                ComputationCandidate,
-            },
+        use asap_logical_asap_optimization::per_computation_candidates::{
+            compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
         };
         use asap_types::ir::schema::SketchAlgorithm;
         use asap_types::workload::TimestampMs;
@@ -2079,9 +2075,20 @@ mod tests {
                     .into_iter()
                     .map(|(_, root)| root)
                     .collect();
-                let candidates = sharing_candidates(&roots);
-                let shared =
-                    with_shared_candidates(&roots, &candidates, &vec![true; candidates.len()]);
+                // Identical sub-DAGs made one node, as the memo's groups are.
+                let shared: Vec<_> = asap_types::ir::cse::share_common_sub_dags(
+                    roots
+                        .iter()
+                        .enumerate()
+                        .map(|(id, root)| match root {
+                            QueryRoot::Operator(node) => (id, Rc::clone(node)),
+                            QueryRoot::Scalar(_) => panic!("operator root"),
+                        })
+                        .collect(),
+                )
+                .into_iter()
+                .map(|(_, node)| QueryRoot::Operator(node))
+                .collect();
                 let mut configured = CandidateConfigurationInventory {
                     inventory: CandidateInventory {
                         graph: CandidateDependencyGraph::default(),

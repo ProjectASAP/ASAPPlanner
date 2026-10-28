@@ -1732,21 +1732,23 @@ fn scans_projecting_different_labels_are_shared() {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.as_ref().unwrap();
     let roots = lower_promql_roots(&workload).unwrap();
-    use asap_logical_asap_optimization::asap_aware_cse::{
-        sharing_candidates, with_shared_candidates, with_union_scan_labels,
-    };
+    use asap_logical_asap_optimization::asap_aware_cse::with_union_scan_labels;
     let widened = with_union_scan_labels(&roots).unwrap().unwrap();
-    let sharing = sharing_candidates(&widened);
-    let share_scans: Vec<_> = sharing
-        .iter()
-        .map(|candidate| {
-            matches!(
-                candidate.nodes[0].non_asap(),
-                Some(asap_types::ir::NonASAPOp::Scan { .. })
-            )
-        })
-        .collect();
-    let shared = with_shared_candidates(&widened, &sharing, &share_scans);
+    // Identical sub-DAGs made one node, as the memo's groups are: the
+    // widened scan, and the two instant selectors' identical range.
+    let shared: Vec<_> = asap_types::ir::cse::share_common_sub_dags(
+        widened
+            .iter()
+            .enumerate()
+            .map(|(id, root)| match root {
+                asap_types::ir::QueryRoot::Operator(node) => (id, std::rc::Rc::clone(node)),
+                asap_types::ir::QueryRoot::Scalar(_) => panic!("operator root"),
+            })
+            .collect(),
+    )
+    .into_iter()
+    .map(|(_, node)| asap_types::ir::QueryRoot::Operator(node))
+    .collect();
     use asap_types::physical::{Materialization, Medium};
     let physical = asap_physical_asap_optimization::optimize_physical_asap_assigned(
         "widened-scan-rule",
@@ -1755,7 +1757,7 @@ fn scans_projecting_different_labels_are_shared() {
         data,
         &asap_planner::DeploymentCapabilities::default(),
         &mut |readers| {
-            Some(if readers.len() == 4 {
+            Some(if readers.len() > 1 {
                 Materialization::MatAtQuery(Medium::Memory)
             } else {
                 Materialization::NotMaterialized

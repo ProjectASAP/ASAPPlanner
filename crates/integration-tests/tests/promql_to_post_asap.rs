@@ -731,14 +731,36 @@ fn ddsketch_ratio_selection(
         recurrence: Default::default(),
         range_evaluation: None,
     }];
-    let run = asap_integration_tests::planning::explicit_assignment_plans(
-        inventory,
-        vec![exact, dds],
-        &entries,
-        &data,
-    );
-    let ratios = run
-        .stage2_physical_asap_optimization
+    // Pass 1 choices composed and implemented by Stage 2; one query, so no
+    // sharing rule applies.
+    use asap_logical_asap_optimization::per_computation_candidates::{
+        compose_logical_candidate, recompose_guarantees,
+    };
+    let models = asap_plan_selection::PlanningModels::builtin();
+    let mut physical = Vec::new();
+    for choice in [exact, dds] {
+        let roots: Vec<_> = compose_logical_candidate(&inventory, &choice)
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect();
+        let roots = recompose_guarantees(&roots).unwrap();
+        physical.extend(
+            asap_physical_asap_optimization::optimize_physical_asap(
+                &format!("L{}", physical.len() + 1),
+                &roots,
+                &entries,
+                &data,
+                models.deployment_capabilities,
+            )
+            .unwrap(),
+        );
+    }
+    for (index, plan) in physical.iter_mut().enumerate() {
+        plan.id = format!("fixture-{index}");
+    }
+    let selection = asap_plan_selection::select_plan(&physical, &entries, &data, models).unwrap();
+    let ratios = physical
         .into_iter()
         .filter(|candidate| {
             let sketches: Vec<_> = candidate
@@ -756,7 +778,7 @@ fn ddsketch_ratio_selection(
             sketches == [SketchAlgorithm::DDSketch, SketchAlgorithm::DDSketch]
         })
         .collect();
-    (ratios, run.stage3_plan_selection.unwrap())
+    (ratios, selection)
 }
 
 /// Declared nonnegative inputs permit formal ratio admission; an unknown
