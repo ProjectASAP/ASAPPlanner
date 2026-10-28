@@ -299,6 +299,29 @@ pub mod planning {
             })
             .collect()
     }
+    /// The memo Stage 1 hands to plan selection for `roots`: Pass 1
+    /// candidates, local panes for `entries`' recurrences, then every Pass 2
+    /// rule with concrete summary states on the seed pane grids. Rule tests
+    /// read a group's candidates by `CandidateOrigin`.
+    pub fn expanded_memo(
+        roots: Vec<(usize, QueryRoot)>,
+        entries: &[asap_types::workload::QueryWorkloadEntry],
+    ) -> asap_logical_asap_optimization::memo::candidates::CandidateMemo {
+        use asap_logical_asap_optimization::memo::{
+            candidates::try_populate_pass1, state_configurations::PaneWidthDomain,
+            state_groups::expand_concrete_summary_state_groups_in_domain,
+            window_candidates::add_local_window_composition, LogicalMemo,
+        };
+        use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
+        let initial = LogicalMemo::from_roots(&roots);
+        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let mut memo = try_populate_pass1(initial, &inventory).unwrap();
+        add_local_window_composition(&mut memo, entries);
+        expand_concrete_summary_state_groups_in_domain(memo, PaneWidthDomain::SeedGrids)
+            .unwrap()
+            .memo
+    }
+
     /// Apply sharing rules and Stage 2 to a small explicitly supplied fixture set,
     /// then price it with the production evaluator. No workload product search.
     pub fn explicit_assignment_plans(
