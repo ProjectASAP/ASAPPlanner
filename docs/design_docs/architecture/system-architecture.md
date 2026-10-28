@@ -24,11 +24,11 @@ flowchart TB
     subgraph facade["planner (facade)"]
         UI["<b>UserInput</b><br/>workload, frontend_specific, models, pass"]
         E2E["e2e_plan(UserInput) → <b>PlanOutput</b>"]
-        PI["plan_installable(UserInput) →<br/>(<b>InstallablePlan</b>, SelectedPlanReport)"]
+        PI["plan_installable(UserInput) →<br/>(<b>InstallablePlan</b>, Option of SelectedPlanReport)"]
     end
 
     subgraph s0["Stage 0: query-language frontends (frontend-sql, frontend-promql, frontend-metricsql, frontend-common)"]
-        LOW["lower_sql_dialect | lower_promql_query_workload |<br/>lower_metricsql_query_workload<br/>UnresolvedOp → resolve_root → canonicalize"]
+        LOW["lower_sql_dialect | lower_promql_query_workload |<br/>lower_metricsql_query_workload<br/>UnresolvedOp → resolve_root (calls canonicalize)"]
         QR["Vec of <b>QueryRoot</b> over <b>OperatorNode</b><br/>(Pre-ASAP IR, asap-types)"]
         PW["<b>ParsedWorkload</b>::from_roots"]
     end
@@ -55,7 +55,7 @@ flowchart TB
     end
 
     subgraph s3["Stage 3: plan selection (plan-selection)"]
-        SEL["<b>PlanSelector</b> offer / finish:<br/>accuracy, latency, compile check, CostModel →<br/><b>Selection</b> (CandidateCost per candidate, Rejection)"]
+        SEL["<b>PlanSelector</b> offer_before / finish:<br/>accuracy, latency, compile check, CostModel →<br/><b>Selection</b> (CandidateCost per candidate, Rejection)"]
     end
 
     subgraph handoff["Plan file (planner, asap-types)"]
@@ -88,9 +88,9 @@ flowchart TB
     P2 -->|"adds candidates"| CM
     CM -->|"build_candidate_inventory_before"| INV
     INV -->|"enumerate_candidate_configurations_before"| CFG
-    CFG -->|"solve"| MILP
+    CFG -->|"select_candidates (MILP)"| MILP
     MILP -->|"materialize_selected_candidates"| OPT
-    OPT -->|"offer"| SEL
+    OPT -->|"offer_before"| SEL
     SEL -.->|"compile check"| CMP
     SEL -->|"PlanOutput.selection"| E2E
     E2E -->|"installable_plan_of"| PI
@@ -138,13 +138,16 @@ Read the figure top to bottom:
   its stored views, and refreshes and retains views as the plan says. The
   Planner never sees storage or instances.
 
-No stage crate depends on the executor. Only `planner` calls it, for the
-compile check that Stage 3 runs (`PlannerExecutorCompileCheck`).
+No stage crate depends on the executor. Of the library crates, only the
+facade `planner` calls it, for the compile check that Stage 3 runs
+(`PlannerExecutorCompileCheck`); `devtools` and the integration tests also
+use it.
 
 ## 2. Structures inside Stages 1–3
 
 An arrow `A *-- B` means A contains B; `A --> B` means A refers to B by id;
-`A ..> B` means A is produced from B.
+`A ..> B` means A is produced from B, or (for `ComputationTarget`) holds the
+same node as B.
 
 ```mermaid
 classDiagram
@@ -174,9 +177,9 @@ classDiagram
         candidates: per group Vec~ImplementationCandidate~
     }
     class ImplementationCandidate {
-        implements: MemoGroupId
+        implements: Vec~MemoGroupId~
         node: OperatorNode
-        children: MemoGroupId
+        children: Vec~MemoGroupId~
         origin: CandidateOrigin
     }
     class CandidateOrigin {
@@ -216,7 +219,7 @@ classDiagram
     LogicalMemo *-- MemoGroup
     PerComputationCandidates *-- ComputationTarget
     ComputationTarget *-- ComputationCandidate
-    ComputationTarget --> MemoGroup : aggregate is a group
+    ComputationTarget ..> MemoGroup : aggregate is a group's node
     CandidateMemo *-- MemoGroup
     CandidateMemo *-- ImplementationCandidate
     CandidateMemo ..> LogicalMemo : try_populate_pass1
