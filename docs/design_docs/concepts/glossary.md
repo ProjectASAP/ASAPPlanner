@@ -24,6 +24,18 @@ A logical plan representation that can contain ASAP primitives, alongside relati
 
 One legal Post-ASAP alternative for answering an intent. Planner preserves alternatives for downstream selection rather than committing to one.
 
+## Memo group
+
+One distinct sub-expression of the workload, shared by every query that contains it, as in the Cascades/Volcano memo. Not a GROUP BY group. Code: `MemoGroup`, in `LogicalMemo` and `CandidateMemo`. See the [name decoder](../architecture/system-architecture.md#3-name-decoder) for the related candidate structures.
+
+## Implementation candidate
+
+One way to implement a memo group over its child groups, produced by Pass 1 or a Pass 2 rule (Cascades calls it a group expression). Code: `ImplementationCandidate`.
+
+## Physical candidate
+
+In Stage 3's search, one executable way to implement a memo group, with its own cost and input slots (`PhysicalCandidate`). A whole-workload physical plan is a `PhysicalWorkloadPlan`.
+
 ## Summary
 
 Maintained state, exact or approximate, that can answer some query intent more efficiently than raw data. A sketch is one kind of approximate summary.
