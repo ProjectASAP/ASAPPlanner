@@ -34,7 +34,7 @@ A concrete execution and deployment choice: runtime topology of data lifecycle s
 
 ## Raw data sample
 
-One timestamped value of a time series as it arrives, such as one Prometheus Remote Write sample. Raw data samples are the rows a time-series scan reads. Code names them `RawDataSample` / `raw_data_sample`, e.g. `RawDataSampleWindow`, `WeightDomain::RawDataSamplesOfMetric`, `raw_data_samples_of_metric`.
+One timestamped value of a time series as it arrives, such as one Prometheus Remote Write sample. Raw data samples are the rows a time-series scan reads. Code names them with `raw_data_sample`, e.g. `RawDataSampleWindow`, `WeightDomain::RawDataSamplesOfMetric`, `raw_data_samples_of_metric`.
 
 ## Summary sample
 

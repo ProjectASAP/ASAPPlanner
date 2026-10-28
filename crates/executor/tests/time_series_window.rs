@@ -95,18 +95,28 @@ fn window_over_rows(
 
 /// `(instance, ts, value)` samples of `latency_ms` as a provider's rows.
 fn provider(samples: &[(&str, i64, f64)]) -> BindingDataSources {
+    provider_in_batches(&[samples])
+}
+
+/// [`provider`] returning one batch per element of `batches`, in order.
+fn provider_in_batches(batches: &[&[(&str, i64, f64)]]) -> BindingDataSources {
     let schema = Arc::new(series_schema());
-    let rows = samples
+    let batches = batches
         .iter()
-        .map(|&(instance, ts, value)| {
-            let labels = BTreeMap::from([
-                ("__name__".to_string(), "latency_ms".to_string()),
-                ("instance".to_string(), instance.to_string()),
-            ]);
-            promql_rows::series_row(&schema, &labels, ts, value).unwrap()
+        .map(|samples| {
+            let rows = samples
+                .iter()
+                .map(|&(instance, ts, value)| {
+                    let labels = BTreeMap::from([
+                        ("__name__".to_string(), "latency_ms".to_string()),
+                        ("instance".to_string(), instance.to_string()),
+                    ]);
+                    promql_rows::series_row(&schema, &labels, ts, value).unwrap()
+                })
+                .collect();
+            Batch::try_new(schema.clone(), rows).unwrap()
         })
         .collect();
-    let batch = Batch::try_new(schema.clone(), rows).unwrap();
     let mut data_sources = BindingDataSources::default();
     data_sources
         .tables
@@ -114,7 +124,7 @@ fn provider(samples: &[(&str, i64, f64)]) -> BindingDataSources {
             Source::TimeSeries {
                 metric: "latency_ms".into(),
             },
-            Arc::new(MemorySource::new(schema, vec![batch]).unwrap()),
+            Arc::new(MemorySource::new(schema, batches).unwrap()),
         )
         .unwrap();
     data_sources
@@ -123,8 +133,17 @@ fn provider(samples: &[(&str, i64, f64)]) -> BindingDataSources {
 /// The `(ts, value)` rows `dag`'s root outputs in a run of `scope` over
 /// `samples`, bound at the `Scan`.
 fn points(dag: &PhysicalASAPDAG, samples: &[(&str, i64, f64)], scope: Scope) -> Vec<(i64, f64)> {
+    points_of(dag, provider(samples), scope)
+}
+
+/// The `(ts, value)` rows `dag`'s root outputs in a run of `scope` with
+/// `data_sources` bound.
+fn points_of(
+    dag: &PhysicalASAPDAG,
+    data_sources: BindingDataSources,
+    scope: Scope,
+) -> Vec<(i64, f64)> {
     let roots = [dag.roots[0] as u64];
-    let data_sources = provider(samples);
     let bound = compile(dag, &BTreeSet::new(), &roots)
         .unwrap()
         .instantiate(&data_sources)
@@ -191,6 +210,25 @@ fn an_instant_window_keeps_each_series_latest_sample() {
         ("a", 10_500, 99.0),
     ];
     assert_eq!(points(&dag, &samples, at(10_000)), [(9_900, 11.0)]);
+}
+
+// An instant window over several input batches keeps each series' latest
+// sample across them: of two at one time in different batches, the later
+// batch's; and a stale latest sample in a later batch ends the series.
+#[test]
+fn an_instant_window_over_several_batches_keeps_the_latest_across_them() {
+    let stale = f64::from_bits(STALE_MARKER);
+    let dag = window_over(1_000, TimeRangeKind::Instant, 0);
+    let tied: [&[(&str, i64, f64)]; 2] = [
+        &[("a", 9_900, 10.0)],
+        &[("a", 9_100, 1.0), ("a", 9_900, 11.0)],
+    ];
+    assert_eq!(
+        points_of(&dag, provider_in_batches(&tied), at(10_000)),
+        [(9_900, 11.0)]
+    );
+    let ended: [&[(&str, i64, f64)]; 2] = [&[("a", 9_500, 5.0)], &[("a", 9_900, stale)]];
+    assert_eq!(points_of(&dag, provider_in_batches(&ended), at(10_000)), []);
 }
 
 // A range window drops a stale marker and keeps the samples around it, an

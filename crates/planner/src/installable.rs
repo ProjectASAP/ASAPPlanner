@@ -31,11 +31,14 @@
 //! evaluation that first needs it (`StoredOutputBuild::QueryRun`), stores
 //! the result, and binds it the same way wherever the DAG reads that node.
 //! An ingestion run over `(window_start_ms, window_end_ms]` builds the
-//! window ending at `window_end_ms`: each `TimeRange(w)` keeps
-//! `(window_end_ms - w, window_end_ms]`, so a runtime builds a window
-//! `(start, end]` of `raw_data_sample_windows`
+//! windows ending at `window_end_ms`: each `TimeRange(w)` keeps
+//! `(window_end_ms - w, window_end_ms]`, whatever the shifts below it, so
+//! a runtime builds a window `(start, end]` of `raw_data_sample_windows`
 //! (`RawDataSampleWindow::bounds_ms` at the evaluation it is built for) in
-//! the run over `(start, end]`.
+//! the run over `(start, end]`. An output built in an ingestion run
+//! therefore reads windows that all end at one offset before the
+//! evaluation; a plan with one that does not is refused
+//! ([`InstallablePlanError::IngestionBuildReadsWindowsOfDifferentOffsets`]).
 //! A query run binds the stored outputs it reaches from the queries' roots
 //! without passing another stored output; an output only other stored
 //! outputs read is read through them.
@@ -353,6 +356,21 @@ pub enum InstallablePlanError {
         time_range_node_id: PhysicalASAPNodeId,
         reason: &'static str,
     },
+    /// Unsatisfiable request: stored output `node_id` is built in an
+    /// ingestion run but reads raw-data-sample windows that end at
+    /// different offsets before the evaluation (`end_offsets_ms`). An
+    /// ingestion run builds the windows ending at its `window_end_ms`
+    /// (each `TimeRange(w)` keeps `(window_end_ms - w, window_end_ms]`),
+    /// so no one run builds them all; a runtime cannot build this plan.
+    #[error(
+        "stored output {node_id} is built in an ingestion run from raw windows ending at \
+         different offsets {end_offsets_ms:?} ms before the evaluation, which no one \
+         ingestion run builds"
+    )]
+    IngestionBuildReadsWindowsOfDifferentOffsets {
+        node_id: PhysicalASAPNodeId,
+        end_offsets_ms: Vec<i64>,
+    },
 }
 
 impl From<ReferencePlanError> for InstallablePlanError {
@@ -472,6 +490,9 @@ impl ExecutorCompileCheck for PlannerExecutorCompileCheck {
             // selection accept a plan that final installation must reject.
             Err(
                 error @ (InstallablePlanError::UnsupportedRawDataSampleWindow { .. }
+                | InstallablePlanError::IngestionBuildReadsWindowsOfDifferentOffsets {
+                    ..
+                }
                 | InstallablePlanError::StoredOutputReadsUnwindowedSource { .. }
                 | InstallablePlanError::StoredOutputWithoutCoverage { .. }),
             ) => {
@@ -1107,6 +1128,23 @@ fn runtime_inputs_of_before(
         check_installation_deadline(deadline)?;
         let node = indexed.nodes[&id];
         let inputs = indexed.inputs_of_stored(id, &stored)?;
+        if matches!(node.materialization, Materialization::MatAtIngestion(_)) {
+            let mut end_offsets_ms: Vec<i64> = inputs
+                .raw_data_sample_windows
+                .iter()
+                .map(|window| window.end_offset_ms)
+                .collect();
+            end_offsets_ms.sort_unstable();
+            end_offsets_ms.dedup();
+            if end_offsets_ms.len() > 1 {
+                return Err(
+                    InstallablePlanError::IngestionBuildReadsWindowsOfDifferentOffsets {
+                        node_id: id,
+                        end_offsets_ms,
+                    },
+                );
+            }
+        }
         let coverage = coverage_of(id, &inputs, &ir, &coverage_by_node).map_err(|error| {
             InstallablePlanError::StoredOutputWithoutCoverage {
                 node_id: id,
@@ -1738,6 +1776,84 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(300_000, 0)]
         );
+    }
+
+    // A summary stored at ingestion time over a window ending at the
+    // evaluation and one ending a minute before it cannot be built in one
+    // ingestion run, so the plan is refused, not built wrong.
+    #[test]
+    fn an_ingestion_build_of_windows_at_different_offsets_is_refused() {
+        use asap_types::ir::operator::operator_properties::TimeShift;
+        use asap_types::ir::operator::{Reduction, Source};
+        use asap_types::ir::physical_export::compile_physical_asap_dag;
+        use asap_types::ir::scalar::ColumnRef;
+        use asap_types::ir::schema::{
+            DataType, ExactKind, ExactParams, Field, FieldDataType, Schema, SummaryUpdate,
+        };
+        use asap_types::ir::{
+            apply_materialization_timings, OperatorNode, TimeRangeKind, TimingMemo,
+        };
+        use asap_types::physical::Medium;
+        use std::time::Duration;
+        let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::TimeSeries {
+                metric: "latency_ms".into(),
+            },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                ],
+                0,
+                vec![],
+            ),
+        }))
+        .unwrap();
+        // A one-minute window ending `offset_ms` before the evaluation.
+        let window = |offset_ms: i64| {
+            let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
+                shift: TimeShift {
+                    offset_ms,
+                    at: None,
+                },
+                child: Rc::clone(&scan),
+            }))
+            .unwrap();
+            OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+                range: Duration::from_secs(60),
+                kind: TimeRangeKind::Range,
+                child: shifted,
+            }))
+            .unwrap()
+        };
+        // One sum over both windows' rows.
+        let both = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Concat {
+            children: vec![window(0), window(60_000)],
+            discriminator_unique_key: None,
+        }))
+        .unwrap();
+        let merged = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+            child: both,
+            family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            input: SummaryUpdate::column(ColumnRef::Named("value".into())),
+            reduction: Reduction::by(vec![]),
+            grouping: Default::default(),
+            filter: None,
+        }))
+        .unwrap();
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&merged, Materialization::MatAtIngestion(Medium::Memory));
+        let timed =
+            apply_materialization_timings(&merged, &assignment, &mut TimingMemo::new()).unwrap();
+        let dag = compile_physical_asap_dag(&timed).unwrap();
+        match runtime_inputs_of(&dag, &HashMap::new(), &HashMap::new()) {
+            Err(InstallablePlanError::IngestionBuildReadsWindowsOfDifferentOffsets {
+                end_offsets_ms,
+                ..
+            }) => assert_eq!(end_offsets_ms, [0, 60_000]),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// Unrestricted summaries become the executor's families; a caller's

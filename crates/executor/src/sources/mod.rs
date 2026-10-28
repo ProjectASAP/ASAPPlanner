@@ -37,7 +37,7 @@ pub trait TableProvider {
     /// time range, predicates and projection, so a provider may ignore any
     /// field. A materialized view slot is not re-filtered: its provider returns exactly
     /// the states the run reads, selected by `request.time_range_ms` (see
-    /// [`ScanRequest::time_range_ms`]). The executor treats a view's states
+    /// [`ScanRequest::time_range_ms`]). The executor treats a materialized view's states
     /// as held by the store, so a run is not charged for them.
     fn scan(
         &self,
@@ -118,7 +118,7 @@ pub struct BindingDataSources {
     /// however many `Scan`s read it.
     pub tables: DataSources,
     /// Materialized view (its slot's node id) → provider of the
-    /// view's stored states.
+    /// materialized view's stored states.
     pub materialized_views: BTreeMap<NodeId, Arc<dyn TableProvider>>,
 }
 
@@ -173,8 +173,8 @@ pub(crate) struct Scan {
     /// `predicates` as the provider receives them.
     predicate_hints: Vec<ScalarExpr<()>>,
     window: ScanWindow,
-    /// A table slot re-applies its requested time range; a view's
-    /// provider selects its panes, which the executor cannot check.
+    /// A table slot re-applies its requested time range; a materialized
+    /// view's provider selects its panes, which the executor cannot check.
     reapplies_time_range: bool,
 }
 impl Scan {
@@ -223,7 +223,7 @@ impl Scan {
                 evaluation_time_ms, ..
             } => self.window.bounds_ms(evaluation_time_ms),
             // A table slot read through windows reads the rows of the
-            // window the run builds; a view's states are those bound.
+            // window the run builds; a materialized view's states are those bound.
             Scope::Ingestion {
                 window_start_ms,
                 window_end_ms,
@@ -332,7 +332,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                 }
                 let batch = self.to_output(batch?, &provider_schema)?;
                 if !self.reapplies_time_range {
-                    // A view's states are the store's, read by this run.
+                    // A materialized view's states are the store's, read by this run.
                     batch.mark_states_held_outside_run();
                 }
                 if predicates.is_empty() && time_filter.is_none() {
