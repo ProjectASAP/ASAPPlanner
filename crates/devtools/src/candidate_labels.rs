@@ -12,6 +12,7 @@ use asap_logical_asap_optimization::per_computation_candidates::{
 };
 use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
+use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::NonASAPOp;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
@@ -528,7 +529,8 @@ fn duration_name(ms: u64) -> String {
 }
 
 /// `logical` followed by what the candidate materializes, e.g.
-/// "… · ingestion time: Kll ×5 panes · query time, shared: DDSketch";
+/// "… · ingestion time: Kll for Q1, 5 × 1m panes · query time, shared:
+/// DDSketch";
 /// just `logical` when nothing is.
 pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String {
     let mut parts: Vec<(&str, Vec<String>)> = Vec::new();
@@ -545,7 +547,23 @@ pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String
             .iter()
             .find(|n| n.id == *id)
             .expect("an assigned node is in the DAG");
-        let label = build_label(&node.payload);
+        let label = match &node.payload {
+            // Name the chain: chains of one family and pane count differ by
+            // their readers and pane width.
+            Operator::ASAP(ASAPOp::PaneChain {
+                pane_width_ms,
+                pane_count,
+                ..
+            }) => format!(
+                "{}, {pane_count} × {} panes",
+                for_queries(
+                    state_label(&node.payload),
+                    &dag_readers(&candidate.dag, *id)
+                ),
+                duration_name(*pane_width_ms)
+            ),
+            payload => build_label(payload),
+        };
         match parts.iter_mut().find(|(p, _)| *p == phase) {
             Some((_, labels)) => labels.push(label),
             None => parts.push((phase, vec![label])),
@@ -563,21 +581,63 @@ pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String
 
 /// A summary build, e.g. "Kll ×5 panes" or "Sum acc".
 fn build_label<C>(payload: &Operator<C>) -> String {
-    let Operator::ASAP(op) = payload else {
-        return payload.kind_name().to_string();
-    };
-    let state = match op {
-        ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. } => match family {
-            FieldDataType::Sketch(kind, _) => sketch_name(kind.algorithm()),
-            FieldDataType::ExactAggregate(kind, _) => format!("{kind:?} acc"),
-            _ => payload.kind_name().to_string(),
-        },
-        _ => payload.kind_name().to_string(),
-    };
-    match op {
-        ASAPOp::PaneChain { pane_count, .. } => format!("{state} ×{pane_count} panes"),
-        _ => state,
+    match payload {
+        Operator::ASAP(ASAPOp::PaneChain { pane_count, .. }) => {
+            format!("{} ×{pane_count} panes", state_label(payload))
+        }
+        _ => state_label(payload),
     }
+}
+
+/// The state a summary build or pane chain keeps, e.g. "Kll" or "Sum acc";
+/// any other operator's kind.
+fn state_label<C>(payload: &Operator<C>) -> String {
+    match payload {
+        Operator::ASAP(ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. }) => {
+            match family {
+                FieldDataType::Sketch(kind, _) => sketch_name(kind.algorithm()),
+                FieldDataType::ExactAggregate(kind, _) => format!("{kind:?} acc"),
+                _ => payload.kind_name().to_string(),
+            }
+        }
+        _ => payload.kind_name().to_string(),
+    }
+}
+
+/// The queries (in workload order) whose root reaches node `id` of `dag`.
+fn dag_readers(dag: &PhysicalASAPDAG, id: PhysicalASAPNodeId) -> Vec<usize> {
+    // Query `q` is the scalar root keyed `q` when there is one, and
+    // otherwise the next operator root.
+    let mut operator_roots = dag.roots.iter();
+    let query_starts: Vec<Vec<PhysicalASAPNodeId>> = (0..dag.roots.len() + dag.scalar_roots.len())
+        .map(|q| match dag.scalar_roots.iter().find(|(i, _)| *i == q) {
+            Some((_, expr)) => expr.operator_refs().into_iter().copied().collect(),
+            None => operator_roots.next().into_iter().copied().collect(),
+        })
+        .collect();
+    query_starts
+        .into_iter()
+        .enumerate()
+        .filter(|(_, starts)| {
+            let mut seen = std::collections::HashSet::new();
+            let mut stack = starts.clone();
+            while let Some(node) = stack.pop() {
+                if node == id {
+                    return true;
+                }
+                if seen.insert(node) {
+                    stack.extend(
+                        dag.edges
+                            .iter()
+                            .filter(|e| e.consumer == node)
+                            .map(|e| e.producer),
+                    );
+                }
+            }
+            false
+        })
+        .map(|(q, _)| q)
+        .collect()
 }
 
 /// A sketch algorithm's display name, e.g. "CMS+heap" or "Kll".
@@ -645,6 +705,126 @@ mod tests {
         let label = connected_candidate_label(&[roots[1].1.clone(), roots[1].1.clone()]);
         assert!(label.contains("shared Sum acc (Q1, Q2)"), "{label}");
         assert_eq!(label.matches("shared Sum acc").count(), 1);
+    }
+
+    /// Two physical candidates that each maintain a different query's pane
+    /// chain at ingestion time get different labels, even when both chains
+    /// have the same family and pane count (6 × 10s for Q1, 6 × 30s for Q2).
+    #[test]
+    fn physical_labels_name_the_pane_chain_maintained_at_ingestion() {
+        use asap_logical_asap_optimization::asap_aware_cse::{
+            pane_candidates, window_composition_pass2_candidates,
+        };
+        use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
+        use asap_physical_asap_optimization::optimize_physical_asap;
+        use asap_types::workload::PlanningWorkload;
+
+        let workload: PlanningWorkload = serde_json::from_str(
+            r#"{"query_workload": {"language": "promql", "query_batch": null, "repeating_queries": [
+              {"query": "quantile_over_time(0.5, data[1m])", "demand": {"fixed_interval": 10000},
+               "requirements": {"accuracy": {"max_error": 0.01, "failure_probability": 0.001}},
+               "predictability": {"predictable": {"known_at": null}}},
+              {"query": "quantile_over_time(0.5, data[3m])", "demand": {"fixed_interval": 30000},
+               "requirements": {"accuracy": {"max_error": 0.01, "failure_probability": 0.001}},
+               "predictability": {"predictable": {"known_at": null}}}]},
+             "data_workload": {"arrival": {"ingesting": {"rows_per_second": 666.67}},
+              "sources": {"data": {"series_count": 10000, "metric_type": "gauge", "sample_interval": 15000}}}}"#,
+        )
+        .unwrap();
+        let inventory = generate_per_computation_candidates(
+            lower_promql_roots(&workload)
+                .unwrap()
+                .into_iter()
+                .enumerate()
+                .collect(),
+        )
+        .unwrap();
+        let choice: Vec<usize> = inventory
+            .targets
+            .iter()
+            .map(|target| {
+                target
+                    .choices
+                    .candidates
+                    .iter()
+                    .position(|c| *c == ComputationCandidate::Summary(SketchAlgorithm::DDSketch))
+                    .expect("a DDSketch candidate")
+            })
+            .collect();
+        let summary: Vec<_> = compose_logical_candidate(&inventory, &choice)
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect();
+        let entries: Vec<_> = workload.query_workload.entries().collect();
+        let grids: Vec<_> = entries.iter().map(|e| e.evaluation_grid_ms()).collect();
+        let panes = pane_candidates(&summary, &grids);
+        let roots = window_composition_pass2_candidates(&summary, &panes)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.pane_candidates.len() == 2 && c.shared_chains.is_empty())
+            .expect("each query's DDSketch in its own pane chain")
+            .roots
+            .unwrap();
+        let plans = optimize_physical_asap(
+            "L1",
+            &roots,
+            &entries,
+            &workload.data_workload.clone().unwrap_or_default(),
+            &DeploymentCapabilities::default(),
+        )
+        .unwrap();
+        // The plans that maintain exactly one pane chain at ingestion time.
+        let one_chain_at_ingestion: Vec<String> = plans
+            .iter()
+            .filter(|plan| {
+                plan.materialization
+                    .iter()
+                    .filter(|(id, m)| {
+                        matches!(m, Materialization::MatAtIngestion(_))
+                            && matches!(
+                                plan.dag
+                                    .nodes
+                                    .iter()
+                                    .find(|n| n.id == **id)
+                                    .unwrap()
+                                    .payload,
+                                Operator::ASAP(ASAPOp::PaneChain { .. })
+                            )
+                    })
+                    .count()
+                    == 1
+            })
+            .map(|plan| physical_label("L1", plan))
+            .collect();
+        let ingestion = |label: &String| {
+            label
+                .split(" · ")
+                .find(|p| p.starts_with("ingestion time"))
+                .map(str::to_string)
+        };
+        assert!(
+            one_chain_at_ingestion
+                .iter()
+                .any(|l| ingestion(l).as_deref()
+                    == Some("ingestion time: DDSketch for Q1, 6 × 10s panes")),
+            "{one_chain_at_ingestion:#?}"
+        );
+        assert!(
+            one_chain_at_ingestion
+                .iter()
+                .any(|l| ingestion(l).as_deref()
+                    == Some("ingestion time: DDSketch for Q2, 6 × 30s panes")),
+            "{one_chain_at_ingestion:#?}"
+        );
+        let mut distinct = one_chain_at_ingestion.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            one_chain_at_ingestion.len(),
+            "{one_chain_at_ingestion:#?}"
+        );
     }
 
     /// Raw logical operators have an exact label, rather than an empty choice label.
