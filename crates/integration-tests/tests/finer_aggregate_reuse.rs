@@ -341,11 +341,11 @@ fn filtered_sum_costs_little_beyond_the_finer_sums() {
 /// Example C end to end: the joint plan costs no more than planning each
 /// query alone, and no more than on main before the state path (0.2285/s).
 /// The joint optimum is 0.1963/s: q1 keeps the NYC and SF states of a KLL
-/// by city built over q0's query-time rows. Open: the search proves it only
-/// after about 16 evaluations and 9 s, past the seed round's 5 s, and later
-/// rounds return a query-time plan at 0.3321/s.
+/// by city built over q0's query-time rows. The search reaches the separate
+/// plans' cost because the first round evaluates them combined when the joint
+/// search ends above them; reaching 0.1963/s within the budget needs
+/// candidate-level cuts for rejected proposals.
 #[test]
-#[ignore = "the joint search needs the independent plan as a seed (separate plan-selection PR)"]
 fn filtered_kll_states_cost_no_more_than_separate_plans() {
     let grouped = format!("SELECT city, {P90} FROM metrics WHERE {WINDOW} GROUP BY city");
     let filtered = format!("SELECT {P90} FROM metrics WHERE {WINDOW} AND city IN ('NYC', 'SF')");
