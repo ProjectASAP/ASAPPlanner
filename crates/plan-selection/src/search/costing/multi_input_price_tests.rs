@@ -97,6 +97,7 @@ fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
+            seed_separate_plans: false,
             original_roots: &roots,
             entries: &entries,
             data: &data,
@@ -251,6 +252,7 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
     let context = CandidatePlanningContext {
         deadline: None,
         refine_materialization: false,
+        seed_separate_plans: false,
         original_roots: &original,
         entries: &entries,
         data: &data,

@@ -848,6 +848,8 @@ fn search_domain<Id: Clone>(
     // State-group splitting is currently one-shot. Keep the unexpanded memo;
     // later rounds append local widths, then rebuild the state/physical catalog.
     progress.local_memo = Some(memo.clone());
+    // The seed-grid round, or the one complete round when there is none.
+    let first_round = progress.previous_domain.is_none();
     progress.previous_domain = Some(domain);
     let memo = expand_concrete_summary_state_groups_before(memo, domain, deadline)
         .map_err(|error| {
@@ -886,6 +888,7 @@ fn search_domain<Id: Clone>(
     let context = CandidatePlanningContext {
         deadline,
         refine_materialization: domain == asap_logical_asap_optimization::memo::state_configurations::PaneWidthDomain::SeedGrids,
+        seed_separate_plans: first_round,
         original_roots: &roots,
         entries,
         data,
