@@ -59,7 +59,7 @@ because its output has no guarantee;
 reason.
 Open the document in the [Stage Viewer](stage-viewer.md) to see every
 stage, or run a built-in example of the design document, such as
-`--example planner-layering-1 --exhaustive --enforce-accuracy-guarantees`. The Stage Viewer guide lists every option.
+`--example planner-layering-1 --exhaustive --enforce-accuracy-guarantees`. The [stage_pipeline guide](stage-pipeline.md) describes more options.
 
 ## Inspect a query's logical DAG
 
