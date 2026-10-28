@@ -1597,37 +1597,44 @@ mod tests {
 
     // A query-time scan, its window and the exact build over it are priced
     // from the window's rows at the slowest query rate: positive bounds that
-    // never exceed the evaluated plan's cost.
+    // never exceed the evaluated plan's cost, also for a shifted window, whose
+    // scan Stage 3 prices at the window's width and whose older raw rows it
+    // keeps at its own charge.
     #[test]
     fn query_time_scans_and_builds_have_certified_bounds() {
-        let (configured, bound, cost) = query_time_bound_and_cost(
+        for query in [
             "sum_over_time(latency[5m])",
-            AccuracyTarget::exact(),
-            AccuracyTarget::exact(),
-            &crate::PlanSelectionSettings::default(),
-            |node| {
-                matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(..), child, .. })
-                    if matches!(child.non_asap(), Some(NonASAPOp::TimeRange { .. })))
-            },
-        );
-        let scan = bound_of(&configured, |node| {
-            matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }))
-        });
-        let range = bound_of(&configured, |node| {
-            matches!(node.non_asap(), Some(NonASAPOp::TimeRange { .. }))
-        });
-        let build = bound_of(&configured, |node| {
-            matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. }))
-        });
-        // 300 s × 1000 rows/s, every 10 s: 30000 rows read per second.
-        assert!(
-            scan > 0.0 && range > 0.0 && build > 0.0,
-            "{scan} {range} {build}"
-        );
-        assert!(
-            bound > 0.0 && bound <= cost * (1.0 + 1e-9),
-            "bound {bound} against cost {cost}"
-        );
+            "sum_over_time(latency[5m] offset 1m)",
+        ] {
+            let (configured, bound, cost) = query_time_bound_and_cost(
+                query,
+                AccuracyTarget::exact(),
+                AccuracyTarget::exact(),
+                &crate::PlanSelectionSettings::default(),
+                |node| {
+                    matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(..), child, .. })
+                        if matches!(child.non_asap(), Some(NonASAPOp::TimeRange { .. })))
+                },
+            );
+            let scan = bound_of(&configured, |node| {
+                matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }))
+            });
+            let range = bound_of(&configured, |node| {
+                matches!(node.non_asap(), Some(NonASAPOp::TimeRange { .. }))
+            });
+            let build = bound_of(&configured, |node| {
+                matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. }))
+            });
+            // 300 s × 1000 rows/s, every 10 s: 30000 rows read per second.
+            assert!(
+                scan > 0.0 && range > 0.0 && build > 0.0,
+                "{query}: {scan} {range} {build}"
+            );
+            assert!(
+                bound > 0.0 && bound <= cost * (1.0 + 1e-9),
+                "{query}: bound {bound} against cost {cost}"
+            );
+        }
     }
 
     fn is_kll_build(node: &OperatorNode) -> bool {
