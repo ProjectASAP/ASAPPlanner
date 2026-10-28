@@ -167,9 +167,6 @@ fn composed_summary_candidates(
 fn shared_kll_candidate(
     workload: &PlanningWorkload,
 ) -> asap_physical_asap_optimization::PhysicalWorkloadPlan {
-    use asap_logical_asap_optimization::asap_aware_cse::{
-        sharing_candidates, with_shared_candidates,
-    };
     use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
     use asap_logical_asap_optimization::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
@@ -195,8 +192,20 @@ fn shared_kll_candidate(
         .into_iter()
         .map(|(_, root)| root)
         .collect();
-    let sharing = sharing_candidates(&roots);
-    let roots = with_shared_candidates(&roots, &sharing, &vec![true; sharing.len()]);
+    // Every identical sub-DAG of the two queries made one node.
+    let roots: Vec<_> = asap_types::ir::cse::share_common_sub_dags(
+        roots
+            .into_iter()
+            .enumerate()
+            .map(|(id, root)| match root {
+                QueryRoot::Operator(node) => (id, node),
+                QueryRoot::Scalar(_) => panic!("operator root"),
+            })
+            .collect(),
+    )
+    .into_iter()
+    .map(|(_, node)| QueryRoot::Operator(node))
+    .collect();
     let mut physical = asap_physical_asap_optimization::optimize_physical_asap_chosen(
         "shared-kll",
         &roots,
