@@ -1090,17 +1090,29 @@ class AppTests(unittest.TestCase):
         js.eval("__els.pick1.__on.change({ target: { value: 'L2' } })")
         self.assertNotIn('aria-pressed="true"', js.eval("__els.enumRows.innerHTML"))
 
-    def test_an_enumerated_dag_with_fewer_root_groups_than_queries_names_no_query(self):
-        """Its roots are root groups: with one root for two queries the lane
-        labels the root as a root group, not as a query."""
-        doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
-        choice = doc["memo"]["enumeration"]["choices"][0]
-        choice["dag"]["roots"] = choice["dag"]["roots"][:1]
+    def enumerated_roots(self, doc, choice_id):
         js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
-        js.eval("__els.enumRows.__on.click({ target: { closest() { return { dataset: { id: 'E1' } }; } } })")
-        roots = [e["data"]["rootFor"] for e in self.ev(js, "__rendered.cy1") if e["data"].get("rootFor")]
-        self.assertEqual(roots, [["root group #1"]])
-        self.assertIn("1 root groups for 2 queries", self.text(js, "lane1-meta"))
+        js.eval(f"__els.enumRows.__on.click({{ target: {{ closest() {{ return {{ dataset: {{ id: {json.dumps(choice_id)} }} }}; }} }} }})")
+        roots = {e["data"]["nodeId"]: e["data"]["rootFor"] for e in self.ev(js, "__rendered.cy1") if e["data"].get("rootFor")}
+        return roots, self.text(js, "lane1-meta")
+
+    def test_enumerated_roots_are_named_by_their_root_groups_queries(self):
+        """Roots come in increasing root-group id, not query order: with G3
+        the root of q2 and G7 the root of q1, the first root is q2's."""
+        doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
+        groups = {g["id"]: g for g in doc["memo"]["steps"][1]["groups"]}
+        groups[3]["roots_of"], groups[7]["roots_of"] = [1], [0]
+        dag = doc["memo"]["enumeration"]["choices"][0]["dag"]
+        first, second = (r["Operator"] for r in dag["roots"])
+        roots, _ = self.enumerated_roots(doc, "E1")
+        self.assertEqual(roots, {first: ["q2"], second: ["q1"]})
+
+    def test_enumerated_roots_without_the_steps_memo_name_no_query(self):
+        doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
+        doc["memo"]["steps"] = doc["memo"]["steps"][:1]
+        roots, meta = self.enumerated_roots(doc, "E1")
+        self.assertEqual(sorted(roots.values()), [["root group #1"], ["root group #2"]])
+        self.assertIn("roots not matched to queries", meta)
 
     def test_a_broken_enumeration_refuses_the_document(self):
         doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}

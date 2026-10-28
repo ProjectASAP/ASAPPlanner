@@ -153,7 +153,15 @@ function enumerationView(doc) {
     ? `every group's candidate (no selected choice${memo.selected_choice_unavailable ? `: ${memo.selected_choice_unavailable}` : ''})`
     : sameStep ? 'groups whose candidate differs from the selected plan’s choice'
       : `groups whose candidate differs from the selected plan’s choice, which is over the ${memoStepName(lastStep)} memo: its group ids and candidate indices may not match ${name}'s, and “selected” is not meaningful`;
-  return { counts, listing, priced, against, rows };
+  // `compose` writes one root per root group, in increasing group id: root k
+  // is the k-th group with `roots_of` and names those queries. Null when the
+  // enumerated step's memo is not in the document.
+  const queryIds = ((doc.workload || {}).queries || []).map((q) => q.id);
+  const rootGroups = step && Array.isArray(step.groups)
+    ? step.groups.filter((g) => g && Array.isArray(g.roots_of) && g.roots_of.length).sort((a, b) => a.id - b.id) : null;
+  const rootNames = rootGroups
+    ? rootGroups.map((g) => g.roots_of.map((q) => queryIds[q] || `query #${q + 1}`).join(', ')) : null;
+  return { counts, listing, priced, against, rows: sameStep ? rows : rows.map((r) => ({ ...r, selected: false })), rootNames };
 }
 
 // The panel's state: the document's view, the row drawn in the Stage 1
@@ -183,7 +191,8 @@ function pressEnumeratedRow(id) {
 }
 
 // Fill the panel for `doc` (hidden without `memo.enumeration`); a click on a
-// row calls `draw(id, dag, description)` and marks the row.
+// row calls `draw(id, dag, description, rootNames)` (rootNames: the queries
+// each root answers, or null when unknown) and marks the row.
 function renderEnumeration(doc, draw) {
   const $ = (id) => document.getElementById(id);
   const state = enumerationPanel;
@@ -202,7 +211,8 @@ function renderEnumeration(doc, draw) {
     if (!button || !state.view) return;
     const choice = state.doc.memo.enumeration.choices.find((c) => c.id === button.dataset.id);
     const row = state.view.rows.find((r) => r.id === button.dataset.id);
-    state.draw(choice.id, choice.dag, row.text);
+    const names = state.view.rootNames && state.view.rootNames.length === choice.dag.roots.length ? state.view.rootNames : null;
+    state.draw(choice.id, choice.dag, row.text, names);
     pressEnumeratedRow(choice.id);
   });
 }

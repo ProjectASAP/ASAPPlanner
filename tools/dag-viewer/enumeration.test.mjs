@@ -100,6 +100,7 @@ test('a selected choice over a later step than the enumerated one is flagged', (
   doc.memo.selected_choice = { 7: 1, 9: 2 };
   const view = call('enumerationView', doc);
   assert.match(view.against, /over the Pass 2 memo/);
+  assert.ok(view.rows.every((r) => !r.selected));
   // Only the row's own groups are compared across steps.
   assert.equal(view.rows[1].text, 'the selected choice');
 });

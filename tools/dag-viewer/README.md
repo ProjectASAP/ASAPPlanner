@@ -93,8 +93,11 @@ To run it, see [RUNNING.md](RUNNING.md).
   plan is red; the selected choice says `✓ selected`. Clicking a row draws
   its DAG in the Stage 1 lane; the document holds every listed choice's
   composed DAG, so the page composes nothing. Such a DAG has no Stage 2
-  plan, so the Stage 2 lane is cleared. Its roots are its root groups; when
-  there are fewer than queries, the lane labels them `root group #n`.
+  plan, so the Stage 2 lane is cleared. Its roots are its root groups, in
+  increasing group id; the lane names each by the queries in its group's
+  `roots_of`, or labels it `root group #n` when the enumerated step's memo is
+  not in the document. When the enumerated step is earlier than the last
+  one, no row is marked selected.
 - **Highlighting**: the **highlight query** menu dims, in every lane, what
   that query's root does not reach. Clicking a node dims everything but
   what it reads and what reads it, directly or through other nodes; clicking
