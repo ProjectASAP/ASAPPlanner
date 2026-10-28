@@ -10,10 +10,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use asap_executor::operators::Operator as ExecutorOperator;
-use asap_executor::physical_planner::{bind_with_data_sources, compile, Source};
+use asap_executor::physical_planner::compile;
 use asap_executor::runtime::{Limits, RunContext, Scope};
-use asap_executor::sources::{DataSources, MemorySource};
+use asap_executor::sources::{BindingDataSources, DataSources, MemorySource, TableProvider};
 use asap_executor::values::{Batch, Value};
 use asap_executor::{RawDataSample, RawDataSampleSelector};
 use asap_planner::{
@@ -234,7 +233,12 @@ fn run_sql(plan: &InstallablePlan, query: usize) -> Vec<Batch> {
         )
         .unwrap();
     let roots = [reference.roots[query] as u64];
-    let bound = bind_with_data_sources(&reference, BTreeMap::new(), &roots, &sources)
+    let data_sources = BindingDataSources {
+        tables: sources,
+        ..Default::default()
+    };
+    let bound = compile(&reference, &BTreeSet::new(), &roots)
+        .and_then(|compiled| compiled.instantiate(&data_sources))
         .expect("the plan binds to the table");
     let batches = collect(bound.execute(&roots, query_scope()).unwrap().remove(0));
     batches
@@ -276,11 +280,15 @@ fn run_promql(plan: &InstallablePlan) -> Vec<Batch> {
     let sources = inputs
         .into_iter()
         .map(|(id, batch)| {
-            let source = ExecutorOperator::source(batch.schema().clone(), vec![batch]).unwrap();
-            (id, Box::new(source) as Source<'_>)
+            let source = MemorySource::new(batch.schema().clone(), vec![batch]).unwrap();
+            (id, Arc::new(source) as Arc<dyn TableProvider>)
         })
         .collect();
-    let instance = compiled.instantiate(sources).unwrap();
+    let data_sources = BindingDataSources {
+        views: sources,
+        ..Default::default()
+    };
+    let instance = compiled.instantiate(&data_sources).unwrap();
     let batches = collect(
         instance
             .execute(compiled.roots(), query_scope())

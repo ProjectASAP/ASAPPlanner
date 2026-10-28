@@ -36,11 +36,6 @@ fn invalid(message: impl Into<String>) -> Error {
     Error::Invalid(message.into())
 }
 
-/// Source nodes cut the DAG at an installed storage/ingestion frontier. The
-/// binding must have exactly the declared schema and no upstream dependencies.
-/// A deployment must authorize these frontiers before calling this function.
-pub type Source<'a> = Box<dyn PhysicalOperator<Batch, SchemaRef> + 'a>;
-
 pub mod precompute;
 // The executor's PromQL row encoding and the timing frontier are internals:
 // a deployment runtime feeds samples with `crate::RawDataSampleSelector`
@@ -66,9 +61,11 @@ pub use compiled::CompiledPhysicalDAG;
 mod row_values;
 
 /// Compile computation without opening or retaining deployment readers.
-/// `boundaries` are the nodes cut out as input slots, each with its
-/// `output_schema` in `dag`; a raw-data `Scan` boundary must also have
-/// predicates that compile over that schema.
+/// Every reachable `Scan` leaf is a table slot, bound by its `Source`; its
+/// predicates must compile over its schema. `boundaries` are the other nodes
+/// cut out as view slots, bound by node id, each with its `output_schema` in
+/// `dag`. ([`precompute::compile`] differs: its frontiers, a `Scan`
+/// included, are view slots bound by node id, with no derived window.)
 pub fn compile(
     dag: &PhysicalASAPDAG,
     boundaries: &BTreeSet<NodeId>,
@@ -97,51 +94,6 @@ fn check_compile_deadline(deadline: Option<std::time::Instant>) -> Result<(), Er
     } else {
         Ok(())
     }
-}
-
-/// Convenience for callers that already resolved inputs. Lowering never
-/// reads them; instantiation checks each against its slot.
-pub fn bind<'a>(
-    dag: &PhysicalASAPDAG,
-    sources: BTreeMap<NodeId, Source<'a>>,
-    roots: &[NodeId],
-) -> Result<PhysicalDAG<'a, Batch, SchemaRef>, Error> {
-    let boundaries = sources.keys().copied().collect();
-    compile(dag, &boundaries, roots)?.instantiate(sources)
-}
-
-/// Resolve raw scan connectors before invoking the reader-independent compiler.
-pub fn bind_with_data_sources<'a>(
-    dag: &PhysicalASAPDAG,
-    mut sources: BTreeMap<NodeId, Source<'a>>,
-    roots: &[NodeId],
-    data_sources: &crate::sources::DataSources,
-) -> Result<PhysicalDAG<'a, Batch, SchemaRef>, Error> {
-    let restored = logical::restore(dag)?;
-    // Only resolve scans reachable below the selected input boundaries.
-    let mut pending = roots.to_vec();
-    let mut seen = BTreeSet::new();
-    while let Some(id) = pending.pop() {
-        if !seen.insert(id) || sources.contains_key(&id) {
-            continue;
-        }
-        let _node = dag
-            .nodes
-            .iter()
-            .find(|n| n.id as u64 == id)
-            .ok_or_else(|| invalid(format!("missing node {id}")))?;
-        if matches!(restored[&id].non_asap(), Some(NonASAPOp::Scan { .. })) {
-            sources.insert(id, Box::new(data_sources.bind(&restored[&id])?));
-        } else {
-            pending.extend(
-                dag.edges
-                    .iter()
-                    .filter(|e| e.consumer as u64 == id)
-                    .map(|e| e.producer as u64),
-            );
-        }
-    }
-    bind(dag, sources, roots)
 }
 
 #[cfg(test)]
@@ -238,6 +190,13 @@ fn compile_internal(
             }
         }
     }
+    // Each compiled node's readers in this DAG: a boundary reads nothing.
+    let mut readers = BTreeMap::<NodeId, Vec<NodeId>>::new();
+    for &id in ordered.iter().filter(|id| !boundaries.contains(id)) {
+        for &input in dependencies.get(&id).into_iter().flatten() {
+            readers.entry(input).or_default().push(id);
+        }
+    }
     let mut physical_dag = CompiledPhysicalDAG::new(roots.to_vec());
     for id in ordered {
         check_compile_deadline(deadline)?;
@@ -245,26 +204,45 @@ fn compile_internal(
         let auxiliary = helper_id(id, 0)?;
         let output = Arc::new(node.output_schema.clone());
         crate::values::validate_schema(&output)?;
-        if boundaries.contains(&id) {
-            // A raw-data scan slot is bound with the payload's schema, and its
-            // predicates compile over it, as the bound scan compiles them.
-            if let Payload::NonASAP(NonASAPOp::Scan {
-                predicates, schema, ..
-            }) = &node.payload
-            {
-                if *schema != node.output_schema {
-                    return Err(invalid(format!(
-                        "scan {id}: schema differs from its output schema"
-                    )));
-                }
-                for predicate in predicates {
-                    local_scalar(&predicate.0)
-                        .and_then(|predicate| {
-                            crate::sources::compile_scan_predicate(&predicate, &output)
-                        })
-                        .map_err(|error| invalid(format!("scan {id}: {error}")))?;
-                }
+        if let Some(window) = view_window(id, &nodes, &dependencies)? {
+            physical_dag.set_view_window(id, window);
+        }
+        if let Payload::NonASAP(NonASAPOp::Scan {
+            source,
+            predicates,
+            schema,
+        }) = &node.payload
+        {
+            // A table slot reads the payload's schema; its predicates
+            // compile over it.
+            if *schema != node.output_schema {
+                return Err(invalid(format!(
+                    "scan {id}: schema differs from its output schema"
+                )));
             }
+            let predicates = predicates
+                .iter()
+                .map(|predicate| {
+                    local_scalar(&predicate.0).and_then(|predicate| {
+                        crate::sources::compile_scan_predicate(&predicate, &output)
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| invalid(format!("scan {id}: {error}")))?;
+            let window = match output.time_index {
+                Some(_) => table_slot_window(id, roots, &nodes, &readers)?,
+                None => None,
+            };
+            physical_dag.add_table(
+                id,
+                compiled::TableSlot {
+                    source: source.clone(),
+                    schema: output,
+                    predicates,
+                    window,
+                },
+            )?;
+        } else if boundaries.contains(&id) {
             physical_dag.add_input(id, output)?;
         } else {
             #[cfg(test)]
@@ -723,37 +701,26 @@ fn table_time_operator(
     dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
     input_schemas: &[SchemaRef],
 ) -> Result<Option<Operator>, Error> {
-    let child = |id: NodeId| dependencies.get(&id).and_then(|d| d.first()).copied();
     // The shifts' total offset below `id` (`id` included), and whether the
     // first node below them is a table `Scan`.
-    let mut offset_ms = 0i64;
-    let mut below = match &nodes[&id].payload {
+    let below = match &nodes[&id].payload {
         Payload::NonASAP(NonASAPOp::TimeRange {
             kind: TimeRangeKind::Range,
             ..
-        }) => child(id),
+        }) => first_input(id, dependencies),
         Payload::NonASAP(NonASAPOp::TimeShift { .. }) => Some(id),
         _ => return Ok(None),
     };
-    while let Some(node) = below {
-        match &nodes[&node].payload {
-            Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) => {
-                if shift.at.is_some() {
-                    return Ok(None);
-                }
-                offset_ms = offset_ms
-                    .checked_add(shift.offset_ms)
-                    .ok_or_else(|| invalid("window offset overflows Int64"))?;
-                below = child(node);
-            }
-            Payload::NonASAP(NonASAPOp::Scan {
-                source: planner_types::ir::operator::Source::Table { .. },
-                ..
-            }) => break,
-            _ => return Ok(None),
-        }
-    }
-    if below.is_none() {
+    let Some((offset_ms, below)) = below_shifts(below, nodes, dependencies)? else {
+        return Ok(None);
+    };
+    if !matches!(
+        &nodes[&below].payload,
+        Payload::NonASAP(NonASAPOp::Scan {
+            source: planner_types::ir::operator::Source::Table { .. },
+            ..
+        })
+    ) {
         return Ok(None);
     }
     let [input] = input_schemas else {
@@ -772,11 +739,8 @@ fn table_time_operator(
     let time = input
         .time_index
         .ok_or_else(|| invalid("a table time range needs the table's time column"))?;
-    let width_ms =
-        i64::try_from(range.as_millis()).map_err(|_| invalid("window width overflows Int64"))?;
-    let start_back_ms = offset_ms
-        .checked_add(width_ms)
-        .ok_or_else(|| invalid("window overflows Int64"))?;
+    let start_back_ms =
+        crate::sources::SlotWindow::new(offset_ms, width_ms(range)?)?.start_before_ms;
     // `now() - back`, as SQL timestamp arithmetic.
     let now_minus = |back_ms: i64| -> Result<ScalarExpr, Error> {
         let nanos = back_ms
@@ -809,6 +773,102 @@ fn table_time_operator(
     ]);
     let predicate = crate::expressions::CompiledExpression::compile(&window, input)?;
     Operator::filter(input.clone(), Expression::planner(predicate)).map(Some)
+}
+
+fn first_input(id: NodeId, dependencies: &BTreeMap<NodeId, Vec<NodeId>>) -> Option<NodeId> {
+    dependencies.get(&id).and_then(|d| d.first()).copied()
+}
+
+fn width_ms(range: &std::time::Duration) -> Result<i64, Error> {
+    i64::try_from(range.as_millis()).map_err(|_| invalid("window width overflows Int64"))
+}
+
+/// The total offset of the `TimeShift`s at and below `start` and the first
+/// node below them; `None` when `start` is `None`, a shift has an `@`
+/// anchor, or a shift lacks its child.
+fn below_shifts(
+    start: Option<NodeId>,
+    nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
+    dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
+) -> Result<Option<(i64, NodeId)>, Error> {
+    let mut offset_ms = 0i64;
+    let mut below = start;
+    while let Some(node) = below {
+        let Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) = &nodes[&node].payload else {
+            return Ok(Some((offset_ms, node)));
+        };
+        if shift.at.is_some() {
+            return Ok(None);
+        }
+        offset_ms = offset_ms
+            .checked_add(shift.offset_ms)
+            .ok_or_else(|| invalid("window offset overflows Int64"))?;
+        below = first_input(node, dependencies);
+    }
+    Ok(None)
+}
+
+/// The window of a view slot at `id`: that of the range `TimeRange` (over
+/// shifts without an `@` anchor) `id` reads as its only input, as an
+/// expanded pane reads its range. `None` for any other node (an instant
+/// `TimeRange` included), whose window is not derived.
+fn view_window(
+    id: NodeId,
+    nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
+    dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
+) -> Result<Option<crate::sources::SlotWindow>, Error> {
+    let [input] = dependencies.get(&id).map_or(&[][..], Vec::as_slice) else {
+        return Ok(None);
+    };
+    let Payload::NonASAP(NonASAPOp::TimeRange {
+        range,
+        kind: TimeRangeKind::Range,
+        ..
+    }) = &nodes[input].payload
+    else {
+        return Ok(None);
+    };
+    match below_shifts(first_input(*input, dependencies), nodes, dependencies)? {
+        Some((offset_ms, _)) => {
+            crate::sources::SlotWindow::new(offset_ms, width_ms(range)?).map(Some)
+        }
+        None => Ok(None),
+    }
+}
+
+/// The union of the range windows the `Scan` `scan` is read through: each
+/// reader path of `TimeShift`s (without an `@` anchor) up to a `TimeRange`
+/// adds that range's window. `None` when any reader reads it otherwise, or
+/// a root reads it or one of those shifts.
+fn table_slot_window(
+    scan: NodeId,
+    roots: &[NodeId],
+    nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
+    readers: &BTreeMap<NodeId, Vec<NodeId>>,
+) -> Result<Option<crate::sources::SlotWindow>, Error> {
+    let mut window: Option<crate::sources::SlotWindow> = None;
+    let mut pending = vec![(scan, 0i64)];
+    while let Some((id, offset_ms)) = pending.pop() {
+        if roots.contains(&id) {
+            return Ok(None);
+        }
+        for &reader in readers.get(&id).into_iter().flatten() {
+            match &nodes[&reader].payload {
+                Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) if shift.at.is_none() => {
+                    let offset_ms = offset_ms
+                        .checked_add(shift.offset_ms)
+                        .ok_or_else(|| invalid("window offset overflows Int64"))?;
+                    pending.push((reader, offset_ms));
+                }
+                Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
+                    let range = crate::sources::SlotWindow::new(offset_ms, width_ms(range)?)?;
+                    window = Some(window.map_or(range, |window| window.union(range)));
+                }
+                _ => return Ok(None),
+            }
+        }
+    }
+    Ok(window)
 }
 
 /// The first node at or below `node` that is not a `TimeShift`, following
@@ -1483,47 +1543,6 @@ fn expression(
     Ok(Expression::planner(
         crate::expressions::CompiledExpression::compile(&expr, input)?,
     ))
-}
-
-struct CheckedSource<'a> {
-    source: Source<'a>,
-    output: SchemaRef,
-}
-impl PhysicalOperator<Batch, SchemaRef> for CheckedSource<'_> {
-    fn properties(&self, inputs: &[crate::plan::PlanProperties]) -> crate::plan::PlanProperties {
-        self.source.properties(inputs)
-    }
-
-    fn name(&self) -> &str {
-        self.source.name()
-    }
-    fn input_schemas(&self) -> Vec<SchemaRef> {
-        vec![]
-    }
-    fn output_schema(&self) -> SchemaRef {
-        self.output.clone()
-    }
-    fn output_bytes(&self, batch: &Batch) -> usize {
-        self.source.output_bytes(batch)
-    }
-    fn start<'a>(
-        &'a self,
-        inputs: Vec<crate::runtime::Input<'a, Batch>>,
-        context: crate::runtime::RunContext,
-    ) -> Result<crate::runtime::OutputStream<'a, Batch>, Error> {
-        use futures::StreamExt;
-        Ok(self
-            .source
-            .start(inputs, context)?
-            .map(|batch| {
-                let batch = batch?;
-                if batch.schema() != &self.output {
-                    return Err(invalid("source batch differs from its bound schema"));
-                }
-                Ok(batch)
-            })
-            .boxed_local())
-    }
 }
 
 // Bound recursion before invoking the upstream recursive provenance validator.

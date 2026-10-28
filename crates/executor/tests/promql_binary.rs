@@ -1,7 +1,7 @@
 //! Binary computation must be fully compiled before deployment binds values.
+use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
 use asap_executor::{
-    operators::Operator,
-    physical_planner::{compile_node, CompiledPhysicalDAG, Source},
+    physical_planner::{compile_node, CompiledPhysicalDAG},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, SchemaRef, Value},
 };
@@ -110,11 +110,16 @@ fn evaluate_with(
             let batch = Batch::try_new(schema(), rows).unwrap();
             (
                 id as u64,
-                Box::new(Operator::source(schema(), vec![batch]).unwrap()) as Source<'_>,
+                Arc::new(MemorySource::new(schema(), vec![batch]).unwrap())
+                    as Arc<dyn TableProvider>,
             )
         })
         .collect();
-    let bound = physical_dag.instantiate(sources)?;
+    let data_sources = BindingDataSources {
+        views: sources,
+        ..Default::default()
+    };
+    let bound = physical_dag.instantiate(&data_sources)?;
     let ctx = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 1,
@@ -185,18 +190,18 @@ fn scalar_broadcast_and_bool_comparison_are_distinct() {
         let sources = BTreeMap::from([
             (
                 0,
-                Box::new(
-                    Operator::source(
+                Arc::new(
+                    MemorySource::new(
                         scalar.clone(),
                         vec![Batch::try_new(scalar, vec![vec![Value::Float64(2.)]]).unwrap()],
                     )
                     .unwrap(),
-                ) as Source<'_>,
+                ) as Arc<dyn TableProvider>,
             ),
             (
                 1,
-                Box::new(
-                    Operator::source(
+                Arc::new(
+                    MemorySource::new(
                         vector.clone(),
                         vec![Batch::try_new(
                             vector,
@@ -205,10 +210,14 @@ fn scalar_broadcast_and_bool_comparison_are_distinct() {
                         .unwrap()],
                     )
                     .unwrap(),
-                ) as Source<'_>,
+                ) as Arc<dyn TableProvider>,
             ),
         ]);
-        let bound = physical_dag.instantiate(sources).unwrap();
+        let data_sources = BindingDataSources {
+            views: sources,
+            ..Default::default()
+        };
+        let bound = physical_dag.instantiate(&data_sources).unwrap();
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 1,
@@ -252,17 +261,21 @@ fn binary_obeys_memory_and_cancellation() {
             .map(|id| {
                 (
                     id,
-                    Box::new(
-                        Operator::source(
+                    Arc::new(
+                        MemorySource::new(
                             schema(),
                             vec![Batch::try_new(schema(), vec![row("x", "api", 1.)]).unwrap()],
                         )
                         .unwrap(),
-                    ) as Source<'_>,
+                    ) as Arc<dyn TableProvider>,
                 )
             })
             .collect();
-        let bound = physical_dag.instantiate(sources).unwrap();
+        let data_sources = BindingDataSources {
+            views: sources,
+            ..Default::default()
+        };
+        let bound = physical_dag.instantiate(&data_sources).unwrap();
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 1,
@@ -457,12 +470,16 @@ fn stored_series_evaluations_support_filters_and_sets() {
                     .unwrap();
                     (
                         id,
-                        Box::new(Operator::source(state_schema.clone(), vec![batch]).unwrap())
-                            as Source<'_>,
+                        Arc::new(MemorySource::new(state_schema.clone(), vec![batch]).unwrap())
+                            as Arc<dyn TableProvider>,
                     )
                 })
                 .collect();
-            let bound = physical_dag.instantiate(sources).unwrap();
+            let data_sources = BindingDataSources {
+                views: sources,
+                ..Default::default()
+            };
+            let bound = physical_dag.instantiate(&data_sources).unwrap();
             let context = RunContext::new(
                 Scope::Query {
                     evaluation_time_ms: 1,

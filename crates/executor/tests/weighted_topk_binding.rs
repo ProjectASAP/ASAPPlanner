@@ -1,8 +1,8 @@
 //! Planner output binds directly to the shared runtime at a declared rate-value frontier.
+use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
 mod common;
 use asap_executor::{
-    operators::Operator,
-    physical_planner::{compile, Source},
+    physical_planner::compile,
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
@@ -143,17 +143,19 @@ fn assert_weighted_binding(algorithm: SketchAlgorithm) {
         ),
     ] {
         let rate_id = rate_id_of(&placed);
-        let source = Box::new(Operator::source(rates.clone(), vec![batch.clone()]).unwrap())
-            as Source<'static>;
+        let source = Arc::new(MemorySource::new(rates.clone(), vec![batch.clone()]).unwrap())
+            as Arc<dyn TableProvider>;
         let compiled = compile(
             &placed,
             &BTreeSet::from([rate_id as u64]),
             &[dag.roots[0] as u64],
         )
         .unwrap();
-        let physical_dag = compiled
-            .instantiate(BTreeMap::from([(rate_id as u64, source)]))
-            .unwrap();
+        let data_sources = BindingDataSources {
+            views: BTreeMap::from([(rate_id as u64, source)]),
+            ..Default::default()
+        };
+        let physical_dag = compiled.instantiate(&data_sources).unwrap();
         let context = RunContext::new(scope, Limits::default()).unwrap();
         let output = block_on(async {
             let mut output = Vec::new();
@@ -394,12 +396,14 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
                     revision: 1,
                 },
             ] {
-                let source = Box::new(
-                    Operator::source(raw_schema.clone(), vec![raw_batch.clone()]).unwrap(),
-                ) as Source<'static>;
-                let physical_dag = raw_compiled
-                    .instantiate(BTreeMap::from([(raw.id as u64, source)]))
-                    .unwrap();
+                let source = Arc::new(
+                    MemorySource::new(raw_schema.clone(), vec![raw_batch.clone()]).unwrap(),
+                ) as Arc<dyn TableProvider>;
+                let data_sources = BindingDataSources {
+                    views: BTreeMap::from([(raw.id as u64, source)]),
+                    ..Default::default()
+                };
+                let physical_dag = raw_compiled.instantiate(&data_sources).unwrap();
                 let context = RunContext::new(scope, Limits::default()).unwrap();
                 let mut raw_scores = block_on(async {
                     let mut scores = Vec::new();
@@ -493,11 +497,13 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
                 },
             ] {
                 let source =
-                    Box::new(Operator::source(schema.clone(), vec![batch.clone()]).unwrap())
-                        as Source<'static>;
-                let physical_dag = compiled
-                    .instantiate(BTreeMap::from([(input_id as u64, source)]))
-                    .unwrap();
+                    Arc::new(MemorySource::new(schema.clone(), vec![batch.clone()]).unwrap())
+                        as Arc<dyn TableProvider>;
+                let data_sources = BindingDataSources {
+                    views: BTreeMap::from([(input_id as u64, source)]),
+                    ..Default::default()
+                };
+                let physical_dag = compiled.instantiate(&data_sources).unwrap();
                 let context = RunContext::new(scope, Limits::default()).unwrap();
                 let mut scores = block_on(async {
                     let mut scores = vec![];
@@ -643,9 +649,13 @@ fn maintained_rate_heap_compiles_fixed_window_precompute() {
                        input: Batch,
                        scope: Scope| {
             let id = plan.input_slots().next().unwrap().0;
-            let source = Box::new(Operator::source(input.schema().clone(), vec![input]).unwrap())
-                as Source<'static>;
-            let physical_dag = plan.instantiate(BTreeMap::from([(id, source)])).unwrap();
+            let source = Arc::new(MemorySource::new(input.schema().clone(), vec![input]).unwrap())
+                as Arc<dyn TableProvider>;
+            let data_sources = BindingDataSources {
+                views: BTreeMap::from([(id, source)]),
+                ..Default::default()
+            };
+            let physical_dag = plan.instantiate(&data_sources).unwrap();
             block_on(async {
                 let mut stream = physical_dag
                     .execute(

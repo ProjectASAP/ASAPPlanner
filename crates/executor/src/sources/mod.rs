@@ -1,37 +1,91 @@
-//! Raw data access. Connectors provide rows; Scan owns Planner predicate semantics.
+//! Data access. A deployment implements [`TableProvider`] for raw data and for
+//! materialized views; the executor's `Scan` owns the Planner's time-range,
+//! predicate and projection semantics over what a provider returns.
 use crate::{
     expressions::CompiledExpression,
-    plan::PhysicalOperator,
-    runtime::{Input, OutputStream, RunContext},
+    plan::{NodeId, PhysicalOperator},
+    runtime::{Input, OutputStream, RunContext, Scope},
     values::{Batch, SchemaRef},
     Error,
 };
 use futures::{stream, StreamExt};
 use planner_types::ir::operator::Source;
-use planner_types::ir::schema::{DataType, FieldDataType as SummaryFamilyType};
-use planner_types::ir::{NonASAPOp, OperatorNode};
+use planner_types::ir::schema::DataType;
+use planner_types::ir::ScalarExpr;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// A bound data source. Metadata must be stable for the lifetime of the binding.
-/// Each scan opens an independent cursor. Connectors return raw, unfiltered rows
-/// and must honor cancellation and bound their own I/O buffers. Dropping a cursor
-/// must release its resources. A connector error is never an empty successful scan.
-pub trait RawSource {
+/// A table a deployment binds to an input slot: raw data (a SQL table, a
+/// time series as `(ts, value, *labels)`) or a materialized view's stored
+/// states. Metadata must be stable for the lifetime of the binding. Each scan
+/// opens an independent cursor; connectors must honor cancellation and bound
+/// their own I/O buffers. Dropping a cursor must release its resources. A
+/// connector error is never an empty successful scan.
+pub trait TableProvider {
+    /// Contains every column of the slots it is bound to (matched by field
+    /// name, with the same type and nullability); may have more.
     fn schema(&self) -> SchemaRef;
     /// Declare a finite snapshot/window explicitly; execution scope alone does not bound a cursor.
     fn boundedness(&self) -> crate::plan::Boundedness {
         crate::plan::Boundedness::Unknown
     }
-    fn scan(&self, context: RunContext) -> Result<OutputStream<'_, Batch>, Error>;
+    /// Rows for one run, in [`Self::schema`] or in its `projection` columns
+    /// when the provider applies it.
+    ///
+    /// For a table slot `request` is a hint: the executor re-applies its
+    /// time range, predicates and projection, so a provider may ignore any
+    /// field. A view slot is not re-filtered: its provider returns exactly
+    /// the states the run reads, selected by `request.time_range_ms` (see
+    /// [`ScanRequest::time_range_ms`]). The executor treats a view's states
+    /// as held by the store, so a run is not charged for them.
+    fn scan(
+        &self,
+        request: &ScanRequest,
+        context: RunContext,
+    ) -> Result<OutputStream<'_, Batch>, Error>;
+}
+
+/// What a slot reads in one run.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScanRequest<'a> {
+    /// `(start, end]` in milliseconds, in a query run at evaluation time `T`.
+    /// A `TimeRange(w)` over `TimeShift`s summing to `s` reads `(T - s - w,
+    /// T - s]`.
+    ///
+    /// - Table slot: the smallest range covering the range windows above
+    ///   the `Scan`, on the slot's time column; `None` when the `Scan` is
+    ///   read outside a range window. The executor re-applies it.
+    /// - View slot: the window of the one range `TimeRange` the view reads
+    ///   directly, as an expanded pane does; the provider returns the
+    ///   states whose pane ends in `(start, end]`. `None` when the window
+    ///   is not derivable from the DAG: the provider returns every state
+    ///   bound for this run, as a bound source did before.
+    ///
+    /// `None` in every ingestion run (until ingestion windows are defined
+    /// for slots): a table slot reads, and re-filters, as before.
+    pub time_range_ms: Option<(i64, i64)>,
+    /// The slot's columns, as indices into the provider's schema, in the
+    /// slot's order.
+    pub projection: Option<&'a [usize]>,
+    /// A table slot's `Scan` predicates, over the slot's schema (after
+    /// `projection`: column `i` is provider column `projection[i]`). They
+    /// may read `now()`, the run's evaluation time, and read no other
+    /// operator (`ScalarExpr<()>`). A hint only: the executor re-applies
+    /// every predicate.
+    pub predicates: &'a [ScalarExpr<()>],
 }
 
 /// Explicit source identities; no implicit network discovery or fallback.
 #[derive(Default)]
 pub struct DataSources {
-    sources: Vec<(Source, Arc<dyn RawSource>)>,
+    sources: Vec<(Source, Arc<dyn TableProvider>)>,
 }
 impl DataSources {
-    pub fn register(&mut self, identity: Source, source: Arc<dyn RawSource>) -> Result<(), Error> {
+    pub fn register(
+        &mut self,
+        identity: Source,
+        source: Arc<dyn TableProvider>,
+    ) -> Result<(), Error> {
         if self.sources.iter().any(|(key, _)| key == &identity) {
             return Err(Error::Invalid("duplicate data source".into()));
         }
@@ -39,39 +93,65 @@ impl DataSources {
         self.sources.push((identity, source));
         Ok(())
     }
-    pub fn bind(&self, expression: &OperatorNode) -> Result<Scan, Error> {
-        let Some(NonASAPOp::Scan {
-            source,
-            predicates,
-            schema,
-        }) = expression.non_asap()
-        else {
-            return Err(Error::Invalid(
-                "raw Scan requires a Planner Scan leaf".into(),
-            ));
-        };
-        let output = Arc::new(schema.clone());
-        crate::values::validate_schema(&output)?;
-        let reader = self
-            .sources
+    /// The provider registered for `identity`.
+    pub(crate) fn provider(&self, identity: &Source) -> Option<&Arc<dyn TableProvider>> {
+        self.sources
             .iter()
-            .find(|(key, _)| key == source)
-            .map(|(_, reader)| reader.clone())
-            .ok_or_else(|| Error::Invalid(format!("unbound raw source: {source:?}")))?;
-        if reader.schema() != output {
-            return Err(Error::Invalid(
-                "raw source differs from Planner Scan schema".into(),
-            ));
-        }
-        let predicates = predicates
-            .iter()
-            .map(|predicate| compile_scan_predicate(&predicate.0, &output))
-            .collect::<Result<Vec<_>, Error>>()?;
-        Ok(Scan {
-            reader,
-            output,
-            predicates,
+            .find(|(key, _)| key == identity)
+            .map(|(_, provider)| provider)
+    }
+}
+
+/// The data a compiled DAG's input slots read in one instantiation: a table
+/// slot by its `Scan`'s `Source`, a view slot by its node id.
+///
+/// Transitional (removed by #969): a runtime binds the raw-window rows
+/// `RawDataSampleSelector` or `TableRowSelector` produced at a `TimeRange`
+/// node, cut out as a slot, through `views` too, with a provider over the
+/// given batches (e.g. [`MemorySource`]).
+#[derive(Default)]
+pub struct BindingDataSources {
+    /// Source → provider, as a catalog: one provider per table or metric,
+    /// however many `Scan`s read it.
+    pub tables: DataSources,
+    /// View slot (node id) → provider of the view's stored states.
+    pub views: BTreeMap<NodeId, Arc<dyn TableProvider>>,
+}
+
+/// The time range a slot reads at time `T`: `(T - start_before_ms, T -
+/// end_before_ms]`, the union of the range windows above it (each
+/// `TimeRange(w)` over shifts summing to `s` reads `(T - s - w, T - s]`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(any(test, feature = "test-support"), derive(serde::Serialize))]
+pub(crate) struct SlotWindow {
+    pub(crate) start_before_ms: i64,
+    pub(crate) end_before_ms: i64,
+}
+impl SlotWindow {
+    /// The window of a `TimeRange` of `width_ms` over shifts summing to `offset_ms`.
+    pub(crate) fn new(offset_ms: i64, width_ms: i64) -> Result<Self, Error> {
+        Ok(Self {
+            start_before_ms: offset_ms
+                .checked_add(width_ms)
+                .ok_or_else(|| Error::Invalid("window overflows Int64".into()))?,
+            end_before_ms: offset_ms,
         })
+    }
+    /// The smallest window holding both.
+    pub(crate) fn union(self, other: Self) -> Self {
+        Self {
+            start_before_ms: self.start_before_ms.max(other.start_before_ms),
+            end_before_ms: self.end_before_ms.min(other.end_before_ms),
+        }
+    }
+    /// `(start, end]` at time `t_ms`.
+    fn at(self, t_ms: i64) -> Result<(i64, i64), Error> {
+        let overflow = || Error::Invalid("window overflows Int64".into());
+        Ok((
+            t_ms.checked_sub(self.start_before_ms)
+                .ok_or_else(overflow)?,
+            t_ms.checked_sub(self.end_before_ms).ok_or_else(overflow)?,
+        ))
     }
 }
 
@@ -88,15 +168,130 @@ pub(crate) fn compile_scan_predicate(
     Ok(predicate)
 }
 
-pub struct Scan {
-    reader: Arc<dyn RawSource>,
+/// Each of `output`'s columns' index in `provider`'s schema, matched by
+/// name; bad input when one is missing or has another type or nullability.
+fn projection(provider: &SchemaRef, output: &SchemaRef) -> Result<Vec<usize>, Error> {
+    output
+        .fields
+        .iter()
+        .map(|field| {
+            let index = provider
+                .fields
+                .iter()
+                .position(|candidate| candidate.name == field.name)
+                .ok_or_else(|| {
+                    Error::Invalid(format!("provider schema lacks column {}", field.name))
+                })?;
+            let candidate = &provider.fields[index];
+            if candidate.dtype != field.dtype || candidate.nullable != field.nullable {
+                return Err(Error::Invalid(format!(
+                    "provider column {} differs in type from the slot's schema",
+                    field.name
+                )));
+            }
+            Ok(index)
+        })
+        .collect()
+}
+
+/// An input slot bound to its provider: reads the provider with this run's
+/// [`ScanRequest`] and returns the slot's rows in the slot's schema.
+pub(crate) struct Scan {
+    provider: Arc<dyn TableProvider>,
     output: SchemaRef,
+    /// Each output column's index in the provider's schema.
+    projection: Vec<usize>,
+    /// A table slot's predicates, compiled over `output`; none for a view.
     predicates: Vec<CompiledExpression>,
+    /// `predicates` as the provider receives them.
+    predicate_hints: Vec<ScalarExpr<()>>,
+    window: Option<SlotWindow>,
+    /// A table slot re-applies its requested time range; a view's
+    /// provider selects its panes, which the executor cannot check.
+    reapplies_time_range: bool,
+}
+impl Scan {
+    /// A table slot over `provider`, which must contain `output`'s columns
+    /// and declare `Bounded`.
+    pub(crate) fn table(
+        provider: Arc<dyn TableProvider>,
+        output: SchemaRef,
+        predicates: Vec<CompiledExpression>,
+        window: Option<SlotWindow>,
+    ) -> Result<Self, Error> {
+        let mut scan = Self::view(provider, output, window)?;
+        scan.predicate_hints = predicates
+            .iter()
+            .map(|predicate| predicate.expression().clone())
+            .collect();
+        scan.predicates = predicates;
+        scan.reapplies_time_range = true;
+        Ok(scan)
+    }
+    /// A view slot over `provider`, which must contain `output`'s columns
+    /// and declare `Bounded`.
+    pub(crate) fn view(
+        provider: Arc<dyn TableProvider>,
+        output: SchemaRef,
+        window: Option<SlotWindow>,
+    ) -> Result<Self, Error> {
+        let projection = projection(&provider.schema(), &output)?;
+        if provider.boundedness() != crate::plan::Boundedness::Bounded {
+            return Err(Error::Invalid("provider does not declare Bounded".into()));
+        }
+        Ok(Self {
+            provider,
+            output,
+            projection,
+            predicates: vec![],
+            predicate_hints: vec![],
+            window,
+            reapplies_time_range: false,
+        })
+    }
+    /// The time range this run reads (see [`ScanRequest::time_range_ms`]).
+    fn time_range_ms(&self, context: &RunContext) -> Result<Option<(i64, i64)>, Error> {
+        let Some(window) = self.window else {
+            return Ok(None);
+        };
+        match context.scope {
+            Scope::Query {
+                evaluation_time_ms, ..
+            } => window.at(evaluation_time_ms).map(Some),
+            Scope::Ingestion { .. } => Ok(None),
+        }
+    }
+    /// `batch` in the slot's schema: projected when it is in the provider's
+    /// schema, relabeled when the provider already projected it.
+    fn to_output(&self, batch: Batch, provider: &SchemaRef) -> Result<Batch, Error> {
+        if batch.schema() == &self.output {
+            return Ok(batch);
+        }
+        if batch.schema() == provider {
+            return batch.project(self.output.clone(), &self.projection);
+        }
+        let projected =
+            batch.schema().fields.len() == self.output.fields.len()
+                && batch.schema().fields.iter().zip(&self.output.fields).all(
+                    |(actual, expected)| {
+                        actual.name == expected.name
+                            && actual.dtype == expected.dtype
+                            && actual.nullable == expected.nullable
+                    },
+                );
+        if !projected {
+            return Err(Error::Invalid(
+                "provider returned a batch in neither its schema nor the slot's".into(),
+            ));
+        }
+        let columns: Vec<usize> = (0..self.output.fields.len()).collect();
+        batch.project(self.output.clone(), &columns)
+    }
 }
 impl PhysicalOperator<Batch, SchemaRef> for Scan {
     fn properties(&self, _: &[crate::plan::PlanProperties]) -> crate::plan::PlanProperties {
         crate::plan::PlanProperties {
-            boundedness: self.reader.boundedness(),
+            boundedness: self.provider.boundedness(),
             emission: crate::plan::Emission::Incremental,
         }
     }
@@ -133,13 +328,29 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                 false => std::borrow::Cow::Borrowed(predicate),
             })
             .collect();
+        let time_range_ms = self.time_range_ms(&context)?;
+        let time_filter = match time_range_ms {
+            Some(range) if self.reapplies_time_range => Some((
+                self.output
+                    .time_index
+                    .ok_or_else(|| Error::Invalid("windowed Scan lacks a time column".into()))?,
+                range,
+            )),
+            _ => None,
+        };
+        let provider_schema = self.provider.schema();
         // Opening is lazy: validation and construction of a run perform no I/O.
         let opening = context.clone();
         let stream = stream::once(async move {
             if opening.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            self.reader.scan(opening)
+            let request = ScanRequest {
+                time_range_ms,
+                projection: Some(&self.projection),
+                predicates: &self.predicate_hints,
+            };
+            self.provider.scan(&request, opening)
         });
         use futures::TryStreamExt;
         Ok(stream
@@ -148,13 +359,12 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                 if context.is_cancelled() {
                     return Err(Error::Cancelled);
                 }
-                let batch = batch?;
-                if batch.schema() != &self.output {
-                    return Err(Error::Invalid(
-                        "connector returned a different Scan schema".into(),
-                    ));
+                let batch = self.to_output(batch?, &provider_schema)?;
+                if !self.reapplies_time_range {
+                    // A view's states are the store's, read by this run.
+                    batch.mark_states_held_outside_run();
                 }
-                if predicates.is_empty() {
+                if predicates.is_empty() && time_filter.is_none() {
                     return Ok(batch);
                 }
                 // The filtered copy is at most the batch again; the
@@ -166,10 +376,25 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                         .checked_mul(2)
                         .ok_or(Error::MemoryLimit)?,
                 )?;
+                let mut batch = batch;
+                // The requested time range, whether or not the provider applied it.
+                if let Some((time, (start_ms, end_ms))) = time_filter {
+                    let times = batch
+                        .column(time)
+                        .as_any()
+                        .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+                        .ok_or_else(|| {
+                            Error::Invalid("Scan time column is not a timestamp".into())
+                        })?;
+                    let keep: arrow::array::BooleanArray = times
+                        .iter()
+                        .map(|t| Some(t.is_some_and(|t| t > start_ms && t <= end_ms)))
+                        .collect();
+                    batch = keep_rows(batch, &keep)?;
+                }
                 // Each predicate is one column over the rows the earlier ones
                 // kept; over dictionary-encoded labels it is evaluated once
                 // per distinct label value, not once per row.
-                let mut batch = batch;
                 for predicate in &predicates {
                     if batch.num_rows() == 0 {
                         break;
@@ -179,12 +404,21 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                         .as_any()
                         .downcast_ref::<arrow::array::BooleanArray>()
                         .ok_or_else(|| Error::Invalid("Scan predicate is not boolean".into()))?;
-                    batch = batch.filter(keep)?;
+                    batch = keep_rows(batch, keep)?;
                 }
                 Ok(batch)
             })
             .boxed_local())
     }
+}
+
+/// The rows of `batch` that `keep` keeps; `batch` itself, uncopied, when it
+/// keeps every row.
+fn keep_rows(batch: Batch, keep: &arrow::array::BooleanArray) -> Result<Batch, Error> {
+    if keep.true_count() == batch.num_rows() {
+        return Ok(batch);
+    }
+    batch.filter(keep)
 }
 
 mod memory;

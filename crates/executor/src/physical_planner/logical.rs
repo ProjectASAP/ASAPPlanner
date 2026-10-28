@@ -3,10 +3,6 @@ use super::*;
 use planner_types::ir::{ASAPOp, Operator as LogicalOperator, OperatorNode};
 use std::rc::Rc;
 
-pub(super) fn restore(dag: &PhysicalASAPDAG) -> Result<BTreeMap<NodeId, Rc<OperatorNode>>, Error> {
-    restore_before(dag, None)
-}
-
 pub(super) fn restore_before(
     dag: &PhysicalASAPDAG,
     deadline: Option<std::time::Instant>,

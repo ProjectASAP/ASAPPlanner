@@ -1,9 +1,10 @@
 //! Opaque state travels through a retained physical projection without scalar decoding.
+use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
 use asap_executor::{
     expressions::Expression,
     factory::create_planner_accumulator,
     operators::Operator,
-    physical_planner::{compile, Source},
+    physical_planner::compile,
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
@@ -141,12 +142,14 @@ fn summary_projection_survives_recovery() {
         ]],
     )
     .unwrap();
-    let physical_dag = program
-        .instantiate(BTreeMap::from([(
+    let data_sources = BindingDataSources {
+        views: BTreeMap::from([(
             0,
-            Box::new(Operator::source(schema, vec![batch]).unwrap()) as Source<'_>,
-        )]))
-        .unwrap();
+            Arc::new(MemorySource::new(schema, vec![batch]).unwrap()) as Arc<dyn TableProvider>,
+        )]),
+        ..Default::default()
+    };
+    let physical_dag = program.instantiate(&data_sources).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 1,

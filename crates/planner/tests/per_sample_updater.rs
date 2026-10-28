@@ -2,10 +2,11 @@
 //! with `StateColumnUpdater`, the code the plan's `SummaryAgg` runs on a
 //! batch (issue #762): the same states as the executor's pane build.
 
+use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
-use asap_executor::operators::Operator as ExecutorOperator;
-use asap_executor::physical_planner::{compile, Source};
+use asap_executor::physical_planner::compile;
 use asap_executor::planner::ir::physical_export::PhysicalASAPOperatorPayload as Payload;
 use asap_executor::planner::ir::ASAPOp;
 use asap_executor::runtime::{Limits, RunContext, Scope};
@@ -118,11 +119,13 @@ async fn per_sample_updates_build_the_stored_pane_the_plan_builds() {
     let input = selector.window_batch(end_ms, &samples).unwrap();
     let window = output.inputs.raw_data_sample_windows[0].time_range_node_id as u64;
     let compiled = compile(dag, &BTreeSet::from([window]), &[output.node_id as u64]).unwrap();
-    let source: Source<'_> =
-        Box::new(ExecutorOperator::source(input.schema().clone(), vec![input]).unwrap());
-    let build = compiled
-        .instantiate(BTreeMap::from([(window, source)]))
-        .unwrap();
+    let source: Arc<dyn TableProvider> =
+        Arc::new(MemorySource::new(input.schema().clone(), vec![input]).unwrap());
+    let data_sources = BindingDataSources {
+        views: BTreeMap::from([(window, source)]),
+        ..Default::default()
+    };
+    let build = compiled.instantiate(&data_sources).unwrap();
     let context = RunContext::new(
         Scope::Ingestion {
             window_start_ms: start_ms,
@@ -212,11 +215,15 @@ async fn answers(
     let sources = inputs
         .into_iter()
         .map(|(id, batch)| {
-            let source = ExecutorOperator::source(batch.schema().clone(), vec![batch]).unwrap();
-            (id, Box::new(source) as Source<'_>)
+            let source = MemorySource::new(batch.schema().clone(), vec![batch]).unwrap();
+            (id, Arc::new(source) as Arc<dyn TableProvider>)
         })
         .collect();
-    let instance = compiled.instantiate(sources).unwrap();
+    let data_sources = BindingDataSources {
+        views: sources,
+        ..Default::default()
+    };
+    let instance = compiled.instantiate(&data_sources).unwrap();
     let context = RunContext::new(scope, Limits::default()).unwrap();
     let mut results = Vec::new();
     for mut output in instance.execute(compiled.roots(), context).unwrap() {

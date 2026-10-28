@@ -1,8 +1,8 @@
 //! Persisted precompute DAGs preserve group/window identity and execute state-to-state computation.
+use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
 use asap_executor::{
     factory::create_planner_accumulator,
-    operators::Operator,
-    physical_planner::{precompute, CompiledPhysicalDAG, Source},
+    physical_planner::{precompute, CompiledPhysicalDAG},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
@@ -211,10 +211,14 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                 Batch::try_new(precompute::population_schema(family.clone()), rows).unwrap();
             let sources = BTreeMap::from([(
                 0,
-                Box::new(Operator::source(input.schema().clone(), vec![input]).unwrap())
-                    as Source<'_>,
+                Arc::new(MemorySource::new(input.schema().clone(), vec![input]).unwrap())
+                    as Arc<dyn TableProvider>,
             )]);
-            let physical_dag = program.instantiate(sources).unwrap();
+            let data_sources = BindingDataSources {
+                views: sources,
+                ..Default::default()
+            };
+            let physical_dag = program.instantiate(&data_sources).unwrap();
             let context = RunContext::new(
                 Scope::Ingestion {
                     window_start_ms: 0,
@@ -377,10 +381,15 @@ fn native_run(
         })
         .collect();
     let input = Batch::try_new(precompute::population_schema(family), rows)?;
-    let physical_dag = program.instantiate(BTreeMap::from([(
-        0,
-        Box::new(Operator::source(input.schema().clone(), vec![input])?) as Source<'_>,
-    )]))?;
+    let data_sources = BindingDataSources {
+        views: BTreeMap::from([(
+            0,
+            Arc::new(MemorySource::new(input.schema().clone(), vec![input])?)
+                as Arc<dyn TableProvider>,
+        )]),
+        ..Default::default()
+    };
+    let physical_dag = program.instantiate(&data_sources)?;
     block_on(async {
         let mut rows = Vec::new();
         let mut stream = physical_dag.execute(program.roots(), context)?.remove(0);

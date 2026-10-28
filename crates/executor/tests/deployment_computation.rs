@@ -1,9 +1,9 @@
 //! Planner-selected PromQL computation compiles from the timed DAG alone;
 //! the deployment supplies only raw rows at the ingestion frontier.
+use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
 mod common;
 use asap_executor::{
-    operators::Operator,
-    physical_planner::{compile, promql_rows, Source},
+    physical_planner::{compile, promql_rows},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
@@ -169,11 +169,18 @@ fn execute_relabeled(
             let batch = Batch::try_new(schema.clone(), rows).unwrap();
             (
                 *id,
-                Box::new(Operator::source(schema.clone(), vec![batch]).unwrap()) as Source<'_>,
+                Arc::new(MemorySource::new(schema.clone(), vec![batch]).unwrap())
+                    as Arc<dyn TableProvider>,
             )
         })
         .collect();
-    let physical_dag = program.instantiate(sources).map_err(|e| e.to_string())?;
+    let data_sources = BindingDataSources {
+        views: sources,
+        ..Default::default()
+    };
+    let physical_dag = program
+        .instantiate(&data_sources)
+        .map_err(|e| e.to_string())?;
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: end,
@@ -819,12 +826,14 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
         })
         .collect();
     let batch = Batch::try_new(schema.clone(), vec![row]).unwrap();
-    let physical_dag = program
-        .instantiate(BTreeMap::from([(
+    let data_sources = BindingDataSources {
+        views: BTreeMap::from([(
             state.id as u64,
-            Box::new(Operator::source(schema, vec![batch]).unwrap()) as Source<'_>,
-        )]))
-        .unwrap();
+            Arc::new(MemorySource::new(schema, vec![batch]).unwrap()) as Arc<dyn TableProvider>,
+        )]),
+        ..Default::default()
+    };
+    let physical_dag = program.instantiate(&data_sources).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,

@@ -4,10 +4,11 @@
 //! the compiler checks that no internal is used (CI runs
 //! `cargo check -p asap-planner --tests --locked` on its own for that).
 
+use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
-use asap_executor::operators::Operator as ExecutorOperator;
-use asap_executor::physical_planner::{compile, Source};
+use asap_executor::physical_planner::compile;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, Value};
 use asap_executor::{series_labels_of_output_row, RawDataSample, RawDataSampleSelector};
@@ -110,12 +111,16 @@ fn run(
     let sources = inputs
         .into_iter()
         .map(|(id, batch)| {
-            let source = ExecutorOperator::source(batch.schema().clone(), vec![batch]).unwrap();
-            (id, Box::new(source) as Source<'_>)
+            let source = MemorySource::new(batch.schema().clone(), vec![batch]).unwrap();
+            (id, Arc::new(source) as Arc<dyn TableProvider>)
         })
         .collect();
     // The plan bound to its sources, ready to run.
-    let instance = compiled.instantiate(sources).unwrap();
+    let data_sources = BindingDataSources {
+        views: sources,
+        ..Default::default()
+    };
+    let instance = compiled.instantiate(&data_sources).unwrap();
     block_on(async {
         // The run's scope (ingestion window or query time) and limits.
         let context = RunContext::new(scope, Limits::default()).unwrap();

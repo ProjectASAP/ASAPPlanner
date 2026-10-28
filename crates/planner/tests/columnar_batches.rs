@@ -3,12 +3,13 @@
 //! `RawDataSampleSelector` and built by the executor, read through the public
 //! batch API only.
 
+use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use arrow::array::{AsArray, Float64Array};
 use arrow::datatypes::UInt32Type;
-use asap_executor::operators::Operator as ExecutorOperator;
-use asap_executor::physical_planner::{compile, Source};
+use asap_executor::physical_planner::compile;
 use asap_executor::planner::ir::schema::PROMQL_SERIES_IDENTITY;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::Batch;
@@ -121,12 +122,14 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
     )
     .unwrap();
     // The input bound as an in-memory source.
-    let source: Source<'_> =
-        Box::new(ExecutorOperator::source(input.schema().clone(), vec![input]).unwrap());
+    let source: Arc<dyn TableProvider> =
+        Arc::new(MemorySource::new(input.schema().clone(), vec![input]).unwrap());
     // The build, ready to run in the pane's ingestion window.
-    let build = compiled
-        .instantiate(BTreeMap::from([(window, source)]))
-        .unwrap();
+    let data_sources = BindingDataSources {
+        views: BTreeMap::from([(window, source)]),
+        ..Default::default()
+    };
+    let build = compiled.instantiate(&data_sources).unwrap();
     let context = RunContext::new(
         Scope::Ingestion {
             window_start_ms: start_ms,

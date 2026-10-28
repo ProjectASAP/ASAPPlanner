@@ -271,3 +271,71 @@ fn a_merge_passing_stored_states_through_does_not_charge_them() {
     });
     assert_eq!(rows.unwrap(), 2_000);
 }
+
+/// A deployment's own view provider (not `MemorySource`): returns `PANES`
+/// copies of one stored pane on every scan.
+struct StoredPanes {
+    schema: Arc<Schema>,
+    pane: Batch,
+}
+impl asap_executor::sources::TableProvider for StoredPanes {
+    fn schema(&self) -> Arc<Schema> {
+        self.schema.clone()
+    }
+    fn boundedness(&self) -> asap_executor::plan::Boundedness {
+        asap_executor::plan::Boundedness::Bounded
+    }
+    fn scan(
+        &self,
+        _: &asap_executor::sources::ScanRequest,
+        _: RunContext,
+    ) -> Result<asap_executor::runtime::OutputStream<'_, Batch>, Error> {
+        Ok(futures::stream::iter(vec![Ok(self.pane.clone()); PANES]).boxed_local())
+    }
+}
+
+// A view slot's states are the store's whatever provider returns them: the
+// merge over twelve stored panes from a deployment's own provider fits the
+// 32 MiB limit, as it does over `Operator::source`.
+#[test]
+fn a_view_providers_states_are_not_charged_to_the_run() {
+    use asap_executor::physical_planner::CompiledPhysicalDAG;
+    use asap_executor::sources::{BindingDataSources, TableProvider};
+    use std::collections::BTreeMap;
+    let (schema, pane) = pane();
+    let merge = Operator::summary_merge(schema.clone(), 1, vec![0]).unwrap();
+    let compiled = CompiledPhysicalDAG::from_operators(
+        BTreeMap::from([(0, schema.clone())]),
+        BTreeMap::from([(1, (vec![0], merge))]),
+        vec![1],
+    )
+    .unwrap();
+    let data_sources = BindingDataSources {
+        views: BTreeMap::from([(
+            0,
+            Arc::new(StoredPanes { schema, pane }) as Arc<dyn TableProvider>,
+        )]),
+        ..Default::default()
+    };
+    let dag = compiled.instantiate(&data_sources).unwrap();
+    let context = RunContext::new(
+        Scope::Query {
+            evaluation_time_ms: 0,
+            revision: 1,
+        },
+        Limits {
+            max_bytes: 32 << 20,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    let rows = block_on(async {
+        let mut output = dag.execute(&[1], context).unwrap().remove(0);
+        let mut rows = 0;
+        while let Some(batch) = output.next().await {
+            rows += batch.unwrap().num_rows();
+        }
+        rows
+    });
+    assert_eq!(rows, SERIES as usize);
+}

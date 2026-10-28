@@ -3,9 +3,9 @@
 //! five minutes up to the evaluation. Without an evaluation time (an
 //! ingestion run) `now()` has no value and the run fails.
 use asap_executor::{
-    physical_planner::{bind_with_data_sources, compile},
+    physical_planner::compile,
     runtime::{Limits, RunContext, Scope},
-    sources::{DataSources, MemorySource},
+    sources::{BindingDataSources, DataSources, MemorySource},
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
@@ -15,7 +15,7 @@ use planner_types::ir::properties::ExecutionDataState;
 use planner_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ExprSemantics, ScalarValue};
 use planner_types::ir::schema::{DataType, Field, Schema};
 use planner_types::ir::{NonASAPOp, Predicate, ScalarExpr};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 const MINUTE_MS: i64 = 60_000;
@@ -78,7 +78,7 @@ fn scan_plan(predicates: Vec<Predicate<usize>>) -> PhysicalASAPDAG {
 
 /// One row a minute over the 10 minutes up to the evaluation, user = its
 /// minute.
-fn sources() -> DataSources {
+fn data_sources() -> BindingDataSources {
     let schema = Arc::new(schema());
     let rows = (0..=10)
         .map(|minute| {
@@ -89,8 +89,8 @@ fn sources() -> DataSources {
         })
         .collect();
     let batch = Batch::try_new(schema.clone(), rows).unwrap();
-    let mut sources = DataSources::default();
-    sources
+    let mut tables = DataSources::default();
+    tables
         .register(
             Source::Table {
                 table_ref: "http".into(),
@@ -98,14 +98,20 @@ fn sources() -> DataSources {
             Arc::new(MemorySource::new(schema, vec![batch]).unwrap()),
         )
         .unwrap();
-    sources
+    BindingDataSources {
+        tables,
+        ..Default::default()
+    }
 }
 
 /// The users the scan keeps in a run of `scope`.
 fn kept_users(scope: Scope) -> Result<Vec<i64>, String> {
     let dag = scan_plan(vec![last_five_minutes()]);
-    let sources = sources();
-    let bound = bind_with_data_sources(&dag, BTreeMap::new(), &[0], &sources).unwrap();
+    let data_sources = data_sources();
+    let bound = compile(&dag, &BTreeSet::new(), &[0])
+        .unwrap()
+        .instantiate(&data_sources)
+        .unwrap();
     let context = RunContext::new(scope, Limits::default()).unwrap();
     block_on(async {
         let mut output = bound

@@ -3,14 +3,14 @@
 //! filter contributes nothing, but its group is kept.
 mod physical_common;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use asap_executor::{
-    physical_planner::{compile, Source},
+    physical_planner::compile,
     runtime::{Limits, RunContext, Scope},
-    sources::{DataSources, MemorySource},
+    sources::{BindingDataSources, DataSources, MemorySource},
     values::{Batch, Value},
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
@@ -79,10 +79,6 @@ fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
         &[dag.roots[0] as u64],
     )
     .unwrap();
-    let expression = OperatorNode::reachable(root)
-        .into_iter()
-        .find(|node| matches!(node.non_asap(), Some(NonASAPOp::Scan { source: s, .. }) if s == source))
-        .unwrap();
     let mut sources = DataSources::default();
     sources
         .register(
@@ -96,12 +92,11 @@ fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
             ),
         )
         .unwrap();
-    let bound = plan
-        .instantiate(BTreeMap::from([(
-            scan.id as u64,
-            Box::new(sources.bind(&expression).unwrap()) as Source<'_>,
-        )]))
-        .unwrap();
+    let data_sources = BindingDataSources {
+        tables: sources,
+        ..Default::default()
+    };
+    let bound = plan.instantiate(&data_sources).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,

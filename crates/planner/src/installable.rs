@@ -19,11 +19,14 @@
 //! reads is listed before it. A runtime builds an output once all of its
 //! inputs are complete: each raw-data-sample window's samples have arrived
 //! (sealed) and each stored input is built. It compiles the DAG with the
-//! executor for that output's node, with each input bound as a source: a
-//! raw-data-sample window at its `time_range_node_id` (the rows
-//! `RawDataSampleSelector::window_batch` or `TableRowSelector::window_batch`
-//! returns) and a stored input at its own
-//! node id (its stored state). It runs the build in an ingestion run
+//! executor for that output's node, with each input bound in
+//! `asap_executor::sources::BindingDataSources`: a stored input at its own
+//! node id in `views` (a `TableProvider` over its stored state), and a
+//! raw-data-sample window at its `time_range_node_id` in `views` too, with a
+//! provider over the rows `RawDataSampleSelector::window_batch` or
+//! `TableRowSelector::window_batch` returns. Binding raw windows at the
+//! `TimeRange` is transitional (removed by #969, which binds raw data only
+//! at a `Scan`, by its `Source` in `tables`). It runs the build in an ingestion run
 //! (`StoredOutputBuild::IngestionRun`) or in the query run of the
 //! evaluation that first needs it (`StoredOutputBuild::QueryRun`), stores
 //! the result, and binds it the same way wherever the DAG reads that node.

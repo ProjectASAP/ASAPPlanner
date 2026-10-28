@@ -11,10 +11,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use asap_executor::operators::Operator as ExecutorOperator;
-use asap_executor::physical_planner::{bind_with_data_sources, compile};
+use asap_executor::physical_planner::compile;
 use asap_executor::runtime::{Limits, RunContext, Scope};
-use asap_executor::sources::{DataSources, MemorySource};
+use asap_executor::sources::{BindingDataSources, DataSources, MemorySource, TableProvider};
 use asap_executor::values::{Batch, Value};
 use asap_executor::TableRowSelector;
 use asap_planner::{
@@ -185,7 +184,12 @@ fn run_query(plan: &InstallablePlan, query: usize) -> (Vec<FieldDataType>, Vec<V
         )
         .unwrap();
     let roots = [reference.roots[query] as u64];
-    let bound = bind_with_data_sources(&reference, BTreeMap::new(), &roots, &sources)
+    let data_sources = BindingDataSources {
+        tables: sources,
+        ..Default::default()
+    };
+    let bound = compile(&reference, &BTreeSet::new(), &roots)
+        .and_then(|compiled| compiled.instantiate(&data_sources))
         .expect("the plan binds to the table");
     let context = RunContext::new(
         Scope::Query {
@@ -421,14 +425,15 @@ fn run_bound(
     let sources = inputs
         .into_iter()
         .map(|(id, batch)| {
-            let source = ExecutorOperator::source(batch.schema().clone(), vec![batch]).unwrap();
-            (
-                id,
-                Box::new(source) as asap_executor::physical_planner::Source<'_>,
-            )
+            let source = MemorySource::new(batch.schema().clone(), vec![batch]).unwrap();
+            (id, Arc::new(source) as Arc<dyn TableProvider>)
         })
         .collect();
-    let instance = compiled.instantiate(sources).unwrap();
+    let data_sources = BindingDataSources {
+        views: sources,
+        ..Default::default()
+    };
+    let instance = compiled.instantiate(&data_sources).unwrap();
     block_on(async {
         let context = RunContext::new(scope, Limits::default()).unwrap();
         let outputs = instance.execute(compiled.roots(), context).unwrap();
@@ -645,4 +650,110 @@ async fn a_window_equal_to_its_interval_is_built_at_ingestion_time_from_table_ro
         .map(|s| (format!("s{s}"), shown(&Value::Int64(100))))
         .collect();
     assert_eq!(by_key(run_data_plane(&plan).remove(0)), expected);
+}
+
+/// Each run's requested `(start, end]` time range, in order.
+type RequestedTimeRanges = std::sync::Mutex<Vec<Option<(i64, i64)>>>;
+
+/// The `http` table as a provider that records each run's requested time
+/// range and returns every row (it ignores the request).
+struct RecordingTable {
+    rows: MemorySource,
+    requested_time_ranges_ms: Arc<RequestedTimeRanges>,
+}
+impl TableProvider for RecordingTable {
+    fn schema(&self) -> asap_executor::values::SchemaRef {
+        self.rows.schema()
+    }
+    fn boundedness(&self) -> asap_executor::plan::Boundedness {
+        self.rows.boundedness()
+    }
+    fn scan(
+        &self,
+        request: &asap_executor::sources::ScanRequest,
+        context: RunContext,
+    ) -> Result<asap_executor::runtime::OutputStream<'_, Batch>, asap_executor::Error> {
+        self.requested_time_ranges_ms
+            .lock()
+            .unwrap()
+            .push(request.time_range_ms);
+        self.rows.scan(request, context)
+    }
+}
+
+// The `http` provider of a `ts >= now() - INTERVAL '5 minutes'` query is
+// asked for `(T - 5m, T]` at evaluation time `T`; it returns all 20 minutes
+// of rows, and the answer is the one over the window.
+#[tokio::test]
+async fn a_table_provider_is_asked_for_the_query_window() {
+    // The user's query, planned exactly over the `http` table.
+    let plan = plan(
+        "SELECT service, COUNT(*) AS value FROM http \
+         WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service",
+        EXACT,
+    )
+    .await;
+    // The plan with every node at query time: it reads the table at the Scan.
+    let reference = plan.dag.dag.with_every_node_at_query_time().unwrap();
+    // The schema the plan's Scan reads.
+    let schema = reference
+        .nodes
+        .iter()
+        .find_map(|node| match &node.payload {
+            PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { schema, .. }) => {
+                Some(Arc::new(schema.clone()))
+            }
+            _ => None,
+        })
+        .unwrap();
+    // Each run's requested time range, as the provider saw it.
+    let requested_time_ranges_ms = Arc::new(RequestedTimeRanges::default());
+    // The deployment's catalog: `http` → its provider.
+    let mut data_sources = BindingDataSources::default();
+    data_sources
+        .tables
+        .register(
+            Source::Table {
+                table_ref: "http".into(),
+            },
+            Arc::new(RecordingTable {
+                rows: MemorySource::new(
+                    schema.clone(),
+                    vec![Batch::try_new(schema, rows()).unwrap()],
+                )
+                .unwrap(),
+                requested_time_ranges_ms: requested_time_ranges_ms.clone(),
+            }),
+        )
+        .unwrap();
+    // Compiled once (no reader opened), then instantiated for this run.
+    let roots = [reference.roots[0] as u64];
+    let compiled = compile(&reference, &BTreeSet::new(), &roots).unwrap();
+    let bound = compiled.instantiate(&data_sources).unwrap();
+    let context = RunContext::new(
+        Scope::Query {
+            evaluation_time_ms: EVALUATION_MS,
+            revision: 1,
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    // The answer rows: each service and its count.
+    let rows = block_on(async {
+        let mut output = bound.execute(&roots, context).unwrap().remove(0);
+        let mut rows = Vec::new();
+        while let Some(batch) = output.next().await {
+            rows.extend(batch.unwrap().to_rows());
+        }
+        rows
+    });
+    assert_eq!(
+        *requested_time_ranges_ms.lock().unwrap(),
+        vec![Some((EVALUATION_MS - 5 * MINUTE_MS, EVALUATION_MS))]
+    );
+    // The 300 rows of the window, 100 per service.
+    let expected: BTreeMap<String, String> = (0..3)
+        .map(|s| (format!("s{s}"), shown(&Value::Int64(100))))
+        .collect();
+    assert_eq!(by_key(rows), expected);
 }
