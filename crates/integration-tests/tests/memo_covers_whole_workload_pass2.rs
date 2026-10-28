@@ -277,15 +277,11 @@ fn rollup() {
 }
 
 /// Exact top-k reuse: two top-k of one ranking.
+// The memo shares one stored Limit(10) ▸ Sort and each reader derives
+// Limit(k) ▸ Project from it (0.7755078/s); the whole-workload winner also
+// re-sorts per reader (0.7756417/s). The search reaches it once query-time
+// scans and builds have certified lower bounds (#963).
 #[test]
-// Search miss (#963): the memo shares one stored Limit(10) ▸ Sort, and each
-// reader derives Limit(k) ▸ Project from it, as the whole-workload winner
-// does (which also re-sorts per reader). The search evaluates that shape
-// over a query-time pane chain (0.7800940/s or 0.8203239/s, by run) and
-// over a time range with the summary build stored (1.0255661/s), but not
-// over a time range with the Limit(10) stored, the winner's 0.7756417/s;
-// every lower bound is 0.
-#[ignore = "search miss: #963"]
 fn topk_reuse() {
     check(&[
         ("topk by (job) (5, rate(m[1m]))", AccuracyTarget::exact()),

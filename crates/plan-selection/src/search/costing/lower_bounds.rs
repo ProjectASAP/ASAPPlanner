@@ -93,6 +93,7 @@ pub(in crate::search) fn apply(
                     .flat_map(|input| input.compatible_producers.iter().map(|producer| producer.0)),
             );
         }
+        let shortest_reader_window_ms = shortest_reader_windows(configured);
         let nodes: Vec<_> = (0..count)
             .map(|id| {
                 let configuration = configured.configurations[id];
@@ -108,7 +109,25 @@ pub(in crate::search) fn apply(
                         return None;
                     }
                     match (template.non_asap(), template.asap()) {
-                        (Some(NonASAPOp::Project { .. }), _)
+                        // A query-time scan reads at least its shortest
+                        // reader window ([`shortest_reader_windows`]); the
+                        // row operators and builds above it read at least
+                        // the rows that bound certifies.
+                        (Some(NonASAPOp::Scan { .. }), _)
+                            if shortest_reader_window_ms[id].is_none() =>
+                        {
+                            return None
+                        }
+                        (
+                            Some(
+                                NonASAPOp::Project { .. }
+                                | NonASAPOp::Scan { .. }
+                                | NonASAPOp::TimeRange { .. }
+                                | NonASAPOp::TimeShift { .. }
+                                | NonASAPOp::Aggregate { .. },
+                            ),
+                            _,
+                        )
                         | (
                             _,
                             Some(
@@ -117,6 +136,13 @@ pub(in crate::search) fn apply(
                             ),
                         ) => ExecutionDataState::QUERY_ROWS,
                         (_, Some(ASAPOp::SummaryMerge { .. })) => ExecutionDataState {
+                            timing: ExecutionTiming::QueryTime,
+                            primitive: DataPrimitive::SummaryState,
+                        },
+                        (
+                            _,
+                            Some(build @ (ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })),
+                        ) if template_price_is_a_floor(build, context) => ExecutionDataState {
                             timing: ExecutionTiming::QueryTime,
                             primitive: DataPrimitive::SummaryState,
                         },
@@ -147,12 +173,14 @@ pub(in crate::search) fn apply(
                         ) => ExecutionDataState::INGESTION_SUMMARY,
                         (
                             _,
-                            Some(ASAPOp::PaneChain {
-                                family: FieldDataType::Sketch(kind, _),
-                                ..
-                            }),
+                            Some(
+                                chain @ ASAPOp::PaneChain {
+                                    family: FieldDataType::Sketch(..),
+                                    ..
+                                },
+                            ),
                             Materialization::MatAtIngestion(_),
-                        ) if matches!(kind.params(), SketchParams::DDSketch { .. }) => {
+                        ) if template_price_is_a_floor(chain, context) => {
                             ExecutionDataState::INGESTION_SUMMARY
                         }
                         _ => return None,
@@ -200,6 +228,7 @@ pub(in crate::search) fn apply(
                 id,
                 configured,
                 &nodes,
+                &shortest_reader_window_ms,
                 context,
                 query_rate_floor,
                 &mut cache,
@@ -242,6 +271,104 @@ pub(in crate::search) fn apply(
         .validate()
         .map_err(|e| e.to_string())?;
     Ok(metrics)
+}
+
+/// Each candidate's shortest reader window: the least window any candidate
+/// that may read it (through time shifts) reads, as the evaluator's
+/// `windows_read` counts windows (a time range's range, a pane chain's
+/// panes). A query-time scan reads its readers' longest window, or every
+/// row held when no reader has one; both are at least the rows of this
+/// window capped by the rows held. `None` when no reader has a window.
+fn shortest_reader_windows(configured: &CandidateConfigurationInventory) -> Vec<Option<u64>> {
+    let graph = &configured.inventory.graph;
+    let mut readers = vec![Vec::new(); graph.candidates.len()];
+    for (reader, candidate) in graph.candidates.iter().enumerate() {
+        for requirement in &candidate.producer_requirements {
+            for producer in requirement.compatible_producers.iter() {
+                readers[producer.0].push(reader);
+            }
+        }
+    }
+    (0..graph.candidates.len())
+        .map(|id| {
+            let mut shortest: Option<u64> = None;
+            let mut pending = vec![id];
+            let mut seen = std::collections::HashSet::new();
+            while let Some(producer) = pending.pop() {
+                if !seen.insert(producer) {
+                    continue;
+                }
+                for &reader in &readers[producer] {
+                    let window = match configured.inventory.templates[reader]
+                        .as_ref()
+                        .map(|template| &template.operator)
+                    {
+                        Some(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeRange {
+                            range,
+                            ..
+                        })) => Some(range.as_millis() as u64),
+                        Some(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeShift {
+                            ..
+                        })) => {
+                            pending.push(reader);
+                            None
+                        }
+                        // A chain kept across evaluations reads one pane;
+                        // its scans are never certified (retained ancestors).
+                        Some(asap_types::ir::Operator::ASAP(ASAPOp::PaneChain {
+                            pane_width_ms,
+                            pane_count,
+                            ..
+                        })) => Some(pane_width_ms.saturating_mul(u64::from(*pane_count))),
+                        _ => None,
+                    };
+                    if let Some(window) = window {
+                        shortest = Some(shortest.map_or(window, |least| least.min(window)));
+                    }
+                }
+            }
+            shortest
+        })
+        .collect()
+}
+
+/// Whether a summary build's price at its template's parameters is at most
+/// its price in any plan that selects it. Stage 3 resizes a sketch only to
+/// larger parameters (`with_failure_probability` and HLL's `min_precision`
+/// keep at least the current size), and the analytical shape
+/// (`sketch_shape`) never charges a larger sketch less. A measured table
+/// interpolates between measured sizes and need not grow with size, so a
+/// resizable sketch with measured entries is not certified. DDSketch and
+/// exact accumulators are never resized.
+fn template_price_is_a_floor(build: &ASAPOp, context: &CandidatePlanningContext<'_>) -> bool {
+    let (ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. }) = build else {
+        return false;
+    };
+    let FieldDataType::Sketch(kind, _) = family else {
+        return true;
+    };
+    let params = kind.params();
+    matches!(params, SketchParams::DDSketch { .. })
+        || !measured_family(
+            params,
+            &context.models.plan_selection.measured_operation_costs,
+        )
+}
+
+/// Whether `table` measures any operator, at any phase, over `params`'s
+/// sketch algorithm. Such a family is priced by interpolating measured
+/// sizes, which need not rise with size, so a resized sketch can be priced
+/// below its Pass 1 size: neither its build nor the estimates and merges
+/// above it get a size-based bound.
+fn measured_family(
+    params: &SketchParams,
+    table: &crate::cost::measured::MeasuredOperationCosts,
+) -> bool {
+    table.operators.iter().any(|entry| {
+        entry.sketch.as_ref().is_some_and(|measured| {
+            std::mem::discriminant(measured) == std::mem::discriminant(params)
+        })
+    })
 }
 
 fn round_down_small_bounds(costs: &mut [f64]) -> usize {
@@ -432,6 +559,7 @@ fn certified_price<'a>(
     id: usize,
     configured: &CandidateConfigurationInventory,
     nodes: &'a [Option<PhysicalASAPDAGNode>],
+    shortest_reader_window_ms: &[Option<u64>],
     context: &'a CandidatePlanningContext<'a>,
     query_rate_floor: f64,
     cache: &mut [Option<PricedNode<'a>>],
@@ -459,6 +587,7 @@ fn certified_price<'a>(
                     supplier.0,
                     configured,
                     nodes,
+                    shortest_reader_window_ms,
                     context,
                     query_rate_floor,
                     cache,
@@ -475,9 +604,10 @@ fn certified_price<'a>(
                 // Other whitelisted operators do not use this domain flag.
                 let raw_nonnegative = matches!(
                     &node.payload,
-                    asap_types::ir::Operator::ASAP(ASAPOp::PaneChain {
-                        family: FieldDataType::Sketch(kind, _), ..
-                    }) if matches!(kind.params(), SketchParams::DDSketch { .. })
+                    asap_types::ir::Operator::ASAP(
+                        ASAPOp::PaneChain { family: FieldDataType::Sketch(kind, _), .. }
+                        | ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
+                    ) if matches!(kind.params(), SketchParams::DDSketch { .. })
                 )
                 .then(|| {
                     matches!(
@@ -551,9 +681,10 @@ fn certified_price<'a>(
             _ => 1,
         };
         // One ingestion boundary executes once per accounted second; additional
-        // unmaterialized consumers can only add executions. DDSketch and exact
-        // accumulators are not resized by failure-probability composition. Retention above its own
-        // pane count and all whole-plan charges are deliberately omitted.
+        // unmaterialized consumers can only add executions. A summary build is
+        // priced at its template's size, the smallest Stage 3 can give it
+        // ([`template_price_is_a_floor`]). Retention above its own pane count
+        // and all whole-plan charges are deliberately omitted.
         Ok(price_node(
             node,
             &views,
@@ -565,7 +696,9 @@ fn certified_price<'a>(
                     query_rate_floor
                 },
             ),
-            asap_types::ir::physical_export::ScanWindow::Unbounded,
+            // Stage 3 scans the width of the union of the readers' windows,
+            // at least the shortest one, whatever their offsets.
+            crate::trailing_window(shortest_reader_window_ms[id]),
             retained,
             maintained_window,
             context.data,
@@ -1302,5 +1435,279 @@ mod tests {
         let metrics = apply(&mut configured, &context).unwrap();
         assert_eq!(metrics.ingestion_pane_chains, 0);
         assert_eq!(metrics.ingestion_scans, 2);
+    }
+
+    /// `query`'s Pass 1 candidate that `pick` selects, built for `built_for`,
+    /// every node at query time: its configured inventory after [`apply`],
+    /// the bound of its selected plan, and that plan's evaluated cost for
+    /// queries with target `evaluated_for` (Stage 3 resizes sketches to it).
+    fn query_time_bound_and_cost(
+        query: &str,
+        built_for: AccuracyTarget,
+        evaluated_for: AccuracyTarget,
+        settings: &crate::PlanSelectionSettings,
+        pick: fn(&OperatorNode) -> bool,
+    ) -> (CandidateConfigurationInventory, f64, f64) {
+        let roots_with_ids = vec![(0usize, QueryRoot::Operator(lower_promql(query, built_for)))];
+        let memo = try_populate_pass1(
+            LogicalMemo::from_roots(&roots_with_ids),
+            &generate_per_computation_candidates(roots_with_ids).unwrap(),
+        )
+        .unwrap();
+        let root_group = memo
+            .groups
+            .iter()
+            .position(|group| group.roots_of.contains(&0))
+            .unwrap();
+        let candidate = memo.candidates[root_group]
+            .iter()
+            .find(|candidate| {
+                OperatorNode::reachable(&candidate.node)
+                    .iter()
+                    .any(|node| pick(node))
+            })
+            .unwrap();
+        let mut configured = CandidateConfigurationInventory {
+            inventory: CandidateInventory {
+                graph: CandidateDependencyGraph::default(),
+                templates: Vec::new(),
+                group_candidates: Vec::new(),
+            },
+            configurations: Vec::new(),
+        };
+        fn intern(
+            node: &Rc<OperatorNode>,
+            configured: &mut CandidateConfigurationInventory,
+        ) -> usize {
+            let mut inputs = Vec::new();
+            node.operator.map_children(|child| {
+                inputs.push(intern(child, configured));
+                Rc::clone(child)
+            });
+            let id = configured.inventory.templates.len();
+            configured.configurations.push(CandidateConfiguration {
+                source_candidate: PhysicalCandidateId(id),
+                timing: ExecutionTiming::QueryTime,
+                materialization: Materialization::NotMaterialized,
+            });
+            configured.inventory.templates.push(Some(Rc::clone(node)));
+            configured
+                .inventory
+                .graph
+                .candidates
+                .push(PhysicalCandidate {
+                    group: MemoGroupId(id as u32),
+                    local_cost: 0.0,
+                    producer_requirements: inputs
+                        .into_iter()
+                        .map(|input| ProducerRequirement {
+                            compatible_producers: vec![PhysicalCandidateId(input)].into(),
+                        })
+                        .collect(),
+                });
+            id
+        }
+        let root = intern(&candidate.node, &mut configured);
+        configured
+            .inventory
+            .graph
+            .query_roots
+            .push(QueryRootCandidates {
+                compatible_candidates: vec![PhysicalCandidateId(root)],
+            });
+        let roots = vec![QueryRoot::Operator(Rc::clone(&candidate.node))];
+        let entries = vec![entry_with(
+            evaluated_for,
+            QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(10_000))),
+        )];
+        let data = DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1000.0,
+            },
+            sources: [(
+                "latency".into(),
+                SourceFacts {
+                    series_count: Some(2),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let models = PlanningModels::builtin().with_plan_selection(settings);
+        let context = CandidatePlanningContext {
+            deadline: None,
+            refine_materialization: false,
+            original_roots: &roots,
+            entries: &entries,
+            data: &data,
+            models,
+            calibration: CalibrationFit::default(),
+            seed_separate_plans: false,
+        };
+        apply(&mut configured, &context).unwrap();
+        let selected = solve_candidate_proposal(&configured.inventory.graph, &[], None)
+            .unwrap()
+            .unwrap()
+            .selected;
+        let modes: Vec<_> = configured
+            .configurations
+            .iter()
+            .map(|config| Some(config.materialization))
+            .collect();
+        let physical = materialize_selected_candidates(
+            &configured.inventory,
+            &selected,
+            &modes,
+            &roots,
+            &entries,
+            &data,
+            models.deployment_capabilities,
+        )
+        .unwrap();
+        let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
+        selector.offer(&physical.physical).unwrap();
+        let (result, _) = selector.finish().unwrap();
+        let cost = result.costs[&result.selected].cost_per_second.unwrap();
+        (configured, selected.modeled_cost, cost)
+    }
+
+    fn bound_of(
+        configured: &CandidateConfigurationInventory,
+        matches: impl Fn(&OperatorNode) -> bool,
+    ) -> f64 {
+        configured
+            .inventory
+            .templates
+            .iter()
+            .zip(&configured.inventory.graph.candidates)
+            .find(|(template, _)| matches(template.as_ref().unwrap()))
+            .unwrap()
+            .1
+            .local_cost
+    }
+
+    // A query-time scan, its window and the exact build over it are priced
+    // from the window's rows at the slowest query rate: positive bounds that
+    // never exceed the evaluated plan's cost, also for a shifted window, whose
+    // scan Stage 3 prices at the window's width and whose older raw rows it
+    // keeps at its own charge.
+    #[test]
+    fn query_time_scans_and_builds_have_certified_bounds() {
+        for query in [
+            "sum_over_time(latency[5m])",
+            "sum_over_time(latency[5m] offset 1m)",
+        ] {
+            let (configured, bound, cost) = query_time_bound_and_cost(
+                query,
+                AccuracyTarget::exact(),
+                AccuracyTarget::exact(),
+                &crate::PlanSelectionSettings::default(),
+                |node| {
+                    matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(..), child, .. })
+                        if matches!(child.non_asap(), Some(NonASAPOp::TimeRange { .. })))
+                },
+            );
+            let scan = bound_of(&configured, |node| {
+                matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }))
+            });
+            let range = bound_of(&configured, |node| {
+                matches!(node.non_asap(), Some(NonASAPOp::TimeRange { .. }))
+            });
+            let build = bound_of(&configured, |node| {
+                matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. }))
+            });
+            // 300 s × 1000 rows/s, every 10 s: 30000 rows read per second.
+            assert!(
+                scan > 0.0 && range > 0.0 && build > 0.0,
+                "{query}: {scan} {range} {build}"
+            );
+            assert!(
+                bound > 0.0 && bound <= cost * (1.0 + 1e-9),
+                "{query}: bound {bound} against cost {cost}"
+            );
+        }
+    }
+
+    fn is_kll_build(node: &OperatorNode) -> bool {
+        matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
+            if matches!(kind.params(), SketchParams::Kll { .. }))
+    }
+
+    // A KLL build is priced at its template's size, the smallest Stage 3
+    // gives it: a smaller failure probability (as a smaller budget share
+    // gives) resizes it larger, and the bound stays below every such cost.
+    #[test]
+    fn a_kll_build_bound_holds_for_every_resized_size() {
+        let built_for = AccuracyTarget::max_error(0.01).failure_probability(0.01);
+        let mut costs = Vec::new();
+        for failure_probability in [0.01, 0.001, 0.0001] {
+            let (configured, bound, cost) = query_time_bound_and_cost(
+                "quantile_over_time(0.9, latency[5m])",
+                built_for.clone(),
+                AccuracyTarget::max_error(0.01).failure_probability(failure_probability),
+                &crate::PlanSelectionSettings::default(),
+                is_kll_build,
+            );
+            assert!(bound_of(&configured, is_kll_build) > 0.0);
+            assert!(
+                bound > 0.0 && bound <= cost * (1.0 + 1e-9),
+                "bound {bound} against cost {cost} at failure probability {failure_probability}"
+            );
+            costs.push(cost);
+        }
+        assert!(
+            costs[2] > costs[0],
+            "resizing must enlarge the sketch: {costs:?}"
+        );
+    }
+
+    // A measured table need not grow with size, so a resizable sketch with
+    // measured entries gets no certified bound.
+    #[test]
+    fn a_measured_kll_build_is_not_certified() {
+        let settings = crate::PlanSelectionSettings {
+            measured_operation_costs: serde_json::from_value(serde_json::json!({"operators": [
+            {"operator": "SummaryAgg", "phase": "query_time", "sketch": {"Kll": {"k": 200}}, "ns_per_unit": 300.0, "ns_per_invocation": 200.0}
+        ]}))
+        .unwrap(),
+            ..Default::default()
+        };
+        let (configured, _, _) = query_time_bound_and_cost(
+            "quantile_over_time(0.9, latency[5m])",
+            AccuracyTarget::max_error(0.01).failure_probability(0.01),
+            AccuracyTarget::max_error(0.01).failure_probability(0.01),
+            &settings,
+            is_kll_build,
+        );
+        assert_eq!(bound_of(&configured, is_kll_build), 0.0);
+    }
+
+    // A measured estimate over a KLL can make a larger, resized KLL cheaper
+    // than its Pass 1 size: a measured entry for the family on any operator
+    // leaves the build and the estimate above it uncertified, so the bound
+    // stays below the evaluated cost.
+    #[test]
+    fn a_measured_kll_estimate_keeps_the_bound_below_the_cost() {
+        let settings = crate::PlanSelectionSettings {
+            measured_operation_costs: serde_json::from_value(serde_json::json!({"operators": [
+            {"operator": "SummaryEstimate", "phase": "query_time", "sketch": {"Kll": {"k": 8}}, "ns_per_unit": 0.0, "ns_per_invocation": 5.0e9},
+            {"operator": "SummaryEstimate", "phase": "query_time", "sketch": {"Kll": {"k": 20000}}, "ns_per_unit": 0.0, "ns_per_invocation": 1.0}
+        ]}))
+        .unwrap(),
+            ..Default::default()
+        };
+        let built_for = AccuracyTarget::max_error(0.01).failure_probability(0.01);
+        for failure_probability in [0.01, 0.0001] {
+            let (configured, bound, cost) = query_time_bound_and_cost(
+                "quantile_over_time(0.9, latency[5m])",
+                built_for.clone(),
+                AccuracyTarget::max_error(0.01).failure_probability(failure_probability),
+                &settings,
+                is_kll_build,
+            );
+            assert_eq!(bound_of(&configured, is_kll_build), 0.0);
+            assert!(bound <= cost, "{failure_probability}: {bound} above {cost}");
+        }
     }
 }

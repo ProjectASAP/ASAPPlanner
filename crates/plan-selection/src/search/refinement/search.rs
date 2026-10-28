@@ -636,7 +636,10 @@ fn search_with_solver(
             if !cost.is_finite() || cost < 0.0 {
                 return Err("evaluator returned a nonfinite or negative cost".into());
             }
-            if cost < proposal.selected.modeled_cost {
+            // The bound and the evaluator add the same per-node prices in
+            // different orders, so an exact bound may exceed the cost by a
+            // rounding step.
+            if cost < proposal.selected.modeled_cost * (1.0 - 1e-12) {
                 return Err(format!(
                     "actual cost {cost} is below certified local bound {}",
                     proposal.selected.modeled_cost
