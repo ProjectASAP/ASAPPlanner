@@ -45,6 +45,53 @@ range R". The current shape has three problems:
 
 ## 2. Components and ownership
 
+```mermaid
+flowchart LR
+    subgraph planner["ASAPPlanner (offline)"]
+        IP["<b>InstallablePlan</b> (plan file)<br/>dag: PhysicalASAPDAG<br/>query_texts<br/>materialized_views() → MaterializedView<br/>raw_data_retention()"]
+    end
+
+    subgraph executor["asap-executor (one run at evaluation time T)"]
+        C["compile(dag) → compiled query DAG<br/>instantiate(&BindingDataSources)"]
+        TS["<b>table slot</b><br/>at each Scan, keyed by Source"]
+        VS["<b>materialized view slot</b><br/>knows its MaterializedView,<br/>computes time_range_ms (start, end]"]
+        OPS["PhysicalOperators<br/>re-filter table rows, merge states"]
+        C --> TS & VS
+        TS -->|"rows"| OPS
+        VS -->|"states, held outside the memory limit"| OPS
+    end
+
+    subgraph deployment["Deployment (for example ASAPQuery-backend)"]
+        subgraph bds["BindingDataSources"]
+            DS["<b>tables: DataSources</b><br/>Source → TableProvider"]
+            MVS["<b>materialized_views: MaterializedViewStore</b><br/>read(view, time_range_ms, RunContext)"]
+        end
+        RAW[("raw data<br/>tables, time series")]
+        CAT["<b>Summary catalog</b> (SDS definitions)<br/>Summary Descriptor, Data Descriptor"]
+        INST[("<b>Summary instances</b><br/>interval, group values, completeness,<br/>state_reference, status, revision")]
+        REF["<b>refresh scheduler</b><br/>AtIngestion: per pane, ingestion run<br/>OnFirstRead: before the query run"]
+        DS --> RAW
+        MVS -->|"1. resolve definition"| CAT
+        MVS -->|"2–5. select by pane end, tile,<br/>check readiness, decode"| INST
+        REF -->|"run refresh DAG over raw data,<br/>publish instance"| INST
+        REF -.->|"reads"| RAW
+    end
+
+    IP -->|"install: definition_id + selection"| CAT
+    IP -->|"install: retention_ms, refresh,<br/>raw_data_retention()"| REF
+    IP -->|"dag"| C
+    bds -->|"passed to instantiate"| C
+    TS -->|"TableProvider::scan(ScanRequest)"| DS
+    VS -->|"read(view, time_range_ms, ctx)<br/>ctx carries the store revision"| MVS
+    MVS -.->|"rows: group columns + state column<br/>(no instance identity)"| VS
+```
+
+The interface between the executor and the deployment is
+`BindingDataSources`: a table read is `TableProvider::scan(ScanRequest)` keyed
+by `Source`, and a view read is `MaterializedViewStore::read` keyed by the
+`MaterializedView`. Everything right of it (catalog, instances, refresh) is the
+deployment's.
+
 | Component | Holds | Owner |
 | --- | --- | --- |
 | Plan file | `InstallablePlan`: the DAG, query texts, and from them `materialized_views()` and `raw_data_retention()` | Planner |
