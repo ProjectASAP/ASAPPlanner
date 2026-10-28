@@ -93,7 +93,7 @@ pub(in crate::search) fn apply(
                     .flat_map(|input| input.compatible_producers.iter().map(|producer| producer.0)),
             );
         }
-        let lookbacks = shortest_reader_windows(configured);
+        let shortest_reader_window_ms = shortest_reader_windows(configured);
         let nodes: Vec<_> = (0..count)
             .map(|id| {
                 let configuration = configured.configurations[id];
@@ -113,7 +113,9 @@ pub(in crate::search) fn apply(
                         // reader window ([`shortest_reader_windows`]); the
                         // row operators and builds above it read at least
                         // the rows that bound certifies.
-                        (Some(NonASAPOp::Scan { .. }), _) if lookbacks[id].is_none() => {
+                        (Some(NonASAPOp::Scan { .. }), _)
+                            if shortest_reader_window_ms[id].is_none() =>
+                        {
                             return None
                         }
                         (
@@ -140,17 +142,10 @@ pub(in crate::search) fn apply(
                         (
                             _,
                             Some(build @ (ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })),
-                        ) if template_price_is_a_floor(
-                            build,
-                            ExecutionTiming::QueryTime,
-                            context,
-                        ) =>
-                        {
-                            ExecutionDataState {
-                                timing: ExecutionTiming::QueryTime,
-                                primitive: DataPrimitive::SummaryState,
-                            }
-                        }
+                        ) if template_price_is_a_floor(build, context) => ExecutionDataState {
+                            timing: ExecutionTiming::QueryTime,
+                            primitive: DataPrimitive::SummaryState,
+                        },
                         _ => return None,
                     }
                 } else {
@@ -185,12 +180,7 @@ pub(in crate::search) fn apply(
                                 },
                             ),
                             Materialization::MatAtIngestion(_),
-                        ) if template_price_is_a_floor(
-                            chain,
-                            ExecutionTiming::IngestionTime,
-                            context,
-                        ) =>
-                        {
+                        ) if template_price_is_a_floor(chain, context) => {
                             ExecutionDataState::INGESTION_SUMMARY
                         }
                         _ => return None,
@@ -238,7 +228,7 @@ pub(in crate::search) fn apply(
                 id,
                 configured,
                 &nodes,
-                &lookbacks,
+                &shortest_reader_window_ms,
                 context,
                 query_rate_floor,
                 &mut cache,
@@ -350,11 +340,7 @@ fn shortest_reader_windows(configured: &CandidateConfigurationInventory) -> Vec<
 /// interpolates between measured sizes and need not grow with size, so a
 /// resizable sketch with measured entries is not certified. DDSketch and
 /// exact accumulators are never resized.
-fn template_price_is_a_floor(
-    build: &ASAPOp,
-    timing: ExecutionTiming,
-    context: &CandidatePlanningContext<'_>,
-) -> bool {
+fn template_price_is_a_floor(build: &ASAPOp, context: &CandidatePlanningContext<'_>) -> bool {
     let (ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. }) = build else {
         return false;
     };
@@ -362,22 +348,27 @@ fn template_price_is_a_floor(
         return true;
     };
     let params = kind.params();
-    if matches!(params, SketchParams::DDSketch { .. }) {
-        return true;
-    }
-    use crate::cost::measured::{lookup, OperatorKind, StateFamily};
-    [OperatorKind::SummaryAgg, OperatorKind::PaneChain]
-        .into_iter()
-        .all(|operator| {
-            lookup(
-                &context.models.plan_selection.measured_operation_costs,
-                operator,
-                timing,
-                StateFamily::Sketch(params),
-                |_| 1.0,
-            )
-            .is_none()
+    matches!(params, SketchParams::DDSketch { .. })
+        || !measured_family(
+            params,
+            &context.models.plan_selection.measured_operation_costs,
+        )
+}
+
+/// Whether `table` measures any operator, at any phase, over `params`'s
+/// sketch algorithm. Such a family is priced by interpolating measured
+/// sizes, which need not rise with size, so a resized sketch can be priced
+/// below its Pass 1 size: neither its build nor the estimates and merges
+/// above it get a size-based bound.
+fn measured_family(
+    params: &SketchParams,
+    table: &crate::cost::measured::MeasuredOperationCosts,
+) -> bool {
+    table.operators.iter().any(|entry| {
+        entry.sketch.as_ref().is_some_and(|measured| {
+            std::mem::discriminant(measured) == std::mem::discriminant(params)
         })
+    })
 }
 
 fn round_down_small_bounds(costs: &mut [f64]) -> usize {
@@ -568,7 +559,7 @@ fn certified_price<'a>(
     id: usize,
     configured: &CandidateConfigurationInventory,
     nodes: &'a [Option<PhysicalASAPDAGNode>],
-    lookbacks: &[Option<u64>],
+    shortest_reader_window_ms: &[Option<u64>],
     context: &'a CandidatePlanningContext<'a>,
     query_rate_floor: f64,
     cache: &mut [Option<PricedNode<'a>>],
@@ -596,7 +587,7 @@ fn certified_price<'a>(
                     supplier.0,
                     configured,
                     nodes,
-                    lookbacks,
+                    shortest_reader_window_ms,
                     context,
                     query_rate_floor,
                     cache,
@@ -613,9 +604,10 @@ fn certified_price<'a>(
                 // Other whitelisted operators do not use this domain flag.
                 let raw_nonnegative = matches!(
                     &node.payload,
-                    asap_types::ir::Operator::ASAP(ASAPOp::PaneChain {
-                        family: FieldDataType::Sketch(kind, _), ..
-                    }) if matches!(kind.params(), SketchParams::DDSketch { .. })
+                    asap_types::ir::Operator::ASAP(
+                        ASAPOp::PaneChain { family: FieldDataType::Sketch(kind, _), .. }
+                        | ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
+                    ) if matches!(kind.params(), SketchParams::DDSketch { .. })
                 )
                 .then(|| {
                     matches!(
@@ -706,7 +698,7 @@ fn certified_price<'a>(
             ),
             // Stage 3 scans the width of the union of the readers' windows,
             // at least the shortest one, whatever their offsets.
-            crate::trailing_window(lookbacks[id]),
+            crate::trailing_window(shortest_reader_window_ms[id]),
             retained,
             maintained_window,
             context.data,
@@ -1689,5 +1681,33 @@ mod tests {
             is_kll_build,
         );
         assert_eq!(bound_of(&configured, is_kll_build), 0.0);
+    }
+
+    // A measured estimate over a KLL can make a larger, resized KLL cheaper
+    // than its Pass 1 size: a measured entry for the family on any operator
+    // leaves the build and the estimate above it uncertified, so the bound
+    // stays below the evaluated cost.
+    #[test]
+    fn a_measured_kll_estimate_keeps_the_bound_below_the_cost() {
+        let settings = crate::PlanSelectionSettings {
+            measured_operation_costs: serde_json::from_value(serde_json::json!({"operators": [
+            {"operator": "SummaryEstimate", "phase": "query_time", "sketch": {"Kll": {"k": 8}}, "ns_per_unit": 0.0, "ns_per_invocation": 5.0e9},
+            {"operator": "SummaryEstimate", "phase": "query_time", "sketch": {"Kll": {"k": 20000}}, "ns_per_unit": 0.0, "ns_per_invocation": 1.0}
+        ]}))
+        .unwrap(),
+            ..Default::default()
+        };
+        let built_for = AccuracyTarget::max_error(0.01).failure_probability(0.01);
+        for failure_probability in [0.01, 0.0001] {
+            let (configured, bound, cost) = query_time_bound_and_cost(
+                "quantile_over_time(0.9, latency[5m])",
+                built_for.clone(),
+                AccuracyTarget::max_error(0.01).failure_probability(failure_probability),
+                &settings,
+                is_kll_build,
+            );
+            assert_eq!(bound_of(&configured, is_kll_build), 0.0);
+            assert!(bound <= cost, "{failure_probability}: {bound} above {cost}");
+        }
     }
 }
