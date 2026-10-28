@@ -784,6 +784,15 @@ mod tests {
         use asap_types::workload::{
             DataWorkload, QueryRecurrence, RepeatedDemand, RepetitionInterval,
         };
+        // A summary build over rows, as opposed to a rollup over an already
+        // aggregated result: a finalized accumulator, or (since an exact
+        // rollup reads the finer query's own result) the finer query's
+        // aggregate.
+        let builds_over_rows = |node: &OperatorNode| {
+            matches!(node.asap(), Some(ASAPOp::SummaryAgg { child, .. })
+                if !matches!(child.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. }))
+                    && !matches!(child.non_asap(), Some(NonASAPOp::Aggregate { .. })))
+        };
         for (queries, kind) in [
             (["avg(m)", "sum(m)"], "partial"),
             (["sum by (job) (m)", "sum by (job, instance) (m)"], "rollup"),
@@ -830,18 +839,15 @@ mod tests {
                 }) {
                     return Ok(100_000.0);
                 }
-                Ok(match node.asap() {
-                    Some(ASAPOp::SummaryAgg { child, .. })
-                        if !matches!(
-                            child.asap(),
-                            Some(ASAPOp::FinalizeExactAccumulator { .. })
-                        ) =>
+                Ok(
+                    if builds_over_rows(node)
+                        || matches!(node.non_asap(), Some(NonASAPOp::Sort { .. }))
                     {
                         1000.0
-                    }
-                    _ if matches!(node.non_asap(), Some(NonASAPOp::Sort { .. })) => 1000.0,
-                    _ => 1.0,
-                })
+                    } else {
+                        1.0
+                    },
+                )
             })
             .unwrap();
             if matches!(kind, "ranking" | "sketch") {
@@ -868,7 +874,11 @@ mod tests {
                     1
                 );
             } else {
-                assert_eq!(chosen.iter().filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg {child, ..}) if !matches!(child.asap(), Some(ASAPOp::FinalizeExactAccumulator {..})))).count(), if kind == "partial" { 2 } else { 1 }, "{kind}");
+                assert_eq!(
+                    chosen.iter().filter(|node| builds_over_rows(node)).count(),
+                    if kind == "partial" { 2 } else { 1 },
+                    "{kind}"
+                );
             }
             let entries: Vec<_> = (0..2)
                 .map(|_| {
