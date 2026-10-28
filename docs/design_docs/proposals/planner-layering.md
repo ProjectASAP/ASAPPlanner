@@ -399,8 +399,9 @@ all; the memo has 259 candidates.
   accumulators; and 2 `FinalizeExactAccumulator` groups (G6's sum and count
   readouts).
 - 1738 candidates. G2 and G4 have 691 each: 10 `Pass1` (the 7 above and
-  3 KLL candidates the state-configuration rule rewrote: one to the shared
-  size `k` 1156, two keeping their size),
+  3 the state-size rule made from the `budget_share` 1 KLL `k` 567 by
+  resizing it to `k` 567, 1156 and 1184; each keeps `budget_share` 1, and the
+  `k` 1184 one composes the same DAG as the `budget_share` 2 KLL),
   336 `Panes` and 345 `SharedBuild`. G6 has 3: `Pass1`, `SummaryResult` and
   `SharedBuild`.
 - Enumeration stops at `stage_pipeline`'s default limit of 1,000 candidate
@@ -417,10 +418,12 @@ These numbers are the production planner's, read from the stage-pipeline
 document `tools/dag-viewer/examples/memo-ratio-of-quantiles.json` (made by
 `stage_pipeline` from `tools/dag-viewer/memo-examples/promql/ratio-of-quantiles-5m.json`,
 with accuracy guarantees enforced and the `aws-fargate-us-east-1` cost model).
-The `lower_promql` test helper used by
-`crates/integration-tests/tests/memo_enumeration.rs` lowers the query without
-the series-identity column, so there the two `quantile 0.5` stay two groups
-and the counts are larger.
+`crates/integration-tests/tests/memo_enumeration.rs` lowers the query as
+production does (with the series-identity column) and reads the memo from the
+production run. It asserts the Stage 0 and Pass 1 numbers above. The last
+step is the memo of the planning round whose plan was selected, so it depends
+on the time budget; the test runs one round over the complete pane-width
+domain, which gives 438 groups and 2158 candidates.
 
 #### Algorithm: memo to candidate DAGs
 
@@ -472,10 +475,13 @@ because only G2 and G4 have more than one candidate and both read only G1.
 
 **Correctness.** Every recorded choice composes unless the memo has a
 construction bug (`ChildNotInCandidate`). For Pass 1 of the example
-each of the 49 choices composes a different DAG. That the whole-budget
-choices compose exactly the whole-workload plans is checked by
-`memo_enumeration.rs` on the test helper's lowering (also on a three-query
-workload). `enumerate` counts
+each of the 49 choices composes a different DAG. The whole-budget
+choices and the whole-workload plans are not the same set: 9 of the 27
+whole-workload plans are memo DAGs (those that give both `quantile 0.5` the
+same choice, since the memo has one group for them), and 7 of the 16
+whole-budget choices take the KLL sized for the whole result, which the
+whole-workload inventory does not offer. `memo_enumeration.rs` checks this
+(also on a three-query workload). `enumerate` counts
 choices, not DAGs: two candidates of a group that differ only in what
 recomposing re-derives compose equal DAGs. It does not check validity: input
 contracts, accuracy at the query roots, Stage 2 legality and Stage 3
