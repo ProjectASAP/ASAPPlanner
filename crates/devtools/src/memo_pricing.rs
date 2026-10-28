@@ -4,10 +4,12 @@
 //! (`select_plan`, under the run's models), so a choice cheaper than the
 //! selected plan shows that the search missed a plan the memo stands for.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use asap_logical_asap_optimization::memo::candidates::CandidateMemo;
 use asap_logical_asap_optimization::memo::enumeration::{compose, MemoChoice};
+use asap_logical_asap_optimization::memo::MemoGroupId;
 use asap_physical_asap_optimization::optimize_physical_asap;
 use asap_plan_selection::{select_plan, PlanningModels, Selection, SelectionError};
 use asap_types::ir::{OperatorNode, QueryRoot};
@@ -21,7 +23,7 @@ pub struct PricedChoice {
     /// Why it is not valid: the Stage 3 rejection cause of its first
     /// physical plan in snake_case (e.g. `accuracy_target_missed`), or
     /// `compose_failed`, `invalid_structure`, `stage2_failed`,
-    /// `stage3_failed`.
+    /// `stage3_failed`, or `rejected` (no plan and no rejection listed).
     pub rejection: Option<String>,
     /// The rejection's one-line reason, with the numbers.
     pub rejection_reason: Option<String>,
@@ -58,7 +60,7 @@ impl SelectedBaseline {
 }
 
 /// Costs within this fraction of each other are the same sum of charges
-/// rounded differently (Stage 3's tie tolerance).
+/// rounded differently (Stage 3's relative tie tolerance).
 const TIE_TOLERANCE: f64 = 1e-9;
 
 /// Each of `choices` of `memo`, composed, implemented and priced. Query `i`
@@ -79,15 +81,19 @@ pub fn price_choices(
     }
     let models = models.with_plan_selection(&settings);
     let selected_cost = selected.and_then(|s| s.cost_per_second);
+    // Which root group each query's operator references name is the same
+    // for every choice.
+    let root_groups = root_groups_of_queries(memo, stage0_roots);
     choices
         .iter()
         .enumerate()
         .map(|(index, choice)| {
-            let mut priced = price_choice(memo, choice, index, stage0_roots, entries, data, models);
+            let roots = compose(memo, choice)
+                .map_err(|error| error.to_string())
+                .and_then(|composed| query_roots(&composed, stage0_roots, &root_groups));
+            let mut priced = price_choice(roots, index, entries, data, models);
             priced.cheaper_than_selected = match (priced.cost_per_second, selected_cost) {
-                (Some(cost), Some(selected)) => {
-                    cost < selected - TIE_TOLERANCE * selected.abs().max(1.0)
-                }
+                (Some(cost), Some(selected)) => cost < selected - TIE_TOLERANCE * selected.abs(),
                 _ => false,
             };
             priced
@@ -95,11 +101,11 @@ pub fn price_choices(
         .collect()
 }
 
+/// One choice, its query roots composed (or why they do not compose),
+/// implemented and priced.
 fn price_choice(
-    memo: &CandidateMemo,
-    choice: &MemoChoice,
+    roots: Result<Vec<QueryRoot>, String>,
     index: usize,
-    stage0_roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
@@ -111,10 +117,7 @@ fn price_choice(
         cost_per_second: None,
         cheaper_than_selected: false,
     };
-    let roots = match compose(memo, choice)
-        .map_err(|error| error.to_string())
-        .and_then(|composed| query_roots(memo, &composed, stage0_roots))
-    {
+    let roots = match roots {
         Ok(roots) => roots,
         Err(error) => return invalid("compose_failed", error),
     };
@@ -154,42 +157,72 @@ fn price_choice(
     }
 }
 
-/// Each query's root with every operator reference replaced by the composed
-/// DAG of the root group it names.
-fn query_roots(
+/// For each query, the root group of each of its operator references, in
+/// `operator_refs` order: the one group whose `roots_of` names the query when
+/// its root is one operator, else the group whose node is the reference.
+fn root_groups_of_queries(
     memo: &CandidateMemo,
-    composed: &[(
-        asap_logical_asap_optimization::memo::MemoGroupId,
-        Rc<OperatorNode>,
-    )],
     stage0_roots: &[QueryRoot],
-) -> Result<Vec<QueryRoot>, String> {
-    let composed_of = |query: usize, original: &Rc<OperatorNode>| {
-        composed
-            .iter()
-            .find(|(group, _)| {
-                let group = &memo.groups[group.0 as usize];
-                group.roots_of.contains(&query)
-                    && (Rc::ptr_eq(&group.node, original) || *group.node == **original)
-            })
-            .map(|(_, node)| Rc::clone(node))
-            .ok_or_else(|| format!("query {query}'s root has no root group"))
-    };
+) -> Result<Vec<Vec<MemoGroupId>>, String> {
     stage0_roots
         .iter()
         .enumerate()
-        .map(|(query, root)| match root {
-            QueryRoot::Operator(node) => composed_of(query, node).map(QueryRoot::Operator),
-            QueryRoot::Scalar(expression) => {
-                let mut error = None;
-                let mapped = expression.map_operator_refs(&mut |node| {
-                    composed_of(query, node).unwrap_or_else(|e| {
-                        error = Some(e);
-                        Rc::clone(node)
-                    })
-                });
-                error.map_or(Ok(QueryRoot::Scalar(mapped)), Err)
+        .map(|(query, root)| {
+            let groups: Vec<_> = (0..memo.groups.len())
+                .filter(|&g| memo.groups[g].roots_of.contains(&query))
+                .map(|g| MemoGroupId(g as u32))
+                .collect();
+            match root {
+                QueryRoot::Operator(_) if groups.len() == 1 => Ok(groups),
+                QueryRoot::Operator(node) => Ok(vec![group_of(memo, &groups, node, query)?]),
+                QueryRoot::Scalar(expression) => expression
+                    .operator_refs()
+                    .into_iter()
+                    .map(|node| group_of(memo, &groups, node, query))
+                    .collect(),
             }
+        })
+        .collect()
+}
+
+/// The group among `groups` whose node is `node`: the same node, else an
+/// equal one (the memo's group nodes are the frontends' nodes with common
+/// sub-DAGs shared).
+fn group_of(
+    memo: &CandidateMemo,
+    groups: &[MemoGroupId],
+    node: &Rc<OperatorNode>,
+    query: usize,
+) -> Result<MemoGroupId, String> {
+    let node_of = |g: &&MemoGroupId| &memo.groups[g.0 as usize].node;
+    groups
+        .iter()
+        .find(|g| Rc::ptr_eq(node_of(g), node))
+        .or_else(|| groups.iter().find(|g| **node_of(g) == **node))
+        .copied()
+        .ok_or_else(|| format!("query {query}'s root has no root group"))
+}
+
+/// Each query's root with every operator reference replaced by the composed
+/// DAG of its root group (`root_groups`).
+fn query_roots(
+    composed: &[(MemoGroupId, Rc<OperatorNode>)],
+    stage0_roots: &[QueryRoot],
+    root_groups: &Result<Vec<Vec<MemoGroupId>>, String>,
+) -> Result<Vec<QueryRoot>, String> {
+    let root_groups = root_groups.as_ref().map_err(String::clone)?;
+    let composed: HashMap<_, _> = composed.iter().cloned().collect();
+    stage0_roots
+        .iter()
+        .zip(root_groups)
+        .map(|(root, groups)| {
+            let mut next = groups.iter().map(|group| Rc::clone(&composed[group]));
+            Ok(match root {
+                QueryRoot::Operator(_) => QueryRoot::Operator(next.next().expect("one group")),
+                QueryRoot::Scalar(expression) => QueryRoot::Scalar(
+                    expression.map_operator_refs(&mut |_| next.next().expect("a group per ref")),
+                ),
+            })
         })
         .collect()
 }

@@ -321,3 +321,32 @@ fn a_worse_selection_is_caught_by_cheaper_than_selected() {
     }
     assert!(priced.iter().any(|p| p.cheaper_than_selected));
 }
+
+/// A query whose root is a scalar expression reading two operator DAGs:
+/// each reference is replaced by its own root group's composed DAG, so
+/// every choice composes and is priced.
+#[test]
+fn scalar_root_choices_are_composed_and_priced() {
+    let mut workload = ratio_of_quantiles();
+    workload.query_workload.repeating_queries.as_mut().unwrap()[0].query = Query(
+        "scalar(sum(quantile_over_time(0.5, data[5m]))) + scalar(max(rate(data[1m])))".into(),
+    );
+    let planned = planned(&workload, true);
+    assert!(matches!(planned.roots[0], QueryRoot::Scalar(_)));
+    let (settings, deployment) = (settings(false), deployment());
+    let enumeration = enumerate(&planned.memo, 100_000);
+    assert!(enumeration.complete && enumeration.choices.len() > 1);
+    let priced = price_choices(
+        &planned.memo,
+        &enumeration.choices,
+        &planned.roots,
+        &planned.entries,
+        &planned.data,
+        models(&settings, &deployment),
+        None,
+    );
+    for p in &priced {
+        assert_ne!(p.rejection.as_deref(), Some("compose_failed"), "{p:?}");
+    }
+    assert!(priced.iter().any(|p| p.valid));
+}

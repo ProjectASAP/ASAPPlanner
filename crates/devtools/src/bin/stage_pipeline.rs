@@ -140,7 +140,8 @@
 // choices is also run through Stage 2 and Stage 3 as the selected plan is
 // (`memo_pricing::price_choices`, under the run's models): `valid`,
 // `rejection` (a Stage 3 rejection cause, or `compose_failed`,
-// `invalid_structure`, `stage2_failed`) with `rejection_reason`,
+// `invalid_structure`, `stage2_failed`, `stage3_failed`, `rejected`) with
+// `rejection_reason`,
 // `cost_per_second` (its cheapest valid physical plan's) and
 // `cheaper_than_selected` (valid and cheaper than the selected plan); and
 // `priced` is `{count, cheaper_than_selected, selected_cost_per_second}`.
@@ -392,7 +393,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         candidates_per_group: 64,
         enumeration_limit: 1000,
         enumerated: 200,
-        priced: 0,
+        choices_to_price: 0,
     };
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -466,7 +467,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 memo_caps.enumerated = value()?.parse().map_err(|e| format!("{e}"))?
             }
             "--price-enumerated" => {
-                memo_caps.priced = value()?.parse().map_err(|e| format!("{e}"))?
+                memo_caps.choices_to_price = value()?.parse().map_err(|e| format!("{e}"))?
             }
             "--search" => {
                 search_algorithm = Some(match value()?.as_str() {
@@ -590,6 +591,23 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         },
     };
     plan_selection.ignore_accuracy_guarantees = !enforce_accuracy_guarantees;
+    if memo_caps.choices_to_price > 0 {
+        if !write_memo {
+            return Err("--price-enumerated needs the memo (drop --no-memo)".into());
+        }
+        // The exhaustive search reports no calibration factor to price each
+        // choice on the selection's scale.
+        if exhaustive
+            && plan_selection.frozen_calibration_factor.is_none()
+            && !plan_selection.measured_operation_costs.operators.is_empty()
+        {
+            return Err(
+                "--price-enumerated with --exhaustive needs a frozen_calibration_factor \
+                        when measured operation costs are given"
+                    .into(),
+            );
+        }
+    }
     let from_files = if workload_paths.is_empty() {
         None
     } else if example.is_none() && queries.is_empty() {
@@ -1480,7 +1498,7 @@ struct MemoCaps {
     candidates_per_group: usize,
     enumeration_limit: usize,
     enumerated: usize,
-    priced: usize,
+    choices_to_price: usize,
 }
 
 /// What pricing an enumerated choice needs: the run's workload, models and
@@ -1546,10 +1564,10 @@ fn memo_json(steps: &MemoSteps, caps: &MemoCaps, pricing: &Pricing<'_>) -> Value
     let (step, memo) = listed.unwrap_or(("concrete_states", last));
     let selected = steps.selected_choice.as_ref().ok();
     let enumerated = enumerate(memo, caps.enumerated).choices;
-    let priced = (caps.priced > 0).then(|| {
+    let priced = (caps.choices_to_price > 0).then(|| {
         price_choices(
             memo,
-            &enumerated[..caps.priced.min(enumerated.len())],
+            &enumerated[..caps.choices_to_price.min(enumerated.len())],
             pricing.stage0_roots,
             pricing.entries,
             pricing.data,
