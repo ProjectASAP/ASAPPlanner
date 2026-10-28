@@ -500,12 +500,12 @@ time, together with that position's schema, which is the DAG node's
 | **View slot** | a materialized view cut out of a query DAG | the view's schema | node id |
 
 ```rust
-pub fn compile(dag: &PhysicalASAPDAG, views: &BTreeSet<NodeId>, roots: &[NodeId])
+pub fn compile(dag: &PhysicalASAPDAG, materialized_views: &BTreeSet<NodeId>, roots: &[NodeId])
     -> Result<CompiledPhysicalDAG, Error>;
 ```
 
 `compile` opens no readers. The DAG that refreshes a view has the view as a
-root; a DAG that reads it has the view in `views`. A runtime compiles each
+root; a DAG that reads it has the view in `materialized_views`. A runtime compiles each
 cut once, at install time. `CompiledPhysicalDAG` is derived inside the
 executor and is not persisted: the plan file is the only handoff.
 
@@ -539,7 +539,7 @@ is still correct.
 ```rust
 pub struct BindingDataSources {
     pub tables: DataSources,                             // Source → provider
-    pub views: BTreeMap<NodeId, Arc<dyn TableProvider>>, // view slot → provider
+    pub materialized_views: BTreeMap<NodeId, Arc<dyn TableProvider>>, // view slot → provider
 }
 impl CompiledPhysicalDAG {
     pub fn instantiate<'a>(&self, data_sources: &'a BindingDataSources)
@@ -580,7 +580,7 @@ Each complete pane (12:04, 12:05]:
     store the KllState in the summary store under the view's coverage
 
 Query at T = 12:05 over (12:00, 12:05]:
-    query.instantiate(&BindingDataSources { views: { pane → summary-store provider } })
+    query.instantiate(&BindingDataSources { materialized_views: { pane → summary-store provider } })
         the view slot asks for time_range_ms = (12:00, 12:05]
         ├── latency-kll-1m/(12:00,12:01]
         ├── latency-kll-1m/(12:01,12:02]
