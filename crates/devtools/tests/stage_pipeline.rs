@@ -2299,7 +2299,10 @@ fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
     assert!(!choices.is_empty() && choices.len() <= 200);
     for choice in choices {
         validated_dag(&choice["dag"], 1);
+        // Pricing is off without `--price-enumerated`.
+        assert!(choice.get("valid").is_none());
     }
+    assert_eq!(enumeration["priced"], Value::Null);
     // `--no-memo` leaves the section out.
     let out = std::env::temp_dir().join(format!(
         "stage_pipeline_{}_no_memo_ratio.json",
