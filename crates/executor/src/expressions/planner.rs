@@ -166,6 +166,30 @@ pub(super) fn evaluate(
             }
             Ok(if null { Value::Null } else { Value::Bool(and) })
         }
+        // SQL's `x IN (v1, …)` is `x = v1 OR …`: true on a match, else NULL
+        // when x or an item is NULL, else false; `NOT IN` negates it.
+        ScalarExpr::InList {
+            expr,
+            list,
+            negated,
+        } => {
+            let value = evaluate(expr, row, schema, evaluation_time_ms, regexes)?;
+            let mut null = false;
+            for item in list {
+                let item = evaluate(item, row, schema, evaluation_time_ms, regexes)?;
+                match compare(&CompareOpKind::Eq, value.clone(), item)? {
+                    Value::Bool(true) => return Ok(Value::Bool(!negated)),
+                    Value::Bool(false) => {}
+                    Value::Null => null = true,
+                    _ => return Err(Error::Invalid("boolean predicate required".into())),
+                }
+            }
+            Ok(if null {
+                Value::Null
+            } else {
+                Value::Bool(*negated)
+            })
+        }
         ScalarExpr::Not(value) => {
             match evaluate(value, row, schema, evaluation_time_ms, regexes)? {
                 Value::Bool(value) => Ok(Value::Bool(!value)),
@@ -704,12 +728,42 @@ impl CompiledExpression {
         Self::compile_local(&expression, input)
     }
 
+    /// `expression` compiled over `input` whose other columns may hold
+    /// summary state: a filter that keeps whole states by their keys. The
+    /// expression itself reads only plain columns.
+    pub fn compile_over_states(expression: &PlannedExpr, input: &SchemaRef) -> Result<Self, Error> {
+        if !expression.operator_refs().is_empty() {
+            return Err(Error::Invalid(
+                "a state filter must read only plain columns".into(),
+            ));
+        }
+        Self::bind_over_states(&expression.map_operator_refs(&mut |_| ()), input)
+    }
+
+    fn bind_over_states(expression: &ScalarExpr, input: &SchemaRef) -> Result<Self, Error> {
+        if expression.columns_referenced().iter().any(|&column| {
+            input
+                .fields
+                .get(column)
+                .is_none_or(|field| !field.is_plain())
+        }) {
+            return Err(Error::Invalid(
+                "a state filter must read only plain columns".into(),
+            ));
+        }
+        Self::bind(expression, input)
+    }
+
     fn compile_local(expression: &ScalarExpr, input: &SchemaRef) -> Result<Self, Error> {
         if !input.is_all_plain() {
             return Err(Error::Invalid(
                 "scalar expression cannot consume summary state".into(),
             ));
         }
+        Self::bind(expression, input)
+    }
+
+    fn bind(expression: &ScalarExpr, input: &SchemaRef) -> Result<Self, Error> {
         let schema = input.as_ref().clone();
         validate(expression, &schema)?;
         let output = expression
@@ -727,7 +781,12 @@ impl CompiledExpression {
         self.output.clone()
     }
     pub(crate) fn validate_input(&self, input: &SchemaRef) -> Result<(), Error> {
-        let checked = Self::compile_local(&self.expression, input)?;
+        let checked = if input.is_all_plain() {
+            Self::compile_local(&self.expression, input)?
+        } else {
+            // A state filter's expression, compiled by `compile_over_states`.
+            Self::bind_over_states(&self.expression, input)?
+        };
         if checked.output != self.output {
             return Err(Error::Invalid(
                 "persisted expression type differs from its semantics".into(),
@@ -752,9 +811,12 @@ impl CompiledExpression {
     pub fn evaluate(&self, row: &[Value]) -> Result<Value, Error> {
         if row.len() != self.schema.fields.len()
             || row.iter().zip(&self.schema.fields).any(|(value, column)| {
-                !column
-                    .plain_dtype()
-                    .is_some_and(|dtype| value.matches(dtype, column.nullable))
+                match column.plain_dtype() {
+                    Some(dtype) => !value.matches(dtype, column.nullable),
+                    // A state column a state filter carries but does not read;
+                    // batch evaluation passes NULL for columns it does not read.
+                    None => !matches!(value, Value::Summary { .. } | Value::Null),
+                }
             })
         {
             return Err(Error::Invalid(
@@ -973,6 +1035,22 @@ fn validate(expr: &ScalarExpr, schema: &planner_types::ir::schema::Schema) -> Re
             Ok(())
         }
         ScalarExpr::IsNull(value) | ScalarExpr::IsNotNull(value) => validate(value, schema),
+        // Valid when its operand is (an empty list still evaluates it) and
+        // each `expr = item` it evaluates is.
+        ScalarExpr::InList { expr, list, .. } => {
+            validate(expr, schema)?;
+            list.iter().try_for_each(|item| {
+                validate(
+                    &ScalarExpr::Compare {
+                        left: expr.clone(),
+                        op: CompareOpKind::Eq,
+                        right: Box::new(item.clone()),
+                        semantics: planner_types::ir::scalar::ExprSemantics::Sql,
+                    },
+                    schema,
+                )
+            })
+        }
         _ => Err(invalid()),
     }
 }
@@ -1038,6 +1116,60 @@ mod tests {
             }
         }
     }
+
+    // `IN` and `NOT IN` follow SQL: a match is true; otherwise a NULL
+    // operand or item gives NULL, else false.
+    #[test]
+    fn in_list_follows_sql_three_valued_logic() {
+        let schema = Arc::new(planner_types::ir::schema::Schema::new(vec![
+            planner_types::ir::schema::Field::plain("city", DataType::Utf8, true),
+        ]));
+        let text = |value: &str| PlannedExpr::Literal(ScalarValue::Utf8(value.into()));
+        let in_list = |list: Vec<PlannedExpr>, negated: bool| {
+            CompiledExpression::compile(
+                &PlannedExpr::InList {
+                    expr: Box::new(PlannedExpr::Column(0)),
+                    list,
+                    negated,
+                },
+                &schema,
+            )
+            .unwrap()
+        };
+        let nyc_sf = in_list(vec![text("NYC"), text("SF")], false);
+        let not_nyc_sf = in_list(vec![text("NYC"), text("SF")], true);
+        let with_null = in_list(
+            vec![text("NYC"), PlannedExpr::Literal(ScalarValue::Null)],
+            false,
+        );
+        let utf8 = |value: &str| vec![Value::Utf8(value.into())];
+        let result = |expression: &CompiledExpression, row: Vec<Value>| match expression
+            .evaluate(&row)
+            .unwrap()
+        {
+            Value::Bool(value) => Some(value),
+            Value::Null => None,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(result(&nyc_sf, utf8("SF")), Some(true));
+        assert_eq!(result(&nyc_sf, utf8("LA")), Some(false));
+        assert_eq!(result(&nyc_sf, vec![Value::Null]), None);
+        assert_eq!(result(&not_nyc_sf, utf8("LA")), Some(true));
+        assert_eq!(result(&not_nyc_sf, utf8("NYC")), Some(false));
+        assert_eq!(result(&with_null, utf8("NYC")), Some(true));
+        assert_eq!(result(&with_null, utf8("LA")), None);
+        // An item of another type is not comparable.
+        assert!(CompiledExpression::compile(
+            &PlannedExpr::InList {
+                expr: Box::new(PlannedExpr::Column(0)),
+                list: vec![PlannedExpr::Literal(ScalarValue::Int64(1))],
+                negated: false,
+            },
+            &schema,
+        )
+        .is_err());
+    }
+
     #[test]
     fn mixed_comparison_preserves_integer_precision_and_boundaries() {
         assert_eq!(

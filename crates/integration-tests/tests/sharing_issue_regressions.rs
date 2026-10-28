@@ -334,6 +334,31 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
             .guarantee
             .is_none()
     );
+    // A filter that also reads the estimate decides by an approximate value
+    // which group is kept, so the selected group's bound does not hold.
+    let mut on_estimate = (*filtered).clone();
+    if let asap_types::ir::Operator::NonASAP(NonASAPOp::Filter { pred, .. }) =
+        &mut on_estimate.operator
+    {
+        pred.0 = asap_types::ir::ScalarExpr::BoolAnd(vec![
+            pred.0.clone(),
+            asap_types::ir::ScalarExpr::IsNotNull(Box::new(asap_types::ir::ScalarExpr::Column(1))),
+        ]);
+    }
+    let on_estimate = Rc::new(on_estimate);
+    let invalid = Rc::new(
+        candidate
+            .node
+            .with_new_children(|_| Rc::clone(&on_estimate))
+            .unwrap(),
+    );
+    assert!(
+        recompose_guarantees(&[QueryRoot::Operator(invalid)]).unwrap()[0]
+            .as_operator()
+            .unwrap()
+            .guarantee
+            .is_none()
+    );
     let row = |city: &str, value| {
         vec![
             Value::Timestamp(0),

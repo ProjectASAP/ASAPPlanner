@@ -5,7 +5,7 @@
 //!
 //! - **Vectorized:** an expression built only from operations that cannot
 //!   fail on well-typed input (column reads, literals, comparisons of
-//!   scalar types, Kleene logic, null tests, `Float64` arithmetic and
+//!   scalar types and `IN` lists of them, Kleene logic, null tests, `Float64` arithmetic and
 //!   negation, `Int64`-to-`Float64` casts) runs as Arrow kernels or tight
 //!   loops over whole columns.
 //! - **Per distinct input:** any other expression runs through its row
@@ -28,7 +28,7 @@ use arrow::array::{
     UInt32Array,
 };
 use arrow::datatypes::UInt32Type;
-use planner_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
+use planner_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ExprSemantics, ScalarValue};
 use planner_types::ir::schema::{DataType, FieldDataType, Schema};
 use std::sync::Arc;
 
@@ -299,6 +299,29 @@ fn lower_scalar(
                 },
                 DataType::Bool,
             )
+        }
+        // `x IN (v1, …)` is `x = v1 OR …` under Kleene logic, which is
+        // also its row semantics; `NOT IN` negates it.
+        ScalarExpr::InList {
+            expr,
+            list,
+            negated,
+        } => {
+            let any = ScalarExpr::BoolOr(
+                list.iter()
+                    .map(|item| ScalarExpr::Compare {
+                        left: expr.clone(),
+                        op: CompareOpKind::Eq,
+                        right: Box::new(item.clone()),
+                        semantics: ExprSemantics::Sql,
+                    })
+                    .collect(),
+            );
+            let in_list = match negated {
+                false => any,
+                true => ScalarExpr::Not(Box::new(any)),
+            };
+            return lower_scalar(&in_list, schema, evaluation_time_ms);
         }
         ScalarExpr::Not(operand) => {
             let (operand, dtype) = lower_scalar(operand, schema, evaluation_time_ms)?;
@@ -922,6 +945,39 @@ mod tests {
         let bound = bound.at_evaluation_time(&context);
         assert!(lower_expression(&bound, batch.schema()).is_some());
         check(&bound, &batch);
+    }
+
+    // `s [NOT] IN (…)` gives the row values, NULLs included, and is
+    // vectorized unless an item is a NULL literal.
+    #[test]
+    fn an_in_list_is_vectorized_with_row_values() {
+        let batch = batch(300);
+        let text = |value: &str| ScalarExpr::Literal(ScalarValue::Utf8(value.into()));
+        for (column, list) in [
+            (4, vec![text("api"), text("db")]),
+            (5, vec![text("web")]),
+            (4, vec![text("api"), ScalarExpr::Literal(ScalarValue::Null)]),
+            (5, vec![]),
+        ] {
+            for negated in [false, true] {
+                let in_list = planner(
+                    ScalarExpr::InList {
+                        expr: Box::new(ScalarExpr::Column(column)),
+                        list: list.clone(),
+                        negated,
+                    },
+                    &batch,
+                );
+                let null_item = list
+                    .iter()
+                    .any(|item| matches!(item, ScalarExpr::Literal(ScalarValue::Null)));
+                assert_eq!(
+                    lower_expression(&in_list, batch.schema()).is_some(),
+                    !null_item
+                );
+                check(&in_list, &batch);
+            }
+        }
     }
 
     // A column-free numeric subexpression (`g > 1.0 + 2.0`) stays vectorized.

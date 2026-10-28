@@ -794,6 +794,7 @@ fn rolled_up_build(state: &OperatorNode) -> Option<Rc<OperatorNode>> {
     let [input] = children.as_slice() else {
         return None;
     };
+    let input = selected_from(input).unwrap_or(input);
     let build = match input.asap()? {
         ASAPOp::SummaryAgg { .. } => (**input).clone(),
         _ if super::pane_chain::merged_chain(input).is_some() => {
@@ -872,9 +873,26 @@ fn finalized_data_type(kind: &crate::ir::schema::sketch::ExactKind) -> DataType 
     }
 }
 
+/// The states `node` selects from when it is a `Filter` that keeps whole
+/// summary states by their plain columns (its output is state); `None` for
+/// any other node.
+pub fn selected_from(node: &OperatorNode) -> Option<&Rc<OperatorNode>> {
+    match node.non_asap() {
+        Some(crate::ir::NonASAPOp::Filter { child, .. })
+            if node.result_kind == OperatorResultKind::State =>
+        {
+            Some(child)
+        }
+        _ => None,
+    }
+}
+
 /// The category of the values a evaluation of `state` produces: the category
 /// of the relational input the state was built from.
 fn source_kind(node: &OperatorNode) -> OperatorResultKind {
+    if let Some(states) = selected_from(node) {
+        return source_kind(states);
+    }
     match &node.operator {
         super::node::Operator::ASAP(op) => match op.children().first() {
             Some(child) => source_kind(child),
@@ -1024,6 +1042,7 @@ fn quantile_may_be_empty(state: &OperatorNode) -> bool {
             };
             global || nullable
         }
-        _ => false,
+        // Selecting whole states empties none of them.
+        _ => selected_from(state).is_some_and(|states| quantile_may_be_empty(states)),
     }
 }
