@@ -155,7 +155,6 @@ fn summary_projection_survives_recovery() {
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 1,
-            revision: 1,
         },
         Limits::default(),
     )

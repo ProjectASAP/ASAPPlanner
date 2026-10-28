@@ -52,7 +52,6 @@ fn run_inputs(
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 1,
         },
         Limits::default(),
     )
@@ -280,7 +279,6 @@ fn composed_ensemble_shares_a_producer_across_roots() {
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 0,
-                revision: 0,
             },
             Limits {
                 max_buffered_batches: 1,

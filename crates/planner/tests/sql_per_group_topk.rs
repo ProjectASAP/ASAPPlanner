@@ -285,7 +285,6 @@ fn query_scope() -> RunContext {
     RunContext::new(
         Scope::Query {
             evaluation_time_ms: EVALUATION_MS,
-            revision: 1,
         },
         Limits::default(),
     )

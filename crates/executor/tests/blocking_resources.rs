@@ -33,7 +33,6 @@ fn context(max_bytes: usize) -> RunContext {
     RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 0,
         },
         Limits {
             max_bytes,

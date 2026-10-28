@@ -184,7 +184,6 @@ fn execute_relabeled(
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: end,
-            revision: 0,
         },
         Limits::default(),
     )
@@ -837,7 +836,6 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 0,
         },
         Limits::default(),
     )

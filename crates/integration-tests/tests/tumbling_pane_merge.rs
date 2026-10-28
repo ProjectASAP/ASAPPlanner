@@ -264,7 +264,6 @@ fn has_timestamp(row: &[Value], ms: i64) -> bool {
 fn query_scope() -> Scope {
     Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
-        revision: 1,
     }
 }
 
@@ -362,7 +361,6 @@ fn execute_retained_as(
             Scope::Ingestion {
                 window_start_ms: end - PANE_MS,
                 window_end_ms: end,
-                revision: 1,
             },
         );
         assert!(rows.iter().all(|row| has_timestamp(row, end)));
@@ -525,7 +523,6 @@ fn whole_build_values_at(query: &str, evaluation_ms: i64, samples: &[RawDataSamp
         inputs,
         Scope::Query {
             evaluation_time_ms: evaluation_ms,
-            revision: 1,
         },
     ))
 }
@@ -827,7 +824,6 @@ fn execute_ranges_at_their_windows(
     .unwrap();
     let scope = Scope::Query {
         evaluation_time_ms: evaluation_ms,
-        revision: 1,
     };
     run(&plan, inputs, scope)
 }

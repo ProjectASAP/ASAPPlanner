@@ -150,7 +150,6 @@ fn context() -> RunContext {
     RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 1,
         },
         Limits::default(),
     )
@@ -177,7 +176,6 @@ fn raw_scan_to_sort_limit_at_both_phases() {
                 Scope::Ingestion {
                     window_start_ms: 0,
                     window_end_ms: 1,
-                    revision: 1,
                 },
                 Limits::default(),
             )
@@ -322,7 +320,6 @@ fn schema_drift_and_memory_limits_fail_the_scan() {
     let ctx = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 1,
         },
         Limits {
             max_bytes: 1,
@@ -681,7 +678,6 @@ fn windowed_rows(
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: T_MS,
-            revision: 1,
         },
         Limits::default(),
     )

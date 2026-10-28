@@ -136,7 +136,6 @@ fn kept_users(scope: Scope) -> Result<Vec<i64>, String> {
 fn now_is_the_query_evaluation_time() {
     let users = kept_users(Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
-        revision: 1,
     })
     .unwrap();
     // Minutes 5..=10: from five minutes before the evaluation on.
@@ -148,7 +147,6 @@ fn now_has_no_value_in_an_ingestion_run() {
     let error = kept_users(Scope::Ingestion {
         window_start_ms: EVALUATION_MS - MINUTE_MS,
         window_end_ms: EVALUATION_MS,
-        revision: 1,
     })
     .unwrap_err();
     assert!(error.contains("now()"), "{error}");

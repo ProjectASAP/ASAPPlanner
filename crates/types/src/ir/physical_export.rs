@@ -403,6 +403,40 @@ impl PhysicalASAPDAG {
         }
     }
 
+    /// The interval of data the output of `node` summarizes, back from the
+    /// evaluation time `T`: the union of the windows
+    /// ([`Self::time_range_window`]) of every `TimeRange` below it. For an
+    /// expanded pane, its pane; for a view built from panes, all of them.
+    /// `Unbounded` when no `TimeRange` is below it or one of them is
+    /// unbounded (a whole SQL table, an `@` anchor). O(nodes + edges).
+    pub fn view_window(&self, node: PhysicalASAPNodeId) -> ScanWindow {
+        let time_ranges: HashSet<PhysicalASAPNodeId> = self
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.payload, Operator::NonASAP(NonASAPOp::TimeRange { .. })))
+            .map(|node| node.id)
+            .collect();
+        let mut inputs: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
+        for edge in &self.edges {
+            inputs.entry(edge.consumer).or_default().push(edge.producer);
+        }
+        let mut seen = HashSet::new();
+        let mut pending = vec![node];
+        let mut window: Option<ScanWindow> = None;
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if time_ranges.contains(&id) {
+                let read = self.time_range_window(id);
+                window = Some(window.map_or(read, |window| window.union(read)));
+                continue;
+            }
+            pending.extend(inputs.get(&id).into_iter().flatten());
+        }
+        window.unwrap_or(ScanWindow::Unbounded)
+    }
+
     /// The IR this DAG exports, one root per query in batch order, every
     /// node untimed and `NotMaterialized`: the inverse of
     /// [`compile_physical_asap_workload`] up to `Rc` identity and timing.

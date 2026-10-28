@@ -51,7 +51,6 @@ fn raw_schema() -> SchemaRef {
 fn query_scope() -> Scope {
     Scope::Query {
         evaluation_time_ms: 300_000,
-        revision: 1,
     }
 }
 fn fixture() -> (CompiledPhysicalDAG, Operator, SchemaRef) {
@@ -81,7 +80,6 @@ fn pane_state(maintenance: &CompiledPhysicalDAG, pane: i64) -> Arc<dyn Aggregate
         Scope::Ingestion {
             window_start_ms: pane * 60_000,
             window_end_ms: (pane + 1) * 60_000,
-            revision: 1,
         },
     );
     let Value::Summary { state, .. } = &state[0][0].to_rows()[0][0] else {
@@ -221,7 +219,6 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
             inputs,
             Scope::Query {
                 evaluation_time_ms,
-                revision: 1,
             },
         );
         let Value::Summary { state, .. } = &result[0][0].to_rows()[0][0] else {

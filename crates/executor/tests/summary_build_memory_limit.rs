@@ -83,7 +83,6 @@ fn one_large_batch_fails_near_the_memory_limit() {
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 1,
         },
         Limits {
             max_bytes: LIMIT_BYTES,

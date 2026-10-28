@@ -55,7 +55,6 @@ fn run(program: &CompiledPhysicalDAG, data: Batch, end: i64) -> Result<Vec<Batch
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: end,
-            revision: 0,
         },
         Limits::default(),
     )
@@ -260,7 +259,6 @@ fn current_series_observes_resource_limits() {
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 60_000,
-                revision: 0,
             },
             Limits {
                 max_bytes: if cancelled { 1 << 20 } else { 1 },

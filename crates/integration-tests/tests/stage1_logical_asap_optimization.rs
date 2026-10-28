@@ -373,7 +373,6 @@ fn execute(root: &Rc<OperatorNode>, rows: &[Vec<(&str, Value)>]) -> Vec<Vec<Stri
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 1,
         },
         Limits::default(),
     )

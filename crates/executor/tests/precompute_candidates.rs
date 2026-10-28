@@ -231,7 +231,6 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
             Scope::Ingestion {
                 window_start_ms: -58_000,
                 window_end_ms: 2000,
-                revision: 1,
             },
         );
         let output = run(
@@ -239,7 +238,6 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
             BTreeMap::from([(precompute.roots()[0], stored[0].clone())]),
             Scope::Query {
                 evaluation_time_ms: 2000,
-                revision: 1,
             },
         );
         assert!(
@@ -287,12 +285,10 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     );
     let query_scope = Scope::Query {
         evaluation_time_ms: 2000,
-        revision: 1,
     };
     let maintenance_scope = Scope::Ingestion {
         window_start_ms: -58_000,
         window_end_ms: 2000,
-        revision: 1,
     };
     let mut results = vec![];
     for candidate in candidates {
@@ -311,7 +307,6 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
                 Scope::Ingestion {
                     window_start_ms: 0,
                     window_end_ms: 2000,
-                    revision: 1,
                 },
                 Limits::default(),
             )
@@ -495,7 +490,6 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
                     Scope::Ingestion {
                         window_start_ms: 0,
                         window_end_ms: 60_000,
-                        revision: 1,
                     },
                 );
                 assert_eq!(stored.len(), 1);
@@ -511,7 +505,6 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
                 inputs,
                 Scope::Query {
                     evaluation_time_ms: 60_000,
-                    revision: 1,
                 },
             );
             assert_eq!(output.len(), 1);

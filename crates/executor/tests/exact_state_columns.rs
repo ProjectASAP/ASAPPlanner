@@ -58,7 +58,6 @@ fn context() -> RunContext {
     RunContext::new(
         Scope::Query {
             evaluation_time_ms: 2_000,
-            revision: 1,
         },
         Limits::default(),
     )

@@ -273,22 +273,6 @@ pub(crate) fn unit_frequency_column(
     }
 }
 
-pub(crate) fn is_unit_sample_frequency(update: &planner_types::ir::schema::SummaryUpdate) -> bool {
-    use planner_types::ir::schema::{NonNegativeWeightProof, SummaryInputExpr, WeightDomain};
-    matches!(
-        update.item,
-        Some(SummaryInputExpr::Column(
-            planner_types::ir::scalar::ColumnRef::SampleValue
-        ))
-    ) && matches!(update.weight, SummaryInputExpr::Constant(1.0))
-        && matches!(
-            update.weight_domain,
-            WeightDomain::NonNegative {
-                proof: NonNegativeWeightProof::UnitCount
-            }
-        )
-}
-
 pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     use planner_types::ir::schema::SketchAlgorithm as A;
     if let SummaryFamilyType::Sketch(kind, grouping) = family {

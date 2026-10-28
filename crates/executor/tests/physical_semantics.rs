@@ -38,7 +38,6 @@ fn context() -> RunContext {
     RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 1,
         },
         Limits {
             max_buffered_batches: 1,
@@ -807,7 +806,6 @@ fn zero_column_output_obeys_memory_limit() {
     let run = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 0,
         },
         Limits {
             max_bytes: 1024,

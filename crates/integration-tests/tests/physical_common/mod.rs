@@ -135,7 +135,6 @@ pub fn execute_raw_rows_at(
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms,
-            revision: 1,
         },
         Limits::default(),
     )

@@ -153,7 +153,6 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
         Scope::Ingestion {
             window_start_ms: start_ms,
             window_end_ms: end_ms,
-            revision: 1,
         },
         Limits::default(),
     )

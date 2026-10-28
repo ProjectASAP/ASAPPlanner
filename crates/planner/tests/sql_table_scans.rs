@@ -193,7 +193,6 @@ fn run_query(plan: &InstallablePlan, query: usize) -> (Vec<FieldDataType>, Vec<V
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: EVALUATION_MS,
-            revision: 1,
         },
         Limits::default(),
     )
@@ -503,11 +502,9 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
             MaterializedViewRefresh::AtIngestion => Scope::Ingestion {
                 window_start_ms: span.0,
                 window_end_ms: span.1,
-                revision: 1,
             },
             MaterializedViewRefresh::OnFirstRead => Scope::Query {
                 evaluation_time_ms: EVALUATION_MS,
-                revision: 1,
             },
         };
         let batches = run_bound(dag, sources, &table, &[view.node_id as u64], scope).remove(0);
@@ -539,7 +536,6 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
     }
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
-        revision: 1,
     };
     run_bound(dag, inputs, &table, &roots, query)
         .iter()
@@ -724,7 +720,6 @@ async fn a_table_provider_is_asked_for_the_query_window() {
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: EVALUATION_MS,
-            revision: 1,
         },
         Limits::default(),
     )

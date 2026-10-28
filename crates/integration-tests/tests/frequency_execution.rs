@@ -84,7 +84,6 @@ fn execute(candidate: &Rc<OperatorNode>) -> Vec<f64> {
         inputs,
         Scope::Query {
             evaluation_time_ms: EVALUATION_MS,
-            revision: 1,
         },
     );
     result[0]

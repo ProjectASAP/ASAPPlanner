@@ -1148,7 +1148,6 @@ fn stage3_plan_selection_selected_kmv_plan_executes_end_to_end() {
         batches,
         Scope::Query {
             evaluation_time_ms: 55_000,
-            revision: 1,
         },
     );
     let values: Vec<f64> = result[0]

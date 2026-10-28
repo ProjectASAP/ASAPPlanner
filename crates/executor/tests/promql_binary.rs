@@ -124,7 +124,6 @@ fn evaluate_with(
     let ctx = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 1,
-            revision: 0,
         },
         Limits::default(),
     )?;
@@ -222,7 +221,6 @@ fn scalar_broadcast_and_bool_comparison_are_distinct() {
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 1,
-                revision: 0,
             },
             Limits::default(),
         )
@@ -280,7 +278,6 @@ fn binary_obeys_memory_and_cancellation() {
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 1,
-                revision: 0,
             },
             Limits {
                 max_bytes: if cancel { 10000 } else { 1 },
@@ -485,7 +482,6 @@ fn stored_series_evaluations_support_filters_and_sets() {
             let context = RunContext::new(
                 Scope::Query {
                     evaluation_time_ms: 1,
-                    revision: 0,
                 },
                 Limits::default(),
             )

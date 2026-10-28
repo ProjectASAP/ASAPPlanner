@@ -167,7 +167,6 @@ fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
         inputs,
         Scope::Query {
             evaluation_time_ms: EVALUATION_MS,
-            revision: 1,
         },
     )
     .remove(0)

@@ -436,12 +436,10 @@ mod tests {
         for scope in [
             Scope::Query {
                 evaluation_time_ms: 2000,
-                revision: 1,
             },
             Scope::Ingestion {
                 window_start_ms: 0,
                 window_end_ms: 2000,
-                revision: 1,
             },
         ] {
             for (intent, expected) in [
@@ -487,7 +485,6 @@ mod tests {
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 0,
-                revision: 0,
             },
             Limits::default(),
         )
@@ -510,7 +507,6 @@ mod tests {
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 0,
-                revision: 0,
             },
             Limits::default(),
         )

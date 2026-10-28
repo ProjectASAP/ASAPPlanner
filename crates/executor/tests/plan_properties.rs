@@ -120,7 +120,6 @@ fn blocking_inputs_require_an_explicit_finite_source() {
         let run = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 0,
-                revision: 0,
             },
             Limits::default(),
         )

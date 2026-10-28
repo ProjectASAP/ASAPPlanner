@@ -167,7 +167,6 @@ fn points_of(
 fn at(evaluation_time_ms: i64) -> Scope {
     Scope::Query {
         evaluation_time_ms,
-        revision: 1,
     }
 }
 
@@ -268,7 +267,6 @@ fn an_ingestion_run_builds_the_window_ending_at_its_end() {
     let ingestion = Scope::Ingestion {
         window_start_ms: 4_000,
         window_end_ms: 5_000,
-        revision: 1,
     };
     assert_eq!(
         points(&dag, &samples, ingestion),

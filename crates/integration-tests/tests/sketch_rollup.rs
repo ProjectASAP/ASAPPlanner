@@ -138,7 +138,6 @@ fn execute(root: &Rc<OperatorNode>) -> BTreeMap<String, f64> {
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 1,
         },
         // The UnivMon states planned here are large: the merge's copy of
         // twelve of them exceeds the default limit.

@@ -399,11 +399,9 @@ fn run_data_plane_on(
                 MaterializedViewRefresh::AtIngestion => Scope::Ingestion {
                     window_start_ms: span.0,
                     window_end_ms: span.1,
-                    revision: 1,
                 },
                 MaterializedViewRefresh::OnFirstRead => Scope::Query {
                     evaluation_time_ms: evaluation_ms,
-                    revision: 1,
                 },
             };
             // The batches that run produced, in one batch, as the store keeps it.
@@ -450,7 +448,6 @@ fn run_data_plane_on(
     // The query evaluation, which reads the stored states.
     let query = Scope::Query {
         evaluation_time_ms: evaluation_ms,
-        revision: 1,
     };
     // Each query's answers: (series labels, value) per series.
     let answers_per_query = run(
@@ -904,7 +901,6 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
     ];
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
-        revision: 1,
     };
     let answered = answers(&run(dag, BTreeMap::new(), &samples, &query_roots(&plan), query)[0]);
     assert_eq!(answered.len(), 1);

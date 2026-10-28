@@ -102,7 +102,6 @@ fn merge_stored_panes(max_bytes: usize) -> Result<usize, Error> {
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 1,
         },
         Limits {
             max_bytes,
@@ -161,7 +160,6 @@ fn compacting_a_stored_pane_does_not_charge_its_shared_sketches() {
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 0,
-                revision: 1,
             },
             Limits {
                 max_bytes: 8 << 20,
@@ -212,7 +210,6 @@ fn sorting_then_limiting_stored_panes_does_not_charge_their_sketches() {
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 1,
         },
         Limits {
             max_bytes: 8 << 20,
@@ -253,7 +250,6 @@ fn a_merge_passing_stored_states_through_does_not_charge_them() {
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 1,
         },
         Limits {
             max_bytes: 8 << 20,
@@ -321,7 +317,6 @@ fn a_materialized_view_providers_states_are_not_charged_to_the_run() {
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
-            revision: 1,
         },
         Limits {
             max_bytes: 32 << 20,

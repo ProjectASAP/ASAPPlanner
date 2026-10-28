@@ -123,7 +123,6 @@ async fn per_sample_updates_build_the_materialized_pane_the_plan_refreshes() {
         Scope::Ingestion {
             window_start_ms: start_ms,
             window_end_ms: end_ms,
-            revision: 1,
         },
         Limits::default(),
     )
@@ -383,7 +382,6 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
     assert_eq!(panes.len(), 5);
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
-        revision: 1,
     };
     let roots: Vec<u64> = plan.dag.roots.iter().map(|&r| r as u64).collect();
     // The query's answers from the installed panes.

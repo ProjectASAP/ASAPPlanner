@@ -411,7 +411,6 @@ fn ingestion_context(limits: Limits) -> RunContext {
         Scope::Ingestion {
             window_start_ms: 0,
             window_end_ms: 2000,
-            revision: 1,
         },
         limits,
     )

@@ -66,7 +66,6 @@ fn run(dag: &PhysicalDAG<'_, Batch, SchemaRef>, root: u64, scope: Scope) -> Vec<
 fn query() -> Scope {
     Scope::Query {
         evaluation_time_ms: 1000,
-        revision: 2,
     }
 }
 fn floats(rows: &[Vec<Value>], column: usize) -> Vec<f64> {
@@ -174,7 +173,6 @@ fn summary_construction_merge_and_evaluation_at_both_phases() {
         Scope::Ingestion {
             window_start_ms: 0,
             window_end_ms: 1000,
-            revision: 2,
         },
     ] {
         assert_eq!(floats(&run(&dag, 4, scope), 0), vec![420.]);
@@ -362,7 +360,6 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
             Scope::Ingestion {
                 window_start_ms: 0,
                 window_end_ms: 1000,
-                revision: 1,
             },
         )
     };
@@ -846,7 +843,6 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
             Scope::Ingestion {
                 window_start_ms: 0,
                 window_end_ms: 1000,
-                revision: 2,
             },
         ),
     ] {
@@ -1175,7 +1171,6 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
         Scope::Ingestion {
             window_start_ms: 0,
             window_end_ms: 60_000,
-            revision: 2,
         },
         query(),
     ] {

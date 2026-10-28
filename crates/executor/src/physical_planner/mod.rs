@@ -13,6 +13,7 @@ use crate::{
 use planner_types::ir::operator::{
     agg_has_exact_per_entity_kernel, AggIntent, GroupKeys, Reduction as PlannerReduction,
 };
+use planner_types::ir::materialized_view::MaterializedView;
 use planner_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
     PhysicalASAPOperatorPayload as Payload, ScanWindow,
@@ -21,12 +22,10 @@ use planner_types::ir::scalar::{ColumnRef, CompareOpKind};
 use planner_types::ir::schema::{
     DataType, FamilyCapability, FieldDataType, SketchStatistic, SummaryInputExpr,
 };
-// `promql_rows` reads `LogicalOperator` and `OperatorNode` through `super::*`
-// only in its test-support helpers.
+// `promql_rows` reads `OperatorNode` through `super::*` only in its
+// test-support helpers.
 #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_imports))]
-use planner_types::ir::{
-    ASAPOp, NonASAPOp, Operator as LogicalOperator, OperatorNode, ScalarExpr, TimeRangeKind,
-};
+use planner_types::ir::{ASAPOp, NonASAPOp, OperatorNode, ScalarExpr, TimeRangeKind};
 mod logical;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -36,7 +35,6 @@ fn invalid(message: impl Into<String>) -> Error {
     Error::Invalid(message.into())
 }
 
-pub mod precompute;
 // The executor's PromQL row encoding and the timing frontier are internals:
 // a deployment runtime binds raw data at each `Scan` through a
 // `TableProvider` and derives the materialized views from the installable plan. The Planner's own
@@ -47,13 +45,6 @@ pub mod promql_rows;
 pub(crate) mod promql_rows;
 pub mod promql_values;
 
-mod candidates;
-#[cfg(feature = "test-support")]
-pub use candidates::frontier_from_timing;
-pub use candidates::{
-    compile_candidate, compile_candidates, cut_candidate, enumerate_frontiers, select_candidate,
-    CandidateCost, CandidateSelection, CompiledPhysicalPlan,
-};
 
 mod compiled;
 pub use compiled::CompiledPhysicalDAG;
@@ -61,29 +52,29 @@ pub use compiled::CompiledPhysicalDAG;
 mod row_values;
 
 /// Compile computation without opening or retaining deployment readers.
-/// Every reachable `Scan` leaf is a table slot, bound by its `Source`; its
-/// predicates must compile over its schema. `boundaries` are the other nodes
-/// cut out as materialized view slots, bound by node id, each with its `output_schema` in
-/// `dag`. ([`precompute::compile`] differs: its frontiers, a `Scan`
-/// included, are materialized view slots bound by node id, with no derived window.)
+/// Every reachable `Scan` leaf is a raw data slot, read by its `Source`; its
+/// predicates must compile over its schema. Each of `views`
+/// ([`PhysicalASAPDAG::materialized_views`]) is a materialized view slot,
+/// read by its `MaterializedView`, with its node's `output_schema`; nothing
+/// below it is compiled.
 pub fn compile(
     dag: &PhysicalASAPDAG,
-    boundaries: &BTreeSet<NodeId>,
+    views: &[MaterializedView],
     roots: &[NodeId],
 ) -> Result<CompiledPhysicalDAG, Error> {
-    compile_before(dag, boundaries, roots, None)
+    compile_before(dag, views, roots, None)
 }
 
 /// Compile with cooperative cancellation between planning operations. The
 /// ordinary runtime compiler delegates here without a deadline.
 pub fn compile_before(
     dag: &PhysicalASAPDAG,
-    boundaries: &BTreeSet<NodeId>,
+    views: &[MaterializedView],
     roots: &[NodeId],
     deadline: Option<std::time::Instant>,
 ) -> Result<CompiledPhysicalDAG, Error> {
     check_compile_deadline(deadline)?;
-    let compiled = compile_internal(dag, boundaries, roots, deadline)?;
+    let compiled = compile_internal(dag, views, roots, deadline)?;
     check_compile_deadline(deadline)?;
     Ok(compiled)
 }
@@ -115,7 +106,7 @@ fn helper_id(node: NodeId, index: u64) -> Result<NodeId, Error> {
 
 fn compile_internal(
     dag: &PhysicalASAPDAG,
-    boundaries: &BTreeSet<NodeId>,
+    views: &[MaterializedView],
     roots: &[NodeId],
     deadline: Option<std::time::Instant>,
 ) -> Result<CompiledPhysicalDAG, Error> {
@@ -165,8 +156,15 @@ fn compile_internal(
             .or_default()
             .push(edge.producer as u64);
     }
-    if !boundaries.iter().all(|id| nodes.contains_key(id)) {
-        return Err(invalid("source binding names an unknown node"));
+    let mut views_by_node = BTreeMap::new();
+    for view in views {
+        let id = view.node_id as NodeId;
+        if !nodes.contains_key(&id) {
+            return Err(invalid(format!("materialized view {id} is not in the DAG")));
+        }
+        if views_by_node.insert(id, view).is_some() {
+            return Err(invalid(format!("materialized view {id} is given twice")));
+        }
     }
     let mut ordered = Vec::new();
     let mut seen = BTreeSet::new();
@@ -184,7 +182,7 @@ fn compile_internal(
             return Err(invalid(format!("missing root {id}")));
         }
         pending.push((id, true));
-        if !boundaries.contains(&id) {
+        if !views_by_node.contains_key(&id) {
             for &input in dependencies.get(&id).into_iter().flatten() {
                 pending.push((input, false));
             }
@@ -197,10 +195,16 @@ fn compile_internal(
         let auxiliary = helper_id(id, 0)?;
         let output = Arc::new(node.output_schema.clone());
         crate::values::validate_schema(&output)?;
-        if let Some(window) = materialized_view_window(dag, id, &nodes, &dependencies) {
-            physical_dag.set_materialized_view_window(id, window);
-        }
-        if let Payload::NonASAP(NonASAPOp::Scan {
+        if let Some(view) = views_by_node.get(&id) {
+            physical_dag.add_materialized_view(
+                id,
+                compiled::MaterializedViewSlot {
+                    view: (*view).clone(),
+                    schema: output,
+                    window: dag.view_window(view.node_id),
+                },
+            )?;
+        } else if let Payload::NonASAP(NonASAPOp::Scan {
             source,
             predicates,
             schema,
@@ -229,17 +233,15 @@ fn compile_internal(
                 }
                 _ => ScanWindow::Unbounded,
             };
-            physical_dag.add_table(
+            physical_dag.add_raw_data(
                 id,
-                compiled::TableSlot {
+                compiled::RawDataSlot {
                     source: source.clone(),
                     schema: output,
                     predicates,
                     window,
                 },
             )?;
-        } else if boundaries.contains(&id) {
-            physical_dag.add_input(id, output)?;
         } else {
             #[cfg(test)]
             LOWERED_NODES.with(|count| count.set(count.get() + 1));
@@ -787,33 +789,6 @@ fn node_below_shifts(
         below = first_input(node, dependencies);
     }
     None
-}
-
-/// The window of a materialized view slot at `id`: that of the range `TimeRange` `id`
-/// reads as its only input ([`PhysicalASAPDAG::time_range_window`]), as an
-/// expanded pane reads its range. `None` for any other node (an instant
-/// `TimeRange`, or one over an `@` anchor, included), whose window is not
-/// derived.
-fn materialized_view_window(
-    dag: &PhysicalASAPDAG,
-    id: NodeId,
-    nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
-    dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
-) -> Option<ScanWindow> {
-    let [input] = dependencies.get(&id).map_or(&[][..], Vec::as_slice) else {
-        return None;
-    };
-    let Payload::NonASAP(NonASAPOp::TimeRange {
-        kind: TimeRangeKind::Range,
-        ..
-    }) = &nodes[input].payload
-    else {
-        return None;
-    };
-    match dag.time_range_window(*input as PhysicalASAPNodeId) {
-        ScanWindow::Unbounded => None,
-        window => Some(window),
-    }
 }
 
 /// The first node at or below `node` that is not a `TimeShift`, following
@@ -1630,16 +1605,16 @@ mod compilation_deadline_tests {
     fn expired_compilation_is_distinct_from_invalid_graph() {
         let dag = empty_dag();
         assert!(matches!(
-            compile_before(&dag, &BTreeSet::new(), &[], Some(Instant::now())),
+            compile_before(&dag, &[], &[], Some(Instant::now())),
             Err(Error::CompilationDeadlineExceeded)
         ));
-        let unbounded = compile(&dag, &BTreeSet::new(), &[]).err();
+        let unbounded = compile(&dag, &[], &[]).err();
         assert!(matches!(unbounded, Some(Error::Invalid(_))));
         assert_eq!(
             unbounded,
             compile_before(
                 &dag,
-                &BTreeSet::new(),
+                &[],
                 &[],
                 Some(Instant::now() + Duration::from_secs(1)),
             )
@@ -1669,8 +1644,46 @@ mod compilation_deadline_tests {
             .collect();
         let deadline = Instant::now() + Duration::from_millis(1);
         assert!(matches!(
-            compile_before(&dag, &BTreeSet::new(), &[], Some(deadline)),
+            compile_before(&dag, &[], &[], Some(deadline)),
             Err(Error::CompilationDeadlineExceeded)
         ));
+    }
+}
+
+/// Helpers for the Planner's own tests (`test-support`).
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    use super::*;
+    use planner_types::physical::{Materialization, Medium};
+    use std::collections::HashMap;
+
+    /// The materialized views at `nodes`, in that order: each node that is
+    /// not a view is marked `MatAtIngestion`, and every view's
+    /// `retention_ms` is set ([`PhysicalASAPDAG::set_retention`]) with no
+    /// pane or range-evaluation span. For tests that bind states at those
+    /// nodes, as a deployment binds its views.
+    pub fn views_at(
+        dag: &mut PhysicalASAPDAG,
+        nodes: &[NodeId],
+    ) -> Result<Vec<MaterializedView>, Error> {
+        for node in &mut dag.nodes {
+            if nodes.contains(&(node.id as NodeId)) && !node.materialization.is_materialized_view()
+            {
+                node.materialization = Materialization::MatAtIngestion(Medium::Memory);
+            }
+        }
+        let views = dag
+            .set_retention(&HashMap::new(), &HashMap::new(), None)
+            .map_err(|error| invalid(error.to_string()))?;
+        nodes
+            .iter()
+            .map(|&id| {
+                views
+                    .iter()
+                    .find(|view| view.node_id as NodeId == id)
+                    .cloned()
+                    .ok_or_else(|| invalid(format!("node {id} is not a materialized view")))
+            })
+            .collect()
     }
 }

@@ -131,14 +131,12 @@ fn assert_weighted_binding(algorithm: SketchAlgorithm) {
             Scope::Ingestion {
                 window_start_ms: 0,
                 window_end_ms: 60_000,
-                revision: 1,
             },
         ),
         (
             dag.clone(),
             Scope::Query {
                 evaluation_time_ms: 60_000,
-                revision: 1,
             },
         ),
     ] {
@@ -389,11 +387,9 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
                 Scope::Ingestion {
                     window_start_ms: end - 60_000,
                     window_end_ms: end,
-                    revision: 1,
                 },
                 Scope::Query {
                     evaluation_time_ms: end,
-                    revision: 1,
                 },
             ] {
                 let source = Arc::new(
@@ -488,12 +484,10 @@ fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
             for scope in [
                 Scope::Query {
                     evaluation_time_ms: time,
-                    revision: 1,
                 },
                 Scope::Ingestion {
                     window_start_ms: time - 60_000,
                     window_end_ms: time,
-                    revision: 1,
                 },
             ] {
                 let source =
@@ -742,7 +736,6 @@ fn maintained_rate_heap_compiles_fixed_window_precompute() {
                 Scope::Ingestion {
                     window_start_ms: end - 60_000,
                     window_end_ms: end,
-                    revision: 1,
                 },
             );
             let result = execute(
@@ -750,7 +743,6 @@ fn maintained_rate_heap_compiles_fixed_window_precompute() {
                 heap,
                 Scope::Query {
                     evaluation_time_ms: end,
-                    revision: 1,
                 },
             );
             let identity = result

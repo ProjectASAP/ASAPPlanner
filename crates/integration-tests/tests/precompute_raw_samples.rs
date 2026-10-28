@@ -161,7 +161,6 @@ fn execute(
         Scope::Ingestion {
             window_start_ms: 0,
             window_end_ms: 6000,
-            revision: 1,
         },
         Limits::default(),
     )

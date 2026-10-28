@@ -217,7 +217,6 @@ async fn sql_sum_example_executes_with_sql_null_semantics() {
                 RunContext::new(
                     Scope::Query {
                         evaluation_time_ms: 300_000,
-                        revision: 1,
                     },
                     Limits::default(),
                 )

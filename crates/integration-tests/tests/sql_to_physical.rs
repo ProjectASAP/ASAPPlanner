@@ -112,7 +112,6 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
                     RunContext::new(
                         Scope::Query {
                             evaluation_time_ms: 300_000,
-                            revision: 1,
                         },
                         Limits::default(),
                     )

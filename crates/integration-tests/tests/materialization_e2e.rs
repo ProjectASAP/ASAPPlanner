@@ -182,7 +182,6 @@ fn execute(
         query_sources,
         Scope::Query {
             evaluation_time_ms,
-            revision: 1,
         },
     );
     (floats(&result), frontier)
@@ -243,7 +242,6 @@ fn materialization_decides_precompute_contents() {
         let ingestion = Scope::Ingestion {
             window_start_ms: 0,
             window_end_ms: 300_000,
-            revision: 1,
         };
         let (values, frontier) = execute(&dag, &values_1_to_100, ingestion, 300_000);
         assert_eq!(frontier, states(&dag));
@@ -293,7 +291,6 @@ fn mixed_placement_answers_like_query_time() {
         let ingestion = Scope::Ingestion {
             window_start_ms: 0,
             window_end_ms: 300_000,
-            revision: 1,
         };
         let (values, frontier) = execute(&dag, &values_1_to_100, ingestion, 300_000);
         assert_eq!(frontier, states(&dag));
@@ -364,7 +361,6 @@ fn population_materialization_decides_precompute_contents() {
         let ingestion = Scope::Ingestion {
             window_start_ms: end - lookback,
             window_end_ms: end,
-            revision: 1,
         };
         let (values, frontier) = execute(&dag, &batch, ingestion, end);
         assert_eq!(frontier, states(&dag));
@@ -387,7 +383,6 @@ fn ingestion_binary(dag: &PhysicalASAPDAG) -> bool {
 const INGESTION_WINDOW: Scope = Scope::Ingestion {
     window_start_ms: 240_000,
     window_end_ms: 300_000,
-    revision: 1,
 };
 
 /// Prometheus drops series without a match: arithmetic over different
