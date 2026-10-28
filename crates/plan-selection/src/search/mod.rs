@@ -42,7 +42,8 @@ use asap_logical_asap_optimization::per_computation_candidates::PerComputationCa
 
 pub use pipeline::{
     run_stage1_to_stage3, run_stage1_to_stage3_from_pass1, run_stage1_to_stage3_with,
-    LogicalCandidate, PrunedCandidate, Stage1ToStage3Pass, Stage1ToStage3Run, Stage1ToStage3Search,
+    LogicalCandidate, MemoSteps, PrunedCandidate, Stage1ToStage3Pass, Stage1ToStage3Run,
+    Stage1ToStage3Search,
 };
 
 static BUILTIN_ACCURACY_MODEL: BuiltinAccuracyModel = BuiltinAccuracyModel;

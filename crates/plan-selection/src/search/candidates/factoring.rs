@@ -80,8 +80,12 @@ impl CompatibilityMemo {
 /// certified_price checks every supplied producer; template-based proposal
 /// prices remain advisory. Execution and accuracy are recomputed from selected
 /// suppliers, never from the representative template's child witness.
+///
+/// `memo_candidate_roots` (root IDs, by memo group and candidate) is mapped
+/// to the new IDs without removing duplicates.
 pub(super) fn factor_terminal_readers(
     inventory: &mut super::inventory::CandidateInventory,
+    memo_candidate_roots: &mut [Vec<PhysicalCandidateId>],
     deadline: Option<std::time::Instant>,
 ) -> Result<usize, super::inventory::CandidateInventoryError> {
     use super::inventory::CandidateInventoryError;
@@ -231,6 +235,9 @@ pub(super) fn factor_terminal_readers(
     for group in &mut inventory.group_candidates {
         remap(group);
     }
+    for id in memo_candidate_roots.iter_mut().flatten() {
+        *id = new_ids[id.0];
+    }
     inventory.graph.candidates = candidates;
     inventory.templates = templates;
     inventory
@@ -336,7 +343,10 @@ mod tests {
         for assignment in [[0, 0], [0, 1], [1, 0], [1, 1]] {
             let original = with_scopes(terminal_fixture());
             let mut factored = terminal_fixture();
-            assert_eq!(factor_terminal_readers(&mut factored, None).unwrap(), 1);
+            assert_eq!(
+                factor_terminal_readers(&mut factored, &mut [], None).unwrap(),
+                1
+            );
             assert_eq!(factored.graph.candidates.len(), 3);
             let compressed = with_scopes(factored);
             assert!(
@@ -383,7 +393,10 @@ mod tests {
         };
         let original = with_scopes(build());
         let mut compact = build();
-        assert_eq!(factor_terminal_readers(&mut compact, None).unwrap(), 1);
+        assert_eq!(
+            factor_terminal_readers(&mut compact, &mut [], None).unwrap(),
+            1
+        );
         let compact = with_scopes(compact);
         let counts = |graph: &super::super::graph::CandidateDependencyGraph| {
             (
@@ -409,17 +422,26 @@ mod tests {
         let mut other = (**accuracy.templates[3].as_ref().unwrap()).clone();
         other.guarantee = Some(AccuracyGuarantee::exact("different proof contract"));
         accuracy.templates[3] = Some(Rc::new(other));
-        assert_eq!(factor_terminal_readers(&mut accuracy, None).unwrap(), 0);
+        assert_eq!(
+            factor_terminal_readers(&mut accuracy, &mut [], None).unwrap(),
+            0
+        );
         let mut eligibility = terminal_fixture();
         eligibility.graph.query_roots[1].compatible_candidates = vec![PhysicalCandidateId(3)];
-        assert_eq!(factor_terminal_readers(&mut eligibility, None).unwrap(), 0);
+        assert_eq!(
+            factor_terminal_readers(&mut eligibility, &mut [], None).unwrap(),
+            0
+        );
         let mut internal = terminal_fixture();
         internal.graph.candidates[0]
             .producer_requirements
             .push(ProducerRequirement {
                 compatible_producers: vec![PhysicalCandidateId(2)].into(),
             });
-        assert_eq!(factor_terminal_readers(&mut internal, None).unwrap(), 0);
+        assert_eq!(
+            factor_terminal_readers(&mut internal, &mut [], None).unwrap(),
+            0
+        );
     }
 
     // Logical ownership (including window semantics), closedness and required

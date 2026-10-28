@@ -107,6 +107,35 @@
 //     `timing` and predicted CPU (`cpu_core_seconds_per_second`), and each
 //     shown candidate's `cpu_core_seconds_per_second` is their sum: report
 //     only, as `plan_installable`'s predicted usage names them.
+// `memo` (unless `--no-memo`) is the memo the search built, from the
+// planning round whose plan was selected (`MemoSteps`): `steps`, one per
+// memo step in pipeline order (`stage0`: the frontends' DAG hash-consed,
+// groups without candidates; `pass1`: Pass 1's candidates, with the
+// accuracy-scoped sizes; `pass2`: local window composition's pane
+// candidates; `concrete_states`: the Pass 2 memo rules (scan labels,
+// summary inputs, top-k reuse, finer aggregates, rollups, summary results,
+// state configurations) and the concrete summary-state groups, the memo the
+// search selects from). Each step lists its groups (`id`, `label`,
+// `children`, `parents`, `queries`, `roots_of`, the group's `dag`) and their
+// candidates (`candidate_count`, `candidate_count_by_origin`, and the first
+// `--max-memo-candidates` (default 64) under `candidates`, with
+// `candidates_capped`): each with its `index` in the group, `implements`,
+// `children`, `origin` (`CandidateOrigin` in snake case), `budget_share`,
+// `added` (not in the group at the step before), a one-line `label`, its
+// `dag` (its node and everything below) and `group_of_node` (the `dag`
+// nodes that are a child group's node, to that group's id).
+// `selected_choice` maps each group of the last step the selected plan uses
+// (by id, as a string) to its candidate's index; it is null, with
+// `selected_choice_unavailable` saying why, when the plan cannot be read as
+// one candidate per group. `enumeration` counts each step's candidate DAGs
+// (`memo::enumeration::enumerate`) up to `--memo-enumeration-limit`
+// (default 1000) under `per_step` (`count`, `complete`; Stage 0 counts its
+// one DAG), and lists the first `--max-enumerated` (default 200) `choices`
+// of `step`: the last step enumerated completely within that many, else
+// the last step. Each choice has its `id` (`E1`, ...), `choice`, `dag`
+// (`memo::enumeration::compose`; null with `error` when it does not
+// compose), `budget_share_1` (every chosen candidate sized for the whole
+// budget) and `selected` (it is `selected_choice`). `priced` is null.
 // `workload.data_workload` is the `DataWorkload` the run planned with, as
 // declared (`--workload`, `--example`) or built from `--sample-interval-ms`
 // (`--promql`); each query also carries its `recurrence` and
@@ -213,17 +242,21 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeSet, HashSet};
+use std::rc::Rc;
 
 use asap_devtools::candidate_labels::{candidate_labels, computation_label, query_of_each_target};
 use asap_devtools::planner_layering_examples::{
     example1, example2, pattern_a, pattern_b, PatternARecurrence, SHARED_ROWS_PER_SECOND,
 };
 use asap_devtools::planning_stages::{
-    lower_promql_roots, lower_sql_roots, run_search_over, sql_catalog, PlanningStagesError,
-    PlanningStagesRun,
+    lower_promql_roots, lower_sql_roots, run_search_over, sql_catalog, MemoSteps,
+    PlanningStagesError, PlanningStagesRun,
 };
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{counter_function_over_gauge_warnings, promql_metric_names};
+use asap_logical_asap_optimization::memo::candidates::{CandidateMemo, CandidateOrigin};
+use asap_logical_asap_optimization::memo::enumeration::{compose, enumerate, MemoChoice};
+use asap_logical_asap_optimization::memo::MemoGroupId;
 use asap_logical_asap_optimization::per_computation_candidates::{
     ComputationCandidate, PerComputationCandidates, PruneReason,
 };
@@ -249,7 +282,8 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>] [--series-count <u64>] [--rows-per-second <f64>] [--rows-held <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
-[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search candidate-connections] [--milp-time-limit-s <f64>] [--max-displayed <n>] --out <file>\n\
+[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search candidate-connections] [--milp-time-limit-s <f64>] [--max-displayed <n>] \
+[--no-memo | [--max-memo-candidates <n>] [--memo-enumeration-limit <n>] [--max-enumerated <n>]] --out <file>\n\
 --search candidate-connections is the default search.";
 
 /// Default evaluator-assignment budget for an exhaustive archive run.
@@ -343,6 +377,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut search_algorithm: Option<SearchAlgorithm> = None;
     let mut milp_time_limit_ms: Option<u64> = None;
     let mut max_combinations_given = false;
+    let mut write_memo = true;
+    let mut memo_caps = MemoCaps {
+        candidates_per_group: 64,
+        enumeration_limit: 1000,
+        enumerated: 200,
+    };
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or(format!("{flag} needs a value"));
@@ -404,6 +444,16 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--plan-selection-settings" => plan_selection_settings_path = Some(value()?),
             "--enforce-accuracy-guarantees" => enforce_accuracy_guarantees = true,
             "--exhaustive" => exhaustive = true,
+            "--no-memo" => write_memo = false,
+            "--max-memo-candidates" => {
+                memo_caps.candidates_per_group = value()?.parse().map_err(|e| format!("{e}"))?
+            }
+            "--memo-enumeration-limit" => {
+                memo_caps.enumeration_limit = value()?.parse().map_err(|e| format!("{e}"))?
+            }
+            "--max-enumerated" => {
+                memo_caps.enumerated = value()?.parse().map_err(|e| format!("{e}"))?
+            }
             "--search" => {
                 search_algorithm = Some(match value()?.as_str() {
                     "candidate-connections" => SearchAlgorithm::CandidateConnections,
@@ -688,7 +738,16 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 )
             }),
     );
+    let memo = result
+        .as_ref()
+        .ok()
+        .and_then(|run| run.memo_steps.as_ref())
+        .filter(|_| write_memo)
+        .map(|steps| memo_json(steps, &memo_caps));
     let mut document = document_of(described, &roots, &entries, result, max_displayed)?;
+    if let Some(memo) = memo {
+        document["memo"] = memo;
+    }
     if !warnings.is_empty() {
         document["stage3_plan_selection"]["warnings"] = json!(warnings);
     }
@@ -1384,6 +1443,319 @@ fn query_batch(
             metrics,
             DurationMs(sample_interval_ms),
         )),
+    }
+}
+
+/// How much of the memo the document writes (`--max-memo-candidates`,
+/// `--memo-enumeration-limit`, `--max-enumerated`).
+struct MemoCaps {
+    candidates_per_group: usize,
+    enumeration_limit: usize,
+    enumerated: usize,
+}
+
+/// The document's `memo` section: the memo after each step, the selected
+/// plan's choice over the last step's memo, and the candidate DAGs each
+/// step's memo stands for (`memo::enumeration::enumerate`; each listed
+/// choice composed by `memo::enumeration::compose`).
+fn memo_json(steps: &MemoSteps, caps: &MemoCaps) -> Value {
+    let named = [
+        (
+            "stage0",
+            "Stage 0, the frontends' DAG hash-consed",
+            &steps.stage0,
+        ),
+        ("pass1", "Stage 1, Pass 1", &steps.pass1),
+        (
+            "pass2",
+            "Stage 1, Pass 2: local window composition",
+            &steps.pass2,
+        ),
+        (
+            "concrete_states",
+            "Stage 1, Pass 2 rules and concrete state groups",
+            &steps.concrete_states,
+        ),
+    ];
+    let mut previous: Option<&CandidateMemo> = None;
+    let mut json_steps = Vec::new();
+    let mut per_step = serde_json::Map::new();
+    // The last step (with candidates) enumerated completely within `enumerated`.
+    let mut listed = None;
+    for &(step, title, memo) in &named {
+        json_steps.push(json!({
+            "step": step,
+            "title": title,
+            "groups": memo_groups_json(memo, previous, caps.candidates_per_group),
+        }));
+        previous = Some(memo);
+        if step == "stage0" {
+            // One DAG: the frontends' own.
+            per_step.insert(step.into(), json!({ "count": 1, "complete": true }));
+            continue;
+        }
+        let enumeration = enumerate(memo, caps.enumeration_limit);
+        if enumeration.complete && enumeration.choices.len() <= caps.enumerated {
+            listed = Some((step, memo));
+        }
+        per_step.insert(
+            step.into(),
+            json!({ "count": enumeration.choices.len(), "complete": enumeration.complete }),
+        );
+    }
+    let last = &steps.concrete_states;
+    let (step, memo) = listed.unwrap_or(("concrete_states", last));
+    let selected = steps.selected_choice.as_ref().ok();
+    let choices: Vec<_> = enumerate(memo, caps.enumerated)
+        .choices
+        .iter()
+        .enumerate()
+        .map(|(index, choice)| {
+            let mut entry = json!({
+                "id": format!("E{}", index + 1),
+                "choice": choice_json(choice),
+                "budget_share_1": choice.iter().all(|(group, &candidate)| {
+                    memo.candidates[group.0 as usize][candidate].budget_share == 1
+                }),
+                "selected": step == "concrete_states" && selected == Some(choice),
+            });
+            match compose(memo, choice) {
+                Ok(roots) => {
+                    let roots: Vec<_> = roots
+                        .into_iter()
+                        .map(|(_, node)| QueryRoot::Operator(node))
+                        .collect();
+                    entry["dag"] = json!(export(&roots));
+                }
+                Err(error) => {
+                    entry["dag"] = Value::Null;
+                    entry["error"] = json!(error.to_string());
+                }
+            }
+            entry
+        })
+        .collect();
+    let mut memo = json!({
+        "steps": json_steps,
+        "selected_choice": selected.map_or(Value::Null, choice_json),
+        "enumeration": {
+            "step": step,
+            "per_step": per_step,
+            "limit": caps.enumeration_limit,
+            "choices": choices,
+            "priced": null,
+        },
+    });
+    if let Err(reason) = &steps.selected_choice {
+        memo["selected_choice_unavailable"] = json!(reason);
+    }
+    memo
+}
+
+/// Group id (as a string) to candidate index.
+fn choice_json(choice: &MemoChoice) -> Value {
+    Value::Object(
+        choice
+            .iter()
+            .map(|(group, &candidate)| (group.0.to_string(), json!(candidate)))
+            .collect(),
+    )
+}
+
+/// `memo`'s groups, each with its first `max_candidates` candidates; a
+/// candidate is `added` when `previous` (the memo at the step before) has no
+/// candidate of that group with the same node and children.
+fn memo_groups_json(
+    memo: &CandidateMemo,
+    previous: Option<&CandidateMemo>,
+    max_candidates: usize,
+) -> Vec<Value> {
+    let ids = |groups: &[MemoGroupId]| groups.iter().map(|g| g.0).collect::<Vec<_>>();
+    memo.groups
+        .iter()
+        .zip(&memo.candidates)
+        .enumerate()
+        .map(|(id, (group, candidates))| {
+            let (dag, _) = flatten(&[QueryRoot::Operator(group.node.clone())]);
+            let mut by_origin = serde_json::Map::new();
+            for candidate in candidates {
+                let count = by_origin
+                    .entry(origin_name(&candidate.origin))
+                    .or_insert(json!(0));
+                *count = json!(count.as_u64().unwrap_or(0) + 1);
+            }
+            let earlier = previous
+                .and_then(|memo| memo.candidates.get(id))
+                .map_or(&[][..], Vec::as_slice);
+            let listed: Vec<_> = candidates
+                .iter()
+                .take(max_candidates)
+                .enumerate()
+                .map(|(index, candidate)| {
+                    let (dag, originals) = flatten(&[QueryRoot::Operator(candidate.node.clone())]);
+                    let group_of_node: serde_json::Map<_, _> = originals
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(node, original)| {
+                            candidate
+                                .children
+                                .iter()
+                                .find(|child| {
+                                    Rc::ptr_eq(&memo.groups[child.0 as usize].node, original)
+                                })
+                                .map(|child| (node.to_string(), json!(child.0)))
+                        })
+                        .collect();
+                    json!({
+                        "index": index,
+                        "implements": ids(&candidate.implements),
+                        "children": ids(&candidate.children),
+                        "origin": origin_name(&candidate.origin),
+                        "budget_share": candidate.budget_share,
+                        "added": !earlier.iter().any(|before| {
+                            Rc::ptr_eq(&before.node, &candidate.node)
+                                && before.children == candidate.children
+                        }),
+                        "label": candidate_node_label(&dag, &group_of_node),
+                        "dag": dag,
+                        "group_of_node": group_of_node,
+                    })
+                })
+                .collect();
+            json!({
+                "id": id,
+                "label": node_label(&dag.nodes[dag.nodes.len() - 1]),
+                "children": ids(&group.children),
+                "parents": ids(&group.parents),
+                "queries": group.queries,
+                "roots_of": group.roots_of,
+                "dag": dag,
+                "candidate_count": candidates.len(),
+                "candidate_count_by_origin": by_origin,
+                "candidates_capped": listed.len() < candidates.len(),
+                "candidates": listed,
+            })
+        })
+        .collect()
+}
+
+/// `CandidateOrigin` in snake case.
+fn origin_name(origin: &CandidateOrigin) -> String {
+    match origin {
+        CandidateOrigin::Pass1 => "pass1",
+        CandidateOrigin::SharedBuild => "shared_build",
+        CandidateOrigin::SummaryResult => "summary_result",
+        CandidateOrigin::SummaryInput => "summary_input",
+        CandidateOrigin::Panes => "panes",
+        CandidateOrigin::Rollup => "rollup",
+        CandidateOrigin::TopKReuse => "top_k_reuse",
+        CandidateOrigin::WidenedScans => "widened_scans",
+    }
+    .into()
+}
+
+/// A candidate's own nodes (those above its child groups' nodes), root
+/// first, as `node_label`s joined by " ← ".
+fn candidate_node_label(dag: &FlatDag, group_of_node: &serde_json::Map<String, Value>) -> String {
+    let Some(QueryRoot::Operator(root)) = dag.roots.first() else {
+        return String::new();
+    };
+    let mut labels = Vec::new();
+    let mut pending = vec![*root];
+    let mut seen = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if group_of_node.contains_key(&id.to_string()) || !seen.insert(id) {
+            continue;
+        }
+        labels.push(node_label(&dag.nodes[id]));
+        pending.extend(dag.nodes[id].operator.children().into_iter().rev().copied());
+    }
+    labels.join(" ← ")
+}
+
+/// One node's operator kind with its sketch family and parameters, its
+/// summary query and its time range, when it has them: e.g.
+/// `SummaryAgg Kll(k=200)`, `SummaryEstimate Quantile(q=0.5)`.
+fn node_label(node: &asap_types::ir::flat::FlatNode) -> String {
+    let operator = serde_json::to_value(&node.operator).unwrap_or_default();
+    // `{"ASAP": {"SummaryAgg": {...}}}` (or a unit variant's string).
+    let (kind, fields) = match operator.as_object().and_then(|o| o.values().next()) {
+        Some(Value::Object(inner)) => match inner.iter().next() {
+            Some((kind, fields)) => (kind.clone(), fields.clone()),
+            None => (String::new(), Value::Null),
+        },
+        Some(Value::String(kind)) => (kind.clone(), Value::Null),
+        _ => (operator.to_string(), Value::Null),
+    };
+    let mut details = Vec::new();
+    find_details(&fields, &mut details, 0);
+    let mut label = kind;
+    for detail in details {
+        label.push(' ');
+        label.push_str(&detail);
+    }
+    label
+}
+
+/// Sketch algorithms with parameters, summary queries and time ranges found
+/// in an operator's fields (not inside its schemas).
+fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
+    if depth > 6 || details.len() >= 3 {
+        return;
+    }
+    let compact = |value: &Value| -> String {
+        match value {
+            Value::Object(fields) => fields
+                .iter()
+                .map(|(key, value)| match value {
+                    Value::Object(inner) if inner.len() == 1 => {
+                        let (k, v) = inner.iter().next().unwrap();
+                        format!("{key}({k}={v})")
+                    }
+                    Value::Object(inner) => format!(
+                        "{key}({})",
+                        inner
+                            .iter()
+                            .filter(|(_, v)| !v.is_object() && !v.is_array())
+                            .map(|(k, v)| format!("{k}={v}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    other => format!("{key}={other}"),
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+            other => other.to_string(),
+        }
+    };
+    match value {
+        Value::Object(fields) => {
+            if let (Some(Value::String(algorithm)), Some(params)) =
+                (fields.get("algorithm"), fields.get("params"))
+            {
+                let params = params
+                    .as_object()
+                    .and_then(|p| p.values().next())
+                    .map(compact)
+                    .unwrap_or_default();
+                details.push(format!("{algorithm}({params})"));
+                return;
+            }
+            for (key, field) in fields {
+                match key.as_str() {
+                    "schema" | "input_schema" | "output_schema" | "predicates" | "cols" => {}
+                    "query" => details.push(compact(field)),
+                    "range" | "window" => details.push(format!("{key}={field}")),
+                    _ => find_details(field, details, depth + 1),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                find_details(item, details, depth + 1);
+            }
+        }
+        _ => {}
     }
 }
 

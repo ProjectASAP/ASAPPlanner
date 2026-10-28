@@ -648,6 +648,7 @@ pub mod planning {
             stage3_selected: Some(selected),
             stage1_selected: Some(selected_logical),
             stage3_plan_selection: Ok(selection),
+            memo_steps: None,
         }
     }
 }

@@ -297,7 +297,7 @@ pub mod search;
 pub use search as pass;
 pub use search::{
     optimize, run_stage1_to_stage3, run_stage1_to_stage3_with, ExecutorCompileCheck,
-    ExecutorCompileError, OptimizationInput, OptimizationInputError, OptimizationPass,
+    ExecutorCompileError, MemoSteps, OptimizationInput, OptimizationInputError, OptimizationPass,
     OptimizeError, PassNameConflict, PassRegistry, PlanOutput, PlanningModels, QueryPlan,
     Stage1ToStage3Pass, Stage1ToStage3Run, Stage1ToStage3Search,
 };
