@@ -299,10 +299,9 @@ pub mod planning {
             })
             .collect()
     }
-    /// The memo Stage 1 hands to plan selection for `roots`: Pass 1
-    /// candidates, local panes for `entries`' recurrences, then every Pass 2
-    /// rule with concrete summary states on the seed pane grids. Rule tests
-    /// read a group's candidates by `CandidateOrigin`.
+    /// Pass 1, local panes for `entries`' recurrences and every Pass 2 rule
+    /// on the seed grids (no query pruning). Rule tests read a group's
+    /// candidates by `CandidateOrigin`.
     pub fn expanded_memo(
         roots: Vec<(usize, QueryRoot)>,
         entries: &[asap_types::workload::QueryWorkloadEntry],
@@ -320,6 +319,135 @@ pub mod planning {
         expand_concrete_summary_state_groups_in_domain(memo, PaneWidthDomain::SeedGrids)
             .unwrap()
             .memo
+    }
+
+    /// One plan of `memo`'s first `queries` queries: each group a query
+    /// needs implemented by its candidate `choice[group]` (an index), or by
+    /// its first candidate, each child group composed once and shared by
+    /// every candidate that reads it.
+    pub fn compose_memo_plan(
+        memo: &asap_logical_asap_optimization::memo::candidates::CandidateMemo,
+        queries: usize,
+        choice: &std::collections::BTreeMap<usize, usize>,
+    ) -> Vec<Rc<OperatorNode>> {
+        fn compose(
+            memo: &asap_logical_asap_optimization::memo::candidates::CandidateMemo,
+            group: usize,
+            choice: &std::collections::BTreeMap<usize, usize>,
+            done: &mut std::collections::HashMap<usize, Rc<OperatorNode>>,
+        ) -> Rc<OperatorNode> {
+            if let Some(found) = done.get(&group) {
+                return Rc::clone(found);
+            }
+            let candidate = &memo.candidates[group][choice.get(&group).copied().unwrap_or(0)];
+            let replacements: Vec<_> = candidate
+                .children
+                .iter()
+                .map(|child| {
+                    let child = child.0 as usize;
+                    (
+                        Rc::clone(&memo.groups[child].node),
+                        compose(memo, child, choice, done),
+                    )
+                })
+                .collect();
+            let composed = with_nodes_replaced(&candidate.node, &replacements);
+            done.insert(group, Rc::clone(&composed));
+            composed
+        }
+        let mut done = std::collections::HashMap::new();
+        (0..queries)
+            .map(|query| {
+                let root = memo
+                    .groups
+                    .iter()
+                    .position(|group| group.roots_of.contains(&query))
+                    .expect("the query's root group");
+                compose(memo, root, choice, &mut done)
+            })
+            .collect()
+    }
+
+    /// `root` with every node in `replacements` (by identity) replaced by
+    /// its replacement; the nodes above are rebuilt, shared ones once.
+    pub fn with_nodes_replaced(
+        root: &Rc<OperatorNode>,
+        replacements: &[(Rc<OperatorNode>, Rc<OperatorNode>)],
+    ) -> Rc<OperatorNode> {
+        fn walk(
+            node: &Rc<OperatorNode>,
+            replacements: &[(Rc<OperatorNode>, Rc<OperatorNode>)],
+            done: &mut std::collections::HashMap<*const OperatorNode, Rc<OperatorNode>>,
+        ) -> Rc<OperatorNode> {
+            if let Some((_, new)) = replacements.iter().find(|(old, _)| Rc::ptr_eq(old, node)) {
+                return Rc::clone(new);
+            }
+            if let Some(found) = done.get(&Rc::as_ptr(node)) {
+                return Rc::clone(found);
+            }
+            let children: std::collections::HashMap<_, _> = node
+                .children()
+                .into_iter()
+                .map(|child| (Rc::as_ptr(child), walk(child, replacements, done)))
+                .collect();
+            let out = if node
+                .children()
+                .into_iter()
+                .all(|old| Rc::ptr_eq(old, &children[&Rc::as_ptr(old)]))
+            {
+                Rc::clone(node)
+            } else {
+                Rc::new(
+                    node.with_new_children(|old| Rc::clone(&children[&Rc::as_ptr(old)]))
+                        .expect("same-schema children"),
+                )
+            };
+            done.insert(Rc::as_ptr(node), Rc::clone(&out));
+            out
+        }
+        walk(root, replacements, &mut Default::default())
+    }
+
+    /// Stage 2 and plan selection over fixed workload plans, without a timed
+    /// search: each `(name, roots)` is implemented by Stage 2 (plan ids start
+    /// with `name`), and all are priced together.
+    pub fn select_among(
+        variants: &[(&str, Vec<QueryRoot>)],
+        entries: &[asap_types::workload::QueryWorkloadEntry],
+        data: &DataWorkload,
+    ) -> (
+        Vec<asap_physical_asap_optimization::PhysicalWorkloadPlan>,
+        asap_plan_selection::Selection,
+    ) {
+        let models = asap_plan_selection::PlanningModels::builtin();
+        let mut physical = Vec::new();
+        for (name, roots) in variants {
+            let mut plans = asap_physical_asap_optimization::optimize_physical_asap(
+                name,
+                roots,
+                entries,
+                data,
+                models.deployment_capabilities,
+            )
+            .unwrap_or_else(|error| panic!("Stage 2 implements {name}: {error}"));
+            for (index, plan) in plans.iter_mut().enumerate() {
+                plan.id = format!("{name}-{index}");
+            }
+            physical.extend(plans);
+        }
+        let selection = asap_plan_selection::select_plan(&physical, entries, data, models).unwrap();
+        (physical, selection)
+    }
+
+    /// The lowest price per second among `selection`'s plans whose id starts
+    /// with `name`.
+    pub fn cheapest_of(selection: &asap_plan_selection::Selection, name: &str) -> f64 {
+        selection
+            .costs
+            .iter()
+            .filter(|(id, _)| id.starts_with(&format!("{name}-")))
+            .filter_map(|(_, cost)| cost.cost_per_second)
+            .fold(f64::INFINITY, f64::min)
     }
 
     /// Apply sharing rules and Stage 2 to a small explicitly supplied fixture set,

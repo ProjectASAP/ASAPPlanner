@@ -2,7 +2,8 @@
 //! selected over the nested sums and answers the same; the rollup and exact
 //! top-k reuse candidates (Pass 2 memo rules) are selected once the finer
 //! computation they read is materialized for all its readers, and answer as
-//! the computation they replace.
+//! the computation they replace. Selection prices fixed plans made of the
+//! memo's candidates, so no assertion depends on a timed search.
 mod physical_common;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,9 +15,11 @@ use asap_executor::physical_planner::{compile, promql_rows};
 use asap_executor::runtime::Scope;
 use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_integration_tests::planning::expanded_memo;
+use asap_integration_tests::planning::{
+    cheapest_of, compose_memo_plan, expanded_memo, select_among,
+};
 use asap_logical_asap_optimization::memo::candidates::{CandidateMemo, CandidateOrigin};
-use asap_plan_selection::{PlanningModels, Stage1ToStage3Run};
+use asap_plan_selection::PlanningModels;
 use asap_types::ir::physical_export::compile_physical_asap_dag_with_node_ids;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::Schema;
@@ -53,17 +56,6 @@ fn exact_queries<'a>(queries: &[&'a str]) -> Vec<(&'a str, AccuracyTarget)> {
         .collect()
 }
 
-/// The memo search's plan for `queries`, exact, each with `recurrence`.
-fn plan(queries: &[&str], recurrence: QueryRecurrence) -> Stage1ToStage3Run<usize> {
-    asap_plan_selection::run_stage1_to_stage3(
-        roots(&exact_queries(queries)),
-        &vec![exact(recurrence); queries.len()],
-        &data(),
-        PlanningModels::builtin(),
-    )
-    .unwrap()
-}
-
 /// The memo Stage 1 builds for `queries`, each with `recurrence`.
 fn memo(queries: &[(&str, AccuracyTarget)], recurrence: QueryRecurrence) -> CandidateMemo {
     expanded_memo(roots(queries), &vec![exact(recurrence); queries.len()])
@@ -98,14 +90,6 @@ fn data() -> DataWorkload {
 /// Every minute.
 fn repeating() -> QueryRecurrence {
     QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(60_000)))
-}
-
-/// Query `q`'s root in the selected logical plan of `run`.
-fn selected_root(run: &Stage1ToStage3Run<usize>, q: usize) -> Rc<OperatorNode> {
-    match &run.selected_logical().expect("a plan")[q] {
-        QueryRoot::Operator(node) => Rc::clone(node),
-        QueryRoot::Scalar(_) => panic!("operator root"),
-    }
 }
 
 /// Two jobs of two series each, a sample every 15 s over [0, 5m).
@@ -224,6 +208,87 @@ fn candidates_of<'a>(
         })
 }
 
+/// Plan selection's choice among fixed plans of `memo`'s `queries`: every
+/// group on its first candidate (`group`), and `variant{i}` per entry of
+/// `variants`, a group's candidate index each. Returns the selected plan's
+/// name, its roots, whether it builds some computation once per evaluation
+/// for all its readers (`MatAtQuery`), and the selection's lowest prices of
+/// `group` and of every variant.
+fn select(
+    memo: &CandidateMemo,
+    queries: usize,
+    entry: QueryWorkloadEntry,
+    variants: &[BTreeMap<usize, usize>],
+) -> (String, Vec<Rc<OperatorNode>>, bool, f64, f64) {
+    let mut plans = vec![(
+        "group".to_string(),
+        compose_memo_plan(memo, queries, &BTreeMap::new()),
+    )];
+    for (i, choice) in variants.iter().enumerate() {
+        plans.push((
+            format!("variant{i}"),
+            compose_memo_plan(memo, queries, choice),
+        ));
+    }
+    let named: Vec<(&str, Vec<QueryRoot>)> = plans
+        .iter()
+        .map(|(name, roots)| {
+            (
+                name.as_str(),
+                roots.iter().cloned().map(QueryRoot::Operator).collect(),
+            )
+        })
+        .collect();
+    let (physical, selection) = select_among(&named, &vec![entry; queries], &data());
+    let selected = physical
+        .iter()
+        .find(|plan| plan.id == selection.selected)
+        .expect("the selected plan");
+    let name = selected.from_logical.clone();
+    let built_once = selected
+        .materialization
+        .values()
+        .any(|m| matches!(m, Materialization::MatAtQuery(_)));
+    let roots = plans
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, roots)| roots.clone())
+        .unwrap();
+    let variants = (0..variants.len())
+        .map(|i| cheapest_of(&selection, &format!("variant{i}")))
+        .fold(f64::INFINITY, f64::min);
+    (
+        name,
+        roots,
+        built_once,
+        cheapest_of(&selection, "group"),
+        variants,
+    )
+}
+
+/// `(group, candidate index)` of every candidate [`candidates_of`] yields.
+fn choices(memo: &CandidateMemo, origins: &[CandidateOrigin]) -> Vec<(usize, usize)> {
+    candidates_of(memo, origins)
+        .map(|(group, node)| {
+            let index = memo.candidates[group]
+                .iter()
+                .position(|c| Rc::ptr_eq(&c.node, node))
+                .unwrap();
+            (group, index)
+        })
+        .collect()
+}
+
+/// [`candidates_of`], without the candidates that are their group's own
+/// node.
+fn own_candidates<'a>(
+    memo: &'a CandidateMemo,
+    origins: &'a [CandidateOrigin],
+) -> impl Iterator<Item = (usize, &'a Rc<OperatorNode>)> + 'a {
+    candidates_of(memo, origins)
+        .filter(|(group, node)| !Rc::ptr_eq(node, &memo.groups[*group].node))
+}
+
 /// `sum by (job) (sum_over_time(m[5m]))`: the nested sums and their merge
 /// into one accumulator over the raw data samples. Plan selection picks the
 /// merge, which builds no per-series state, and every candidate answers the
@@ -232,22 +297,26 @@ fn candidates_of<'a>(
 fn nested_sum_merge_is_selected_and_answers_as_the_nested_sums() {
     // Evaluated once, so no tumbling-pane candidates.
     let query = "sum by (job) (sum_over_time(m[5m]))";
-    let run = plan(&[query], QueryRecurrence::Unknown);
-    assert_eq!(summary_builds(&selected_root(&run, 0)), 1);
-    let answer = execute(&selected_root(&run, 0));
+    let memo = memo(&exact_queries(&[query]), QueryRecurrence::Unknown);
+    let variants: Vec<_> = choices(&memo, &[CandidateOrigin::Pass1])
+        .into_iter()
+        .map(|(group, index)| BTreeMap::from([(group, index)]))
+        .collect();
+    let (_, roots, ..) = select(&memo, 1, exact(QueryRecurrence::Unknown), &variants);
+    assert_eq!(summary_builds(&roots[0]), 1);
+    let answer = execute(&roots[0]);
     assert_eq!(answer.len(), 2, "one sum per job: {answer:?}");
     every_candidate_answers_alike(query);
 }
 
 /// Kinds of the nodes, other than the source chain, that query 0's and
-/// query 1's selected roots share: what one query reads of the other's
-/// computation.
-fn shared_kinds(run: &Stage1ToStage3Run<usize>) -> BTreeSet<String> {
-    let first: BTreeSet<_> = OperatorNode::reachable(&selected_root(run, 0))
+/// query 1's roots share: what one query reads of the other's computation.
+fn shared_kinds(roots: &[Rc<OperatorNode>]) -> BTreeSet<String> {
+    let first: BTreeSet<_> = OperatorNode::reachable(&roots[0])
         .iter()
         .map(Rc::as_ptr)
         .collect();
-    OperatorNode::reachable(&selected_root(run, 1))
+    OperatorNode::reachable(&roots[1])
         .into_iter()
         .filter(|node| first.contains(&Rc::as_ptr(node)))
         .map(|node| node.operator.kind_name().to_string())
@@ -255,28 +324,46 @@ fn shared_kinds(run: &Stage1ToStage3Run<usize>) -> BTreeSet<String> {
         .collect()
 }
 
-/// The nodes the selected plan of `queries` shares between its two
-/// queries. Stage 2 offers each computation two queries read built once per
-/// evaluation (`MatAtQuery`); the selected reuse candidate takes it.
-fn selected_reuse(queries: &[&str]) -> BTreeSet<String> {
-    let run = plan(queries, repeating());
-    let selected = run.selected().unwrap();
+/// The nodes the plan selected for `queries` shares between its two
+/// queries, among the queries' own roots and the plans reading `origin`
+/// candidates (the `i`-th of each group that has some, together). Stage 2
+/// offers each computation two queries read built once per evaluation
+/// (`MatAtQuery`); the reuse plan is selected and is cheaper than without it.
+fn selected_reuse(queries: &[&str], origin: CandidateOrigin) -> BTreeSet<String> {
+    let memo = memo(&exact_queries(queries), repeating());
+    let mut by_group: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (group, index) in choices(&memo, std::slice::from_ref(&origin)) {
+        by_group.entry(group).or_default().push(index);
+    }
+    let most = by_group.values().map(Vec::len).max().unwrap_or(0);
+    assert!(most > 0, "{queries:?}: some {origin:?} candidate");
+    let variants: Vec<BTreeMap<_, _>> = (0..most)
+        .map(|i| {
+            by_group
+                .iter()
+                .map(|(group, indices)| (*group, indices[i.min(indices.len() - 1)]))
+                .collect()
+        })
+        .collect();
+    let (name, roots, built_once, own, reuse) =
+        select(&memo, queries.len(), exact(repeating()), &variants);
+    assert!(name.starts_with("variant"), "{queries:?}: selected {name}");
     assert!(
-        selected
-            .materialization
-            .values()
-            .any(|m| matches!(m, Materialization::MatAtQuery(_))),
-        "{queries:?}: {} computes its shared state once",
-        selected.id
+        built_once,
+        "{queries:?}: {name} computes its shared state once"
     );
-    shared_kinds(&run)
+    assert!(reuse < own, "{queries:?}: reuse {reuse} vs own {own}");
+    shared_kinds(&roots)
 }
 
 /// `sum by (job)` beside `sum by (job, instance)`: with the finer sums
 /// computed once, plan selection answers the coarse sum from them.
 #[test]
 fn rollup_is_selected_when_the_finer_sums_are_computed_once() {
-    let shared = selected_reuse(&["sum by (job) (m)", "sum by (job, instance) (m)"]);
+    let shared = selected_reuse(
+        &["sum by (job) (m)", "sum by (job, instance) (m)"],
+        CandidateOrigin::Rollup,
+    );
     // The coarse sum reads the finer sums' state or finalized values.
     assert!(
         shared.contains("Aggregate") || shared.contains("SummaryAgg"),
@@ -289,19 +376,23 @@ fn rollup_is_selected_when_the_finer_sums_are_computed_once() {
 /// sorting every series twice.
 #[test]
 fn exact_topk_reuse_is_selected_when_the_ranking_is_computed_once() {
-    let shared = selected_reuse(&[
-        "topk by (job) (5, rate(m[1m]))",
-        "topk by (job) (10, rate(m[1m]))",
-    ]);
+    let shared = selected_reuse(
+        &[
+            "topk by (job) (5, rate(m[1m]))",
+            "topk by (job) (10, rate(m[1m]))",
+        ],
+        CandidateOrigin::TopKReuse,
+    );
     assert!(shared.contains("Sort"), "{shared:?}");
 }
 
-/// `node` as Stage 2 implements it (its first materialization), executed.
-fn execute_implemented(node: &Rc<OperatorNode>) -> Vec<String> {
+/// `node` as Stage 2 implements it for `entry` (its first
+/// materialization), executed.
+fn execute_implemented(node: &Rc<OperatorNode>, entry: &QueryWorkloadEntry) -> Vec<String> {
     let plans = asap_physical_asap_optimization::optimize_physical_asap(
         "candidate",
         &[QueryRoot::Operator(Rc::clone(node))],
-        &[exact(repeating())],
+        std::slice::from_ref(entry),
         &data(),
         PlanningModels::builtin().deployment_capabilities,
     )
@@ -312,20 +403,24 @@ fn execute_implemented(node: &Rc<OperatorNode>) -> Vec<String> {
     }
 }
 
-/// Every memo candidate of `query`'s aggregate and root groups executes to
-/// the same rows as the group's own logical node.
+/// Every memo candidate of `query`'s aggregate and root groups other than
+/// the group's own node executes to the same rows as that node.
 fn every_candidate_answers_alike(query: &str) {
     let memo = memo(&exact_queries(&[query]), QueryRecurrence::Unknown);
+    let entry = exact(QueryRecurrence::Unknown);
     let mut checked = 0;
-    for (group, node) in candidates_of(&memo, &[CandidateOrigin::Pass1]) {
+    for (group, node) in own_candidates(&memo, &[CandidateOrigin::Pass1]) {
         assert_eq!(
-            execute_implemented(node),
-            execute_implemented(&memo.groups[group].node),
+            execute_implemented(node, &entry),
+            execute_implemented(&memo.groups[group].node, &entry),
             "{query}: a candidate of group {group} differs"
         );
         checked += 1;
     }
-    assert!(checked > 1, "{query}");
+    assert!(
+        checked > 0,
+        "{query}: some candidate other than the group's node"
+    );
 }
 
 /// A per-series sum drops the metric name, so grouping by `__name__` over
@@ -338,19 +433,28 @@ fn nested_sum_by_the_metric_name_answers_as_the_nested_sums() {
     every_candidate_answers_alike("sum by (job) (sum_over_time(m[5m]))");
 }
 
-/// Every rollup or top-k reuse candidate in `memo`, of a group only
-/// `exact` queries read, executes to the rows of the computation it replaces
-/// (its group's logical node).
-fn reuse_answers_alike_in(memo: &CandidateMemo, queries: &[(&str, AccuracyTarget)], exact: usize) {
+/// Every rollup or top-k reuse candidate in `memo`, of a group only the
+/// queries before `first_approximate_query` read, executes to the rows of
+/// the computation it replaces (its group's logical node).
+fn reuse_answers_alike_in(
+    memo: &CandidateMemo,
+    queries: &[(&str, AccuracyTarget)],
+    first_approximate_query: usize,
+) {
+    let entry = exact(repeating());
     let mut checked = 0;
     for (group, node) in candidates_of(memo, &[CandidateOrigin::Rollup, CandidateOrigin::TopKReuse])
     {
-        if memo.groups[group].queries.iter().any(|&q| q >= exact) {
+        if memo.groups[group]
+            .queries
+            .iter()
+            .any(|&q| q >= first_approximate_query)
+        {
             continue;
         }
         assert_eq!(
-            execute_implemented(node),
-            execute_implemented(&memo.groups[group].node),
+            execute_implemented(node, &entry),
+            execute_implemented(&memo.groups[group].node, &entry),
             "{queries:?}: a reuse candidate of group {group} differs"
         );
         checked += 1;
@@ -388,12 +492,33 @@ fn exact_topk_reuse_answers_as_each_topk() {
     ]));
 }
 
-/// A fine and a coarse sum beside two differently grouped quantiles: in the
-/// memo, the quantiles gain a shared summary build (summary-capability
-/// rule) and the coarse sum a rollup of the fine one; the rollup answers as
-/// the coarse sum computed from the raw data samples. The memo chooses each
-/// group's candidate on its own, so the rollup's answer does not depend on
-/// the quantiles' choice.
+/// Query `q`'s rows when Stage 2 implements `roots` together (its first
+/// materialization) for `entries`.
+fn execute_plan(
+    roots: &[Rc<OperatorNode>],
+    entries: &[QueryWorkloadEntry],
+    q: usize,
+) -> Vec<String> {
+    let roots: Vec<_> = roots.iter().cloned().map(QueryRoot::Operator).collect();
+    let plans = asap_physical_asap_optimization::optimize_physical_asap(
+        "plan",
+        &roots,
+        entries,
+        &data(),
+        PlanningModels::builtin().deployment_capabilities,
+    )
+    .expect("Stage 2 implements the plan");
+    match &plans[0].roots[q] {
+        QueryRoot::Operator(root) => execute(root),
+        QueryRoot::Scalar(_) => panic!("operator root"),
+    }
+}
+
+/// A fine and a coarse sum beside two differently grouped quantiles: a plan
+/// that shares the quantiles' summary build (summary-capability rule) and
+/// rolls the coarse sum up from the fine one (rollup rule) answers each sum
+/// as its own computation does (from the raw data samples), and each
+/// quantile as the same shared build without the rollup.
 #[test]
 fn a_rollup_over_a_shared_summary_candidate_answers_as_without_it() {
     let quantile = AccuracyTarget::max_error(0.05).failure_probability(0.3);
@@ -413,11 +538,71 @@ fn a_rollup_over_a_shared_summary_candidate_answers_as_without_it() {
         ("avg by (job) (quantile_over_time(0.95, m[5m]))", quantile),
     ];
     let memo = memo(&queries, repeating());
+    let shared = memo
+        .groups
+        .iter()
+        .find(|group| {
+            group.queries.len() > 1
+                && group.queries.iter().all(|&q| q >= 2)
+                && matches!(group.node.asap(), Some(ASAPOp::SummaryAgg { .. }))
+        })
+        .map(|group| Rc::clone(&group.node))
+        .expect("the quantiles share a summary build");
+    // Each quantile's own candidate that reads the shared build.
+    let mut sharing: BTreeMap<usize, usize> = [2, 3]
+        .into_iter()
+        .map(|q| {
+            memo.candidates
+                .iter()
+                .enumerate()
+                .filter(|(group, _)| memo.groups[*group].queries == [q])
+                .flat_map(|(group, candidates)| {
+                    candidates
+                        .iter()
+                        .enumerate()
+                        .map(move |(i, c)| (group, i, c))
+                })
+                .find(|(_, _, c)| {
+                    OperatorNode::reachable(&c.node)
+                        .iter()
+                        .any(|node| Rc::ptr_eq(node, &shared))
+                })
+                .map(|(group, i, _)| (group, i))
+                .unwrap_or_else(|| panic!("Q{} reads the shared build", q + 1))
+        })
+        .collect();
+    let without = compose_memo_plan(&memo, queries.len(), &sharing);
+    let (group, index) = choices(&memo, &[CandidateOrigin::Rollup])
+        .into_iter()
+        .find(|(group, _)| memo.groups[*group].queries == [0])
+        .expect("a rollup of the coarse sum");
+    sharing.insert(group, index);
+    let with = compose_memo_plan(&memo, queries.len(), &sharing);
+    let own = compose_memo_plan(&memo, queries.len(), &BTreeMap::new());
     assert!(
-        memo.groups.iter().any(|group| group.queries.len() > 1
-            && group.queries.iter().all(|&q| q >= 2)
-            && matches!(group.node.asap(), Some(ASAPOp::SummaryAgg { .. }))),
-        "the quantiles share a summary build"
+        OperatorNode::reachable(&with[2])
+            .iter()
+            .any(|node| OperatorNode::reachable(&with[3])
+                .iter()
+                .any(|other| Rc::ptr_eq(node, other)
+                    && matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })))),
+        "both quantiles read one summary build"
     );
-    reuse_answers_alike_in(&memo, &queries, 2);
+    let entries = vec![exact(repeating()); queries.len()];
+    for q in 0..2 {
+        assert_eq!(
+            execute_plan(&with, &entries, q),
+            execute_plan(&own, &entries, q),
+            "Q{}",
+            q + 1
+        );
+    }
+    for q in 2..4 {
+        assert_eq!(
+            execute_plan(&with, &entries, q),
+            execute_plan(&without, &entries, q),
+            "Q{}",
+            q + 1
+        );
+    }
 }

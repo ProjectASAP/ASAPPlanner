@@ -1,15 +1,20 @@
 //! Sketch rollup in planning: the memo's rollup rule offers answering a
 //! coarse sketch grouping from the finest build of the same sketch over the
-//! same rows, and the memo search selects it when one build and a merge
-//! cost less than two builds over the raw rows.
+//! same rows, and plan selection selects it when one build and a merge cost
+//! less than a build per query over the raw rows. Selection prices fixed
+//! plans made of the memo's candidates, so no assertion depends on a timed
+//! search.
 use std::rc::Rc;
 
 use asap_executor::physical_planner::promql_rows;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_integration_tests::planning::expanded_memo;
-use asap_logical_asap_optimization::memo::candidates::CandidateOrigin;
-use asap_plan_selection::{PlanningModels, Stage1ToStage3Run};
+use asap_integration_tests::planning::{
+    cheapest_of, compose_memo_plan, expanded_memo, select_among,
+};
+use asap_logical_asap_optimization::memo::candidates::{
+    CandidateMemo, CandidateOrigin, ImplementationCandidate,
+};
 use asap_types::ir::properties::{AccuracyMetric, AccuracyScope, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
@@ -17,6 +22,7 @@ use asap_types::workload::{
     DataWorkload, Predictability, QueryRecurrence, QueryRequirements, QueryWorkloadEntry,
     RepeatedDemand, RepetitionInterval,
 };
+use std::collections::BTreeMap;
 
 fn catalog() -> SqlCatalog {
     SqlCatalog::new().with_table(
@@ -65,8 +71,8 @@ fn data() -> DataWorkload {
     .unwrap()
 }
 
-/// Every stage's output for the SQL `queries` at `accuracy`.
-async fn plan_sql(queries: &[&str], accuracy: AccuracyTarget) -> Stage1ToStage3Run<usize> {
+/// The SQL `queries` lowered at `accuracy`.
+async fn sql_roots(queries: &[&str], accuracy: &AccuracyTarget) -> Vec<(usize, QueryRoot)> {
     let mut roots = Vec::new();
     for (i, query) in queries.iter().enumerate() {
         let root = lower_sql(query, &catalog(), accuracy.clone())
@@ -74,33 +80,118 @@ async fn plan_sql(queries: &[&str], accuracy: AccuracyTarget) -> Stage1ToStage3R
             .unwrap();
         roots.push((i, QueryRoot::Operator(root)));
     }
-    search(
-        roots,
-        &vec![entry(&accuracy, 60_000); queries.len()],
-        &data(),
+    roots
+}
+
+/// Whether `node` builds a summary.
+fn is_build(node: &Rc<OperatorNode>) -> bool {
+    matches!(
+        node.asap(),
+        Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
     )
 }
 
-/// The memo search's run for `roots`.
-fn search(
-    roots: Vec<(usize, QueryRoot)>,
-    entries: &[QueryWorkloadEntry],
-    data: &DataWorkload,
-) -> Stage1ToStage3Run<usize> {
-    asap_plan_selection::run_stage1_to_stage3(roots, entries, data, PlanningModels::builtin())
-        .unwrap()
+/// `(group, candidate index)` of query `q`'s own groups' (read by `q`
+/// alone) candidates `keep` accepts; those of the topmost group first.
+fn own_choices(
+    memo: &CandidateMemo,
+    q: usize,
+    keep: impl Fn(&ImplementationCandidate) -> bool,
+) -> Vec<(usize, usize)> {
+    let mut found: Vec<_> = memo
+        .candidates
+        .iter()
+        .enumerate()
+        .filter(|(group, _)| memo.groups[*group].queries == [q])
+        .flat_map(|(group, candidates)| {
+            candidates
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| keep(c))
+                .map(move |(index, _)| (group, index))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    // Children come before parents in the memo.
+    found.sort_by_key(|(group, _)| std::cmp::Reverse(*group));
+    found
 }
 
-/// The selected plan's roots.
-fn selected_roots(run: &Stage1ToStage3Run<usize>) -> Vec<Rc<OperatorNode>> {
-    run.selected_logical()
-        .expect("a plan")
-        .iter()
-        .map(|root| match root {
-            QueryRoot::Operator(node) => Rc::clone(node),
-            QueryRoot::Scalar(_) => panic!("operator root"),
+/// The selected plan's roots among fixed plans of `memo`'s queries, and
+/// the selection's lowest prices of `separate` and of the `shared` plans:
+/// - `separate`: each query reads its own summary build (its topmost own
+///   group's first Pass 1 candidate that builds one);
+/// - `shared{g}`: every query reads the summary state group `g`, its own
+///   estimate or a regrouping merge of it, when every query can.
+fn select_rollup(
+    memo: &CandidateMemo,
+    queries: usize,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+) -> (Vec<Rc<OperatorNode>>, f64, f64) {
+    let builds = |node: &Rc<OperatorNode>| OperatorNode::reachable(node).iter().any(is_build);
+    let separate: BTreeMap<usize, usize> = (0..queries)
+        .map(|q| {
+            own_choices(memo, q, |c| {
+                c.origin == CandidateOrigin::Pass1 && builds(&c.node)
+            })
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("Q{} has a summary candidate", q + 1))
         })
-        .collect()
+        .collect();
+    let mut plans = vec![(
+        "separate".to_string(),
+        compose_memo_plan(memo, queries, &separate),
+    )];
+    for (state, group) in memo.groups.iter().enumerate() {
+        if !is_build(&group.node) || group.queries.len() < queries {
+            continue;
+        }
+        let reading: Option<BTreeMap<usize, usize>> = (0..queries)
+            .map(|q| {
+                own_choices(memo, q, |c| {
+                    c.children.iter().any(|child| child.0 as usize == state)
+                })
+                .into_iter()
+                .next()
+            })
+            .collect();
+        if let Some(choice) = reading {
+            plans.push((
+                format!("shared{state}"),
+                compose_memo_plan(memo, queries, &choice),
+            ));
+        }
+    }
+    assert!(
+        plans.len() > 1,
+        "a plan in which every query reads one build"
+    );
+    let named: Vec<(&str, Vec<QueryRoot>)> = plans
+        .iter()
+        .map(|(name, roots)| {
+            (
+                name.as_str(),
+                roots.iter().cloned().map(QueryRoot::Operator).collect(),
+            )
+        })
+        .collect();
+    let (physical, selection) = select_among(&named, entries, data);
+    let selected = physical
+        .iter()
+        .find(|plan| plan.id == selection.selected)
+        .expect("the selected plan");
+    let roots = plans
+        .iter()
+        .find(|(name, _)| *name == selected.from_logical)
+        .map(|(_, roots)| roots.clone())
+        .unwrap();
+    let shared = plans[1..]
+        .iter()
+        .map(|(name, _)| cheapest_of(&selection, name))
+        .fold(f64::INFINITY, f64::min);
+    (roots, cheapest_of(&selection, "separate"), shared)
 }
 
 /// The summary builds and rollups (regrouping merges) `roots` read, each
@@ -113,7 +204,7 @@ fn builds_and_rollups(roots: &[Rc<OperatorNode>]) -> (usize, usize) {
             continue;
         }
         match node.asap() {
-            Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. }) => builds += 1,
+            _ if is_build(&node) => builds += 1,
             Some(ASAPOp::SummaryMerge {
                 group_by: Some(_), ..
             }) => rollups += 1,
@@ -125,9 +216,9 @@ fn builds_and_rollups(roots: &[Rc<OperatorNode>]) -> (usize, usize) {
 
 /// Distinct users by (region, service) and by service, both at relative
 /// ε = 0.05 per value over the same window (W-RollupHeavy's targets): the
-/// memo offers the coarse KMV rolled up from the finer one, and the search
-/// selects a plan with one build and a rollup over one that builds both
-/// from the raw rows.
+/// memo offers the coarse KMV rolled up from the finer one, and plan
+/// selection selects one build and a rollup, cheaper than a build per
+/// query from the raw rows.
 #[tokio::test]
 async fn stage3_selects_a_distinct_count_rollup_when_it_is_cheaper() {
     let accuracy = AccuracyTarget::max_error(0.05)
@@ -135,7 +226,7 @@ async fn stage3_selects_a_distinct_count_rollup_when_it_is_cheaper() {
         .accuracy_metric(AccuracyMetric::Relative)
         .accuracy_scope(AccuracyScope::PerValue);
     let window = "WHERE ts >= now() - INTERVAL '5 minutes'";
-    let run = plan_sql(
+    let roots = sql_roots(
         &[
             &format!(
                 "SELECT region, service, COUNT(DISTINCT user_id) AS value FROM http {window} \
@@ -146,15 +237,19 @@ async fn stage3_selects_a_distinct_count_rollup_when_it_is_cheaper() {
                  GROUP BY service"
             ),
         ],
-        accuracy,
+        &accuracy,
     )
     .await;
-    assert_eq!(builds_and_rollups(&selected_roots(&run)), (1, 1));
+    let entries = vec![entry(&accuracy, 60_000); 2];
+    let memo = expanded_memo(roots, &entries);
+    let (selected, separate, rolled_up) = select_rollup(&memo, 2, &entries, &data());
+    assert!(rolled_up < separate, "{rolled_up} vs {separate}");
+    assert_eq!(builds_and_rollups(&selected), (1, 1));
 }
 
 /// p99 latency by (region, service), by region and by service at rank
 /// ε = 0.05 (template 13's shape): both coarse groupings roll up from one
-/// KLL, and the memo search selects that plan.
+/// KLL, and plan selection selects that plan.
 #[tokio::test]
 async fn coarse_quantile_groupings_roll_up_from_one_kll() {
     let accuracy = AccuracyTarget::max_error(0.05)
@@ -168,22 +263,26 @@ async fn coarse_quantile_groupings_roll_up_from_one_kll() {
              GROUP BY {keys}"
         )
     };
-    let run = plan_sql(
+    let roots = sql_roots(
         &[
             &query("region, service"),
             &query("region"),
             &query("service"),
         ],
-        accuracy,
+        &accuracy,
     )
     .await;
-    assert_eq!(builds_and_rollups(&selected_roots(&run)), (1, 2));
+    let entries = vec![entry(&accuracy, 60_000); 3];
+    let memo = expanded_memo(roots, &entries);
+    let (selected, separate, rolled_up) = select_rollup(&memo, 3, &entries, &data());
+    assert!(rolled_up < separate, "{rolled_up} vs {separate}");
+    assert_eq!(builds_and_rollups(&selected), (1, 2));
 }
 
 /// #840's `quantile by (host, job)` and `quantile by (job)` over 10,000
 /// series, every 10 s at rank ε = 0.01, δ = 0.001: the memo offers the
 /// coarse KLL rolled up from the finer one, and its guarantee meets the
-/// target, so the search can select it.
+/// target, so plan selection selects it.
 #[test]
 fn promql_quantile_by_job_rolls_up_from_by_host_job() {
     let accuracy = AccuracyTarget::max_error(0.01)
@@ -206,19 +305,15 @@ fn promql_quantile_by_job_rolls_up_from_by_host_job() {
     let data: DataWorkload = serde_json::from_value(serde_json::json!({
         "arrival": {"ingesting": {"rows_per_second": 666.67}},
         "sources": {"data": {"series_count": 10_000, "metric_type": "gauge",
-                             "sample_interval": 15_000}},
+                             "sample_interval": 15_000,
+                             // 15 minutes of raw rows.
+                             "rows_held": 600_000}},
     }))
     .unwrap();
     let entry = entry(&accuracy, 10_000);
     let entries = [entry.clone(), entry];
-    let memo = expanded_memo(roots.clone(), &entries);
-    assert!(
-        memo.candidates
-            .iter()
-            .flatten()
-            .any(|c| c.origin == CandidateOrigin::Rollup),
-        "a rollup candidate"
-    );
-    let run = search(roots, &entries, &data);
-    assert_eq!(builds_and_rollups(&selected_roots(&run)), (1, 1));
+    let memo = expanded_memo(roots, &entries);
+    let (selected, separate, rolled_up) = select_rollup(&memo, 2, &entries, &data);
+    assert!(rolled_up < separate, "{rolled_up} vs {separate}");
+    assert_eq!(builds_and_rollups(&selected), (1, 1));
 }
