@@ -61,9 +61,11 @@ fn finds_issue_903_looser_accuracy_not_reading_the_exact_result() {
     }
 }
 
-/// #902: Q3 = p90 per city; the same query for `city = 'city1'` builds its
-/// own KLL instead of selecting the group from Q3's result. Open bug: flip
-/// to `Holds` when #902 is fixed.
+/// #902: Q3 = p90 per city; the same query for `city = 'city1'` built its
+/// own KLL instead of selecting the group from Q3's result. #943 fixed the
+/// issue's ungrouped case and closed #902; this grouped variant
+/// (`… AND city = 'city1' GROUP BY city`) holds only since #952's
+/// finer-aggregate reuse (#950), and is now its regression test.
 #[test]
 fn finds_issue_902_filter_on_group_key_not_reading_the_grouped_result() {
     let mut workload = seed("issue902.json");
@@ -78,19 +80,11 @@ fn finds_issue_902_filter_on_group_key_not_reading_the_grouped_result() {
         workload.queries[0].clone(),
         workload.queries[2].with_spec(QuerySpec::Sql(per_city)),
     ];
-    match check(Relation::FilterOnGroupKey, workload, 1) {
-        Outcome::Violated(m) => {
-            let witness = m.witness.expect("a marginal relation has a witness");
-            assert!(matches!(witness.derivation, Some(Witness::Filter { .. })));
-            assert!(witness.key_filter_keeps_input_guarantee);
-            assert!(
-                m.related_cost_per_second > witness.cost_per_second * 1.1,
-                "{}",
-                m.summary
-            );
-        }
-        other => panic!("expected #902's violation, got {other:?}"),
-    }
+    let outcome = check(Relation::FilterOnGroupKey, workload, 1);
+    assert!(
+        matches!(outcome, Outcome::Holds(_)),
+        "expected #902's case to hold, got {outcome:?}"
+    );
 }
 
 /// #891: the per-pod CPU rate query filtered on a group key does not read
