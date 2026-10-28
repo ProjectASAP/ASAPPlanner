@@ -57,15 +57,6 @@ pub(super) fn guarantee(
                 "kmv_exact_below_k_chernoff_v1",
             ))
         }
-        SketchParams::Theta { k } => Some(super::bounded_guarantee(
-            algorithm,
-            params,
-            query,
-            AccuracyMetric::Relative,
-            10.0 / f64::from(k.saturating_sub(2).max(1)).sqrt(),
-            ProbabilityExpr::Constant { value: 0.01 },
-            "theta_variance_chebyshev_99_v1",
-        )),
         _ => None,
     }
 }
@@ -117,12 +108,6 @@ pub(crate) fn kmv_k(eps: f64, delta: f64) -> u32 {
         }
     }
     hi
-}
-
-/// 99%-confidence Theta relative bound via Chebyshev, using
-/// `RSE <= 1/sqrt(k-2)` and a ten-standard-deviation interval.
-pub(crate) fn theta_k_99(eps: f64) -> u32 {
-    saturating_ceil(100.0 / (eps * eps) + 2.0, 16, 1 << 26)
 }
 
 #[cfg(test)]

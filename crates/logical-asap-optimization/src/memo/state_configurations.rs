@@ -365,7 +365,7 @@ pub fn shared_size(a: &FieldDataType, b: &FieldDataType) -> Option<FieldDataType
         {
             let params = size_for_all_readers(&[a.params(), b.params()])?;
             Some(FieldDataType::Sketch(
-                SketchKind::new(a.algorithm().clone(), params),
+                SketchKind::new(*a.algorithm(), params),
                 grouping.clone(),
             ))
         }

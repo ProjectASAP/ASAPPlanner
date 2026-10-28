@@ -258,7 +258,7 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_evaluation_contract
         let candidates = candidates_using(
             &pre,
             AccuracyTarget::max_error(0.01).failure_probability(0.01),
-            expected_family.clone(),
+            expected_family,
         );
         assert!(
             !candidates.is_empty(),
@@ -771,7 +771,7 @@ fn ddsketch_ratio_selection(
                     PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                         family: FieldDataType::Sketch(kind, _),
                         ..
-                    }) => Some(kind.algorithm().clone()),
+                    }) => Some(*kind.algorithm()),
                     _ => None,
                 })
                 .collect();

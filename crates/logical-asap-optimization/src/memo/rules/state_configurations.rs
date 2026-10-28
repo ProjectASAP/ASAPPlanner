@@ -227,7 +227,7 @@ impl SharedProducer for SummaryStates {
                     StateCovering::Size(match (first, configuration) {
                         (FieldDataType::Sketch(kind, grouping), Some(params)) => {
                             FieldDataType::Sketch(
-                                SketchKind::new(kind.algorithm().clone(), params),
+                                SketchKind::new(*kind.algorithm(), params),
                                 grouping.clone(),
                             )
                         }

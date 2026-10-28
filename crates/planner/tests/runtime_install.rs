@@ -2774,7 +2774,7 @@ fn heap_of(plan: &InstallablePlan) -> Option<(SketchAlgorithm, u32)> {
             FieldDataType::Sketch(kind, _) => match kind.params() {
                 SketchParams::CmsWithHeap { width, .. }
                 | SketchParams::CountSketchWithHeap { width, .. } => {
-                    Some((kind.algorithm().clone(), *width))
+                    Some((*kind.algorithm(), *width))
                 }
                 _ => None,
             },
@@ -2899,7 +2899,7 @@ async fn assert_forced_heap_answers(
     (samples, truth): (&[RawDataSample], &BTreeMap<String, BTreeMap<String, f64>>),
     labels: (Option<&str>, &str, usize),
 ) {
-    let plan = plan_ignoring_guarantees(workload, Some(algorithm.clone()))
+    let plan = plan_ignoring_guarantees(workload, Some(algorithm))
         .await
         .unwrap_or_else(|error| panic!("{algorithm:?}: {error}"));
     let (built, width) = heap_of(&plan).expect("a heap plan");
@@ -3130,7 +3130,7 @@ async fn a_forced_heap_grouped_topk_sum_plan_compiles_and_answers_within_its_bou
         let query = format!("topk(3, sum by (region) ({function}(data[1m])))");
         let workload = heap_topk_workload(&query, "data", facts);
         let truth = BTreeMap::from([(String::new(), truth.clone())]);
-        let plan = plan_ignoring_guarantees(&workload, Some(algorithm.clone()))
+        let plan = plan_ignoring_guarantees(&workload, Some(algorithm))
             .await
             .unwrap_or_else(|error| panic!("{query} {algorithm:?}: {error}"));
         let (built, width) = heap_of(&plan).expect("a heap plan");

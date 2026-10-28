@@ -28,4 +28,4 @@ ahash = { version = "0.8", default-features = false, features = ["std", "runtime
 # medians), #248 (`DdSketch::quantile_interpolated`), #249 (`memory_bytes` and
 # `estimated_memory_bytes`; KMV without `experimental`) and #251 (the public
 # capability table). Moves to 0.4.1 once that is released.
-asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "950bb5cb6249831ad27eb9c8546c58fb64fe8f22" }
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "21b63578c2e612e153f5aaa4d3848f1035a13c60" }

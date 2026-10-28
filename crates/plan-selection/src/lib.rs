@@ -4984,12 +4984,10 @@ fn keeps_every_value(measure: &AggIntent) -> bool {
 ///   [`DDSKETCH_ASSUMED_VALUE_RANGE`] and fill its negative store too
 ///   unless proven non-negative.
 ///
-/// Two families are priced without the library's estimate:
-/// - KLL: its fixed bytes ([`kll_fixed_bytes`]: the struct and its level
-///   array) plus the 8-byte item array as `asap_sketchlib` grows it for the
-///   rows the state folds, at most its full capacity ([`kll_buffer_items`]);
-/// - Theta, which candidate generation does not offer because
-///   `asap_sketchlib` has no Theta sketch: its `k` 64-bit hashes.
+/// KLL is priced without the library's estimate: its fixed bytes
+/// ([`kll_fixed_bytes`]: the struct and its level array) plus the 8-byte
+/// item array as `asap_sketchlib` grows it for the rows the state folds, at
+/// most its full capacity ([`kll_buffer_items`]).
 ///
 /// An exact accumulator's state is the executor's per-group state,
 /// [`EXACT_ACCUMULATOR_STATE_BYTES`] for every kind.
@@ -5105,7 +5103,6 @@ fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, u64)
             HyperLogLog::<Classic>::estimated_memory_bytes(usize::from(*precision)) as u64,
         ),
         SketchParams::Kmv { k, .. } => (1.0, Kmv::estimated_memory_bytes(*k as usize, rows) as u64),
-        SketchParams::Theta { k } => (1.0, 8 * u64::from(*k)),
         SketchParams::UnivMon {
             heap_size,
             sketch_rows,
@@ -5575,7 +5572,7 @@ mod tests {
                     SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap
                 ) =>
                 {
-                    Some(kind.algorithm().clone())
+                    Some(*kind.algorithm())
                 }
                 _ => None,
             })
@@ -8100,7 +8097,7 @@ mod tests {
         for (algorithm, params, rows, priced_as, fields, full) in &families {
             for n in [1, 100, *full] {
                 let family = FieldDataType::Sketch(
-                    SketchKind::new(algorithm.clone(), params.clone()),
+                    SketchKind::new(*algorithm, params.clone()),
                     GroupingStrategy::default(),
                 );
                 let input = match rows {
@@ -8506,7 +8503,7 @@ mod tests {
                 Payload::ASAP(ASAPOp::SummaryAgg {
                     family: FieldDataType::Sketch(kind, _),
                     ..
-                }) => Some(kind.algorithm().clone()),
+                }) => Some(*kind.algorithm()),
                 _ => None,
             })
             .collect()

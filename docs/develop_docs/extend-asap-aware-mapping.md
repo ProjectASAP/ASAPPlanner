@@ -10,17 +10,19 @@ owns the decision.
 
 A new sketch that Pass 1 can offer for an intent.
 
-1. **Type.** Add the variant to `SketchAlgorithm` and its parameters to
-   `SketchParams` (`crates/types/src/ir/schema/sketch.rs`).
-2. **Capability.** Map it to its `asap_sketchlib` family in
+1. **Type.** `SketchAlgorithm` is `asap_sketchlib`'s family enum, so the
+   family must exist in the library first. Add its parameters to
+   `SketchParams` (`crates/types/src/ir/schema/sketch.rs`); a Hydra kind
+   maps to its library family in `FamilyCapability::of`.
+2. **Capability.** Its row, which inputs it can merge and which statistics
+   it answers with the merged error, is the library's family-capability
+   table (`SketchAlgorithm::capability`), read unchanged by
    `FamilyCapability::of_per_instance_sketch`
-   (`crates/types/src/ir/schema/family_capability.rs`; a Hydra kind maps
-   in `FamilyCapability::of`). Its row, which inputs it can merge and which
-   statistics it answers with the merged error, is the library's capability
-   table (`SketchFamily::capability`); a readout the library lists that
-   nothing here reads yet goes in `NOT_READ_YET`. A family the library has
-   no row for (Theta) keeps a planner row there, as the exact aggregates
-   do. Pass 2's sharing, pane and rollup rules read only this table.
+   (`crates/types/src/ir/schema/family_capability.rs`). Pass 2's sharing,
+   pane and rollup rules read only this table. Which readouts the executor
+   evaluates is its own declaration, `EVALUATED_READOUTS`
+   (`crates/executor/src/capability.rs`); add the family's readouts there
+   once the executor answers them.
 3. **Offer and size.** Place it in `realization::FAMILY_PREFERENCE`
    (`crates/logical-asap-optimization`): `summary_candidates` offers it, in
    that order, for every intent whose statistic its capability row answers.

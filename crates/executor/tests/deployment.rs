@@ -311,7 +311,7 @@ fn factory_and_dag_heap_states_are_interchangeable() {
             FrequencyAlgorithm::CountSketch,
         ),
     ] {
-        let family = heap_sketch(algorithm.clone(), 1_024, 5, 4);
+        let family = heap_sketch(algorithm, 1_024, 5, 4);
         let factory = build_weighted_frequency(&family, [(0, 1.0), (1, 2.0)]);
         let mut dag = WeightedFrequency::new(frequency, 1_024, 5, 4).unwrap();
         dag.update(&[Value::Utf8("host-0".into())], 3.0).unwrap();

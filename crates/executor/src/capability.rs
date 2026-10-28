@@ -325,27 +325,31 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     .map_err(Error::Invalid)
 }
 
-/// The families the executor builds per instance and reads, in
-/// `SketchAlgorithm` order. A family it builds but reads nothing from
-/// (plain Count Sketch) and one it does not build (Theta) are absent.
-pub(crate) const EVALUATED_FAMILIES: [SketchAlgorithm; 8] = [
-    SketchAlgorithm::UnivMon,
-    SketchAlgorithm::Kll,
-    SketchAlgorithm::Cms,
-    SketchAlgorithm::Hll,
-    SketchAlgorithm::DDSketch,
-    SketchAlgorithm::CmsWithHeap,
-    SketchAlgorithm::Kmv,
-    SketchAlgorithm::CountSketchWithHeap,
+/// What the executor evaluates from a per-instance state of each family it
+/// builds and reads: its supported-summary declaration. Every readout here is
+/// in the family's row of the family-capability table; a readout the row
+/// lists and this omits is not evaluated yet (Count-Min's and the heap
+/// families' item frequency, which the executor answers only from a Hydra
+/// grid; KLL's rank; UnivMon's G-sum). Plain Count Sketch is built but read
+/// from nothing.
+pub(crate) const EVALUATED_READOUTS: &[(SketchAlgorithm, &[StatisticKind])] = &[
+    (SketchAlgorithm::Cms, &[StatisticKind::Total]),
+    (SketchAlgorithm::CmsWithHeap, &[StatisticKind::TopK]),
+    (SketchAlgorithm::CountSketchWithHeap, &[StatisticKind::TopK]),
+    (SketchAlgorithm::Hll, &[StatisticKind::Distinct]),
+    (SketchAlgorithm::Kmv, &[StatisticKind::Distinct]),
+    (SketchAlgorithm::Kll, &[StatisticKind::Quantile]),
+    (SketchAlgorithm::DDSketch, &[StatisticKind::Quantile]),
+    (
+        SketchAlgorithm::UnivMon,
+        &[
+            StatisticKind::Total,
+            StatisticKind::FrequencyL2,
+            StatisticKind::Distinct,
+            StatisticKind::FrequencyEntropy,
+        ],
+    ),
 ];
-
-/// The readouts the family-capability table lists for an evaluated family
-/// that the executor does not evaluate yet: a per-instance Count-Min's item
-/// frequency (the executor answers an item's frequency only from a Hydra
-/// grid, which Stage 2 does not produce yet; `SupportedSummary` gains a
-/// grouping dimension when it does).
-pub(crate) const UNEVALUATED_READOUTS: [(SketchAlgorithm, StatisticKind); 1] =
-    [(SketchAlgorithm::Cms, StatisticKind::ItemFrequency)];
 
 /// Whether the executor reads `readout` from a state of `family` whose
 /// family-capability table row answers it.
@@ -353,9 +357,9 @@ fn evaluates(family: &SummaryFamilyType, readout: StatisticKind) -> bool {
     use planner_types::ir::schema::HydraKind;
     match family {
         SummaryFamilyType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance) => {
-            let algorithm = kind.algorithm();
-            EVALUATED_FAMILIES.contains(algorithm)
-                && !UNEVALUATED_READOUTS.contains(&(algorithm.clone(), readout))
+            EVALUATED_READOUTS
+                .iter()
+                .any(|(family, readouts)| family == kind.algorithm() && readouts.contains(&readout))
         }
         SummaryFamilyType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
             matches!(kind, HydraKind::HydraCms | HydraKind::HydraKll)

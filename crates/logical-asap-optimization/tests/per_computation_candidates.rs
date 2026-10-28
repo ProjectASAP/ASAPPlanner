@@ -28,7 +28,7 @@ fn algorithms(choices: &[ComputationCandidate]) -> Vec<SketchAlgorithm> {
     choices
         .iter()
         .filter_map(|choice| match choice {
-            ComputationCandidate::Summary(algorithm) => Some(algorithm.clone()),
+            ComputationCandidate::Summary(algorithm) => Some(*algorithm),
             _ => None,
         })
         .collect()

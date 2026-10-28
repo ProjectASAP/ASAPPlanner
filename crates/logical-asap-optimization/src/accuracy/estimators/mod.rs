@@ -26,9 +26,7 @@ pub(super) fn sketch_guarantee(
         SketchParams::CountSketch { .. } | SketchParams::CountSketchWithHeap { .. } => {
             count_sketch::guarantee(algorithm, params, query)
         }
-        SketchParams::Kmv { .. } | SketchParams::Theta { .. } => {
-            cardinality::guarantee(algorithm, params, query)
-        }
+        SketchParams::Kmv { .. } => cardinality::guarantee(algorithm, params, query),
         SketchParams::UnivMon { .. } => univmon::guarantee(algorithm, params, query),
     }
 }
@@ -91,7 +89,7 @@ pub fn local_guarantee(
 /// UnivMon's heap, and KMV's `k` at the relative error it was sized for
 /// (#694). Other parameters are returned as they are: DDSketch never fails;
 /// classic HLL's failure probability comes from its source's distinct bound
-/// ([`hll::min_precision`]); Theta is calibrated at a fixed 99%; a KMV not
+/// ([`hll::min_precision`]); a KMV not
 /// sized for a relative error and an L2 or entropy UnivMon are not
 /// enlarged.
 pub fn with_failure_probability(params: &SketchParams, delta: f64) -> SketchParams {
@@ -166,13 +164,10 @@ pub(crate) fn size_params(
                 heap_size: topk_capacity(k, eps),
             }
         }
-        // Non-preferred candidates (DDSketch / Theta / Kmv / CountSketch /
+        // Non-preferred candidates (DDSketch / Kmv / CountSketch /
         // CountSketchWithHeap) are only reachable once a cost model picks
         // them; sized here so that wiring is local.
         SketchAlgorithm::DDSketch => ddsketch::size_params(eps),
-        SketchAlgorithm::Theta => SketchParams::Theta {
-            k: cardinality::theta_k_99(eps),
-        },
         SketchAlgorithm::Kmv => SketchParams::Kmv {
             k: cardinality::kmv_k(eps, delta),
             relative_error: Some(eps),
@@ -195,6 +190,29 @@ pub(crate) fn size_params(
                 depth: count_sketch::count_sketch_depth(width, delta),
                 heap_size: topk_capacity(k, eps),
             }
+        }
+        // Listed, not `_`: a family `asap_sketchlib` adds fails to compile
+        // here until the planner sizes it or lists it as not offered.
+        SketchAlgorithm::CountSketchWithL2Norm
+        | SketchAlgorithm::CmsWithSpaceSaving
+        | SketchAlgorithm::CountSketchWithSpaceSaving
+        | SketchAlgorithm::CmsFold
+        | SketchAlgorithm::CountSketchFold
+        | SketchAlgorithm::HllHip
+        | SketchAlgorithm::KllDynamic
+        | SketchAlgorithm::SpaceSaving
+        | SketchAlgorithm::Elastic
+        | SketchAlgorithm::Coco
+        | SketchAlgorithm::Bloom
+        | SketchAlgorithm::SetAggregator
+        | SketchAlgorithm::UnivMonTwoTier
+        | SketchAlgorithm::UnivMonQ
+        | SketchAlgorithm::HydraCms
+        | SketchAlgorithm::HydraCountSketch
+        | SketchAlgorithm::HydraKll
+        | SketchAlgorithm::HydraHll
+        | SketchAlgorithm::HydraUnivMon => {
+            unreachable!("Pass 1 offers only the families in FAMILY_PREFERENCE, not {kind:?}")
         }
     }
 }
@@ -353,7 +371,6 @@ pub fn size_for_all_readers(params: &[&SketchParams]) -> Option<SketchParams> {
                 k: k.max(*k2),
                 relative_error: min_recorded(relative_error, *e),
             },
-            (P::Theta { k }, P::Theta { k: k2 }) => P::Theta { k: k.max(*k2) },
             _ => return None,
         })
     })?;

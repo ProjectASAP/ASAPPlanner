@@ -107,7 +107,7 @@ use asap_types::ir::schema::{DataType, Schema};
 use asap_types::ir::schema::{
     EntityIdentity, ExactKind, ExactParams, FamilyCapability, FieldDataType, GroupingStrategy,
     MergedError, NonNegativeWeightProof, SketchAlgorithm, SketchKind, SketchParams,
-    SketchStatistic, SummaryInputExpr, SummaryUpdate, WeightDomain,
+    SketchStatistic, StatisticKind, SummaryInputExpr, SummaryUpdate, WeightDomain,
 };
 use asap_types::ir::{
     ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, OperatorNode, OperatorResultKind,
@@ -417,7 +417,8 @@ impl<Id> PerComputationCandidates<Id> {
             let Some(NonASAPOp::Aggregate { measures, .. }) = target.aggregate.non_asap() else {
                 continue;
             };
-            let Ok(readout) = statistic(&measures[target.measure]).map(|s| s.kind()) else {
+            let Some(readout) = sketch_statistic(&measures[target.measure]).map(|s| s.kind())
+            else {
                 continue;
             };
             let unsupported = |candidate: &ComputationCandidate| {
@@ -983,12 +984,8 @@ fn add_whole_expression_targets(
             .iter()
             .cloned()
             .partition(|candidate| {
-                matches!(
-                    candidate,
-                    ComputationCandidate::Summary(
-                        SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
-                    )
-                )
+                matches!(candidate, ComputationCandidate::Summary(family)
+                    if family.capability().answers(StatisticKind::TopK))
             });
         if heaps.is_empty() {
             continue;
@@ -1025,12 +1022,8 @@ fn prune_topk_heaps_over_one_row_per_item(targets: &mut [ComputationTarget]) {
         target
             .choices
             .prune(PruneReason::TopKHeapOverOneRowPerItem, |candidate| {
-                matches!(
-                    candidate,
-                    ComputationCandidate::Summary(
-                        SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
-                    )
-                )
+                matches!(candidate, ComputationCandidate::Summary(family)
+                    if family.capability().answers(StatisticKind::TopK))
             });
     }
 }
@@ -1459,7 +1452,7 @@ pub fn with_resized_summaries(
         ) = &mut operator
         {
             if let Some(params) = resize(node, kind.params()).filter(|p| p != kind.params()) {
-                *kind = SketchKind::new(kind.algorithm().clone(), params);
+                *kind = SketchKind::new(*kind.algorithm(), params);
                 changed = true;
             }
         }
@@ -3225,7 +3218,9 @@ fn whole_expression(
     sizing.built.borrow_mut().push((state.clone(), key));
     let estimate = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
         summary_input: state,
-        query: statistic(intent)?,
+        query: sketch_statistic(intent).ok_or(PerComputationCandidateError::Unsupported(
+            "sketch evaluation",
+        ))?,
     }))?;
     ranked_as_topk(target, estimate)
 }
@@ -3391,7 +3386,9 @@ fn substitute_measure(
             sizing.built.borrow_mut().push((summary_input.clone(), key));
             let estimate = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
                 summary_input,
-                query: statistic(intent)?,
+                query: sketch_statistic(intent).ok_or(
+                    PerComputationCandidateError::Unsupported("sketch evaluation"),
+                )?,
             }))?;
             match intent {
                 AggIntent::TopK { .. } => ranked_as_topk(target, estimate)?,
@@ -3677,16 +3674,15 @@ fn sized(algorithm: &SketchAlgorithm, intent: &AggIntent, share: usize) -> Sketc
     let size = |target: &AccuracyTarget| {
         let (epsilon, delta) = accuracy_budget(target);
         SketchKind::new(
-            algorithm.clone(),
-            default_size_params(algorithm.clone(), intent, epsilon, delta),
+            *algorithm,
+            default_size_params(*algorithm, intent, epsilon, delta),
         )
     };
     let whole = size(&target);
     if share <= 1 {
         return whole;
     }
-    let metric = statistic(intent)
-        .ok()
+    let metric = sketch_statistic(intent)
         .and_then(|query| {
             local_guarantee(
                 &FieldDataType::Sketch(whole.clone(), GroupingStrategy::default()),
@@ -3874,12 +3870,6 @@ fn summary_update(
     })
 }
 
-fn statistic(intent: &AggIntent) -> Result<SketchStatistic, PerComputationCandidateError> {
-    sketch_statistic(intent).ok_or(PerComputationCandidateError::Unsupported(
-        "sketch evaluation",
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     /// Aggregate replacement qualifiers survive both renaming and later input rebinding.
@@ -3913,7 +3903,6 @@ mod tests {
 
     use super::*;
     use asap_types::ir::properties::AccuracyTarget;
-    use asap_types::ir::schema::StatisticKind;
     /// Approximate count keeps one exact option, its accumulator, beside the
     /// universal summary; plain exact execution is not offered.
     #[test]
@@ -3942,7 +3931,7 @@ mod tests {
         .unwrap()
         .candidates;
         assert!(!choices.contains(&ComputationCandidate::Summary(SketchAlgorithm::CountSketch)));
-        let total = statistic(&AggIntent::Count {
+        let total = sketch_statistic(&AggIntent::Count {
             accuracy: AccuracyTarget::exact(),
         })
         .unwrap();
@@ -4692,10 +4681,7 @@ mod tests {
             .filter(|node| {
                 matches!(node.asap(), Some(ASAPOp::SummaryAgg {
                     family: FieldDataType::Sketch(kind, _), ..
-                }) if matches!(
-                    kind.algorithm(),
-                    SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
-                ))
+                }) if kind.algorithm().capability().answers(StatisticKind::TopK))
             })
             .collect()
     }
@@ -5616,7 +5602,7 @@ mod tests {
                 supported
                     .iter()
                     .map(|(family, readouts)| crate::SupportedSummary {
-                        family: family.clone(),
+                        family: *family,
                         readouts: readouts.to_vec(),
                     })
                     .collect(),
@@ -5780,7 +5766,7 @@ mod tests {
                     .iter()
                     .map(|a| {
                         (
-                            ComputationCandidate::Summary(a.clone()),
+                            ComputationCandidate::Summary(*a),
                             PruneReason::RequiresExact,
                         )
                     })
@@ -5901,7 +5887,7 @@ mod tests {
         let (_, root) = composed_with(inventory, topk)
             .into_iter()
             .skip(own)
-            .find(|(candidate, _)| *candidate == ComputationCandidate::Summary(algorithm.clone()))
+            .find(|(candidate, _)| *candidate == ComputationCandidate::Summary(algorithm))
             .unwrap_or_else(|| panic!("a fused {algorithm:?} candidate"));
         let [state] = &heap_states(&root)[..] else {
             panic!("one heap: {root:#?}")

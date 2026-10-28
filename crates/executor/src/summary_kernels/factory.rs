@@ -712,10 +712,8 @@ mod planner_parameter_regression {
                 },
             ),
         ] {
-            let family = SummaryFamilyType::Sketch(
-                SketchKind::new(algorithm.clone(), params),
-                Default::default(),
-            );
+            let family =
+                SummaryFamilyType::Sketch(SketchKind::new(algorithm, params), Default::default());
             let update = SummaryUpdate {
                 item: Some(SummaryInputExpr::Column(
                     planner_types::ir::scalar::ColumnRef::Named("host".into()),

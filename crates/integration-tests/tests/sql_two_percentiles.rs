@@ -212,7 +212,7 @@ fn sketch_of(root: &Rc<OperatorNode>) -> Option<SketchAlgorithm> {
                     family: FieldDataType::Sketch(kind, _),
                     ..
                 },
-            ) => Some(kind.algorithm().clone()),
+            ) => Some(*kind.algorithm()),
             _ => None,
         })
 }
@@ -271,7 +271,7 @@ async fn q1_with_one_exact_and_one_sketched_percentile_compiles_and_matches() {
     for algorithm in [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch] {
         let candidate = mixed
             .iter()
-            .find(|c| sketch_of(operator(&c.roots[0])) == Some(algorithm.clone()))
+            .find(|c| sketch_of(operator(&c.roots[0])) == Some(algorithm))
             .unwrap_or_else(|| panic!("no mixed {algorithm:?} plan"));
         let root = operator(&candidate.roots[0]);
         // The percentile the exact aggregate computes.
@@ -494,8 +494,7 @@ async fn q2_pane_chain_serves_q1_through_newest_panes_and_a_rollup() {
         let (id, roots) = candidates
             .iter()
             .find(|(_, roots)| {
-                newest_panes_rolled_up(roots)
-                    && sketch_of(operator(&roots[0])) == Some(algorithm.clone())
+                newest_panes_rolled_up(roots) && sketch_of(operator(&roots[0])) == Some(algorithm)
             })
             .unwrap_or_else(|| panic!("no {algorithm:?} newest-panes rollup candidate"));
         let q1 = answers(operator(&roots[0]));

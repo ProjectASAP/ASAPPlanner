@@ -1308,7 +1308,7 @@ mod tests {
             Some(asap_executor::supported_summary_families())
         );
         assert!(!defaulted.raw_data_retained);
-        assert!(!defaulted.supports(&SketchAlgorithm::Theta, StatisticKind::Distinct));
+        assert!(!defaulted.supports(&SketchAlgorithm::CountSketch, StatisticKind::ItemFrequency));
         let kll_only = DeploymentCapabilities {
             supported_summaries: Some(vec![SupportedSummary {
                 family: SketchAlgorithm::Kll,

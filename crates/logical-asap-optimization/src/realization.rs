@@ -24,15 +24,14 @@ use std::rc::Rc;
 /// one. `ln(1/0.01) → depth 5`, matching the conventional CMS sizing.
 pub const DEFAULT_DELTA: f64 = 0.01;
 
-/// Every sketch family, in the order Pass 1 offers those that answer an
-/// intent's statistic: the specialized families before the universal
-/// UnivMon.
+/// The sketch families the planner sizes and offers, in the order Pass 1
+/// offers those that answer an intent's statistic: the specialized families
+/// before the universal UnivMon.
 const FAMILY_PREFERENCE: &[SketchAlgorithm] = &[
     SketchAlgorithm::Kll,
     SketchAlgorithm::DDSketch,
     SketchAlgorithm::Hll,
     SketchAlgorithm::Kmv,
-    SketchAlgorithm::Theta,
     SketchAlgorithm::Cms,
     SketchAlgorithm::CountSketch,
     SketchAlgorithm::CmsWithHeap,
@@ -40,14 +39,10 @@ const FAMILY_PREFERENCE: &[SketchAlgorithm] = &[
     SketchAlgorithm::UnivMon,
 ];
 
-/// The families Pass 1 does not offer because nothing can execute them:
-/// `asap_sketchlib` has no Theta sketch. Remove one once the library has it.
-const UNIMPLEMENTED_FAMILIES: &[SketchAlgorithm] = &[SketchAlgorithm::Theta];
-
 /// The sketch kinds that can serve an intent, most-preferred first: the
 /// families whose family-capability table row answers the intent's
-/// statistic, in preference order, less the ones nothing executes and
-/// UnivMon for a distinct-tuple count. Empty for an intent no sketch
+/// statistic, in preference order, less UnivMon for a distinct-tuple
+/// count. Empty for an intent no sketch
 /// statistic serves.
 pub fn summary_candidates(intent: &AggIntent) -> Vec<SketchAlgorithm> {
     candidates_by(intent, FamilyCapability::of_per_instance_sketch)
@@ -70,7 +65,6 @@ fn candidates_by(
     FAMILY_PREFERENCE
         .iter()
         .filter(|family| capability(family).answers(&statistic))
-        .filter(|family| !UNIMPLEMENTED_FAMILIES.contains(family))
         .filter(|family| !(tuple && **family == SketchAlgorithm::UnivMon))
         .cloned()
         .collect()
@@ -616,46 +610,29 @@ mod tests {
     /// the candidates of the intents that read it, with no other edit.
     #[test]
     fn a_dropped_readout_drops_the_family() {
-        // Count Sketch's row is Count-Min's less its total.
-        let cms_without_total = |family: &SketchAlgorithm| {
+        // Count-Min's row is Count-Min-with-heap's less its top-k.
+        let heap_without_top_k = |family: &SketchAlgorithm| {
             FamilyCapability::of_per_instance_sketch(match family {
-                SketchAlgorithm::Cms => &SketchAlgorithm::CountSketch,
+                SketchAlgorithm::CmsWithHeap => &SketchAlgorithm::Cms,
                 other => other,
             })
         };
-        let count = AggIntent::Count {
+        let top_k = AggIntent::TopK {
+            k: 10,
             accuracy: AccuracyTarget::max_error(0.01),
         };
         assert_eq!(
-            candidates_by(&count, cms_without_total),
-            vec![SketchAlgorithm::UnivMon]
+            candidates_by(&top_k, heap_without_top_k),
+            vec![SketchAlgorithm::CountSketchWithHeap]
         );
     }
 
-    /// The preference order names every sketch family exactly once, so no
-    /// family that answers a statistic is left out of the candidates.
+    /// The preference order names each family it offers once.
     #[test]
-    fn preference_order_names_every_family_once() {
-        use SketchAlgorithm as S;
-        // Exhaustive: a new family does not compile until it gets the next
-        // slot here (and `named` one more), then fails until the order
-        // names it.
-        let slot = |family: &S| match family {
-            S::UnivMon => 0,
-            S::Kll => 1,
-            S::Cms => 2,
-            S::Hll => 3,
-            S::DDSketch => 4,
-            S::CmsWithHeap => 5,
-            S::Kmv => 6,
-            S::Theta => 7,
-            S::CountSketch => 8,
-            S::CountSketchWithHeap => 9,
-        };
-        let mut named = [0; 10];
+    fn preference_order_names_each_family_once() {
+        let mut seen = std::collections::HashSet::new();
         for family in FAMILY_PREFERENCE {
-            named[slot(family)] += 1;
+            assert!(seen.insert(family), "{family:?} twice");
         }
-        assert_eq!(named, [1; 10]);
     }
 }
