@@ -262,7 +262,7 @@ function memoStepElements(memo, s, options) {
           // order; none of this origin is in it.
           lines.push('none listed');
           return {
-            data: { id: `g${group.id}o${origin}`, kind: 'origin', groupId: group.id, origin, count, color: MEMO_ORIGINS[origin].color,
+            data: { id: `g${group.id}o${origin}`, kind: 'origin', noneListed: true, groupId: group.id, origin, count, color: MEMO_ORIGINS[origin].color,
               label: lines.join('\n'), queries, w: MEMO_ITEM.width, h: MEMO_ITEM.height },
             classes: 'memoItem', children: [], chosenChildren: [], chosen: false,
           };
@@ -443,7 +443,7 @@ function memoViewController() {
 
   function tap(d) {
     const group = groupOf(d.groupId);
-    if (d.kind === 'origin') { expanded[stepIndex] = [...expanded[stepIndex], d.groupId]; draw(); showGroup(group); return; }
+    if (d.kind === 'origin' && !d.noneListed) { expanded[stepIndex] = [...expanded[stepIndex], d.groupId]; draw(); showGroup(group); return; }
     if (d.kind === 'group' && d.collapsible && !d.collapsed) { expanded[stepIndex] = expanded[stepIndex].filter((id) => id !== d.groupId); draw(); showGroup(group); return; }
     if (d.kind === 'candidate') showCandidate(group, group.candidates.find((c) => c.index === d.index));
     else showGroup(group);
