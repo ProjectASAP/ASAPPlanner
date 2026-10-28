@@ -131,6 +131,9 @@ pub(in crate::memo) fn add_rollup_candidates(
                 // one stored result then serves both queries, as the
                 // whole-workload rewrite does, without a separate producer the
                 // finer query would read through an identity projection.
+                // Exactness is checked when this rule runs; a later
+                // implementation of the group is still checked by plan
+                // reconstruction (input contract) and Stage 3 (guarantee).
                 let fine_result_is_value = *fine_node == *value
                     && memo.groups[*fine_group].node.schema == value.schema
                     && memo.candidates[*fine_group].iter().all(|candidate| {
