@@ -8,7 +8,9 @@ use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 use std::collections::BTreeMap;
 
 use crate::search::candidates::configurations::CandidateConfigurationInventory;
-use crate::search::candidates::graph::{RejectedQuerySubgraph, SelectedCandidateGraph};
+use crate::search::candidates::graph::{
+    PhysicalCandidateId, RejectedQuerySubgraph, SelectedCandidateGraph,
+};
 use crate::search::candidates::physical::{
     materialize_selected_candidates, PhysicalCandidateError,
 };
@@ -165,7 +167,7 @@ pub(in crate::search) fn optimize_configured_candidates(
     let maintained_graph = maintained
         .as_ref()
         .map(|profile| {
-            use crate::search::candidates::graph::{PhysicalCandidateId, ReaderConstraint};
+            use crate::search::candidates::graph::ReaderConstraint;
             let mut graph = configured.inventory.graph.clone();
             for (id, candidate) in graph.candidates.iter_mut().enumerate() {
                 candidate.local_cost = weights[id];
@@ -1001,7 +1003,9 @@ fn retained_pane_priority_cost(
 }
 
 pub(in crate::search) enum MaterializationOutcome {
-    Implemented(PhysicalWorkloadPlan),
+    /// The plan, and the selected candidates whose output Stage 2 gave an
+    /// exact guarantee.
+    Implemented(Box<PhysicalWorkloadPlan>, Vec<PhysicalCandidateId>),
     RejectedAssignment(String),
 }
 
@@ -1011,7 +1015,7 @@ pub(in crate::search) fn materialize_configured_candidate(
     selected: &SelectedCandidateGraph,
     evaluation_number: usize,
     rejections: &mut CandidateRejectionSummary,
-) -> Result<Option<PhysicalWorkloadPlan>, String> {
+) -> Result<Option<(PhysicalWorkloadPlan, Vec<PhysicalCandidateId>)>, String> {
     match materialize_configured_candidate_with_diagnostics(
         configured,
         context,
@@ -1019,7 +1023,7 @@ pub(in crate::search) fn materialize_configured_candidate(
         evaluation_number,
         rejections,
     )? {
-        MaterializationOutcome::Implemented(physical) => Ok(Some(physical)),
+        MaterializationOutcome::Implemented(physical, exact) => Ok(Some((*physical, exact))),
         MaterializationOutcome::RejectedAssignment(_) => Ok(None),
     }
 }
@@ -1068,7 +1072,21 @@ pub(in crate::search) fn materialize_configured_candidate_with_diagnostics(
     // selected-plan references and viewer cost lookups consistent.
     realized.physical.id = format!("joint-plan-{evaluation_number}");
     realized.physical.from_logical = format!("joint-logical-{evaluation_number}");
-    Ok(MaterializationOutcome::Implemented(realized.physical))
+    let exact = selected
+        .selected_candidates
+        .iter()
+        .copied()
+        .filter(|id| {
+            realized.nodes_by_candidate[id.0]
+                .as_ref()
+                .and_then(|node| node.guarantee.as_ref())
+                .is_some_and(|guarantee| guarantee.is_exact())
+        })
+        .collect();
+    Ok(MaterializationOutcome::Implemented(
+        Box::new(realized.physical),
+        exact,
+    ))
 }
 
 pub(in crate::search) fn reconstruct_configured_candidate(
@@ -1079,7 +1097,7 @@ pub(in crate::search) fn reconstruct_configured_candidate(
     rejections: &mut CandidateRejectionSummary,
     rejected_queries: &mut Vec<RejectedQuerySubgraph>,
 ) -> Result<Option<PhysicalWorkloadPlan>, String> {
-    let Some(physical) = materialize_configured_candidate(
+    let Some((physical, exact_outputs)) = materialize_configured_candidate(
         configured,
         context,
         selected,
@@ -1091,7 +1109,9 @@ pub(in crate::search) fn reconstruct_configured_candidate(
     };
     // Reuse the accuracy evaluator's size-independent proof after its normal
     // resizing step. Other consumers can change sizes, but cannot repair this
-    // certified failure of the same complete query dependency subgraph.
+    // certified failure. The cut stops at producers with an exact output:
+    // any other producer, or anything below it, gives an input no better
+    // than exact, so the failure holds whatever feeds that input.
     let targets = crate::accuracy_targets(context.entries);
     if let Ok(sized) = crate::sized_for_failure_probability(&physical, &targets, context.data) {
         let mut output_index = 0;
@@ -1114,8 +1134,10 @@ pub(in crate::search) fn reconstruct_configured_candidate(
                 crate::guarantee_check(query, root, &targets[query], context.data, &context.models)
             {
                 if failure.size_independent && !outputs.is_empty() {
-                    rejected_queries.push(RejectedQuerySubgraph::from_query_outputs(
-                        selected, &outputs,
+                    rejected_queries.push(RejectedQuerySubgraph::from_query_outputs_above(
+                        selected,
+                        &outputs,
+                        |producer| exact_outputs.contains(&producer),
                     )?);
                     let category = serde_json::to_value(failure.cause)
                         .ok()

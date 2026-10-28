@@ -1271,6 +1271,35 @@ mod tests {
         witness.validate(&selected).unwrap();
     }
 
+    // A cut may stop at named producers, but must then hold exactly the
+    // closure above them: a stop at a producer the closure never reaches, or
+    // a missing edge into one it does not name, is not a valid witness.
+    #[test]
+    fn query_cut_stops_only_at_named_reached_producers() {
+        let graph = dependency_graph(
+            vec![
+                candidate(0, 1.0, &[]),
+                candidate(1, 1.0, &[&[0]]),
+                candidate(2, 1.0, &[&[1]]),
+            ],
+            &[&[2]],
+        );
+        let selected = select_candidates(&graph).unwrap().unwrap();
+        let above = RejectedQuerySubgraph::from_query_outputs_above(&selected, &[0], |id| {
+            id == PhysicalCandidateId(1)
+        })
+        .unwrap();
+        assert!(above.connections.is_empty());
+        assert_eq!(above.stopped_at, vec![PhysicalCandidateId(1)]);
+        above.validate(&selected).unwrap();
+        let mut unreached = above.clone();
+        unreached.stopped_at = vec![PhysicalCandidateId(0)];
+        assert!(unreached.validate(&selected).is_err());
+        let mut unnamed = above;
+        unnamed.stopped_at.clear();
+        assert!(unnamed.validate(&selected).is_err());
+    }
+
     /// An unused ingestion configuration must not scale away improvements in
     /// cheap query-time sharing. The unobserved materialized reader still has
     /// zero certified cost and must be explored before declaring the known

@@ -269,18 +269,33 @@ impl CandidateDependencyGraph {
     }
 }
 
-/// A certified size-independent failure of a complete query dependency closure.
+/// A certified size-independent failure of a query's dependency closure.
 /// The evaluator certifies semantics; this module verifies the structural witness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RejectedQuerySubgraph {
     pub query_roots: Vec<QueryRootAssignment>,
     pub connections: Vec<ProducerConsumerConnection>,
+    /// Producers the witness stops at, with no edge into them: the evaluator
+    /// certified the failure holds whatever feeds those inputs.
+    pub stopped_at: Vec<PhysicalCandidateId>,
 }
 
 impl RejectedQuerySubgraph {
+    /// The complete selected upstream closure of `outputs`.
+    #[cfg(test)]
     pub fn from_query_outputs(
         selected: &SelectedCandidateGraph,
         outputs: &[usize],
+    ) -> Result<Self, String> {
+        Self::from_query_outputs_above(selected, outputs, |_| false)
+    }
+
+    /// The selected upstream closure of `outputs`, without the edges into a
+    /// producer `stop` selects or anything below it.
+    pub fn from_query_outputs_above(
+        selected: &SelectedCandidateGraph,
+        outputs: &[usize],
+        stop: impl Fn(PhysicalCandidateId) -> bool,
     ) -> Result<Self, String> {
         if outputs.is_empty()
             || outputs
@@ -304,6 +319,7 @@ impl RejectedQuerySubgraph {
         let mut pending: Vec<_> = query_roots.iter().map(|root| root.candidate).collect();
         let mut visited = Vec::new();
         let mut connections = Vec::new();
+        let mut stopped_at = Vec::new();
         while let Some(candidate) = pending.pop() {
             if visited.contains(&candidate) {
                 continue;
@@ -314,6 +330,12 @@ impl RejectedQuerySubgraph {
                 .iter()
                 .filter(|edge| edge.consumer == candidate)
             {
+                if stop(edge.producer) {
+                    if !stopped_at.contains(&edge.producer) {
+                        stopped_at.push(edge.producer);
+                    }
+                    continue;
+                }
                 connections.push(*edge);
                 pending.push(edge.producer);
             }
@@ -321,6 +343,7 @@ impl RejectedQuerySubgraph {
         Ok(Self {
             query_roots,
             connections,
+            stopped_at,
         })
     }
 
@@ -330,17 +353,28 @@ impl RejectedQuerySubgraph {
             .iter()
             .map(|root| root.query_root)
             .collect();
-        let expected = Self::from_query_outputs(selected, &outputs)?;
+        let expected = Self::from_query_outputs_above(selected, &outputs, |producer| {
+            self.stopped_at.contains(&producer)
+        })?;
         if self.query_roots != expected.query_roots
-            || self.connections.len() != expected.connections.len()
-            || self.connections.iter().enumerate().any(|(i, edge)| {
-                self.connections[..i].contains(edge) || !expected.connections.contains(edge)
-            })
+            || !same_set(&self.connections, &expected.connections)
+            || !same_set(&self.stopped_at, &expected.stopped_at)
         {
-            return Err("query cut must contain the complete selected upstream closure".into());
+            return Err(
+                "query cut must contain the selected upstream closure above its stopped producers"
+                    .into(),
+            );
         }
         Ok(())
     }
+}
+
+/// Whether `a` has no repeats and the same items as `b`.
+fn same_set<T: PartialEq>(a: &[T], b: &[T]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .enumerate()
+            .all(|(i, item)| !a[..i].contains(item) && b.contains(item))
 }
 
 /// Check the decoded integral graph instead of trusting rounded solver values.
