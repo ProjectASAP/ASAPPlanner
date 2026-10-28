@@ -87,7 +87,7 @@ flowchart LR
     IP -.->|"retention_ms, refresh,<br/>raw_data_retention()"| REF
     DST -->|"instantiate(store)"| cdag
     DST -->|"read_raw_data(source, RawDataRequest)"| TS
-    DST -->|"read_materialized_view(view, time_range_ms)<br/>group columns + state column,<br/>no instance identity"| VS
+    DST -->|"read_materialized_view(view, MaterializedViewRequest)<br/>group columns + state column,<br/>no instance identity"| VS
 ```
 
 Arrows point the way data flows, from producer to consumer. An edge label
@@ -138,13 +138,12 @@ pub trait DataStore {
         context: RunContext,
     ) -> Result<OutputStream<'_, Batch>, Error>;
 
-    /// The stored states of `view`: the instances of `view.coverage` whose
-    /// pane ends in `time_range_ms` (`(start, end]`), in the view's schema
-    /// (group columns and one state column). Exact: never re-filtered.
+    /// The stored states of `view` that `request` selects. Exact: the
+    /// executor never re-filters them.
     fn read_materialized_view(
         &self,
         view: &MaterializedView,
-        time_range_ms: (i64, i64),
+        request: &MaterializedViewRequest,
         context: RunContext,
     ) -> Result<OutputStream<'_, Batch>, Error>;
 }
@@ -162,6 +161,17 @@ pub struct RawDataRequest<'a> {
     pub predicates: &'a [ScalarExpr<()>],
 }
 
+/// What a materialized view slot reads in one run.
+pub struct MaterializedViewRequest<'a> {
+    /// `(start, end]`: the store returns the instances of `view.coverage`
+    /// whose pane ends in it. Always given (see "Executor side").
+    pub time_range_ms: (i64, i64),
+    /// The slot's columns, from the view node's schema: group columns and
+    /// one state column. The store returns rows with these columns, in this
+    /// order.
+    pub schema: &'a SchemaRef,
+}
+
 // CompiledDAG::instantiate(&self, store: Arc<dyn DataStore>) -> Result<Instance, Error>
 ```
 
@@ -171,13 +181,15 @@ the two contracts differ:
 | | `read_raw_data` | `read_materialized_view` |
 | --- | --- | --- |
 | Keyed by | `Source` | `MaterializedView` |
+| Request | `RawDataRequest { time_range_ms, schema, predicates }` | `MaterializedViewRequest { time_range_ms, schema }` |
 | Time range | optional, a hint | always given, exact |
+| Predicates | a hint | none |
 | Executor re-filters | yes | no |
 | Charged to the run's memory | yes | no, held by the store |
 
 - **Removed:** `TableProvider`, `ScanRequest`, `DataSources` and
   `BindingDataSources`. `TableProvider::schema` is replaced by
-  `RawDataRequest::schema`: the store returns the slot's columns, and the
+  the requests' `schema`: the store returns the slot's columns, and the
   executor checks each batch against them, instead of matching columns by
   name at bind time. `TableProvider::boundedness` was a hint no slot needed.
 - **Executor side.** `compile` records, for each materialized view slot, the
@@ -188,7 +200,7 @@ the two contracts differ:
   view's raw-data windows and the views it reads. A time range is therefore
   always given; there is no `None`.
 - **Contract of `read_materialized_view`.** It returns exactly the instances
-  that cover `time_range_ms` (`(start, end]`, matched by pane end) for the
+  that cover `request.time_range_ms` (`(start, end]`, matched by pane end) for the
   view's definition and selection. The executor does not
   re-filter them, so the store must:
   - never count an observation twice;
@@ -253,7 +265,8 @@ This is a public API change in `asap_executor`:
 
 - `instantiate` takes `Arc<dyn DataStore>` instead of `&BindingDataSources`;
 - `TableProvider`, `ScanRequest`, `DataSources` and `BindingDataSources` are
-  removed, and `RawDataRequest` replaces `ScanRequest`;
+  removed; `RawDataRequest` replaces `ScanRequest`, and `MaterializedViewRequest`
+  is new;
 - `Scope` loses `revision`;
 - a materialized view slot's request always carries a time range.
 
