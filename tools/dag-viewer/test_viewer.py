@@ -28,6 +28,9 @@ EXAMPLE1 = HERE / "examples" / "planner-layering-example1.json"
 # workload-01 (nine repeating PromQL queries), planned with the default
 # search as the MVP deployment; its selected plan keeps panes at ingestion.
 SEED862 = HERE / "examples" / "random-mixed-seed-862-workload-01.json"
+# A hand-written priced `memo` section for Example 1: four enumerated
+# Pass 1 DAGs, E2 selected, E3 cheaper than it, E4 invalid.
+MEMO_ENUMERATION = HERE / "test-fixtures" / "memo-enumeration-small.json"
 WORKLOADS = HERE / "workloads"
 # Standalone scalar queries at positions 0, 2 and 4 (first, middle, last):
 # scalar(sum(m)), sum(n), time(), sum by (job) (k), 1 + 2.
@@ -762,7 +765,7 @@ class PageTests(unittest.TestCase):
     def test_every_element_the_scripts_use_is_on_the_page(self):
         page = (HERE / "index.html").read_text()
         ids = set(re.findall(r'id="([^"]+)"', page))
-        for script in ("app.js", "editor.js"):
+        for script in ("app.js", "editor.js", "enumeration.js"):
             used = set(re.findall(r"\$\('([^']+)'\)", (HERE / script).read_text()))
             with self.subTest(script):
                 self.assertLessEqual(used, ids)
@@ -884,7 +887,7 @@ class AppTests(unittest.TestCase):
     def page(self, search="", files=None, hash_=""):
         js = py_mini_racer.MiniRacer()
         js.eval(STUB_DOM)
-        for name in ("node-style.js", "stages.js"):
+        for name in ("node-style.js", "stages.js", "enumeration.js"):
             js.eval((HERE / name).read_text())
         for url, text in (files or {}).items():
             js.eval(f"__files[{json.dumps(url)}] = {json.dumps(text)};")
@@ -1058,6 +1061,41 @@ class AppTests(unittest.TestCase):
         self.assertNotIn(scan["data"]["id"], self.ev(js, "__dimmed.cy2"))
         js.eval("__taps['cy2 background']({ target: { isNode: false } })")
         self.assertEqual(js.eval("__dimmed.cy2.length"), 0)
+
+    def test_a_document_without_memo_hides_the_enumerated_dags(self):
+        js = self.page("?doc=e1.json", {"e1.json": EXAMPLE1.read_text()})
+        self.assertTrue(js.eval("__els.enumPanel.hidden"))
+        self.assertEqual(js.eval("__els.enumRows.innerHTML"), "")
+
+    def test_clicking_an_enumerated_dag_draws_it_in_the_stage1_lane(self):
+        """The panel lists the enumerated choices; a click draws the
+        choice's composed DAG in lane 1 and clears lane 2."""
+        doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
+        js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
+        self.assertFalse(js.eval("__els.enumPanel.hidden"))
+        meta = js.eval("__els['enum-meta'].textContent")
+        self.assertIn("Pass 1: 4", meta)
+        self.assertIn("Pass 2: ≥ 1000", meta)
+        self.assertIn("1 cheaper than the selected plan", meta)
+        rows = js.eval("__els.enumRows.innerHTML")
+        self.assertEqual(rows.count("<li>"), 4)
+        self.assertIn('data-id="E3" aria-pressed="false" class="cheaper"', rows)
+        e3 = doc["memo"]["enumeration"]["choices"][2]
+        js.eval("__els.enumRows.__on.click({ target: { closest() { return { dataset: { id: 'E3' } }; } } })")
+        drawn = [e for e in self.ev(js, "__rendered.cy1") if "source" not in e["data"]]
+        self.assertEqual(len(drawn), len(e3["dag"]["nodes"]))
+        self.assertIn("enumerated DAG E3", self.text(js, "lane1-meta"))
+        self.assertIn("no physical plan for an enumerated DAG", js.eval("__els['lane2-meta'].textContent"))
+        self.assertIn('data-id="E3" aria-pressed="true"', js.eval("__els.enumRows.innerHTML"))
+        # Choosing a Stage 1 candidate again releases the row.
+        js.eval("__els.pick1.__on.change({ target: { value: 'L2' } })")
+        self.assertNotIn('aria-pressed="true"', js.eval("__els.enumRows.innerHTML"))
+
+    def test_a_broken_enumeration_refuses_the_document(self):
+        doc = {**example1(), **json.loads(MEMO_ENUMERATION.read_text())}
+        doc["memo"]["enumeration"]["limit"] = 0
+        js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
+        self.assertIn("limit must be a positive integer", js.eval("__els.queries.innerHTML"))
 
     def test_an_invalid_document_shows_an_error(self):
         js = self.page("?doc=bad.json", {"bad.json": json.dumps({"format": "nope"})})

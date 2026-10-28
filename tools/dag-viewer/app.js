@@ -164,6 +164,7 @@
   }
 
   function renderRanking() {
+    pressEnumeratedRow(null);
     const pressed = current.physical ? `P:${current.physical}` : `L:${current.logical}`;
     $('rank').innerHTML = rows.map((r) => `<li><button type="button" data-key="${esc(rowKey(r))}" aria-pressed="${rowKey(r) === pressed}"${r.status === 'not kept' ? ' disabled title="the default search did not keep this candidate"' : ''}>
         <span class="pid">${esc(r.id)}</span><span class="plabel">${esc(r.display_name || r.id)}</span>
@@ -205,6 +206,18 @@
     }
   }
 
+  // Draw enumerated DAG `id` of `memo.enumeration` (enumeration.js) in
+  // lane 1; the document has no physical plan for it.
+  function showEnumerated(id, dag, description) {
+    current = { logical: null, physical: null };
+    $('pick1').value = '';
+    $('pick2').value = '';
+    render(1, dag, false, null);
+    $('lane1-meta').innerHTML = `enumerated DAG <b>${esc(id)}</b> · ${esc(description)} · ${dag.nodes.length} nodes`;
+    clearLane(2, 'no physical plan for an enumerated DAG');
+    renderRanking();
+  }
+
   function selectPhysical(id) {
     current.physical = id;
     $('pick2').value = id;
@@ -230,7 +243,7 @@
 
   // Show one stage document; `source` names it, `story` explains it.
   function showDocument(data, source, story) {
-    const errors = validateStagePipeline(data);
+    const errors = validateStagePipeline(data).concat(validateMemoEnumeration(data));
     if (errors.length) throw new Error(errors.slice(0, 3).join('; '));
     doc = data;
     current = { logical: null, physical: null };
@@ -284,6 +297,7 @@
     }
     renderMaterializedViews();
     renderMemoSearch();
+    renderEnumeration(doc, showEnumerated);
   }
 
   const table = (head, body) => `<table><thead><tr>${head.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>`;

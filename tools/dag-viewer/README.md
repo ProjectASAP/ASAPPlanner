@@ -76,6 +76,21 @@ To run it, see [RUNNING.md](RUNNING.md).
   for the newest), a `TimeRange` of one pane and the pane's build with its
   window (`window t−40 s … t−20 s`), and clicking a pane folds them back.
   This is display only: the document keeps the chain.
+- **Enumerated DAGs**, between the Stage 0 and Stage 1 lanes, shown only
+  when the document has `memo.enumeration`: the complete candidate DAGs the
+  memo stands for. The header counts them after each memo step (`Pass 1:
+  343 · Pass 2: ≥ 1000`; `≥` and the limit when counting stopped), says how
+  many of the enumerated step's DAGs the document lists, and, when they were
+  priced, how many are cheaper than the selected plan. Each row names the
+  groups whose candidate differs from the selected plan's choice
+  (`G7 → #2 CountSketch+heap (pass1)`: group, candidate index, its label and
+  origin when the step's memo lists the candidate), `budget share < 1` when
+  a chosen candidate shares its budget, and, when priced, its cost and
+  validity (`✗ invalid` with the cause). A row cheaper than the selected
+  plan is red; the selected choice says `✓ selected`. Clicking a row draws
+  its DAG in the Stage 1 lane; the document holds every listed choice's
+  composed DAG, so the page composes nothing. Such a DAG has no Stage 2
+  plan, so the Stage 2 lane is cleared.
 - **Highlighting**: the **highlight query** menu dims, in every lane, what
   that query's root does not reach. Clicking a node dims everything but
   what it reads and what reads it, directly or through other nodes; clicking
@@ -340,8 +355,10 @@ are ignored, `stage_pipeline`'s default.
 The viewer checks the document before showing it: one root per query, node,
 edge and root references, `scalar_roots` positions, `from_logical`, the Stage 3 ids, costs and
 `per_node` keys, the data workload's shape, and each materialized view's fields
-and `stage2_node_id`. Documents written before these sections are still
-shown. If a check fails, it shows the problems instead.
+and `stage2_node_id`, and, when present, `memo.enumeration`: per-step
+counts, the listed choices' ids, group → candidate maps, DAGs (one root per
+root group) and the optional pricing fields. Documents written before these
+sections are still shown. If a check fails, it shows the problems instead.
 
 ## Files
 
@@ -349,6 +366,10 @@ shown. If a check fails, it shows the problems instead.
 - `stages.js`: document checks, the candidate list, lane elements and node
   labels, pane-chain expansion, the queries reaching each node and the
   highlighted neighborhoods; no DOM. `stages.test.mjs`: its Node tests.
+- `enumeration.js`: the Enumerated DAGs panel and the checks of
+  `memo.enumeration`. `enumeration.test.mjs`: its Node tests, over
+  `test-fixtures/memo-enumeration-small.json` (a hand-written priced memo
+  for Example 1).
 - `node-style.js`: the operator-kind table (`KIND_CATEGORY_JSON`, checked
   against the IR by `crates/devtools/tests/viewer_contract.rs`) and the
   node groups.
@@ -399,7 +420,7 @@ python3 -m unittest test_viewer test_server
 cytoscape (headless), from the repository root:
 
 ```bash
-node --test tools/dag-viewer/stages.test.mjs
+node --test tools/dag-viewer/stages.test.mjs tools/dag-viewer/enumeration.test.mjs
 ```
 
 The JavaScript runs in V8 through `py_mini_racer` (`pip install

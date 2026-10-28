@@ -83,6 +83,9 @@ h1 { font-family: var(--font-display); font-weight: 600; font-size: 26px; letter
 .chip.selected { color: var(--ok); background: var(--ok-soft); }
 .chip.invalid { color: var(--bad); background: var(--bad-soft); }
 .chip.costlier { color: var(--warn); background: var(--warn-soft); }
+/* Enumerated DAGs: a row cheaper than the selected plan is red. */
+#enumRows { max-height: 360px; }
+.rank button.cheaper { border-color: var(--bad); background: var(--bad-soft); }
 /* Stage 0, 1 and 2 stack top to bottom, each as wide as the page allows. */
 .lanes { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
 .lane .panel-head { align-items: center; }
@@ -217,6 +220,11 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
           <div class="lane-meta" id="lane0-meta"></div>
           <div class="cy" id="cy0"></div>
         </section>
+        <section class="panel" id="enumPanel" aria-labelledby="enum-title" hidden>
+          <div class="panel-head"><div><div class="eyebrow">Memo · complete candidate DAGs</div><h2 id="enum-title">Enumerated DAGs</h2></div><span class="eyebrow">click a row to draw it in Stage 1</span></div>
+          <div class="lane-meta" id="enum-meta"></div>
+          <ol class="rank" id="enumRows"></ol>
+        </section>
         <section class="panel lane" aria-labelledby="lane1-title">
           <div class="panel-head"><div><div class="eyebrow">Stage 1</div><h2 id="lane1-title">Logical ASAP candidate</h2></div>
             <label><span class="eyebrow" style="display:block">candidate</span><select id="pick1" aria-label="Logical ASAP candidate"></select></label></div>
@@ -264,6 +272,7 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
 <script src="cytoscape-dagre.js"></script>
 <script src="node-style.js"></script>
 <script src="stages.js"></script>
+<script src="enumeration.js"></script>
 <script src="app.js"></script>
 <script src="editor.js"></script>
 <script src="workload-sets.js"></script>
