@@ -18,8 +18,8 @@
 //! before it. A runtime refreshes a view once all of its inputs are
 //! complete: each raw-data window's samples have arrived (sealed) and each
 //! view it reads is refreshed. It compiles the DAG with the executor for
-//! that view's node, with each view it reads bound at its own node id and
-//! raw data bound by `Source` at each `Scan`. It refreshes the view in an
+//! that view's node, with each view it reads as a materialized view slot
+//! and raw data read by `Source` at each `Scan`. It refreshes the view in an
 //! ingestion run ([`MaterializedViewRefresh::AtIngestion`]) or in the query
 //! run of the evaluation that first reads it
 //! ([`MaterializedViewRefresh::OnFirstRead`]), keeps the result, and binds
@@ -51,6 +51,7 @@ use thiserror::Error;
 
 use super::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError, PhysicalASAPNodeId,
+    ScanWindow,
 };
 use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::{Operator, OperatorNode};
@@ -202,13 +203,15 @@ pub enum InstallableDagError {
         reason: String,
     },
     /// Unsatisfiable request: view `node_id` is refreshed in an ingestion
-    /// run but reads raw-data windows that end at different offsets before
-    /// the evaluation (`end_offsets_ms`). An ingestion run refreshes the
-    /// windows ending at its `window_end_ms` (each `TimeRange(w)` keeps
-    /// `(window_end_ms - w, window_end_ms]`), so no one run refreshes them
+    /// run but reads windows that end at different offsets before the
+    /// evaluation (`end_offsets_ms`): its raw-data windows and the windows
+    /// the views it reads summarize. An ingestion run refreshes the windows
+    /// ending at its `window_end_ms` (each `TimeRange(w)` keeps
+    /// `(window_end_ms - w, window_end_ms]`, and each view it reads is
+    /// read for the window ending there), so no one run refreshes them
     /// all; a runtime cannot build this plan.
     #[error(
-        "materialized view {node_id} is built in an ingestion run from raw windows ending at \
+        "materialized view {node_id} is built in an ingestion run from windows ending at \
          different offsets {end_offsets_ms:?} ms before the evaluation, which no one \
          ingestion run builds"
     )]
@@ -450,15 +453,41 @@ impl PhysicalASAPDAG {
         };
         let mut derived = Vec::new();
         let mut coverage_by_node: HashMap<PhysicalASAPNodeId, SummaryCoverage> = HashMap::new();
+        // The window each view summarizes ([`PhysicalASAPDAG::view_window`]):
+        // its raw-data windows and those of the views it reads, unioned.
+        let mut window_by_view: HashMap<PhysicalASAPNodeId, ScanWindow> = HashMap::new();
         for &id in index.children_first.iter().filter(|id| views.contains(id)) {
             check_deadline(deadline)?;
             let node = index.nodes[&id];
             let (inputs, scans) = index.inputs_of_view(id, &views)?;
+            let read_windows: Vec<ScanWindow> = inputs
+                .materialized_views
+                .iter()
+                .filter_map(|read| window_by_view.get(read).copied())
+                .collect();
+            if let Some(window) = inputs
+                .raw_data_windows
+                .iter()
+                .map(|window| ScanWindow::Within {
+                    end_offset_ms: window.end_offset_ms,
+                    width_ms: window.width_ms,
+                })
+                .chain(read_windows.iter().copied())
+                .reduce(ScanWindow::union)
+            {
+                window_by_view.insert(id, window);
+            }
             if matches!(node.materialization, Materialization::MatAtIngestion(_)) {
+                // An ingestion run reads each view for the window ending at
+                // its end, so a view read must end where the raw windows do.
                 let mut end_offsets_ms: Vec<i64> = inputs
                     .raw_data_windows
                     .iter()
                     .map(|window| window.end_offset_ms)
+                    .chain(read_windows.iter().filter_map(|window| match window {
+                        ScanWindow::Within { end_offset_ms, .. } => Some(*end_offset_ms),
+                        ScanWindow::Unbounded => None,
+                    }))
                     .collect();
                 end_offsets_ms.sort_unstable();
                 end_offsets_ms.dedup();

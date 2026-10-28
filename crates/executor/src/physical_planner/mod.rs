@@ -35,10 +35,10 @@ fn invalid(message: impl Into<String>) -> Error {
     Error::Invalid(message.into())
 }
 
-// The executor's PromQL row encoding and the timing frontier are internals:
-// a deployment runtime binds raw data at each `Scan` through a
-// `TableProvider` and derives the materialized views from the installable plan. The Planner's own
-// tests reach them with the `test-support` feature.
+// The executor's PromQL row encoding is internal: a deployment runtime reads
+// raw data at each `Scan` through its `DataStore` and derives the
+// materialized views from the installable plan. The Planner's own tests
+// reach it with the `test-support` feature.
 #[cfg(feature = "test-support")]
 pub mod promql_rows;
 #[cfg(not(feature = "test-support"))]
@@ -195,12 +195,20 @@ fn compile_internal(
         let output = Arc::new(node.output_schema.clone());
         crate::values::validate_schema(&output)?;
         if let Some(view) = views_by_node.get(&id) {
+            // A view read is exact for the window its state summarizes, so
+            // that window must be bounded.
+            let window = dag.view_window(view.node_id);
+            if window == ScanWindow::Unbounded {
+                return Err(invalid(format!(
+                    "materialized view {id} summarizes an unbounded window"
+                )));
+            }
             physical_dag.add_materialized_view(
                 id,
                 compiled::MaterializedViewSlot {
                     view: (*view).clone(),
                     schema: output,
-                    window: dag.view_window(view.node_id),
+                    window,
                 },
             )?;
         } else if let Payload::NonASAP(NonASAPOp::Scan {
@@ -209,7 +217,7 @@ fn compile_internal(
             schema,
         }) = &node.payload
         {
-            // A table slot reads the payload's schema; its predicates
+            // A raw data slot reads the payload's schema; its predicates
             // compile over it.
             if *schema != node.output_schema {
                 return Err(invalid(format!(

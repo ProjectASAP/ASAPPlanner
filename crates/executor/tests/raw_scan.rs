@@ -910,7 +910,7 @@ impl DataStore for RecordingViewStore {
 // `(T - 15m, T - 10m]` under a 10-minute shift, and its state is the
 // answer's.
 #[test]
-fn a_materialized_view_provider_is_asked_for_the_window_it_covers() {
+fn a_materialized_view_is_requested_for_the_window_it_summarizes() {
     use asap_executor::physical_planner::test_support::views_at;
     use asap_executor::summary_kernels::exact::ExactAccumulator;
     for (shift_ms, expected) in [
@@ -968,5 +968,26 @@ fn a_materialized_view_provider_is_asked_for_the_window_it_covers() {
             "{rows:?}"
         );
         assert_eq!(*store.time_ranges_ms.lock().unwrap(), vec![expected]);
+        // An ingestion run reads the view for the window ending at the
+        // run's end, whatever the shift: the window it builds.
+        let window_end_ms = 2 * T_MS;
+        let ingestion = RunContext::new(
+            Scope::Ingestion {
+                window_start_ms: window_end_ms - 5 * MINUTE_MS,
+                window_end_ms,
+            },
+            Limits::default(),
+        )
+        .unwrap();
+        block_on(async {
+            let mut output = physical_dag.execute(&[4], ingestion).unwrap().remove(0);
+            while let Some(batch) = output.next().await {
+                batch.unwrap();
+            }
+        });
+        assert_eq!(
+            store.time_ranges_ms.lock().unwrap()[1],
+            (window_end_ms - 5 * MINUTE_MS, window_end_ms)
+        );
     }
 }

@@ -238,6 +238,32 @@ impl ScanWindow {
     }
 }
 
+/// The window of the `TimeRange` `time_range`
+/// ([`PhysicalASAPDAG::time_range_window`]), with `payload` giving each
+/// node's operator.
+fn time_range_window_of<'a>(
+    time_range: PhysicalASAPNodeId,
+    payload: impl Fn(PhysicalASAPNodeId) -> Option<&'a PhysicalASAPOperatorPayload>,
+) -> ScanWindow {
+    let Some(Operator::NonASAP(NonASAPOp::TimeRange { range, child, .. })) = payload(time_range)
+    else {
+        return ScanWindow::Unbounded;
+    };
+    let mut end_offset_ms = 0i64;
+    let mut below = payload(*child);
+    while let Some(Operator::NonASAP(NonASAPOp::TimeShift { shift, child })) = below {
+        if shift.at.is_some() {
+            return ScanWindow::Unbounded;
+        }
+        end_offset_ms = end_offset_ms.saturating_add(shift.offset_ms);
+        below = payload(*child);
+    }
+    ScanWindow::Within {
+        end_offset_ms,
+        width_ms: i64::try_from(range.as_millis()).unwrap_or(i64::MAX),
+    }
+}
+
 /// Why [`PhysicalASAPDAG::with_every_node_at_query_time`] failed.
 #[derive(Debug, Error)]
 pub enum ReferencePlanError {
@@ -380,27 +406,12 @@ impl PhysicalASAPDAG {
     /// [`Self::scan_window`] counts for it. `Unbounded` when one of those
     /// shifts has an `@` anchor, or `time_range` is not a `TimeRange`.
     pub fn time_range_window(&self, time_range: PhysicalASAPNodeId) -> ScanWindow {
-        let node = |id: PhysicalASAPNodeId| self.nodes.iter().find(|node| node.id == id);
-        let Some(Operator::NonASAP(NonASAPOp::TimeRange { range, child, .. })) =
-            node(time_range).map(|node| &node.payload)
-        else {
-            return ScanWindow::Unbounded;
-        };
-        let mut end_offset_ms = 0i64;
-        let mut below = node(*child);
-        while let Some(Operator::NonASAP(NonASAPOp::TimeShift { shift, child })) =
-            below.map(|node| &node.payload)
-        {
-            if shift.at.is_some() {
-                return ScanWindow::Unbounded;
-            }
-            end_offset_ms = end_offset_ms.saturating_add(shift.offset_ms);
-            below = node(*child);
-        }
-        ScanWindow::Within {
-            end_offset_ms,
-            width_ms: i64::try_from(range.as_millis()).unwrap_or(i64::MAX),
-        }
+        time_range_window_of(time_range, |id| {
+            self.nodes
+                .iter()
+                .find(|node| node.id == id)
+                .map(|node| &node.payload)
+        })
     }
 
     /// The interval of data the output of `node` summarizes, back from the
@@ -410,11 +421,10 @@ impl PhysicalASAPDAG {
     /// `Unbounded` when no `TimeRange` is below it or one of them is
     /// unbounded (a whole SQL table, an `@` anchor). O(nodes + edges).
     pub fn view_window(&self, node: PhysicalASAPNodeId) -> ScanWindow {
-        let time_ranges: HashSet<PhysicalASAPNodeId> = self
+        let payloads: HashMap<PhysicalASAPNodeId, &PhysicalASAPOperatorPayload> = self
             .nodes
             .iter()
-            .filter(|node| matches!(node.payload, Operator::NonASAP(NonASAPOp::TimeRange { .. })))
-            .map(|node| node.id)
+            .map(|node| (node.id, &node.payload))
             .collect();
         let mut inputs: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
         for edge in &self.edges {
@@ -427,8 +437,8 @@ impl PhysicalASAPDAG {
             if !seen.insert(id) {
                 continue;
             }
-            if time_ranges.contains(&id) {
-                let read = self.time_range_window(id);
+            if let Some(Operator::NonASAP(NonASAPOp::TimeRange { .. })) = payloads.get(&id) {
+                let read = time_range_window_of(id, |id| payloads.get(&id).copied());
                 window = Some(window.map_or(read, |window| window.union(read)));
                 continue;
             }

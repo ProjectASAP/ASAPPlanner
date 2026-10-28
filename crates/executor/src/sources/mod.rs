@@ -36,7 +36,7 @@ pub(crate) fn compile_scan_predicate(
 }
 
 /// What a `Scan` reads, and how.
-enum Read {
+enum ScanInput {
     /// A raw data slot: re-applies its time range and predicates.
     RawData {
         source: Source,
@@ -51,10 +51,9 @@ enum Read {
     /// the store's.
     MaterializedView {
         view: MaterializedView,
-        /// The data its state summarizes, back from the evaluation time.
-        /// `(T - o - w, T - o]` (`Within { end_offset_ms: o, width_ms: w }`).
-        end_offset_ms: i64,
-        width_ms: i64,
+        /// The data its state summarizes, back from the evaluation time;
+        /// always `Within`.
+        window: ScanWindow,
     },
 }
 
@@ -63,7 +62,7 @@ enum Read {
 pub(crate) struct Scan {
     store: Arc<dyn DataStore>,
     output: SchemaRef,
-    read: Read,
+    input: ScanInput,
 }
 impl Scan {
     /// A raw data slot reading `source`.
@@ -81,7 +80,7 @@ impl Scan {
         Self {
             store,
             output,
-            read: Read::RawData {
+            input: ScanInput::RawData {
                 source,
                 predicates,
                 predicate_hints,
@@ -97,24 +96,16 @@ impl Scan {
         output: SchemaRef,
         window: ScanWindow,
     ) -> Result<Self, Error> {
-        let ScanWindow::Within {
-            end_offset_ms,
-            width_ms,
-        } = window
-        else {
+        if window == ScanWindow::Unbounded {
             return Err(Error::Invalid(format!(
                 "materialized view {} summarizes an unbounded window",
                 view.node_id
             )));
-        };
+        }
         Ok(Self {
             store,
             output,
-            read: Read::MaterializedView {
-                view,
-                end_offset_ms,
-                width_ms,
-            },
+            input: ScanInput::MaterializedView { view, window },
         })
     }
     /// `batch` in the slot's schema; bad input when its columns differ.
@@ -171,55 +162,65 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
         if context.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        match &self.read {
-            Read::RawData {
+        match &self.input {
+            ScanInput::RawData {
                 source,
                 predicates,
                 predicate_hints,
                 window,
             } => self.start_raw_data(source, predicates, predicate_hints, *window, context),
-            Read::MaterializedView {
-                view,
-                end_offset_ms,
-                width_ms,
-            } => {
-                let end_ms = match context.scope {
-                    Scope::Query {
-                        evaluation_time_ms, ..
-                    } => evaluation_time_ms.saturating_sub(*end_offset_ms),
-                    // An ingestion run builds the windows ending at its end.
-                    Scope::Ingestion { window_end_ms, .. } => window_end_ms,
-                };
-                let time_range_ms = (end_ms.saturating_sub(*width_ms), end_ms);
-                let opening = context.clone();
-                let stream = stream::once(async move {
-                    if opening.is_cancelled() {
-                        return Err(Error::Cancelled);
-                    }
-                    let request = MaterializedViewRequest {
-                        time_range_ms,
-                        schema: &self.output,
-                    };
-                    self.store.read_materialized_view(view, &request, opening)
-                });
-                use futures::TryStreamExt;
-                Ok(stream
-                    .try_flatten()
-                    .map(move |batch| {
-                        if context.is_cancelled() {
-                            return Err(Error::Cancelled);
-                        }
-                        let batch = self.to_output(batch?)?;
-                        // A materialized view's states are the store's, read by this run.
-                        batch.mark_states_held_outside_run();
-                        Ok(batch)
-                    })
-                    .boxed_local())
+            ScanInput::MaterializedView { view, window } => {
+                self.start_materialized_view(view, *window, context)
             }
         }
     }
 }
 impl Scan {
+    fn start_materialized_view<'a>(
+        &'a self,
+        view: &'a MaterializedView,
+        window: ScanWindow,
+        context: RunContext,
+    ) -> Result<OutputStream<'a, Batch>, Error> {
+        // A query run reads the window back from its evaluation time; an
+        // ingestion run builds the windows ending at its end.
+        let at_ms = match context.scope {
+            Scope::Query { evaluation_time_ms } => evaluation_time_ms,
+            Scope::Ingestion { window_end_ms, .. } => match window {
+                ScanWindow::Within { end_offset_ms, .. } => {
+                    window_end_ms.saturating_add(end_offset_ms)
+                }
+                ScanWindow::Unbounded => window_end_ms,
+            },
+        };
+        let time_range_ms = window
+            .bounds_ms(at_ms)
+            .ok_or_else(|| Error::Invalid("unbounded materialized view window".into()))?;
+        let opening = context.clone();
+        let stream = stream::once(async move {
+            if opening.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let request = MaterializedViewRequest {
+                time_range_ms,
+                schema: &self.output,
+            };
+            self.store.read_materialized_view(view, &request, opening)
+        });
+        use futures::TryStreamExt;
+        Ok(stream
+            .try_flatten()
+            .map(move |batch| {
+                if context.is_cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                let batch = self.to_output(batch?)?;
+                // A materialized view's states are the store's, read by this run.
+                batch.mark_states_held_outside_run();
+                Ok(batch)
+            })
+            .boxed_local())
+    }
     fn start_raw_data<'a>(
         &'a self,
         source: &'a Source,
@@ -237,9 +238,7 @@ impl Scan {
             })
             .collect();
         let time_range_ms = match context.scope {
-            Scope::Query {
-                evaluation_time_ms, ..
-            } => window.bounds_ms(evaluation_time_ms),
+            Scope::Query { evaluation_time_ms } => window.bounds_ms(evaluation_time_ms),
             // A slot read through windows reads the rows of the window the
             // run builds.
             Scope::Ingestion {

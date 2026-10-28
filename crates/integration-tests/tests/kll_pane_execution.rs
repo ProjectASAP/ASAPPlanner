@@ -446,3 +446,114 @@ fn panes_reject_parameters_schema_and_missing_binding() {
         "{relabelled}"
     );
 }
+
+/// Finds a view's states only by its definition id and the requested time
+/// range, as a deployment's summary store does; never by node id.
+struct DefinitionStore {
+    states: std::collections::BTreeMap<(String, (i64, i64)), Batch>,
+    requested: std::sync::Mutex<Vec<(String, (i64, i64))>>,
+}
+impl asap_executor::sources::DataStore for DefinitionStore {
+    fn read_raw_data(
+        &self,
+        source: &Source,
+        _: &asap_executor::sources::RawDataRequest,
+        _: RunContext,
+    ) -> Result<OutputStream<'_, Batch>, Error> {
+        Err(Error::Invalid(format!("no raw data: {source:?}")))
+    }
+    fn read_materialized_view(
+        &self,
+        view: &MaterializedView,
+        request: &asap_executor::sources::MaterializedViewRequest,
+        _: RunContext,
+    ) -> Result<OutputStream<'_, Batch>, Error> {
+        let key = (view.coverage.definition_id.clone(), request.time_range_ms);
+        self.requested.lock().unwrap().push(key.clone());
+        let state = self
+            .states
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| Error::Invalid(format!("no state for {key:?}")))?;
+        Ok(futures::stream::iter([Ok(state)]).boxed_local())
+    }
+}
+
+/// A store keyed only by `(definition_id, time range)` answers the five-pane
+/// query: the five panes share one definition and request the five
+/// one-minute ranges that tile the window, and the answers equal those of
+/// binding each pane's state to its node.
+#[test]
+fn a_store_keyed_by_definition_and_time_range_answers_the_panes() {
+    let fixture = fixture();
+    let maintenance = compile(&fixture.dag, &[], &[fixture.panes[0]]).unwrap();
+    // The state of the pane of minute `m`, `(m, m + 1]` minutes.
+    let panes: Vec<Batch> = (0..5).map(|m| pane_state(&maintenance, m)).collect();
+    let definition = fixture.views[0].coverage.definition_id.clone();
+    assert!(fixture
+        .views
+        .iter()
+        .all(|view| view.coverage.definition_id == definition));
+    let states = (0..5)
+        .map(|m| {
+            (
+                (definition.clone(), (m * PANE_MS, (m + 1) * PANE_MS)),
+                panes[m as usize].clone(),
+            )
+        })
+        .collect();
+    let store = Arc::new(DefinitionStore {
+        states,
+        requested: Default::default(),
+    });
+    let compiled = compile(&fixture.dag, &fixture.views, &[fixture.p50, fixture.p99]).unwrap();
+    let scope = query_scope();
+    let by_definition = block_on(async {
+        let dag = compiled.instantiate(store.clone()).unwrap();
+        let streams = dag
+            .execute(
+                compiled.roots(),
+                RunContext::new(scope.clone(), Limits::default()).unwrap(),
+            )
+            .unwrap();
+        let mut outputs = Vec::new();
+        for mut stream in streams {
+            let mut rows = Vec::new();
+            while let Some(batch) = stream.next().await {
+                rows.extend(batch.unwrap().to_rows());
+            }
+            outputs.push(rows);
+        }
+        outputs
+    });
+    let mut requested: Vec<(i64, i64)> = store
+        .requested
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, range)| *range)
+        .collect();
+    requested.sort_unstable();
+    assert_eq!(
+        requested,
+        (0..5)
+            .map(|m| (m * PANE_MS, (m + 1) * PANE_MS))
+            .collect::<Vec<_>>()
+    );
+    // View `i` holds the pane ending `i` minutes before the evaluation time.
+    let by_node =
+        fixture
+            .panes
+            .iter()
+            .enumerate()
+            .fold(InMemoryDataStore::default(), |store, (i, &view)| {
+                store
+                    .with_materialized_view(view as usize, vec![panes[4 - i].clone()])
+                    .unwrap()
+            });
+    let by_node: Vec<Vec<Vec<Value>>> = physical_common::execute(&compiled, by_node, scope)
+        .iter()
+        .map(|batches| batches.iter().flat_map(Batch::to_rows).collect())
+        .collect();
+    assert_eq!(format!("{by_definition:?}"), format!("{by_node:?}"));
+}
