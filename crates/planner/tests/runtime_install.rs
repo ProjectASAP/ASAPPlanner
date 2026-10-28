@@ -524,7 +524,10 @@ async fn the_plan_carries_stage3s_predicted_usage() {
         planned_with_report(&["quantile_over_time(0.99, latency_ms[60m])"]).await;
     let views = plan.materialized_views().unwrap();
     assert!(!views.is_empty(), "a pane-only plan");
-    assert!(plan.raw_data_retention().is_empty(), "a pane-only plan");
+    assert!(
+        plan.raw_data_retention().unwrap().is_empty(),
+        "a pane-only plan"
+    );
     let selection = selection.as_ref().expect("Stage 3's report");
     let usage = selection.predicted_usage.as_ref().expect("predicted usage");
     let node_costs: f64 = usage
@@ -803,7 +806,7 @@ async fn assert_answers_as_reference_without_raw_data(
         "{views:#?}"
     );
     assert!(
-        plan.raw_data_retention().is_empty(),
+        plan.raw_data_retention().unwrap().is_empty(),
         "no raw data at query time"
     );
     // Samples of `m`, `job` a (instances 1-3) and b (4-6), every second
@@ -888,6 +891,7 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
     let dag = &plan.dag;
     let [retention] = plan
         .raw_data_retention()
+        .unwrap()
         .try_into()
         .unwrap_or_else(|r: Vec<_>| {
             panic!("{r:?}");
@@ -947,8 +951,8 @@ fn the_compile_check_rejects_a_time_series_window_the_executor_cannot_run() {
 /// evaluations (#509 Example 4's B3), with a dashboard panel
 /// (`max_over_time(latency_ms[5m])` every minute over 1M series sampled
 /// every 1.5 s, answered as the last hour at 1-minute steps): Stage 3
-/// keeps five 1-minute panes refreshed at query time, and feeds their ranges
-/// only through those refreshes, so no window is listed twice. The first
+/// keeps five 1-minute panes refreshed at query time, and keeps raw data
+/// for refreshing the oldest pane at the oldest step (5 min + 1 h). The first
 /// evaluation, with an empty store, refreshes all five in its query run; the
 /// next, a minute later, reuses the four still in its window and refreshes
 /// only the newest. Each
@@ -979,17 +983,20 @@ async fn query_time_results_kept_across_evaluations_are_built_in_query_runs() {
         .iter()
         .all(|v| v.refresh == MaterializedViewRefresh::OnFirstRead
             && v.inputs.raw_data_windows[0].width_ms == 60_000));
-    // The panes' windows are listed once, through their refreshes: raw data
-    // is kept as far back as the oldest pane reaches, and no further.
+    // Raw data is kept for refreshing the oldest pane at the oldest step:
+    // the five panes' 5 minutes plus the hour of steps, as long as the panes
+    // themselves are kept.
     let pane_lookback_ms = views
         .iter()
         .flat_map(|v| &v.inputs.raw_data_windows)
         .map(|w| w.lookback_ms())
         .max();
-    let retention = installed.raw_data_retention();
+    assert_eq!(pane_lookback_ms, Some(300_000));
+    assert!(views.iter().all(|v| v.retention_ms == 3_900_000));
+    let retention = installed.raw_data_retention().unwrap();
     assert_eq!(
         retention.iter().map(|r| r.lookback_ms).collect::<Vec<_>>(),
-        vec![pane_lookback_ms],
+        vec![Some(3_900_000)],
         "{retention:?}"
     );
     // The pane cache the data plane keeps across evaluations.
@@ -1038,7 +1045,7 @@ async fn an_exact_per_series_quantile_runs_from_raw_data_samples() {
         installed.materialized_views().unwrap().is_empty(),
         "the exact plan"
     );
-    assert_eq!(installed.raw_data_retention().len(), 1);
+    assert_eq!(installed.raw_data_retention().unwrap().len(), 1);
     // Ten samples per series in the window, one every 10 s, and one before it.
     let mut samples = Vec::new();
     for (instance, region, value) in [
@@ -1154,7 +1161,10 @@ async fn a_ratio_of_two_quantiles_runs_from_ddsketches_within_its_relative_targe
     };
     let plan_json = plan_json_for(relative_workload(&[query]), &capabilities).await;
     let installed: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
-    assert!(installed.raw_data_retention().is_empty(), "no raw scan");
+    assert!(
+        installed.raw_data_retention().unwrap().is_empty(),
+        "no raw scan"
+    );
     let alphas = ddsketch_alphas(&installed);
     assert!(!alphas.is_empty(), "DDSketch states");
     let share = 1.0 - 1.05f64.powf(-0.5);
@@ -1206,7 +1216,10 @@ async fn a_quantile_shared_with_a_ratio_is_sized_for_the_ratio() {
     )
     .await;
     let installed: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
-    assert!(installed.raw_data_retention().is_empty(), "no raw scan");
+    assert!(
+        installed.raw_data_retention().unwrap().is_empty(),
+        "no raw scan"
+    );
     let share = 1.0 - 1.05f64.powf(-0.5);
     for alpha in ddsketch_alphas(&installed) {
         assert!(alpha <= share + 1e-12, "α {alpha} > {share}");
@@ -1428,7 +1441,7 @@ async fn group_outputs_from_one_stored_per_series_sum_are_listed_and_built() {
         assert_eq!(output.coverage.selection, relative_time(-60_000, 0));
         assert_eq!(output.retention_ms, 60_000);
     }
-    assert!(plan.raw_data_retention().is_empty());
+    assert!(plan.raw_data_retention().unwrap().is_empty());
     let run = run_data_plane(
         &plan_json,
         &job_samples(),
@@ -1801,7 +1814,10 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
         1,
         "one DDSketch"
     );
-    assert!(plan.raw_data_retention().is_empty(), "no raw samples read");
+    assert!(
+        plan.raw_data_retention().unwrap().is_empty(),
+        "no raw samples read"
+    );
     // The query's guarantee, with `data`'s declared sign and its 1,000
     // series bound as Stage 3 binds them: a relative error of at most 0.05
     // at failure probability at most 0.3 (DDSketch's bound is
@@ -2176,7 +2192,10 @@ async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
     .expect("a plan is selected");
     let report = report.as_ref().expect("Stage 3's report");
     assert_eq!(report.queries_accepted_without_guarantee, vec![0]);
-    assert!(plan.raw_data_retention().is_empty(), "no raw samples read");
+    assert!(
+        plan.raw_data_retention().unwrap().is_empty(),
+        "no raw samples read"
+    );
 }
 
 /// [`p99_avg_workload`]'s query with `outer` in place of `avg`, planned

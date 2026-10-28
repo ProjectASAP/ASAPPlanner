@@ -4,13 +4,15 @@
 //!
 //! The runtime writes the returned [`InstallablePlan`] as its plan file and
 //! executes its DAG with the executor, as given (#509 Assumption 8). The
-//! plan file holds only what the DAG cannot derive: the DAG, with each
-//! materialized view's `retention_ms` on its node, and the query texts.
+//! plan file holds only what the DAG cannot derive: the DAG, with the
+//! `retention_ms` of each materialized view and each query-time `Scan` on
+//! its node, and the query texts.
 //! Everything else a runtime needs is derived from the DAG
 //! (`asap_types::ir::materialized_view`): the views to maintain, with what
 //! each is refreshed from and when ([`InstallablePlan::materialized_views`]),
-//! and how far back each raw-data source is read at query time
-//! ([`InstallablePlan::raw_data_retention`]). Raw data is bound only at the
+//! and how far back each raw-data source is kept for query-time scans
+//! ([`InstallablePlan::raw_data_retention`]). A runtime reads the file with
+//! [`InstallablePlan::from_json`]. Raw data is bound only at the
 //! DAG's `Scan`s, by their `Source`: the runtime implements one
 //! `asap_executor::sources::TableProvider` per time series (a table `(ts,
 //! value, *labels)` over the samples it buffers) or SQL table, and the
@@ -61,8 +63,8 @@ pub struct InstallablePlan {
     pub wire_version: u32,
     /// The selected physical ASAP DAG with Stage 3's timings and
     /// materialization, every pane chain expanded into its panes, each
-    /// materialized view carrying its `retention_ms`; the executor compiles
-    /// it as is.
+    /// materialized view and query-time `Scan` carrying its `retention_ms`;
+    /// the executor compiles it as is.
     pub dag: PhysicalASAPDAG,
     /// One per workload query, in `QueryWorkload::entries()` order, as the
     /// workload gave it: query `i` is answered by `dag.roots[i]`.
@@ -170,9 +172,13 @@ pub enum InstallablePlanError {
     /// Internal bug: a pane chain of the selected plan does not expand.
     #[error("pane chain expansion: {0}")]
     PaneChainExpansion(#[from] SchemaDerivationError),
-    /// Bad input (a plan file): written for another plan-file format.
-    #[error("unsupported installable plan wire version {0}")]
-    UnsupportedWireVersion(u32),
+    /// Bad input (a plan file): written for another plan-file format; `None`
+    /// for a file without `wire_version`, written before version 11.
+    #[error("unsupported installable plan wire version {0:?}")]
+    UnsupportedWireVersion(Option<u32>),
+    /// Bad input (a plan file): not JSON of an [`InstallablePlan`].
+    #[error("plan file: {0}")]
+    Json(#[from] serde_json::Error),
     /// Bad input (a plan file): the DAG is not a valid physical ASAP DAG.
     #[error("invalid physical ASAP DAG: {0}")]
     InvalidDag(#[from] PhysicalASAPDAGValidationError),
@@ -207,6 +213,7 @@ impl From<InstallableDagError> for InstallablePlanError {
     fn from(error: InstallableDagError) -> Self {
         match error {
             InstallableDagError::InvalidDag(e) => Self::InvalidDag(e),
+            InstallableDagError::DeadlineExceeded => Self::DeadlineExceeded,
             error => Self::Uninstallable(error),
         }
     }
@@ -375,11 +382,29 @@ impl InstallablePlan {
         Ok(self.dag.materialized_views()?)
     }
 
-    /// How far back each raw-data source is read at query time
+    /// How far back each raw-data source is kept for query-time scans
     /// ([`PhysicalASAPDAG::raw_data_retention`]): the raw data a runtime
     /// keeps, the raw-data counterpart of each view's retention.
-    pub fn raw_data_retention(&self) -> Vec<RawDataRetention> {
-        self.dag.raw_data_retention()
+    pub fn raw_data_retention(&self) -> Result<Vec<RawDataRetention>, InstallablePlanError> {
+        Ok(self.dag.raw_data_retention()?)
+    }
+
+    /// Reads a plan file: its `wire_version` first, so a file of another
+    /// format is refused as [`InstallablePlanError::UnsupportedWireVersion`]
+    /// rather than as a field it does not have, then the plan. Does not
+    /// [`validate`](Self::validate) it.
+    pub fn from_json(text: &str) -> Result<Self, InstallablePlanError> {
+        /// Only the version of any plan file.
+        #[derive(Deserialize)]
+        struct WireVersion {
+            #[serde(default)]
+            wire_version: Option<u32>,
+        }
+        let WireVersion { wire_version } = serde_json::from_str(text)?;
+        if wire_version != Some(INSTALLABLE_PLAN_WIRE_VERSION) {
+            return Err(InstallablePlanError::UnsupportedWireVersion(wire_version));
+        }
+        Ok(serde_json::from_str(text)?)
     }
 
     /// Whether the Planner's executor compiles this plan as a runtime runs
@@ -468,9 +493,9 @@ impl InstallablePlan {
         check_compile_deadline(deadline)
     }
 
-    /// The plan of `dag`, with each view's retention set
-    /// ([`PhysicalASAPDAG::set_materialized_view_retention`]) and each
-    /// view's refresh compiled.
+    /// The plan of `dag`, with each view's and query-time scan's retention
+    /// set ([`PhysicalASAPDAG::set_retention`]) and each view's refresh
+    /// compiled.
     pub(crate) fn of_dag(
         dag: PhysicalASAPDAG,
         query_texts: Vec<String>,
@@ -496,7 +521,7 @@ impl InstallablePlan {
     ) -> Result<(Self, Vec<MaterializedView>), InstallablePlanError> {
         check_installation_deadline(deadline)?;
         let views =
-            dag.set_materialized_view_retention(pane_retention_ms_by_node, reader_span_ms_by_node)?;
+            dag.set_retention(pane_retention_ms_by_node, reader_span_ms_by_node, deadline)?;
         check_installation_deadline(deadline)?;
         // The first refresh is compiled in the whole plan, which runs the
         // executor's checks of the whole plan once; every other over the
@@ -522,18 +547,18 @@ impl InstallablePlan {
 
     /// Checks a plan, e.g. one read from a plan file, for what is not
     /// derived from its DAG: its wire version, the DAG's validity, one query
-    /// text per root and no standalone scalar query, and each view's
-    /// retention covering how far back its data reaches (which derives the
-    /// views, [`Self::materialized_views`]).
+    /// text per root and no standalone scalar query, and each view's and
+    /// query-time scan's retention covering how far back it is read (which
+    /// derives the views, [`Self::materialized_views`], validating the DAG).
     pub fn validate(&self) -> Result<(), InstallablePlanError> {
         if self.wire_version != INSTALLABLE_PLAN_WIRE_VERSION {
-            return Err(InstallablePlanError::UnsupportedWireVersion(
+            return Err(InstallablePlanError::UnsupportedWireVersion(Some(
                 self.wire_version,
-            ));
+            )));
         }
-        self.dag.validate()?;
         check_queries(&self.dag, &self.query_texts)?;
         self.materialized_views()?;
+        self.raw_data_retention()?;
         Ok(())
     }
 }
@@ -1138,7 +1163,7 @@ mod tests {
         let plan = install(export(range)).unwrap();
         assert!(plan.materialized_views().unwrap().is_empty());
         assert_eq!(
-            plan.raw_data_retention(),
+            plan.raw_data_retention().unwrap(),
             [RawDataRetention {
                 source: Source::TimeSeries {
                     metric: "latency_ms".into()

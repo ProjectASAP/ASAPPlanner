@@ -159,7 +159,10 @@ async fn installable_plan_has_its_pane_chains_expanded() {
     let refreshed: Vec<u64> = views.iter().map(|v| v.node_id as u64).collect();
     assert_eq!(refreshed, frontier_from_timing(dag).unwrap());
     assert_pane_coverage(plan, dag.roots[0], 0, 3_600_000);
-    assert!(plan.raw_data_retention().is_empty(), "no raw data kept");
+    assert!(
+        plan.raw_data_retention().unwrap().is_empty(),
+        "no raw data kept"
+    );
     let report = report.as_ref().expect("Stage 3 selected");
     assert!(report.cost_per_second.is_some());
 
@@ -207,7 +210,7 @@ async fn reference_plan_runs_the_installable_plan_at_query_time() {
     assert_eq!(materialized_count(&reference.dag), 0);
     assert!(reference.materialized_views().unwrap().is_empty());
     // The reference reads the raw data the plan's views were refreshed from.
-    let [retention] = reference.raw_data_retention().try_into().unwrap();
+    let [retention] = reference.raw_data_retention().unwrap().try_into().unwrap();
     assert_eq!(retention.lookback_ms, Some(3_600_000));
     assert!(reference
         .dag
@@ -318,7 +321,7 @@ async fn raw_data_windows_of_unsupported_shapes_are_refused() {
             }
             Ok(plan) => panic!(
                 "{query}: unexpectedly installed {:?}",
-                plan.raw_data_retention()
+                plan.raw_data_retention().unwrap()
             ),
         }
     }
@@ -326,7 +329,7 @@ async fn raw_data_windows_of_unsupported_shapes_are_refused() {
         .await
         .unwrap();
     // 10 minutes of data ending 5 minutes back reaches 15 minutes back.
-    let [retention] = plain.raw_data_retention().try_into().unwrap();
+    let [retention] = plain.raw_data_retention().unwrap().try_into().unwrap();
     assert_eq!(retention.lookback_ms, Some(900_000));
 }
 

@@ -586,7 +586,7 @@ async fn ingestion_time_row_counts_read_each_table_row_once() {
     let fifteen = five.replace("5 minutes", "15 minutes");
     let plan = plan_without_raw_data(&[five, &fifteen], EXACT).await;
     assert!(
-        plan.raw_data_retention().is_empty(),
+        plan.raw_data_retention().unwrap().is_empty(),
         "no raw data at query time"
     );
     let answers = run_data_plane(&plan);
@@ -622,7 +622,7 @@ async fn a_window_equal_to_its_interval_is_built_at_ingestion_time_from_table_ro
         views
     );
     assert!(
-        plan.raw_data_retention().is_empty(),
+        plan.raw_data_retention().unwrap().is_empty(),
         "no raw data at query time"
     );
     assert_eq!(
@@ -634,7 +634,7 @@ async fn a_window_equal_to_its_interval_is_built_at_ingestion_time_from_table_ro
                      WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service";
     let plan = plan_without_raw_data_every(&[row_count], EXACT, five_minutes_ms).await;
     assert!(
-        plan.raw_data_retention().is_empty(),
+        plan.raw_data_retention().unwrap().is_empty(),
         "no raw data at query time"
     );
     let expected: BTreeMap<String, String> = (0..3)

@@ -79,9 +79,11 @@ pub struct PhysicalASAPDAGNode {
     pub guarantee: Option<AccuracyGuarantee>,
     /// For a materialized view (a node whose materialization keeps its
     /// output across evaluations), how far back from the newest evaluation
-    /// time its output must stay available once refreshed; `None` on every
-    /// other node, and on a view of a DAG exported before installation
-    /// sets it ([`PhysicalASAPDAG::set_materialized_view_retention`]). A
+    /// time its output must stay available once refreshed; for a query-time
+    /// `Scan`, how far back its source's rows must stay available (`None`
+    /// when it reads them unbounded). `None` on every other node, and on
+    /// every node of a DAG exported before installation sets it
+    /// ([`PhysicalASAPDAG::set_retention`]). A
     /// node field rather than part of [`Materialization`], because Stage 2
     /// enumerates materializations before Stage 3 knows retention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,8 +134,10 @@ pub enum PhysicalASAPDAGValidationError {
         producer: PhysicalASAPNodeId,
         consumer: PhysicalASAPNodeId,
     },
-    #[error("node {0:?} has a retention_ms but is not a materialized view")]
-    RetentionOnNonView(PhysicalASAPNodeId),
+    #[error(
+        "node {0:?} has a retention_ms but is neither a materialized view nor a query-time scan"
+    )]
+    UnexpectedRetention(PhysicalASAPNodeId),
     #[error("duplicate physical ASAP node id {0:?}")]
     DuplicateNodeId(PhysicalASAPNodeId),
     #[error("physical ASAP DAG root {0:?} does not name a node")]
@@ -317,32 +321,39 @@ impl PhysicalASAPDAG {
         scan: PhysicalASAPNodeId,
         kept_chains: &HashSet<PhysicalASAPNodeId>,
     ) -> ScanWindow {
-        let payload = |id: PhysicalASAPNodeId| {
-            self.nodes
-                .iter()
-                .find(|node| node.id == id)
-                .map(|node| &node.payload)
-        };
+        // Indexed once per call: O(nodes + edges), not a search per edge.
+        let payloads: HashMap<PhysicalASAPNodeId, &PhysicalASAPOperatorPayload> = self
+            .nodes
+            .iter()
+            .map(|node| (node.id, &node.payload))
+            .collect();
+        let mut consumers: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
+        for edge in &self.edges {
+            consumers
+                .entry(edge.producer)
+                .or_default()
+                .push(edge.consumer);
+        }
+        let payload = |id: PhysicalASAPNodeId| payloads.get(&id).copied();
         let mut window: Option<ScanWindow> = None;
         let mut pending = vec![(scan, 0i64)];
         while let Some((id, end_offset_ms)) = pending.pop() {
             if self.roots.contains(&id) {
                 return ScanWindow::Unbounded;
             }
-            for edge in self.edges.iter().filter(|edge| edge.producer == id) {
-                let width_ms = match payload(edge.consumer) {
+            for &consumer in consumers.get(&id).into_iter().flatten() {
+                let width_ms = match payload(consumer) {
                     Some(Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }))
                         if shift.at.is_none() =>
                     {
-                        pending
-                            .push((edge.consumer, end_offset_ms.saturating_add(shift.offset_ms)));
+                        pending.push((consumer, end_offset_ms.saturating_add(shift.offset_ms)));
                         continue;
                     }
                     Some(Operator::NonASAP(NonASAPOp::TimeRange { range, .. })) => {
                         range.as_millis()
                     }
                     Some(Operator::ASAP(ASAPOp::PaneChain { pane_width_ms, .. }))
-                        if kept_chains.contains(&edge.consumer) =>
+                        if kept_chains.contains(&consumer) =>
                     {
                         u128::from(*pane_width_ms)
                     }
@@ -437,8 +448,11 @@ impl PhysicalASAPDAG {
                     },
                 );
             }
-            if node.retention_ms.is_some() && !node.materialization.is_materialized_view() {
-                return Err(PhysicalASAPDAGValidationError::RetentionOnNonView(node.id));
+            if node.retention_ms.is_some()
+                && !node.materialization.is_materialized_view()
+                && !super::materialized_view::is_query_time_scan(node)
+            {
+                return Err(PhysicalASAPDAGValidationError::UnexpectedRetention(node.id));
             }
             if let Operator::ASAP(ASAPOp::SummaryAgg {
                 family, grouping, ..

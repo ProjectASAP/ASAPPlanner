@@ -5,8 +5,9 @@ use std::collections::HashSet;
 
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_planner::{
-    e2e_plan, plan_installable, FrontendInput, MaterializedViewRefresh, PlanningModels,
-    RawDataRetention, UserInput,
+    e2e_plan, installable_plan_of, plan_installable, FrontendInput, InstallablePlan,
+    InstallablePlanError, MaterializedViewRefresh, PlanningModels, RawDataRetention, UserInput,
+    INSTALLABLE_PLAN_WIRE_VERSION,
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::physical_export::{compile_physical_asap_workload, PhysicalASAPDAG};
@@ -18,13 +19,18 @@ use serde_json::Value;
 
 /// A repeating PromQL workload over ingesting `m`, each query every minute.
 fn repeating(queries: &[&str]) -> PlanningWorkload {
+    repeating_with(queries, "")
+}
+
+/// [`repeating`], each entry with `extra` fields (e.g. a range evaluation).
+fn repeating_with(queries: &[&str], extra: &str) -> PlanningWorkload {
     let entries: Vec<String> = queries
         .iter()
         .map(|q| {
             format!(
                 r#"{{"query": {q:?}, "demand": {{"fixed_interval": 60000}},
                 "requirements": {{"accuracy": {{"max_error": 0.01, "failure_probability": 0.01}}}},
-                "predictability": {{"predictable": {{"known_at": null}}}}}}"#
+                "predictability": {{"predictable": {{"known_at": null}}}}{extra}}}"#
             )
         })
         .collect();
@@ -91,7 +97,7 @@ async fn raw_data_retention_is_the_lookback_stage3_prices() {
     let (plan, _) = plan_installable(input()).await.unwrap();
     let m = Source::TimeSeries { metric: "m".into() };
     assert_eq!(
-        plan.raw_data_retention(),
+        plan.raw_data_retention().unwrap(),
         [RawDataRetention {
             source: m.clone(),
             lookback_ms: Some(65 * 60_000),
@@ -113,7 +119,71 @@ async fn raw_data_retention_is_the_lookback_stage3_prices() {
     .await
     .unwrap();
     assert!(!plan.materialized_views().unwrap().is_empty());
-    assert_eq!(plan.raw_data_retention(), []);
+    assert_eq!(plan.raw_data_retention().unwrap(), []);
+}
+
+/// A range-evaluated query (`max_over_time(m[5m])` over the last hour at
+/// 1-minute steps) installed with every node at query time (its frontend
+/// DAG, nothing materialized): its oldest step reads `m` 5 minutes before an
+/// hour ago, so the runtime keeps 65 minutes of `m`, the scan's window plus
+/// the range span, on the scan's node. (Stage 3 prices one evaluation's
+/// window, 5 minutes.)
+#[test]
+fn a_range_evaluated_query_time_scan_keeps_its_window_plus_the_span() {
+    let workload = repeating_with(
+        &["max_over_time(m[5m])"],
+        r#", "range_evaluation": {"step_ms": 60000, "span_ms": 3600000}"#,
+    );
+    let roots = asap_devtools::planning_stages::lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let (plan, _) = installable_plan_of(&roots, None, &entries).unwrap();
+    plan.validate().unwrap();
+    assert!(plan.materialized_views().unwrap().is_empty());
+    assert_eq!(
+        plan.raw_data_retention().unwrap(),
+        [RawDataRetention {
+            source: Source::TimeSeries { metric: "m".into() },
+            lookback_ms: Some(5 * 60_000 + 3_600_000),
+        }]
+    );
+    let scan = plan
+        .dag
+        .nodes
+        .iter()
+        .find(|node| matches!(node.payload, Operator::NonASAP(NonASAPOp::Scan { .. })))
+        .unwrap();
+    assert_eq!(scan.retention_ms, Some(3_900_000));
+}
+
+/// A plan file of wire version 10 (assembled from the parts of a plan
+/// written on `main` before #970: the versioned DAG envelope, `queries`,
+/// `stored_outputs`, `query_time_raw_windows`, `selection`) is refused for
+/// its version, not for a missing field; a file of this version reads back.
+#[test]
+fn a_plan_file_of_an_older_wire_version_is_refused_by_version() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/materialized_view_fixtures/plan_wire_version_10.json");
+    let old = std::fs::read_to_string(path).unwrap();
+    assert!(matches!(
+        InstallablePlan::from_json(&old),
+        Err(InstallablePlanError::UnsupportedWireVersion(None))
+    ));
+    let mut other: Value = serde_json::from_str(&old).unwrap();
+    other["wire_version"] = serde_json::json!(INSTALLABLE_PLAN_WIRE_VERSION + 1);
+    assert!(matches!(
+        InstallablePlan::from_json(&other.to_string()),
+        Err(InstallablePlanError::UnsupportedWireVersion(Some(v))) if v == INSTALLABLE_PLAN_WIRE_VERSION + 1
+    ));
+    let current = InstallablePlan {
+        wire_version: INSTALLABLE_PLAN_WIRE_VERSION,
+        dag: serde_json::from_value(
+            serde_json::from_str::<Value>(&old).unwrap()["dag"]["dag"].clone(),
+        )
+        .unwrap(),
+        query_texts: vec!["a".into(), "b".into()],
+    };
+    let read = InstallablePlan::from_json(&serde_json::to_string(&current).unwrap()).unwrap();
+    assert_eq!(read, current);
 }
 
 /// For installable plans captured from `main` before #970 (each the plan

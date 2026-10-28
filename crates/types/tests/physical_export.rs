@@ -444,9 +444,10 @@ fn exports_summary_over_summary_as_typed_precompute_edges() {
 }
 
 /// `retention_ms` is accepted on a materialized view (a node kept across
-/// evaluations), survives a round trip, and is rejected on any other node.
+/// evaluations), survives a round trip, and is rejected on a node that is
+/// neither a view nor a query-time scan (here an ingestion-time node).
 #[test]
-fn retention_is_only_on_materialized_views() {
+fn retention_is_only_on_materialized_views_and_query_time_scans() {
     let mut dag = compile_physical_asap_dag(&timed_at_ingestion()).unwrap();
     let view = dag
         .nodes
@@ -456,8 +457,11 @@ fn retention_is_only_on_materialized_views() {
     let other = dag
         .nodes
         .iter()
-        .position(|node| !node.materialization.is_materialized_view())
-        .expect("a query-time node");
+        .position(|node| {
+            !node.materialization.is_materialized_view()
+                && node.output_state.timing == ExecutionTiming::IngestionTime
+        })
+        .expect("an ingestion-time node that is not a view");
     dag.nodes[view].retention_ms = Some(60_000);
     dag.validate().unwrap();
     let decoded: PhysicalASAPDAG =
@@ -466,7 +470,7 @@ fn retention_is_only_on_materialized_views() {
     dag.nodes[other].retention_ms = Some(60_000);
     assert_eq!(
         dag.validate(),
-        Err(PhysicalASAPDAGValidationError::RetentionOnNonView(
+        Err(PhysicalASAPDAGValidationError::UnexpectedRetention(
             dag.nodes[other].id
         ))
     );
