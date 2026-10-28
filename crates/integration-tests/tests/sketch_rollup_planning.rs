@@ -1,13 +1,15 @@
-//! Sketch rollup in planning: Pass 2 offers answering a coarse sketch
-//! grouping from the finest build of the same sketch over the same rows,
-//! and Stage 3 selects it when one build and a merge cost less than two
-//! builds over the raw rows.
+//! Sketch rollup in planning: the memo's rollup rule offers answering a
+//! coarse sketch grouping from the finest build of the same sketch over the
+//! same rows, and the memo search selects it when one build and a merge
+//! cost less than two builds over the raw rows.
 use std::rc::Rc;
 
 use asap_executor::physical_planner::promql_rows;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_plan_selection::Stage1ToStage3Run;
+use asap_integration_tests::planning::expanded_memo;
+use asap_logical_asap_optimization::memo::candidates::CandidateOrigin;
+use asap_plan_selection::{PlanningModels, Stage1ToStage3Run};
 use asap_types::ir::properties::{AccuracyMetric, AccuracyScope, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
@@ -72,50 +74,27 @@ async fn plan_sql(queries: &[&str], accuracy: AccuracyTarget) -> Stage1ToStage3R
             .unwrap();
         roots.push((i, QueryRoot::Operator(root)));
     }
-    explicit_rollup_plans(
+    search(
         roots,
         &vec![entry(&accuracy, 60_000); queries.len()],
         &data(),
     )
 }
 
-/// Explicit exact, KMV, and KLL assignments expose both separate builds and
-/// their rollup rewrites without relying on which plans a timed solver visits.
-fn explicit_rollup_plans(
+/// The memo search's run for `roots`.
+fn search(
     roots: Vec<(usize, QueryRoot)>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
 ) -> Stage1ToStage3Run<usize> {
-    use asap_logical_asap_optimization::per_computation_candidates::{
-        generate_per_computation_candidates, ComputationCandidate,
-    };
-    use asap_types::ir::schema::SketchAlgorithm;
-    let inventory = generate_per_computation_candidates(roots).unwrap();
-    let mut assignments = vec![vec![0; inventory.targets.len()]];
-    for family in [SketchAlgorithm::Kmv, SketchAlgorithm::Kll] {
-        let choice: Vec<_> = inventory.targets.iter().map(|target| target.choices.candidates.iter()
-            .position(|candidate| matches!(candidate, ComputationCandidate::Summary(found) if *found == family)).unwrap_or(0)).collect();
-        if !assignments.contains(&choice) {
-            assignments.push(choice);
-        }
-    }
-    asap_integration_tests::planning::explicit_assignment_plans(
-        inventory,
-        assignments,
-        entries,
-        data,
-    )
+    asap_plan_selection::run_stage1_to_stage3(roots, entries, data, PlanningModels::builtin())
+        .unwrap()
 }
 
-/// The logical candidate `id`'s roots.
-fn logical_roots(run: &Stage1ToStage3Run<usize>, id: &str) -> Vec<Rc<OperatorNode>> {
-    run.stage1_logical_asap_optimization
-        .iter()
-        .find(|c| c.id == id)
-        .unwrap()
-        .roots
-        .as_ref()
-        .unwrap()
+/// The selected plan's roots.
+fn selected_roots(run: &Stage1ToStage3Run<usize>) -> Vec<Rc<OperatorNode>> {
+    run.selected_logical()
+        .expect("a plan")
         .iter()
         .map(|root| match root {
             QueryRoot::Operator(node) => Rc::clone(node),
@@ -144,25 +123,11 @@ fn builds_and_rollups(roots: &[Rc<OperatorNode>]) -> (usize, usize) {
     (builds, rollups)
 }
 
-/// The cheapest valid candidate's cost per second among the Stage 2
-/// candidates whose logical candidate does (`rolled_up`) or does not roll
-/// up a sketch.
-fn cheapest(run: &Stage1ToStage3Run<usize>, rolled_up: bool) -> Option<f64> {
-    let selection = run.stage3_plan_selection.as_ref().unwrap();
-    run.stage2_physical_asap_optimization
-        .iter()
-        .filter(|c| {
-            let (_, rollups) = builds_and_rollups(&logical_roots(run, &c.from_logical));
-            (rollups > 0) == rolled_up
-        })
-        .filter_map(|c| selection.costs.get(&c.id)?.cost_per_second)
-        .min_by(f64::total_cmp)
-}
-
 /// Distinct users by (region, service) and by service, both at relative
-/// ε = 0.05 per value over the same window (W-RollupHeavy's targets): Pass 2 offers the coarse KMV rolled up
-/// from the finer one, and Stage 3 selects a plan with one build and a
-/// rollup, cheaper than any plan that builds both from the raw rows.
+/// ε = 0.05 per value over the same window (W-RollupHeavy's targets): the
+/// memo offers the coarse KMV rolled up from the finer one, and the search
+/// selects a plan with one build and a rollup over one that builds both
+/// from the raw rows.
 #[tokio::test]
 async fn stage3_selects_a_distinct_count_rollup_when_it_is_cheaper() {
     let accuracy = AccuracyTarget::max_error(0.05)
@@ -184,21 +149,12 @@ async fn stage3_selects_a_distinct_count_rollup_when_it_is_cheaper() {
         accuracy,
     )
     .await;
-    let rolled_up = cheapest(&run, true).expect("a rollup candidate is priced");
-    let separate = cheapest(&run, false).expect("separate builds are priced");
-    assert!(rolled_up < separate, "{rolled_up} vs {separate}");
-    let selected = run.selected().unwrap();
-    assert_eq!(
-        builds_and_rollups(&logical_roots(&run, &selected.from_logical)),
-        (1, 1),
-        "{}",
-        selected.from_logical
-    );
+    assert_eq!(builds_and_rollups(&selected_roots(&run)), (1, 1));
 }
 
 /// p99 latency by (region, service), by region and by service at rank
 /// ε = 0.05 (template 13's shape): both coarse groupings roll up from one
-/// KLL, in one Pass 2 candidate, and Stage 3 selects it.
+/// KLL, and the memo search selects that plan.
 #[tokio::test]
 async fn coarse_quantile_groupings_roll_up_from_one_kll() {
     let accuracy = AccuracyTarget::max_error(0.05)
@@ -221,25 +177,19 @@ async fn coarse_quantile_groupings_roll_up_from_one_kll() {
         accuracy,
     )
     .await;
-    let selected = run.selected().unwrap();
-    assert_eq!(
-        builds_and_rollups(&logical_roots(&run, &selected.from_logical)),
-        (1, 2),
-        "{}",
-        selected.from_logical
-    );
+    assert_eq!(builds_and_rollups(&selected_roots(&run)), (1, 2));
 }
 
 /// #840's `quantile by (host, job)` and `quantile by (job)` over 10,000
-/// series, every 10 s at rank ε = 0.01, δ = 0.001: Pass 2 offers the
+/// series, every 10 s at rank ε = 0.01, δ = 0.001: the memo offers the
 /// coarse KLL rolled up from the finer one, and its guarantee meets the
-/// target, so Stage 3 prices it.
+/// target, so the search can select it.
 #[test]
 fn promql_quantile_by_job_rolls_up_from_by_host_job() {
     let accuracy = AccuracyTarget::max_error(0.01)
         .failure_probability(0.001)
         .accuracy_metric(AccuracyMetric::Rank);
-    let roots = [
+    let roots: Vec<(usize, QueryRoot)> = [
         "quantile by (host, job) (0.5, data)",
         "quantile by (job) (0.5, data)",
     ]
@@ -260,23 +210,15 @@ fn promql_quantile_by_job_rolls_up_from_by_host_job() {
     }))
     .unwrap();
     let entry = entry(&accuracy, 10_000);
-    let run = explicit_rollup_plans(roots, &[entry.clone(), entry], &data);
-    let rolled: Vec<_> = run
-        .stage1_logical_asap_optimization
-        .iter()
-        .filter(|c| {
-            c.pass2
-                .as_ref()
-                .is_some_and(|p| !p.rollup_candidates.is_empty())
-        })
-        .collect();
-    assert!(!rolled.is_empty(), "a rollup Pass 2 candidate");
-    let selection = run.stage3_plan_selection.as_ref().unwrap();
+    let entries = [entry.clone(), entry];
+    let memo = expanded_memo(roots.clone(), &entries);
     assert!(
-        run.stage2_physical_asap_optimization
+        memo.candidates
             .iter()
-            .filter(|c| rolled.iter().any(|l| l.id == c.from_logical))
-            .any(|c| selection.costs.contains_key(&c.id)),
-        "a rollup plan is valid and priced"
+            .flatten()
+            .any(|c| c.origin == CandidateOrigin::Rollup),
+        "a rollup candidate"
     );
+    let run = search(roots, &entries, &data);
+    assert_eq!(builds_and_rollups(&selected_roots(&run)), (1, 1));
 }
