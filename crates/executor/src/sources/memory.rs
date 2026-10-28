@@ -27,7 +27,9 @@ impl InMemoryDataStore {
     ) -> Result<Self, Error> {
         crate::values::validate_schema(&schema)?;
         if self.raw_data.iter().any(|(bound, _, _)| bound == &source) {
-            return Err(Error::Invalid(format!("raw data {source:?} is bound twice")));
+            return Err(Error::Invalid(format!(
+                "raw data {source:?} is bound twice"
+            )));
         }
         if batches.iter().any(|batch| batch.schema() != &schema) {
             return Err(Error::Invalid("raw data batch schema mismatch".into()));
@@ -107,9 +109,7 @@ impl DataStore for InMemoryDataStore {
         let batches = self
             .materialized_views
             .get(&view.node_id)
-            .ok_or_else(|| {
-                Error::Invalid(format!("unbound materialized view {}", view.node_id))
-            })?;
+            .ok_or_else(|| Error::Invalid(format!("unbound materialized view {}", view.node_id)))?;
         Ok(stream_batches(batches.iter().cloned().map(Ok), context))
     }
 }
@@ -125,9 +125,7 @@ fn projection(schema: &SchemaRef, output: &SchemaRef) -> Result<Vec<usize>, Erro
                 .fields
                 .iter()
                 .position(|candidate| candidate.name == field.name)
-                .ok_or_else(|| {
-                    Error::Invalid(format!("raw data lacks column {}", field.name))
-                })?;
+                .ok_or_else(|| Error::Invalid(format!("raw data lacks column {}", field.name)))?;
             let candidate = &schema.fields[index];
             if candidate.dtype != field.dtype || candidate.nullable != field.nullable {
                 return Err(Error::Invalid(format!(

@@ -142,11 +142,11 @@ async fn sql_sum_example_executes_with_sql_null_semantics() {
     use asap_executor::{
         physical_planner::compile,
         runtime::{Limits, RunContext, Scope},
-        sources::{BindingDataSources, DataSources, MemorySource},
+        sources::InMemoryDataStore,
         values::{Batch, Value},
     };
     use futures::StreamExt;
-    use std::{collections::BTreeSet, sync::Arc};
+    use std::sync::Arc;
     let root = lower_sql(
         "SELECT SUM(bytes) + 1 AS total_bytes FROM requests WHERE status = 200",
         &catalog(),
@@ -175,12 +175,7 @@ async fn sql_sum_example_executes_with_sql_null_semantics() {
         })
         .unwrap();
     let schema = Arc::new(scan.output_schema.clone());
-    let plan = compile(
-        &wire,
-        &BTreeSet::from([scan.id as u64]),
-        &[wire.roots[0] as u64],
-    )
-    .unwrap();
+    let plan = compile(&wire, &[], &[wire.roots[0] as u64]).unwrap();
     for (rows, expected) in [
         (
             vec![
@@ -193,24 +188,14 @@ async fn sql_sum_example_executes_with_sql_null_semantics() {
         (vec![], Value::Null),
         (vec![vec![Value::Null, Value::Int64(200)]], Value::Null),
     ] {
-        let mut sources = DataSources::default();
-        sources
-            .register(
+        let store = InMemoryDataStore::default()
+            .with_raw_data(
                 source.clone(),
-                Arc::new(
-                    MemorySource::new(
-                        schema.clone(),
-                        vec![Batch::try_new(schema.clone(), rows).unwrap()],
-                    )
-                    .unwrap(),
-                ),
+                schema.clone(),
+                vec![Batch::try_new(schema.clone(), rows).unwrap()],
             )
             .unwrap();
-        let data_sources = BindingDataSources {
-            tables: sources,
-            ..Default::default()
-        };
-        let bound = plan.instantiate(&data_sources).unwrap();
+        let bound = plan.instantiate(Arc::new(store)).unwrap();
         let mut stream = bound
             .execute(
                 plan.roots(),

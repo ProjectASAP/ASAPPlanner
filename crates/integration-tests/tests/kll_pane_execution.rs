@@ -1,27 +1,40 @@
 //! Maintenance -> stored pane state -> independently bound query execution.
 mod physical_common;
-use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
+use asap_executor::sources::InMemoryDataStore;
 use asap_executor::{
     operators::{Operator, SummaryEvaluation},
-    physical_planner::CompiledPhysicalDAG,
+    physical_planner::{compile, test_support::views_at, CompiledPhysicalDAG},
     plan::{PhysicalDAG, PhysicalOperator, PlanProperties},
     runtime::{Input, Limits, OutputStream, RunContext, Scope},
     summary_kernels::datasketches_kll::DatasketchesKLLAccumulator,
     values::{Batch, SchemaRef, Value},
     AggregateCore, Error,
 };
+use asap_types::ir::materialized_view::MaterializedView;
+use asap_types::ir::operator::operator_properties::TimeShift;
+use asap_types::ir::operator::{GroupKeys, Reduction, Source};
+use asap_types::ir::physical_export::{
+    compile_physical_asap_workload_with_node_ids, PhysicalASAPDAG,
+};
+use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
-    DataType, Field, FieldDataType, Schema, SketchAlgorithm, SketchKind, SketchParams,
-    SketchStatistic,
+    DataType, Field, FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchKind,
+    SketchParams, SketchStatistic, SummaryUpdate,
+};
+use asap_types::ir::{
+    apply_materialization_timings_to_roots, ASAPOp, MaterializationAssignment, NonASAPOp,
+    OperatorNode, QueryRoot, TimeRangeKind,
 };
 use futures::{executor::block_on, StreamExt};
 use std::{
-    collections::BTreeMap,
+    rc::Rc,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
 };
+
+const PANE_MS: i64 = 60_000;
 
 fn family(k: u32) -> FieldDataType {
     FieldDataType::Sketch(
@@ -35,57 +48,192 @@ fn family(k: u32) -> FieldDataType {
         Default::default(),
     )
 }
-fn raw_schema() -> SchemaRef {
-    Arc::new(Schema {
-        unique_keys: vec![],
-        closed: false,
-        fields: vec![Field {
-            table: None,
-            name: "value".into(),
-            dtype: FieldDataType::Plain(DataType::Float64),
-            nullable: false,
-        }],
-        time_index: None,
-    })
+/// `t(ts, value)`, time index `ts`.
+fn table_schema() -> Schema {
+    Schema::with_time_index(
+        vec![
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
+        ],
+        0,
+        vec![],
+    )
 }
 fn query_scope() -> Scope {
     Scope::Query {
         evaluation_time_ms: 300_000,
     }
 }
-fn fixture() -> (CompiledPhysicalDAG, Operator, SchemaRef) {
-    let raw = raw_schema();
-    let build =
-        Operator::per_group_summary_build(raw.clone(), family(200), 0, None, vec![]).unwrap();
-    let state = build.schema();
-    let maintenance = CompiledPhysicalDAG::from_operators(
-        BTreeMap::from([(0, raw)]),
-        BTreeMap::from([(1, (vec![0], build))]),
-        vec![1],
+
+/// p50 and p99 of one KLL (k = 200) merged from five one-minute panes of
+/// `t`, each pane a materialized view.
+struct Fixture {
+    dag: PhysicalASAPDAG,
+    /// Pane `i` reads the minute ending `i` minutes before the evaluation time.
+    panes: Vec<u64>,
+    views: Vec<MaterializedView>,
+    merge: u64,
+    p50: u64,
+    p99: u64,
+}
+fn fixture() -> Fixture {
+    let new = |operator| OperatorNode::new_shared(operator).unwrap();
+    let scan = new(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::Table {
+            table_ref: "t".into(),
+        },
+        predicates: vec![],
+        schema: table_schema(),
+    }));
+    let panes: Vec<Rc<OperatorNode>> = (0..5)
+        .map(|i| {
+            let shifted = new(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeShift {
+                shift: TimeShift {
+                    offset_ms: i * PANE_MS,
+                    at: None,
+                },
+                child: scan.clone(),
+            }));
+            let range = new(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeRange {
+                range: std::time::Duration::from_millis(PANE_MS as u64),
+                kind: TimeRangeKind::Range,
+                child: shifted,
+            }));
+            new(asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
+                child: range,
+                family: family(200),
+                input: SummaryUpdate::column(ColumnRef::Named("value".into())),
+                reduction: Reduction::Reduce(GroupKeys::default()),
+                grouping: GroupingStrategy::PerSubpopulationInstance,
+                filter: None,
+            }))
+        })
+        .collect();
+    let merge = new(asap_types::ir::Operator::ASAP(ASAPOp::SummaryMerge {
+        children: panes.clone(),
+        newest_panes: None,
+        group_by: None,
+    }));
+    let estimate = |q| {
+        new(asap_types::ir::Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input: merge.clone(),
+            query: SketchStatistic::Quantile { q },
+        }))
+    };
+    let roots = apply_materialization_timings_to_roots(
+        &[
+            QueryRoot::Operator(estimate(0.5)),
+            QueryRoot::Operator(estimate(0.99)),
+        ],
+        &MaterializationAssignment::default(),
     )
     .unwrap();
-    let merge = Operator::summary_merge(state.clone(), 0, vec![]).unwrap();
-    (maintenance, merge, state)
+    let compiled = compile_physical_asap_workload_with_node_ids(&roots).unwrap();
+    let mut pane_ids = vec![0; 5];
+    let (mut merge, mut p50, mut p99) = (0, 0, 0);
+    for node in &compiled.dag.nodes {
+        let id = node.id as u64;
+        match &compiled.node_ids.operator_node(node.id).unwrap().operator {
+            asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) => {
+                let shift = match child.children()[0].non_asap() {
+                    Some(NonASAPOp::TimeShift { shift, .. }) => shift.offset_ms,
+                    _ => unreachable!("a pane reads a shifted range"),
+                };
+                pane_ids[(shift / PANE_MS) as usize] = id;
+            }
+            asap_types::ir::Operator::ASAP(ASAPOp::SummaryMerge { .. }) => merge = id,
+            asap_types::ir::Operator::ASAP(ASAPOp::SummaryEstimate {
+                query: SketchStatistic::Quantile { q },
+                ..
+            }) => match q {
+                0.5 => p50 = id,
+                _ => p99 = id,
+            },
+            _ => {}
+        }
+    }
+    let mut dag = compiled.dag;
+    let views = views_at(&mut dag, &pane_ids).unwrap();
+    Fixture {
+        dag,
+        panes: pane_ids,
+        views,
+        merge,
+        p50,
+        p99,
+    }
 }
-fn pane_state(maintenance: &CompiledPhysicalDAG, pane: i64) -> Arc<dyn AggregateCore> {
+fn schema_of(dag: &PhysicalASAPDAG, id: u64) -> SchemaRef {
+    Arc::new(
+        dag.nodes
+            .iter()
+            .find(|node| node.id as u64 == id)
+            .unwrap()
+            .output_schema
+            .clone(),
+    )
+}
+/// Run `plan` against `store`; the first error of any root, if one fails.
+fn try_execute(
+    plan: &CompiledPhysicalDAG,
+    store: InMemoryDataStore,
+    scope: Scope,
+) -> Result<Vec<Vec<Batch>>, Error> {
+    let dag = plan.instantiate(Arc::new(store))?;
+    block_on(async {
+        let streams = dag.execute(plan.roots(), RunContext::new(scope, Limits::default())?)?;
+        let mut outputs = Vec::new();
+        for mut stream in streams {
+            let mut batches = Vec::new();
+            while let Some(batch) = stream.next().await {
+                batches.push((*batch?).clone());
+            }
+            outputs.push(batches);
+        }
+        Ok(outputs)
+    })
+}
+fn summary(batch: &Batch) -> Arc<dyn AggregateCore> {
+    batch.to_rows()[0]
+        .iter()
+        .find_map(|value| match value {
+            Value::Summary { state, .. } => Some(state.clone()),
+            _ => None,
+        })
+        .expect("missing KLL")
+}
+/// Pane `pane`'s state, built by `maintenance` (the newest pane's build) in
+/// the ingestion run of `(pane, pane + 1]` minutes.
+fn pane_state(maintenance: &CompiledPhysicalDAG, pane: i64) -> Batch {
     // Twenty samples in each (start,end] one-minute pane; k=200 avoids
     // compaction so quantiles and sample counts have deterministic oracles.
-    let raw = raw_schema();
+    let schema = Arc::new(table_schema());
     let rows = (0..20)
-        .map(|i| vec![Value::Float64((pane * 20 + i) as f64)])
+        .map(|i| {
+            vec![
+                Value::Timestamp(pane * PANE_MS + 1 + i * 1000),
+                Value::Float64((pane * 20 + i) as f64),
+            ]
+        })
         .collect();
+    let store = InMemoryDataStore::default()
+        .with_raw_data(
+            Source::Table {
+                table_ref: "t".into(),
+            },
+            schema.clone(),
+            vec![Batch::try_new(schema, rows).unwrap()],
+        )
+        .unwrap();
     let state = physical_common::execute(
         maintenance,
-        BTreeMap::from([(0, Batch::try_new(raw, rows).unwrap())]),
+        store,
         Scope::Ingestion {
-            window_start_ms: pane * 60_000,
-            window_end_ms: (pane + 1) * 60_000,
+            window_start_ms: pane * PANE_MS,
+            window_end_ms: (pane + 1) * PANE_MS,
         },
     );
-    let Value::Summary { state, .. } = &state[0][0].to_rows()[0][0] else {
-        panic!("missing KLL")
-    };
-    state.clone()
+    state[0][0].clone()
 }
 fn restore(schema: SchemaRef, states: &[Arc<dyn AggregateCore>]) -> Batch {
     Batch::try_new(
@@ -147,24 +295,16 @@ impl PhysicalOperator<Batch, SchemaRef> for CountStarts {
 /// native merge supplies p50, p99 and the population-count oracle per run.
 #[test]
 fn five_panes_roundtrip_and_shared_merge_runs_once() {
-    let (maintenance, merge, schema) = fixture();
-    let panes: Vec<_> = (0..6).map(|pane| pane_state(&maintenance, pane)).collect();
+    let fixture = fixture();
+    let maintenance = compile(&fixture.dag, &[], &[fixture.panes[0]]).unwrap();
+    let panes: Vec<Batch> = (0..6).map(|pane| pane_state(&maintenance, pane)).collect();
     drop(maintenance);
-    let compiled = CompiledPhysicalDAG::from_operators(
-        (0..5).map(|id| (id, schema.clone())).collect(),
-        BTreeMap::from([
-            (
-                5,
-                (
-                    vec![0, 1, 2, 3, 4],
-                    Operator::union(schema.clone(), 5).unwrap(),
-                ),
-            ),
-            (6, (vec![5], merge.clone())),
-            (7, (vec![6], evaluation(schema.clone(), 0.5))),
-            (8, (vec![6], evaluation(schema.clone(), 0.99))),
-        ]),
-        vec![6, 7, 8],
+    let schema = schema_of(&fixture.dag, fixture.panes[0]);
+    let merge = Operator::summary_merge(schema.clone(), 0, vec![]).unwrap();
+    let compiled = compile(
+        &fixture.dag,
+        &fixture.views,
+        &[fixture.merge, fixture.p50, fixture.p99],
     )
     .unwrap();
     let layout = asap_types::physical::PaneLayout {
@@ -181,7 +321,13 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
         "moving window edges require residual computation"
     );
     for offset in [0, 1] {
-        let restored = restore(schema.clone(), &panes[offset..offset + 5]);
+        let restored = restore(
+            schema.clone(),
+            &panes[offset..offset + 5]
+                .iter()
+                .map(summary)
+                .collect::<Vec<_>>(),
+        );
         let evaluation_time_ms = (5 + offset as i64) * 60_000;
         asap_types::physical::validate_pane_coverage(
             &layout,
@@ -189,49 +335,41 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
             &asap_types::physical::WindowEdgeCoverage::PaneAligned,
         )
         .unwrap();
-        let inputs: BTreeMap<_, _> = (0..5)
-            .map(|id| {
-                (
-                    id as u64,
-                    restore(schema.clone(), &panes[offset + id..offset + id + 1]),
-                )
-            })
-            .collect();
-        // A five-pane deployment cannot bind only four state slots.
-        let incomplete: BTreeMap<_, _> = inputs
-            .iter()
-            .take(4)
-            .map(|(&id, batch)| {
-                (
-                    id,
-                    Arc::new(MemorySource::new(schema.clone(), vec![batch.clone()]).unwrap())
-                        as Arc<dyn TableProvider>,
-                )
-            })
-            .collect();
-        let data_sources = BindingDataSources {
-            materialized_views: incomplete,
-            ..Default::default()
+        // View `i` holds the pane ending `i` minutes before the evaluation time.
+        let bind = |count: usize| {
+            fixture.panes[..count].iter().enumerate().fold(
+                InMemoryDataStore::default(),
+                |store, (i, &view)| {
+                    store
+                        .with_materialized_view(view as usize, vec![panes[offset + 4 - i].clone()])
+                        .unwrap()
+                },
+            )
         };
-        assert!(compiled.instantiate(&data_sources).is_err());
-        let result = physical_common::execute(
-            &compiled,
-            inputs,
-            Scope::Query {
-                evaluation_time_ms,
-            },
+        let scope = Scope::Query { evaluation_time_ms };
+        // A five-pane deployment cannot bind only four materialized views.
+        let missing = try_execute(&compiled, bind(4), scope.clone())
+            .err()
+            .unwrap();
+        assert!(
+            missing.to_string().contains("unbound materialized view"),
+            "{missing}"
         );
-        let Value::Summary { state, .. } = &result[0][0].to_rows()[0][0] else {
-            panic!("missing merged state")
-        };
-        let kll = state
+        let result = physical_common::execute(&compiled, bind(5), scope);
+        let kll_state = summary(&result[0][0]);
+        let kll = kll_state
             .as_any()
             .downcast_ref::<DatasketchesKLLAccumulator>()
             .unwrap();
         assert_eq!(kll.inner.count(), 100);
-        let value = |index: usize| match result[index][0].to_rows()[0][0] {
-            Value::Float64(value) => value,
-            _ => panic!("missing quantile"),
+        let value = |index: usize| {
+            result[index][0].to_rows()[0]
+                .iter()
+                .find_map(|value| match value {
+                    Value::Float64(value) => Some(*value),
+                    _ => None,
+                })
+                .expect("missing quantile")
         };
         assert!((value(1) - (50 + offset * 20) as f64).abs() <= 1.);
         assert!((value(2) - (99 + offset * 20) as f64).abs() <= 1.);
@@ -252,9 +390,9 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
             },
         )
         .unwrap();
-        dag.add(2, vec![1], evaluation(schema.clone(), 0.5))
+        dag.add(2, vec![1], evaluation(merge.output_schema(), 0.5))
             .unwrap();
-        dag.add(3, vec![1], evaluation(schema.clone(), 0.99))
+        dag.add(3, vec![1], evaluation(merge.output_schema(), 0.99))
             .unwrap();
         let outputs = block_on(futures::future::join_all(
             dag.execute(
@@ -272,35 +410,39 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
     }
 }
 
-/// Relabelled KLL parameters and missing bindings fail explicitly.
+/// Relabelled KLL parameters, a view bound in another schema and a missing
+/// view fail explicitly.
 #[test]
 fn panes_reject_parameters_schema_and_missing_binding() {
-    let (_maintenance, merge, schema) = fixture();
+    let fixture = fixture();
+    let schema = schema_of(&fixture.dag, fixture.panes[0]);
     let wrong = Value::Summary {
         family: family(200),
         state: Arc::new(DatasketchesKLLAccumulator::new(128)),
     };
-    assert!(Batch::try_new(schema.clone(), vec![vec![wrong]]).is_err());
-    let compiled = CompiledPhysicalDAG::from_operators(
-        BTreeMap::from([(0, schema)]),
-        BTreeMap::from([(1, (vec![0], merge))]),
-        vec![1],
-    )
-    .unwrap();
-    let data_sources = BindingDataSources {
-        materialized_views: BTreeMap::new(),
-        ..Default::default()
-    };
-    assert!(compiled.instantiate(&data_sources).is_err());
-    let raw = raw_schema();
-    let source = MemorySource::new(
-        raw.clone(),
-        vec![Batch::try_new(raw, vec![vec![Value::Float64(1.)]]).unwrap()],
-    )
-    .unwrap();
-    let data_sources = BindingDataSources {
-        materialized_views: BTreeMap::from([(0, Arc::new(source) as Arc<dyn TableProvider>)]),
-        ..Default::default()
-    };
-    assert!(compiled.instantiate(&data_sources).is_err());
+    assert!(Batch::try_new(schema, vec![vec![wrong]]).is_err());
+    let compiled = compile(&fixture.dag, &fixture.views, &[fixture.merge]).unwrap();
+    let missing = try_execute(&compiled, InMemoryDataStore::default(), query_scope())
+        .err()
+        .unwrap();
+    assert!(
+        missing.to_string().contains("unbound materialized view"),
+        "{missing}"
+    );
+    let raw = Arc::new(table_schema());
+    let raw_rows =
+        Batch::try_new(raw, vec![vec![Value::Timestamp(1), Value::Float64(1.)]]).unwrap();
+    let store = fixture
+        .panes
+        .iter()
+        .fold(InMemoryDataStore::default(), |store, &view| {
+            store
+                .with_materialized_view(view as usize, vec![raw_rows.clone()])
+                .unwrap()
+        });
+    let relabelled = try_execute(&compiled, store, query_scope()).err().unwrap();
+    assert!(
+        relabelled.to_string().contains("another schema"),
+        "{relabelled}"
+    );
 }

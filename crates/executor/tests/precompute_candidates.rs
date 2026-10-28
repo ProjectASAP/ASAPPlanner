@@ -1,12 +1,10 @@
-//! Materialized frontiers are compiled by Planner, never rewritten by deployment.
-use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
+//! A grouped Rate→Sum answers the same whether the deployment stores the
+//! Rate state or the grouped Sum state.
+use asap_executor::sources::InMemoryDataStore;
 mod common;
 use asap_executor::{
     factory::create_planner_accumulator,
-    physical_planner::{
-        compile, compile_candidate, compile_candidates, cut_candidate, enumerate_frontiers,
-        select_candidate, CandidateCost, CompiledPhysicalDAG, CompiledPhysicalPlan,
-    },
+    physical_planner::{compile, test_support::views_at, CompiledPhysicalDAG},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
@@ -17,10 +15,7 @@ use planner_types::ir::properties::AccuracyTarget;
 use planner_types::ir::schema::{DataType, *};
 use planner_types::ir::ASAPOp;
 use planner_types::workload::*;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 /// `sum by(job)(rate(m[1m]))` with its rows carrying the series identity.
 fn grouped_rate_root() -> std::rc::Rc<planner_types::ir::OperatorNode> {
@@ -59,19 +54,8 @@ fn exact_promql_root(query: &str) -> std::rc::Rc<planner_types::ir::OperatorNode
 fn grouped_rate() -> PhysicalASAPDAG {
     compile_physical_asap_dag(&selected_dag(grouped_rate_root(), AccuracyTarget::exact())).unwrap()
 }
-fn run(plan: &CompiledPhysicalDAG, inputs: BTreeMap<u64, Batch>, scope: Scope) -> Vec<Batch> {
-    let sources = inputs
-        .into_iter()
-        .map(|(id, batch)| {
-            let source = MemorySource::new(batch.schema().clone(), vec![batch]).unwrap();
-            (id, Arc::new(source) as Arc<dyn TableProvider>)
-        })
-        .collect();
-    let data_sources = BindingDataSources {
-        materialized_views: sources,
-        ..Default::default()
-    };
-    let dag = plan.instantiate(&data_sources).unwrap();
+fn run(plan: &CompiledPhysicalDAG, store: InMemoryDataStore, scope: Scope) -> Vec<Batch> {
+    let dag = plan.instantiate(Arc::new(store)).unwrap();
     block_on(async {
         let context = RunContext::new(scope, Limits::default()).unwrap();
         let mut output = dag.execute(plan.roots(), context).unwrap().remove(0);
@@ -83,8 +67,48 @@ fn run(plan: &CompiledPhysicalDAG, inputs: BTreeMap<u64, Batch>, scope: Scope) -
     })
 }
 
-/// Rate evaluations and grouped Sum can run together during bounded precompute;
-/// storing per-series rates instead leaves the same Sum in the query DAG.
+/// The root's output when the deployment stores the Rate `state` (bound to
+/// `states`) and, with `stored`, also the output of node `stored`, which an
+/// ingestion run over `ingestion` computes from the states.
+fn answer(
+    dag: &PhysicalASAPDAG,
+    state: u64,
+    states: &Batch,
+    stored: Option<u64>,
+    ingestion: Scope,
+    query: Scope,
+) -> Vec<Batch> {
+    let mut dag = dag.clone();
+    let views = views_at(
+        &mut dag,
+        &[state].into_iter().chain(stored).collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let state_store = || {
+        InMemoryDataStore::default()
+            .with_materialized_view(state as usize, vec![states.clone()])
+            .unwrap()
+    };
+    let root = [dag.roots[0] as u64];
+    let Some(stored) = stored else {
+        return run(&compile(&dag, &views, &root).unwrap(), state_store(), query);
+    };
+    let outputs = run(
+        &compile(&dag, &views[..1], &[stored]).unwrap(),
+        state_store(),
+        ingestion,
+    );
+    assert_eq!(outputs.len(), 1);
+    let store = InMemoryDataStore::default()
+        .with_materialized_view(stored as usize, outputs)
+        .unwrap();
+    run(&compile(&dag, &views[1..], &root).unwrap(), store, query)
+}
+
+/// Rate evaluations and grouped Sum can run together at ingestion into a
+/// stored Sum state, which answers as the query-time Rate→Sum over the stored
+/// Rate state. Moving Sum before Rate would answer differently across
+/// counter resets.
 #[test]
 fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     let dag = grouped_rate();
@@ -99,19 +123,6 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
                     ..
                 })
             )
-        })
-        .unwrap();
-    let evaluation = dag
-        .nodes
-        .iter()
-        .find(|node| {
-            matches!(
-                node.payload,
-                PhysicalASAPOperatorPayload::ASAP(ASAPOp::FinalizeExactAccumulator { .. })
-            ) && dag
-                .edges
-                .iter()
-                .any(|edge| edge.producer == state.id && edge.consumer == node.id)
         })
         .unwrap();
     let input_schema = Arc::new(state.output_schema.clone());
@@ -169,166 +180,39 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         })
         .collect();
     let batch = Batch::try_new(input_schema.clone(), rows).unwrap();
-    let root = dag.roots[0] as u64;
     let state_id = state.id as u64;
-    let rate_id = evaluation.id as u64;
-    let frontiers = asap_executor::physical_planner::enumerate_frontiers(
-        &dag,
-        &BTreeSet::from([state_id]),
-        &[root],
-        128,
-    )
-    .unwrap();
-    assert!(frontiers.contains(&vec![]));
-    assert!(frontiers.contains(&vec![rate_id]));
-    assert!(frontiers.contains(&vec![root]));
-    assert!(!frontiers.contains(&vec![root, rate_id]));
-    assert!(asap_executor::physical_planner::enumerate_frontiers(
-        &dag,
-        &BTreeSet::from([state_id]),
-        &[root],
-        1,
-    )
-    .is_err());
-    let candidates = compile_candidates(
-        &dag,
-        &BTreeSet::from([state_id]),
-        &[root],
-        &[vec![], vec![rate_id], vec![root]],
-    );
-    // Scoped cost fixtures select either precompute boundary. No readers are
-    // opened during candidate construction or selection.
-    for prefer_grouped in [false, true] {
-        let inventory = compile_candidates(
-            &dag,
-            &BTreeSet::from([state_id]),
-            &[root],
-            &[vec![999], vec![rate_id], vec![root]],
-        );
-        assert!(inventory[0].is_err());
-        let mut evaluated = 0;
-        let selected = select_candidate(inventory, |candidate| {
-            evaluated += 1;
-            let grouped = candidate.materialized_outputs.contains_key(&root);
-            Ok(Some(CandidateCost {
-                workload_scope: "reset-counter-workload".into(),
-                horizon_seconds: 300.,
-                total_cost: if grouped == prefer_grouped { 1. } else { 100. },
-            }))
+    let sum_id = dag
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
+                    family: FieldDataType::ExactAggregate(ExactKind::Sum, _),
+                    ..
+                })
+            )
         })
-        .unwrap();
-        assert_eq!(
-            selected.candidate.materialized_outputs.contains_key(&root),
-            prefer_grouped
-        );
-        assert_eq!(selected.cost.total_cost, 1.);
-        assert_eq!(evaluated, 2, "uncompilable candidates must never be priced");
-        let candidate = selected.candidate;
-        let precompute = candidate.precompute.as_ref().unwrap();
-        let stored = run(
-            precompute,
-            BTreeMap::from([(state_id, batch.clone())]),
-            Scope::Ingestion {
-                window_start_ms: -58_000,
-                window_end_ms: 2000,
-            },
-        );
-        let output = run(
-            &candidate.query,
-            BTreeMap::from([(precompute.roots()[0], stored[0].clone())]),
-            Scope::Query {
-                evaluation_time_ms: 2000,
-            },
-        );
-        assert!(
-            matches!(output[0].to_rows()[0][1], Value::Float64(value) if value == expected_rate_sum)
-        );
-    }
-    let contracts = BTreeSet::from([state_id]);
-    for frontier in [vec![rate_id, rate_id], vec![root, rate_id], vec![999]] {
-        assert!(asap_executor::physical_planner::compile_candidate(
-            &dag,
-            &contracts,
-            &[root],
-            &frontier
-        )
-        .is_err());
-    }
-    let inventory = compile_candidates(&dag, &contracts, &[root], &[vec![rate_id], vec![root]]);
-    let selected = select_candidate(inventory, |candidate| {
-        if candidate.materialized_outputs.contains_key(&root) {
-            return Ok(None);
-        }
-        Ok(Some(CandidateCost {
-            workload_scope: "same-workload".into(),
-            horizon_seconds: 300.,
-            total_cost: 100.,
-        }))
-    })
-    .unwrap();
-    assert!(selected
-        .candidate
-        .materialized_outputs
-        .contains_key(&rate_id));
-    let inventory = compile_candidates(&dag, &contracts, &[root], &[vec![rate_id], vec![root]]);
-    assert!(
-        select_candidate(inventory, |candidate| Ok(Some(CandidateCost {
-            workload_scope: "same-workload".into(),
-            horizon_seconds: if candidate.materialized_outputs.contains_key(&root) {
-                60.
-            } else {
-                300.
-            },
-            total_cost: 1.,
-        })))
-        .is_err()
-    );
-    let query_scope = Scope::Query {
-        evaluation_time_ms: 2000,
-    };
-    let maintenance_scope = Scope::Ingestion {
+        .unwrap()
+        .id as u64;
+    let ingestion = Scope::Ingestion {
         window_start_ms: -58_000,
         window_end_ms: 2000,
     };
+    let query = Scope::Query {
+        evaluation_time_ms: 2000,
+    };
     let mut results = vec![];
-    for candidate in candidates {
-        let candidate = candidate.unwrap();
-        let inputs = if let Some(precompute) = &candidate.precompute {
-            let source = MemorySource::new(batch.schema().clone(), vec![batch.clone()]).unwrap();
-            let data_sources = BindingDataSources {
-                materialized_views: BTreeMap::from([(
-                    state_id,
-                    Arc::new(source) as Arc<dyn TableProvider>,
-                )]),
-                ..Default::default()
-            };
-            let invalid = precompute.instantiate(&data_sources).unwrap();
-            let context = RunContext::new(
-                Scope::Ingestion {
-                    window_start_ms: 0,
-                    window_end_ms: 2000,
-                },
-                Limits::default(),
-            )
-            .unwrap();
-            assert!(invalid.execute(precompute.roots(), context).is_err());
-            let stored = run(
-                precompute,
-                BTreeMap::from([(state_id, batch.clone())]),
-                maintenance_scope.clone(),
-            );
-            assert_eq!(stored.len(), 1);
-            let boundary = precompute.roots()[0];
-            assert_eq!(
-                candidate.materialized_outputs[&boundary],
-                *stored[0].schema()
-            );
-            BTreeMap::from([(boundary, stored[0].clone())])
-        } else {
-            BTreeMap::from([(state_id, batch.clone())])
-        };
-        let output = run(&candidate.query, inputs, query_scope.clone());
-        assert_eq!(output.len(), 1);
+    for stored in [None, Some(sum_id)] {
+        let output = answer(
+            &dag,
+            state_id,
+            &batch,
+            stored,
+            ingestion.clone(),
+            query.clone(),
+        );
+        assert_eq!(output.len(), 1, "{stored:?}");
         assert_eq!(output[0].to_rows().len(), 1);
         assert!(matches!(&output[0].to_rows()[0][0], Value::Utf8(job) if job.as_ref() == "api"));
         assert!(
@@ -342,7 +226,6 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         );
     }
     assert_eq!(results[0], results[1]);
-    assert_eq!(results[1], results[2]);
     let mut wrong_order = create_planner_accumulator(family, update, grouping).unwrap();
     for (i, value) in [200., 200., 100.].into_iter().enumerate() {
         wrong_order.update_single(value, i as i64 * 1000).unwrap();
@@ -361,43 +244,8 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     );
 }
 
-/// Enumerated frontiers include both grouped-result and per-series evaluation
-/// persistence; an explicit Rate-state input retains its original semantics.
-#[test]
-fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
-    use asap_executor::physical_planner::enumerate_frontiers;
-    let dag = grouped_rate();
-    let state = dag
-        .nodes
-        .iter()
-        .find(|node| {
-            matches!(
-                &node.payload,
-                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
-                    family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
-                    ..
-                })
-            )
-        })
-        .unwrap();
-    let inputs = BTreeSet::from([state.id as u64]);
-    let roots = [dag.roots[0] as u64];
-    let frontiers = enumerate_frontiers(&dag, &inputs, &roots, 4096).unwrap();
-    let candidates = compile_candidates(&dag, &inputs, &roots, &frontiers)
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert!(candidates.iter().any(|c| c.precompute.is_none()));
-    assert!(candidates
-        .iter()
-        .any(|c| c.materialized_outputs.contains_key(&roots[0])));
-    assert!(candidates
-        .iter()
-        .any(|c| !c.materialized_outputs.is_empty()
-            && !c.materialized_outputs.contains_key(&roots[0])));
-    assert!(enumerate_frontiers(&dag, &inputs, &roots, 1).is_err());
-}
-
+/// Every Pass 1 computation candidate of the grouped Rate answers a numeric
+/// value at query time, from the stored Rate state or a stored grouped Sum.
 #[test]
 fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
     let mut executed = 0;
@@ -428,12 +276,6 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
             })
             .map(|node| node.id as u64)
             .unwrap_or(dag.roots[0] as u64);
-        let physical_asap_dags = compile_candidates(
-            &dag,
-            &BTreeSet::from([state.id as u64]),
-            &[dag.roots[0] as u64],
-            &[vec![], vec![boundary]],
-        );
         let (family, input, grouping) = match &state.payload {
             PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
                 family,
@@ -480,29 +322,16 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
             })
             .collect();
         let batch = Batch::try_new(schema, rows).unwrap();
-        for physical in physical_asap_dags {
-            let physical = physical.unwrap();
-            let inputs = if let Some(precompute) = &physical.precompute {
-                let source_id = precompute.input_slots().next().unwrap().0;
-                let stored = run(
-                    precompute,
-                    BTreeMap::from([(source_id, batch.clone())]),
-                    Scope::Ingestion {
-                        window_start_ms: 0,
-                        window_end_ms: 60_000,
-                    },
-                );
-                assert_eq!(stored.len(), 1);
-                BTreeMap::from([(precompute.roots()[0], stored[0].clone())])
-            } else {
-                BTreeMap::from([(
-                    physical.query.input_slots().next().unwrap().0,
-                    batch.clone(),
-                )])
-            };
-            let output = run(
-                &physical.query,
-                inputs,
+        for stored in [None, Some(boundary)] {
+            let output = answer(
+                &dag,
+                state.id as u64,
+                &batch,
+                stored,
+                Scope::Ingestion {
+                    window_start_ms: 0,
+                    window_end_ms: 60_000,
+                },
                 Scope::Query {
                     evaluation_time_ms: 60_000,
                 },
@@ -528,187 +357,4 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
         executed >= 2,
         "must execute both stored and query-time grouped Rate candidates: {executed}"
     );
-}
-
-/// The per-frontier lowering used before compile-once cuts: each boundary
-/// choice lowers the precompute and query DAGs from the logical DAG again.
-fn recompiled_candidate(
-    dag: &PhysicalASAPDAG,
-    inputs: &BTreeSet<u64>,
-    roots: &[u64],
-    frontier: &[u64],
-) -> Result<CompiledPhysicalPlan, asap_executor::Error> {
-    if frontier.is_empty() {
-        return Ok(CompiledPhysicalPlan {
-            precompute: None,
-            query: compile(dag, inputs, roots)?,
-            materialized_outputs: BTreeMap::new(),
-        });
-    }
-    let precompute = compile(dag, inputs, frontier)?;
-    let mut materialized_outputs = BTreeMap::new();
-    for &id in frontier {
-        materialized_outputs.insert(id, precompute.output_schema(id)?);
-    }
-    let mut query_inputs = inputs.clone();
-    query_inputs.extend(frontier);
-    Ok(CompiledPhysicalPlan {
-        precompute: Some(precompute),
-        query: compile(dag, &query_inputs, roots)?,
-        materialized_outputs,
-    })
-}
-
-fn assert_cuts_match_recompilation(
-    dag: &PhysicalASAPDAG,
-    inputs: BTreeSet<u64>,
-    roots: &[u64],
-    min_frontiers: usize,
-) {
-    let compiled = compile(dag, &inputs, roots).unwrap();
-    let frontiers = enumerate_frontiers(dag, &inputs, roots, 4096).unwrap();
-    assert!(frontiers.len() >= min_frontiers, "{frontiers:?}");
-    for frontier in &frontiers {
-        let cut = cut_candidate(&compiled, frontier).unwrap();
-        let expected = recompiled_candidate(dag, &inputs, roots, frontier).unwrap();
-        assert_eq!(
-            serde_json::to_vec(&cut).unwrap(),
-            serde_json::to_vec(&expected).unwrap(),
-            "{frontier:?}"
-        );
-    }
-}
-
-/// Every enumerated grouped Rate→Sum frontier (query-only, stored Rate,
-/// stored Sum) cuts to exactly the candidate that per-frontier lowering builds.
-#[test]
-fn grouped_rate_cuts_equal_per_frontier_compilation() {
-    let dag = grouped_rate();
-    let state = dag
-        .nodes
-        .iter()
-        .find(|node| {
-            matches!(
-                node.payload,
-                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })
-            )
-        })
-        .unwrap();
-    let inputs = BTreeSet::from([state.id as u64]);
-    assert_cuts_match_recompilation(&dag, inputs, &[dag.roots[0] as u64], 3);
-}
-
-/// Cuts of a DAG whose nodes lower to helper operators (current-series
-/// population read by Sort→Limit) keep the same operator IDs as recompilation.
-#[test]
-fn population_topk_cuts_equal_per_frontier_compilation() {
-    let workload = PlanningWorkload {
-        query_workload: QueryWorkload {
-            language: QueryLanguage::PromQL,
-            query_batch: Some(vec![BatchEntry {
-                query: Query("topk by(job)(1, m)".into()),
-                requirements: QueryRequirements {
-                    accuracy: AccuracyTarget::exact(),
-                    ..Default::default()
-                },
-                predictability: Predictability::Unknown,
-                invocations: 1,
-                execute_at: None,
-                range_evaluation: None,
-            }]),
-            repeating_queries: None,
-        },
-        data_workload: Some(DataWorkload::sampled_every(
-            ["m".to_string()],
-            DurationMs(60_000),
-        )),
-    };
-    let original = asap_frontend_promql::lower_promql_workload(&workload)
-        .unwrap()
-        .remove(0);
-    let root =
-        asap_executor::physical_planner::promql_rows::with_series_identity(&original).unwrap();
-    let selected = asap_logical_asap_optimization::test_support::population_over_selector(
-        &root,
-        planner_types::ir::operator::maintained_population::PopulationStatistic::TopK { k: 1 },
-        &["job"],
-    );
-    let dag = compile_physical_asap_dag(&selected).unwrap();
-    let raw = dag
-        .nodes
-        .iter()
-        .find(|node| {
-            matches!(
-                node.payload,
-                PhysicalASAPOperatorPayload::NonASAP(
-                    planner_types::ir::NonASAPOp::TimeRange { .. }
-                )
-            )
-        })
-        .unwrap();
-    let inputs = BTreeSet::from([raw.id as u64]);
-    let roots = [dag.roots[0] as u64];
-    let compiled = compile(&dag, &inputs, &roots).unwrap();
-    // The root reads its population through a Sort helper numbered by the root.
-    let helper = u64::MAX - (roots[0] << 16);
-    assert_eq!(compiled.operator_name(helper), Some("Sort"));
-    assert!(
-        cut_candidate(&compiled, &[helper]).is_err(),
-        "helper operators are not Planner boundaries"
-    );
-    assert_cuts_match_recompilation(&dag, inputs, &roots, 2);
-}
-
-/// Cuts reject frontiers that recompilation rejects: duplicates, inputs,
-/// unknown IDs, and an output shadowed by its descendant.
-#[test]
-fn cut_candidate_rejects_invalid_frontiers() {
-    let dag = grouped_rate();
-    let state = dag
-        .nodes
-        .iter()
-        .find(|node| {
-            matches!(
-                node.payload,
-                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { .. })
-            )
-        })
-        .unwrap();
-    let evaluation = dag
-        .nodes
-        .iter()
-        .find(|node| {
-            matches!(
-                node.payload,
-                PhysicalASAPOperatorPayload::ASAP(ASAPOp::FinalizeExactAccumulator { .. })
-            )
-        })
-        .unwrap();
-    let (state_id, rate_id, root) = (state.id as u64, evaluation.id as u64, dag.roots[0] as u64);
-    let inputs = BTreeSet::from([state_id]);
-    let compiled = compile(&dag, &inputs, &[root]).unwrap();
-    for frontier in [
-        vec![rate_id, rate_id],
-        vec![state_id],
-        vec![999],
-        vec![root, rate_id],
-    ] {
-        assert!(cut_candidate(&compiled, &frontier).is_err(), "{frontier:?}");
-        assert!(compile_candidate(&dag, &inputs, &[root], &frontier).is_err());
-    }
-}
-
-// A rejected composition must fail the assertion helper without relying on a planner bug.
-#[test]
-#[should_panic(expected = "does not compose")]
-fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
-    use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError;
-    common::require_composed_operator_candidates(vec![
-        asap_plan_selection::search::LogicalCandidate {
-            id: "invalid-composition".into(),
-            choice: Vec::new(),
-            roots: Err(PerComputationCandidateError::InvalidChoice),
-            pass2: None,
-        },
-    ]);
 }

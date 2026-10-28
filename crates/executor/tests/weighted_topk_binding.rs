@@ -1,22 +1,24 @@
-//! Planner output binds directly to the shared runtime at a declared rate-value frontier.
-use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
+//! Planner output binds directly to the shared runtime over raw counter samples.
+use asap_executor::sources::InMemoryDataStore;
 mod common;
 use asap_executor::{
-    physical_planner::compile,
+    physical_planner::{
+        compile,
+        promql_rows::{series_row, with_series_identity},
+    },
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
 use common::{compile_physical_asap_dag, computation_candidates};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
-use planner_types::ir::properties::{AccuracyTarget, *};
-use planner_types::ir::schema::{DataType, *};
+use planner_types::ir::properties::AccuracyTarget;
+use planner_types::ir::schema::*;
 use planner_types::ir::ASAPOp;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    rc::Rc,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, rc::Rc, sync::Arc};
+// The heap candidates of `topk by(job)(2, sum by(service, job)(rate(m[1m])))`
+// rank the summed per-series rates of raw counter samples bound at the
+// `Scan`, both maintained at ingestion and run at query time.
 #[test]
 fn planner_weighted_topk_binds_at_either_deployment_phase() {
     assert_weighted_binding(SketchAlgorithm::CmsWithHeap);
@@ -77,52 +79,49 @@ fn assert_weighted_binding(algorithm: SketchAlgorithm) {
         AccuracyTarget::max_error(0.1),
     )
     .unwrap();
+    // The per-series rate reads each raw series by its full identity.
+    let root = with_series_identity(&root).unwrap();
     let plan = confirmed_as_counter(heap_candidate(root, &algorithm));
     let dag = compile_physical_asap_dag(&plan).unwrap();
-    let rate_id_of = |dag: &PhysicalASAPDAG| {
-        let build=dag.nodes.iter().find(|node|matches!(&node.payload,PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {family:FieldDataType::Sketch(kind,_),..})if kind.algorithm()==&algorithm)).unwrap();
-        dag.edges
-            .iter()
-            .find(|edge| edge.consumer == build.id)
-            .unwrap()
-            .producer
-    };
-    let rate_id = rate_id_of(&dag);
-    let rates = Arc::new(
-        dag.nodes
-            .iter()
-            .find(|node| node.id == rate_id)
-            .unwrap()
-            .output_schema
-            .clone(),
-    );
+    let scan = dag
+        .nodes
+        .iter()
+        .find_map(|node| match &node.payload {
+            PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::Scan {
+                source,
+                ..
+            }) => Some((source.clone(), Arc::new(node.output_schema.clone()))),
+            _ => None,
+        })
+        .unwrap();
+    let (source, samples) = scan;
+    // One counter series per rate: two samples 32 s apart in `(0, 60 s]`,
+    // the first an increase above zero, so `rate(m[1m])` extrapolates to the
+    // whole minute and is exactly `increase / 32 s`. The two `auth` series
+    // differ in `instance`.
     let rows = [
-        ("auth", "api", 0.125),
-        ("auth", "api", 0.25),
-        ("checkout", "api", 0.3125),
-        ("search", "api", 0.0625),
-        ("ingest", "batch", 100.),
-        ("export", "batch", 80.),
-        ("cleanup", "batch", 20.),
+        ("auth", "api", "a", 0.125),
+        ("auth", "api", "b", 0.25),
+        ("checkout", "api", "a", 0.3125),
+        ("search", "api", "a", 0.0625),
+        ("ingest", "batch", "a", 100.),
+        ("export", "batch", "a", 80.),
+        ("cleanup", "batch", "a", 20.),
     ]
     .into_iter()
-    .map(|(service, job, value)| {
-        rates
-            .fields
-            .iter()
-            .map(|field| match field.name.as_str() {
-                "service" => Value::Utf8(service.into()),
-                "job" => Value::Utf8(job.into()),
-                "value" => Value::Float64(value),
-                _ => match field.dtype {
-                    FieldDataType::Plain(DataType::Timestamp) => Value::Timestamp(60_000),
-                    _ => panic!("unexpected rate column {field:?}"),
-                },
-            })
-            .collect()
+    .flat_map(|(service, job, instance, rate)| {
+        let labels = BTreeMap::from([
+            ("__name__".to_string(), "m".to_string()),
+            ("instance".to_string(), instance.to_string()),
+            ("job".to_string(), job.to_string()),
+            ("service".to_string(), service.to_string()),
+        ]);
+        let increase = rate * 32.;
+        [(14_000, increase), (46_000, 2. * increase)]
+            .map(|(ts, value)| series_row(&samples, &labels, ts, value).unwrap())
     })
     .collect();
-    let batch = Batch::try_new(rates.clone(), rows).unwrap();
+    let batch = Batch::try_new(samples.clone(), rows).unwrap();
     // The summaries `MatAtIngestion` run as data arrives; `NotMaterialized`
     // (the default) runs everything when the query does.
     for (placed, scope) in [
@@ -140,20 +139,11 @@ fn assert_weighted_binding(algorithm: SketchAlgorithm) {
             },
         ),
     ] {
-        let rate_id = rate_id_of(&placed);
-        let source = Arc::new(MemorySource::new(rates.clone(), vec![batch.clone()]).unwrap())
-            as Arc<dyn TableProvider>;
-        let compiled = compile(
-            &placed,
-            &BTreeSet::from([rate_id as u64]),
-            &[dag.roots[0] as u64],
-        )
-        .unwrap();
-        let data_sources = BindingDataSources {
-            materialized_views: BTreeMap::from([(rate_id as u64, source)]),
-            ..Default::default()
-        };
-        let physical_dag = compiled.instantiate(&data_sources).unwrap();
+        let compiled = compile(&placed, &[], &[dag.roots[0] as u64]).unwrap();
+        let store = InMemoryDataStore::default()
+            .with_raw_data(source.clone(), samples.clone(), vec![batch.clone()])
+            .unwrap();
+        let physical_dag = compiled.instantiate(Arc::new(store)).unwrap();
         let context = RunContext::new(scope, Limits::default()).unwrap();
         let output = block_on(async {
             let mut output = Vec::new();
@@ -270,272 +260,6 @@ fn rate_updates_cannot_enter_integer_heap_factory() {
     .is_err());
 }
 
-// A per-series rate feeds a heap sketch directly, without a grouped Sum
-// between Rate and TopK. Unreferenced labels still distinguish series
-// throughout Rate and heap evaluation. Pass 1 proves no sign for rate values,
-// and the runtime admits a Count-Min heap only over non-negative weights, so
-// only the Count Sketch heap runs.
-#[test]
-#[ignore = "direct TopK(rate(...)) does not generate the required CountSketchWithHeap candidate"]
-fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
-    use asap_executor::physical_planner::promql_rows::{
-        decode_series_identity, series_row, with_series_identity, SERIES_IDENTITY_COLUMN,
-    };
-    let logical = lower_promql(
-        "topk by(job)(2, rate(m[1m]))",
-        AccuracyTarget::max_error(0.1),
-    )
-    .unwrap();
-    let root = with_series_identity(&logical).unwrap();
-    for algorithm in [SketchAlgorithm::CountSketchWithHeap] {
-        let candidate = &heap_candidate(Rc::clone(&root), &algorithm);
-        let (source, ranked) =
-            asap_executor::physical_planner::promql_rows::compile_rate_ranking(candidate).unwrap();
-        assert!(matches!(
-            source.operator,
-            planner_types::ir::Operator::ASAP(
-                planner_types::ir::ASAPOp::FinalizeExactAccumulator { .. }
-            )
-        ));
-        assert_eq!(ranked.input_slots().count(), 1);
-        let encoded = String::from_utf8(serde_json::to_vec(&ranked).unwrap()).unwrap();
-        assert!(encoded.contains("PerGroupKeyedSummaryBuild"));
-        assert!(encoded.contains("KeyedEvaluation"));
-        assert!(
-            !encoded.contains("\"Rate\""),
-            "Rate must be supplied by its exact stored-state evaluation"
-        );
-        let dag = compile_physical_asap_dag(candidate).unwrap();
-        assert!(dag.nodes.iter().any(|node| matches!(&node.payload,
-            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if kind.algorithm() == &algorithm)));
-        let build = dag.nodes.iter().find(|node| matches!(&node.payload,
-            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if kind.algorithm() == &algorithm)).unwrap();
-        let input_id = dag
-            .edges
-            .iter()
-            .find(|edge| edge.consumer == build.id)
-            .unwrap()
-            .producer;
-        let schema = Arc::new(
-            dag.nodes
-                .iter()
-                .find(|node| node.id == input_id)
-                .unwrap()
-                .output_schema
-                .clone(),
-        );
-        let raw = dag
-            .nodes
-            .iter()
-            .find(|node| {
-                matches!(
-                    &node.payload,
-                    PhysicalASAPOperatorPayload::NonASAP(
-                        planner_types::ir::NonASAPOp::TimeRange { .. }
-                    )
-                )
-            })
-            .unwrap_or_else(|| panic!("no raw counter source: {dag:?}"));
-        let raw_schema = Arc::new(raw.output_schema.clone());
-        let raw_compiled = compile(
-            &dag,
-            &BTreeSet::from([raw.id as u64]),
-            &[dag.roots[0] as u64],
-        )
-        .unwrap();
-        // Each evaluation receives a complete raw window. A reset, a stopped
-        // series and an expired leader must not retain last run's heap weights.
-        for (end, series, expected) in [
-            (
-                60_000,
-                vec![
-                    ("auth", vec![10., 30., 50.]),
-                    ("checkout", vec![10., 50., 90.]),
-                    ("search", vec![10., 70., 130.]),
-                ],
-                vec![11. / 6., 8. / 3.],
-            ),
-            (
-                120_000,
-                vec![
-                    ("auth", vec![100., 10., 50.]),
-                    ("checkout", vec![100., 100., 100.]),
-                ],
-                vec![0., 1.25],
-            ),
-        ] {
-            let mut raw_rows = Vec::new();
-            for (service, samples) in series {
-                for (offset, value) in [10_000, 30_000, 50_000].into_iter().zip(samples) {
-                    raw_rows.push(
-                        series_row(
-                            &raw_schema,
-                            &BTreeMap::from([
-                                ("job".into(), "api".into()),
-                                ("service".into(), service.into()),
-                                ("unreferenced".into(), format!("{service}-extra")),
-                            ]),
-                            end - 60_000 + offset,
-                            value,
-                        )
-                        .unwrap(),
-                    );
-                }
-            }
-            let raw_batch = Batch::try_new(raw_schema.clone(), raw_rows).unwrap();
-            for scope in [
-                Scope::Ingestion {
-                    window_start_ms: end - 60_000,
-                    window_end_ms: end,
-                },
-                Scope::Query {
-                    evaluation_time_ms: end,
-                },
-            ] {
-                let source = Arc::new(
-                    MemorySource::new(raw_schema.clone(), vec![raw_batch.clone()]).unwrap(),
-                ) as Arc<dyn TableProvider>;
-                let data_sources = BindingDataSources {
-                    materialized_views: BTreeMap::from([(raw.id as u64, source)]),
-                    ..Default::default()
-                };
-                let physical_dag = raw_compiled.instantiate(&data_sources).unwrap();
-                let context = RunContext::new(scope, Limits::default()).unwrap();
-                let mut raw_scores = block_on(async {
-                    let mut scores = Vec::new();
-                    let mut stream = physical_dag
-                        .execute(&[dag.roots[0] as u64], context)
-                        .unwrap()
-                        .remove(0);
-                    while let Some(batch) = stream.next().await {
-                        let batch = batch.unwrap();
-                        for row in &batch.to_rows() {
-                            let column = batch
-                                .schema()
-                                .fields
-                                .iter()
-                                .position(|field| field.name == SERIES_IDENTITY_COLUMN)
-                                .unwrap();
-                            let Value::Utf8(encoded) = &row[column] else {
-                                panic!("identity lost");
-                            };
-                            let labels = decode_series_identity(encoded).unwrap();
-                            assert_eq!(labels["job"], "api");
-                            assert_eq!(
-                                labels["unreferenced"],
-                                format!("{}-extra", labels["service"])
-                            );
-                            assert!(row.iter().any(
-                                |value| matches!(value, Value::Timestamp(time) if *time == end)
-                            ));
-                            scores.extend(row.iter().filter_map(|value| match value {
-                                Value::Float64(value) => Some(*value),
-                                _ => None,
-                            }));
-                        }
-                    }
-                    scores
-                });
-                raw_scores.sort_by(f64::total_cmp);
-                assert_eq!(raw_scores.len(), expected.len());
-                for (actual, expected) in raw_scores.iter().zip(&expected) {
-                    assert!(
-                        (actual - expected).abs() < 1e-12,
-                        "raw counter semantics must precede heap ranking: {raw_scores:?}"
-                    );
-                }
-            }
-        }
-        let compiled = compile(
-            &dag,
-            &BTreeSet::from([input_id as u64]),
-            &[dag.roots[0] as u64],
-        )
-        .unwrap();
-        for (time, values, expected) in [
-            (
-                60_000,
-                vec![("auth", 3.), ("checkout", 2.), ("search", 1.)],
-                vec![2., 3.],
-            ),
-            (
-                61_000,
-                vec![("auth", 0.), ("checkout", 2.), ("search", 4.)],
-                vec![2., 4.],
-            ),
-            (62_000, vec![("auth", 0.), ("checkout", 2.)], vec![0., 2.]),
-        ] {
-            let rows = values
-                .into_iter()
-                .map(|(service, value)| {
-                    series_row(
-                        &schema,
-                        &BTreeMap::from([
-                            ("job".into(), "api".into()),
-                            ("service".into(), service.into()),
-                        ]),
-                        time,
-                        value,
-                    )
-                    .unwrap()
-                })
-                .collect();
-            let batch = Batch::try_new(schema.clone(), rows).unwrap();
-            for scope in [
-                Scope::Query {
-                    evaluation_time_ms: time,
-                },
-                Scope::Ingestion {
-                    window_start_ms: time - 60_000,
-                    window_end_ms: time,
-                },
-            ] {
-                let source =
-                    Arc::new(MemorySource::new(schema.clone(), vec![batch.clone()]).unwrap())
-                        as Arc<dyn TableProvider>;
-                let data_sources = BindingDataSources {
-                    materialized_views: BTreeMap::from([(input_id as u64, source)]),
-                    ..Default::default()
-                };
-                let physical_dag = compiled.instantiate(&data_sources).unwrap();
-                let context = RunContext::new(scope, Limits::default()).unwrap();
-                let mut scores = block_on(async {
-                    let mut scores = vec![];
-                    let mut stream = physical_dag
-                        .execute(&[dag.roots[0] as u64], context)
-                        .unwrap()
-                        .remove(0);
-                    while let Some(batch) = stream.next().await {
-                        let batch = batch.unwrap();
-                        for row in &batch.to_rows() {
-                            assert!(row.iter().any(
-                                |value| matches!(value, Value::Timestamp(actual) if *actual == time)
-                            ));
-                            scores.push(
-                                row.iter()
-                                    .find_map(|value| {
-                                        if let Value::Float64(value) = value {
-                                            Some(*value)
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .unwrap(),
-                            );
-                        }
-                    }
-                    scores
-                });
-                scores.sort_by(f64::total_cmp);
-                assert_eq!(
-                    scores, expected,
-                    "heap snapshots must not accumulate across evaluations"
-                );
-            }
-        }
-    }
-}
-
 /// `candidate` with every `SummaryAgg` `MatAtIngestion`, the materialization
 /// a continuously served query would get: each summary and every input it
 /// consumes run at ingestion time, the rest at query time. The candidate pins
@@ -568,204 +292,4 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
     let timed =
         apply_materialization_timings(&candidate, &assignment, &mut TimingMemo::new()).unwrap();
     planner_types::ir::physical_export::compile_physical_asap_dag(&timed).unwrap()
-}
-
-// A maintained heap over finalized per-series Rate is the fixed-window
-// placement: materialization timing, not a separate candidate, puts it in precompute.
-#[test]
-#[ignore = "direct TopK(rate(...)) does not generate the required CountSketchWithHeap candidate"]
-fn maintained_rate_heap_compiles_fixed_window_precompute() {
-    use asap_executor::physical_planner::{compile_candidate, promql_rows::with_series_identity};
-    let root = Rc::new(
-        with_series_identity(
-            &lower_promql(
-                "topk by(job)(2, rate(m[1m]))",
-                AccuracyTarget::max_error(0.1),
-            )
-            .unwrap(),
-        )
-        .unwrap(),
-    );
-    // Count Sketch only: Pass 1 proves no sign for rate values, so the
-    // runtime rejects a Count-Min heap over them.
-    let candidates = [heap_candidate(
-        Rc::clone(&root),
-        &SketchAlgorithm::CountSketchWithHeap,
-    )];
-    for root in candidates {
-        let dag = continuously_maintained_dag(&root);
-        let state = dag
-            .nodes
-            .iter()
-            .find(|node| {
-                matches!(
-                    &node.payload,
-                    PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
-                        family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
-                        ..
-                    })
-                )
-            })
-            .unwrap();
-        let heap = dag
-            .nodes
-            .iter()
-            .find(|node| {
-                matches!(
-                    &node.payload,
-                    PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
-                        family: FieldDataType::Sketch(..),
-                        ..
-                    })
-                )
-            })
-            .unwrap();
-        assert_eq!(heap.output_state.timing, ExecutionTiming::IngestionTime);
-        let physical = compile_candidate(
-            &dag,
-            &BTreeSet::from([state.id as u64]),
-            &[dag.roots[0] as u64],
-            &[heap.id as u64],
-        )
-        .unwrap();
-        let exported =
-            asap_executor::physical_planner::promql_rows::compile_fixed_window_rate_aggregation(
-                &dag,
-            )
-            .unwrap();
-        assert_eq!(
-            serde_json::to_vec(&exported).unwrap(),
-            serde_json::to_vec(&physical).unwrap()
-        );
-        // Execute the selected split across a state serialization boundary.
-        // Each run builds fresh weights from that window's counters.
-        let execute = |plan: &asap_executor::physical_planner::CompiledPhysicalDAG,
-                       input: Batch,
-                       scope: Scope| {
-            let id = plan.input_slots().next().unwrap().0;
-            let source = Arc::new(MemorySource::new(input.schema().clone(), vec![input]).unwrap())
-                as Arc<dyn TableProvider>;
-            let data_sources = BindingDataSources {
-                materialized_views: BTreeMap::from([(id, source)]),
-                ..Default::default()
-            };
-            let physical_dag = plan.instantiate(&data_sources).unwrap();
-            block_on(async {
-                let mut stream = physical_dag
-                    .execute(
-                        plan.roots(),
-                        RunContext::new(scope, Limits::default()).unwrap(),
-                    )
-                    .unwrap()
-                    .remove(0);
-                let mut batches = Vec::new();
-                while let Some(batch) = stream.next().await {
-                    batches.push((*batch.unwrap()).clone());
-                }
-                assert_eq!(batches.len(), 1);
-                batches.remove(0)
-            })
-        };
-        let (family, input, grouping) = match &state.payload {
-            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
-                family,
-                input,
-                grouping,
-                ..
-            }) => (family, input, grouping),
-            _ => unreachable!(),
-        };
-        for (end, samples, leader) in [
-            (
-                60_000,
-                [[0., 100., 200.], [0., 10., 20.], [0., 1., 2.]],
-                "a",
-            ),
-            (
-                120_000,
-                [[200., 200., 200.], [100., 0., 300.], [2., 3., 4.]],
-                "b",
-            ),
-        ] {
-            let schema = Arc::new(state.output_schema.clone());
-            let rows = samples
-                .into_iter()
-                .zip(["a", "b", "c"])
-                .map(|(samples, label)| {
-                    let mut accumulator =
-                        asap_executor::factory::create_planner_accumulator(family, input, grouping)
-                            .unwrap();
-                    for (offset, value) in [10_000, 30_000, 50_000].into_iter().zip(samples) {
-                        accumulator
-                            .update_single(value, end - 60_000 + offset)
-                            .unwrap();
-                    }
-                    let summary = Value::Summary {
-                        family: family.clone(),
-                        state: Arc::from(accumulator.into_accumulator()),
-                    };
-                    schema
-                        .fields
-                        .iter()
-                        .map(|field| match &field.dtype {
-                            FieldDataType::ExactAggregate(..) => summary.clone(),
-                            FieldDataType::Plain(DataType::Timestamp) => Value::Timestamp(end),
-                            FieldDataType::Plain(DataType::Utf8)
-                                if field.name == "$promql_series_identity" =>
-                            {
-                                Value::Utf8(
-                                    serde_json::to_string(&BTreeMap::from([
-                                        ("job", "api"),
-                                        ("instance", label),
-                                    ]))
-                                    .unwrap()
-                                    .into(),
-                                )
-                            }
-                            FieldDataType::Plain(DataType::Utf8) => Value::Utf8("api".into()),
-                            _ => panic!("unexpected state field {field:?}"),
-                        })
-                        .collect()
-                })
-                .collect();
-            let batch = Batch::try_new(schema, rows).unwrap();
-            let precompute = physical.precompute.as_ref().unwrap();
-            let heap = execute(
-                precompute,
-                batch,
-                Scope::Ingestion {
-                    window_start_ms: end - 60_000,
-                    window_end_ms: end,
-                },
-            );
-            let result = execute(
-                &physical.query,
-                heap,
-                Scope::Query {
-                    evaluation_time_ms: end,
-                },
-            );
-            let identity = result
-                .schema()
-                .fields
-                .iter()
-                .position(|f| f.name == "$promql_series_identity")
-                .unwrap();
-            let Value::Utf8(encoded) = &result.to_rows()[0][identity] else {
-                panic!()
-            };
-            let labels: BTreeMap<String, String> = serde_json::from_str(encoded).unwrap();
-            assert_eq!(labels["instance"], leader);
-            assert_eq!(result.to_rows().len(), 2);
-        }
-        let precompute =
-            String::from_utf8(serde_json::to_vec(&physical.precompute.unwrap()).unwrap()).unwrap();
-        assert!(precompute.contains("PerGroupKeyedSummaryBuild"));
-        assert!(precompute.contains("Rate"));
-        assert!(
-            !String::from_utf8(serde_json::to_vec(&physical.query).unwrap())
-                .unwrap()
-                .contains("PerGroupKeyedSummaryBuild")
-        );
-    }
 }

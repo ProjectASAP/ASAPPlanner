@@ -636,6 +636,37 @@ fn a_scan_window_is_the_union_of_its_readers_windows() {
     );
 }
 
+// A node above `m[5m]` and `m[1h] offset 10m` summarizes `(T - 70m, T]`,
+// the union of the windows below it; a node with no window below it, the
+// `Scan` itself, summarizes an unbounded window.
+#[test]
+fn a_view_window_is_the_union_of_the_windows_below_it() {
+    use asap_types::ir::physical_export::ScanWindow;
+    let minute_ms = 60_000;
+    let scan = series_scan();
+    let offset = asap_types::ir::operator::TimeShift {
+        offset_ms: 10 * minute_ms as i64,
+        at: None,
+    };
+    let both = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Concat {
+        children: vec![
+            window_over(&scan, 5 * minute_ms, None),
+            window_over(&scan, 60 * minute_ms, Some(offset)),
+        ],
+        discriminator_unique_key: None,
+    }))
+    .unwrap();
+    let (dag, scan_id) = exported_with_scan(vec![both]);
+    assert_eq!(
+        dag.view_window(dag.roots[0]),
+        ScanWindow::Within {
+            end_offset_ms: 0,
+            width_ms: 70 * minute_ms as i64,
+        }
+    );
+    assert_eq!(dag.view_window(scan_id), ScanWindow::Unbounded);
+}
+
 // A window under an `@` anchor is not a fixed span back from the evaluation
 // time, so the `Scan` it reads is read over an unbounded window.
 #[test]

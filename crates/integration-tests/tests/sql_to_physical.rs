@@ -4,7 +4,7 @@ mod physical_common;
 use asap_executor::{
     physical_planner::compile,
     runtime::{Limits, RunContext, Scope},
-    sources::{BindingDataSources, DataSources, MemorySource},
+    sources::InMemoryDataStore,
     values::{Batch, Value},
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
@@ -14,7 +14,7 @@ use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use futures::StreamExt;
 use physical_common::compile_physical_asap_dag;
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
 /// SQL filtering and grouped aggregation survive logical/physical lowering;
 /// rebinding the compiled DAG runs against new data rather than cached results.
@@ -51,12 +51,7 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
             .fields
             .iter()
             .all(|field| matches!(field.dtype, FieldDataType::Plain(_))));
-        let plan = compile(
-            &dag,
-            &BTreeSet::from([scan.id as u64]),
-            &[dag.roots[0] as u64],
-        )
-        .unwrap();
+        let plan = compile(&dag, &[], &[dag.roots[0] as u64]).unwrap();
         for multiplier in [1., 2.] {
             let rows = [
                 ("api", Some(2.)),
@@ -88,24 +83,14 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
             else {
                 unreachable!()
             };
-            let mut sources = DataSources::default();
-            sources
-                .register(
+            let store = InMemoryDataStore::default()
+                .with_raw_data(
                     source.clone(),
-                    Arc::new(
-                        MemorySource::new(
-                            schema.clone(),
-                            vec![Batch::try_new(schema.clone(), rows).unwrap()],
-                        )
-                        .unwrap(),
-                    ),
+                    schema.clone(),
+                    vec![Batch::try_new(schema.clone(), rows).unwrap()],
                 )
                 .unwrap();
-            let data_sources = BindingDataSources {
-                tables: sources,
-                ..Default::default()
-            };
-            let bound = plan.instantiate(&data_sources).unwrap();
+            let bound = plan.instantiate(Arc::new(store)).unwrap();
             let mut stream = bound
                 .execute(
                     plan.roots(),

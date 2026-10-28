@@ -1,18 +1,246 @@
 //! Compile, persist and rebind dynamic-label computation without deployment lowering.
 use asap_executor::expressions::binary::{BinaryOpKind, BinaryOperator};
-use asap_executor::sources::{BindingDataSources, MemorySource, TableProvider};
+use asap_executor::sources::InMemoryDataStore;
 use std::sync::Arc;
 
 use asap_executor::{
+    operators::{Expression, Operator, Reduction, SortKey},
     physical_planner::{promql_values::*, CompiledPhysicalDAG},
     runtime::{Limits, RunContext, Scope},
-    values::{Batch, Value},
+    values::{Batch, SchemaRef, Value},
+    Error,
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::{AggIntent, GroupKeys};
 use planner_types::ir::scalar::ColumnRef;
 
 use std::collections::BTreeMap;
+
+/// Lowered PromQL operators over input nodes `0..inputs`, which a run feeds
+/// with `Operator::source`s.
+#[derive(Clone)]
+struct Computation {
+    operators: BTreeMap<u64, (Vec<u64>, Operator)>,
+    root: u64,
+}
+
+/// `operators` chained over one input (node 0): operator `i` is node `i + 1`.
+fn unary(operators: Vec<Operator>) -> Computation {
+    let root = operators.len() as u64;
+    Computation {
+        operators: operators
+            .into_iter()
+            .enumerate()
+            .map(|(i, op)| ((i + 1) as u64, (vec![i as u64], op)))
+            .collect(),
+        root,
+    }
+}
+
+/// `operator` (node 2) over inputs 0 and 1, in operand order.
+fn binary_of(operator: Operator) -> Computation {
+    Computation {
+        operators: BTreeMap::from([(2, (vec![0, 1], operator))]),
+        root: 2,
+    }
+}
+
+/// PromQL `range_function(m[w])` over a matrix: dropping the metric name
+/// unless `preserve_metric_name`.
+fn compile_temporal(
+    intent: &AggIntent<ColumnRef>,
+    preserve_metric_name: bool,
+) -> Result<Computation, Error> {
+    let mut operators = vec![Operator::range_window(intent.clone())?];
+    if !preserve_metric_name {
+        operators.push(Operator::project(
+            vector_schema(),
+            vec![
+                (
+                    "labels".into(),
+                    Expression::LabelSet {
+                        column: 0,
+                        labels: vec![],
+                        without: true,
+                    },
+                ),
+                ("value".into(), Expression::Column(1)),
+            ],
+        )?);
+    }
+    Ok(unary(operators))
+}
+
+/// `histogram_quantile(q, buckets)`: `q` input 0, the buckets input 1.
+fn compile_histogram_quantile() -> Computation {
+    binary_of(Operator::histogram_quantile())
+}
+
+/// A PromQL binary operation; input 0 the left operand, 1 the right.
+fn compile_binary(
+    operator: &BinaryOperator,
+    return_bool: bool,
+    left_scalar: bool,
+    right_scalar: bool,
+) -> Result<Computation, Error> {
+    let schema = |scalar| match scalar {
+        true => scalar_schema(),
+        false => vector_schema(),
+    };
+    Ok(binary_of(Operator::vector_binary(
+        schema(left_scalar),
+        schema(right_scalar),
+        operator.clone(),
+        return_bool,
+    )?))
+}
+
+/// The vector's rows with a `group` column: their label set under `grouping`.
+fn grouped(grouping: &GroupKeys<ColumnRef>) -> Result<Operator, Error> {
+    let labels = grouping
+        .keys()
+        .iter()
+        .map(|key| match key {
+            ColumnRef::Named(label) => Ok(label.clone()),
+            _ => Err(Error::Invalid(
+                "vector grouping requires label names".into(),
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Operator::project(
+        vector_schema(),
+        vec![
+            ("labels".into(), Expression::Column(0)),
+            ("value".into(), Expression::Column(1)),
+            (
+                "group".into(),
+                Expression::LabelSet {
+                    column: 0,
+                    labels,
+                    without: grouping.is_without(),
+                },
+            ),
+        ],
+    )
+}
+
+/// The `(labels, value)` vector of `input`'s columns `labels` and `value`.
+fn vector_output(input: SchemaRef, labels: usize, value: usize) -> Result<Operator, Error> {
+    Operator::project(
+        input,
+        vec![
+            ("labels".into(), Expression::Column(labels)),
+            ("value".into(), Expression::ExactFloat64(value)),
+        ],
+    )
+}
+
+/// A PromQL vector aggregation `intent by|without (grouping) (v)`.
+fn compile_aggregate(
+    intent: &AggIntent<ColumnRef>,
+    grouping: &GroupKeys<ColumnRef>,
+) -> Result<Computation, Error> {
+    let project = grouped(grouping)?;
+    let reduction = match intent {
+        AggIntent::Sum { .. } => Reduction::Sum(1),
+        AggIntent::Avg { .. } => Reduction::Avg(1),
+        AggIntent::Count { .. } => Reduction::Count,
+        AggIntent::Min { .. } => Reduction::Min(1),
+        AggIntent::Max { .. } => Reduction::Max(1),
+        _ => return Err(Error::Invalid("unsupported vector aggregate".into())),
+    };
+    let aggregate =
+        Operator::aggregate(project.schema(), vec![2], vec![("value".into(), reduction)])?;
+    let output = vector_output(aggregate.schema(), 0, 1)?;
+    Ok(unary(vec![project, aggregate, output]))
+}
+
+/// A sort of the vector by value within each `grouping` group.
+fn compile_sort(descending: bool, grouping: &GroupKeys<ColumnRef>) -> Result<Computation, Error> {
+    let project = grouped(grouping)?;
+    let sort = Operator::sort(
+        project.schema(),
+        vec![SortKey {
+            column: 1,
+            descending,
+            nulls_first: false,
+        }],
+        vec![2],
+    )?;
+    let output = vector_output(sort.schema(), 0, 1)?;
+    Ok(unary(vec![project, sort, output]))
+}
+
+/// The first `n` rows after `offset` of each `grouping` group.
+fn compile_limit(
+    n: u64,
+    offset: u64,
+    grouping: &GroupKeys<ColumnRef>,
+) -> Result<Computation, Error> {
+    let project = grouped(grouping)?;
+    let limit = Operator::limit(project.schema(), n, offset, vec![2])?;
+    let output = vector_output(limit.schema(), 0, 1)?;
+    Ok(unary(vec![project, limit, output]))
+}
+
+/// PromQL `scalar(v)`.
+fn compile_vector_to_scalar() -> Result<Computation, Error> {
+    Ok(unary(vec![Operator::vector_to_scalar(vector_schema(), 1)?]))
+}
+
+/// Stored exact states of `family`, per series: `(labels, state)`.
+fn exact_state_schema(family: planner_types::ir::schema::FieldDataType) -> SchemaRef {
+    let mut schema = (*vector_schema()).clone();
+    schema.fields[1].dtype = family;
+    Arc::new(schema)
+}
+
+/// Merge stored exact panes per series and finalize them; a counter (`Rate`,
+/// `Increase`) over the `lookback_ms` window ending at the evaluation time.
+fn compile_exact_evaluation(
+    family: planner_types::ir::schema::FieldDataType,
+    lookback_ms: i64,
+    preserve_metric_name: bool,
+) -> Result<Computation, Error> {
+    use asap_executor::operators::SummaryEvaluation;
+    use asap_executor::summary_kernels::exact::ExactEvaluation;
+    use planner_types::ir::schema::{ExactKind, FieldDataType};
+    let FieldDataType::ExactAggregate(statistic, _) = family else {
+        return Err(Error::Invalid(
+            "exact evaluation requires an exact family".into(),
+        ));
+    };
+    let is_counter = matches!(statistic, ExactKind::Rate | ExactKind::Increase);
+    let merge = Operator::summary_merge(exact_state_schema(family), 1, vec![0])?;
+    let evaluation = Operator::evaluation(
+        merge.schema(),
+        1,
+        SummaryEvaluation::Exact(ExactEvaluation {
+            statistic,
+            lookback_ms: is_counter.then_some(lookback_ms),
+            offset_ms: 0,
+        }),
+    )?;
+    let project = Operator::project(
+        evaluation.schema(),
+        vec![
+            (
+                "labels".into(),
+                if preserve_metric_name {
+                    Expression::Column(0)
+                } else {
+                    Expression::LabelSet {
+                        column: 0,
+                        labels: vec![],
+                        without: true,
+                    }
+                },
+            ),
+            ("value".into(), Expression::ExactFloat64(1)),
+        ],
+    )?;
+    Ok(unary(vec![merge, evaluation, project]))
+}
 
 fn row(labels: &[(&str, &str)], value: f64) -> Vec<Value> {
     vec![
@@ -26,29 +254,28 @@ fn row(labels: &[(&str, &str)], value: f64) -> Vec<Value> {
         Value::Float64(value),
     ]
 }
-fn run(dag: CompiledPhysicalDAG, rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
-    run_inputs(dag, vec![Batch::try_new(vector_schema(), rows).unwrap()]).unwrap()
+fn run(computation: Computation, rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+    run_inputs(
+        computation,
+        vec![Batch::try_new(vector_schema(), rows).unwrap()],
+    )
+    .unwrap()
 }
-fn run_inputs(
-    dag: CompiledPhysicalDAG,
-    batches: Vec<Batch>,
-) -> Result<Vec<Vec<Value>>, asap_executor::Error> {
-    let sources = batches
-        .into_iter()
-        .enumerate()
-        .map(|(id, batch)| {
-            (
-                id as u64,
-                Arc::new(MemorySource::new(batch.schema().clone(), vec![batch]).unwrap())
-                    as Arc<dyn TableProvider>,
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let data_sources = BindingDataSources {
-        materialized_views: sources,
-        ..Default::default()
-    };
-    let bound = dag.instantiate(&data_sources).unwrap();
+/// `computation` with input `i` the source of `batches[i]`, at time 0.
+fn run_inputs(computation: Computation, batches: Vec<Batch>) -> Result<Vec<Vec<Value>>, Error> {
+    let mut operators = computation.operators;
+    for (id, batch) in batches.into_iter().enumerate() {
+        let source = Operator::source(batch.schema().clone(), vec![batch]).unwrap();
+        operators.insert(id as u64, (vec![], source));
+    }
+    let dag = CompiledPhysicalDAG::from_operators(operators, vec![computation.root]).unwrap();
+    execute(&dag)
+}
+/// The rows of `dag`'s root at time 0, over a store with no data.
+fn execute(dag: &CompiledPhysicalDAG) -> Result<Vec<Vec<Value>>, Error> {
+    let bound = dag
+        .instantiate(Arc::new(InMemoryDataStore::default()))
+        .unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
@@ -193,7 +420,7 @@ fn temporal_dag_uses_bound_window_without_recompilation() {
 // The quantile is an ordinary scalar input, and bucket labels are native computation.
 #[test]
 fn histogram_quantile_keeps_each_label_group() {
-    let dag = compile_histogram_quantile().unwrap();
+    let dag = compile_histogram_quantile();
     let buckets = vec![
         row(&[("job", "api"), ("le", "1")], 2.),
         row(&[("job", "api"), ("le", "2")], 4.),
@@ -210,102 +437,11 @@ fn histogram_quantile_keeps_each_label_group() {
     equal_rows(output, vec![row(&[("job", "api")], 1.5)]);
 }
 
-// Linking an ensemble preserves its shared producer and every selected operator.
-#[test]
-fn composed_ensemble_shares_a_producer_across_roots() {
-    use asap_executor::{runtime::OutputStream, sources::ScanRequest, values::SchemaRef};
-    use planner_types::ir::scalar::ArithmeticOpKind;
-    struct Counted {
-        source: MemorySource,
-        starts: Arc<std::sync::atomic::AtomicUsize>,
-    }
-    impl TableProvider for Counted {
-        fn schema(&self) -> SchemaRef {
-            self.source.schema()
-        }
-        fn boundedness(&self) -> asap_executor::plan::Boundedness {
-            self.source.boundedness()
-        }
-        fn scan(
-            &self,
-            request: &ScanRequest,
-            context: RunContext,
-        ) -> Result<OutputStream<'_, Batch>, asap_executor::Error> {
-            self.starts
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.source.scan(request, context)
-        }
-    }
-    let aggregate = compile_aggregate(
-        &AggIntent::Sum { col: None },
-        &GroupKeys::by(vec![ColumnRef::Named("job".into())]),
-    )
-    .unwrap();
-    let binary = compile_binary(
-        &BinaryOperator {
-            kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
-            vector_match: None,
-            checked_finite_division: false,
-            checked_relative_division: false,
-        },
-        false,
-        false,
-        false,
-    )
-    .unwrap();
-    let dag = CompiledPhysicalDAG::compose(
-        BTreeMap::from([(0, vector_schema())]),
-        BTreeMap::from([
-            (10, (vec![0], aggregate)),
-            (20, (vec![10, 10], binary)),
-            (30, (vec![10], compile_negate(false).unwrap())),
-        ]),
-        vec![20, 30],
-    )
-    .unwrap();
-    assert_eq!(dag.input_slots().count(), 1);
-    let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    for _ in 0..2 {
-        let input = Batch::try_new(vector_schema(), vec![row(&[("job", "api")], 3.)]).unwrap();
-        let source = Counted {
-            source: MemorySource::new(vector_schema(), vec![input]).unwrap(),
-            starts: starts.clone(),
-        };
-        let data_sources = BindingDataSources {
-            materialized_views: BTreeMap::from([(0, Arc::new(source) as Arc<dyn TableProvider>)]),
-            ..Default::default()
-        };
-        let bound = dag.instantiate(&data_sources).unwrap();
-        let context = RunContext::new(
-            Scope::Query {
-                evaluation_time_ms: 0,
-            },
-            Limits {
-                max_buffered_batches: 1,
-                ..Limits::default()
-            },
-        )
-        .unwrap();
-        let results = block_on(futures::future::join_all(
-            bound
-                .execute(dag.roots(), context)
-                .unwrap()
-                .into_iter()
-                .map(|mut stream| async move {
-                    stream.next().await.unwrap().unwrap().to_rows().to_vec()
-                }),
-        ));
-        equal_rows(results[0].clone(), vec![row(&[("job", "api")], 6.)]);
-        equal_rows(results[1].clone(), vec![row(&[("job", "api")], -3.)]);
-    }
-    assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 2);
-}
-
 #[test]
 fn compiled_constant_needs_no_deployment_source() {
     let dag = compile_scalar(3.).unwrap();
     assert_eq!(dag.input_slots().count(), 0);
-    let result = run_inputs(dag, vec![]).unwrap();
+    let result = execute(&dag).unwrap();
     assert!(matches!(result[0][0], Value::Float64(3.)));
 }
 
@@ -423,7 +559,7 @@ fn exact_state_evaluations_recover_and_finalize_panes() {
                 .collect();
             let output = run_inputs(
                 compile_exact_evaluation(family.clone(), 60_000, preserve).unwrap(),
-                vec![Batch::try_new(exact_state_schema(family.clone()).unwrap(), rows).unwrap()],
+                vec![Batch::try_new(exact_state_schema(family.clone()), rows).unwrap()],
             )
             .unwrap();
             let labels = if preserve {
@@ -471,7 +607,7 @@ fn recovered_exact_counter_uses_window_and_omits_insufficient_samples() {
             .collect();
         let output = run_inputs(
             compile_exact_evaluation(family.clone(), 60_000, false).unwrap(),
-            vec![Batch::try_new(exact_state_schema(family).unwrap(), rows).unwrap()],
+            vec![Batch::try_new(exact_state_schema(family), rows).unwrap()],
         )
         .unwrap();
         equal_rows(output, vec![row(&[("instance", "two")], expected)]);

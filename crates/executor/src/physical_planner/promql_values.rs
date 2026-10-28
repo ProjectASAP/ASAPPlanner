@@ -18,8 +18,5 @@ pub fn compile_scalar(value: f64) -> Result<CompiledPhysicalDAG, Error> {
         planner_types::ir::schema::DataType::Float64,
     )?
     .with_output_schema(scalar_schema())?;
-    CompiledPhysicalDAG::from_operators(
-        BTreeMap::from([(0, (vec![], operator))]),
-        vec![0],
-    )
+    CompiledPhysicalDAG::from_operators(BTreeMap::from([(0, (vec![], operator))]), vec![0])
 }

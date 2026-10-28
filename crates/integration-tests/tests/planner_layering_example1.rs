@@ -631,25 +631,15 @@ fn stage2_physical_asap_optimization_materializes_only_panes_at_ingestion() {
 }
 
 /// Compile `p` in the physical planner (the runtime capability check), with
-/// the samples each time range reads as its input.
+/// its materialized views as view slots and every `Scan` as raw data.
 fn compile_in_runtime(p: &Physical) -> Result<(), String> {
     use asap_executor::physical_planner::compile;
-    let dag = p.dag();
-    let mut inputs = BTreeSet::new();
-    let mut pending = dag.roots.clone();
-    let mut seen = HashSet::new();
-    while let Some(id) = pending.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
-        if relational(dag.payload(id)).as_deref() == Some("time_range") {
-            inputs.insert(id as u64);
-        } else {
-            pending.extend(dag.producers(id));
-        }
-    }
+    let mut dag = p.dag().clone();
+    let views = dag
+        .set_retention(&Default::default(), &Default::default(), None)
+        .map_err(|e| format!("{}: {e}", p.id))?;
     let roots: Vec<u64> = dag.roots.iter().map(|&id| id as u64).collect();
-    compile(dag, &inputs, &roots)
+    compile(&dag, &views, &roots)
         .map(|_| ())
         .map_err(|e| format!("{}: {e}", p.id))
 }

@@ -6,14 +6,14 @@
 //! (KLL), and its coverage is the direct build's.
 mod physical_common;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use asap_executor::{
     physical_planner::compile,
     runtime::{Limits, RunContext, Scope},
-    sources::{BindingDataSources, DataSources, MemorySource},
+    sources::InMemoryDataStore,
     values::{Batch, Value},
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
@@ -99,12 +99,7 @@ fn execute(root: &Rc<OperatorNode>) -> BTreeMap<String, f64> {
         unreachable!()
     };
     let schema = Arc::new(scan.output_schema.clone());
-    let plan = compile(
-        &dag,
-        &BTreeSet::from([scan.id as u64]),
-        &[dag.roots[0] as u64],
-    )
-    .unwrap();
+    let plan = compile(&dag, &[], &[dag.roots[0] as u64]).unwrap();
     let table: Vec<Vec<Value>> = rows()
         .into_iter()
         .map(|(region, job, latency, user)| {
@@ -117,24 +112,14 @@ fn execute(root: &Rc<OperatorNode>) -> BTreeMap<String, f64> {
             ]
         })
         .collect();
-    let mut sources = DataSources::default();
-    sources
-        .register(
+    let store = InMemoryDataStore::default()
+        .with_raw_data(
             source.clone(),
-            Arc::new(
-                MemorySource::new(
-                    schema.clone(),
-                    vec![Batch::try_new(schema.clone(), table).unwrap()],
-                )
-                .unwrap(),
-            ),
+            schema.clone(),
+            vec![Batch::try_new(schema.clone(), table).unwrap()],
         )
         .unwrap();
-    let data_sources = BindingDataSources {
-        tables: sources,
-        ..Default::default()
-    };
-    let bound = plan.instantiate(&data_sources).unwrap();
+    let bound = plan.instantiate(Arc::new(store)).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,

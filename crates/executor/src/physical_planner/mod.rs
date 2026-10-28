@@ -10,10 +10,10 @@ use crate::{
     values::{Batch, SchemaRef},
     Error,
 };
+use planner_types::ir::materialized_view::MaterializedView;
 use planner_types::ir::operator::{
     agg_has_exact_per_entity_kernel, AggIntent, GroupKeys, Reduction as PlannerReduction,
 };
-use planner_types::ir::materialized_view::MaterializedView;
 use planner_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
     PhysicalASAPOperatorPayload as Payload, ScanWindow,
@@ -44,7 +44,6 @@ pub mod promql_rows;
 #[cfg(not(feature = "test-support"))]
 pub(crate) mod promql_rows;
 pub mod promql_values;
-
 
 mod compiled;
 pub use compiled::CompiledPhysicalDAG;
@@ -1658,18 +1657,50 @@ pub mod test_support {
     use std::collections::HashMap;
 
     /// The materialized views at `nodes`, in that order: each node that is
-    /// not a view is marked `MatAtIngestion`, and every view's
-    /// `retention_ms` is set ([`PhysicalASAPDAG::set_retention`]) with no
-    /// pane or range-evaluation span. For tests that bind states at those
-    /// nodes, as a deployment binds its views.
+    /// not a view is marked `MatAtIngestion`, and it and every node below it
+    /// run at ingestion time (their outputs and outgoing edges); then every
+    /// view's `retention_ms` is set ([`PhysicalASAPDAG::set_retention`])
+    /// with no pane or range-evaluation span. For tests that bind states at
+    /// those nodes, as a deployment binds its views.
     pub fn views_at(
         dag: &mut PhysicalASAPDAG,
         nodes: &[NodeId],
     ) -> Result<Vec<MaterializedView>, Error> {
+        use planner_types::ir::properties::ExecutionTiming;
+        let mut producers: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for edge in &dag.edges {
+            producers
+                .entry(edge.consumer as NodeId)
+                .or_default()
+                .push(edge.producer as NodeId);
+        }
+        let marked: Vec<NodeId> = dag
+            .nodes
+            .iter()
+            .filter(|node| {
+                nodes.contains(&(node.id as NodeId)) && !node.materialization.is_materialized_view()
+            })
+            .map(|node| node.id as NodeId)
+            .collect();
+        let mut at_ingestion = BTreeSet::new();
+        let mut pending = marked.clone();
+        while let Some(id) = pending.pop() {
+            if at_ingestion.insert(id) {
+                pending.extend(producers.get(&id).into_iter().flatten());
+            }
+        }
         for node in &mut dag.nodes {
-            if nodes.contains(&(node.id as NodeId)) && !node.materialization.is_materialized_view()
-            {
+            let id = node.id as NodeId;
+            if marked.contains(&id) {
                 node.materialization = Materialization::MatAtIngestion(Medium::Memory);
+            }
+            if at_ingestion.contains(&id) {
+                node.output_state.timing = ExecutionTiming::IngestionTime;
+            }
+        }
+        for edge in &mut dag.edges {
+            if at_ingestion.contains(&(edge.producer as NodeId)) {
+                edge.data_state.timing = ExecutionTiming::IngestionTime;
             }
         }
         let views = dag

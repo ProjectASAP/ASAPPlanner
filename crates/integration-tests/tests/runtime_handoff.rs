@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use asap_executor::physical_planner::{compile, frontier_from_timing};
+use asap_executor::physical_planner::compile;
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_planner::{
     e2e_plan, plan_installable, test_support::query_time_reference, FrontendInput,
@@ -15,7 +15,7 @@ use asap_types::ir::physical_export::{
     compile_physical_asap_workload, PhysicalASAPDAG, PhysicalASAPNodeId,
 };
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
+use asap_types::ir::{ASAPOp, Operator};
 use asap_types::physical::Materialization;
 use asap_types::workload::PlanningWorkload;
 
@@ -117,16 +117,6 @@ async fn installable(workload: &PlanningWorkload) -> InstallablePlan {
     installable_with_report(workload).await.0
 }
 
-/// The deployment's raw input slots: each raw `TimeRange` of `dag`, bound to
-/// the rows a runtime reads for the range it scans.
-fn raw_range_inputs(dag: &PhysicalASAPDAG) -> BTreeSet<u64> {
-    dag.nodes
-        .iter()
-        .filter(|n| matches!(n.payload, Operator::NonASAP(NonASAPOp::TimeRange { .. })))
-        .map(|n| n.id as u64)
-        .collect()
-}
-
 fn pane_chain_count(dag: &PhysicalASAPDAG) -> usize {
     dag.nodes
         .iter()
@@ -149,15 +139,16 @@ async fn installable_plan_has_its_pane_chains_expanded() {
     assert_eq!(pane_chain_count(dag), 0);
     assert_eq!(materialized_count(dag), views.len());
     let roots: Vec<u64> = dag.roots.iter().map(|&r| r as u64).collect();
-    compile(dag, &raw_range_inputs(dag), &roots).expect("the executor compiles it");
+    let compiled = compile(dag, &views, &roots).expect("the executor compiles it");
     assert_eq!(plan.query_texts.len(), 1);
     assert_eq!(
         plan.query_texts[0],
         "quantile_over_time(0.99, latency_ms[60m])"
     );
-    // The materialized views are exactly the ingestion frontier.
-    let refreshed: Vec<u64> = views.iter().map(|v| v.node_id as u64).collect();
-    assert_eq!(refreshed, frontier_from_timing(dag).unwrap());
+    // The query reads exactly the materialized views, and no raw data.
+    let refreshed: BTreeSet<u64> = views.iter().map(|v| v.node_id as u64).collect();
+    let slots: BTreeSet<u64> = compiled.input_slots().map(|(id, _)| id).collect();
+    assert_eq!(slots, refreshed);
     assert_pane_coverage(plan, dag.roots[0], 0, 3_600_000);
     assert!(
         plan.raw_data_retention().unwrap().is_empty(),

@@ -4,7 +4,7 @@
 //! selector's latest sample per series and Prometheus stale markers.
 use asap_executor::physical_planner::{compile, promql_rows};
 use asap_executor::runtime::{Limits, RunContext, Scope};
-use asap_executor::sources::{BindingDataSources, MemorySource};
+use asap_executor::sources::InMemoryDataStore;
 use asap_executor::values::{Batch, Value};
 use futures::{executor::block_on, StreamExt};
 use planner_types::ir::operator::{Source, TimeShift};
@@ -15,7 +15,7 @@ use planner_types::ir::{
     apply_materialization_timings, ExprSemantics, MaterializationAssignment, NonASAPOp, Operator,
     OperatorNode, Predicate, ScalarExpr, TimeRangeKind, TimingMemo,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -93,13 +93,13 @@ fn window_over_rows(
     compile_physical_asap_dag(&timed).unwrap()
 }
 
-/// `(instance, ts, value)` samples of `latency_ms` as a provider's rows.
-fn provider(samples: &[(&str, i64, f64)]) -> BindingDataSources {
+/// `(instance, ts, value)` samples of `latency_ms` as a store's raw data.
+fn provider(samples: &[(&str, i64, f64)]) -> InMemoryDataStore {
     provider_in_batches(&[samples])
 }
 
 /// [`provider`] returning one batch per element of `batches`, in order.
-fn provider_in_batches(batches: &[&[(&str, i64, f64)]]) -> BindingDataSources {
+fn provider_in_batches(batches: &[&[(&str, i64, f64)]]) -> InMemoryDataStore {
     let schema = Arc::new(series_schema());
     let batches = batches
         .iter()
@@ -117,17 +117,15 @@ fn provider_in_batches(batches: &[&[(&str, i64, f64)]]) -> BindingDataSources {
             Batch::try_new(schema.clone(), rows).unwrap()
         })
         .collect();
-    let mut data_sources = BindingDataSources::default();
-    data_sources
-        .tables
-        .register(
+    InMemoryDataStore::default()
+        .with_raw_data(
             Source::TimeSeries {
                 metric: "latency_ms".into(),
             },
-            Arc::new(MemorySource::new(schema, batches).unwrap()),
+            schema,
+            batches,
         )
-        .unwrap();
-    data_sources
+        .unwrap()
 }
 
 /// The `(ts, value)` rows `dag`'s root outputs in a run of `scope` over
@@ -137,16 +135,12 @@ fn points(dag: &PhysicalASAPDAG, samples: &[(&str, i64, f64)], scope: Scope) -> 
 }
 
 /// The `(ts, value)` rows `dag`'s root outputs in a run of `scope` with
-/// `data_sources` bound.
-fn points_of(
-    dag: &PhysicalASAPDAG,
-    data_sources: BindingDataSources,
-    scope: Scope,
-) -> Vec<(i64, f64)> {
+/// `store` bound.
+fn points_of(dag: &PhysicalASAPDAG, store: InMemoryDataStore, scope: Scope) -> Vec<(i64, f64)> {
     let roots = [dag.roots[0] as u64];
-    let bound = compile(dag, &BTreeSet::new(), &roots)
+    let bound = compile(dag, &[], &roots)
         .unwrap()
-        .instantiate(&data_sources)
+        .instantiate(Arc::new(store))
         .unwrap();
     let context = RunContext::new(scope, Limits::default()).unwrap();
     block_on(async {
@@ -165,9 +159,7 @@ fn points_of(
 }
 
 fn at(evaluation_time_ms: i64) -> Scope {
-    Scope::Query {
-        evaluation_time_ms,
-    }
+    Scope::Query { evaluation_time_ms }
 }
 
 // A range window `(T - w, T]` excludes a sample at its start and includes one
@@ -284,7 +276,7 @@ fn a_time_series_window_without_a_float_sample_value_does_not_compile() {
         TimeRangeKind::Instant,
         0,
     );
-    let error = compile(&dag, &BTreeSet::new(), &[dag.roots[0] as u64])
+    let error = compile(&dag, &[], &[dag.roots[0] as u64])
         .err()
         .expect("an Int64 sample value has no native time-series window");
     assert!(error.to_string().contains("Float64"), "{error}");

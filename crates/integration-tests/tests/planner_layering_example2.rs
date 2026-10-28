@@ -1083,10 +1083,9 @@ fn stage3_plan_selection_selected_plan_has_at_most_one_univmon() {
 fn stage3_plan_selection_selected_kmv_plan_executes_end_to_end() {
     use asap_executor::physical_planner::{compile, promql_rows};
     use asap_executor::runtime::Scope;
-    use asap_executor::values::{Batch, Value};
+    use asap_executor::values::Value;
     use asap_plan_selection::select_plan;
     use asap_plan_selection::PlanningModels;
-    use std::sync::Arc;
 
     let workload = standin_workload();
     let roots = lower_promql(&workload);
@@ -1120,32 +1119,19 @@ fn stage3_plan_selection_selected_kmv_plan_executes_end_to_end() {
         .map(|i| (i64::from(i) * 50, f64::from(i * 7 % distinct)))
         .collect();
     let labels = BTreeMap::from([("__name__".to_string(), "flows_src_ip".to_string())]);
+    // The whole plan runs at query time over the samples bound at its `Scan`.
     let dag = p.dag();
-    let mut inputs = BTreeSet::new();
-    let mut batches = BTreeMap::new();
-    for node in &dag.nodes {
-        if relational(&node.payload).as_deref() == Some("time_range") {
-            let schema = Arc::new(node.output_schema.clone());
-            let rows = samples
-                .iter()
-                .map(|(ts, v)| promql_rows::series_row(&schema, &labels, *ts, *v).unwrap())
-                .collect();
-            batches.insert(
-                node.id as u64,
-                Batch::try_new(schema.clone(), rows).unwrap(),
-            );
-            inputs.insert(node.id as u64);
-        }
-    }
+    let store = physical_common::raw_data_store(dag, |_, schema| {
+        samples
+            .iter()
+            .map(|(ts, v)| promql_rows::series_row(schema, &labels, *ts, *v).unwrap())
+            .collect()
+    });
     let q1 = p.query_roots[0] as u64;
-    let plan = compile(dag, &inputs, &[q1]).unwrap_or_else(|e| panic!("{}: {e}", p.id));
-    let batches = plan
-        .input_slots()
-        .map(|(id, _)| (id, batches[&id].clone()))
-        .collect();
+    let plan = compile(dag, &[], &[q1]).unwrap_or_else(|e| panic!("{}: {e}", p.id));
     let result = physical_common::execute(
         &plan,
-        batches,
+        store,
         Scope::Query {
             evaluation_time_ms: 55_000,
         },

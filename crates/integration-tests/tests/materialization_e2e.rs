@@ -1,22 +1,18 @@
 //! Materialization decides placement, not answers: the same selected DAG
 //! timed with its states `NotMaterialized` (everything at query time) and
-//! `MatAtIngestion` (states in precompute) executes to the same result.
+//! `MatAtIngestion` (materialized views refreshed at ingestion time)
+//! executes to the same result.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
-use std::sync::Arc;
 
-use asap_executor::physical_planner::{
-    compile_candidate, frontier_from_timing, promql_rows, CompiledPhysicalDAG,
-};
+use asap_executor::physical_planner::{compile, promql_rows};
 use asap_executor::runtime::Scope;
 use asap_executor::values::{Batch, SchemaRef, Value};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::{
     explicit_local_candidates, explicit_summary_candidate, selected_dag,
 };
-use asap_logical_asap_optimization::test_support::population_over_selector;
-use asap_types::ir::operator::maintained_population::{PopulationInput, PopulationStatistic};
 use asap_types::ir::operator::Source;
 use asap_types::ir::physical_export::{
     compile_physical_asap_dag, PhysicalASAPDAG, PhysicalASAPOperatorPayload,
@@ -112,79 +108,41 @@ fn floats(result: &[Vec<Batch>]) -> Vec<f64> {
         .collect()
 }
 
-/// Execute a timed DAG over one raw-source batch per `TimeRange`/`Scan`
-/// input (`batch(schema, metric)`): precompute (when there is one) over
-/// `ingestion`, then the query at `evaluation_time_ms`. Returns the root's
-/// values and the frontier.
+/// Execute a timed DAG over one raw-source batch per `Scan`
+/// (`batch(schema, metric)`): each materialized view refreshed in an
+/// ingestion run over `ingestion`, then the query at `evaluation_time_ms`
+/// reading the views' states. Returns the root's values and the views.
 fn execute(
     dag: &PhysicalASAPDAG,
     batch: &dyn Fn(&SchemaRef, &str) -> Batch,
     ingestion: Scope,
     evaluation_time_ms: i64,
 ) -> (Vec<f64>, Vec<u64>) {
-    let mut raw = BTreeMap::new();
-    for node in &dag.nodes {
-        if !matches!(
-            node.payload,
-            PhysicalASAPOperatorPayload::NonASAP(
-                NonASAPOp::TimeRange { .. } | NonASAPOp::Scan { .. }
-            )
-        ) {
-            continue;
-        }
-        let mut id = node.id;
-        loop {
-            let n = dag.nodes.iter().find(|n| n.id == id).unwrap();
-            if let PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan {
-                source: Source::TimeSeries { metric },
-                ..
-            }) = &n.payload
-            {
-                raw.insert(
-                    node.id as u64,
-                    (Arc::new(node.output_schema.clone()), metric.clone()),
-                );
-                break;
-            }
-            id = dag
-                .edges
-                .iter()
-                .find(|e| e.consumer == id)
-                .unwrap()
-                .producer;
-        }
-    }
-    let frontier = frontier_from_timing(dag).unwrap();
-    let candidate = compile_candidate(
-        dag,
-        &raw.keys().copied().collect(),
-        &[dag.roots[0] as u64],
-        &frontier,
-    )
-    .unwrap();
-    let raw_sources = |plan: &CompiledPhysicalDAG| {
-        plan.input_slots()
-            .filter_map(|(id, _)| raw.get(&id).map(|(schema, name)| (id, batch(schema, name))))
-            .collect::<BTreeMap<_, _>>()
+    let mut dag = dag.clone();
+    let views = dag
+        .set_retention(&HashMap::new(), &HashMap::new(), None)
+        .unwrap();
+    let raw = |dag: &PhysicalASAPDAG| {
+        physical_common::raw_data_store(dag, |source, schema| {
+            let Source::TimeSeries { metric } = source else {
+                panic!("a time series source")
+            };
+            batch(schema, metric).to_rows()
+        })
     };
-    let mut query_sources = raw_sources(&candidate.query);
-    if frontier.is_empty() {
-        assert!(candidate.precompute.is_none());
+    // Each view's ingestion run refreshes it from the raw data.
+    let mut store = raw(&dag);
+    for view in &views {
+        let refresh = compile(&dag, &[], &[view.node_id as u64]).unwrap();
+        let states = physical_common::execute(&refresh, raw(&dag), ingestion.clone()).remove(0);
+        store = store.with_materialized_view(view.node_id, states).unwrap();
     }
-    if let Some(precompute) = &candidate.precompute {
-        let stored = physical_common::execute(precompute, raw_sources(precompute), ingestion);
-        for (root, batches) in precompute.roots().iter().zip(stored) {
-            query_sources.insert(*root, batches[0].clone());
-        }
-    }
-    let result = physical_common::execute(
-        &candidate.query,
-        query_sources,
-        Scope::Query {
-            evaluation_time_ms,
-        },
-    );
-    (floats(&result), frontier)
+    let query = compile(&dag, &views, &[dag.roots[0] as u64]).unwrap();
+    let result = physical_common::execute(&query, store, Scope::Query { evaluation_time_ms });
+    (
+        floats(&result),
+        views.iter().map(|view| view.node_id as u64).collect(),
+    )
 }
 
 /// `(metric, job, seconds, value)` samples as one batch per metric.
@@ -230,8 +188,8 @@ fn values_1_to_100(schema: &SchemaRef, _metric: &str) -> Batch {
     Batch::try_new(schema.clone(), rows).unwrap()
 }
 
-/// `MatAtIngestion` puts the quantile's state in precompute;
-/// `NotMaterialized` leaves precompute empty and reads the raw source at
+/// `MatAtIngestion` puts the quantile's state in a materialized view;
+/// `NotMaterialized` has no view and reads the raw source at
 /// query time; both answer alike.
 #[test]
 fn materialization_decides_precompute_contents() {
@@ -252,7 +210,7 @@ fn materialization_decides_precompute_contents() {
     assert_eq!(answers[0], answers[1]);
 }
 
-/// Mixed placement in one DAG: one summary `MatAtIngestion` (in precompute)
+/// Mixed placement in one DAG: one summary `MatAtIngestion` (a materialized view)
 /// and the other `NotMaterialized` (built from the raw source at query
 /// time) answer like the all-query-time placement.
 #[test]
@@ -301,73 +259,6 @@ fn mixed_placement_answers_like_query_time() {
     assert_eq!(answers[1].1, 1);
     assert_eq!(answers[1].0.len(), 1);
     assert_eq!(answers[0].0, answers[1].0);
-}
-
-/// A maintained current-series population: `MatAtIngestion` stores it in
-/// precompute, `NotMaterialized` rebuilds it from the raw source at query
-/// time; both rank alike.
-#[test]
-fn population_materialization_decides_precompute_contents() {
-    let root = promql_rows::with_series_identity(
-        &lower_promql("topk by(job)(1, m)", AccuracyTarget::max_error(0.01)).unwrap(),
-    )
-    .unwrap();
-    let root = population_over_selector(&root, PopulationStatistic::TopK { k: 1 }, &["job"]);
-    let population = OperatorNode::reachable(&root)
-        .into_iter()
-        .find(|node| matches!(node.asap(), Some(ASAPOp::MaintainPopulation { .. })))
-        .expect("a maintained population");
-    let mut stored = MaterializationAssignment::default();
-    stored.set(&population, AT_INGESTION);
-    assert!(!states(&timed_dag(&root, &stored)).is_empty());
-    let mut answers = Vec::new();
-    for assignment in [MaterializationAssignment::default(), stored] {
-        let dag = timed_dag(&root, &assignment);
-        let lookback = dag
-            .nodes
-            .iter()
-            .find_map(|node| match &node.payload {
-                PhysicalASAPOperatorPayload::ASAP(ASAPOp::MaintainPopulation {
-                    population,
-                    ..
-                }) => match &population.input {
-                    PopulationInput::CurrentSeries(spec) => {
-                        Some(i64::try_from(spec.lookback_ms).unwrap())
-                    }
-                    _ => None,
-                },
-                _ => None,
-            })
-            .expect("current-series population");
-        let end = 60_000;
-        let batch = |schema: &SchemaRef, _: &str| {
-            let rows = [("a", end - 1, 100.), ("a", end, 1.), ("b", end, 20.)]
-                .into_iter()
-                .map(|(instance, at, value)| {
-                    promql_rows::series_row(
-                        schema,
-                        &BTreeMap::from([
-                            ("job".into(), "api".into()),
-                            ("instance".into(), instance.into()),
-                        ]),
-                        at,
-                        value,
-                    )
-                    .unwrap()
-                })
-                .collect();
-            Batch::try_new(schema.clone(), rows).unwrap()
-        };
-        let ingestion = Scope::Ingestion {
-            window_start_ms: end - lookback,
-            window_end_ms: end,
-        };
-        let (values, frontier) = execute(&dag, &batch, ingestion, end);
-        assert_eq!(frontier, states(&dag));
-        answers.push(values);
-    }
-    assert_eq!(answers[0], answers[1]);
-    assert_eq!(answers[0], [20.]);
 }
 
 /// Whether the DAG has an ingestion-time `BinaryOp`.

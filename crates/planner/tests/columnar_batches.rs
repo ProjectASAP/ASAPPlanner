@@ -1,11 +1,11 @@
 //! A runtime's samples reach the executor as Arrow columns (issue #762):
 //! the planner-layering #509 Example 4b plan, one pane built by the
-//! executor from a time-series provider whose batch the runtime built as
+//! executor from a time series' raw data whose batch the runtime built as
 //! Arrow columns, each series' identity stored once, through the public
 //! batch API only.
 
-use asap_executor::sources::{BindingDataSources, DataSources, MemorySource};
-use std::collections::{BTreeMap, BTreeSet};
+use asap_executor::sources::InMemoryDataStore;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arrow::array::{DictionaryArray, Float64Array, TimestampMillisecondArray};
@@ -131,24 +131,20 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
     let input = Batch::try_from_columns(schema.clone(), columns).unwrap();
     assert_eq!(input.num_rows(), expected_rows);
 
-    // The executor's pane build over the `latency_ms` provider bound at
+    // The executor's pane build over the `latency_ms` raw data bound at
     // the `Scan`; its `TimeRange` keeps the pane's window.
-    let compiled = compile(&plan.dag, &BTreeSet::new(), &[output.node_id as u64]).unwrap();
-    let mut tables = DataSources::default();
-    tables
-        .register(
+    let compiled = compile(&plan.dag, &[], &[output.node_id as u64]).unwrap();
+    let store = InMemoryDataStore::default()
+        .with_raw_data(
             Source::TimeSeries {
                 metric: "latency_ms".into(),
             },
-            Arc::new(MemorySource::new(schema, vec![input]).unwrap()),
+            schema,
+            vec![input],
         )
         .unwrap();
     // The build, ready to run in the pane's ingestion window.
-    let data_sources = BindingDataSources {
-        tables,
-        ..Default::default()
-    };
-    let build = compiled.instantiate(&data_sources).unwrap();
+    let build = compiled.instantiate(Arc::new(store)).unwrap();
     let context = RunContext::new(
         Scope::Ingestion {
             window_start_ms: start_ms,

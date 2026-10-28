@@ -268,52 +268,144 @@ fn a_merge_passing_stored_states_through_does_not_charge_them() {
     assert_eq!(rows.unwrap(), 2_000);
 }
 
-/// A deployment's own view provider (not `MemorySource`): returns `PANES`
-/// copies of one stored pane on every scan.
+/// A deployment's own data store (not `InMemoryDataStore`): returns `PANES`
+/// copies of one stored pane for every materialized view read.
 struct StoredPanes {
-    schema: Arc<Schema>,
     pane: Batch,
 }
-impl asap_executor::sources::TableProvider for StoredPanes {
-    fn schema(&self) -> Arc<Schema> {
-        self.schema.clone()
-    }
-    fn boundedness(&self) -> asap_executor::plan::Boundedness {
-        asap_executor::plan::Boundedness::Bounded
-    }
-    fn scan(
+impl asap_executor::sources::DataStore for StoredPanes {
+    fn read_raw_data(
         &self,
-        _: &asap_executor::sources::ScanRequest,
+        source: &asap_executor::planner::ir::operator::Source,
+        _: &asap_executor::sources::RawDataRequest,
+        _: RunContext,
+    ) -> Result<asap_executor::runtime::OutputStream<'_, Batch>, Error> {
+        Err(Error::Invalid(format!("no raw data {source:?}")))
+    }
+    fn read_materialized_view(
+        &self,
+        _: &asap_executor::planner::ir::materialized_view::MaterializedView,
+        _: &asap_executor::sources::MaterializedViewRequest,
         _: RunContext,
     ) -> Result<asap_executor::runtime::OutputStream<'_, Batch>, Error> {
         Ok(futures::stream::iter(vec![Ok(self.pane.clone()); PANES]).boxed_local())
     }
 }
 
-// A materialized view slot's states are the store's whatever provider returns them: the
-// merge over twelve stored panes from a deployment's own provider fits the
+/// `SummaryMerge` (node 1) over the materialized view of a pane (node 0):
+/// the pane's KLLs per series, built over a minute of raw samples of
+/// `latency` (`Scan` node 2, `TimeRange` node 3).
+fn merge_over_a_stored_pane(
+    schema: &Schema,
+) -> asap_executor::planner::ir::physical_export::PhysicalASAPDAG {
+    use asap_executor::planner::ir::operator::{GroupKeys, Reduction, Source};
+    use asap_executor::planner::ir::physical_export::{
+        EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge,
+        PhysicalASAPDAGNode, PhysicalASAPOperatorPayload as Payload, WindowEdgeCompatibility,
+    };
+    use asap_executor::planner::ir::properties::ExecutionDataState;
+    use asap_executor::planner::ir::scalar::ColumnRef;
+    use asap_executor::planner::ir::schema::{GroupingStrategy, SummaryUpdate};
+    use asap_executor::planner::ir::{ASAPOp, NonASAPOp, TimeRangeKind};
+    let samples = Schema::with_time_index(
+        vec![
+            Field::plain("series", DataType::Utf8, false),
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
+        ],
+        1,
+        vec![],
+    );
+    let node = |id, payload, output_schema: &Schema, output_state| PhysicalASAPDAGNode {
+        id,
+        payload,
+        output_schema: output_schema.clone(),
+        output_state,
+        materialization: Default::default(),
+        guarantee: None,
+        retention_ms: None,
+    };
+    let nodes = vec![
+        node(
+            0,
+            Payload::ASAP(ASAPOp::SummaryAgg {
+                child: 3,
+                family: schema.fields[1].dtype.clone(),
+                input: SummaryUpdate::column(ColumnRef::SampleValue),
+                reduction: Reduction::Reduce(GroupKeys::by(vec![0])),
+                grouping: GroupingStrategy::default(),
+                filter: None,
+            }),
+            schema,
+            ExecutionDataState::INGESTION_SUMMARY,
+        ),
+        node(
+            1,
+            Payload::ASAP(ASAPOp::SummaryMerge {
+                children: vec![0],
+                newest_panes: None,
+                group_by: None,
+            }),
+            schema,
+            ExecutionDataState::INGESTION_SUMMARY,
+        ),
+        node(
+            2,
+            Payload::NonASAP(NonASAPOp::Scan {
+                source: Source::TimeSeries {
+                    metric: "latency".into(),
+                },
+                schema: samples.clone(),
+                predicates: vec![],
+            }),
+            &samples,
+            ExecutionDataState::QUERY_ROWS,
+        ),
+        node(
+            3,
+            Payload::NonASAP(NonASAPOp::TimeRange {
+                range: std::time::Duration::from_secs(60),
+                kind: TimeRangeKind::Range,
+                child: 2,
+            }),
+            &samples,
+            ExecutionDataState::QUERY_ROWS,
+        ),
+    ];
+    let edges = [(2, 3), (3, 0), (0, 1)]
+        .into_iter()
+        .map(|(producer, consumer): (usize, usize)| PhysicalASAPDAGEdge {
+            producer,
+            consumer,
+            role: EdgeRole::Input,
+            intermediate_schema: nodes[producer].output_schema.clone(),
+            data_state: nodes[producer].output_state,
+            grouping: GroupingEdgeCompatibility::NotApplicable,
+            window: WindowEdgeCompatibility::NotApplicable,
+        })
+        .collect();
+    PhysicalASAPDAG {
+        nodes,
+        edges,
+        roots: vec![1],
+        scalar_roots: vec![],
+    }
+}
+
+// A materialized view slot's states are the store's whatever store returns them: the
+// merge over twelve stored panes from a deployment's own store fits the
 // 32 MiB limit, as it does over `Operator::source`.
 #[test]
 fn a_materialized_view_providers_states_are_not_charged_to_the_run() {
-    use asap_executor::physical_planner::CompiledPhysicalDAG;
-    use asap_executor::sources::{BindingDataSources, TableProvider};
-    use std::collections::BTreeMap;
+    use asap_executor::physical_planner::{compile, test_support::views_at};
     let (schema, pane) = pane();
-    let merge = Operator::summary_merge(schema.clone(), 1, vec![0]).unwrap();
-    let compiled = CompiledPhysicalDAG::from_operators(
-        BTreeMap::from([(0, schema.clone())]),
-        BTreeMap::from([(1, (vec![0], merge))]),
-        vec![1],
-    )
-    .unwrap();
-    let data_sources = BindingDataSources {
-        materialized_views: BTreeMap::from([(
-            0,
-            Arc::new(StoredPanes { schema, pane }) as Arc<dyn TableProvider>,
-        )]),
-        ..Default::default()
-    };
-    let dag = compiled.instantiate(&data_sources).unwrap();
+    let mut dag = merge_over_a_stored_pane(&schema);
+    let views = views_at(&mut dag, &[0]).unwrap();
+    let compiled = compile(&dag, &views, &[1]).unwrap();
+    assert_eq!(compiled.operator_name(0), Some("MaterializedView"));
+    let dag = compiled
+        .instantiate(Arc::new(StoredPanes { pane }))
+        .unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,

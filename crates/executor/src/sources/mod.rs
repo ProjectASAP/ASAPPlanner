@@ -122,17 +122,15 @@ impl Scan {
         if batch.schema() == &self.output {
             return Ok(batch);
         }
-        let same_columns = batch.schema().fields.len() == self.output.fields.len()
-            && batch
-                .schema()
-                .fields
-                .iter()
-                .zip(&self.output.fields)
-                .all(|(actual, expected)| {
-                    actual.name == expected.name
-                        && actual.dtype == expected.dtype
-                        && actual.nullable == expected.nullable
-                });
+        let same_columns =
+            batch.schema().fields.len() == self.output.fields.len()
+                && batch.schema().fields.iter().zip(&self.output.fields).all(
+                    |(actual, expected)| {
+                        actual.name == expected.name
+                            && actual.dtype == expected.dtype
+                            && actual.nullable == expected.nullable
+                    },
+                );
         if !same_columns {
             return Err(Error::Invalid(
                 "data store returned a batch in another schema than the slot's".into(),

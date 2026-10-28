@@ -2,14 +2,13 @@
 //! a query is a valid DAG with the query's output columns (names, types and
 //! nullability).
 
-use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use asap_executor::{
     physical_planner::compile,
     runtime::{Limits, RunContext, Scope},
-    sources::{BindingDataSources, DataSources, MemorySource},
+    sources::InMemoryDataStore,
     values::{Batch, Value},
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
@@ -331,12 +330,7 @@ fn execute(root: &Rc<OperatorNode>, rows: &[Vec<(&str, Value)>]) -> Vec<Vec<Stri
         unreachable!()
     };
     let schema = Arc::new(scan.output_schema.clone());
-    let plan = compile(
-        &dag,
-        &BTreeSet::from([scan.id as u64]),
-        &[dag.roots[0] as u64],
-    )
-    .unwrap();
+    let plan = compile(&dag, &[], &[dag.roots[0] as u64]).unwrap();
     let rows = rows
         .iter()
         .map(|row| {
@@ -352,24 +346,14 @@ fn execute(root: &Rc<OperatorNode>, rows: &[Vec<(&str, Value)>]) -> Vec<Vec<Stri
                 .collect()
         })
         .collect();
-    let mut sources = DataSources::default();
-    sources
-        .register(
+    let store = InMemoryDataStore::default()
+        .with_raw_data(
             source.clone(),
-            Arc::new(
-                MemorySource::new(
-                    schema.clone(),
-                    vec![Batch::try_new(schema.clone(), rows).unwrap()],
-                )
-                .unwrap(),
-            ),
+            schema.clone(),
+            vec![Batch::try_new(schema.clone(), rows).unwrap()],
         )
         .unwrap();
-    let data_sources = BindingDataSources {
-        tables: sources,
-        ..Default::default()
-    };
-    let bound = plan.instantiate(&data_sources).unwrap();
+    let bound = plan.instantiate(Arc::new(store)).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
