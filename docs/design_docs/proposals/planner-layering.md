@@ -403,9 +403,9 @@ shared sizes and pane layouts on the seed grids:
 | Stage 1, Pass 1 | 8 | 26 | 343 = 27 whole-budget + 316 budget-share variants |
 | Stage 1, Pass 2 and concrete summary-state groups | 378 | 2614 | over 1,000,000 (enumeration stopped at its limit) |
 
-The Pass 1 numbers are checked by
-`crates/integration-tests/tests/memo_enumeration.rs`. The Pass 2 numbers come
-from the `expanded_memo` test helper, which builds steps 1–3 without the
+The 8 groups, the 343 = 27 + 316 split and the 378 groups and 2614 candidates
+are checked by `crates/integration-tests/tests/memo_enumeration.rs`. The
+Pass 2 numbers come from the `expanded_memo` test helper, which builds steps 1–3 without the
 production search's query pruning, pane-width rounds and accuracy-scoped
 candidates, so a production run of the same query can have different counts.
 
@@ -439,12 +439,12 @@ that vector.
   2. Each group's DAG is built once and shared by every candidate that reads
      it.
   3. `recompose_guarantees` then runs over the roots, as plan reconstruction
-     does, so every node carries the guarantee composed from the children
-     chosen, not the one its candidate had alone.
+     does: every node is rebuilt with the schema and guarantee derived from
+     the children chosen, not the ones its candidate had alone.
   4. `ComposeError` reports a candidate index the group does not have
      (`NoSuchCandidate`, bad input), a child group whose node is not in the
      candidate (`ChildNotInCandidate`, a memo construction bug), or a
-     guarantee that does not recompose (`Guarantee`).
+     DAG whose schemas or guarantees cannot be re-derived (`Recompose`).
 
 **Why the count is not a product over groups.**
 
@@ -462,8 +462,10 @@ only G1.
 construction bug (`ChildNotInCandidate`). For Pass 1 of the example
 each of the 343 choices composes a different DAG, and the 27 whole-budget
 choices compose exactly the whole-workload plans
-(`memo_enumeration.rs`, also on a three-query workload). `enumerate` does
-not check validity: accuracy at the query roots, Stage 2 legality and Stage 3
+(`memo_enumeration.rs`, also on a three-query workload). `enumerate` counts
+choices, not DAGs: two candidates of a group that differ only in what
+recomposing re-derives compose equal DAGs. It does not check validity: input
+contracts, accuracy at the query roots, Stage 2 legality and Stage 3
 cost stay with the plan validator and the stages, as for whole-workload
 candidates.
 
