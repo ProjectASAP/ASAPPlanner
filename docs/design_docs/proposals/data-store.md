@@ -4,11 +4,9 @@
 > `BindingDataSources { tables: DataSources, materialized_views:
 > BTreeMap<NodeId, Arc<dyn TableProvider>> }`. This document proposes one
 > trait, `DataStore`, with one method for raw data and one for materialized
-> views, each keyed by what the plan names. The interface is Planner and
-> executor work. How a store finds a view's instances (§4) is a reference for
-> deployments; ASAPQuery's SummaryStore design
-> (`summary-catalog-sds-architecture.md` in ASAPQuery-backend) owns the actual
-> implementation.
+> views, each keyed by what the plan names, and the contract a store must
+> keep. How a store implements it is the deployment's design (for ASAPQuery,
+> `summary-catalog-sds-architecture.md` in ASAPQuery-backend).
 
 **Audience:** designers of the executor ↔ deployment boundary, and backend
 developers implementing a store.
@@ -72,14 +70,14 @@ flowchart LR
     end
 
     subgraph deployment["Deployment (for example ASAPQuery-backend)"]
-        DST["<b>DataStore</b> at revision r"]
+        DST["<b>DataStore</b><br/>one consistent snapshot per run"]
         RAW[("raw data<br/>tables, time series")]
         CAT["<b>Summary catalog</b> (SDS definitions)<br/>Summary Descriptor, Data Descriptor"]
         INST[("<b>Summary instances</b><br/>interval, group values, completeness,<br/>state_reference, status, revision")]
         REF["<b>refresh scheduler</b><br/>AtIngestion: per pane, ingestion run<br/>OnFirstRead: before the query run"]
         RAW --> DST
-        CAT -->|"1. resolve definition"| DST
-        INST -->|"2–5. select by pane end, tile,<br/>check readiness, decode"| DST
+        CAT -->|"definition"| DST
+        INST -->|"states covering the time range"| DST
         RAW -->|"refresh DAG over raw data"| REF
         REF -->|"publish instance"| INST
     end
@@ -111,7 +109,7 @@ instances, refresh) is the deployment's.
 | Store interface | the `DataStore` trait and `RawDataRequest` (`sources/data_store.rs`), and their contract (§3) | ASAPPlanner (`asap-executor`) |
 | Store implementation | `impl DataStore`: raw data storage, and resolving a view read to stored states | deployment |
 | Summary catalog and instances | definitions (descriptors) and instances (interval, group values, completeness, placement, state reference, status, revision) | deployment |
-| Refresh, lifecycle, snapshot | refresh scheduling, retention, the revision a run reads | deployment |
+| Refresh, lifecycle, snapshot | refresh scheduling, retention, how a run's handle stays consistent | deployment |
 
 Only definitions cross the interface. Instances never do:
 
@@ -129,7 +127,7 @@ executor or the Planner.
 
 ```rust
 /// A deployment's raw data and stored materialized views, as one run reads
-/// them. The deployment passes one handle per run, fixed at one revision.
+/// them. The deployment passes one handle per run; see "Consistent snapshot".
 pub trait DataStore {
     /// Rows of the raw table or time series `source` names. `request` is a
     /// hint: the executor re-applies its time range and predicates.
@@ -190,7 +188,8 @@ the two contracts differ:
   view's raw-data windows and the views it reads. A time range is therefore
   always given; there is no `None`.
 - **Contract of `read_materialized_view`.** It returns exactly the instances
-  that cover `time_range_ms` for the view's definition. The executor does not
+  that cover `time_range_ms` (`(start, end]`, matched by pane end) for the
+  view's definition and selection. The executor does not
   re-filter them, so the store must:
   - never count an observation twice;
   - never return an instance of another definition;
@@ -198,87 +197,35 @@ the two contracts differ:
 
   If it cannot prove that, it returns an error. The deployment decides the
   fallback, for example exact execution.
-- **Snapshot.** All reads of one run see the same store revision. The
-  deployment fixes it in the handle it passes (`store.at_revision(r)`). The
-  executor never reads a revision, so `Scope::Ingestion` and `Scope::Query`
-  drop their `revision` field, and `RunContext` keeps only what the executor
-  uses: scope, limits, cancellation and the query range.
+- **Consistent snapshot.** A `DataStore` handle presents one consistent
+  state to every `read_raw_data` and `read_materialized_view` of its run. A
+  refresh that publishes or replaces an instance during the run is not seen
+  by it; the next run sees it. Otherwise, at `T = 12:05`, `pane_1` could be
+  read before a late-data correction replaced it and `pane_0` after a new
+  instance was published, and the merge would answer for a data set that
+  never existed. How the store keeps the snapshot (a revision number, MVCC,
+  locking) is the deployment's choice. The executor
+  never reads a revision, so `Scope::Ingestion` and `Scope::Query` drop their
+  `revision` field, and `RunContext` keeps only what the executor uses:
+  scope, limits, cancellation and the query range.
 - **A deployment without materialized views** implements
   `read_materialized_view` as an error. `test-support` provides
   `InMemoryDataStore` (batches by `Source` and by view) for tests.
 
-## 4. How a store resolves a materialized view read (reference algorithm)
-
-### 4.1 At install
-
-For each `view` in `plan.materialized_views()`:
-
-1. **Definition.** Map `view.coverage.definition_id` to the store's summary
-   definition. The Summary Descriptor comes from the view node's operator and
-   state schema. The Data Descriptor comes from `view.inputs` (sources) and
-   the non-time part of `view.coverage.selection` (value sets and ranges).
-   Equal `definition_id` and equal non-time selection mean the same
-   definition. That is how panes of one chain, and identical views of
-   different plans, share instances.
-2. **Lifecycle.** Keep each instance for `view.retention_ms` behind the newest
-   evaluation time.
-3. **Raw data.** Keep raw data per `plan.raw_data_retention()`.
-4. **Refresh schedule.** For an `AtIngestion` view, schedule a refresh per
-   pane: `compile(dag, {}, [view.node_id])`, run in an ingestion run over
-   `(end - width, end]` of its raw-data window. Publish the result as an
-   instance with interval `(end - width, end]`.
-
-### 4.2 Per query run at evaluation time `T`
-
-1. **Ensure on-first-read views.** For every `OnFirstRead` view the query DAG
-   reads, compute its `time_range_ms` at `T` as the executor will (§3). If the
-   store has no complete instance for it, run the view's refresh in a query
-   run over the raw data, then publish it. Views are refreshed in
-   `materialized_views()` order, so a view's inputs are refreshed first.
-2. **Fix the snapshot.** Take one store revision `r` for the whole run.
-3. **Instantiate and run** the query DAG with `store.at_revision(r)`. Each
-   materialized view slot calls `read_materialized_view(view, time_range_ms,
-   ctx)`; each raw data slot calls `read_raw_data(source, request, ctx)`.
-
-### 4.3 `read_materialized_view(view, (start, end], ctx)`
-
-1. **Resolve the definition** from `view.coverage` (§4.1, step 1) in the
-   catalog generation the plan was installed with. If it is unknown, return an
-   error.
-2. **Select candidate instances** of that definition at the handle's revision
-   whose pane end is in `(start, end]`, across all group values. Exclude
-   instances of an older catalog generation, retired instances and expired
-   ones.
-3. **Check coverage.** For each group value, the selected intervals must tile
-   `(start, end]` exactly: no gap and no overlap.
-   - A gap is acceptable only when the store can prove the group had no
-     samples there (closed-input proof). Otherwise return an error.
-   - An overlap, for example a replaced snapshot next to the original, keeps
-     only the current instance.
-4. **Check readiness.** Every selected instance is published and not fenced
-   by admitted-but-unpublished input overlapping the range. Otherwise return
-   an error, or wait, as the deployment chooses.
-5. **Decode** each instance's state into rows of the view's schema (group
-   columns and the state column), and stream them.
-
-Cost: one catalog lookup plus a range scan over the definition's instances by
-pane end. With instances indexed by `(definition, pane end)`, this is
-O(log n + k) for k returned instances.
-
-### 4.4 Running example
+## 4. Example
 
 At `T = 12:05`, the query DAG reads `pane_0` … `pane_4`. Pane `i` sits under
 `TimeShift(i·1m)`.
 
 ```text
-read_materialized_view(pane_0, (12:04, 12:05]) → instance kll-200-latency / (12:04,12:05]
-read_materialized_view(pane_1, (12:03, 12:04]) → instance kll-200-latency / (12:03,12:04]
+read_materialized_view(pane_0, (12:04, 12:05]) → states of kll-200-latency, pane ending 12:05
+read_materialized_view(pane_1, (12:03, 12:04]) → states of kll-200-latency, pane ending 12:04
 …
-read_materialized_view(pane_4, (12:00, 12:01]) → instance kll-200-latency / (12:00,12:01]
+read_materialized_view(pane_4, (12:00, 12:01]) → states of kll-200-latency, pane ending 12:01
 NativeKllMerge merges the five states once → p50, p99
 ```
 
-All five reads resolve to the same definition. Only the interval differs. The
+All five reads name the same definition. Only the time range differs. The
 ingestion run that built pane `(12:04, 12:05]` read its input with
 `read_raw_data(TimeSeries { metric: "latency" }, (12:04, 12:05])`.
 
@@ -287,7 +234,7 @@ ingestion run that built pane `(12:04, 12:05]` read its input with
 | Alternative | Why not |
 | --- | --- |
 | Keep `DataSources` and `NodeId → TableProvider` (today) | Three names for raw data, node ids in the deployment, per-run maps, and a table contract that does not fit views (§1) |
-| Two traits, `TableStore` and `MaterializedViewStore` | Two handles to build and fix at one revision per run. The contracts differ per method, not per object, so one trait with two named methods is enough |
+| Two traits, `TableStore` and `MaterializedViewStore` | Two handles per run that must share one snapshot. The contracts differ per method, not per object, so one trait with two named methods is enough |
 | One method `read(input)` over an enum of raw data and view | Hides which contract applies at the call site; the method names should say what is read |
 | Key views by `definition_id` only | Two views can share a definition but differ in value selection, and panes differ in time. The read needs the full `MaterializedView` and a time range |
 | Let the executor call SDS directly | Puts storage identity and instance lifecycle in the executor; SDS must stay in the deployment |
@@ -299,14 +246,6 @@ ingestion run that built pane `(12:04, 12:05]` read its input with
   whose `Scan` frontiers are bound by node id, and some tests cut at a
   `TimeRange`. Either keep a crate-internal or `test-support` node-id binding
   for them, or give each such boundary a `MaterializedView`.
-- **Interval convention.** The executor's windows are `(start, end]`, and
-  ASAPQuery's instances record `[start, end)`. An instance's contents follow
-  the refresh DAG that built it. So the store must match by pane end and
-  width, and record intervals with the executor's convention or convert them
-  exactly.
-- **Group completeness.** §4.3 step 3 needs the store to know which groups
-  exist. For a closed population this is exact. For an open one, the store
-  needs a closed-input proof per group, or returns an error.
 
 ## 7. Migration
 
