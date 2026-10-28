@@ -49,7 +49,7 @@ function validateMemo(memo, queryCount) {
   if (memo === undefined) return [];
   if (!memo || typeof memo !== 'object' || Array.isArray(memo)) return ['memo must be an object'];
   if (!Array.isArray(memo.steps) || memo.steps.length === 0) return ['memo.steps must be a non-empty array'];
-  if (!Array.isArray(memo.nodes)) return ['memo.nodes must be an array'];
+  if (!Array.isArray(memo.nodes)) return ['memo.nodes must be an array (a memo section written before the node table: regenerate the document with stage_pipeline)'];
   const errors = validateLogicalDag({ nodes: memo.nodes, roots: [] }, 'memo.nodes', 0);
   let previous = -1;
   memo.steps.forEach((step, s) => {

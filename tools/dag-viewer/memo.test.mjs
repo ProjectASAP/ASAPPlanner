@@ -191,6 +191,18 @@ test("a candidate's own nodes stop at its child groups' nodes", () => {
   assert.deepEqual(call('memoCandidateOwnNodes', memo.nodes, memo.steps[1].groups[0].candidates[0]).own.map((n) => n.lines[0]), ['Scan']);
 });
 
+test('memoNodeDag follows and renumbers a node read through a scalar body', () => {
+  // `vector(scalar(x))`: PromqlVectorFromScalar's body is the scalar itself.
+  const scan = { operator: { NonASAP: { Scan: { predicates: [] } } } };
+  const other = { operator: { NonASAP: { Scan: { predicates: ['other'] } } } };
+  const vector = { operator: { NonASAP: { PromqlVectorFromScalar: { PromqlScalarFromVector: 1 } } } };
+  assert.deepEqual(call('stageLogicalChildren', { PromqlScalarFromVector: 1 }), [1]);
+  const dag = call('memoNodeDag', [other, scan, vector], [2]);
+  assert.equal(dag.nodes.length, 2);
+  assert.deepEqual(dag.nodes[1].operator, { NonASAP: { PromqlVectorFromScalar: { PromqlScalarFromVector: 0 } } });
+  assert.deepEqual(dag.roots, [{ Operator: 1 }]);
+});
+
 test('a node shared by groups is stored once, and memoNodeDag rebuilds each DAG from the table', () => {
   const memo = fixture();
   const keys = memo.nodes.map((n) => JSON.stringify(n));

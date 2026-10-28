@@ -40,7 +40,9 @@ function stageLogicalChildren(body) {
   STAGE_CHILD_FIELDS.forEach((field) => {
     [].concat(body[field] ?? []).forEach((id) => { if (typeof id === 'number') ids.push(id); });
   });
-  Object.entries(body).forEach(([field, value]) => { if (!STAGE_CHILD_FIELDS.includes(field)) stageScalarRefs(value, ids); });
+  // With its field name, so a body that is itself a scalar reference (e.g.
+  // `PromqlVectorFromScalar`'s `{"PromqlScalarFromVector": id}`) is seen.
+  Object.entries(body).forEach(([field, value]) => { if (!STAGE_CHILD_FIELDS.includes(field)) stageScalarRefs({ [field]: value }, ids); });
   return ids;
 }
 
@@ -61,7 +63,7 @@ function stageMapLogicalChildren(operator, f) {
   const [kind, body] = Object.entries(inner)[0];
   if (!body || typeof body !== 'object' || Array.isArray(body)) return operator;
   const mapped = Object.fromEntries(Object.entries(body).map(([field, value]) => {
-    if (!STAGE_CHILD_FIELDS.includes(field)) return [field, stageMapScalarRefs(value, f)];
+    if (!STAGE_CHILD_FIELDS.includes(field)) return [field, stageMapScalarRefs({ [field]: value }, f)[field]];
     const id = (v) => (typeof v === 'number' ? f(v) : v);
     return [field, Array.isArray(value) ? value.map(id) : id(value)];
   }));
@@ -71,7 +73,7 @@ function stageMapLogicalChildren(operator, f) {
 // The flat DAG below `roots` (indices into `table`, the memo section's
 // `memo.nodes`): the nodes they reach, renumbered from 0 in table order (so
 // children still come before parents), with one operator root per entry of
-// `roots`. `tableIds[i]` is node i's index in the table.
+// `roots`.
 function memoNodeDag(table, roots) {
   const reached = new Set();
   const pending = [...roots];
@@ -84,7 +86,7 @@ function memoNodeDag(table, roots) {
   const tableIds = [...reached].sort((a, b) => a - b);
   const local = new Map(tableIds.map((id, i) => [id, i]));
   const nodes = tableIds.map((id) => ({ ...table[id], operator: stageMapLogicalChildren(table[id].operator, (child) => local.get(child)) }));
-  return { nodes, roots: roots.map((id) => ({ Operator: local.get(id) })), tableIds };
+  return { nodes, roots: roots.map((id) => ({ Operator: local.get(id) })) };
 }
 
 // A scalar expression as short text: `time()`, `scalar(#3)` (node 3),
