@@ -746,6 +746,22 @@ mod tests {
         assert!(Rc::ptr_eq(&ra, &rb));
     }
 
+    /// `LIMIT 10` without an order may return any 10 rows, so two copies may
+    /// differ; one shared copy would make both readers see the same rows.
+    #[test]
+    fn unordered_limits_are_not_shared() {
+        let limit = || {
+            node(NonASAPOp::Limit {
+                n: Some(10),
+                offset: 0,
+                partition_by: GroupKeys::default(),
+                child: scan(),
+            })
+        };
+        let (ra, rb) = two_roots(limit(), limit());
+        assert!(!Rc::ptr_eq(&ra, &rb));
+    }
+
     #[test]
     fn group_keys_gate_still_prevented_when_partition_by_without_used() {
         let without_agg = || {
