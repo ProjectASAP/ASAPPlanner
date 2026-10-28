@@ -612,6 +612,11 @@ computation's Count-Min or Count Sketch with a top-*k* heap. In
 beneath the grouped sum, so it absorbs both the grouped sum and the per-series
 sum. Like every target's options, a fused computation's are exact or a summary.
 
+A top-*k* over the current series has one more candidate, planned and not
+offered yet: an exact maintained population of the current series, updated as
+series arrive and retracted as they disappear, from which each evaluation reads
+its top-*k*. It is one way to compute that target, not a sharing rule.
+
 Example for summary candidates:
 
 | Original computation | Per-computation candidates |
@@ -841,6 +846,10 @@ their overlapping windows.
 | Window-composition rule | The computations have the same summary input data, and one window summary can answer the requested windows within their accuracy requirements. | One window summary feeding per-query merge (where needed) and estimation nodes, e.g. a sliding-window or tumbling-window KLL, or an Exponential Histogram with a KLL per EH bucket. |
 | Rollup rule | A coarse exact accumulator (`sum`, `min`, `max`) or per-group sketch reads the same rows as a finer build of the same family (a sketch at any size) the workload already computes, grouped by a superset of its keys. | Exact: the finer accumulator's finalized values feeding an exact accumulator grouped by the coarse keys, e.g. `sum by (job)` from `sum by (job, instance)`. Sketch: a rollup (a `SummaryMerge` with `group_by`) of the finest build's states by the coarse keys, e.g. a KLL per `job` merged from the KLLs per `(host, job)`. Every coarse grouping of one finest build rolls up together, and that build is sized for its strictest reader. Every coarse reader must be an estimate whose merged readout keeps a guarantee (not a heap's top-k or UnivMon's entropy). The rolled-up state keeps the family's merged guarantee: KMV, HLL, DDSketch, Count-Min and Count Sketch give the direct coarse build's state, UnivMon its total, distinct count and L2, and KLL keeps its rank bound. Stage 3 prices one merge per input state and the coarse groups' states. |
 | Exact top-k reuse rule | Exact top-k computations read the same input and partition with different `k`. | One ranking (`Limit(k_max)` over `Sort`) that each top-k reads its first `k` rows from. |
+
+The summary-capability and exact top-k reuse rules have one shape: one producer
+covers every consumer's need (each size parameter's strictest value, the largest
+`k`), and each consumer derives its own result from it.
 
 The rules compare computations by their **summary input data**: what a summary for
 that computation would ingest, namely the data source, the filters, and the key
@@ -1279,6 +1288,16 @@ usage into a choice:
 | Cost model 1, `UsageOverTime(ResourceUnitCost)` (default) | Pay-as-you-go | Unit cost × usage per second; the cheapest wins |
 | Cost model 2, `ProvisionedCapacity(ResourceUnitCost)` | Pays for provisioned capacity | Unit cost × peak memory, peak CPU cores and disk; the cheapest wins |
 | Cost model 3, `ClusterCapacity(ClusterLimits)` | Its own cluster | No prices: a candidate over the cluster's memory, disk or (optionally) cores is invalid; the objective `LowestLatency`, `LeastMemory` or `ParetoFront` chooses among the rest |
+
+Disk includes the raw data the plan keeps for query-time readers, as concrete
+groups of the memo (planned). A source's retained raw data is a group
+`raw window(S, H)`, one per distinct lookback `H` among the source's query-time
+readers. A reader's lookback is its window plus any offset (`m[5m] offset 1h`
+looks back 65 minutes). A reader with lookback `r` gets a candidate reading each
+`raw window(S, H)` with `H ≥ r`, filtered to its own window. A chosen group is
+charged once, for the storage of `H` of raw data, however many readers read it.
+A deployment may keep less raw data of a source than a lookback; a group whose
+`H` exceeds what the deployment keeps is invalid.
 
 ### 4. Execution
 
