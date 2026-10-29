@@ -3,7 +3,7 @@
 //! (`optimize_physical_asap`, every materialization assignment) and Stage 3
 //! (`select_plan`, under the run's models), and the plan Stage 3 selects for
 //! it is installed as `plan_installable` installs one (`installable_plan_of`,
-//! which compiles it with the executor), so a choice cheaper than the
+//! which also compiles it with the executor), so a choice cheaper than the
 //! selected plan shows that the search missed a plan the memo stands for.
 
 use std::collections::HashMap;
@@ -22,13 +22,17 @@ use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 #[derive(Debug, Clone, PartialEq)]
 pub struct PricedChoice {
     /// Stage 2 implemented it, Stage 3 accepted one of its physical plans,
-    /// and the executor compiles the plan Stage 3 selected.
+    /// and the plan Stage 3 selected installs (a standalone scalar query,
+    /// which no choice changes, aside).
     pub valid: bool,
     /// Why it is not valid: the Stage 3 rejection cause of its first
     /// physical plan in snake_case (e.g. `accuracy_target_missed`), or
     /// `compose_failed`, `invalid_structure`, `stage2_failed`,
-    /// `stage3_failed`, `rejected` (no plan and no rejection listed), or
-    /// `not_executable` (the executor cannot compile the selected plan).
+    /// `stage3_failed`, `rejected` (no plan and no rejection listed),
+    /// `not_executable` (the executor cannot compile the selected plan's
+    /// view refresh or query run), or `not_installable` (installation
+    /// refuses the selected plan for another reason, e.g. an unsupported
+    /// raw-data window).
     pub rejection: Option<String>,
     /// The rejection's one-line reason, with the numbers.
     pub rejection_reason: Option<String>,
@@ -141,20 +145,20 @@ fn price_choice(
     }
     match select_plan(&physical, entries, data, models) {
         Ok(selection) => match installable_plan_of(&selection.plan, Some(&selection), entries) {
-            // The executor cannot run the selected plan. Other installation
-            // errors (e.g. a standalone scalar query, which a runtime cannot
-            // answer yet) do not depend on the choice.
-            Err(
-                error @ (InstallablePlanError::MaterializedViewNotExecutable { .. }
-                | InstallablePlanError::QueryRunNotExecutable { .. }),
-            ) => invalid("not_executable", error.to_string()),
-            _ => PricedChoice {
+            // A standalone scalar query, which a runtime cannot answer yet,
+            // does not depend on the choice.
+            Ok(_) | Err(InstallablePlanError::UnsupportedQueryRoot { .. }) => PricedChoice {
                 valid: true,
                 rejection: None,
                 rejection_reason: None,
                 cost_per_second: selection.costs[&selection.selected].cost_per_second,
                 cheaper_than_selected: false,
             },
+            Err(
+                error @ (InstallablePlanError::MaterializedViewNotExecutable { .. }
+                | InstallablePlanError::QueryRunNotExecutable { .. }),
+            ) => invalid("not_executable", error.to_string()),
+            Err(error) => invalid("not_installable", error.to_string()),
         },
         Err(SelectionError::NoValidCandidate(rejected)) => match rejected.first() {
             Some(first) => invalid(

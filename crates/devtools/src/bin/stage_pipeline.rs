@@ -143,10 +143,11 @@
 // budget) and `selected` (it is `selected_choice`). With
 // `--price-enumerated <n>` (off by default), each of the first `n` listed
 // choices is also run through Stage 2 and Stage 3 as the selected plan is,
-// and its selected plan compiled (`memo_pricing::price_choices`, under the
+// and its selected plan installed (`memo_pricing::price_choices`, under the
 // run's models): `valid`, `rejection` (a Stage 3 rejection cause, or
 // `compose_failed`, `invalid_structure`, `stage2_failed`, `stage3_failed`,
-// `rejected`, `not_executable`) with
+// `rejected`, `not_executable` (the executor cannot compile the selected
+// plan), `not_installable` (installation refuses it otherwise)) with
 // `rejection_reason`,
 // `cost_per_second` (its cheapest valid physical plan's) and
 // `cheaper_than_selected` (valid and cheaper than the selected plan); and

@@ -232,7 +232,11 @@ impl From<ReferencePlanError> for InstallablePlanError {
 /// the plan file. Supported summaries the caller leaves unrestricted
 /// (`DeploymentCapabilities::supported_summaries` `None`) default to the
 /// families the Planner's executor runs; raw-data and query-time-result
-/// retention stay the caller's.
+/// retention stay the caller's. Stage 3 does not compile candidates;
+/// installation compiles the selected plan, and one the executor cannot run
+/// returns `PlanError::Installable` with
+/// [`InstallablePlanError::MaterializedViewNotExecutable`] or
+/// [`InstallablePlanError::QueryRunNotExecutable`].
 pub async fn plan_installable(
     input: UserInput<'_>,
 ) -> Result<(InstallablePlan, Option<SelectedPlanReport>), PlanError> {

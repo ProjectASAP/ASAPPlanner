@@ -2849,8 +2849,8 @@ fn skewed_series_samples() -> (Vec<RawDataSample>, BTreeMap<String, BTreeMap<Str
     (samples, truth)
 }
 
-/// `workload`'s plan with only `algorithm`'s heap plans allowed (guarantees
-/// ignored): it builds that heap, compiles as a runtime compiles it, and
+/// `workload`'s plan with only `algorithm`'s heap plans accepted
+/// ([`HeapPlansOnly`] forces the heap; guarantees are not ignored): it builds that heap, compiles as a runtime compiles it, and
 /// both it and its query-time reference answer `samples` with the true top
 /// `k` per partition, each named by its labels and within the heap's bound
 /// of `truth` ([`assert_heap_topk_answers`]).
