@@ -751,7 +751,7 @@ fn ddsketch_ratio_selection(
                 &roots,
                 &entries,
                 &data,
-                models.deployment_capabilities,
+                models.deployment_capabilities.query_time_results_retained,
             )
             .unwrap(),
         );

@@ -129,7 +129,7 @@ use crate::accuracy::estimators::local_guarantee;
 use crate::accuracy::estimators::{hll, univmon};
 use crate::accuracy::function_rules::approximate_input_composition;
 use crate::accuracy::{per_input_target, PropagationStats};
-use crate::deployment_capabilities::DeploymentCapabilities;
+use crate::deployment_capabilities::{summary_supported, SupportedSummary};
 use crate::pass1::realization::{
     accuracy_budget, default_size_params, sizing_target, sketch_statistic, summary_candidates,
 };
@@ -184,7 +184,7 @@ pub enum PruneReason {
     NoRelationalCountSketchRealization,
     /// The deployment's executor cannot build the summary's family or
     /// answer the measure's readout from it
-    /// ([`DeploymentCapabilities::supports`]).
+    /// ([`summary_supported`]).
     UnsupportedByDeployment,
     /// The quantile's φ is outside [0, 1], where PromQL answers -Inf or
     /// +Inf: no sketch estimates that, and the executor's sketches refuse
@@ -414,14 +414,18 @@ impl<Id> PerComputationCandidates<Id> {
         })
     }
 
-    /// This inventory without the summary candidates `deployment` does not
-    /// support: a target's own are moved to its pruned candidates with
+    /// This inventory without the summary candidates the executor does not
+    /// support (`supported_summaries`, the deployment's
+    /// `DeploymentCapabilities::supported_summaries`; `None` supports
+    /// every one): a target's own are moved to its pruned candidates with
     /// [`PruneReason::UnsupportedByDeployment`], and so are a fused
     /// computation's (with all of them pruned, the fusion is not offered).
-    /// The readout is the
-    /// statistic the measure's estimate reads (the outer measure's for a
+    /// The readout is the statistic the measure's estimate reads (the outer measure's for a
     /// fused computation). With every summary supported it is unchanged.
-    pub fn without_unsupported_summaries(mut self, deployment: &DeploymentCapabilities) -> Self {
+    pub fn without_unsupported_summaries(
+        mut self,
+        supported_summaries: Option<&[SupportedSummary]>,
+    ) -> Self {
         for target in &mut self.targets {
             let Some(NonASAPOp::Aggregate { measures, .. }) = target.aggregate.non_asap() else {
                 continue;
@@ -432,7 +436,7 @@ impl<Id> PerComputationCandidates<Id> {
             };
             let unsupported = |candidate: &HowToComputeAggregateMeasure| {
                 matches!(candidate, HowToComputeAggregateMeasure::Summary(family)
-                    if !deployment.supports(family, readout))
+                    if !summary_supported(supported_summaries, family, readout))
             };
             target
                 .choices
@@ -5666,19 +5670,14 @@ mod tests {
 
     /// A deployment whose executor supports only `supported`: each family
     /// with its readouts.
-    fn supporting(supported: &[(SketchAlgorithm, &[StatisticKind])]) -> DeploymentCapabilities {
-        DeploymentCapabilities {
-            supported_summaries: Some(
-                supported
-                    .iter()
-                    .map(|(family, readouts)| crate::SupportedSummary {
-                        family: *family,
-                        readouts: readouts.to_vec(),
-                    })
-                    .collect(),
-            ),
-            ..DeploymentCapabilities::default()
-        }
+    fn supporting(supported: &[(SketchAlgorithm, &[StatisticKind])]) -> Vec<SupportedSummary> {
+        supported
+            .iter()
+            .map(|(family, readouts)| SupportedSummary {
+                family: *family,
+                readouts: readouts.to_vec(),
+            })
+            .collect()
     }
 
     /// A family the deployment cannot build is pruned from Pass 1 with
@@ -5688,10 +5687,10 @@ mod tests {
     fn a_family_the_deployment_cannot_build_is_pruned() {
         let query = "quantile_over_time(0.99, m[5m])";
         let unrestricted = inventory(query);
-        let restricted = inventory(query).without_unsupported_summaries(&supporting(&[(
+        let restricted = inventory(query).without_unsupported_summaries(Some(&supporting(&[(
             SketchAlgorithm::Kll,
             &[StatisticKind::Quantile],
-        )]));
+        )])));
         let target = &restricted.targets[0];
         assert_eq!(
             target.choices.candidates,
@@ -5707,8 +5706,7 @@ mod tests {
                 PruneReason::UnsupportedByDeployment
             )]
         );
-        let default =
-            inventory(query).without_unsupported_summaries(&DeploymentCapabilities::default());
+        let default = inventory(query).without_unsupported_summaries(None);
         assert_eq!(default.targets[0].choices, unrestricted.targets[0].choices);
     }
 
@@ -5718,14 +5716,15 @@ mod tests {
     /// stays.
     #[test]
     fn a_readout_the_deployment_cannot_answer_prunes_its_family() {
-        let restricted =
-            inventory("count_over_time(m[1m])").without_unsupported_summaries(&supporting(&[
+        let restricted = inventory("count_over_time(m[1m])").without_unsupported_summaries(Some(
+            &supporting(&[
                 (SketchAlgorithm::Cms, &[StatisticKind::Total]),
                 (
                     SketchAlgorithm::UnivMon,
                     &[StatisticKind::Distinct, StatisticKind::FrequencyL2],
                 ),
-            ]));
+            ]),
+        ));
         let target = &restricted.targets[0];
         assert_eq!(
             target.choices.candidates,
@@ -5750,10 +5749,10 @@ mod tests {
     #[test]
     fn a_fused_computation_loses_its_unsupported_heaps() {
         let query = "topk by (job) (10, sum_over_time(m[1m]))";
-        let one_heap = inventory(query).without_unsupported_summaries(&supporting(&[(
+        let one_heap = inventory(query).without_unsupported_summaries(Some(&supporting(&[(
             SketchAlgorithm::CountSketchWithHeap,
             &[StatisticKind::TopK],
-        )]));
+        )])));
         let topk = topk_target(&one_heap);
         assert_eq!(
             one_heap.targets[topk]
@@ -5778,10 +5777,10 @@ mod tests {
         );
         assert_eq!(one_heap.combinations(), 2);
         // Count-Min with a heap answers item frequencies, not top-k.
-        let none = inventory(query).without_unsupported_summaries(&supporting(&[(
+        let none = inventory(query).without_unsupported_summaries(Some(&supporting(&[(
             SketchAlgorithm::CmsWithHeap,
             &[StatisticKind::ItemFrequency],
-        )]));
+        )])));
         let topk = topk_target(&none);
         let fused = none.targets[topk].fused_computation.as_ref().unwrap();
         assert!(fused.candidates.is_empty());

@@ -118,7 +118,7 @@ async fn check_every_choice(
             &roots,
             &[],
             &asap_types::workload::DataWorkload::default(),
-            &asap_logical_asap_optimization::DeploymentCapabilities::default(),
+            false,
         )
         .unwrap_or_else(|e| panic!("{sql}, choice {choice:?} pruned: {e}"))
         .remove(0);

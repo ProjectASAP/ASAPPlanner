@@ -518,9 +518,14 @@ impl Planner {
         let models = PlanningModels::builtin()
             .with_plan_selection(&plan_selection)
             .with_deployment_capabilities(&deployment);
-        let mut candidates =
-            optimize_physical_asap("witness", &roots, &entries, &workload.data, &deployment)
-                .map_err(|e| format!("witness Stage 2: {e}"))?;
+        let mut candidates = optimize_physical_asap(
+            "witness",
+            &roots,
+            &entries,
+            &workload.data,
+            deployment.query_time_results_retained,
+        )
+        .map_err(|e| format!("witness Stage 2: {e}"))?;
         for (index, candidate) in candidates.iter_mut().enumerate() {
             candidate.id = format!("witness-m{index}");
         }

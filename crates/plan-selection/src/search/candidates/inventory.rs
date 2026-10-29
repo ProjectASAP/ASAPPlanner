@@ -539,7 +539,7 @@ mod tests {
             &roots,
             &entries,
             &data,
-            crate::PlanningModels::builtin().deployment_capabilities,
+            false,
             &mut |_, _, options| {
                 let query_materialization = Materialization::MatAtQuery(Medium::Memory);
                 if options.contains(&query_materialization) {
@@ -720,7 +720,7 @@ mod tests {
             &roots,
             &entries,
             &data,
-            &deployment,
+            deployment.query_time_results_retained,
         )
         .unwrap();
         physical.physical.dag.validate().unwrap();
@@ -901,13 +901,7 @@ mod tests {
                 .or_default()
                 .values_non_negative = true;
             let mut realized = materialize_selected_candidates(
-                &inventory,
-                &selected,
-                &modes,
-                &roots,
-                &entries,
-                &data,
-                crate::PlanningModels::builtin().deployment_capabilities,
+                &inventory, &selected, &modes, &roots, &entries, &data, false,
             )
             .unwrap();
             realized.physical.id = format!("shared-{kind}");
@@ -1079,13 +1073,7 @@ mod tests {
             }
             let mut realized =
                 crate::search::candidates::physical::materialize_selected_candidates(
-                    &inventory,
-                    &selected,
-                    &modes,
-                    &roots,
-                    &entries,
-                    &data,
-                    crate::PlanningModels::builtin().deployment_capabilities,
+                    &inventory, &selected, &modes, &roots, &entries, &data, false,
                 )
                 .unwrap();
             realized.physical.id = format!("independent-capacities-{share_both}");
@@ -1163,7 +1151,7 @@ mod tests {
             &roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>(),
             &entries,
             &DataWorkload::default(),
-            crate::PlanningModels::builtin().deployment_capabilities,
+            false,
         )
         .unwrap();
         physical.physical.dag.validate().unwrap();
@@ -1481,7 +1469,7 @@ mod tests {
                 &roots,
                 &entries,
                 &data,
-                models.deployment_capabilities,
+                models.deployment_capabilities.query_time_results_retained,
                 &mut |_, _, _| Materialization::NotMaterialized,
             )
             .unwrap()

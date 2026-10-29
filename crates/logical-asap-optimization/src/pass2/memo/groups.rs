@@ -655,12 +655,7 @@ mod tests {
         let original_roots = initial.query_roots.clone();
         let inventory = generate_per_computation_candidates(roots).unwrap();
         let expanded = populate_pass1(initial.clone(), &inventory);
-        let restricted_inventory = inventory.without_unsupported_summaries(
-            &crate::deployment_capabilities::DeploymentCapabilities {
-                supported_summaries: Some(Vec::new()),
-                ..Default::default()
-            },
-        );
+        let restricted_inventory = inventory.without_unsupported_summaries(Some(&[]));
         let restricted = populate_pass1(initial, &restricted_inventory);
         for memo in [&expanded, &restricted] {
             assert_eq!(memo.groups.len(), original_groups.len());

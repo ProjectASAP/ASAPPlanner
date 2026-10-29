@@ -74,7 +74,6 @@ fn reads_sketch(root: &Rc<OperatorNode>) -> bool {
 fn physical_candidates(
     workload: &PlanningWorkload,
 ) -> Vec<asap_physical_asap_optimization::PhysicalWorkloadPlan> {
-    use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
@@ -106,7 +105,7 @@ fn physical_candidates(
                 &roots,
                 &workload.query_workload.entries().collect::<Vec<_>>(),
                 workload.data_workload.as_ref().unwrap(),
-                &DeploymentCapabilities::default(),
+                false,
                 &mut |_, _, _| Materialization::NotMaterialized,
             )
             .unwrap()

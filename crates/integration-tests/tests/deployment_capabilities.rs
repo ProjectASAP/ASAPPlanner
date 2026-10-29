@@ -89,7 +89,9 @@ fn assert_removes_exactly(
         result
     };
     let unrestricted = enumerate_local(&local);
-    let restricted = enumerate_local(&local.without_unsupported_summaries(deployment));
+    let restricted = enumerate_local(
+        &local.without_unsupported_summaries(deployment.supported_summaries.as_deref()),
+    );
     let expected = unrestricted
         .iter()
         .filter(|dag| {

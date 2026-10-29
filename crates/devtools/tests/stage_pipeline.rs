@@ -1202,7 +1202,7 @@ fn workload_file_with_a_range_evaluation_is_planned() {
             &recompose_guarantees(&paned).unwrap(),
             &entries,
             &data,
-            &deployment,
+            deployment.query_time_results_retained,
         )
         .unwrap()
         .into_iter()
@@ -1813,7 +1813,7 @@ fn scans_projecting_different_labels_are_shared() {
             &shared,
             &entries,
             data,
-            &asap_planner::DeploymentCapabilities::default(),
+            false,
             &mut |readers| {
                 Some(if readers.len() > 1 {
                     Materialization::MatAtQuery(Medium::Memory)

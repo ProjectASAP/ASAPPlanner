@@ -27,10 +27,9 @@ depends on the executor.
 ```text
 asap-types ◄── frontends (Stage 0)
 asap-types ◄── asap-cost (shared cost model) ◄── asap-plan-selection
-asap-types ◄── asap-logical-asap-optimization (Stage 1)
-                 ◄── asap-physical-asap-optimization (Stage 2)
-                       ◄── asap-plan-selection (Stage 3, also depends on Stage 1)
-                             ◄── asap-planner (also depends on the frontends)
+asap-types ◄── asap-logical-asap-optimization (Stage 1) ◄── asap-plan-selection
+asap-types ◄── asap-physical-asap-optimization (Stage 2) ◄── asap-plan-selection
+asap-plan-selection (Stage 3) ◄── asap-planner (also depends on the frontends)
 asap-types ◄── asap-executor (Stage 4; no stage crate depends on it)
 ```
 
@@ -40,7 +39,7 @@ asap-types ◄── asap-executor (Stage 4; no stage crate depends on it)
 QueryRoots (Stage 0)
   │  per_computation_candidates::generate_per_computation_candidates     Stage 1, Pass 1
   ▼
-PerComputationCandidates  ──without_unsupported_summaries(deployment)──┐
+PerComputationCandidates  ──without_unsupported_summaries(supported)───┐
   │  workload_candidates::stage1_logical_asap_optimization              │ Stage 1, enumeration
   │    compose_logical_candidate per choice, then asap_aware_cse rules  │ + Pass 2
   ▼                                                                    │
@@ -69,7 +68,7 @@ same pipeline behind the `OptimizationPass` trait that `asap-planner` calls.
 | Stage 3: accuracy check, latency check, deployment-capability checks, resource usage (`ResourceUsage`), cost models 1–3 (`CostModel`), measured operation costs | `asap-plan-selection`, `lib.rs`; `asap-cost`, `lib.rs` and `measured.rs` |
 | The analytical per-operator resource model Stage 3 measures with | `asap-cost`, `analytical.rs` and `operator_statistics.rs` |
 | The accuracy algebra: per-family guarantees, composition, budget split | `asap-logical-asap-optimization`, `accuracy/` (`AccuracyModel`, `DefaultAccuracyModel`, `estimators/`, `composition.rs`, `budget.rs`) |
-| What the executor supports (`DeploymentCapabilities`) | `asap-logical-asap-optimization`, `deployment_capabilities.rs` |
+| What the executor supports (`DeploymentCapabilities`) | `asap-logical-asap-optimization`, `deployment_capabilities.rs`; each stage receives only the field it reads: Pass 1 `supported_summaries`, Stage 2 `query_time_results_retained` (a `bool` argument, so Stage 2 does not depend on the Stage 1 crate), Stage 3 `raw_data_retained` |
 | The inputs every stage reads (`PlanningModels`: accuracy model, evidence, plan selection settings, deployment capabilities) and the `OptimizationPass` trait | `asap-plan-selection`, `pass/mod.rs` |
 
 The current production search organizes these computations in memo result/state

@@ -1139,7 +1139,7 @@ mod tests {
                 &roots,
                 &entries,
                 &data,
-                models.deployment_capabilities,
+                models.deployment_capabilities.query_time_results_retained,
             )
             .unwrap();
             let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
@@ -1312,7 +1312,7 @@ mod tests {
                     &roots,
                     &entries,
                     &data,
-                    models.deployment_capabilities,
+                    models.deployment_capabilities.query_time_results_retained,
                 )
                 .unwrap();
                 let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
@@ -1595,7 +1595,7 @@ mod tests {
             &roots,
             &entries,
             &data,
-            models.deployment_capabilities,
+            models.deployment_capabilities.query_time_results_retained,
         )
         .unwrap();
         let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();

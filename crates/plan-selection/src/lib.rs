@@ -4634,7 +4634,7 @@ mod tests {
                     &roots,
                     &[],
                     &data(),
-                    &DeploymentCapabilities::default(),
+                    false,
                 )
                 .unwrap()
                 .remove(0);
@@ -5229,7 +5229,7 @@ mod tests {
             &[QueryRoot::Operator(outer), QueryRoot::Operator(inner)],
             &[],
             &data(),
-            &DeploymentCapabilities::default(),
+            false,
         )
         .unwrap()
         .remove(0);
@@ -5286,7 +5286,7 @@ mod tests {
             &[QueryRoot::Operator(outer), QueryRoot::Operator(inner)],
             &[],
             &data(),
-            &DeploymentCapabilities::default(),
+            false,
         )
         .unwrap()
         .remove(0);
@@ -5353,7 +5353,7 @@ mod tests {
                     &roots,
                     &[],
                     &data(),
-                    &DeploymentCapabilities::default(),
+                    false,
                 )
                 .unwrap()
                 .remove(0);
@@ -5810,7 +5810,7 @@ mod tests {
             .into_iter()
             .map(|(_, root)| root)
             .collect();
-        optimize_physical_asap("L1", &roots, &[], data, &DeploymentCapabilities::default())
+        optimize_physical_asap("L1", &roots, &[], data, false)
             .unwrap()
             .remove(0)
             .dag
@@ -7719,16 +7719,10 @@ mod tests {
             .into_iter()
             .map(|(_, root)| root)
             .collect();
-        optimize_physical_asap(
-            "L1",
-            &roots,
-            &[],
-            &data(),
-            &DeploymentCapabilities::default(),
-        )
-        .unwrap()
-        .remove(0)
-        .dag
+        optimize_physical_asap("L1", &roots, &[], &data(), false)
+            .unwrap()
+            .remove(0)
+            .dag
     }
 
     /// A time shift is free and does not change what the scan below it
@@ -7905,16 +7899,11 @@ mod tests {
         .into_iter()
         .map(|query| {
             let root = lower_promql(query, AccuracyTarget::exact());
-            let dag = optimize_physical_asap(
-                "L",
-                &[QueryRoot::Operator(root)],
-                &[],
-                &data(),
-                &DeploymentCapabilities::default(),
-            )
-            .unwrap()
-            .remove(0)
-            .dag;
+            let dag =
+                optimize_physical_asap("L", &[QueryRoot::Operator(root)], &[], &data(), false)
+                    .unwrap()
+                    .remove(0)
+                    .dag;
             (query.to_string(), dag)
         })
         .collect();
@@ -7946,16 +7935,11 @@ mod tests {
     fn kept_exact_state_is_charged_by_the_values_it_keeps() {
         let kept = |query: &str| {
             let root = lower_promql(query, AccuracyTarget::exact());
-            let mut dag = optimize_physical_asap(
-                "L",
-                &[QueryRoot::Operator(root)],
-                &[],
-                &data(),
-                &DeploymentCapabilities::default(),
-            )
-            .unwrap()
-            .remove(0)
-            .dag;
+            let mut dag =
+                optimize_physical_asap("L", &[QueryRoot::Operator(root)], &[], &data(), false)
+                    .unwrap()
+                    .remove(0)
+                    .dag;
             let aggregate = dag
                 .nodes
                 .iter_mut()
@@ -7995,7 +7979,7 @@ mod tests {
             &[QueryRoot::Operator(root.clone())],
             &[],
             &data(),
-            &DeploymentCapabilities::default(),
+            false,
         )
         .unwrap()
         .remove(0)
@@ -8005,7 +7989,7 @@ mod tests {
             &[QueryRoot::Operator(root.clone()), QueryRoot::Operator(root)],
             &[],
             &data(),
-            &DeploymentCapabilities::default(),
+            false,
         )
         .unwrap()
         .remove(0)
@@ -8091,16 +8075,10 @@ mod tests {
     #[test]
     fn one_off_recurrence_is_spread_over_the_horizon() {
         let root = lower_promql("sum by (job) (rate(m[1m]))", AccuracyTarget::exact());
-        let dag = optimize_physical_asap(
-            "L",
-            &[QueryRoot::Operator(root)],
-            &[],
-            &data(),
-            &DeploymentCapabilities::default(),
-        )
-        .unwrap()
-        .remove(0)
-        .dag;
+        let dag = optimize_physical_asap("L", &[QueryRoot::Operator(root)], &[], &data(), false)
+            .unwrap()
+            .remove(0)
+            .dag;
         let horizon = CostInputs::default().non_repeating_query_horizon_seconds;
         assert_eq!(horizon, 3_600.0);
         let per_evaluation = priced(&dag, &[repeating(1_000)]).cost_per_second.unwrap();
@@ -8259,7 +8237,7 @@ mod tests {
             &roots,
             &[every_minute()],
             &arriving(rows_per_s),
-            deployment,
+            deployment.query_time_results_retained,
         )
         .unwrap();
         for (k, c) in candidates.iter_mut().enumerate() {
@@ -8438,15 +8416,9 @@ mod tests {
             .into_iter()
             .map(|(_, root)| root)
             .collect();
-        let mut candidate = optimize_physical_asap(
-            "L1",
-            &roots,
-            &[],
-            &data(),
-            &DeploymentCapabilities::default(),
-        )
-        .unwrap()
-        .remove(0);
+        let mut candidate = optimize_physical_asap("L1", &roots, &[], &data(), false)
+            .unwrap()
+            .remove(0);
         candidate.id = "P1".into();
         let entries = [entry(repeating(MINUTE)), entry(repeating(MINUTE))];
         let no_raw_data = DeploymentCapabilities {
@@ -8999,16 +8971,10 @@ mod tests {
                 .iter()
                 .map(|q| QueryRoot::Operator(lower_promql(q, AccuracyTarget::exact())))
                 .collect();
-            let dag = optimize_physical_asap(
-                "L",
-                &roots,
-                &[],
-                &data(),
-                &DeploymentCapabilities::default(),
-            )
-            .unwrap()
-            .remove(0)
-            .dag;
+            let dag = optimize_physical_asap("L", &roots, &[], &data(), false)
+                .unwrap()
+                .remove(0)
+                .dag;
             priced(&dag, &recurrences(queries.len())).usage.disk_bytes
         };
         let five_minutes = disk(&["sum_over_time(m[5m])"]);
@@ -9256,7 +9222,7 @@ mod tests {
                 ..entry_with(p99_target(), repeating(interval_ms))
             }),
             &arriving(rows_per_s),
-            &DeploymentCapabilities::default(),
+            false,
         )
         .unwrap()
         .into_iter()
@@ -9734,14 +9700,9 @@ mod tests {
             .into_iter()
             .map(|(_, root)| root)
             .collect();
-            let candidates = optimize_physical_asap(
-                "L",
-                &roots,
-                &[every_minute()],
-                &arriving(10_000.0),
-                &DeploymentCapabilities::default(),
-            )
-            .unwrap();
+            let candidates =
+                optimize_physical_asap("L", &roots, &[every_minute()], &arriving(10_000.0), false)
+                    .unwrap();
             for (k, mut candidate) in candidates.into_iter().enumerate() {
                 candidate.id = format!("P{}-m{k}", choice + 1);
                 out.push(candidate);
@@ -10036,15 +9997,9 @@ mod tests {
             valid_for: None,
         }));
         let entries = [entry_with(AccuracyTarget::exact(), recurrence.clone())];
-        let candidate = optimize_physical_asap(
-            "literal",
-            &roots,
-            &entries,
-            &data(),
-            &DeploymentCapabilities::default(),
-        )
-        .unwrap()
-        .remove(0);
+        let candidate = optimize_physical_asap("literal", &roots, &entries, &data(), false)
+            .unwrap()
+            .remove(0);
         assert!(candidate.dag.nodes.is_empty());
         let mut settings = CostInputs::default();
         settings.measured_operation_costs.ns_per_evaluation = 2_000_000.0;

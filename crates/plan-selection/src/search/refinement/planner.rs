@@ -1055,7 +1055,10 @@ pub(in crate::search) fn materialize_configured_candidate_with_diagnostics(
         context.original_roots,
         context.entries,
         context.data,
-        context.models.deployment_capabilities,
+        context
+            .models
+            .deployment_capabilities
+            .query_time_results_retained,
     ) {
         Ok(realized) => realized,
         Err(PhysicalCandidateError::RejectedAssignment(reason)) => {
