@@ -505,7 +505,7 @@ mod tests {
         (
             usage.peak_memory_bytes,
             usage.disk_bytes,
-            crate::worst_latency_ms(usage).to_bits(),
+            crate::selector::worst_latency_ms(usage).to_bits(),
         )
     }
 
