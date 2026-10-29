@@ -33,24 +33,6 @@ pub(super) fn validate_groups(input: &SchemaRef, groups: &[usize]) -> Result<(),
     }
     Ok(())
 }
-#[cfg(test)]
-pub(super) async fn collect_rows(
-    mut input: Input<'_, Batch>,
-    context: &RunContext,
-) -> Result<(Vec<Vec<Value>>, Vec<Reservation>), Error> {
-    let mut rows = Vec::new();
-    let mut work = Cooperative::new(context);
-    let mut reservations = Vec::new();
-    while let Some(batch) = input.next().await {
-        let batch = batch?;
-        reservations.push(context.reserve(batch.memory_bytes())?);
-        for row in &batch.to_rows() {
-            work.checkpoint().await?;
-            rows.push(row.clone());
-        }
-    }
-    Ok((rows, reservations))
-}
 /// Estimates retained workspace before growing collections. It is not an RSS limit.
 pub(super) struct Workspace {
     reservation: Reservation,
@@ -72,17 +54,6 @@ impl Workspace {
         self.bytes = self.bytes.checked_add(bytes).ok_or(Error::MemoryLimit)?;
         self.reservation.resize(self.bytes)
     }
-}
-#[cfg(test)]
-pub(super) fn row_bytes(row: &[Value]) -> usize {
-    std::mem::size_of::<Vec<Value>>() + row.iter().map(Value::bytes).sum::<usize>()
-}
-#[cfg(test)]
-pub(super) fn key_bytes(key: &[Vec<u8>]) -> usize {
-    64 + key
-        .iter()
-        .map(|part| std::mem::size_of::<Vec<u8>>() + part.len())
-        .sum::<usize>()
 }
 
 /// The rows a grouped operator processes at once: memory is checked after

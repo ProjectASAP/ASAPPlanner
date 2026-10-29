@@ -13,102 +13,19 @@
 // every corpus lowers with. Without an approximate target, Pass 1 offers no
 // summary candidate.
 
-use asap_devtools::lower_promql_with_sample_interval;
-use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
+use asap_devtools::corpora::{
+    bgp_catalog, dqc_catalog, netflow_catalog, parse_sample_interval, promql_lines, sql_statements,
+};
+use asap_devtools::{lower_promql_with_sample_interval, SqlCatalog};
+use asap_frontend_sql::lower_sql_dialect;
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     generate_per_computation_candidates, HowToComputeAggregateMeasure,
 };
 use asap_types::ir::properties::AccuracyTarget;
-use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::SqlDialect;
 use std::collections::BTreeSet;
 use std::rc::Rc;
-
-/// Line-based `#`/`--` comment stripping, then split on `;` — the shape every
-/// SQL corpus test in this repo already uses (copied from `variant_coverage`
-/// so both tools walk the exact same corpus text).
-fn sql_stmts(corpus: &str) -> Vec<String> {
-    let sql: String = corpus
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with("--") && !l.starts_with('#'))
-        .collect::<Vec<_>>()
-        .join("\n");
-    sql.split(';')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-fn promql_lines(corpus: &str) -> impl Iterator<Item = &str> {
-    corpus
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-}
-
-fn col(name: &str, dtype: DataType) -> Field {
-    Field::plain(name, dtype, false)
-}
-
-fn dqc_catalog() -> SqlCatalog {
-    SqlCatalog::new().with_table(
-        "packets",
-        Schema::new(vec![
-            col("srcip", DataType::Utf8),
-            col("dstip", DataType::Utf8),
-            col("srcport", DataType::Int64),
-            col("dstport", DataType::Int64),
-            col("proto", DataType::Utf8),
-            col("time", DataType::Float64),
-            col("pkt_len", DataType::Int64),
-        ]),
-    )
-}
-
-fn netflow_catalog() -> SqlCatalog {
-    SqlCatalog::new().with_table(
-        "netflow_table",
-        Schema::with_time_index(
-            vec![
-                col("time", DataType::Timestamp),
-                col("srcip", DataType::Utf8),
-                col("dstip", DataType::Utf8),
-                col("srcport", DataType::Int64),
-                col("dstport", DataType::Int64),
-                col("proto", DataType::Utf8),
-                col("pkt_len", DataType::Int64),
-            ],
-            0,
-            vec![],
-        ),
-    )
-}
-
-fn bgp_catalog() -> SqlCatalog {
-    let updates = Schema::new(vec![
-        col("timestamp", DataType::Timestamp),
-        col("collector", DataType::Utf8),
-        col("peer_ip", DataType::Utf8),
-        col("peer_asn", DataType::Int64),
-        col("prefix", DataType::Utf8),
-        col("operation", DataType::Utf8),
-        col("as_path", DataType::Utf8),
-    ]);
-    let rib = Schema::new(vec![
-        col("snapshot_ts", DataType::Timestamp),
-        col("collector", DataType::Utf8),
-        col("peer_ip", DataType::Utf8),
-        col("peer_asn", DataType::Int64),
-        col("prefix", DataType::Utf8),
-    ]);
-    SqlCatalog::new()
-        .with_table("bgp_updates", updates.clone())
-        .with_table("bgp.bgp_updates", updates)
-        .with_table("bgp_rib_state", rib.clone())
-        .with_table("bgp.bgp_rib_state", rib)
-}
 
 struct CorpusCoverage {
     name: &'static str,
@@ -203,20 +120,6 @@ fn parse_max_error() -> f64 {
     0.01
 }
 
-fn parse_sample_interval() -> u64 {
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--sample-interval-ms" {
-            return args
-                .next()
-                .expect("--sample-interval-ms requires a value")
-                .parse()
-                .expect("--sample-interval-ms must be an unsigned integer");
-        }
-    }
-    panic!("--sample-interval-ms is required")
-}
-
 #[tokio::main]
 async fn main() {
     let max_error = parse_max_error();
@@ -287,7 +190,7 @@ async fn main() {
         let catalog = catalog_fn();
         let mut roots = Vec::new();
         let mut failed = 0;
-        for (i, q) in sql_stmts(corpus).into_iter().enumerate() {
+        for (i, q) in sql_statements(corpus).into_iter().enumerate() {
             match lower_sql_dialect(&q, &catalog, dialect.clone(), accuracy.clone()).await {
                 Ok(qe) => roots.push((format!("q{i}"), qe)),
                 Err(_) => failed += 1,

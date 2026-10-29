@@ -1,8 +1,4 @@
 //! Windowed computations use Planner intents; deployments supply the input window.
-#[cfg(test)]
-use crate::operators::common::{key_bytes, row_bytes};
-#[cfg(test)]
-use crate::values::group_key;
 use crate::{
     operators::{common::Workspace, sort::cooperative_sort},
     runtime::{Cooperative, RunContext},
@@ -10,83 +6,6 @@ use crate::{
 use crate::{values::Value, Error};
 use planner_types::ir::operator::AggIntent;
 use planner_types::ir::scalar::ColumnRef;
-#[cfg(test)]
-use std::collections::BTreeMap;
-
-/// The row-at-a-time reducer (reference for tests).
-#[cfg(test)]
-pub(in crate::operators) async fn reduce(
-    rows: Vec<Vec<Value>>,
-    intent: &AggIntent<ColumnRef>,
-    groups: &[usize],
-    coordinate: usize,
-    value: usize,
-    window: Option<(i64, i64)>,
-    context: &RunContext,
-) -> Result<Vec<Vec<Value>>, Error> {
-    let mut work = Cooperative::new(context);
-    let mut workspace = Workspace::new(context)?;
-    let mut grouped =
-        BTreeMap::<Vec<Vec<u8>>, (Vec<Value>, Vec<(f64, f64)>, Vec<(i64, f64)>)>::new();
-    for row in rows {
-        work.checkpoint().await?;
-        let key = group_key(&row, groups)?;
-        workspace.grow(32)?;
-        if !grouped.contains_key(&key) {
-            workspace.grow(key_bytes(&key) + row_bytes(&row))?;
-        }
-        let entry = grouped.entry(key).or_insert_with(|| {
-            (
-                groups.iter().map(|i| row[*i].clone()).collect(),
-                vec![],
-                vec![],
-            )
-        });
-        let Value::Float64(v) = row[value] else {
-            return Err(Error::Invalid("window value must be Float64".into()));
-        };
-        match row[coordinate] {
-            Value::Timestamp(t) => entry.2.push((t, v)),
-            Value::Float64(bound) => entry.1.push((bound, v)),
-            _ => return Err(Error::Invalid("invalid window coordinate".into())),
-        }
-    }
-    let mut output = Vec::new();
-    for (_, (mut keys, buckets, points)) in grouped {
-        work.checkpoint().await?;
-        let result = if let AggIntent::HistogramQuantile { q, .. } = intent {
-            Some(Value::Float64(bucket_quantile(*q, buckets, context).await?))
-        } else {
-            let points = cooperative_sort(points, |a, b| a.0.cmp(&b.0), context).await?;
-            let (start, end) =
-                window.ok_or_else(|| Error::Invalid("missing temporal window".into()))?;
-            if points.iter().any(|p| p.0 < start || p.0 > end)
-                || points.windows(2).any(|p| p[0].0 == p[1].0)
-            {
-                return Err(Error::Invalid(
-                    "duplicate or out-of-window timestamp".into(),
-                ));
-            }
-            window_value(
-                intent,
-                &points,
-                start,
-                end,
-                match context.scope {
-                    crate::runtime::Scope::Query {
-                        evaluation_time_ms, ..
-                    } => evaluation_time_ms,
-                    _ => end,
-                },
-            )?
-        };
-        if let Some(result) = result {
-            keys.push(result);
-            output.push(keys);
-        }
-    }
-    Ok(output)
-}
 
 /// Each group's temporal value over `batch`: the groups of `groups` in key
 /// order, labelled as their first rows, each with its `intent` over its

@@ -203,17 +203,6 @@ impl Value {
         })
     }
 }
-#[cfg(test)]
-pub(crate) fn group_key(row: &[Value], columns: &[usize]) -> Result<Vec<Vec<u8>>, Error> {
-    columns
-        .iter()
-        .map(|&i| {
-            row.get(i)
-                .ok_or_else(|| Error::Invalid("group column out of range".into()))?
-                .key()
-        })
-        .collect()
-}
 
 pub(crate) use crate::capability::validate_native_family as validate_family;
 

@@ -83,17 +83,6 @@ pub(super) fn execute<'a>(
     .boxed_local())
 }
 
-#[cfg(test)]
-pub(super) fn compare_rows(a: &[Value], b: &[Value], keys: &[SortKey]) -> std::cmp::Ordering {
-    for key in keys {
-        let order = compare_key(&a[key.column], &b[key.column], key);
-        if order.is_ne() {
-            return order;
-        }
-    }
-    std::cmp::Ordering::Equal
-}
-
 /// The order of two values of one sort key: NULLs first or last, NaN after
 /// every number, then the key's direction.
 fn compare_key(a: &Value, b: &Value, key: &SortKey) -> std::cmp::Ordering {
