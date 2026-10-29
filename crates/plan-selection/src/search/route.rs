@@ -1785,6 +1785,67 @@ mod tests {
         assert!(report.full_catalog_completed);
     }
 
+    /// A deployment's accuracy model that accepts no output.
+    struct AcceptsNothing;
+
+    impl crate::AccuracyModel for AcceptsNothing {
+        fn satisfies(
+            &self,
+            _: &asap_types::ir::properties::AccuracyGuarantee,
+            _: &AccuracyTarget,
+        ) -> bool {
+            false
+        }
+
+        fn may_accept_regardless_of_guarantee(&self) -> bool {
+            false
+        }
+    }
+
+    // A failed complete phase must not relabel seed work as initial generation.
+    #[test]
+    fn no_incumbent_report_preserves_seed_and_full_phase_accounting() {
+        let (_, entries, data) = workload();
+        let roots = vec![(
+            0,
+            QueryRoot::Operator(lower_promql("latency[5m]", AccuracyTarget::exact())),
+        )];
+        let initial = LogicalMemo::from_roots(&roots);
+        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
+        let error = candidate_connection_search(
+            initial,
+            &CandidateSearchContext {
+                inventory: &inventory,
+                entries: &entries[..1],
+                data: &data,
+                models: PlanningModels::builtin().with_accuracy(&AcceptsNothing),
+            },
+            Stage1ToStage3Search::default(),
+            Some(17.0),
+            &mut CandidateArchive::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        let report: serde_json::Value =
+            serde_json::from_str(error.split_once("Search report: ").unwrap().1).unwrap();
+        assert_eq!(report["local_candidate_generation_ms"], 17.0);
+        assert!(report["seed_planning_ms"].as_f64().unwrap() > 0.0);
+        assert!(report["full_planning_ms"].as_f64().unwrap() > 0.0);
+        assert_eq!(
+            report["refinements"].as_u64().unwrap() as usize,
+            report["pane_width_rounds"].as_array().unwrap().len()
+        );
+        assert_eq!(report["time_limit_ms"], 30_000);
+        assert!(
+            report["validation_rejection_counts"]["accuracy_target_missed"]
+                .as_u64()
+                .unwrap()
+                > 0,
+            "{}",
+            report["validation_rejection_counts"]
+        );
+    }
+
     fn scalar_run(
         settings: &crate::PlanSelectionSettings,
         search: Stage1ToStage3Search,

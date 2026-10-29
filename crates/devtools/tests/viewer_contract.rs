@@ -351,6 +351,7 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
         C::PerEntityAggregateNotExecutable,
         C::NoAccuracyGuarantee,
         C::RawDataNotRetained,
+        C::UnsupportedRawDataWindow,
         C::LatencyBoundExceeded,
         C::LatencyOverRepeatInterval,
         C::OverClusterCapacity,
@@ -369,6 +370,7 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
             | C::PerEntityAggregateNotExecutable
             | C::NoAccuracyGuarantee
             | C::RawDataNotRetained
+            | C::UnsupportedRawDataWindow
             | C::LatencyBoundExceeded
             | C::LatencyOverRepeatInterval
             | C::OverClusterCapacity

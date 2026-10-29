@@ -324,6 +324,31 @@ async fn raw_data_windows_of_unsupported_shapes_are_refused() {
     assert_eq!(retention.lookback_ms, Some(900_000));
 }
 
+/// A raw-data window the Planner cannot place (here a subquery above the
+/// range) is a Stage 3 check, like other planner-owned constraints: every
+/// candidate reading one is rejected as `unsupported_raw_data_window` with
+/// its reason, and planning fails with that diagnostic rather than
+/// selecting a plan that installation then refuses.
+#[tokio::test]
+async fn stage_3_rejects_a_plan_with_an_unsupported_raw_data_window() {
+    let query = "max_over_time(rate(latency_ms[5m])[1h:1m])";
+    match installable_at_query_time(query).await {
+        Err(PlanError::Optimize(error)) => {
+            let diagnostic = error.to_string();
+            assert!(
+                diagnostic.contains("unsupported_raw_data_window"),
+                "{diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("a subquery or a TimeShift above the range"),
+                "{diagnostic}"
+            );
+        }
+        Err(error) => panic!("refused after Stage 3 selected it: {error}"),
+        Ok(_) => panic!("{query}: unexpectedly installed"),
+    }
+}
+
 /// Example 4b answered as the last hour at 10-minute steps (a range
 /// evaluation): each selected pane view is kept for the hour its window reads
 /// plus the hour the range spans, 7,200,000 ms, as Stage 3 records for the

@@ -66,7 +66,7 @@
 //     its `cause`: a failed check (`failure_probability_resize_failed`,
 //     `accuracy_target_missed`, `count_min_weights_not_proven_non_negative`,
 //     `per_entity_aggregate_not_executable`, `no_accuracy_guarantee`,
-//     `raw_data_not_retained`,
+//     `raw_data_not_retained`, `unsupported_raw_data_window`,
 //     `latency_bound_exceeded`, `latency_over_repeat_interval`,
 //     `over_cluster_capacity`) or a loss under
 //     the cost model (`costlier`, `slower`, `more_memory`,

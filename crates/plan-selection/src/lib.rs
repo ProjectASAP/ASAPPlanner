@@ -838,6 +838,12 @@ pub enum RejectionCause {
     /// It scans raw data at query time in a deployment that does not
     /// retain raw data.
     RawDataNotRetained,
+    /// It reads a raw-data window whose position the Planner cannot place
+    /// as a fixed offset ending at the evaluation time (e.g. a subquery or
+    /// a `TimeShift` above the range), so no runtime can be told which raw
+    /// data to keep or scan
+    /// ([`PhysicalASAPDAG::check_raw_data_windows`]).
+    UnsupportedRawDataWindow,
     /// A query's latency is over its `max_latency_ms` bound.
     LatencyBoundExceeded,
     /// A repeating query's latency per evaluation is over its repeat
@@ -878,6 +884,7 @@ impl RejectionCause {
                 | Self::PerEntityAggregateNotExecutable
                 | Self::NoAccuracyGuarantee
                 | Self::RawDataNotRetained
+                | Self::UnsupportedRawDataWindow
                 | Self::LatencyBoundExceeded
                 | Self::LatencyOverRepeatInterval
                 | Self::OverClusterCapacity
@@ -1583,7 +1590,8 @@ impl<'a> PlanSelector<'a> {
 /// accuracy Stage 3 accepted for each query, or the first check it fails
 /// that does not depend on its materialization or prices: its resized
 /// summaries do not rebuild, the executor cannot run a per-series
-/// aggregate it reads, or a query misses its accuracy target.
+/// aggregate it reads, it reads a raw-data window the Planner cannot place,
+/// or a query misses its accuracy target.
 pub(crate) fn checked_candidate(
     candidate: &PhysicalWorkloadPlan,
     targets: &[AccuracyTarget],
@@ -1602,6 +1610,14 @@ pub(crate) fn checked_candidate(
         return Err(CheckFailure {
             cause: RejectionCause::PerEntityAggregateNotExecutable,
             reason,
+            size_independent: true,
+        });
+    }
+    if let Err(error) = sized.dag.check_raw_data_windows() {
+        // The window's shape is the plan's own, which no summary size changes.
+        return Err(CheckFailure {
+            cause: RejectionCause::UnsupportedRawDataWindow,
+            reason: error.to_string(),
             size_independent: true,
         });
     }
