@@ -720,7 +720,7 @@ fn search_domain<Id: Clone>(
     use crate::search::costing::calibration::CandidateCalibration;
     use crate::search::refinement::planner::CandidatePlanningContext;
     use crate::search::refinement::search::{CandidateSearchLimits, CandidateSearchStatus};
-    use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
+    use asap_logical_asap_optimization::pass1::logical_memo_candidates::generate_per_computation_logical_memo_candidates;
     use asap_logical_asap_optimization::pass2::memo::state_groups::{
         expand_concrete_summary_state_groups_before, StateGroupExpansionError,
     };
@@ -865,18 +865,17 @@ fn search_domain<Id: Clone>(
                 groups: initial.groups.clone(),
                 query_roots: initial.query_roots.clone(),
             };
-            let mut memo = try_populate_pass1(
+            // The deadline is the same instant whenever it is taken:
+            // now plus the remaining budget.
+            let memo = generate_per_computation_logical_memo_candidates(
                 initial,
-                &pruned.as_ref().expect("first round pruned").inventory,
-            )
-            .map_err(|error| unsupported(&error.to_string()))?;
-            crate::search::candidates::accuracy_configurations::add_scoped_candidates(
-                &mut memo,
+                pruned.expect("first round pruned").inventory,
                 entries,
                 data,
                 Instant::now().checked_add(remaining()),
             )
-            .map_err(|error| unsupported(&error))?;
+            .map_err(|error| unsupported(&error.to_string()))?
+            .memo;
             progress.pass1_steps = Some((stage0, memo.clone()));
             memo
         }
