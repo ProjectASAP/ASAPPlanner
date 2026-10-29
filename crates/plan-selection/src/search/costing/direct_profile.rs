@@ -194,7 +194,7 @@ fn prepare_profile(
                                 || (configuration.materialization == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
                                     && matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
                                     && context.models.deployment_capabilities.query_time_results_retained
-                                    && (0..context.entries.len()).any(|reader| asap_physical_asap_optimization::summary_materialization_eligibility(node, &[reader], context.entries, context.data, context.models.deployment_capabilities).is_ok_and(|eligibility| eligibility.may_keep_across_evaluations)))
+                                    && (0..context.entries.len()).any(|reader| asap_physical_asap_optimization::summary_materialization_eligibility(node, &[reader], context.entries, context.data, context.models.deployment_capabilities.query_time_results_retained).is_ok_and(|eligibility| eligibility.may_keep_across_evaluations)))
                         }
                         ExecutionTiming::IngestionTime => match node.asap() {
                             Some(ASAPOp::PaneChain { .. }) => {

@@ -192,7 +192,6 @@ pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
 
 /// The Count-Min summary of a Stage 1 candidate of `query`.
 pub fn cms_summary(query: &str) -> OperatorNode {
-    use crate::deployment_capabilities::DeploymentCapabilities;
     use crate::pass1::per_computation_candidates::compose_logical_candidate;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
@@ -202,7 +201,7 @@ pub fn cms_summary(query: &str) -> OperatorNode {
     // Inspect each local computation choice under the built-in deployment.
     let per_computation = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))])
         .unwrap()
-        .without_unsupported_summaries(&DeploymentCapabilities::default());
+        .without_unsupported_summaries(None);
     let summary = per_computation
         .targets
         .iter()

@@ -223,7 +223,12 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
     initial: Option<DagOfLogicalMemoGroups>,
     local_candidate_generation_ms: Option<f64>,
 ) -> Stage1ToStage3Run<Id> {
-    let pruned = per_computation.without_unsupported_summaries(models.deployment_capabilities);
+    let pruned = per_computation.without_unsupported_summaries(
+        models
+            .deployment_capabilities
+            .supported_summaries
+            .as_deref(),
+    );
     let initial = initial.unwrap_or_else(|| DagOfLogicalMemoGroups::from_roots(&pruned.roots));
     let mut archive = crate::search::route::CandidateArchive::default();
     let found = crate::search::route::candidate_connection_search(

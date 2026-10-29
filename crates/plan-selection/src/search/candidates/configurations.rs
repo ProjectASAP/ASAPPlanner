@@ -174,7 +174,7 @@ pub(in crate::search) fn enumerate_candidate_configurations_before(
                     Materialization::MatAtIngestion(Medium::Memory),
                     entries,
                     data,
-                    deployment,
+                    deployment.query_time_results_retained,
                 )
             }) {
                 modes.push((
@@ -190,7 +190,7 @@ pub(in crate::search) fn enumerate_candidate_configurations_before(
                         Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory),
                         entries,
                         data,
-                        deployment,
+                        deployment.query_time_results_retained,
                     )
                 })
             {
@@ -263,7 +263,7 @@ pub(in crate::search) fn enumerate_candidate_configurations_before(
                             materialization,
                             entries,
                             data,
-                            deployment,
+                            deployment.query_time_results_retained,
                         )
                     })
                     .collect::<Vec<_>>();
@@ -290,7 +290,7 @@ pub(in crate::search) fn enumerate_candidate_configurations_before(
                             materialization,
                             entries,
                             data,
-                            deployment,
+                            deployment.query_time_results_retained,
                         ) {
                             for &left_output in &query_outputs[left] {
                                 for &right_output in &query_outputs[right] {
@@ -495,11 +495,15 @@ fn summary_mode_allowed(
     mode: Materialization,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
-    deployment: &DeploymentCapabilities,
+    query_time_results_retained: bool,
 ) -> bool {
-    let Ok(eligibility) =
-        summary_materialization_eligibility(node, readers, entries, data, deployment)
-    else {
+    let Ok(eligibility) = summary_materialization_eligibility(
+        node,
+        readers,
+        entries,
+        data,
+        query_time_results_retained,
+    ) else {
         return false;
     };
     eligibility.range_compatibility.is_ok()
@@ -820,7 +824,7 @@ mod tests {
             &original_roots,
             &entries,
             &data,
-            &deployment,
+            deployment.query_time_results_retained,
         )
         .unwrap();
         physical.physical.dag.validate().unwrap();

@@ -329,7 +329,7 @@ pub(crate) fn alone_violation<Id: Clone>(
             &roots,
             entries,
             data,
-            models.deployment_capabilities,
+            models.deployment_capabilities.query_time_results_retained,
         )
         .ok()?;
         for candidate in &physical {

@@ -99,7 +99,9 @@ tests in `planner_layering_example4.rs`.
   as bad input).
 - A new pricing input goes in `CostInputs` (validated in its
   `validate`); a new statement about the executor goes in
-  `DeploymentCapabilities`. Both reach every stage through `PlanningModels`.
+  `DeploymentCapabilities`. Both reach the stages through `PlanningModels`;
+  a stage function takes only the field it reads (Stage 2 takes
+  `query_time_results_retained: bool`, not the whole struct).
 - Expose it in `stage_pipeline` and in the
   [Stage Viewer guide](../user_guide_docs/stage-viewer.md).
 

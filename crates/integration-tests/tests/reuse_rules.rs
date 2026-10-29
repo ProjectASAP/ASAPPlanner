@@ -21,7 +21,6 @@ use asap_logical_asap_optimization::pass2::memo::candidates::{
     CandidateMemo, OriginOfCandidateForMemoGroup,
 };
 use asap_logical_asap_optimization::pass2::memo::{root_groups, MemoGroupId};
-use asap_plan_selection::PlanningModels;
 use asap_types::ir::physical_export::compile_physical_asap_dag;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{
@@ -372,7 +371,7 @@ fn execute_implemented(node: &Rc<OperatorNode>, entry: &QueryWorkloadEntry) -> V
         &[QueryRoot::Operator(Rc::clone(node))],
         std::slice::from_ref(entry),
         &data(),
-        PlanningModels::builtin().deployment_capabilities,
+        false,
     )
     .expect("Stage 2 implements the candidate");
     match &plans[0].roots[0] {
@@ -488,7 +487,7 @@ fn execute_plan(
         &roots,
         entries,
         &data(),
-        PlanningModels::builtin().deployment_capabilities,
+        false,
     )
     .expect("Stage 2 implements the plan");
     match &plans[0].roots[q] {

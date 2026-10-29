@@ -320,7 +320,7 @@ pub fn run_explicit_candidates(
             &candidate.roots,
             &entries,
             &data,
-            models.deployment_capabilities,
+            models.deployment_capabilities.query_time_results_retained,
         )
         .expect("explicit computation has executable physical configurations")
         .into_iter()

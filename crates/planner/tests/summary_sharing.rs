@@ -149,7 +149,7 @@ fn composed_summary_candidates(
                 &roots,
                 &entries,
                 data,
-                models.deployment_capabilities,
+                models.deployment_capabilities.query_time_results_retained,
                 &mut |_, _, _| asap_types::physical::Materialization::NotMaterialized,
             )
             .unwrap()
@@ -168,7 +168,6 @@ fn composed_summary_candidates(
 fn shared_kll_candidate(
     workload: &PlanningWorkload,
 ) -> asap_physical_asap_optimization::PhysicalWorkloadPlan {
-    use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
@@ -212,7 +211,7 @@ fn shared_kll_candidate(
         &roots,
         &workload.query_workload.entries().collect::<Vec<_>>(),
         workload.data_workload.as_ref().unwrap(),
-        &DeploymentCapabilities::default(),
+        false,
         &mut |_, _, _| Materialization::NotMaterialized,
     )
     .unwrap()

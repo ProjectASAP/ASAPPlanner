@@ -286,7 +286,7 @@ fn independent_kll_cost(
         &roots,
         entries,
         data,
-        models.deployment_capabilities,
+        models.deployment_capabilities.query_time_results_retained,
         &mut |_, _, _| asap_types::physical::Materialization::NotMaterialized,
     )
     .unwrap()

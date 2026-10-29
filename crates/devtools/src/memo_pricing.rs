@@ -136,12 +136,17 @@ fn price_choice(
         return invalid("invalid_structure", error.to_string());
     }
     let id = format!("E{}", index + 1);
-    let mut physical =
-        match optimize_physical_asap(&id, &roots, entries, data, models.deployment_capabilities) {
-            Ok(physical) if !physical.is_empty() => physical,
-            Ok(_) => return invalid("stage2_failed", "no physical plan".into()),
-            Err(error) => return invalid("stage2_failed", error.to_string()),
-        };
+    let mut physical = match optimize_physical_asap(
+        &id,
+        &roots,
+        entries,
+        data,
+        models.deployment_capabilities.query_time_results_retained,
+    ) {
+        Ok(physical) if !physical.is_empty() => physical,
+        Ok(_) => return invalid("stage2_failed", "no physical plan".into()),
+        Err(error) => return invalid("stage2_failed", error.to_string()),
+    };
     for (k, plan) in physical.iter_mut().enumerate() {
         plan.id = format!("{id}-{k}");
     }

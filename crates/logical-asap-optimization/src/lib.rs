@@ -51,7 +51,7 @@ pub mod deployment_capabilities;
 pub mod test_support;
 
 pub use deployment_capabilities::{
-    DeploymentCapabilities, DeploymentCapabilitiesError, SupportedSummary,
+    summary_supported, DeploymentCapabilities, DeploymentCapabilitiesError, SupportedSummary,
 };
 pub use pass1::realization::summary_candidates;
 

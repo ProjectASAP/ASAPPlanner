@@ -377,7 +377,7 @@ pub mod planning {
                 &roots,
                 entries,
                 data,
-                models.deployment_capabilities,
+                models.deployment_capabilities.query_time_results_retained,
             )
             .unwrap_or_else(|error| panic!("Stage 2 implements {name}: {error}"));
             for (index, plan) in plans.iter_mut().enumerate() {
@@ -614,7 +614,9 @@ pub mod planning {
                         &roots,
                         entries,
                         data,
-                        PlanningModels::builtin().deployment_capabilities,
+                        PlanningModels::builtin()
+                            .deployment_capabilities
+                            .query_time_results_retained,
                     )
                     .expect("explicit rewrite is executable"),
                 );

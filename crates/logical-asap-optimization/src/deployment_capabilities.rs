@@ -70,11 +70,7 @@ impl Default for DeploymentCapabilities {
 impl DeploymentCapabilities {
     /// Whether the executor can build `family` and answer `readout` from it.
     pub fn supports(&self, family: &SketchAlgorithm, readout: StatisticKind) -> bool {
-        self.supported_summaries.as_ref().is_none_or(|supported| {
-            supported
-                .iter()
-                .any(|s| s.family == *family && s.readouts.contains(&readout))
-        })
+        summary_supported(self.supported_summaries.as_deref(), family, readout)
     }
 
     /// Checks these capabilities against the data workload: stored data
@@ -91,6 +87,22 @@ impl DeploymentCapabilities {
             _ => Ok(()),
         }
     }
+}
+
+/// Whether an executor that builds `supported_summaries` (`None`: every
+/// family and readout the planner can build) can build `family` and answer
+/// `readout` from it. Pass 1 reads only this field of
+/// [`DeploymentCapabilities`].
+pub fn summary_supported(
+    supported_summaries: Option<&[SupportedSummary]>,
+    family: &SketchAlgorithm,
+    readout: StatisticKind,
+) -> bool {
+    supported_summaries.is_none_or(|supported| {
+        supported
+            .iter()
+            .any(|s| s.family == *family && s.readouts.contains(&readout))
+    })
 }
 
 /// Deployment capabilities that contradict the other planning inputs
