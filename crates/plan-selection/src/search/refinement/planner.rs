@@ -609,7 +609,7 @@ fn seed_dds_budgets(
     context: &CandidatePlanningContext<'_>,
     output_queries: &[usize],
 ) -> Vec<f64> {
-    use asap_logical_asap_optimization::accuracy::budget::per_input_target;
+    use asap_accuracy::budget::per_input_target;
     use asap_types::ir::{
         operator::AggIntent, properties::AccuracyMetric, NonASAPOp, OperatorNode,
     };
@@ -1732,7 +1732,7 @@ mod tests {
         // A deployment may acquire evidence at another shared summary size.
         // Reuse the original predicate's conservative guard, not a new model.
         struct PotentialEvidence;
-        impl crate::AccuracyEvidenceProvider for PotentialEvidence {}
+        impl asap_accuracy::AccuracyEvidenceProvider for PotentialEvidence {}
         let evidence = PotentialEvidence;
         let evidence_context = CandidatePlanningContext {
             deadline: None,

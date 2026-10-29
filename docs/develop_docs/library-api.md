@@ -26,8 +26,9 @@ artifact, while preserving the checks required by its intended consumer.
 Inside this workspace, depend on the frontend you need, the stage crates
 (`asap-logical-asap-optimization` for Stage 1, `asap-physical-asap-optimization`
 for Stage 2, `asap-plan-selection` for Stage 3 and the Stage 1 to Stage 3
-driver), `asap-cost` for the cost model and its inputs (`CostInputs`), and
-`asap-types`, or on `asap-planner`, which wraps every frontend and
+driver), `asap-cost` for the cost model and its inputs (`CostInputs`),
+`asap-accuracy` for the accuracy model (`AccuracyModel`,
+`AccuracyEvidenceProvider`), and `asap-types`, or on `asap-planner`, which wraps every frontend and
 the planning stages. External users can use Git dependencies pinned to a
 compatible revision; use the same revision across these crates, and pick a
 revision at least as new as the APIs you call. Replace `REV` below with a
@@ -40,6 +41,7 @@ asap-planner = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV"
 asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
 asap-plan-selection = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
 asap-cost = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
+asap-accuracy = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
 asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
 # For the async e2e_plan example:
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
@@ -180,7 +182,7 @@ asap_plan_selection::run_stage1_to_stage3<Id>(
 | Input or output | Meaning |
 | --- | --- |
 | `PlanningModels::new(accuracy, evidence)` | Your `&dyn AccuracyModel` and `&dyn AccuracyEvidenceProvider`, with default plan selection settings and deployment capabilities; `with_accuracy` and `with_evidence` replace one of them |
-| `PlanningModels::builtin()` | Built-in accuracy model (`DefaultAccuracyModel`) and no extra evidence (`NoAccuracyEvidence`). `with_plan_selection(&settings)` sets the deployment's `CostInputs`; `with_deployment_capabilities(&capabilities)` sets its `DeploymentCapabilities` (field `deployment_capabilities`) |
+| `PlanningModels::builtin()` | Built-in accuracy model (`BuiltinAccuracyModel`) and no extra evidence (`NoAccuracyEvidence`). `with_plan_selection(&settings)` sets the deployment's `CostInputs`; `with_deployment_capabilities(&capabilities)` sets its `DeploymentCapabilities` (field `deployment_capabilities`) |
 | `DeploymentCapabilities` (`asap_logical_asap_optimization::deployment_capabilities`) | What the executor supports: `supported_summaries` (`None`, the default, supports every summary the planner builds; otherwise `SupportedSummary { family: SketchAlgorithm, readouts: Vec<StatisticKind> }` entries; Pass 1 prunes others with `PruneReason::UnsupportedByDeployment`), `raw_data_retained` (default `true`; when `false`, a candidate that scans raw data at query time is invalid, and stored data is refused with `SelectionError::InvalidDeploymentCapabilities`) and `query_time_results_retained` (default `false`; when `true`, Stage 2 offers `MatAtQueryKeptAcrossEvaluations` for tumbling panes) |
 | `CostInputs` (`asap_cost`) | `cost_model`, `resource_speed` (`ms_per_cpu_op`, `ms_per_scanned_byte`), `non_repeating_query_horizon_seconds` (default 3,600) and `measured_operation_costs` (`MeasuredOperationCosts`, default empty: `operators`, one `OperatorCost { operator, phase, sketch / exact / measure, ns_per_unit, ns_per_invocation, memory_bytes_per_state }` per measured operator kind, phase and family; `ns_per_evaluation` per query request; `provenance` (executor version, machine). A node with an entry is priced from it, a sketch between the two nearest measured sizes; every other node from the formulas times one calibration factor fitted from the measured nodes; each node's `NodeCost::price_source` says which. The earlier JSON array of `MeasuredOperationCost { sketch, operation, cpu_ns_per_operation }` still loads) |
 | `CostModel::UsageOverTime(ResourceUnitCost)` | Cost model 1 (default, `ResourceUnitCost::illustrative()`): unit cost × usage per second; the cheapest valid candidate wins |

@@ -32,11 +32,11 @@ use asap_types::ir::OperatorNode;
 use asap_types::workload::parsed_workload::ParsedWorkload;
 use asap_types::workload::WorkloadError;
 
-use crate::accuracy::{
-    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, IgnoreAccuracyGuarantees,
-    NoAccuracyEvidence,
-};
+use crate::accuracy::IgnoreAccuracyGuarantees;
 use crate::{Selection, SelectionError};
+use asap_accuracy::{
+    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, NoAccuracyEvidence,
+};
 use asap_cost::CostInputs;
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
 use asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidateError;

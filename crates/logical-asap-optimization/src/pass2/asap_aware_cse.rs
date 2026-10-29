@@ -167,10 +167,10 @@ use asap_types::ir::{
     TimeRangeKind,
 };
 
-use crate::accuracy::estimators::size_for_all_readers;
 use crate::pass1::per_computation_candidates::{
     recompose_guarantees, PerComputationCandidateError,
 };
+use asap_accuracy::estimators::size_for_all_readers;
 
 /// A Pass 2 candidate of the identical-expression rule: the candidate's
 /// roots with each of `sharing_candidates` made one node.

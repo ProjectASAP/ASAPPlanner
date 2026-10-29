@@ -1783,7 +1783,7 @@ mod tests {
     /// A deployment's accuracy model that accepts no output.
     struct AcceptsNothing;
 
-    impl crate::AccuracyModel for AcceptsNothing {
+    impl asap_accuracy::AccuracyModel for AcceptsNothing {
         fn satisfies(
             &self,
             _: &asap_types::ir::properties::AccuracyGuarantee,

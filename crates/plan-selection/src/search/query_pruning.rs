@@ -546,7 +546,7 @@ mod tests {
     #[test]
     fn possible_evidence_preserves_missing_guarantee_candidates() {
         struct PotentialEvidence;
-        impl crate::AccuracyEvidenceProvider for PotentialEvidence {}
+        impl asap_accuracy::AccuracyEvidenceProvider for PotentialEvidence {}
         let (inventory, entries, data) = fixture();
         let evidence = PotentialEvidence;
         let models = PlanningModels {

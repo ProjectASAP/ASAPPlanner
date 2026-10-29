@@ -369,15 +369,16 @@ current composition does not carry.
 
 ## Organization and extension contract
 
-The `asap_logical_asap_optimization::accuracy` module separates these responsibilities:
+The `asap_accuracy` crate separates these responsibilities:
 
 ```text
-accuracy/
-├── mod.rs              # Public interfaces and unified entry point
+accuracy/src/
+├── lib.rs              # Public interfaces and unified entry point (satisfies, per-input targets)
+├── model.rs            # AccuracyModel, AccuracyEvidenceProvider and their built-in defaults
 ├── evidence.rs         # Evidence and source contracts
 ├── composition.rs      # Error propagation across computations
-├── allocation.rs       # End-to-end budget allocation
-├── reconciliation.rs   # Accuracy coordination across consumers
+├── budget.rs           # Splitting a query's accuracy budget across approximate inputs
+├── function_rules.rs   # Error composition of scalar functions over approximate inputs
 └── estimators/
     ├── mod.rs          # Family/evaluation dispatch and source-contract integration
     ├── kll.rs
@@ -408,6 +409,6 @@ not require a new selection rule for every sketch. Deployment extensions to
 `AccuracyModel` remain possible, but carry the same obligation to justify
 metrics, assumptions and propagation.
 
-For implementation details, see the [accuracy module](../../../crates/logical-asap-optimization/src/accuracy/mod.rs),
+For implementation details, see the [accuracy crate](../../../crates/accuracy/src/lib.rs),
 [guarantee representation](../../../crates/types/src/ir/properties/guarantee.rs), and
 [accuracy propagation companion](../../develop_docs/end-to-end-accuracy-guarantees.md).

@@ -68,9 +68,14 @@ pub(crate) fn add_scoped_candidates(
             super::check_deadline(deadline).map_err(|e| e.to_string())?;
             let roots = crate::with_resized_summaries(
                 &[QueryRoot::Operator(candidate.root_node.clone())],
-                &|_, params| Some(asap_logical_asap_optimization::accuracy::estimators::with_failure_probability(
-                    params, budget / candidate.accuracy_budget_parts.max(1) as f64)),
-            ).map_err(|e| e.to_string())?;
+                &|_, params| {
+                    Some(asap_accuracy::estimators::with_failure_probability(
+                        params,
+                        budget / candidate.accuracy_budget_parts.max(1) as f64,
+                    ))
+                },
+            )
+            .map_err(|e| e.to_string())?;
             let QueryRoot::Operator(node) = &roots[0] else {
                 unreachable!()
             };

@@ -119,16 +119,17 @@ use asap_types::ir::{
 use asap_types::physical::Materialization;
 use thiserror::Error;
 
-use crate::accuracy::composition::propagate;
-use crate::accuracy::composition::raw_data_samples_sign_statistic;
-use crate::accuracy::composition::{
+use asap_accuracy::composition::propagate;
+use asap_accuracy::composition::raw_data_samples_sign_statistic;
+use asap_accuracy::composition::{
     additive_as_absolute, StreamNorm, GROUP_ROW_COUNT, PRODUCT_OPERAND_DOMAINS,
     QUOTIENT_OPERAND_DOMAINS,
 };
-use crate::accuracy::estimators::local_guarantee;
-use crate::accuracy::estimators::{hll, univmon};
-use crate::accuracy::function_rules::approximate_input_composition;
-use crate::accuracy::{per_input_target, PropagationStats};
+use asap_accuracy::estimators::local_guarantee;
+use asap_accuracy::estimators::{hll, univmon};
+use asap_accuracy::function_rules::approximate_input_composition;
+use asap_accuracy::{per_input_target, PropagationStats};
+
 use crate::deployment_capabilities::{summary_supported, SupportedSummary};
 use crate::pass1::realization::{
     accuracy_budget, default_size_params, sizing_target, sketch_statistic, summary_candidates,
@@ -1358,7 +1359,7 @@ pub fn approximate_inputs(root: &QueryRoot) -> Vec<Rc<OperatorNode>> {
     let guarantee = root_guarantee(root).or_else(|| {
         bind_guarantees(root, &|guarantee| {
             guarantee.bind(&|statistic| {
-                crate::accuracy::composition::parse_raw_data_samples_sign_statistic(statistic)
+                asap_accuracy::composition::parse_raw_data_samples_sign_statistic(statistic)
                     .map(|_| 1.0)
             })
         })
@@ -4563,10 +4564,8 @@ mod tests {
     /// Which stream norm bounds a Count-Min or Count Sketch estimate (#669).
     mod stream_norms {
         use super::*;
-        use crate::accuracy::composition::{
-            source_norm_statistic, STREAM_L1_NORM, STREAM_ROW_COUNT,
-        };
         use crate::test_support::{cms_summary, weighted};
+        use asap_accuracy::composition::{source_norm_statistic, STREAM_L1_NORM, STREAM_ROW_COUNT};
 
         /// A count (constant weight) is bounded by its weight times the
         /// source's row count; a sum of the source's raw value column by
@@ -5429,7 +5428,9 @@ mod tests {
             let stats = fold_stats(&Reduction::by(vec![]), &estimate).unwrap();
             assert_eq!(
                 stats.sign_statistic,
-                Some(crate::accuracy::composition::raw_data_samples_sign_statistic("m"))
+                Some(asap_accuracy::composition::raw_data_samples_sign_statistic(
+                    "m"
+                ))
             );
         }
         let rate = inventory_root("sum by (job) (rate(m[1m]))");
@@ -5491,8 +5492,8 @@ mod tests {
 
     fn cms(eps: f64, delta: f64) -> SketchParams {
         SketchParams::Cms {
-            width: crate::accuracy::estimators::cms::cms_width(eps),
-            depth: crate::accuracy::estimators::cms::cms_depth(delta),
+            width: asap_accuracy::estimators::cms::cms_width(eps),
+            depth: asap_accuracy::estimators::cms::cms_depth(delta),
         }
     }
 
@@ -5648,9 +5649,7 @@ mod tests {
         assert_eq!(
             symbolic.spec.failure_probability,
             ProbabilityExpr::Unknown {
-                statistic: crate::accuracy::estimators::hll::classic_failure_statistic(
-                    15, 0.05, "a"
-                )
+                statistic: asap_accuracy::estimators::hll::classic_failure_statistic(15, 0.05, "a")
             }
         );
         for (query, over) in [("a * on() b", "a join"), ("a * 2", "computed rows")] {
@@ -6202,7 +6201,7 @@ mod tests {
         assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Rank);
         assert_eq!(
             guarantee.spec.error.evaluate(),
-            Some(crate::accuracy::estimators::kll::kll_rank_error_99(269))
+            Some(asap_accuracy::estimators::kll::kll_rank_error_99(269))
         );
     }
 }

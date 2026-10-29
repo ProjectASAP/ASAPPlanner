@@ -257,7 +257,7 @@ pub fn incomplete_top_layer_probability(heap_size: u32, layers: u8, max_distinct
 /// `δ_c` plus the chance of an incomplete top layer, left symbolic in the
 /// source's distinct bound. `None` for a shape that was not sized for a
 /// distinct count, a heap under 8, or a shape the library would not build.
-pub(crate) fn distinct_guarantee(params: &SketchParams, source: &str) -> Option<AccuracyGuarantee> {
+pub fn distinct_guarantee(params: &SketchParams, source: &str) -> Option<AccuracyGuarantee> {
     let SketchParams::UnivMon {
         heap_size,
         sketch_rows,
@@ -446,7 +446,7 @@ mod tests {
     fn meets(guarantee: &AccuracyGuarantee, epsilon: f64, delta: f64) -> bool {
         satisfies(
             guarantee,
-            &crate::accuracy::native_target(
+            &crate::native_target(
                 &AccuracyTarget::max_error(epsilon).failure_probability(delta),
                 guarantee,
             ),

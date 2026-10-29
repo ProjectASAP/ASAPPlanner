@@ -40,7 +40,7 @@ The main implementation locations are:
 | Concern | Location |
 | --- | --- |
 | Guarantee and error vocabulary | `asap_types::ir::properties::guarantee` |
-| Accuracy model and built-in propagation | `asap_logical_asap_optimization::accuracy` |
+| Accuracy model and built-in propagation | `asap_accuracy` |
 | Candidate construction and legality filtering | `asap_aware_mapping::replacement` |
 | Parameter sizing hooks | `asap_aware_mapping::cost_model` |
 | Guarantee and rejection export | The `stage_pipeline` devtool's document (`crates/devtools/src/bin/stage_pipeline.rs`) |

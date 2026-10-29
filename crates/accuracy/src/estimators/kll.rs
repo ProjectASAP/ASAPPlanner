@@ -48,7 +48,7 @@ pub(crate) const KLL_RANK_ERROR_EXPONENT_99: f64 = 0.9723;
 /// The failure probability of the empirical 99% calibration.
 pub(crate) const KLL_CALIBRATED_FAILURE_PROBABILITY: f64 = 0.01;
 
-pub(crate) fn kll_rank_error_99(k: u32) -> f64 {
+pub fn kll_rank_error_99(k: u32) -> f64 {
     KLL_RANK_ERROR_COEFFICIENT_99 / f64::from(k).powf(KLL_RANK_ERROR_EXPONENT_99)
 }
 
@@ -214,11 +214,11 @@ mod tests {
 
     #[test]
     fn local_guarantee_inverts_rank_sizing() {
-        use crate::pass1::realization::default_size_params;
+        use crate::estimators::size_params;
         use asap_types::ir::operator::agg_intent::default_quantile;
         use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let q = default_quantile(0.99);
-        let params = default_size_params(SketchAlgorithm::Kll, &q, 0.01, 0.01);
+        let params = size_params(SketchAlgorithm::Kll, &q, 0.01, 0.01);
         let g = local_guarantee(
             &FieldDataType::Sketch(
                 SketchKind::new(SketchAlgorithm::Kll, params),
@@ -252,15 +252,15 @@ mod tests {
     /// larger than at δ = 0.01, and the guarantee meets ε = 0.01, δ = 0.001.
     #[test]
     fn sizing_meets_a_failure_probability_below_one_percent() {
-        use crate::pass1::realization::default_size_params;
+        use crate::estimators::size_params;
         use asap_types::ir::operator::agg_intent::default_quantile;
         let q = default_quantile(0.99);
-        let k = |delta| match default_size_params(SketchAlgorithm::Kll, &q, 0.01, delta) {
+        let k = |delta| match size_params(SketchAlgorithm::Kll, &q, 0.01, delta) {
             SketchParams::Kll { k, .. } => k,
             other => panic!("{other:?}"),
         };
         assert!(k(0.001) > k(0.01), "{} vs {}", k(0.001), k(0.01));
-        let params = default_size_params(SketchAlgorithm::Kll, &q, 0.01, 0.001);
+        let params = size_params(SketchAlgorithm::Kll, &q, 0.01, 0.001);
         let g = guarantee(
             &SketchAlgorithm::Kll,
             &params,
@@ -379,18 +379,18 @@ mod tests {
     /// KLL `k` inverts the rank-error fit: ε = 0.01 → 269, ε = 0.05 → 52.
     #[test]
     fn accuracy_target_drives_kll_k() {
-        use crate::pass1::realization::default_size_params;
+        use crate::estimators::size_params;
         use asap_types::ir::operator::agg_intent::default_quantile;
         let q = default_quantile(0.99);
         assert_eq!(
-            default_size_params(SketchAlgorithm::Kll, &q, 0.01, 0.01),
+            size_params(SketchAlgorithm::Kll, &q, 0.01, 0.01),
             SketchParams::Kll {
                 k: 269,
                 failure_probability: None
             }
         );
         assert_eq!(
-            default_size_params(SketchAlgorithm::Kll, &q, 0.05, 0.01),
+            size_params(SketchAlgorithm::Kll, &q, 0.05, 0.01),
             SketchParams::Kll {
                 k: 52,
                 failure_probability: None
@@ -401,10 +401,10 @@ mod tests {
     /// A zero ε saturates KLL `k` to the tightest buildable value.
     #[test]
     fn degenerate_epsilon_saturates_to_tightest_kll_params() {
-        use crate::pass1::realization::default_size_params;
+        use crate::estimators::size_params;
         use asap_types::ir::operator::agg_intent::default_quantile;
         assert_eq!(
-            default_size_params(SketchAlgorithm::Kll, &default_quantile(0.99), 0.0, 0.01),
+            size_params(SketchAlgorithm::Kll, &default_quantile(0.99), 0.0, 0.01),
             SketchParams::Kll {
                 k: 26_602,
                 failure_probability: None

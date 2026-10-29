@@ -28,8 +28,8 @@ A new sketch that Pass 1 can offer for an intent.
    that order, for every intent whose statistic its capability row answers.
    Size it in `realization::default_size_params`.
 4. **Accuracy.** Add its error model under
-   `crates/logical-asap-optimization/src/accuracy/estimators/` and return
-   it from `DefaultAccuracyModel`'s `local_guarantee`, by inverting the same
+   `crates/accuracy/src/estimators/` and return
+   it from `BuiltinAccuracyModel`'s `local_guarantee`, by inverting the same
    sizing formulas. Without a guarantee, every candidate that uses it is
    rejected.
 5. **Cost.** Give it a state size (the library's `estimated_memory_bytes`

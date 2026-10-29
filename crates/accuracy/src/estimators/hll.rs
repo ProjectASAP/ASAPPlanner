@@ -47,11 +47,7 @@ pub fn classic_relative_error(precision: u8, relative_error: Option<f64>) -> f64
 /// `relative_error` over `source` is left as ([`classic_guarantee`]).
 /// `relative_error` is written in Rust's shortest round-trip form, so it
 /// parses back to the same value.
-pub(crate) fn classic_failure_statistic(
-    precision: u8,
-    relative_error: f64,
-    source: &str,
-) -> String {
+pub fn classic_failure_statistic(precision: u8, relative_error: f64, source: &str) -> String {
     format!(
         "{CLASSIC_FAILURE_PROBABILITY}[p={precision},eps={relative_error}]({MAX_DISTINCT}[{source}])"
     )
@@ -85,7 +81,7 @@ pub fn parse_classic_failure_statistic(statistic: &str) -> Option<(u8, f64, &str
 /// distinct bound ([`classic_failure_statistic`]). The failure probability
 /// is per output row: each group's estimate fails with at most it. `None`
 /// for a precision outside the contract's.
-pub(crate) fn classic_guarantee(
+pub fn classic_guarantee(
     precision: u8,
     relative_error: Option<f64>,
     source: &str,
@@ -458,11 +454,10 @@ mod tests {
     /// bound.
     #[test]
     fn precision_is_sized_from_epsilon_and_delta() {
-        use crate::pass1::realization::default_size_params;
+        use crate::estimators::size_params;
         use asap_types::ir::operator::agg_intent::default_cardinality;
         for (eps, delta, precision) in [(0.05, 0.01, 15), (0.02, 0.01, 17)] {
-            let params =
-                default_size_params(SketchAlgorithm::Hll, &default_cardinality(), eps, delta);
+            let params = size_params(SketchAlgorithm::Hll, &default_cardinality(), eps, delta);
             let SketchParams::Hll {
                 precision: sized,
                 relative_error,
@@ -476,11 +471,11 @@ mod tests {
 
     #[test]
     fn generic_rse_sizing_does_not_certify_confidence() {
-        use crate::pass1::realization::default_size_params;
+        use crate::estimators::size_params;
         use asap_types::ir::operator::agg_intent::default_cardinality;
         use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let c = default_cardinality();
-        let params = default_size_params(SketchAlgorithm::Hll, &c, 0.01, 0.01);
+        let params = size_params(SketchAlgorithm::Hll, &c, 0.01, 0.01);
         let g = local_guarantee(
             &FieldDataType::Sketch(
                 SketchKind::new(SketchAlgorithm::Hll, params),
