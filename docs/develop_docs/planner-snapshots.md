@@ -2,9 +2,10 @@
 
 The planner has no reference answer to test against, so CI pins what it
 produces. For each query in a corpus, the plan that `stage_pipeline` selects
-(default search) is committed as a snapshot. A PR that changes any of these
-plans fails the `corpus-snapshots` CI job until the snapshots are regenerated
-and the change is explained.
+(default search) is committed as a snapshot. The `Corpus snapshots` workflow
+checks them nightly on `main` (and on demand from the Actions tab, for any
+branch); a change to any of these plans fails it until the snapshots are
+regenerated and the change is explained.
 
 ## Layout
 
