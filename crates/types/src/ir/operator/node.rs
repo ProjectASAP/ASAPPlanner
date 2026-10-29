@@ -70,14 +70,14 @@ impl Operator {
         }
     }
 
-    pub fn output_kind(&self) -> OperatorResultKind {
+    pub(crate) fn output_kind(&self) -> OperatorResultKind {
         match self {
             Operator::NonASAP(op) => op.output_kind(),
             Operator::ASAP(op) => op.output_kind(),
         }
     }
 
-    pub fn validate_inputs(&self) -> Result<(), SchemaDerivationError> {
+    pub(crate) fn validate_inputs(&self) -> Result<(), SchemaDerivationError> {
         match self {
             Operator::NonASAP(op) => op.validate_inputs(),
             Operator::ASAP(op) => op.validate_inputs(),

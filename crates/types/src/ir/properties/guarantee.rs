@@ -81,6 +81,7 @@ pub enum BoundExpr {
 }
 
 impl BoundExpr {
+    #[cfg_attr(not(test), allow(dead_code))]
     fn optimistic_floor(&self) -> Self {
         match self {
             Self::Unknown { .. } => Self::Zero,
@@ -199,6 +200,7 @@ pub enum ProbabilityExpr {
 }
 
 impl ProbabilityExpr {
+    #[cfg_attr(not(test), allow(dead_code))]
     fn optimistic_floor(&self) -> Self {
         match self {
             Self::Unknown { .. } => Self::Zero,
@@ -428,7 +430,8 @@ impl AccuracyGuarantee {
     /// Optimistic lower bound used only to reject an impossible target.
     /// Replacing unknown non-negative contributions by zero cannot certify
     /// this candidate; the original guarantee remains unresolved.
-    pub fn optimistic_floor(&self) -> Self {
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn optimistic_floor(&self) -> Self {
         let mut floor = self.clone();
         floor.spec.error = self.spec.error.optimistic_floor();
         floor.spec.failure_probability = self.spec.failure_probability.optimistic_floor();

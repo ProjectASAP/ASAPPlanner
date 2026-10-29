@@ -257,7 +257,8 @@ impl<C> ASAPOp<C> {
 
 impl ASAPOp {
     /// Reserved variants that are migrated but not implemented.
-    pub fn is_unimplemented(&self) -> bool {
+    #[allow(dead_code)]
+    pub(crate) fn is_unimplemented(&self) -> bool {
         use ASAPOp::*;
         matches!(
             self,
@@ -538,7 +539,7 @@ impl ASAPOp {
         })
     }
 
-    pub fn output_kind(&self) -> OperatorResultKind {
+    pub(crate) fn output_kind(&self) -> OperatorResultKind {
         use ASAPOp::*;
         match self {
             SummaryAgg { .. }

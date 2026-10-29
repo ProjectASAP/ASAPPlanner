@@ -472,7 +472,8 @@ impl DemandEstimate {
     /// Whether this estimate was already observed and has not expired at
     /// `now_ms`. A validity duration without an observation time is not a
     /// usable freshness contract.
-    pub fn is_fresh_at(&self, now_ms: u64) -> bool {
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn is_fresh_at(&self, now_ms: u64) -> bool {
         match (self.observed_at, self.valid_for) {
             (Some(observed), _) if observed.0 > now_ms => false,
             (Some(observed), Some(valid_for)) => now_ms <= observed.0.saturating_add(valid_for.0),
