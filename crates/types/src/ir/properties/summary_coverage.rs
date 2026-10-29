@@ -239,7 +239,7 @@ pub enum CoverageError {
 
 /// Coverage already derived during one validation, by node address. The
 /// nodes must stay alive while it is in use.
-pub(crate) type CoverageMemo = HashMap<*const OperatorNode, SummaryCoverage>;
+pub(crate) type NodeToSummaryCoverageCache = HashMap<*const OperatorNode, SummaryCoverage>;
 
 impl SummaryCoverage {
     /// Coverage of a `SummaryAgg`, `PaneChain` or `SummaryMerge`. A chain
@@ -251,7 +251,7 @@ impl SummaryCoverage {
     /// table) may also merge overlapping selections, and a counter family
     /// ([`MergeInputRule::DisjointInTime`]) needs disjoint time windows.
     pub fn derive(node: &OperatorNode) -> Result<Self, CoverageError> {
-        Self::derive_memoized(node, &mut CoverageMemo::new())
+        Self::derive_cached(node, &mut NodeToSummaryCoverageCache::new())
     }
 
     /// A stable identity of `definition`: the 128-bit FNV-1a hash, in hex,
@@ -268,19 +268,19 @@ impl SummaryCoverage {
     }
 
     /// [`derive`](Self::derive), reusing and recording the coverage of
-    /// every summary state in `memo`, so validating a DAG derives each
+    /// every summary state in `cache`, so validating a DAG derives each
     /// state once.
-    pub(crate) fn derive_memoized(
+    pub(crate) fn derive_cached(
         node: &OperatorNode,
-        memo: &mut CoverageMemo,
+        cache: &mut NodeToSummaryCoverageCache,
     ) -> Result<Self, CoverageError> {
         let key = node as *const OperatorNode;
-        if let Some(coverage) = memo.get(&key) {
+        if let Some(coverage) = cache.get(&key) {
             return Ok(coverage.clone());
         }
         if let Some(build) = selected_build(node)? {
             let coverage = of_summary_agg(&build);
-            memo.insert(key, coverage.clone());
+            cache.insert(key, coverage.clone());
             return Ok(coverage);
         }
         let coverage = match node.asap() {
@@ -312,7 +312,7 @@ impl SummaryCoverage {
             }) => {
                 let inputs = children
                     .iter()
-                    .map(|child| Self::derive_memoized(child, memo))
+                    .map(|child| Self::derive_cached(child, cache))
                     .collect::<Result<Vec<_>, _>>()?;
                 let merged = of_merge(&inputs)?;
                 match group_by {
@@ -322,7 +322,7 @@ impl SummaryCoverage {
             }
             _ => return Err(CoverageError::NotSummary),
         };
-        memo.insert(key, coverage.clone());
+        cache.insert(key, coverage.clone());
         Ok(coverage)
     }
 }

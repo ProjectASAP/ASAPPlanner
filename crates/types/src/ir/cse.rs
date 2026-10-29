@@ -67,7 +67,7 @@ use crate::ir::NonASAPOp;
 /// letting it persist across every node of one bottom-up pass rather than
 /// starting a new one per call. The caller must keep every cached node alive
 /// for the cache's lifetime, or a reused address would alias a stale entry.
-pub type HashCache = HashMap<*const OperatorNode, u64>;
+pub type NodeToStructuralHashCache = HashMap<*const OperatorNode, u64>;
 
 /// The operator with every child (operator inputs and the operator nodes
 /// referenced from its scalar expressions alike) replaced by `()`. What
@@ -99,8 +99,8 @@ fn own_fields(node: &OperatorNode) -> Operator<()> {
 /// descendant once per parent would cost `O(sub-DAG)` per node instead of
 /// `O(1)` beyond the children's already-known hashes. A non-finite `f64`
 /// serializes as `null`, merely widening one (still equality-checked) bucket.
-pub fn structural_hash(node: &OperatorNode, cache: &mut HashCache) -> u64 {
-    fn child_hash(child: &Rc<OperatorNode>, cache: &mut HashCache) -> u64 {
+pub fn structural_hash(node: &OperatorNode, cache: &mut NodeToStructuralHashCache) -> u64 {
+    fn child_hash(child: &Rc<OperatorNode>, cache: &mut NodeToStructuralHashCache) -> u64 {
         let ptr = Rc::as_ptr(child);
         if let Some(&h) = cache.get(&ptr) {
             return h;
@@ -140,9 +140,9 @@ fn same_value<T: PartialEq + serde::Serialize>(left: &T, right: &T) -> bool {
         }
 }
 
-/// Memo of child-pair comparisons already decided by [`same_node`], keyed by
+/// Cache of child-pair comparisons already decided by [`same_node`], keyed by
 /// pointer pair. Only interned (table-owned, hence alive) nodes are keys.
-type EqMemo = HashMap<(*const OperatorNode, *const OperatorNode), bool>;
+type NodePairToIsSameNodeCache = HashMap<(*const OperatorNode, *const OperatorNode), bool>;
 
 /// The sharing decision: typed equality of two nodes.
 ///
@@ -152,7 +152,11 @@ type EqMemo = HashMap<(*const OperatorNode, *const OperatorNode), bool>;
 /// Children are therefore compared by pointer first; only when the pointers
 /// differ (an equal child that was not legal to share) are the values
 /// compared, memoized per pair so a diamond is still walked once.
-fn same_node(left: &OperatorNode, right: &OperatorNode, memo: &mut EqMemo) -> bool {
+fn same_node(
+    left: &OperatorNode,
+    right: &OperatorNode,
+    cache: &mut NodePairToIsSameNodeCache,
+) -> bool {
     let (lc, rc) = (left.children(), right.children());
     if lc.len() != rc.len() {
         return false;
@@ -162,11 +166,11 @@ fn same_node(left: &OperatorNode, right: &OperatorNode, memo: &mut EqMemo) -> bo
             return true;
         }
         let key = (Rc::as_ptr(a), Rc::as_ptr(b));
-        if let Some(&eq) = memo.get(&key) {
+        if let Some(&eq) = cache.get(&key) {
             return eq;
         }
-        let eq = same_node(a, b, memo);
-        memo.insert(key, eq);
+        let eq = same_node(a, b, cache);
+        cache.insert(key, eq);
         eq
     });
     children_equal
@@ -190,16 +194,16 @@ struct InternTable {
     buckets: HashMap<u64, Vec<Rc<OperatorNode>>>,
     /// Persisted for the table's whole lifetime so hashing is `O(1)` per node
     /// beyond its children; every cached node is owned by `buckets`.
-    hash_cache: HashCache,
-    eq_memo: EqMemo,
+    structural_hash_cache: NodeToStructuralHashCache,
+    same_node_cache: NodePairToIsSameNodeCache,
 }
 
 impl InternTable {
     fn new() -> Self {
         Self {
             buckets: HashMap::new(),
-            hash_cache: HashMap::new(),
-            eq_memo: HashMap::new(),
+            structural_hash_cache: HashMap::new(),
+            same_node_cache: HashMap::new(),
         }
     }
 
@@ -208,7 +212,7 @@ impl InternTable {
     /// sharing is legal (module doc, "Legality") — return the existing `Rc`
     /// instead of allocating a new one.
     fn intern(&mut self, node: OperatorNode) -> Rc<OperatorNode> {
-        let hash = structural_hash(&node, &mut self.hash_cache);
+        let hash = structural_hash(&node, &mut self.structural_hash_cache);
         // A node that is not legal to share is never *returned* as a match
         // for something else; it still occupies a fresh slot in the bucket
         // (harmless: later scans require legality of the new node too).
@@ -220,7 +224,7 @@ impl InternTable {
         if reusable {
             if let Some(existing) = bucket
                 .iter()
-                .find(|candidate| same_node(candidate, &node, &mut self.eq_memo))
+                .find(|candidate| same_node(candidate, &node, &mut self.same_node_cache))
             {
                 return Rc::clone(existing);
             }
@@ -233,8 +237,8 @@ impl InternTable {
 
 /// Input pointer → (input `Rc`, interned result). The input `Rc` is retained
 /// so its address cannot be freed and reused by a fresh allocation while the
-/// memo still maps it.
-type Visited = HashMap<*const OperatorNode, (Rc<OperatorNode>, Rc<OperatorNode>)>;
+/// cache still maps it.
+type NodeToInternedNodeCache = HashMap<*const OperatorNode, (Rc<OperatorNode>, Rc<OperatorNode>)>;
 
 /// Intern `node`'s children (recursively), then `node` itself. The rebuilt
 /// node keeps `node`'s retained schema, result kind, guarantee, timing and
@@ -243,7 +247,7 @@ type Visited = HashMap<*const OperatorNode, (Rc<OperatorNode>, Rc<OperatorNode>)
 /// valid, and the result is `PartialEq`-equal to the input.
 fn intern_bottom_up(
     table: &mut InternTable,
-    visited: &mut Visited,
+    visited: &mut NodeToInternedNodeCache,
     node: &Rc<OperatorNode>,
 ) -> Rc<OperatorNode> {
     if let Some((_, interned)) = visited.get(&Rc::as_ptr(node)) {
@@ -272,7 +276,7 @@ pub fn share_common_sub_dags<Id>(
     roots: Vec<(Id, Rc<OperatorNode>)>,
 ) -> Vec<(Id, Rc<OperatorNode>)> {
     let mut table = InternTable::new();
-    let mut visited = Visited::new();
+    let mut visited = NodeToInternedNodeCache::new();
     roots
         .into_iter()
         .map(|(id, root)| (id, intern_bottom_up(&mut table, &mut visited, &root)))

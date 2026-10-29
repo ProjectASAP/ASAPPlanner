@@ -124,7 +124,7 @@
 // candidates (`candidate_count`, `candidate_count_by_origin`, and the first
 // `--max-memo-candidates` (default 64) under `candidates`, with
 // `candidates_capped`): each with its `index` in the group, `implements`,
-// `children`, `origin` (`CandidateOrigin` in snake case), `budget_share`,
+// `children`, `origin` (`OriginOfCandidateForMemoGroup` in snake case), `budget_share`,
 // `added` (not in the group at the step before), a one-line `label`, its
 // `node` in `nodes` and `group_of_node` (the `nodes` indices below it that
 // are a child group's node, to that group's id).
@@ -137,7 +137,7 @@
 // one DAG), and lists the first `--max-enumerated` (default 200) `choices`
 // of `step`: the last step enumerated completely within that many, else
 // the last step. Each choice has its `id` (`E1`, ...), `choice`, `roots`
-// (`memo::enumeration::compose`'s roots, one per root group, as indices
+// (`memo::enumeration::build_logical_asap_dags_from_chosen_candidates`'s roots, one per root group, as indices
 // into `nodes`; null with `error` when it does not
 // compose), `budget_share_1` (every chosen candidate sized for the whole
 // budget) and `selected` (it is `selected_choice`). With
@@ -273,10 +273,14 @@ use asap_devtools::planning_stages::{
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{counter_function_over_gauge_warnings, promql_metric_names};
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    ComputationCandidate, PerComputationCandidates, PruneReason,
+    HowToComputeAggregateMeasure, PerComputationCandidates, PruneReason,
 };
-use asap_logical_asap_optimization::pass2::memo::candidates::{CandidateMemo, CandidateOrigin};
-use asap_logical_asap_optimization::pass2::memo::enumeration::{compose, enumerate, MemoChoice};
+use asap_logical_asap_optimization::pass2::memo::candidates::{
+    CandidateMemo, OriginOfCandidateForMemoGroup,
+};
+use asap_logical_asap_optimization::pass2::memo::enumeration::{
+    build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
+};
 use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
@@ -1185,7 +1189,7 @@ fn materialized_views_json(
 /// own (`pruned`) and of its fused computation (`fused_pruned`) with the
 /// reason, e.g. `UnsupportedByDeployment`.
 fn pass1_pruned_json(inventory: &PerComputationCandidates<usize>) -> Vec<Value> {
-    let pruned_json = |pruned: &[(ComputationCandidate, PruneReason)]| -> Vec<Value> {
+    let pruned_json = |pruned: &[(HowToComputeAggregateMeasure, PruneReason)]| -> Vec<Value> {
         pruned
             .iter()
             .map(|(candidate, reason)| {
@@ -1519,7 +1523,7 @@ struct Pricing<'a> {
 /// The document's `memo` section: the memo after each step, the selected
 /// plan's choice over the last step's memo, and the candidate DAGs each
 /// step's memo stands for (`memo::enumeration::enumerate`; each listed
-/// choice composed by `memo::enumeration::compose`).
+/// choice composed by `memo::enumeration::build_logical_asap_dags_from_chosen_candidates`).
 fn memo_json(steps: &MemoSteps, caps: &MemoCaps, pricing: &Pricing<'_>) -> Value {
     let named = [
         (
@@ -1558,18 +1562,18 @@ fn memo_json(steps: &MemoSteps, caps: &MemoCaps, pricing: &Pricing<'_>) -> Value
             continue;
         }
         let enumeration = enumerate(memo, caps.enumeration_limit);
-        if enumeration.complete && enumeration.choices.len() <= caps.enumerated {
+        if enumeration.complete && enumeration.all_chosen_candidates.len() <= caps.enumerated {
             listed = Some((step, memo));
         }
         per_step.insert(
             step.into(),
-            json!({ "count": enumeration.choices.len(), "complete": enumeration.complete }),
+            json!({ "count": enumeration.all_chosen_candidates.len(), "complete": enumeration.complete }),
         );
     }
     let last = &steps.concrete_states;
     let (step, memo) = listed.unwrap_or(("concrete_states", last));
     let selected = steps.selected_choice.as_ref().ok();
-    let enumerated = enumerate(memo, caps.enumerated).choices;
+    let enumerated = enumerate(memo, caps.enumerated).all_chosen_candidates;
     let priced = (caps.choices_to_price > 0).then(|| {
         price_choices(
             memo,
@@ -1593,7 +1597,7 @@ fn memo_json(steps: &MemoSteps, caps: &MemoCaps, pricing: &Pricing<'_>) -> Value
                 }),
                 "selected": step == "concrete_states" && selected == Some(choice),
             });
-            match compose(memo, choice) {
+            match build_logical_asap_dags_from_chosen_candidates(memo, choice) {
                 Ok(roots) => {
                     let roots: Vec<_> = roots.into_iter().map(|(_, node)| node).collect();
                     entry["roots"] = json!(table.add(&roots).0);
@@ -1639,7 +1643,7 @@ fn memo_json(steps: &MemoSteps, caps: &MemoCaps, pricing: &Pricing<'_>) -> Value
 }
 
 /// Group id (as a string) to candidate index.
-fn choice_json(choice: &MemoChoice) -> Value {
+fn choice_json(choice: &ChosenCandidatePerMemoGroup) -> Value {
     Value::Object(
         choice
             .iter()
@@ -1767,17 +1771,17 @@ fn memo_groups_json(
         .collect()
 }
 
-/// `CandidateOrigin` in snake case.
-fn origin_name(origin: &CandidateOrigin) -> String {
+/// `OriginOfCandidateForMemoGroup` in snake case.
+fn origin_name(origin: &OriginOfCandidateForMemoGroup) -> String {
     match origin {
-        CandidateOrigin::Pass1 => "pass1",
-        CandidateOrigin::SharedBuild => "shared_build",
-        CandidateOrigin::SummaryResult => "summary_result",
-        CandidateOrigin::SummaryInput => "summary_input",
-        CandidateOrigin::Panes => "panes",
-        CandidateOrigin::Rollup => "rollup",
-        CandidateOrigin::TopKReuse => "top_k_reuse",
-        CandidateOrigin::WidenedScans => "widened_scans",
+        OriginOfCandidateForMemoGroup::Pass1 => "pass1",
+        OriginOfCandidateForMemoGroup::SharedBuild => "shared_build",
+        OriginOfCandidateForMemoGroup::SummaryResult => "summary_result",
+        OriginOfCandidateForMemoGroup::SummaryInput => "summary_input",
+        OriginOfCandidateForMemoGroup::Panes => "panes",
+        OriginOfCandidateForMemoGroup::Rollup => "rollup",
+        OriginOfCandidateForMemoGroup::TopKReuse => "top_k_reuse",
+        OriginOfCandidateForMemoGroup::WidenedScans => "widened_scans",
     }
     .into()
 }

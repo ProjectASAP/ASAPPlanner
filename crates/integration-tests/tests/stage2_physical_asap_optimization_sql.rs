@@ -6,7 +6,7 @@
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    compose_logical_candidate, generate_per_computation_candidates, HowToComputeAggregateMeasure,
 };
 use asap_physical_asap_optimization::optimize_physical_asap;
 use asap_types::ir::operator::AggIntent;
@@ -106,7 +106,7 @@ async fn check_every_choice(
                     };
                     matches!(measures[t.measure], AggIntent::TopK { .. })
                         && t.computation_for(i).map(|(c, _)| c)
-                            != Some(&ComputationCandidate::Exact)
+                            != Some(&HowToComputeAggregateMeasure::Exact)
                 });
                 assert!(summarized_topk, "{sql}, choice {choice:?}: {e}");
                 continue;

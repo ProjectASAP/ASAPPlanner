@@ -20,7 +20,7 @@
 // Memo steps in pipeline order; a step production does not run is omitted.
 const MEMO_STEPS = ['stage0', 'pass1', 'pass2', 'concrete_states'];
 
-// `CandidateOrigin` (snake_case in the document), its Rust name, and the
+// `OriginOfCandidateForMemoGroup` (snake_case in the document), its Rust name, and the
 // border color of its candidates (mid tones, readable in both themes).
 const MEMO_ORIGINS = {
   pass1: { name: 'Pass1', color: '#4f7bd9' },

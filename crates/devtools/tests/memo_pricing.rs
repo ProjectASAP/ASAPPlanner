@@ -8,7 +8,7 @@ use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilit
 use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
 use asap_logical_asap_optimization::pass2::memo::candidates::{try_populate_pass1, CandidateMemo};
 use asap_logical_asap_optimization::pass2::memo::enumeration::enumerate;
-use asap_logical_asap_optimization::pass2::memo::LogicalMemo;
+use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
 use asap_plan_selection::{PlanSelectionSettings, PlanningModels};
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::QueryRoot;
@@ -77,7 +77,7 @@ fn planned(workload: &PlanningWorkload, series_identity: bool) -> Planned {
             .collect()
     };
     let indexed: Vec<_> = roots.iter().cloned().enumerate().collect();
-    let initial = LogicalMemo::from_roots(&indexed);
+    let initial = DagOfLogicalMemoGroups::from_roots(&indexed);
     let inventory = generate_per_computation_candidates(indexed).unwrap();
     Planned {
         roots,
@@ -136,7 +136,7 @@ fn price_every_choice(
     assert!(enumeration.complete);
     price_choices(
         &planned.memo,
-        &enumeration.choices,
+        &enumeration.all_chosen_candidates,
         &planned.roots,
         &planned.entries,
         &planned.data,
@@ -238,7 +238,7 @@ fn ratio_of_quantiles_25_pass1_choices_without_identity_only_exact_is_valid() {
     let without_identity = planned(&ratio_of_quantiles(), false);
     let enumeration = enumerate(&without_identity.memo, 100_000);
     let whole_budget = enumeration
-        .choices
+        .all_chosen_candidates
         .iter()
         .filter(|choice| {
             choice.iter().all(|(group, &index)| {
@@ -246,7 +246,10 @@ fn ratio_of_quantiles_25_pass1_choices_without_identity_only_exact_is_valid() {
             })
         })
         .count();
-    assert_eq!((enumeration.choices.len(), whole_budget), (25, 9));
+    assert_eq!(
+        (enumeration.all_chosen_candidates.len(), whole_budget),
+        (25, 9)
+    );
     let with_identity = planned(&ratio_of_quantiles(), true);
     let deployment = deployment();
     for enforce in [false, true] {
@@ -266,7 +269,7 @@ fn a_worse_selection_is_caught_by_cheaper_than_selected() {
     let planned = planned(&example1(), true);
     let (settings, deployment) = (settings(false), deployment());
     let models = models(&settings, &deployment);
-    let choices = enumerate(&planned.memo, 100).choices;
+    let choices = enumerate(&planned.memo, 100).all_chosen_candidates;
     let price = |selected| {
         price_choices(
             &planned.memo,
@@ -312,10 +315,10 @@ fn scalar_root_choices_are_composed_and_priced() {
     assert!(matches!(planned.roots[0], QueryRoot::Scalar(_)));
     let (settings, deployment) = (settings(false), deployment());
     let enumeration = enumerate(&planned.memo, 100_000);
-    assert!(enumeration.complete && enumeration.choices.len() > 1);
+    assert!(enumeration.complete && enumeration.all_chosen_candidates.len() > 1);
     let priced = price_choices(
         &planned.memo,
-        &enumeration.choices,
+        &enumeration.all_chosen_candidates,
         &planned.roots,
         &planned.entries,
         &planned.data,
@@ -348,7 +351,7 @@ fn a_choice_installation_refuses_is_not_installable() {
     let enumeration = enumerate(&planned.memo, 100_000);
     let priced = price_choices(
         &planned.memo,
-        &enumeration.choices,
+        &enumeration.all_chosen_candidates,
         &planned.roots,
         &planned.entries,
         &planned.data,

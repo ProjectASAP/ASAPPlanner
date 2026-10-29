@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 use planner_types::ir::physical_export::PhysicalASAPDAG;
 use planner_types::ir::{
-    apply_materialization_timings, MaterializationAssignment, OperatorNode, QueryRoot, TimingMemo,
+    apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache, OperatorNode,
+    QueryRoot,
 };
 use std::rc::Rc;
 
@@ -11,7 +12,7 @@ pub fn compile_physical_asap_dag(
     let root = apply_materialization_timings(
         root,
         &MaterializationAssignment::default(),
-        &mut TimingMemo::default(),
+        &mut NodeToTimedNodeCache::default(),
     )?;
     Ok(planner_types::ir::physical_export::compile_physical_asap_dag(&root)?)
 }

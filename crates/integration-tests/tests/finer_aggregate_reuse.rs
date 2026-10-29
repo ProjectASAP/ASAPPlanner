@@ -6,10 +6,12 @@ use asap_executor::values::Value;
 use asap_logical_asap_optimization::{
     pass1::per_computation_candidates::generate_per_computation_candidates,
     pass2::memo::{
-        candidates::{try_populate_pass1, CandidateMemo, CandidateOrigin, ImplementationCandidate},
+        candidates::{
+            try_populate_pass1, CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup,
+        },
         shared_configurations::PaneWidthDomain,
         state_groups::expand_concrete_summary_state_groups_in_domain,
-        LogicalMemo,
+        DagOfLogicalMemoGroups,
     },
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
@@ -53,7 +55,7 @@ fn expanded(queries: &[String]) -> CandidateMemo {
         .into_iter()
         .enumerate()
         .collect();
-    let initial = LogicalMemo::from_roots(&roots);
+    let initial = DagOfLogicalMemoGroups::from_roots(&roots);
     let inventory = generate_per_computation_candidates(roots).unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
     expand_concrete_summary_state_groups_in_domain(memo, PaneWidthDomain::SeedGrids)
@@ -62,7 +64,7 @@ fn expanded(queries: &[String]) -> CandidateMemo {
 }
 
 /// The aggregate group of query `query` alone and its rollup candidates.
-fn rollups(memo: &CandidateMemo, query: usize) -> (usize, Vec<&ImplementationCandidate>) {
+fn rollups(memo: &CandidateMemo, query: usize) -> (usize, Vec<&CandidateForMemoGroup>) {
     let owner = memo
         .groups
         .iter()
@@ -73,14 +75,14 @@ fn rollups(memo: &CandidateMemo, query: usize) -> (usize, Vec<&ImplementationCan
         .expect("the query's own aggregate group");
     let candidates = memo.candidates[owner]
         .iter()
-        .filter(|c| c.origin == CandidateOrigin::Rollup)
+        .filter(|c| c.origin == OriginOfCandidateForMemoGroup::Rollup)
         .collect();
     (owner, candidates)
 }
 
 /// Whether `candidate` reads another group's result through a `Filter`
 /// (the value path), rather than merging summary states.
-fn reads_finer_result(candidate: &ImplementationCandidate) -> bool {
+fn reads_finer_result(candidate: &CandidateForMemoGroup) -> bool {
     !OperatorNode::reachable(&candidate.node)
         .iter()
         .any(|node| matches!(node.asap(), Some(ASAPOp::SummaryMerge { .. })))
@@ -117,7 +119,7 @@ fn row_sets() -> Vec<Vec<Vec<Value>>> {
 }
 
 /// The candidate gives the original query's rows on every row set.
-fn assert_same_rows(memo: &CandidateMemo, owner: usize, candidate: &ImplementationCandidate) {
+fn assert_same_rows(memo: &CandidateMemo, owner: usize, candidate: &CandidateForMemoGroup) {
     let sorted = |rows: Vec<Vec<Value>>| {
         let mut rows: Vec<_> = rows.iter().map(|row| format!("{row:?}")).collect();
         rows.sort();
@@ -208,7 +210,7 @@ fn filtered_kll_states_merge() {
         memo.candidates[owner]
             .iter()
             .find(|candidate| {
-                candidate.origin == CandidateOrigin::Pass1
+                candidate.origin == OriginOfCandidateForMemoGroup::Pass1
                     && OperatorNode::reachable(&candidate.node).iter().any(|node| {
                         matches!(node.asap(), Some(ASAPOp::SummaryAgg { family, .. })
                             if format!("{family:?}").contains("Kll"))

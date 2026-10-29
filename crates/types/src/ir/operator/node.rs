@@ -12,7 +12,7 @@ use super::asap::ASAPOp;
 use super::non_asap::NonASAPOp;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
 use crate::ir::properties::guarantee::AccuracyGuarantee;
-use crate::ir::properties::summary_coverage::{CoverageMemo, SummaryCoverage};
+use crate::ir::properties::summary_coverage::{NodeToSummaryCoverageCache, SummaryCoverage};
 use crate::ir::schema::Schema;
 use crate::ir::SchemaDerivationError;
 use crate::physical::materialization::Materialization;
@@ -113,7 +113,7 @@ impl OperatorNode {
     pub fn new(operator: Operator) -> Result<Self, SchemaDerivationError> {
         let schema = operator.output_schema()?;
         let node = Self::with_schema(operator, schema);
-        node.check_merge(&mut CoverageMemo::new())?;
+        node.check_merge(&mut NodeToSummaryCoverageCache::new())?;
         Ok(node)
     }
 
@@ -180,11 +180,14 @@ impl OperatorNode {
     }
 
     /// A `SummaryMerge` is valid only over inputs with the same definition
-    /// and disjoint selections. `memo` holds the coverage already derived
+    /// and disjoint selections. `cache` holds the coverage already derived
     /// for nodes of the DAG being validated.
-    fn check_merge(&self, memo: &mut CoverageMemo) -> Result<(), SchemaDerivationError> {
+    fn check_merge(
+        &self,
+        cache: &mut NodeToSummaryCoverageCache,
+    ) -> Result<(), SchemaDerivationError> {
         if matches!(self.asap(), Some(ASAPOp::SummaryMerge { .. })) {
-            SummaryCoverage::derive_memoized(self, memo)?;
+            SummaryCoverage::derive_cached(self, cache)?;
         }
         Ok(())
     }
@@ -326,7 +329,7 @@ impl OperatorNode {
     pub fn validate_structure(self: &Rc<Self>) -> Result<(), SchemaDerivationError> {
         // Each summary state's coverage is derived once, not once per merge
         // above it; `reachable` keeps every node alive while it is used.
-        let mut coverage = CoverageMemo::new();
+        let mut coverage = NodeToSummaryCoverageCache::new();
         for node in Self::reachable(self) {
             if node.schema.time_index.is_some_and(|i| {
                 node.schema.fields.get(i).is_none_or(|f| {

@@ -1,6 +1,8 @@
 //! Local pane candidates generated from compatible reader grids. Selected
 //! connections, not the union of potential consumers, determine eligibility.
-use super::candidates::{CandidateMemo as Memo, CandidateOrigin, ImplementationCandidate};
+use super::candidates::{
+    CandidateForMemoGroup, CandidateMemo as Memo, OriginOfCandidateForMemoGroup,
+};
 #[cfg(test)]
 use super::shared_configurations::pane_width_divisors;
 use super::shared_configurations::{pane_width_domain_before, PaneWidthDomain};
@@ -92,7 +94,7 @@ pub fn extend_local_window_composition(
 pub fn local_pane_candidates(
     memo: &Memo,
     entries: &[QueryWorkloadEntry],
-) -> Vec<(usize, ImplementationCandidate)> {
+) -> Vec<(usize, CandidateForMemoGroup)> {
     local_pane_candidates_before(memo, entries, PaneWidthDomain::Complete, None)
         .expect("generation without a deadline cannot time out")
 }
@@ -102,7 +104,7 @@ fn local_pane_candidates_before(
     entries: &[QueryWorkloadEntry],
     domain: PaneWidthDomain,
     deadline: Option<Instant>,
-) -> Result<Vec<(usize, ImplementationCandidate)>, CandidateGenerationTimeout> {
+) -> Result<Vec<(usize, CandidateForMemoGroup)>, CandidateGenerationTimeout> {
     local_pane_candidates_delta(memo, entries, None, domain, deadline)
 }
 
@@ -112,10 +114,10 @@ fn local_pane_candidates_delta(
     previous: Option<PaneWidthDomain>,
     domain: PaneWidthDomain,
     deadline: Option<Instant>,
-) -> Result<Vec<(usize, ImplementationCandidate)>, CandidateGenerationTimeout> {
+) -> Result<Vec<(usize, CandidateForMemoGroup)>, CandidateGenerationTimeout> {
     check_generation_deadline(deadline)?;
     let group_of = group_of_node(&memo.groups);
-    let mut own: Vec<(usize, ImplementationCandidate)> = Vec::new();
+    let mut own: Vec<(usize, CandidateForMemoGroup)> = Vec::new();
     for (g, group) in memo.groups.iter().enumerate() {
         check_generation_deadline(deadline)?;
         let grids = pane_width_domain_before(
@@ -148,7 +150,8 @@ fn local_pane_candidates_delta(
                 check_generation_deadline(deadline)?;
                 if !matches!(
                     candidate.origin,
-                    CandidateOrigin::Pass1 | CandidateOrigin::SharedBuild
+                    OriginOfCandidateForMemoGroup::Pass1
+                        | OriginOfCandidateForMemoGroup::SharedBuild
                 ) {
                     continue;
                 }
@@ -201,7 +204,12 @@ fn local_pane_candidates_delta(
                     let node = restore_scan_boundaries(node, &restored, &mut HashMap::new());
                     own.push((
                         g,
-                        rewritten_candidate(&group_of, candidate, node, CandidateOrigin::Panes),
+                        rewritten_candidate(
+                            &group_of,
+                            candidate,
+                            node,
+                            OriginOfCandidateForMemoGroup::Panes,
+                        ),
                     ));
                 }
             }
@@ -266,17 +274,17 @@ fn group_of_node(groups: &[MemoGroup]) -> HashMap<*const OperatorNode, usize> {
 
 fn rewritten_candidate(
     group_of: &HashMap<*const OperatorNode, usize>,
-    from: &ImplementationCandidate,
+    from: &CandidateForMemoGroup,
     node: Rc<OperatorNode>,
-    origin: CandidateOrigin,
-) -> ImplementationCandidate {
+    origin: OriginOfCandidateForMemoGroup,
+) -> CandidateForMemoGroup {
     let reached = |node: &Rc<OperatorNode>| child_groups(group_of, node, &from.implements);
     let children = if reached(&from.node) == from.children {
         reached(&node)
     } else {
         from.children.clone()
     };
-    ImplementationCandidate {
+    CandidateForMemoGroup {
         implements: from.implements.clone(),
         node,
         children,
@@ -316,7 +324,7 @@ fn child_groups(
     out
 }
 
-fn candidate_signature(candidate: &ImplementationCandidate) -> Result<String, serde_json::Error> {
+fn candidate_signature(candidate: &CandidateForMemoGroup) -> Result<String, serde_json::Error> {
     serde_json::to_string(&flatten(&[QueryRoot::Operator(Rc::clone(&candidate.node))]).0)
 }
 
@@ -324,7 +332,7 @@ fn candidate_signature(candidate: &ImplementationCandidate) -> Result<String, se
 mod tests {
     use super::*;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::{candidates::try_populate_pass1, LogicalMemo};
+    use crate::pass2::memo::{candidates::try_populate_pass1, DagOfLogicalMemoGroups};
     use crate::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
@@ -400,7 +408,7 @@ mod tests {
             .enumerate()
             .map(|(id, _)| (id, QueryRoot::Operator(Rc::clone(&root))))
             .collect();
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let generated = generate_per_computation_candidates(roots).unwrap();
         let memo = try_populate_pass1(initial, &generated).unwrap();
         let entries = recurrences
@@ -418,7 +426,7 @@ mod tests {
         assert!(!candidates.is_empty());
         assert!(candidates
             .iter()
-            .all(|(_, candidate)| candidate.origin == CandidateOrigin::Panes));
+            .all(|(_, candidate)| candidate.origin == OriginOfCandidateForMemoGroup::Panes));
     }
 
     // Individual grids and subset GCDs allow separate or shared physical choices.

@@ -753,7 +753,7 @@ mod tests {
         pane_candidates, window_composition_pass2_candidates,
     };
     use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::{LogicalMemo, MemoGroupId};
+    use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::{OperatorNode, QueryRoot};
@@ -807,7 +807,7 @@ mod tests {
             let root = QueryRoot::Operator(lower_promql(&query, target.clone()));
             let roots_with_ids = vec![(0usize, root)];
             let memo = try_populate_pass1(
-                LogicalMemo::from_roots(&roots_with_ids),
+                DagOfLogicalMemoGroups::from_roots(&roots_with_ids),
                 &generate_per_computation_candidates(roots_with_ids).unwrap(),
             )
             .unwrap();
@@ -1468,7 +1468,7 @@ mod tests {
             })
             .collect();
         let memo = try_populate_pass1(
-            LogicalMemo::from_roots(&roots_with_ids),
+            DagOfLogicalMemoGroups::from_roots(&roots_with_ids),
             &generate_per_computation_candidates(roots_with_ids).unwrap(),
         )
         .unwrap();

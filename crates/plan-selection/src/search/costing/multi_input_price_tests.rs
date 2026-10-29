@@ -169,7 +169,8 @@ fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
 #[test]
 fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        compose_logical_candidate, generate_per_computation_candidates,
+        HowToComputeAggregateMeasure,
     };
     use asap_types::ir::properties::{AccuracyMetric, AccuracyScope};
     use asap_types::ir::schema::SketchAlgorithm;
@@ -197,7 +198,7 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
                 .position(|choice| {
                     matches!(
                         choice,
-                        ComputationCandidate::Summary(SketchAlgorithm::DDSketch)
+                        HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch)
                     )
                 })
                 .unwrap()

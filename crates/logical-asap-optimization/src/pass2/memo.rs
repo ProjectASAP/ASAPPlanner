@@ -42,7 +42,7 @@ pub(crate) fn check_generation_deadline(
     }
 }
 
-/// A group, by index in [`LogicalMemo::groups`].
+/// A group, by index in [`DagOfLogicalMemoGroups::groups`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MemoGroupId(pub u32);
 
@@ -64,7 +64,7 @@ pub struct MemoGroup {
 
 /// Initial logical groups, without implementation choices or solver state.
 #[derive(Debug, Clone)]
-pub struct LogicalMemo {
+pub struct DagOfLogicalMemoGroups {
     pub groups: Vec<MemoGroup>,
     original_roots: Vec<QueryRoot>,
     group_of: GroupOf,
@@ -72,7 +72,7 @@ pub struct LogicalMemo {
     pub build_duration: Duration,
 }
 
-impl LogicalMemo {
+impl DagOfLogicalMemoGroups {
     pub fn from_roots<Id>(roots: &[(Id, QueryRoot)]) -> Self {
         let started = Instant::now();
         let (groups, group_of) = hash_consed(roots);
@@ -253,7 +253,7 @@ mod tests {
             (2, query("quantile_over_time(0.95, m[5m])")),
             (3, query("quantile_over_time(0.99, m[5m])")),
         ];
-        let memo = LogicalMemo::from_roots(&roots);
+        let memo = DagOfLogicalMemoGroups::from_roots(&roots);
         let root_group = |q| {
             memo.groups
                 .iter()
@@ -287,7 +287,7 @@ mod tests {
                 AccuracyTarget::max_error(0.01).failure_probability(0.001),
             )),
         )];
-        let memo = LogicalMemo::from_roots(&roots);
+        let memo = DagOfLogicalMemoGroups::from_roots(&roots);
         let division = memo
             .groups
             .iter()
@@ -317,7 +317,7 @@ mod tests {
             ),
             (30, QueryRoot::Operator(node.clone())),
         ];
-        let memo = LogicalMemo::from_roots(&roots);
+        let memo = DagOfLogicalMemoGroups::from_roots(&roots);
         let group = &memo.groups[memo.group_for_node(&node).unwrap().0 as usize];
         assert_eq!(group.roots_of, vec![1, 2]);
         assert_eq!(group.queries, vec![1, 2]);
@@ -325,14 +325,16 @@ mod tests {
         let mut reordered = roots.clone();
         reordered.swap(0, 1);
         assert!(!memo.matches_root_dependencies(&reordered));
-        assert!(LogicalMemo::from_roots(&roots[..1]).groups.is_empty());
+        assert!(DagOfLogicalMemoGroups::from_roots(&roots[..1])
+            .groups
+            .is_empty());
     }
 
     /// Non-reflexive floating literals must not invalidate unchanged dependencies.
     #[test]
     fn unchanged_nan_root_matches_by_dependency_identity() {
         let roots = vec![(0, QueryRoot::Scalar(ScalarExpr::literal_f64(f64::NAN)))];
-        let memo = LogicalMemo::from_roots(&roots);
+        let memo = DagOfLogicalMemoGroups::from_roots(&roots);
         assert!(memo.matches_root_dependencies(&roots));
     }
 
@@ -362,7 +364,7 @@ mod tests {
         // Construct the identity guard directly so this regression isolates
         // root matching from the independently tested CSE/interner.
         let roots = vec![(0, QueryRoot::Operator(node))];
-        let memo = LogicalMemo {
+        let memo = DagOfLogicalMemoGroups {
             groups: Vec::new(),
             original_roots: roots.iter().map(|(_, r)| r.clone()).collect(),
             group_of: GroupOf::new(),
@@ -375,7 +377,7 @@ mod tests {
     #[test]
     fn rebuilt_equal_roots_do_not_match_the_original_workload() {
         let roots = vec![(0, query("sum by (job) (m)"))];
-        let memo = LogicalMemo::from_roots(&roots);
+        let memo = DagOfLogicalMemoGroups::from_roots(&roots);
         let rebuilt = vec![(0, query("sum by (job) (m)"))];
         assert!(!memo.matches_root_dependencies(&rebuilt));
         assert!(memo.matches_root_dependencies(&roots.clone()));

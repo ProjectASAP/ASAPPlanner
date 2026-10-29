@@ -6,7 +6,7 @@ use crate::search::candidates::graph::{
 };
 use crate::search::candidates::inventory::CandidateInventory;
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    compose_logical_candidate, generate_per_computation_candidates, HowToComputeAggregateMeasure,
 };
 use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_logical_asap_optimization::test_support::lower_promql;
@@ -84,7 +84,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             .position(|candidate| {
                 matches!(
                     candidate,
-                    ComputationCandidate::Summary(SketchAlgorithm::Kll)
+                    HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)
                 )
             })
             .unwrap();

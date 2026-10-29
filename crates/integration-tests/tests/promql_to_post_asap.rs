@@ -702,7 +702,7 @@ fn ddsketch_ratio_selection(
         facts.values_non_negative = non_negative;
     }
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        generate_per_computation_candidates, ComputationCandidate,
+        generate_per_computation_candidates, HowToComputeAggregateMeasure,
     };
     let inventory =
         generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
@@ -716,7 +716,7 @@ fn ddsketch_ratio_selection(
                 .candidates
                 .iter()
                 .position(|candidate| {
-                    *candidate == ComputationCandidate::Summary(SketchAlgorithm::DDSketch)
+                    *candidate == HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch)
                 })
                 .expect("quantile supports DDS")
         })

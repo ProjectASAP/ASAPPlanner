@@ -2,8 +2,8 @@
 use crate::{CostModel, PlanningModels, SelectionError, Stage1ToStage3Search};
 use asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidates;
 use asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo;
-use asap_logical_asap_optimization::pass2::memo::enumeration::MemoChoice;
-use asap_logical_asap_optimization::pass2::memo::{LogicalMemo, MemoGroupId};
+use asap_logical_asap_optimization::pass2::memo::enumeration::ChosenCandidatePerMemoGroup;
+use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 use std::rc::Rc;
@@ -71,7 +71,7 @@ struct DomainProgress {
 /// All rounds use the same planner and frozen objective; only a completed
 /// full-domain round can establish a bound for the declared search space.
 pub(crate) fn candidate_connection_search<Id: Clone>(
-    initial: LogicalMemo,
+    initial: DagOfLogicalMemoGroups,
     context: &CandidateSearchContext<'_, Id>,
     search: Stage1ToStage3Search,
     local_candidate_generation_ms: Option<f64>,
@@ -698,7 +698,7 @@ fn validated_seed_after_stop(
 }
 
 fn search_domain<Id: Clone>(
-    initial: LogicalMemo,
+    initial: DagOfLogicalMemoGroups,
     context: &CandidateSearchContext<'_, Id>,
     search: Stage1ToStage3Search,
     local_candidate_generation_ms: Option<f64>,
@@ -1198,7 +1198,7 @@ fn selected_memo_choice(
     memo_candidate_roots: &[Vec<crate::search::candidates::graph::PhysicalCandidateId>],
     configured: &crate::search::candidates::configurations::CandidateConfigurationInventory,
     selected: &crate::search::candidates::graph::SelectedCandidateGraph,
-) -> Result<MemoChoice, String> {
+) -> Result<ChosenCandidatePerMemoGroup, String> {
     use std::collections::HashMap;
     let mut memo_candidates_of = HashMap::<_, Vec<(MemoGroupId, usize)>>::new();
     for (group, roots) in memo_candidate_roots.iter().enumerate() {
@@ -1219,7 +1219,7 @@ fn selected_memo_choice(
             .or_default()
             .push(source.graph.candidates[source_of(connection.producer).0].group);
     }
-    let mut choice = MemoChoice::new();
+    let mut choice = ChosenCandidatePerMemoGroup::new();
     for &id in &selected.selected_candidates {
         let Some(options) = memo_candidates_of.get(&source_of(id)) else {
             continue; // a candidate's private node
@@ -1313,7 +1313,7 @@ mod tests {
     #[test]
     fn generation_time_is_charged_before_search_starts() {
         let (roots, entries, data) = workload();
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
         let error = candidate_connection_search(
             initial,
@@ -1379,7 +1379,7 @@ mod tests {
                 asap_types::ir::scalar::ScalarValue::Float64(1.0),
             )),
         )];
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
         let seed = search_domain(
             initial.clone(),
@@ -1449,7 +1449,7 @@ mod tests {
     #[test]
     fn invalid_generation_durations_are_rejected_before_seed_search() {
         let (roots, entries, data) = workload();
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
         for invalid in [-1.0, f64::INFINITY, f64::NAN] {
             let error = candidate_connection_search(
@@ -1810,7 +1810,7 @@ mod tests {
             0,
             QueryRoot::Operator(lower_promql("latency[5m]", AccuracyTarget::exact())),
         )];
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
         let error = candidate_connection_search(
             initial,
@@ -1960,7 +1960,7 @@ mod tests {
             entry.recurrence =
                 QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(1_000)));
         }
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let generated = generate_per_computation_candidates(roots).unwrap();
         let mut memo = try_populate_pass1(initial, &generated).unwrap();
         asap_logical_asap_optimization::pass2::memo::window_candidates::add_local_window_composition(

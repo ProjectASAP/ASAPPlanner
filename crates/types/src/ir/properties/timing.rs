@@ -189,22 +189,22 @@ pub fn is_filtered_build(node: &OperatorNode) -> bool {
     )
 }
 
-/// Memo of one [`apply_materialization_timings`] pass: `input node → timed node`,
+/// Cache of one [`apply_materialization_timings`] pass: `input node → timed node`,
 /// shared by every root of a workload so a node shared by two roots stays
 /// one `Rc`. Re-reaching a node with a different timing is a conflict.
 #[derive(Default)]
-pub struct TimingMemo {
-    done: HashMap<*const OperatorNode, Rc<OperatorNode>>,
+pub struct NodeToTimedNodeCache {
+    timed_node_of: HashMap<*const OperatorNode, Rc<OperatorNode>>,
 }
 
-impl TimingMemo {
+impl NodeToTimedNodeCache {
     pub fn new() -> Self {
         Self::default()
     }
 
     /// The timed node produced for `input`, if the pass has reached it.
     pub fn timed(&self, input: &Rc<OperatorNode>) -> Option<&Rc<OperatorNode>> {
-        self.done.get(&Rc::as_ptr(input))
+        self.timed_node_of.get(&Rc::as_ptr(input))
     }
 }
 
@@ -285,18 +285,18 @@ fn forces_query_time(
 
 /// Write the timings of `assignment` into every node reachable from `root`,
 /// top-down, then validate every edge. Returns the timed copy of `root`;
-/// `memo` carries the sharing across the roots of one workload.
+/// `cache` carries the sharing across the roots of one workload.
 pub fn apply_materialization_timings(
     root: &Rc<OperatorNode>,
     assignment: &MaterializationAssignment,
-    memo: &mut TimingMemo,
+    cache: &mut NodeToTimedNodeCache,
 ) -> Result<Rc<OperatorNode>, ExecutionDataStateError> {
     let mut forced = HashMap::new();
     let timed = write(
         root,
         ExecutionTiming::QueryTime,
         assignment,
-        memo,
+        cache,
         &mut forced,
     )?;
     // A root stored at ingestion time is read by the query; one that runs at
@@ -314,27 +314,27 @@ pub fn apply_materialization_timings(
 }
 
 /// [`apply_materialization_timings`] over every root of one workload with
-/// one memo, so a node several roots share is timed once and stays one
+/// one cache, so a node several roots share is timed once and stays one
 /// node. A standalone scalar root has each operator it reads timed, and is
 /// rebuilt over the timed nodes.
 pub fn apply_materialization_timings_to_roots(
     roots: &[QueryRoot],
     assignment: &MaterializationAssignment,
 ) -> Result<Vec<QueryRoot>, ExecutionDataStateError> {
-    let mut memo = TimingMemo::new();
+    let mut cache = NodeToTimedNodeCache::new();
     roots
         .iter()
         .map(|root| {
             Ok(match root {
-                QueryRoot::Operator(node) => {
-                    QueryRoot::Operator(apply_materialization_timings(node, assignment, &mut memo)?)
-                }
+                QueryRoot::Operator(node) => QueryRoot::Operator(apply_materialization_timings(
+                    node, assignment, &mut cache,
+                )?),
                 QueryRoot::Scalar(expr) => {
                     for node in expr.operator_refs() {
-                        apply_materialization_timings(node, assignment, &mut memo)?;
+                        apply_materialization_timings(node, assignment, &mut cache)?;
                     }
                     QueryRoot::Scalar(expr.map_operator_refs(&mut |node| {
-                        Rc::clone(memo.timed(node).expect("scalar reference was timed"))
+                        Rc::clone(cache.timed(node).expect("scalar reference was timed"))
                     }))
                 }
             })
@@ -353,9 +353,9 @@ pub fn validate_at_ingestion(
     root_timing: ExecutionTiming,
 ) -> Result<(), ExecutionDataStateError> {
     let assignment = all_at_ingestion();
-    let mut memo = TimingMemo::new();
+    let mut cache = NodeToTimedNodeCache::new();
     let mut forced = HashMap::new();
-    let timed = write(root, root_timing, &assignment, &mut memo, &mut forced)?;
+    let timed = write(root, root_timing, &assignment, &mut cache, &mut forced)?;
     validate(&timed, &mut HashMap::new())
 }
 
@@ -464,11 +464,11 @@ fn write(
     node: &Rc<OperatorNode>,
     consumer: ExecutionTiming,
     assignment: &MaterializationAssignment,
-    memo: &mut TimingMemo,
+    cache: &mut NodeToTimedNodeCache,
     forced: &mut HashMap<*const OperatorNode, bool>,
 ) -> Result<Rc<OperatorNode>, ExecutionDataStateError> {
     let (timing, materialization) = placement(node, consumer, assignment, forced)?;
-    if let Some(done) = memo.done.get(&Rc::as_ptr(node)) {
+    if let Some(done) = cache.timed_node_of.get(&Rc::as_ptr(node)) {
         let previous = done.timing.expect("memoized node is timed");
         if previous != timing {
             return Err(ExecutionDataStateError::ConflictingTiming {
@@ -487,7 +487,7 @@ fn write(
     let mut error = None;
     let operator =
         node.operator.map_children(
-            |child| match write(child, timing, assignment, memo, forced) {
+            |child| match write(child, timing, assignment, cache, forced) {
                 Ok(timed) => timed,
                 Err(e) => {
                     error.get_or_insert(e);
@@ -504,7 +504,9 @@ fn write(
             .with_timing(Some(timing))
             .with_materialization(materialization),
     );
-    memo.done.insert(Rc::as_ptr(node), Rc::clone(&timed));
+    cache
+        .timed_node_of
+        .insert(Rc::as_ptr(node), Rc::clone(&timed));
     Ok(timed)
 }
 
@@ -1073,7 +1075,7 @@ mod tests {
     /// Apply with every sub-DAG `MatAtIngestion` where the DAG allows it, the
     /// placement whose edge rules these tests exercise.
     fn apply(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, ExecutionDataStateError> {
-        apply_materialization_timings(root, &all_at_ingestion(), &mut TimingMemo::new())
+        apply_materialization_timings(root, &all_at_ingestion(), &mut NodeToTimedNodeCache::new())
     }
 
     const AT_INGESTION: Materialization = Materialization::MatAtIngestion(Medium::Memory);
@@ -1091,7 +1093,7 @@ mod tests {
         let root = apply_materialization_timings(
             &summary,
             &MaterializationAssignment::default(),
-            &mut TimingMemo::new(),
+            &mut NodeToTimedNodeCache::new(),
         )
         .unwrap();
         assert_eq!(
@@ -1115,8 +1117,12 @@ mod tests {
         ] {
             let mut assignment = MaterializationAssignment::default();
             assignment.set(&summary, materialization);
-            let root = apply_materialization_timings(&summary, &assignment, &mut TimingMemo::new())
-                .unwrap();
+            let root = apply_materialization_timings(
+                &summary,
+                &assignment,
+                &mut NodeToTimedNodeCache::new(),
+            )
+            .unwrap();
             assert_eq!(root.timing, Some(timing));
             assert_eq!(root.materialization, materialization);
             assert_eq!(child(&root).timing, Some(timing));
@@ -1137,8 +1143,12 @@ mod tests {
         let mut assignment = MaterializationAssignment::default();
         assignment.set(&outer, AT_INGESTION);
         assert_eq!(
-            apply_materialization_timings(&estimate(outer), &assignment, &mut TimingMemo::new())
-                .err(),
+            apply_materialization_timings(
+                &estimate(outer),
+                &assignment,
+                &mut NodeToTimedNodeCache::new()
+            )
+            .err(),
             Some(ExecutionDataStateError::UpstreamNotAtIngestion {
                 operator: "SummaryAgg"
             })
@@ -1146,9 +1156,12 @@ mod tests {
         assignment.set(&inner, AT_INGESTION);
         let outer = agg(Rc::clone(&inner), kll());
         assignment.set(&outer, AT_INGESTION);
-        let root =
-            apply_materialization_timings(&estimate(outer), &assignment, &mut TimingMemo::new())
-                .unwrap();
+        let root = apply_materialization_timings(
+            &estimate(outer),
+            &assignment,
+            &mut NodeToTimedNodeCache::new(),
+        )
+        .unwrap();
         assert_eq!(child(&root).materialization, AT_INGESTION);
         assert_eq!(child(&child(&root)).materialization, AT_INGESTION);
     }
@@ -1181,9 +1194,12 @@ mod tests {
         let outer = agg(Rc::clone(&inner), kll());
         let mut assignment = all_at_ingestion();
         assignment.set(&inner, Materialization::NotMaterialized);
-        let root =
-            apply_materialization_timings(&estimate(outer), &assignment, &mut TimingMemo::new())
-                .unwrap();
+        let root = apply_materialization_timings(
+            &estimate(outer),
+            &assignment,
+            &mut NodeToTimedNodeCache::new(),
+        )
+        .unwrap();
         let outer = child(&root);
         assert_eq!(outer.timing, Some(ExecutionTiming::QueryTime));
         assert_eq!(outer.materialization, Materialization::NotMaterialized);
@@ -1271,9 +1287,12 @@ mod tests {
         );
         let (split, assignment) =
             split_shared_by_timing(std::slice::from_ref(&root), &all_at_ingestion());
-        assert!(
-            apply_materialization_timings(&split[0], &assignment, &mut TimingMemo::new()).is_ok()
-        );
+        assert!(apply_materialization_timings(
+            &split[0],
+            &assignment,
+            &mut NodeToTimedNodeCache::new()
+        )
+        .is_ok());
     }
 
     /// A finalize pinned to ingestion time (as fixed-window rate candidates
@@ -1293,7 +1312,7 @@ mod tests {
             apply_materialization_timings(
                 &estimate(agg(finalize, kll())),
                 &MaterializationAssignment::default(),
-                &mut TimingMemo::new()
+                &mut NodeToTimedNodeCache::new()
             )
             .err(),
             Some(ExecutionDataStateError::UpstreamNotAtIngestion {
@@ -1317,7 +1336,8 @@ mod tests {
         assignment.set(&summary, AT_INGESTION);
         let (split, assignment) = split_shared_by_timing(std::slice::from_ref(&root), &assignment);
         let timed =
-            apply_materialization_timings(&split[0], &assignment, &mut TimingMemo::new()).unwrap();
+            apply_materialization_timings(&split[0], &assignment, &mut NodeToTimedNodeCache::new())
+                .unwrap();
         let summary = child(&child(&child(&timed)));
         assert!(matches!(
             summary.operator,
@@ -1337,7 +1357,8 @@ mod tests {
         let mut assignment = MaterializationAssignment::default();
         assignment.set(&panes, AT_INGESTION);
         let timed =
-            apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).unwrap();
+            apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new())
+                .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
         assert_eq!(child(&timed).materialization, AT_INGESTION);
         assert_eq!(child(&timed).timing, Some(ExecutionTiming::IngestionTime));
@@ -1350,8 +1371,12 @@ mod tests {
         let mut assignment = MaterializationAssignment::default();
         assignment.set(&over_evaluation, AT_INGESTION);
         assert_eq!(
-            apply_materialization_timings(&over_evaluation, &assignment, &mut TimingMemo::new())
-                .err(),
+            apply_materialization_timings(
+                &over_evaluation,
+                &assignment,
+                &mut NodeToTimedNodeCache::new()
+            )
+            .err(),
             Some(ExecutionDataStateError::UpstreamNotAtIngestion {
                 operator: "Aggregate"
             })
@@ -1398,7 +1423,7 @@ mod tests {
             apply_materialization_timings(
                 &estimate(Rc::clone(&filtered)),
                 &assignment,
-                &mut TimingMemo::new()
+                &mut NodeToTimedNodeCache::new()
             )
             .err(),
             Some(ExecutionDataStateError::FilteredSummaryAtIngestion {
@@ -1433,10 +1458,10 @@ mod tests {
         let mut assignment = MaterializationAssignment::default();
         assignment.set(&summary, AT_INGESTION);
         let timed_unsplit = {
-            let mut memo = TimingMemo::new();
+            let mut cache = NodeToTimedNodeCache::new();
             roots
                 .iter()
-                .map(|root| apply_materialization_timings(root, &assignment, &mut memo))
+                .map(|root| apply_materialization_timings(root, &assignment, &mut cache))
                 .collect::<Result<Vec<_>, _>>()
         };
         assert!(matches!(
@@ -1445,10 +1470,10 @@ mod tests {
         ));
         let (split, assignment) = split_shared_by_timing(&roots, &assignment);
         assert_eq!(split.len(), 2);
-        let mut memo = TimingMemo::new();
+        let mut cache = NodeToTimedNodeCache::new();
         let timed: Vec<_> = split
             .iter()
-            .map(|root| apply_materialization_timings(root, &assignment, &mut memo).unwrap())
+            .map(|root| apply_materialization_timings(root, &assignment, &mut cache).unwrap())
             .collect();
         let summary = child(&child(&child(&timed[0])));
         assert_eq!(summary.materialization, AT_INGESTION);
@@ -1501,7 +1526,8 @@ mod tests {
         let mut assignment = MaterializationAssignment::default();
         assignment.set(&read, stored);
         let timed =
-            apply_materialization_timings(&read, &assignment, &mut TimingMemo::new()).unwrap();
+            apply_materialization_timings(&read, &assignment, &mut NodeToTimedNodeCache::new())
+                .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
         assert_eq!(timed.materialization, stored);
         assert_eq!(exported(&timed, "FinalizeExactAccumulator"), stored);
@@ -1510,7 +1536,8 @@ mod tests {
         assignment.set(&state, AT_INGESTION);
         assignment.set(&read, AT_INGESTION);
         assert_eq!(
-            apply_materialization_timings(&read, &assignment, &mut TimingMemo::new()).err(),
+            apply_materialization_timings(&read, &assignment, &mut NodeToTimedNodeCache::new())
+                .err(),
             Some(
                 ExecutionDataStateError::MaterializationConflictsWithFixedTiming {
                     operator: "FinalizeExactAccumulator",
@@ -1542,7 +1569,8 @@ mod tests {
         let mut assignment = MaterializationAssignment::default();
         assignment.set(&fixed, at_query);
         assert_eq!(
-            apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).err(),
+            apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new())
+                .err(),
             Some(
                 ExecutionDataStateError::MaterializationConflictsWithFixedTiming {
                     operator: "Aggregate",
@@ -1567,7 +1595,8 @@ mod tests {
         let mut assignment = MaterializationAssignment::default();
         assignment.set(&read, Materialization::NotMaterialized);
         let timed =
-            apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).unwrap();
+            apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new())
+                .unwrap();
         let read = child(&timed);
         assert_eq!(read.timing, Some(ExecutionTiming::QueryTime));
         assert_eq!(read.materialization, Materialization::NotMaterialized);
@@ -1595,10 +1624,10 @@ mod tests {
         assignment.set(&state, AT_INGESTION);
         assignment.set(&read, AT_INGESTION);
         let (split, assignment) = split_shared_by_timing(&[pair, read], &assignment);
-        let mut memo = TimingMemo::new();
+        let mut cache = NodeToTimedNodeCache::new();
         let timed: Result<Vec<_>, _> = split
             .iter()
-            .map(|root| apply_materialization_timings(root, &assignment, &mut memo))
+            .map(|root| apply_materialization_timings(root, &assignment, &mut cache))
             .collect();
         assert_eq!(
             timed.err(),
@@ -1623,7 +1652,7 @@ mod tests {
             apply_materialization_timings(
                 &summary,
                 &MaterializationAssignment::default(),
-                &mut TimingMemo::new()
+                &mut NodeToTimedNodeCache::new()
             )
             .err(),
             Some(
@@ -1637,7 +1666,8 @@ mod tests {
         let mut assignment = MaterializationAssignment::default();
         assignment.set(&rows, AT_INGESTION);
         let timed =
-            apply_materialization_timings(&summary, &assignment, &mut TimingMemo::new()).unwrap();
+            apply_materialization_timings(&summary, &assignment, &mut NodeToTimedNodeCache::new())
+                .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
         assert_eq!(child(&timed).materialization, AT_INGESTION);
     }
@@ -1652,7 +1682,7 @@ mod tests {
             apply_materialization_timings(
                 &summary,
                 &MaterializationAssignment::default(),
-                &mut TimingMemo::new()
+                &mut NodeToTimedNodeCache::new()
             )
             .err(),
             Some(
@@ -1666,7 +1696,8 @@ mod tests {
         let mut assignment = MaterializationAssignment::default();
         assignment.set(&state, AT_INGESTION);
         let timed =
-            apply_materialization_timings(&summary, &assignment, &mut TimingMemo::new()).unwrap();
+            apply_materialization_timings(&summary, &assignment, &mut NodeToTimedNodeCache::new())
+                .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::QueryTime));
         assert_eq!(child(&timed).materialization, AT_INGESTION);
     }
@@ -1680,7 +1711,8 @@ mod tests {
         let mut assignment = MaterializationAssignment::default();
         assignment.set(&root, AT_INGESTION);
         let timed =
-            apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).unwrap();
+            apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new())
+                .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::IngestionTime));
         assert_eq!(exported(&timed, "Aggregate"), AT_INGESTION);
 
@@ -1690,7 +1722,8 @@ mod tests {
         assignment.set(&state, AT_INGESTION);
         assignment.set(&root, AT_INGESTION);
         let timed =
-            apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).unwrap();
+            apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new())
+                .unwrap();
         assert_eq!(timed.timing, Some(ExecutionTiming::IngestionTime));
         assert_eq!(exported(&timed, "FinalizeExactAccumulator"), AT_INGESTION);
 
@@ -1698,7 +1731,8 @@ mod tests {
         let root = placed_at_ingestion(max(scan()));
         assignment.set(&root, Materialization::NotMaterialized);
         assert_eq!(
-            apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).err(),
+            apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new())
+                .err(),
             Some(ExecutionDataStateError::UnstoredIngestionRoot {
                 operator: "Aggregate"
             })

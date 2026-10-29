@@ -16,7 +16,7 @@
 use asap_devtools::lower_promql_with_sample_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    generate_per_computation_candidates, ComputationCandidate,
+    generate_per_computation_candidates, HowToComputeAggregateMeasure,
 };
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
@@ -150,7 +150,7 @@ fn analyze_corpus(
             .iter()
             .flat_map(|target| &target.choices.candidates)
             .filter_map(|candidate| match candidate {
-                ComputationCandidate::Summary(algorithm) => Some(format!("{algorithm:?}")),
+                HowToComputeAggregateMeasure::Summary(algorithm) => Some(format!("{algorithm:?}")),
                 _ => None,
             })
             .collect();

@@ -370,7 +370,8 @@ pub fn run_pattern_b_fixture(
 /// exact, whole-window KLL, and a KLL chain of sixty-second panes.
 pub fn pattern_b_computations(workload: &PlanningWorkload) -> Vec<Vec<QueryRoot>> {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        compose_logical_candidate, generate_per_computation_candidates,
+        HowToComputeAggregateMeasure,
     };
     use asap_logical_asap_optimization::pass2::asap_aware_cse::{
         pane_candidates, window_composition_pass2_candidates,
@@ -390,7 +391,7 @@ pub fn pattern_b_computations(workload: &PlanningWorkload) -> Vec<Vec<QueryRoot>
         .position(|candidate| {
             matches!(
                 candidate,
-                ComputationCandidate::Summary(SketchAlgorithm::Kll)
+                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)
             )
         })
         .unwrap();

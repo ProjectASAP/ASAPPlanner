@@ -25,8 +25,8 @@ use asap_types::ir::physical_export::{compile_physical_asap_dag_with_node_ids, P
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::Schema;
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
-    OperatorNode, QueryRoot, TimingMemo,
+    apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
+    NonASAPOp, Operator, OperatorNode, QueryRoot,
 };
 use asap_types::physical::{Materialization, Medium};
 
@@ -172,7 +172,8 @@ struct Exported {
 }
 
 fn export(root: &Rc<OperatorNode>, assignment: &MaterializationAssignment) -> Exported {
-    let timed = apply_materialization_timings(root, assignment, &mut TimingMemo::new()).unwrap();
+    let timed =
+        apply_materialization_timings(root, assignment, &mut NodeToTimedNodeCache::new()).unwrap();
     let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
     let pane = |node: &OperatorNode| -> i64 {
         match node.children()[0].non_asap() {
@@ -292,7 +293,8 @@ fn execute_maintained_chain(
     let mut assignment = MaterializationAssignment::default();
     assignment.set(&chain, Materialization::MatAtIngestion(Medium::Memory));
     let timed =
-        apply_materialization_timings(planned, &assignment, &mut TimingMemo::new()).unwrap();
+        apply_materialization_timings(planned, &assignment, &mut NodeToTimedNodeCache::new())
+            .unwrap();
     let expanded = expand_pane_chains(&timed).unwrap();
     for pane in OperatorNode::reachable(&expanded)
         .iter()

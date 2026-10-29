@@ -102,7 +102,8 @@ async fn run(deployment: &DeploymentCapabilities) -> Run {
     let workload = workload();
     let roots = roots(&workload).await;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        compose_logical_candidate, generate_per_computation_candidates,
+        HowToComputeAggregateMeasure,
     };
     use asap_logical_asap_optimization::pass2::asap_aware_cse::{
         pane_candidates, window_composition_pass2_candidates,
@@ -128,7 +129,9 @@ async fn run(deployment: &DeploymentCapabilities) -> Run {
                 .position(|choice| {
                     matches!(
                         choice,
-                        ComputationCandidate::Summary(asap_types::ir::schema::SketchAlgorithm::Kmv)
+                        HowToComputeAggregateMeasure::Summary(
+                            asap_types::ir::schema::SketchAlgorithm::Kmv
+                        )
                     )
                 })
                 .expect("KMV distinct-count sketch with a failure bound")

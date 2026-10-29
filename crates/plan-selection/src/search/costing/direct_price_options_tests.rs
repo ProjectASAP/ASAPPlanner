@@ -397,7 +397,8 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
 #[test]
 fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        compose_logical_candidate, generate_per_computation_candidates,
+        HowToComputeAggregateMeasure,
     };
     use asap_types::ir::schema::SketchAlgorithm;
     use std::rc::Rc;
@@ -460,7 +461,7 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         .position(|candidate| {
             matches!(
                 candidate,
-                ComputationCandidate::Summary(SketchAlgorithm::Kll)
+                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)
             )
         })
         .unwrap();

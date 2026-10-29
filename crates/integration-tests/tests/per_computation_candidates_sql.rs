@@ -4,8 +4,8 @@
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
-    ComputationTarget, HavingPlacement,
+    compose_logical_candidate, generate_per_computation_candidates, ComputationTarget,
+    HavingPlacement, HowToComputeAggregateMeasure,
 };
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::ColumnRef;
@@ -231,7 +231,7 @@ async fn heap_updates_over(fields: Vec<Field>, sql: &str) -> Vec<(String, String
             let (candidate, _) = target.computation_for(c).unwrap();
             if !matches!(
                 candidate,
-                ComputationCandidate::Summary(
+                HowToComputeAggregateMeasure::Summary(
                     SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
                 )
             ) {

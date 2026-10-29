@@ -4,11 +4,11 @@
 //! The top-k pins were re-recorded when equal keyless results became one
 //! group: the readers' shared `sum_over_time` is now one group, not one per
 //! reader.
-use super::candidates::{try_populate_pass1, CandidateMemo, CandidateOrigin};
+use super::candidates::{try_populate_pass1, CandidateMemo, OriginOfCandidateForMemoGroup};
 use super::shared_configurations::PaneWidthDomain;
 use super::state_groups::expand_concrete_summary_state_groups_in_domain;
 use super::window_candidates::add_local_window_composition;
-use super::LogicalMemo;
+use super::DagOfLogicalMemoGroups;
 use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
 use crate::test_support::{entry_with, lower_promql};
 use asap_types::ir::flat::flatten;
@@ -38,7 +38,7 @@ fn expanded(queries: &[(&str, f64)], step_ms: u32) -> CandidateMemo {
             (id, QueryRoot::Operator(lower_promql(query, target.clone())))
         })
         .collect();
-    let initial = LogicalMemo::from_roots(&roots);
+    let initial = DagOfLogicalMemoGroups::from_roots(&roots);
     let inventory = generate_per_computation_candidates(roots).unwrap();
     let mut memo = try_populate_pass1(initial, &inventory).unwrap();
     let entries: Vec<_> = targets
@@ -131,7 +131,7 @@ fn top_k_reuse_candidates_are_unchanged() {
         .candidates
         .iter()
         .flatten()
-        .any(|candidate| candidate.origin == CandidateOrigin::TopKReuse));
+        .any(|candidate| candidate.origin == OriginOfCandidateForMemoGroup::TopKReuse));
     assert!(one_sum_over_time_group_for(&memo, "m_gauge", &[0, 1]));
     assert_eq!(fingerprint(&memo), (69, 14825718632741491576));
 }

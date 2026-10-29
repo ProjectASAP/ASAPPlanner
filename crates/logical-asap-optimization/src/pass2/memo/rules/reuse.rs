@@ -1,13 +1,15 @@
 //! Shared boundary handling for producer-level reuse rules. Rule outputs retain
 //! canonical input identities after guarantee recomposition rebuilds their DAGs.
-use crate::pass2::memo::candidates::{CandidateMemo, CandidateOrigin, ImplementationCandidate};
+use crate::pass2::memo::candidates::{
+    CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup,
+};
 use crate::pass2::memo::state_groups::{boundary_groups, StateGroupExpansionError};
 use crate::pass2::memo::{MemoGroup, MemoGroupId};
 use asap_types::ir::OperatorNode;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-pub(in crate::pass2::memo) fn eligible(candidate: &ImplementationCandidate) -> bool {
+pub(in crate::pass2::memo) fn eligible(candidate: &CandidateForMemoGroup) -> bool {
     !candidate.implements.is_empty() && candidate.budget_share > 0
 }
 
@@ -95,7 +97,7 @@ pub(in crate::pass2::memo) fn append_producer(
     memo: &mut CandidateMemo,
     node: Rc<OperatorNode>,
     queries: &[usize],
-    origin: CandidateOrigin,
+    origin: OriginOfCandidateForMemoGroup,
     budget_share: usize,
 ) -> Result<MemoGroupId, StateGroupExpansionError> {
     // Reuse only dedicated producer groups. A logical result group can contain
@@ -127,7 +129,7 @@ pub(in crate::pass2::memo) fn append_producer(
         queries: queries.to_vec(),
         roots_of: Vec::new(),
     });
-    memo.candidates.push(vec![ImplementationCandidate {
+    memo.candidates.push(vec![CandidateForMemoGroup {
         implements: vec![id],
         node,
         children,
@@ -140,9 +142,9 @@ pub(in crate::pass2::memo) fn append_producer(
 pub(in crate::pass2::memo) fn append_reader(
     memo: &mut CandidateMemo,
     owner: usize,
-    original: &ImplementationCandidate,
+    original: &CandidateForMemoGroup,
     node: Rc<OperatorNode>,
-    origin: CandidateOrigin,
+    origin: OriginOfCandidateForMemoGroup,
 ) -> Result<bool, StateGroupExpansionError> {
     if original.node.schema.fields != node.schema.fields
         || original.node.schema.time_index != node.schema.time_index
@@ -215,8 +217,8 @@ pub(in crate::pass2::memo) fn replace(
 }
 
 pub(in crate::pass2::memo) fn combined_inputs(
-    left: &ImplementationCandidate,
-    right: &ImplementationCandidate,
+    left: &CandidateForMemoGroup,
+    right: &CandidateForMemoGroup,
 ) -> Vec<MemoGroupId> {
     let mut seen = HashSet::new();
     left.children

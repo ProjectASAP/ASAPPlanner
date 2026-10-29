@@ -8,7 +8,9 @@ use std::time::Instant;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot};
 
-use crate::pass2::memo::candidates::{CandidateMemo, CandidateOrigin, ImplementationCandidate};
+use crate::pass2::memo::candidates::{
+    CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup,
+};
 use crate::pass2::memo::state_groups::{boundary_groups, simple_build, StateGroupExpansionError};
 use crate::pass2::memo::{MemoGroup, MemoGroupId};
 
@@ -117,9 +119,9 @@ pub(in crate::pass2::memo) fn add_scan_label_candidates(
         let mut reader = original;
         reader.node = node;
         reader.children = boundary_groups(&reader.node, &boundaries);
-        reader.origin = CandidateOrigin::WidenedScans;
+        reader.origin = OriginOfCandidateForMemoGroup::WidenedScans;
         if memo.candidates[group].iter().any(|known| {
-            known.origin == CandidateOrigin::WidenedScans
+            known.origin == OriginOfCandidateForMemoGroup::WidenedScans
                 && known.children == reader.children
                 && *known.node == *reader.node
         }) {
@@ -223,11 +225,11 @@ fn intern_inputs(
                 queries: queries.to_vec(),
                 roots_of: Vec::new(),
             });
-            memo.candidates.push(vec![ImplementationCandidate {
+            memo.candidates.push(vec![CandidateForMemoGroup {
                 implements: vec![group],
                 node: Rc::clone(&rewritten),
                 children: inputs,
-                origin: CandidateOrigin::WidenedScans,
+                origin: OriginOfCandidateForMemoGroup::WidenedScans,
                 budget_share: 1,
             }]);
             rewritten

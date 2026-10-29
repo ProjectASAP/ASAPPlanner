@@ -821,7 +821,7 @@ mod tests {
         use asap_types::ir::physical_export::compile_physical_asap_dag;
         use asap_types::ir::schema::{DataType, Field, Schema};
         use asap_types::ir::{
-            apply_materialization_timings, OperatorNode, TimeRangeKind, TimingMemo,
+            apply_materialization_timings, NodeToTimedNodeCache, OperatorNode, TimeRangeKind,
         };
         use std::time::Duration;
         let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
@@ -857,7 +857,7 @@ mod tests {
             let timed = apply_materialization_timings(
                 &root,
                 &MaterializationAssignment::default(),
-                &mut TimingMemo::new(),
+                &mut NodeToTimedNodeCache::new(),
             )
             .unwrap();
             compile_physical_asap_dag(&timed).unwrap()
@@ -899,7 +899,7 @@ mod tests {
             DataType, ExactKind, ExactParams, Field, FieldDataType, Schema, SummaryUpdate,
         };
         use asap_types::ir::{
-            apply_materialization_timings, OperatorNode, TimeRangeKind, TimingMemo,
+            apply_materialization_timings, NodeToTimedNodeCache, OperatorNode, TimeRangeKind,
         };
         use asap_types::physical::Medium;
         use std::time::Duration;
@@ -953,7 +953,8 @@ mod tests {
         let mut assignment = MaterializationAssignment::default();
         assignment.set(&merged, Materialization::MatAtIngestion(Medium::Memory));
         let timed =
-            apply_materialization_timings(&merged, &assignment, &mut TimingMemo::new()).unwrap();
+            apply_materialization_timings(&merged, &assignment, &mut NodeToTimedNodeCache::new())
+                .unwrap();
         let dag = compile_physical_asap_dag(&timed).unwrap();
         match InstallablePlan::of_dag(dag, vec![String::new()], &HashMap::new(), &HashMap::new()) {
             Err(InstallablePlanError::Uninstallable(
@@ -990,7 +991,8 @@ mod tests {
             assignment.set(node, Materialization::MatAtIngestion(Medium::Memory));
         }
         let timed =
-            apply_materialization_timings(&merge, &assignment, &mut TimingMemo::new()).unwrap();
+            apply_materialization_timings(&merge, &assignment, &mut NodeToTimedNodeCache::new())
+                .unwrap();
         let dag = compile_physical_asap_dag(&timed).unwrap();
         match InstallablePlan::of_dag(dag, vec![String::new()], &HashMap::new(), &HashMap::new()) {
             Err(InstallablePlanError::Uninstallable(

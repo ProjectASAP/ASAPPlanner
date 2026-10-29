@@ -1258,7 +1258,8 @@ mod tests {
     #[test]
     fn fixed_sketch_profiles_match_the_real_evaluator() {
         use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-            compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+            compose_logical_candidate, generate_per_computation_candidates,
+            HowToComputeAggregateMeasure,
         };
         use asap_types::ir::schema::SketchAlgorithm;
         use std::rc::Rc;
@@ -1317,7 +1318,7 @@ mod tests {
                 )])
                 .unwrap();
                 let choice = generated.targets[0].choices.candidates.iter().position(|candidate|
-                    matches!(candidate, ComputationCandidate::Summary(found) if *found == algorithm)).unwrap();
+                    matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == algorithm)).unwrap();
                 let roots: Vec<_> = compose_logical_candidate(&generated, &[choice])
                     .unwrap()
                     .into_iter()
@@ -1483,7 +1484,8 @@ mod tests {
         range_evaluation: Option<asap_types::workload::RangeEvaluation>,
     ) {
         use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-            compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+            compose_logical_candidate, generate_per_computation_candidates,
+            HowToComputeAggregateMeasure,
         };
         use asap_types::ir::schema::SketchAlgorithm;
         use std::rc::Rc;
@@ -1565,7 +1567,7 @@ mod tests {
                     )])
                     .unwrap();
                     let choice = generated.targets[0].choices.candidates.iter().position(|candidate|
-                    matches!(candidate, ComputationCandidate::Summary(found) if *found == algorithm)).unwrap();
+                    matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == algorithm)).unwrap();
                     let roots: Vec<_> = compose_logical_candidate(&generated, &[choice])
                         .unwrap()
                         .into_iter()
@@ -2004,7 +2006,8 @@ mod tests {
     #[test]
     fn heterogeneous_shared_sketch_profiles_match_the_real_evaluator() {
         use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-            compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+            compose_logical_candidate, generate_per_computation_candidates,
+            HowToComputeAggregateMeasure,
         };
         use asap_types::ir::schema::SketchAlgorithm;
         use asap_types::workload::TimestampMs;
@@ -2071,7 +2074,7 @@ mod tests {
                 )
                 .unwrap();
                 let choices: Vec<_> = generated.targets.iter().map(|target| target.choices.candidates.iter().position(|candidate|
-                    matches!(candidate,ComputationCandidate::Summary(found) if *found==algorithm)).unwrap()).collect();
+                    matches!(candidate,HowToComputeAggregateMeasure::Summary(found) if *found==algorithm)).unwrap()).collect();
                 let roots: Vec<_> = compose_logical_candidate(&generated, &choices)
                     .unwrap()
                     .into_iter()

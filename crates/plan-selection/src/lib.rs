@@ -8654,7 +8654,8 @@ mod tests {
                     .candidates
                     .iter()
                     .position(|candidate| {
-                        *candidate == pcc::ComputationCandidate::Summary(SketchAlgorithm::DDSketch)
+                        *candidate
+                            == pcc::HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch)
                     })
                     .unwrap_or(0)
             })
@@ -8664,7 +8665,7 @@ mod tests {
             .iter()
             .zip(&choices)
             .any(|(target, &choice)| target.choices.candidates[choice]
-                == pcc::ComputationCandidate::Summary(SketchAlgorithm::DDSketch)));
+                == pcc::HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch)));
         let outputs = pcc::compose_logical_candidate(&inventory, &choices).unwrap();
         let output = &outputs[0].1;
         let guarantee = root_guarantee(output).expect("a symbolic bound");
@@ -8977,7 +8978,7 @@ mod tests {
     /// state materialized as `materialization`.
     fn kll_dag(materialization: Materialization) -> PhysicalASAPDAG {
         use asap_types::ir::{
-            apply_materialization_timings, MaterializationAssignment, TimingMemo,
+            apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
         };
         let root = lower_promql(
             "quantile_over_time(0.99, m[1m])",
@@ -8995,7 +8996,7 @@ mod tests {
                     .candidates
                     .iter()
                     .position(|c| {
-                        *c == asap_logical_asap_optimization::pass1::per_computation_candidates::ComputationCandidate::Summary(
+                        *c == asap_logical_asap_optimization::pass1::per_computation_candidates::HowToComputeAggregateMeasure::Summary(
                             SketchAlgorithm::Kll,
                         )
                     })
@@ -9018,7 +9019,8 @@ mod tests {
             MaterializationAssignment::with_default(Materialization::NotMaterialized);
         assignment.set(&state, materialization);
         let timed =
-            apply_materialization_timings(root, &assignment, &mut TimingMemo::new()).unwrap();
+            apply_materialization_timings(root, &assignment, &mut NodeToTimedNodeCache::new())
+                .unwrap();
         asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids(&[
             QueryRoot::Operator(timed),
         ])
@@ -9548,7 +9550,7 @@ mod tests {
             .position(|c| {
                 matches!(
                     c,
-                    asap_logical_asap_optimization::pass1::per_computation_candidates::ComputationCandidate::Summary(
+                    asap_logical_asap_optimization::pass1::per_computation_candidates::HowToComputeAggregateMeasure::Summary(
                         SketchAlgorithm::Kll
                     )
                 )
@@ -10541,7 +10543,10 @@ mod tests {
                     .candidates
                     .iter()
                     .position(|c| {
-                        matches!(c, pcc::ComputationCandidate::Summary(SketchAlgorithm::Kll))
+                        matches!(
+                            c,
+                            pcc::HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)
+                        )
                     })
                     .unwrap()
             })

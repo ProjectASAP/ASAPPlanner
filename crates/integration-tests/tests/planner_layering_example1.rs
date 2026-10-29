@@ -29,7 +29,8 @@ fn pipeline() -> Run {
 // a production workload search or an exhaustive memo archive.
 fn rule_fixture(workload: &asap_types::workload::PlanningWorkload) -> Run {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        compose_logical_candidate, generate_per_computation_candidates,
+        HowToComputeAggregateMeasure,
     };
     use asap_logical_asap_optimization::pass2::asap_aware_cse::{
         pane_candidates, window_composition_pass2_candidates,
@@ -53,7 +54,7 @@ fn rule_fixture(workload: &asap_types::workload::PlanningWorkload) -> Run {
                     (0..choices.choice_count())
                         .find(|&option| {
                             matches!(choices.computation_for(option),
-                    Some((ComputationCandidate::Summary(algorithm), _)) if *algorithm == family)
+                    Some((HowToComputeAggregateMeasure::Summary(algorithm), _)) if *algorithm == family)
                         })
                         .map(|option| (target, option))
                 })

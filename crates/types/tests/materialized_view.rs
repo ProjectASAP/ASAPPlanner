@@ -16,8 +16,8 @@ use asap_types::ir::schema::{
     SketchParams, SummaryUpdate,
 };
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
-    OperatorNode, TimeRangeKind, TimingMemo,
+    apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
+    NonASAPOp, Operator, OperatorNode, TimeRangeKind,
 };
 use asap_types::physical::{Materialization, Medium};
 
@@ -89,7 +89,9 @@ fn panes_and_kept_merge() -> (PhysicalASAPDAG, usize) {
         &merge,
         Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory),
     );
-    let timed = apply_materialization_timings(&merge, &assignment, &mut TimingMemo::new()).unwrap();
+    let timed =
+        apply_materialization_timings(&merge, &assignment, &mut NodeToTimedNodeCache::new())
+            .unwrap();
     let dag = compile_physical_asap_dag(&timed).unwrap();
     let merge_id = dag.roots[0];
     (dag, merge_id)

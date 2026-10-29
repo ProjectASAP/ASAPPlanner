@@ -98,7 +98,8 @@ pub mod fixtures {
 pub mod physical_export {
     use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPDAG};
     use asap_types::ir::{
-        apply_materialization_timings, MaterializationAssignment, OperatorNode, TimingMemo,
+        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
+        OperatorNode,
     };
     use asap_types::physical::{Materialization, Medium};
     use std::rc::Rc;
@@ -123,7 +124,7 @@ pub mod physical_export {
         root: &Rc<OperatorNode>,
         assignment: &MaterializationAssignment,
     ) -> Rc<OperatorNode> {
-        apply_materialization_timings(root, assignment, &mut TimingMemo::new())
+        apply_materialization_timings(root, assignment, &mut NodeToTimedNodeCache::new())
             .expect("materialization timing failed")
     }
 
@@ -253,12 +254,13 @@ pub mod planning {
         family: asap_types::ir::schema::SketchAlgorithm,
     ) -> Rc<OperatorNode> {
         use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-            compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+            compose_logical_candidate, generate_per_computation_candidates,
+            HowToComputeAggregateMeasure,
         };
         let local =
             generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
         let choices = local.targets.iter().map(|target| target.choices.candidates.iter()
-            .position(|candidate| matches!(candidate, ComputationCandidate::Summary(found) if *found == family)).unwrap_or(0)).collect::<Vec<_>>();
+            .position(|candidate| matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == family)).unwrap_or(0)).collect::<Vec<_>>();
         match compose_logical_candidate(&local, &choices)
             .expect("explicit family choices compose")
             .remove(0)
@@ -301,7 +303,7 @@ pub mod planning {
     }
     /// Pass 1, local panes for `entries`' recurrences and every Pass 2 rule
     /// on the seed grids (no query pruning). Rule tests read a group's
-    /// candidates by `CandidateOrigin`.
+    /// candidates by `OriginOfCandidateForMemoGroup`.
     pub fn expanded_memo(
         roots: Vec<(usize, QueryRoot)>,
         entries: &[asap_types::workload::QueryWorkloadEntry],
@@ -310,9 +312,9 @@ pub mod planning {
         use asap_logical_asap_optimization::pass2::memo::{
             candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
             state_groups::expand_concrete_summary_state_groups_in_domain,
-            window_candidates::add_local_window_composition, LogicalMemo,
+            window_candidates::add_local_window_composition, DagOfLogicalMemoGroups,
         };
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = generate_per_computation_candidates(roots).unwrap();
         let mut memo = try_populate_pass1(initial, &inventory).unwrap();
         add_local_window_composition(&mut memo, entries);
@@ -321,7 +323,7 @@ pub mod planning {
             .memo
     }
 
-    /// One plan of `memo`'s first `queries` queries (`memo::enumeration::compose`):
+    /// One plan of `memo`'s first `queries` queries (`memo::enumeration::build_logical_asap_dags_from_chosen_candidates`):
     /// each query's first root group's DAG, every group `choice` does not
     /// name implemented by its first candidate.
     pub fn compose_memo_plan(
@@ -329,12 +331,15 @@ pub mod planning {
         queries: usize,
         choice: &std::collections::BTreeMap<usize, usize>,
     ) -> Vec<Rc<OperatorNode>> {
-        use asap_logical_asap_optimization::pass2::memo::{enumeration::compose, MemoGroupId};
+        use asap_logical_asap_optimization::pass2::memo::{
+            enumeration::build_logical_asap_dags_from_chosen_candidates, MemoGroupId,
+        };
         let choice = choice
             .iter()
             .map(|(&group, &index)| (MemoGroupId(group as u32), index))
             .collect();
-        let roots = compose(memo, &choice).expect("the choice composes");
+        let roots = build_logical_asap_dags_from_chosen_candidates(memo, &choice)
+            .expect("the choice composes");
         (0..queries)
             .map(|query| {
                 let (_, root) = roots
@@ -402,7 +407,7 @@ pub mod planning {
         memo: &asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo,
         q: usize,
         keep: impl Fn(
-            &asap_logical_asap_optimization::pass2::memo::candidates::ImplementationCandidate,
+            &asap_logical_asap_optimization::pass2::memo::candidates::CandidateForMemoGroup,
         ) -> bool,
     ) -> Vec<(usize, usize)> {
         let mut found: Vec<_> = memo
@@ -463,7 +468,7 @@ pub mod planning {
             .map(|q| {
                 let found = own_choices(memo, q, |c| {
                     c.origin
-                        == asap_logical_asap_optimization::pass2::memo::candidates::CandidateOrigin::Pass1
+                        == asap_logical_asap_optimization::pass2::memo::candidates::OriginOfCandidateForMemoGroup::Pass1
                         && builds(&c.node)
                 });
                 let top = found

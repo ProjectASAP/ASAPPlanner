@@ -15,13 +15,13 @@ use super::{MemoGroup, MemoGroupId};
 pub struct CandidateMemo {
     pub groups: Vec<MemoGroup>,
     /// Each group's implementation candidates, by group index.
-    pub candidates: Vec<Vec<ImplementationCandidate>>,
+    pub candidates: Vec<Vec<CandidateForMemoGroup>>,
 }
 
 /// One way to implement a group: its node as Stage 2 implements it, over
 /// child groups.
 #[derive(Debug, Clone)]
-pub struct ImplementationCandidate {
+pub struct CandidateForMemoGroup {
     /// The groups it implements: one, or several for a fused computation
     /// (the topmost first).
     pub implements: Vec<MemoGroupId>,
@@ -31,7 +31,7 @@ pub struct ImplementationCandidate {
     /// The groups it reads, whose implementations are chosen separately.
     pub children: Vec<MemoGroupId>,
     /// How it was made: by Pass 1, or by which Pass 2 transformation.
-    pub origin: CandidateOrigin,
+    pub origin: OriginOfCandidateForMemoGroup,
     /// The number of equal shares of its measures' accuracy budget its
     /// summaries are sized for: 1 for the whole budget, `n` when it is one
     /// of `n` approximate inputs of a query (a ratio's operand). This positive
@@ -44,7 +44,7 @@ pub struct ImplementationCandidate {
 
 /// Where an implementation candidate came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CandidateOrigin {
+pub enum OriginOfCandidateForMemoGroup {
     /// Pass 1: exact, exact accumulator, or a summary family and size.
     Pass1,
     /// One build serving several reader groups (summary capability).

@@ -1,7 +1,7 @@
 //! Frontend-to-Pass-1 acceptance: candidate discovery precedes empirical selection.
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    computation_candidates_for_intent, generate_per_computation_candidates, ComputationCandidate,
-    HavingEntry, HavingPlacement, PerComputationCandidateError, PruneReason,
+    computation_candidates_for_intent, generate_per_computation_candidates, HavingEntry,
+    HavingPlacement, HowToComputeAggregateMeasure, PerComputationCandidateError, PruneReason,
 };
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
@@ -19,16 +19,16 @@ use std::rc::Rc;
 fn approximate() -> AccuracyTarget {
     AccuracyTarget::max_error(0.05).failure_probability(0.01)
 }
-fn candidates_for(intent: AggIntent) -> Vec<ComputationCandidate> {
+fn candidates_for(intent: AggIntent) -> Vec<HowToComputeAggregateMeasure> {
     computation_candidates_for_intent(&intent)
         .unwrap()
         .candidates
 }
-fn algorithms(choices: &[ComputationCandidate]) -> Vec<SketchAlgorithm> {
+fn algorithms(choices: &[HowToComputeAggregateMeasure]) -> Vec<SketchAlgorithm> {
     choices
         .iter()
         .filter_map(|choice| match choice {
-            ComputationCandidate::Summary(algorithm) => Some(*algorithm),
+            HowToComputeAggregateMeasure::Summary(algorithm) => Some(*algorithm),
             _ => None,
         })
         .collect()
@@ -79,7 +79,7 @@ fn cardinality_keeps_exact_specialized_and_universal_candidates() {
         cols: vec![0],
         accuracy: approximate(),
     });
-    assert_eq!(choices[0], ComputationCandidate::Exact);
+    assert_eq!(choices[0], HowToComputeAggregateMeasure::Exact);
     assert_eq!(
         algorithms(&choices),
         vec![
@@ -109,7 +109,7 @@ fn frequency_statistics_keep_universal_choices() {
         },
     ] {
         let choices = candidates_for(intent);
-        assert_eq!(choices[0], ComputationCandidate::Exact);
+        assert_eq!(choices[0], HowToComputeAggregateMeasure::Exact);
         assert_eq!(algorithms(&choices), vec![SketchAlgorithm::UnivMon]);
     }
 }
@@ -133,16 +133,16 @@ fn exact_quantile_stays_exact_and_approximate_keeps_both_families() {
         accuracy: AccuracyTarget::exact(),
     })
     .unwrap();
-    assert_eq!(exact.candidates, vec![ComputationCandidate::Exact]);
+    assert_eq!(exact.candidates, vec![HowToComputeAggregateMeasure::Exact]);
     assert_eq!(
         exact.pruned,
         vec![
             (
-                ComputationCandidate::Summary(SketchAlgorithm::Kll),
+                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll),
                 PruneReason::RequiresExact
             ),
             (
-                ComputationCandidate::Summary(SketchAlgorithm::DDSketch),
+                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch),
                 PruneReason::RequiresExact
             ),
         ]
@@ -220,8 +220,10 @@ fn example_1_exact_q1_keeps_exact_accumulators_only() {
     assert_eq!(
         found,
         vec![
-            vec![ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum])],
-            vec![ComputationCandidate::ExactAccumulator(vec![
+            vec![HowToComputeAggregateMeasure::ExactAccumulator(vec![
+                ExactKind::Sum
+            ])],
+            vec![HowToComputeAggregateMeasure::ExactAccumulator(vec![
                 ExactKind::Rate
             ])],
         ]
@@ -353,7 +355,7 @@ fn topk_keeps_both_specialized_heap_choices() {
         k: 10,
         accuracy: approximate(),
     });
-    assert_eq!(choices[0], ComputationCandidate::Exact);
+    assert_eq!(choices[0], HowToComputeAggregateMeasure::Exact);
     assert_eq!(
         algorithms(&choices),
         vec![
@@ -402,7 +404,9 @@ fn multi_measure_aggregate_has_one_target_per_measure() {
     );
     assert_eq!(
         candidates[0].choices.candidates,
-        vec![ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum])]
+        vec![HowToComputeAggregateMeasure::ExactAccumulator(vec![
+            ExactKind::Sum
+        ])]
     );
     assert_sql_count_choices(&candidates[1].choices);
 }
@@ -452,7 +456,7 @@ fn assert_sql_count_choices(
 ) {
     assert_eq!(
         choices.candidates,
-        vec![ComputationCandidate::ExactAccumulator(vec![
+        vec![HowToComputeAggregateMeasure::ExactAccumulator(vec![
             ExactKind::Count
         ])]
     );
@@ -461,7 +465,7 @@ fn assert_sql_count_choices(
         [SketchAlgorithm::Cms, SketchAlgorithm::UnivMon]
             .into_iter()
             .map(|algorithm| (
-                ComputationCandidate::Summary(algorithm),
+                HowToComputeAggregateMeasure::Summary(algorithm),
                 PruneReason::NoRelationalCountSketchRealization,
             ))
             .collect::<Vec<_>>()
@@ -579,19 +583,19 @@ fn avg_rewrites_to_sum_and_count_states() {
     .targets;
     assert_eq!(
         targets[0].choices.candidates,
-        vec![ComputationCandidate::ExactAccumulator(vec![
+        vec![HowToComputeAggregateMeasure::ExactAccumulator(vec![
             ExactKind::Sum,
             ExactKind::Count
         ])]
     );
     assert_eq!(
         targets[1].choices.candidates,
-        vec![ComputationCandidate::Exact]
+        vec![HowToComputeAggregateMeasure::Exact]
     );
     assert_eq!(
         targets[1].choices.pruned,
         vec![(
-            ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum, ExactKind::Count]),
+            HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum, ExactKind::Count]),
             PruneReason::NullableAvgInput
         )]
     );
@@ -740,23 +744,25 @@ fn example_1_exact_q2_prunes_topk_heaps() {
         .collect();
     let topk = found
         .iter()
-        .find(|choices| choices.candidates == [ComputationCandidate::Exact])
+        .find(|choices| choices.candidates == [HowToComputeAggregateMeasure::Exact])
         .expect("top-k target");
     assert_eq!(
         topk.pruned,
         vec![
             (
-                ComputationCandidate::Summary(SketchAlgorithm::CmsWithHeap),
+                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CmsWithHeap),
                 PruneReason::RequiresExact
             ),
             (
-                ComputationCandidate::Summary(SketchAlgorithm::CountSketchWithHeap),
+                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CountSketchWithHeap),
                 PruneReason::RequiresExact
             ),
         ]
     );
     assert!(found.iter().any(|choices| choices.candidates
-        == [ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum])]
+        == [HowToComputeAggregateMeasure::ExactAccumulator(vec![
+            ExactKind::Sum
+        ])]
         && choices.pruned.is_empty()));
     assert_eq!(found.len(), 2, "{found:#?}");
 }
@@ -1171,7 +1177,7 @@ fn composed_mixed_exact_and_sketch_measures_keep_output_names() {
     .unwrap();
     assert_eq!(
         candidates_for(quantile(0.5))[0],
-        ComputationCandidate::Exact
+        HowToComputeAggregateMeasure::Exact
     );
     // p50 exact, p90 from the first sketch family.
     let [root] = <[_; 1]>::try_from(composed(vec![node.clone()], &[0, 1])).unwrap();
@@ -1327,7 +1333,7 @@ fn memo_cached_rules_preserve_occurrence_specific_having() {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates_with_memo,
     };
-    use asap_logical_asap_optimization::pass2::memo::LogicalMemo;
+    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
     let shared = grouped_count(None);
     let other = grouped_count(None);
     let key = equals(0, ScalarValue::Utf8("a".into()));
@@ -1339,7 +1345,7 @@ fn memo_cached_rules_preserve_occurrence_specific_having() {
         (1, QueryRoot::Operator(shared)),
         (2, QueryRoot::Operator(having_filter(other, key))),
     ];
-    let memo = LogicalMemo::from_roots(&roots);
+    let memo = DagOfLogicalMemoGroups::from_roots(&roots);
     let baseline = generate_per_computation_candidates(roots.clone()).unwrap();
     let cached = generate_per_computation_candidates_with_memo(roots, &memo).unwrap();
     assert_eq!(cached.targets.len(), 2);

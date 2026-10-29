@@ -41,9 +41,11 @@ use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     compose_logical_candidate, PerComputationCandidates,
 };
 use asap_logical_asap_optimization::pass2::memo::candidates::{
-    CandidateMemo, CandidateOrigin, ImplementationCandidate,
+    CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup,
 };
-use asap_logical_asap_optimization::pass2::memo::enumeration::{compose, enumerate, MemoChoice};
+use asap_logical_asap_optimization::pass2::memo::enumeration::{
+    build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
+};
 use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_plan_selection::{
     run_stage1_to_stage3_with, MemoSteps, PlanningModels, Stage1ToStage3Run, Stage1ToStage3Search,
@@ -158,23 +160,24 @@ fn whole_workload_plans(inventory: &PerComputationCandidates<usize>) -> Vec<(Vec
 }
 
 /// `choice`'s DAG, one root per query.
-fn composed(memo: &CandidateMemo, choice: &MemoChoice) -> Plan {
-    let mut roots = compose(memo, choice).expect("an enumerated choice composes");
+fn composed(memo: &CandidateMemo, choice: &ChosenCandidatePerMemoGroup) -> Plan {
+    let mut roots = build_logical_asap_dags_from_chosen_candidates(memo, choice)
+        .expect("an enumerated choice composes");
     roots.sort_by_key(|(group, _)| memo.groups[group.0 as usize].roots_of.iter().min().copied());
     roots.into_iter().map(|(_, root)| root).collect()
 }
 
 fn chosen<'a>(
     memo: &'a CandidateMemo,
-    choice: &'a MemoChoice,
-) -> impl Iterator<Item = &'a ImplementationCandidate> {
+    choice: &'a ChosenCandidatePerMemoGroup,
+) -> impl Iterator<Item = &'a CandidateForMemoGroup> {
     choice
         .iter()
         .map(|(group, &index)| &memo.candidates[group.0 as usize][index])
 }
 
 /// The KLL parameters of the summaries `candidate` builds.
-fn kll(candidate: &ImplementationCandidate) -> Vec<(u32, Option<f64>)> {
+fn kll(candidate: &CandidateForMemoGroup) -> Vec<(u32, Option<f64>)> {
     OperatorNode::reachable(&candidate.node)
         .iter()
         .filter_map(|node| match node.asap() {
@@ -197,7 +200,7 @@ fn kll(candidate: &ImplementationCandidate) -> Vec<(u32, Option<f64>)> {
 /// the query's failure probability divided over the source's series (1e-7
 /// here), far below what a per-value KLL is sized for (the query's, or half
 /// of it).
-fn sized_for_whole_result(candidate: &ImplementationCandidate) -> bool {
+fn sized_for_whole_result(candidate: &CandidateForMemoGroup) -> bool {
     kll(candidate)
         .iter()
         .any(|(_, p)| p.is_some_and(|p| p < FAILURE_PROBABILITY / 10.0))
@@ -213,7 +216,7 @@ fn assert_pass1_memo_and_whole_workload_plans(
     let enumeration = enumerate(memo, 100_000);
     assert!(enumeration.complete);
     let plans: Vec<_> = enumeration
-        .choices
+        .all_chosen_candidates
         .iter()
         .map(|choice| composed(memo, choice))
         .collect();
@@ -221,7 +224,7 @@ fn assert_pass1_memo_and_whole_workload_plans(
         assert!(!plans[..i].contains(plan), "each choice is a different DAG");
     }
     let whole_budget: Vec<_> = enumeration
-        .choices
+        .all_chosen_candidates
         .iter()
         .zip(&plans)
         .filter(|(choice, _)| chosen(memo, choice).all(|c| c.budget_share == 1))
@@ -289,11 +292,12 @@ fn ratio_of_quantiles_production_memo() {
     assert_eq!(candidate_count(last), 2158);
     let enumeration = enumerate(last, 2_000);
     assert!(!enumeration.complete);
-    assert_eq!(enumeration.choices.len(), 2_000);
+    assert_eq!(enumeration.all_chosen_candidates.len(), 2_000);
     for (group, candidates) in last.candidates.iter().enumerate() {
         for index in 0..candidates.len() {
             let choice = [(MemoGroupId(group as u32), index)].into();
-            compose(last, &choice).unwrap_or_else(|e| panic!("G{group} candidate {index}: {e}"));
+            build_logical_asap_dags_from_chosen_candidates(last, &choice)
+                .unwrap_or_else(|e| panic!("G{group} candidate {index}: {e}"));
         }
     }
     // The state-configuration rule rewrites a candidate's KLL to the size
@@ -311,10 +315,10 @@ fn ratio_of_quantiles_production_memo() {
         .collect();
     assert_eq!(quantile_groups.len(), 2);
     for group in quantile_groups {
-        let sizes = |candidates: &[ImplementationCandidate]| {
+        let sizes = |candidates: &[CandidateForMemoGroup]| {
             candidates
                 .iter()
-                .filter(|c| c.origin == CandidateOrigin::Pass1)
+                .filter(|c| c.origin == OriginOfCandidateForMemoGroup::Pass1)
                 .filter_map(|c| kll(c).first().map(|&(k, _)| (k, c.budget_share)))
                 .collect::<Vec<_>>()
         };
@@ -339,7 +343,7 @@ fn ratio_of_quantiles_production_memo() {
             candidates
                 .iter()
                 .position(|c| {
-                    c.origin == CandidateOrigin::Pass1
+                    c.origin == OriginOfCandidateForMemoGroup::Pass1
                         && c.budget_share == share
                         && kll(c).first().is_some_and(|&(kk, _)| kk == k)
                 })
@@ -373,7 +377,7 @@ fn shared_quantiles_pass1_memo_and_whole_workload_plans() {
 
 /// Candidates may read each other: a coarse quantile's rollup reads the finer
 /// grouping, whose candidates may read the coarse one. A choice taking both
-/// composes no DAG: `compose` says so, and `enumerate` leaves it out. The
+/// composes no DAG: `build_logical_asap_dags_from_chosen_candidates` says so, and `enumerate` leaves it out. The
 /// memo is built from production's roots on the seed grids, without the
 /// search: the pair, not the counts, is what this checks.
 #[test]
@@ -405,12 +409,12 @@ fn choices_whose_candidates_read_each_other_are_left_out() {
         })
         .expect("a pair of groups whose candidates read each other");
     assert!(matches!(
-        compose(memo, &mutual.into()),
-        Err(asap_logical_asap_optimization::pass2::memo::enumeration::ComposeError::Cycle { .. })
+        build_logical_asap_dags_from_chosen_candidates(memo, &mutual.into()),
+        Err(asap_logical_asap_optimization::pass2::memo::enumeration::ErrorBuildingLogicalAsapDagsFromChosenCandidates::Cycle { .. })
     ));
     let enumeration = enumerate(memo, 2_000);
-    assert!(!enumeration.choices.is_empty());
-    for choice in &enumeration.choices {
-        compose(memo, choice).unwrap();
+    assert!(!enumeration.all_chosen_candidates.is_empty());
+    for choice in &enumeration.all_chosen_candidates {
+        build_logical_asap_dags_from_chosen_candidates(memo, choice).unwrap();
     }
 }

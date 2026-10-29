@@ -7,8 +7,8 @@
 use std::rc::Rc;
 
 use asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo;
-use asap_logical_asap_optimization::pass2::memo::enumeration::MemoChoice;
-use asap_logical_asap_optimization::pass2::memo::LogicalMemo;
+use asap_logical_asap_optimization::pass2::memo::enumeration::ChosenCandidatePerMemoGroup;
+use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
 
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
@@ -55,7 +55,7 @@ pub struct MemoSteps {
     pub concrete_states: CandidateMemo,
     /// The selected plan's candidate for each group of `concrete_states` it
     /// uses, or why there is none.
-    pub selected_choice: Result<MemoChoice, String>,
+    pub selected_choice: Result<ChosenCandidatePerMemoGroup, String>,
 }
 
 /// A composed logical candidate that physical ASAP-aware optimization could
@@ -194,7 +194,7 @@ pub fn run_stage1_to_stage3_with<Id: Clone + std::fmt::Debug>(
     for (_, root) in &roots {
         root.validate_structure()?;
     }
-    let initial = LogicalMemo::from_roots(&roots);
+    let initial = DagOfLogicalMemoGroups::from_roots(&roots);
     let per_computation = generate_per_computation_candidates_with_memo(roots, &initial)?;
     Ok(run_with_initial_memo(
         per_computation,
@@ -231,11 +231,11 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
     data: &DataWorkload,
     models: PlanningModels<'_>,
     search: Stage1ToStage3Search,
-    initial: Option<LogicalMemo>,
+    initial: Option<DagOfLogicalMemoGroups>,
     local_candidate_generation_ms: Option<f64>,
 ) -> Stage1ToStage3Run<Id> {
     let pruned = per_computation.without_unsupported_summaries(models.deployment_capabilities);
-    let initial = initial.unwrap_or_else(|| LogicalMemo::from_roots(&pruned.roots));
+    let initial = initial.unwrap_or_else(|| DagOfLogicalMemoGroups::from_roots(&pruned.roots));
     let mut archive = crate::search::route::CandidateArchive::default();
     let found = crate::search::route::candidate_connection_search(
         initial,

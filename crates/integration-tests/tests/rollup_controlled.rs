@@ -2,7 +2,8 @@
 use asap_integration_tests::planning::{builds_and_rollups, expanded_memo, select_rollup};
 use asap_logical_asap_optimization::{
     pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        compose_logical_candidate, generate_per_computation_candidates,
+        HowToComputeAggregateMeasure,
     },
     pass2::asap_aware_cse::{rollup_candidates, rollup_pass2_candidates},
 };
@@ -69,7 +70,9 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
                     .choices
                     .candidates
                     .iter()
-                    .position(|c| matches!(c,ComputationCandidate::Summary(found) if found==a))
+                    .position(
+                        |c| matches!(c,HowToComputeAggregateMeasure::Summary(found) if found==a),
+                    )
                     .expect("family generated"),
             })
             .collect();

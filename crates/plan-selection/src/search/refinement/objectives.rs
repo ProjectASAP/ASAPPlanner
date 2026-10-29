@@ -401,7 +401,7 @@ mod tests {
     };
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::{LogicalMemo, MemoGroupId};
+    use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::{properties::AccuracyTarget, QueryRoot};
     use asap_types::workload::{
@@ -422,7 +422,7 @@ mod tests {
         ));
         let roots = vec![root];
         let identified = vec![(0usize, roots[0].clone())];
-        let initial = LogicalMemo::from_roots(&identified);
+        let initial = DagOfLogicalMemoGroups::from_roots(&identified);
         let output = MemoGroupId(
             initial
                 .groups

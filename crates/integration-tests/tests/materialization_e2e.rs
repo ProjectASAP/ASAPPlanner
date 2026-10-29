@@ -20,8 +20,8 @@ use asap_types::ir::physical_export::{
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, OperatorNode,
-    TimingMemo,
+    apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
+    NonASAPOp, OperatorNode,
 };
 use asap_types::physical::{Materialization, Medium};
 
@@ -84,7 +84,8 @@ fn placements() -> [MaterializationAssignment; 2] {
 }
 
 fn timed_dag(root: &Rc<OperatorNode>, assignment: &MaterializationAssignment) -> PhysicalASAPDAG {
-    let timed = apply_materialization_timings(root, assignment, &mut TimingMemo::new()).unwrap();
+    let timed =
+        apply_materialization_timings(root, assignment, &mut NodeToTimedNodeCache::new()).unwrap();
     compile_physical_asap_dag(&timed).unwrap()
 }
 

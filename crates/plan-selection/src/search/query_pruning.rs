@@ -3,7 +3,7 @@
 //! composition and any size-dependent failure remain eligible for joint planning.
 use crate::{checked_candidate, PlanningModels, RejectionCause};
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    ComputationCandidate, PerComputationCandidates,
+    HowToComputeAggregateMeasure, PerComputationCandidates,
 };
 use asap_logical_asap_optimization::pass2::workload_candidates::stage1_candidates_of_choice;
 use asap_physical_asap_optimization::optimize_physical_asap;
@@ -79,7 +79,7 @@ pub(crate) fn prune_query_candidates<Id: Clone>(
                 .map(|choice| {
                     matches!(
                         computation.computation_for(choice),
-                        Some((ComputationCandidate::Summary(_), _))
+                        Some((HowToComputeAggregateMeasure::Summary(_), _))
                     ) && !has_other_summary_family_choice(inventory, target, choice)
                 })
                 .collect()
@@ -162,7 +162,7 @@ pub(crate) fn prune_query_candidates<Id: Clone>(
                 .computation_for(choice)
                 .ok_or("query pruning references a missing target choice")?
                 .0;
-            let ComputationCandidate::Summary(_) = candidate else {
+            let HowToComputeAggregateMeasure::Summary(_) = candidate else {
                 *keep = true;
                 report.non_summary_choices_retained += 1;
                 continue;
@@ -214,7 +214,7 @@ fn has_other_summary_family_choice<Id>(
     target: usize,
     choice: usize,
 ) -> bool {
-    let Some((ComputationCandidate::Summary(family), _)) =
+    let Some((HowToComputeAggregateMeasure::Summary(family), _)) =
         inventory.targets[target].computation_for(choice)
     else {
         return false;
@@ -222,7 +222,7 @@ fn has_other_summary_family_choice<Id>(
     inventory.targets.iter().enumerate().any(|(other_target, other)| {
         (0..other.choice_count()).any(|other_choice| {
             (other_target != target || other_choice != choice)
-                && matches!(other.computation_for(other_choice), Some((ComputationCandidate::Summary(other_family), _)) if other_family == family)
+                && matches!(other.computation_for(other_choice), Some((HowToComputeAggregateMeasure::Summary(other_family), _)) if other_family == family)
         })
     })
 }
@@ -348,7 +348,7 @@ pub(crate) fn alone_violation<Id: Clone>(
 mod tests {
     use super::*;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        generate_per_computation_candidates, ComputationCandidate,
+        generate_per_computation_candidates, HowToComputeAggregateMeasure,
     };
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
@@ -394,7 +394,7 @@ mod tests {
                 target
                     .choices
                     .candidates
-                    .contains(&ComputationCandidate::Summary(SketchAlgorithm::Kll))
+                    .contains(&HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll))
             })
             .unwrap()
     }
@@ -410,7 +410,7 @@ mod tests {
         assert!(!result.inventory.targets[target]
             .choices
             .candidates
-            .contains(&ComputationCandidate::Summary(SketchAlgorithm::Kll)));
+            .contains(&HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)));
         assert!(!result.report.removed.is_empty());
     }
 
@@ -430,7 +430,7 @@ mod tests {
         assert!(result.inventory.targets[target]
             .choices
             .candidates
-            .contains(&ComputationCandidate::Summary(SketchAlgorithm::Kll)));
+            .contains(&HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)));
     }
 
     // A different logical quantile may read a producer generated for P95.
@@ -454,7 +454,7 @@ mod tests {
         assert!(result.inventory.targets[target]
             .choices
             .candidates
-            .contains(&ComputationCandidate::Summary(SketchAlgorithm::Kll)));
+            .contains(&HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)));
     }
 
     // Shared-only families cannot be deleted, so avoid all physical proof work.
@@ -539,7 +539,7 @@ mod tests {
         assert!(result.inventory.targets[target]
             .choices
             .candidates
-            .contains(&ComputationCandidate::Summary(SketchAlgorithm::Kll)));
+            .contains(&HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)));
     }
 
     // Deployment evidence can depend on a size introduced by future sharing.
