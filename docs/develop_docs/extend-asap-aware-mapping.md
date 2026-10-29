@@ -61,9 +61,8 @@ work.
    `FamilyCapability`.
 2. In `crates/logical-asap-optimization/src/pass2/workload_candidates.rs`, call it
    from Stage 1 enumeration after the
-   existing rules and record what it applied in a new `Pass2Candidate` field.
-3. Rebuild its label from that field in `asap_devtools::candidate_labels`.
-4. Add its row to the Pass 2 rule table of the
+   existing rules.
+3. Add its row to the Pass 2 rule table of the
    [design](../design_docs/proposals/planner-layering.md).
 
 A rule must keep every Pass 1 candidate, must not add a family or a readout,

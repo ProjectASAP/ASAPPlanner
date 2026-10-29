@@ -51,34 +51,34 @@ design is extended.
 
 ### Motivation
 
-* Existing query planners miss the opportunity to share the benefits of ASAP primitives across domains and use cases. ASAP Primitives can be sketches, sampling, statistical models, wavelets, machine learning generative models, etc, such algorithms preserving the a certain semantic information from the raw data. 
+* Existing query planners miss the opportunity to share the benefits of ASAP primitives across domains and use cases. ASAP Primitives can be sketches, sampling, statistical models, wavelets, machine learning generative models, etc, such algorithms preserving the a certain semantic information from the raw data.
 
-* ASAP Primitives can accelerate query execution, but the existing efforts are pretty ad-hoc and a point solution to a point use case scenario. For example, sketch for network monitoring, wavelets or sampling for AQP Query. There is no unified framework for leveraging the acceleration and cost-reduction benefits from mulitple primitive types. 
-  * Lacking a unified way / systematical way to leverage existing primitives for benefits, where the primitives are already a lot of algorithms proposed in the literature. 
+* ASAP Primitives can accelerate query execution, but the existing efforts are pretty ad-hoc and a point solution to a point use case scenario. For example, sketch for network monitoring, wavelets or sampling for AQP Query. There is no unified framework for leveraging the acceleration and cost-reduction benefits from mulitple primitive types.
+  * Lacking a unified way / systematical way to leverage existing primitives for benefits, where the primitives are already a lot of algorithms proposed in the literature.
   * Duplicated efforts will be rediscovered when various use case scenarios trying to optimize with ASAP Primitives, they will re-discover and add the similar optimization rules again and again. But among use cases, they have the potential to share the common optimization with ASAP primitives, benefiting more use cases.
 
 * Therefore, ASAPPlanner aims for building a framework with the capbility to support ASAP Primitives within query execution plans, preserving the original query semantics, as well as fitting to differnet use case scenarios, for reusing the primitive acceleration ideas.
 
 ### Design Requirements for ASAPPlanner
 
-* Query planner/optimizer should consider the query and data workloads of different use cases when doing query optimization. 
+* Query planner/optimizer should consider the query and data workloads of different use cases when doing query optimization.
   * Example use case workloads can be streaming or batch data input, and repeated, batch or ad hoc queries. The query engine and optimzer should be more specialized for targeted workload modeling. (This is not a novelty argument but we should model the workloads and optimize based on specific workload.)
-  * For example, repeated dashboard queries over time should be optimized by considering the overlapping computation between two same query expression over time, which is partially considered in time series databases. Modeling the workloads is the first step for futher optimization plan generation. 
+  * For example, repeated dashboard queries over time should be optimized by considering the overlapping computation between two same query expression over time, which is partially considered in time series databases. Modeling the workloads is the first step for futher optimization plan generation.
 
 * In order to preserve the query semantics/application semantics and generate valid query plans, ASAPPlanner should model:
   * *Logical Plan*: what data is needed and what computation is needed over the data.
   * *Physical Plan*: How to retrieve/process data and what algorithm to use for a computation.
-  * We assume the use case deployment will generate the *execution plan* given a physical plan for now, given different use cases have different deployment constraints. 
+  * We assume the use case deployment will generate the *execution plan* given a physical plan for now, given different use cases have different deployment constraints.
 
-* In order to leverage the benefits from ASAP Primitives for query acceleration and cost reduction, we need to 
+* In order to leverage the benefits from ASAP Primitives for query acceleration and cost reduction, we need to
   - (a) express the operations over ASAP Primitives, as well as
-  - (b) constructing the rules (replacement strategies) for replacing the original logical query plan with ASAP Primitive aware logical plans, where in this stage, summary/synopsis built from raw data is needed and computation over them is needed, in addition to over raw data. 
+  - (b) constructing the rules (replacement strategies) for replacing the original logical query plan with ASAP Primitive aware logical plans, where in this stage, summary/synopsis built from raw data is needed and computation over them is needed, in addition to over raw data.
 
-* ASAPPlanner should selecting the optimal physical plan. 
+* ASAPPlanner should selecting the optimal physical plan.
   * The optimization goals include reducing total query execution costs, obeying the application accuracy target.
   * The use case deployment can take the physical plan and determine how the engines runs the plan at runtime (execution). So deployment constraints can be the input to ASAPPlanner for some invalid plans early pruning (e.g., if the deployment has no materialized view computation engine, MV is not an optimziation option).
   * *Efficiency of selecting optimal physical plan*: ASAPPlanner currently doesn't consider how to early remove sub-optimal plans but just generates all possible candidates and then select an optimal one among all of them.
-  
+
 As a summary, in order to achieve the requirements, ASAPPlanner needs to abstract the following modeling:
 
 | Modeling | Contents |
@@ -91,17 +91,17 @@ As a summary, in order to achieve the requirements, ASAPPlanner needs to abstrac
 
 ## ASAPPlanner Design
 
-### Design Intuition 
+### Design Intuition
 
-The design of ASAPPlanner is largely inspired by the existing DB Query engine work. 
+The design of ASAPPlanner is largely inspired by the existing DB Query engine work.
 
-* *Semantic preserving*: We should borrow the DB Query Engine plan stages, i.e., the logical planning, physical planning separation. 
-  * So that we can have a framework for analyzing the semantics of the queries, and easily design replacement strategies for replacing a query intent with a set of ASAP Primitive operations with the same semantic. 
+* *Semantic preserving*: We should borrow the DB Query Engine plan stages, i.e., the logical planning, physical planning separation.
+  * So that we can have a framework for analyzing the semantics of the queries, and easily design replacement strategies for replacing a query intent with a set of ASAP Primitive operations with the same semantic.
   * We can add information of workload patterns over the planning framework and adds our own optimization rules targeting specific workloads.
 
-* *Materialized View (MV)*: Given that ASAP Primitives mostly work as summary over data, we leverage the idea of Materilzed View (MV) in Database world, and treat ASAP Primitives as MV, and automatically design optimization rules for rewriting queries, mapping queries, based on the operations ASAP primitives can support. 
-  * MV serves as an good integration opportunity for ASAP Primitives to work for semantic-preserving query computation. ASAPPlanner designs MV rules with aware of ASAP Primitives, as well as workload, e.g., we can build MV/incremental MV for repeated queries over time, specifically considering the window summary in ASAP Primitive library. The assumption that we can leverage MV is also, we observed the query and data workloads, where querie can be repated or sharing computation among a batch of queries, the query patterns persist long enough, and queries can be answered by the stored information based on ASAP primitives. 
-  * ASAPPlanner also provides the option of not computing materialized view at all but just execute the query over ASAP Primitive operators once and no reusing; this can potentially accelerate the queries as well due to the algorithmic complexity of ASAP Primitive computation and space is usually smaller than computing from raw data exactly. 
+* *Materialized View (MV)*: Given that ASAP Primitives mostly work as summary over data, we leverage the idea of Materilzed View (MV) in Database world, and treat ASAP Primitives as MV, and automatically design optimization rules for rewriting queries, mapping queries, based on the operations ASAP primitives can support.
+  * MV serves as an good integration opportunity for ASAP Primitives to work for semantic-preserving query computation. ASAPPlanner designs MV rules with aware of ASAP Primitives, as well as workload, e.g., we can build MV/incremental MV for repeated queries over time, specifically considering the window summary in ASAP Primitive library. The assumption that we can leverage MV is also, we observed the query and data workloads, where querie can be repated or sharing computation among a batch of queries, the query patterns persist long enough, and queries can be answered by the stored information based on ASAP primitives.
+  * ASAPPlanner also provides the option of not computing materialized view at all but just execute the query over ASAP Primitive operators once and no reusing; this can potentially accelerate the queries as well due to the algorithmic complexity of ASAP Primitive computation and space is usually smaller than computing from raw data exactly.
 
 > https://dl.acm.org/doi/10.1145/376284.375706
 > https://cloudberry.apache.org/docs/performance/optimize-queries/use-auto-materialized-view-to-answer-queries/
@@ -109,7 +109,7 @@ The design of ASAPPlanner is largely inspired by the existing DB Query engine wo
 > https://docs.aws.amazon.com/redshift/latest/dg/materialized-view-auto-rewrite.html
 
 * *Common Subexpression Elimination (CSE)*: In DB, CSE refers to identifying the common sub-query-expression within a query or multiple queires, and compute the same subexpression once and reuse to eliminate redundant processing.
-  * One example can be the `(price * (1 - discount))` is computed once and being reused, rather than twice. 
+  * One example can be the `(price * (1 - discount))` is computed once and being reused, rather than twice.
 
     ```SQL
     SELECT (price * (1 - discount)) AS net_price
@@ -117,11 +117,11 @@ The design of ASAPPlanner is largely inspired by the existing DB Query engine wo
     WHERE (price * (1 - discount)) > 100;
     ```
 
-  * CSE also serves as a good integration opportunity for ASAP Primitives, because many ASAP Primitives support the pattern of one data structure supporting multiple query intent. For example, one UnivMon sketch supports L2 norm, entropy, and cardinality 3 query intents; one arbitrary sub-window query framework, e.g., Exponential Histogram suports queries within arbitrary sub-window within the outter-most window; wavelets coefficients set in a way can support all linear operations, such as sum, avg, count; and many other examples.  
+  * CSE also serves as a good integration opportunity for ASAP Primitives, because many ASAP Primitives support the pattern of one data structure supporting multiple query intent. For example, one UnivMon sketch supports L2 norm, entropy, and cardinality 3 query intents; one arbitrary sub-window query framework, e.g., Exponential Histogram suports queries within arbitrary sub-window within the outter-most window; wavelets coefficients set in a way can support all linear operations, such as sum, avg, count; and many other examples.
 
 ### Assumptions
 
-ASAPPlanner relies on the assumptions below. 
+ASAPPlanner relies on the assumptions below.
 
 1. **Summary-family capabilities are given.** For each summary family, an algorithm
    developer declares which computations it can answer, which estimates it can
@@ -131,12 +131,12 @@ ASAPPlanner relies on the assumptions below.
 
 2. **Query replacement strategies are given, ASAPPlanner implements some strategies as a default set of strategies** Rewrite and replacement strategies (for
    example, `avg` as `sum`/`count`, or a TopK as a Count-Min Sketch with a
-   heap) are written by developers or algorithm designers. ASAPPlanner does not automatically discover or generate them. 
-   * For ASAPPlanner, given one batch of queries (as a multi-root DAG), the strategies can be applied to a sub-DAG inside the DAG, one sub-DAG (part of the query execution) can be mapped to different candidates based on the strategies, this gives us an initial brute-force version of plan candidate generation.  
+   heap) are written by developers or algorithm designers. ASAPPlanner does not automatically discover or generate them.
+   * For ASAPPlanner, given one batch of queries (as a multi-root DAG), the strategies can be applied to a sub-DAG inside the DAG, one sub-DAG (part of the query execution) can be mapped to different candidates based on the strategies, this gives us an initial brute-force version of plan candidate generation.
    * The semantic/structure of the strategies (rules) are based on the logical DAG representation, where a pattern of a sub-DAG in the DAG can be identified, and being replace by another sub-DAG with ASAP-aware operators (primitive operators).
-   * These strategies can be potentially shared in different use cases and workloads, we depend on the cost model to rank all possible plans. For example, both the repeated dashboard query over time series data, and the batch query execution over data at rest, can leverage the TopK as a Count-Min Sketch replacement strategy. 
-   The strategies we have applied in ASAPPlanner, see Section [Stages and their decisions](#asapplanner-detailed-design-planning-stages-and-their-decisionsstrategies). 
- 
+   * These strategies can be potentially shared in different use cases and workloads, we depend on the cost model to rank all possible plans. For example, both the repeated dashboard query over time series data, and the batch query execution over data at rest, can leverage the TopK as a Count-Min Sketch replacement strategy.
+   The strategies we have applied in ASAPPlanner, see Section [Stages and their decisions](#asapplanner-detailed-design-planning-stages-and-their-decisionsstrategies).
+
 3. **Query-language frontend (e.g., SQL or PromQL query language themselves) semantics are given.** Each frontend preserves its source
    language's behavior, and ASAPPlanner obeys their semantic behavior.
 
@@ -243,7 +243,7 @@ flowchart TB
   style DEPLOY fill:#fff,stroke:#5f6368;
 ```
 
-Stage details: 
+Stage details:
 - [0. Frontends](#0-language-specific-frontends) ·
 - [1. Logical ASAP-aware optimization](#1-logical-asap-aware-optimization) ·
 - [2. Physical ASAP-aware optimization](#2-physical-asap-aware-optimization) ·
@@ -571,7 +571,7 @@ the memo path's entry points.
 |---|---|---|---|
 | 0. Frontends | Query text, language → one logical root per query, carrying its accuracy target | Same: a `QueryRoot` per query | `lower_promql_workload`, `lower_sql_dialect` (`asap-frontend-*`); `plan_installable` (`asap_planner`) runs the frontends and Stages 1–3 on the user input |
 | 1, Pass 1 | Logical roots; the deployment's supported summaries → the Pass 1 inventory, every computation's candidates (`PerComputationCandidates`) | Logical roots → `DagOfLogicalMemoGroups` (hash-consed `MemoGroup`s); with the Pass 1 inventory, less the summaries the deployment does not support → `CandidateMemo`: each group's `CandidateForMemoGroup`s | `DagOfLogicalMemoGroups::from_roots`, `generate_per_computation_candidates_with_memo`, `try_populate_pass1` |
-| 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (`Pass2Candidate`, `stage1_candidates_of_choice`) | `CandidateMemo`; the entries' recurrence and range steps → the same memo with each rule's candidates added to the groups they implement | the memo rules (`pass2/memo/rules/`), `pass2::memo::window_candidates` |
+| 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (`stage1_candidates_of_choice`) | `CandidateMemo`; the entries' recurrence and range steps → the same memo with each rule's candidates added to the groups they implement | the memo rules (`pass2/memo/rules/`), `pass2::memo::window_candidates` |
 | 1, concrete summary-state groups | (part of Pass 2) | `CandidateMemo` → the memo with concrete summary-state groups: one group per shared size or pane layout that readers can read | `expand_concrete_summary_state_groups_before` |
 | 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per materialization assignment | Each candidate for a memo group, on demand → its physical operators and its allowed materializations | `implement_candidate_operators`, `summary_materialization_eligibility` (called from Stage 3) |
 | 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model, raw-data retention → one plan | The expanded memo's candidates and their configurations; the same inputs → one candidate per needed group, connected into one plan | `run_stage1_to_stage3_with`, `candidate_connection_search`; output `Stage1ToStage3Run`, which holds the selected `PhysicalWorkloadPlan` and the selection |
@@ -1953,7 +1953,7 @@ separately in physical planning.
 ## Scenarios
 
 Each scenario lists what a developer or user gives (Assumptions 1–4), what
-ASAPPlanner then does automatically, and what does not change.  
+ASAPPlanner then does automatically, and what does not change.
 
 ### Adding a new query to a workload
 

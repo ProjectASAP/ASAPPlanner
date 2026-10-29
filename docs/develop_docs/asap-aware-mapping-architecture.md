@@ -42,7 +42,7 @@ PerComputationCandidates  ──without_unsupported_summaries(deployment)──�
   │  workload_candidates::stage1_logical_asap_optimization              │ Stage 1, enumeration
   │    compose_logical_candidate per choice, then asap_aware_cse rules  │ + Pass 2
   ▼                                                                    │
-Stage1Candidate / LogicalCandidate (each with its Pass2Candidate)  ◄──┘
+LogicalCandidate (its id and roots)                                ◄──┘
   │  asap_physical_asap_optimization::optimize_physical_asap            Stage 2
   ▼
 PhysicalCandidate (one per materialization assignment)

@@ -54,9 +54,7 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
   enumerated once.
 - **Pass 2.** Each rule adds candidates; none removes a Pass 1 candidate, adds
   a summary family, or adds a readout. So a deployment that does not support a
-  family never sees it again after Pass 1. A Pass 2 candidate records what it
-  changed in `Pass2Candidate` (shared builds, panes, rollups, top-k reuses,
-  identical-node sharing) and keeps its Pass 1 candidate's `choice`.
+  family never sees it again after Pass 1.
 - **Sizing.** A summary shared by several readers is sized with each
   parameter's largest value among them. A summary is sized for ε in Stage 1;
   a δ that depends on data facts (a distinct-count bound, series counts) is
