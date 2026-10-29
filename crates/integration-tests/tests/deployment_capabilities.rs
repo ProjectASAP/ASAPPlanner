@@ -2,7 +2,7 @@
 //! the planner-layering examples: the summaries the executor supports
 //! restrict Stage 1 (Pass 1, and so Pass 2).
 
-mod planner_layering_common;
+use crate::planner_layering_common;
 
 use asap_devtools::planning_stages::lower_sql_roots;
 use asap_logical_asap_optimization::{DeploymentCapabilities, SupportedSummary};

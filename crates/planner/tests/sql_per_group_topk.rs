@@ -24,7 +24,7 @@ use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::NonASAPOp;
 use futures::{executor::block_on, StreamExt};
 
-mod time_series;
+use crate::time_series;
 use time_series::{time_series_tables, RawDataSample};
 
 /// The evaluation time of every run.

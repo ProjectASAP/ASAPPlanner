@@ -471,5 +471,5 @@ built `stage_pipeline` (`cargo build -p asap-devtools --bin
 stage_pipeline`). The Rust side:
 
 ```bash
-cargo test -p asap-devtools --test viewer_contract --test stage_pipeline
+cargo test -p asap-devtools --test devtools -- viewer_contract:: stage_pipeline::
 ```

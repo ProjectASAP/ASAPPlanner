@@ -6,7 +6,7 @@
 //! production checks exercise memo search and validated output selection.
 //! Unsupported algorithms retain their existing ignored tests.
 
-mod planner_layering_common;
+use crate::planner_layering_common;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 

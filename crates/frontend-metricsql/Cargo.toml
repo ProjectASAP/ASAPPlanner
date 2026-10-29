@@ -1,5 +1,6 @@
 [package]
 name = "asap-frontend-metricsql"
+autotests = false
 version = "0.1.0"
 edition = "2021"
 
@@ -8,3 +9,7 @@ asap-types = { path = "../types" }
 asap-frontend-common = { path = "../frontend-common" }
 metricsql_parser = { path = "../metricsql-parser-vendored" }
 thiserror = "2"
+
+[[test]]
+name = "metricsql"
+path = "tests/main.rs"

@@ -1,6 +1,6 @@
 //! Planner output binds directly to the shared runtime over raw counter samples.
+use crate::common;
 use asap_executor::sources::InMemoryDataStore;
-mod common;
 use asap_executor::{
     physical_planner::{
         compile,

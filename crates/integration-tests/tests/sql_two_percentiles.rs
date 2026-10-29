@@ -7,8 +7,8 @@
 //! per-city pane chain serves Q1 through its newest panes rolled up across
 //! cities.
 
-mod physical_common;
-mod planner_layering_common;
+use crate::physical_common;
+use crate::planner_layering_common;
 
 use asap_executor::values::Value;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};

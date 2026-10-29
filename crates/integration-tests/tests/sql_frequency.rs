@@ -1,7 +1,7 @@
 //! The SQL entropy and L2 idioms, recognized by the SQL frontend, execute
 //! natively and exactly: entropy in nats (SQL's `LN`), L2 of the
 //! per-source counts, and NULL on empty input, decided by an exact count.
-mod physical_common;
+use crate::physical_common;
 use asap_executor::values::Value;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::properties::AccuracyTarget;

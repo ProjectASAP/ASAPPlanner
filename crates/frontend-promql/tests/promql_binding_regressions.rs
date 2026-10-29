@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 use asap_types::ir::properties::AccuracyTarget;
 use support::lower_promql;
 

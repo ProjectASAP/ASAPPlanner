@@ -1,5 +1,5 @@
 //! Compilation rejects Planner node IDs outside the range its helper IDs avoid.
-mod common;
+use crate::common;
 use asap_executor::physical_planner::compile;
 use common::compile_physical_asap_dag;
 use planner_types::ir::scalar::ScalarValue;

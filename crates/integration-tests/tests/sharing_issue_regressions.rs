@@ -230,7 +230,7 @@ fn exact_rollup_catalog_crosses_identical_per_series_average() {
     );
 }
 
-mod physical_common;
+use crate::physical_common;
 
 /// #902: selecting one group preserves values and SQL's one NULL row when
 /// the group is absent, including empty inputs and groups of NULL samples.

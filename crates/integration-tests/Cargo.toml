@@ -2,6 +2,7 @@
 name = "asap-integration-tests"
 version = "0.1.0"
 edition = "2021"
+autotests = false
 
 [dependencies]
 asap-types = { path = "../types" }
@@ -21,3 +22,7 @@ tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 
 asap-executor = { path = "../executor", features = ["test-support"] }
 futures = "0.3"
+
+[[test]]
+name = "integration"
+path = "tests/main.rs"

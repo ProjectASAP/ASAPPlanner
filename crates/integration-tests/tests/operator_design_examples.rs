@@ -1,4 +1,5 @@
 //! #511 examples: source text → unified dag → summary rewrite → flat export.
+use crate::physical_common;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::AccuracyTarget;
@@ -9,7 +10,6 @@ use asap_types::ir::schema::{
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 use std::rc::Rc;
-mod physical_common;
 
 fn catalog() -> SqlCatalog {
     SqlCatalog::new()

@@ -1,7 +1,7 @@
 //! Plan selection never commits a heap that needs the PromQL series identity
 //! the query's rows do not carry: the planner pipeline plans the logical DAG
 //! the frontend lowered, and a deployment prices heaps.
-mod common;
+use crate::common;
 use common::{compile_physical_asap_dag, selected_dag};
 use planner_types::ir::OperatorNode;
 

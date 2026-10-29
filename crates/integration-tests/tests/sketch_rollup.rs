@@ -4,7 +4,7 @@
 //! the planner offers a SQL grouped query, the rolled-up answer equals the
 //! direct build's (deterministic merges) or is within the sketch's bound
 //! (KLL), and its coverage is the direct build's.
-mod physical_common;
+use crate::physical_common;
 
 use std::collections::BTreeMap;
 use std::rc::Rc;

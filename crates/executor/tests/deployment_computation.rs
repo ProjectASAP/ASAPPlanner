@@ -1,7 +1,7 @@
 //! Planner-selected PromQL computation compiles from the timed DAG alone;
 //! the deployment supplies only raw rows at its time-series scans.
+use crate::common;
 use asap_executor::sources::InMemoryDataStore;
-mod common;
 use asap_executor::{
     physical_planner::{compile, promql_rows, test_support::views_at},
     runtime::{Limits, RunContext, Scope},

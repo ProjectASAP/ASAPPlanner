@@ -19,7 +19,7 @@
 
 use std::rc::Rc;
 
-mod support;
+use crate::support;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::OperatorNode;
 use support::lower_promql;

@@ -2,7 +2,7 @@
 //! as one build over the whole window (#509 Example 3/4, Pattern B): panes
 //! written by hand, and the planner's window-composition rule's
 //! `PaneChain`, expanded into the panes the executor runs.
-mod physical_common;
+use crate::physical_common;
 
 use std::collections::BTreeMap;
 use std::rc::Rc;

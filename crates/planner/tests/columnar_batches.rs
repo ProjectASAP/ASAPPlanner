@@ -23,7 +23,7 @@ use asap_planner::{
 };
 use futures::StreamExt;
 
-mod time_series;
+use crate::time_series;
 use time_series::{series_identity, RawDataSample};
 
 /// Example 4b's evaluation time: the end of the 60-minute window.

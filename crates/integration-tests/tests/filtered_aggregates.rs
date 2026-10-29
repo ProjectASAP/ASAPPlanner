@@ -1,7 +1,7 @@
 //! Filtered aggregates (`FILTER (WHERE …)`, a per-measure filter, or a
 //! filtered `SummaryAgg`) execute with SQL semantics: a row that fails the
 //! filter contributes nothing, but its group is kept.
-mod physical_common;
+use crate::physical_common;
 
 use std::rc::Rc;
 use std::sync::Arc;
