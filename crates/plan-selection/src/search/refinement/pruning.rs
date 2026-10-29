@@ -245,6 +245,7 @@ mod tests {
             },
             configurations: (0..count)
                 .map(|id| CandidateConfiguration {
+                    may_keep_with_sole_reader: Vec::new(),
                     source_candidate: PhysicalCandidateId(id),
                     timing: ExecutionTiming::QueryTime,
                     materialization: Materialization::NotMaterialized,

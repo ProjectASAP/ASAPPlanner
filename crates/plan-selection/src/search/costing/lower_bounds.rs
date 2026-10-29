@@ -97,7 +97,7 @@ pub(in crate::search) fn apply(
         let common_reader_window_ms = common_reader_windows(configured);
         let nodes: Vec<_> = (0..count)
             .map(|id| {
-                let configuration = configured.configurations[id];
+                let configuration = &configured.configurations[id];
                 let template = configured.inventory.templates[id].as_ref()?;
                 let state = if configuration.timing == ExecutionTiming::QueryTime {
                     if retained_ancestor[id] {
@@ -856,6 +856,7 @@ mod tests {
             let pane = matches!(node.asap(), Some(ASAPOp::PaneChain { .. }));
             let scan = matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }));
             configured.configurations.push(CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: PhysicalCandidateId(id),
                 timing: if pane || scan {
                     ExecutionTiming::IngestionTime
@@ -1000,6 +1001,7 @@ mod tests {
             for node in [range, project] {
                 let id = PhysicalCandidateId(configured.configurations.len());
                 configured.configurations.push(CandidateConfiguration {
+                    may_keep_with_sole_reader: Vec::new(),
                     source_candidate: id,
                     materialization: Materialization::NotMaterialized,
                     timing: ExecutionTiming::IngestionTime,
@@ -1077,6 +1079,7 @@ mod tests {
                 .unwrap();
             let id = PhysicalCandidateId(configured.configurations.len());
             configured.configurations.push(CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: id,
                 materialization: Materialization::NotMaterialized,
                 timing: ExecutionTiming::IngestionTime,
@@ -1507,6 +1510,7 @@ mod tests {
             });
             let id = configured.inventory.templates.len();
             configured.configurations.push(CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: PhysicalCandidateId(id),
                 timing: ExecutionTiming::QueryTime,
                 materialization: Materialization::NotMaterialized,

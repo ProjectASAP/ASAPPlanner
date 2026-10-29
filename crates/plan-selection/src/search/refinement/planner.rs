@@ -788,7 +788,7 @@ fn accuracy_baseline(
                         .max(estimated_costs[id])
                         .max(retained_pane_priority_cost(
                             node,
-                            configured.configurations[id],
+                            &configured.configurations[id],
                             context,
                         ))
                 })
@@ -946,7 +946,7 @@ fn raw_scan_with_shifts(node: &asap_types::ir::OperatorNode) -> bool {
 // Group/cardinality and supplier choices remain authoritative after selection.
 fn retained_pane_priority_cost(
     node: &std::rc::Rc<asap_types::ir::OperatorNode>,
-    configuration: crate::search::candidates::configurations::CandidateConfiguration,
+    configuration: &crate::search::candidates::configurations::CandidateConfiguration,
     context: &CandidatePlanningContext<'_>,
 ) -> f64 {
     use asap_types::ir::{ASAPOp, NonASAPOp};
@@ -1827,7 +1827,7 @@ mod tests {
             configured.inventory.templates.push(Some(template));
             configured
                 .configurations
-                .push(configured.configurations[supplier.0]);
+                .push(configured.configurations[supplier.0].clone());
             projected.push(id);
         }
         let context = CandidatePlanningContext {

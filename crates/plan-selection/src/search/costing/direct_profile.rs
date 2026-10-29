@@ -190,11 +190,21 @@ fn prepare_profile(
                     && (requires_source_sizing(node) || stable_size(node, delta))
                     && match configuration.timing {
                         ExecutionTiming::QueryTime => {
-                            matches!(configuration.materialization, Materialization::NotMaterialized | Materialization::MatAtQuery(Medium::Memory))
-                                || (configuration.materialization == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
-                                    && matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
-                                    && context.models.deployment_capabilities.query_time_results_retained
-                                    && (0..context.entries.len()).any(|reader| asap_physical_asap_optimization::summary_materialization_eligibility(node, &[reader], context.entries, context.data, context.models.deployment_capabilities.query_time_results_retained).is_ok_and(|eligibility| eligibility.may_keep_across_evaluations)))
+                            matches!(
+                                configuration.materialization,
+                                Materialization::NotMaterialized
+                                    | Materialization::MatAtQuery(Medium::Memory)
+                            ) || (configuration.materialization
+                                == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
+                                && matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+                                && context
+                                    .models
+                                    .deployment_capabilities
+                                    .query_time_results_retained
+                                && configuration
+                                    .may_keep_with_sole_reader
+                                    .iter()
+                                    .any(|&may_keep| may_keep))
                         }
                         ExecutionTiming::IngestionTime => match node.asap() {
                             Some(ASAPOp::PaneChain { .. }) => {
@@ -215,7 +225,6 @@ fn prepare_profile(
                             }
                         },
                     }
-
             })
             .map(|node| {
                 let mut position = 0;
@@ -1184,6 +1193,7 @@ mod tests {
                 .map_children(|child| inputs.push(append(child.clone(), configured)));
             let id = PhysicalCandidateId(configured.configurations.len());
             configured.configurations.push(CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: id,
                 materialization: Materialization::NotMaterialized,
                 timing: ExecutionTiming::QueryTime,
@@ -1268,6 +1278,7 @@ mod tests {
                 .map_children(|child| inputs.push(append(child.clone(), configured)));
             let id = PhysicalCandidateId(configured.configurations.len());
             configured.configurations.push(CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: id,
                 materialization: Materialization::NotMaterialized,
                 timing: ExecutionTiming::QueryTime,
@@ -1501,6 +1512,7 @@ mod tests {
             });
             let id = PhysicalCandidateId(configured.configurations.len());
             configured.configurations.push(CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: id,
                 materialization: if pane {
                     mode
@@ -1637,6 +1649,12 @@ mod tests {
                         query_time_results_retained: true,
                         ..Default::default()
                     };
+                    crate::search::candidates::configurations::fill_may_keep_with_sole_reader(
+                        &mut configured,
+                        &entries,
+                        &data,
+                        deployment.query_time_results_retained,
+                    );
                     let context = CandidatePlanningContext {
                         deadline: None,
                         refine_materialization: false,
@@ -1851,6 +1869,7 @@ mod tests {
                         // domains distinct, and validate each selected binding.
                         let normal_chain = PhysicalCandidateId(configured.configurations.len());
                         configured.configurations.push(CandidateConfiguration {
+                            may_keep_with_sole_reader: Vec::new(),
                             source_candidate: normal_chain,
                             timing: ExecutionTiming::QueryTime,
                             materialization: Materialization::MatAtQuery(Medium::Memory),
@@ -2025,6 +2044,7 @@ mod tests {
                 .map_children(|child| children.push(append(child.clone(), inventory)));
             let id = PhysicalCandidateId(inventory.configurations.len());
             inventory.configurations.push(CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: id,
                 timing: ExecutionTiming::QueryTime,
                 materialization: if matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })) {
@@ -2263,6 +2283,7 @@ mod tests {
             },
             configurations: (0..3)
                 .map(|id| CandidateConfiguration {
+                    may_keep_with_sole_reader: Vec::new(),
                     source_candidate: PhysicalCandidateId(id),
                     materialization: Materialization::NotMaterialized,
                     timing: ExecutionTiming::QueryTime,

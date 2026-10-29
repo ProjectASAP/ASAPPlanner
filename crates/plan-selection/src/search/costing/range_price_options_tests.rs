@@ -36,6 +36,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             .map_children(|child| inputs.push(append(child.clone(), configured, ingestion, mode)));
         let id = PhysicalCandidateId(configured.configurations.len());
         configured.configurations.push(CandidateConfiguration {
+            may_keep_with_sole_reader: Vec::new(),
             source_candidate: id,
             materialization: if pane {
                 mode
@@ -166,6 +167,12 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             query_time_results_retained: true,
             ..Default::default()
         };
+        crate::search::candidates::configurations::fill_may_keep_with_sole_reader(
+            &mut configured,
+            &entries,
+            &data,
+            deployment.query_time_results_retained,
+        );
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
