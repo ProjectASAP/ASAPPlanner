@@ -60,13 +60,13 @@ pub fn expand_concrete_summary_state_groups(
 ) -> Result<StateGroupExpansion, StateGroupExpansionError> {
     expand_concrete_summary_state_groups_in_domain(
         memo,
-        super::state_configurations::PaneWidthDomain::Complete,
+        super::shared_configurations::PaneWidthDomain::Complete,
     )
 }
 
 pub fn expand_concrete_summary_state_groups_in_domain(
     memo: CandidateMemo,
-    domain: super::state_configurations::PaneWidthDomain,
+    domain: super::shared_configurations::PaneWidthDomain,
 ) -> Result<StateGroupExpansion, StateGroupExpansionError> {
     expand_concrete_summary_state_groups_before(memo, domain, None)
 }
@@ -74,7 +74,7 @@ pub fn expand_concrete_summary_state_groups_in_domain(
 /// An interrupted catalog is discarded, never returned as a complete search space.
 pub fn expand_concrete_summary_state_groups_before(
     memo: CandidateMemo,
-    domain: super::state_configurations::PaneWidthDomain,
+    domain: super::shared_configurations::PaneWidthDomain,
     deadline: Option<Instant>,
 ) -> Result<StateGroupExpansion, StateGroupExpansionError> {
     expand_with_state_index(memo, domain, deadline, true)
@@ -82,7 +82,7 @@ pub fn expand_concrete_summary_state_groups_before(
 
 fn expand_with_state_index(
     mut memo: CandidateMemo,
-    domain: super::state_configurations::PaneWidthDomain,
+    domain: super::shared_configurations::PaneWidthDomain,
     deadline: Option<Instant>,
     indexed: bool,
 ) -> Result<StateGroupExpansion, StateGroupExpansionError> {
@@ -106,7 +106,7 @@ fn expand_with_state_index(
     super::rules::rollup::add_rollup_candidates(&mut memo, deadline)?;
     super::rules::rollup::add_window_rollup_candidates(&mut memo, deadline)?;
     super::rules::summary_results::factor_summary_results(&mut memo, deadline)?;
-    super::rules::state_configurations::add_state_configuration_candidates_in_domain(
+    super::rules::shared_configuration_readers::add_state_configuration_candidates_in_domain(
         &mut memo, domain, deadline,
     )?;
     let mut builds: Vec<BuildReaders> = Vec::new();
@@ -480,9 +480,9 @@ fn replace_node(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memo::candidates::try_populate_pass1;
-    use crate::memo::LogicalMemo;
-    use crate::per_computation_candidates::generate_per_computation_candidates;
+    use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
+    use crate::pass2::memo::candidates::try_populate_pass1;
+    use crate::pass2::memo::LogicalMemo;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::QueryRoot;
 
@@ -498,7 +498,7 @@ mod tests {
             ]),
             &[6, 6, 6],
         );
-        let domain = super::super::state_configurations::PaneWidthDomain::Complete;
+        let domain = super::super::shared_configurations::PaneWidthDomain::Complete;
         let indexed = expand_with_state_index(memo.clone(), domain, None, true).unwrap();
         let linear = expand_with_state_index(memo, domain, None, false).unwrap();
         assert_eq!(indexed.state_groups, linear.state_groups);
@@ -539,7 +539,7 @@ mod tests {
         assert!(matches!(
             expand_concrete_summary_state_groups_before(
                 memo,
-                super::super::state_configurations::PaneWidthDomain::Complete,
+                super::super::shared_configurations::PaneWidthDomain::Complete,
                 Some(Instant::now())
             ),
             Err(StateGroupExpansionError::DeadlineExceeded(_))
@@ -664,7 +664,7 @@ mod tests {
     }
 
     fn with_local_panes(mut memo: CandidateMemo, grids: &[u64]) -> CandidateMemo {
-        use crate::asap_aware_cse::{pane_candidates, window_composition_pass2_candidates};
+        use crate::pass2::asap_aware_cse::{pane_candidates, window_composition_pass2_candidates};
 
         let boundaries: HashMap<_, _> = memo
             .groups
@@ -1294,7 +1294,8 @@ mod tests {
                     };
                     replacements.insert(Rc::as_ptr(input), project);
                 }
-                candidate.node = crate::memo::rules::reuse::replace(&candidate.node, &replacements);
+                candidate.node =
+                    crate::pass2::memo::rules::reuse::replace(&candidate.node, &replacements);
                 assert!(direct_input_builds(&memo, &candidate).is_empty());
                 memo.candidates[owner].push(candidate);
                 injected += 1;
@@ -1329,7 +1330,7 @@ mod tests {
             .filter(|node| is_univmon(node))
             .collect();
         assert!(!before.is_empty(), "real generation must offer UnivMon");
-        crate::memo::rules::summary_inputs::factor_summary_inputs(&mut memo, None).unwrap();
+        crate::pass2::memo::rules::summary_inputs::factor_summary_inputs(&mut memo, None).unwrap();
         assert!(memo
             .candidates
             .iter()
@@ -1403,7 +1404,7 @@ mod tests {
                 ),
                 grouping.clone(),
             );
-            let roots = crate::asap_aware_cse::with_resized_build(
+            let roots = crate::pass2::asap_aware_cse::with_resized_build(
                 &[QueryRoot::Operator(Rc::clone(&base.node))],
                 &build,
                 family,
@@ -1412,7 +1413,8 @@ mod tests {
             let QueryRoot::Operator(root) = &roots[0] else {
                 unreachable!()
             };
-            let root = crate::memo::rules::reuse::restore_inputs(root, &memo, &base.children);
+            let root =
+                crate::pass2::memo::rules::reuse::restore_inputs(root, &memo, &base.children);
             without_private_guarantees(&root, &boundaries)
         };
         let weak = rewritten(0.001);
@@ -1423,7 +1425,7 @@ mod tests {
         );
         base.node = weak;
         memo.candidates[owner] = vec![base.clone()];
-        assert!(crate::memo::rules::reuse::append_reader(
+        assert!(crate::pass2::memo::rules::reuse::append_reader(
             &mut memo,
             owner,
             &base,

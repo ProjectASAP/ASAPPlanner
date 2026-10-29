@@ -2,10 +2,10 @@
 use super::reuse::{
     append_producer, append_reader, combined_inputs, eligible, replace, restore_inputs,
 };
-use crate::asap_aware_cse::{rollup_candidate_for, rollup_pass2_candidates};
-use crate::memo::candidates::{CandidateMemo, CandidateOrigin};
-use crate::memo::check_generation_deadline;
-use crate::memo::state_groups::{simple_build, StateGroupExpansionError};
+use crate::pass2::asap_aware_cse::{rollup_candidate_for, rollup_pass2_candidates};
+use crate::pass2::memo::candidates::{CandidateMemo, CandidateOrigin};
+use crate::pass2::memo::check_generation_deadline;
+use crate::pass2::memo::state_groups::{simple_build, StateGroupExpansionError};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, ProjectItem, QueryRoot, ScalarExpr,
@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
-pub(in crate::memo) fn add_rollup_candidates(
+pub(in crate::pass2::memo) fn add_rollup_candidates(
     memo: &mut CandidateMemo,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {
@@ -224,12 +224,14 @@ pub(in crate::memo) fn add_rollup_candidates(
 
 /// Existing pane rollup rules applied to producer pairs on already generated
 /// legal local grids. No whole-workload choice combinations are constructed.
-pub(in crate::memo) fn add_window_rollup_candidates(
+pub(in crate::pass2::memo) fn add_window_rollup_candidates(
     memo: &mut CandidateMemo,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {
     check_generation_deadline(deadline)?;
-    use crate::asap_aware_cse::{pane_candidates, window_composition_shared_chain_candidates};
+    use crate::pass2::asap_aware_cse::{
+        pane_candidates, window_composition_shared_chain_candidates,
+    };
     let mut grids = vec![std::collections::BTreeSet::new(); memo.groups.len()];
     for (group, candidates) in memo.candidates.iter().enumerate() {
         check_generation_deadline(deadline)?;
@@ -324,10 +326,10 @@ pub(in crate::memo) fn add_window_rollup_candidates(
 
 #[cfg(test)]
 mod tests {
-    use crate::memo::candidates::{try_populate_pass1, CandidateOrigin};
-    use crate::memo::state_groups::expand_concrete_summary_state_groups;
-    use crate::memo::LogicalMemo;
-    use crate::per_computation_candidates::generate_per_computation_candidates;
+    use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
+    use crate::pass2::memo::candidates::{try_populate_pass1, CandidateOrigin};
+    use crate::pass2::memo::state_groups::expand_concrete_summary_state_groups;
+    use crate::pass2::memo::LogicalMemo;
     use crate::test_support::lower_promql;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::QueryRoot;

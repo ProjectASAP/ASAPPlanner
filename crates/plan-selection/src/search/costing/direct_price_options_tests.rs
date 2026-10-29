@@ -6,7 +6,7 @@ use crate::search::candidates::graph::{
     CandidateDependencyGraph, PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
 };
 use crate::search::candidates::inventory::CandidateInventory;
-use asap_logical_asap_optimization::memo::MemoGroupId;
+use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_logical_asap_optimization::test_support::lower_promql;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{Operator, OperatorNode, ProjectItem, ScalarExpr};
@@ -396,7 +396,7 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
 
 #[test]
 fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
     };
     use asap_types::ir::schema::SketchAlgorithm;
@@ -469,10 +469,12 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         .into_iter()
         .map(|(_, root)| root)
         .collect();
-    let pane_rules =
-        asap_logical_asap_optimization::asap_aware_cse::pane_candidates(&roots, &[Some(60_000)]);
+    let pane_rules = asap_logical_asap_optimization::pass2::asap_aware_cse::pane_candidates(
+        &roots,
+        &[Some(60_000)],
+    );
     let roots =
-        asap_logical_asap_optimization::asap_aware_cse::window_composition_pass2_candidates(
+        asap_logical_asap_optimization::pass2::asap_aware_cse::window_composition_pass2_candidates(
             &roots,
             &pane_rules,
         )

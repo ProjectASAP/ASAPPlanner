@@ -5,10 +5,10 @@ use crate::search::candidates::graph::{
     CandidateDependencyGraph, PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
 };
 use crate::search::candidates::inventory::CandidateInventory;
-use asap_logical_asap_optimization::memo::MemoGroupId;
-use asap_logical_asap_optimization::per_computation_candidates::{
+use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
 };
+use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_logical_asap_optimization::test_support::lower_promql;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::SketchAlgorithm;
@@ -93,12 +93,12 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             .into_iter()
             .map(|(_, root)| root)
             .collect();
-        let rules = asap_logical_asap_optimization::asap_aware_cse::pane_candidates(
+        let rules = asap_logical_asap_optimization::pass2::asap_aware_cse::pane_candidates(
             &roots,
             &[Some(10_000)],
         );
         let roots =
-            asap_logical_asap_optimization::asap_aware_cse::window_composition_pass2_candidates(
+            asap_logical_asap_optimization::pass2::asap_aware_cse::window_composition_pass2_candidates(
                 &roots, &rules,
             )
             .unwrap()

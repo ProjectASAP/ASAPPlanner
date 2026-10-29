@@ -3,7 +3,7 @@ use super::*;
 use crate::search::candidates::configurations::CandidateConfiguration;
 use crate::search::candidates::graph::*;
 use crate::search::candidates::inventory::CandidateInventory;
-use asap_logical_asap_optimization::{memo::MemoGroupId, test_support::lower_promql};
+use asap_logical_asap_optimization::{pass2::memo::MemoGroupId, test_support::lower_promql};
 use asap_types::ir::{properties::AccuracyTarget, OperatorNode};
 use asap_types::workload::{
     DataWorkload, Predictability, Query, QueryRequirements, QueryWorkloadEntry, RepetitionInterval,
@@ -168,7 +168,7 @@ fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
 // budgets; pricing may not silently resize either state after selection.
 #[test]
 fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
     };
     use asap_types::ir::properties::{AccuracyMetric, AccuracyScope};

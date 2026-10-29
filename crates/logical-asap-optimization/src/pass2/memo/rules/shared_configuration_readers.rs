@@ -1,6 +1,6 @@
 //! Expand compatible readers at finite shared sizes and pane horizons before
 //! interning concrete states. Local candidates remain available.
-use crate::memo::check_generation_deadline;
+use crate::pass2::memo::check_generation_deadline;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
@@ -12,13 +12,13 @@ use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use super::shared_producer::{
     add_shared_producer_candidates, spans_groups, Reader, SharedProducer,
 };
-use crate::asap_aware_cse::{with_pane_chain, with_resized_build};
-use crate::memo::candidates::CandidateMemo;
-use crate::memo::state_configurations::{
+use crate::pass2::asap_aware_cse::{with_pane_chain, with_resized_build};
+use crate::pass2::memo::candidates::CandidateMemo;
+use crate::pass2::memo::shared_configurations::{
     pane_configurations_before, shared_size, state_size_configurations, PaneConfiguration,
     PaneRequirement, PaneWidthDomain,
 };
-use crate::memo::state_groups::{same_range_input, simple_build, StateGroupExpansionError};
+use crate::pass2::memo::state_groups::{same_range_input, simple_build, StateGroupExpansionError};
 
 /// `resized` (a rewrite of `original` with the same shape) with each node
 /// that is a child group's node in `original` put back, and the nodes above
@@ -95,7 +95,7 @@ struct SummaryStates {
     requests: HashSet<(usize, usize)>,
 }
 
-pub(in crate::memo) fn add_state_configuration_candidates_in_domain(
+pub(in crate::pass2::memo) fn add_state_configuration_candidates_in_domain(
     memo: &mut CandidateMemo,
     domain: PaneWidthDomain,
     deadline: Option<Instant>,
@@ -478,8 +478,8 @@ fn compatible(left: &StateNeed, right: &StateNeed) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memo::{candidates::try_populate_pass1, LogicalMemo};
-    use crate::per_computation_candidates::generate_per_computation_candidates;
+    use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
+    use crate::pass2::memo::{candidates::try_populate_pass1, LogicalMemo};
     use crate::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
@@ -512,7 +512,7 @@ mod tests {
             );
             2
         ];
-        crate::memo::window_candidates::add_local_window_composition(&mut memo, &entries);
+        crate::pass2::memo::window_candidates::add_local_window_composition(&mut memo, &entries);
         let mut unoptimized = memo.clone();
         let optimized_rewrites =
             expand_configurations(&mut memo, true, PaneWidthDomain::Complete, None).unwrap();

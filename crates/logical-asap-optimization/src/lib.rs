@@ -4,7 +4,7 @@
 //!
 //! Identical-sub-DAG sharing over the logical DAG (`asap_types::ir::cse`)
 //! runs before the stages; Stage 1 adds the ASAP-aware sharing that is
-//! invisible at the logical level ([`asap_aware_cse`], Pass 2), e.g.
+//! invisible at the logical level ([`asap_aware_cse`](pass2::asap_aware_cse), Pass 2), e.g.
 //! `Quantile(x, 0.99)` and `Quantile(x, 0.95)` reading one built sketch.
 //!
 //! It depends only on `asap-types`, never on a later stage: Stage 2
@@ -22,12 +22,12 @@
 //!
 //! ## Components
 //!
-//! - [`per_computation_candidates`] — Pass 1: per-computation candidate
+//! - [`per_computation_candidates`](pass1::per_computation_candidates) — Pass 1: per-computation candidate
 //!   generation and composition.
-//! - [`asap_aware_cse`] — Pass 2: ASAP-aware common-subexpression elimination.
-//! - [`workload_candidates`] — the whole-workload Stage 1 candidates: each
+//! - [`asap_aware_cse`](pass2::asap_aware_cse) — Pass 2: ASAP-aware common-subexpression elimination.
+//! - [`workload_candidates`](pass2::workload_candidates) — the whole-workload Stage 1 candidates: each
 //!   composed Pass 1 candidate followed by its Pass 2 candidates.
-//! - [`realization`] — the summary families that can serve an aggregate
+//! - [`realization`](pass1::realization) — the summary families that can serve an aggregate
 //!   intent, the intent's accuracy target and `(ε, δ)` budget, and default
 //!   sketch sizing, shared by Pass 1 and Pass 2.
 //! - [`accuracy`] — the built-in analytical accuracy rules: per-family
@@ -46,8 +46,6 @@
 pub mod accuracy;
 /// The deployment's capabilities: supported summaries and what it retains.
 pub mod deployment_capabilities;
-mod function_rules;
-pub mod realization;
 /// Test helpers shared by the stage crates' tests (feature `test-support`).
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -55,18 +53,7 @@ pub mod test_support;
 pub use deployment_capabilities::{
     DeploymentCapabilities, DeploymentCapabilitiesError, SupportedSummary,
 };
-pub use realization::summary_candidates;
+pub use pass1::realization::summary_candidates;
 
-/// Stage 1, Pass 1: per-computation candidate generation. No execution timing is
-/// assigned: that is a Stage 2 materialization decision.
-pub mod per_computation_candidates;
-
-/// Stage 1, Pass 2: ASAP-aware common-subexpression elimination (the
-/// identical-expression rule).
-pub mod asap_aware_cse;
-mod finer_aggregate;
-
-pub mod workload_candidates;
-
-/// Logical group identity available before Pass 1 candidate generation.
-pub mod memo;
+pub mod pass1;
+pub mod pass2;

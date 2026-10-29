@@ -2,15 +2,15 @@
 //! This preserves their full expressions and schema, including opaque series
 //! identity, rather than assuming that a projection is an identity operation.
 use super::reuse::{append_producer, append_reader, eligible, replace};
-use crate::memo::candidates::{CandidateMemo, CandidateOrigin};
-use crate::memo::check_generation_deadline;
-use crate::memo::state_groups::StateGroupExpansionError;
+use crate::pass2::memo::candidates::{CandidateMemo, CandidateOrigin};
+use crate::pass2::memo::check_generation_deadline;
+use crate::pass2::memo::state_groups::StateGroupExpansionError;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 
-pub(in crate::memo) fn factor_summary_inputs(
+pub(in crate::pass2::memo) fn factor_summary_inputs(
     memo: &mut CandidateMemo,
     deadline: Option<Instant>,
 ) -> Result<(), StateGroupExpansionError> {
@@ -86,7 +86,7 @@ fn canonical_preprocessing(
         if let Some(group) = memo
             .groups
             .iter()
-            .find(|group| crate::memo::state_groups::same_range_input(&group.node, node))
+            .find(|group| crate::pass2::memo::state_groups::same_range_input(&group.node, node))
         {
             replacements.insert(Rc::as_ptr(node), Rc::clone(&group.node));
         }

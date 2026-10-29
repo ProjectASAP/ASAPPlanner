@@ -2,10 +2,10 @@
 //! A proof considers every local Pass 2 and Stage 2 choice; unknown/unsupported
 //! composition and any size-dependent failure remain eligible for joint planning.
 use crate::{checked_candidate, PlanningModels, RejectionCause};
-use asap_logical_asap_optimization::per_computation_candidates::{
+use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     ComputationCandidate, PerComputationCandidates,
 };
-use asap_logical_asap_optimization::workload_candidates::stage1_candidates_of_choice;
+use asap_logical_asap_optimization::pass2::workload_candidates::stage1_candidates_of_choice;
 use asap_physical_asap_optimization::optimize_physical_asap;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
@@ -347,7 +347,7 @@ pub(crate) fn alone_violation<Id: Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         generate_per_computation_candidates, ComputationCandidate,
     };
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};

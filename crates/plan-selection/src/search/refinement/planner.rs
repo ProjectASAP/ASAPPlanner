@@ -753,7 +753,7 @@ fn accuracy_baseline(
                         .as_ref()
                         .is_some_and(|node| raw_scan_with_shifts(node))
                 })
-                .then_some(asap_logical_asap_optimization::memo::MemoGroupId(
+                .then_some(asap_logical_asap_optimization::pass2::memo::MemoGroupId(
                     group as u32,
                 ))
         })
@@ -1197,10 +1197,12 @@ mod tests {
     use crate::search::candidates::configurations::enumerate_candidate_configurations;
     use crate::search::candidates::inventory::build_candidate_inventory;
     use crate::search::refinement::search::CandidateSearchStatus;
-    use asap_logical_asap_optimization::memo::candidates::{try_populate_pass1, CandidateOrigin};
-    use asap_logical_asap_optimization::memo::state_groups::expand_concrete_summary_state_groups;
-    use asap_logical_asap_optimization::memo::{LogicalMemo, MemoGroupId};
-    use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
+    use asap_logical_asap_optimization::pass2::memo::candidates::{
+        try_populate_pass1, CandidateOrigin,
+    };
+    use asap_logical_asap_optimization::pass2::memo::state_groups::expand_concrete_summary_state_groups;
+    use asap_logical_asap_optimization::pass2::memo::{LogicalMemo, MemoGroupId};
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
@@ -1442,10 +1444,10 @@ mod tests {
         entries[1].recurrence = QueryRecurrence::Unknown;
         entries[1].predictability = Predictability::Unknown;
         // This test isolates selected-consumer eligibility, not width search.
-        asap_logical_asap_optimization::memo::window_candidates::add_local_window_composition_in_domain(
+        asap_logical_asap_optimization::pass2::memo::window_candidates::add_local_window_composition_in_domain(
             &mut memo,
             &entries,
-            asap_logical_asap_optimization::memo::state_configurations::PaneWidthDomain::SeedGrids,
+            asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain::SeedGrids,
         );
         let source = build_candidate_inventory(&memo, &[output, output], |_| Ok(0.0)).unwrap();
         let models = PlanningModels::builtin();
@@ -1659,7 +1661,7 @@ mod tests {
                 entry
             })
             .collect();
-        asap_logical_asap_optimization::memo::window_candidates::add_local_window_composition(
+        asap_logical_asap_optimization::pass2::memo::window_candidates::add_local_window_composition(
             &mut memo, &entries,
         );
         let memo = expand_concrete_summary_state_groups(memo).unwrap().memo;

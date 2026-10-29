@@ -15,7 +15,7 @@
 
 use asap_devtools::lower_promql_with_sample_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
-use asap_logical_asap_optimization::per_computation_candidates::{
+use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     generate_per_computation_candidates, ComputationCandidate,
 };
 use asap_types::ir::properties::AccuracyTarget;

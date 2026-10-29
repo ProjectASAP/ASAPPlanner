@@ -149,7 +149,7 @@ async fn batch_lowering_recognizes_frequency_l2() {
 /// recognized L2 intent.
 #[tokio::test]
 async fn stage1_offers_exact_and_summary_l2_candidates() {
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         generate_per_computation_candidates, ComputationCandidate,
     };
     use asap_types::ir::QueryRoot;

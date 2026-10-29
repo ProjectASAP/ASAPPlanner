@@ -458,7 +458,7 @@ mod tests {
     /// bound.
     #[test]
     fn precision_is_sized_from_epsilon_and_delta() {
-        use crate::realization::default_size_params;
+        use crate::pass1::realization::default_size_params;
         use asap_types::ir::operator::agg_intent::default_cardinality;
         for (eps, delta, precision) in [(0.05, 0.01, 15), (0.02, 0.01, 17)] {
             let params =
@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn generic_rse_sizing_does_not_certify_confidence() {
-        use crate::realization::default_size_params;
+        use crate::pass1::realization::default_size_params;
         use asap_types::ir::operator::agg_intent::default_cardinality;
         use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let c = default_cardinality();

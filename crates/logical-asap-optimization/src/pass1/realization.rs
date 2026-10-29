@@ -284,7 +284,7 @@ pub(crate) fn realize_keyed_additive_summary_input(
             [AggIntent::Rate | AggIntent::Increase | AggIntent::IRate]
         ) =>
         {
-            Some(crate::per_computation_candidates::raw_data_samples_of_metric(samples))
+            Some(crate::pass1::per_computation_candidates::raw_data_samples_of_metric(samples))
         }
         _ => None,
     };

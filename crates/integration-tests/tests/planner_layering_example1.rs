@@ -28,11 +28,11 @@ fn pipeline() -> Run {
 // stays exact, and exercise source sharing and ten-second panes. This is not
 // a production workload search or an exhaustive memo archive.
 fn rule_fixture(workload: &asap_types::workload::PlanningWorkload) -> Run {
-    use asap_logical_asap_optimization::asap_aware_cse::{
-        pane_candidates, window_composition_pass2_candidates,
-    };
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    };
+    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+        pane_candidates, window_composition_pass2_candidates,
     };
     let roots = lower_promql(workload);
     let local =
@@ -818,7 +818,7 @@ fn materialized_case() -> Run {
     let mut workload = example1();
     let repeating = workload.query_workload.repeating_queries.as_mut().unwrap();
     repeating.truncate(1);
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     let roots = lower_promql(&workload);

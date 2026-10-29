@@ -21,7 +21,9 @@ use std::collections::HashSet;
 #[derive(Debug, thiserror::Error)]
 pub(in crate::search) enum DirectProfileError {
     #[error(transparent)]
-    DeadlineExceeded(#[from] asap_logical_asap_optimization::memo::CandidateGenerationTimeout),
+    DeadlineExceeded(
+        #[from] asap_logical_asap_optimization::pass2::memo::CandidateGenerationTimeout,
+    ),
     #[error("direct cost profile: {0}")]
     Invalid(String),
     #[error("direct cost profile unsupported: {0}")]
@@ -1001,7 +1003,7 @@ fn state_compaction_seconds(
 
 fn check_deadline(deadline: Option<std::time::Instant>) -> Result<(), DirectProfileError> {
     if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-        Err(asap_logical_asap_optimization::memo::CandidateGenerationTimeout.into())
+        Err(asap_logical_asap_optimization::pass2::memo::CandidateGenerationTimeout.into())
     } else {
         Ok(())
     }
@@ -1074,7 +1076,7 @@ mod tests {
         CandidateDependencyGraph, PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
     };
     use crate::search::candidates::inventory::CandidateInventory;
-    use asap_logical_asap_optimization::memo::MemoGroupId;
+    use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::{Operator, OperatorNode, ProjectItem, ScalarExpr};
@@ -1255,7 +1257,7 @@ mod tests {
     // direct costs include working memory and agree with the complete evaluator.
     #[test]
     fn fixed_sketch_profiles_match_the_real_evaluator() {
-        use asap_logical_asap_optimization::per_computation_candidates::{
+        use asap_logical_asap_optimization::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
         };
         use asap_types::ir::schema::SketchAlgorithm;
@@ -1480,7 +1482,7 @@ mod tests {
         mode: Materialization,
         range_evaluation: Option<asap_types::workload::RangeEvaluation>,
     ) {
-        use asap_logical_asap_optimization::per_computation_candidates::{
+        use asap_logical_asap_optimization::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
         };
         use asap_types::ir::schema::SketchAlgorithm;
@@ -1570,11 +1572,11 @@ mod tests {
                         .map(|(_, root)| root)
                         .collect();
                     let pane_rules =
-                        asap_logical_asap_optimization::asap_aware_cse::pane_candidates(
+                        asap_logical_asap_optimization::pass2::asap_aware_cse::pane_candidates(
                             &roots,
                             &[Some(width)],
                         );
-                    let roots = asap_logical_asap_optimization::asap_aware_cse::window_composition_pass2_candidates(&roots, &pane_rules).unwrap().pop().unwrap().roots.unwrap();
+                    let roots = asap_logical_asap_optimization::pass2::asap_aware_cse::window_composition_pass2_candidates(&roots, &pane_rules).unwrap().pop().unwrap().roots.unwrap();
                     let data: DataWorkload = serde_json::from_value(serde_json::json!({
                     "arrival":{"ingesting":{"rows_per_second":rows_per_second}},
                     "sources":{"latency":{"series_count":series_count,"rows_held":rows_per_second * 300,"values_non_negative":true,"max_distinct_per_evaluation":1000}}
@@ -2001,7 +2003,7 @@ mod tests {
     // including two equal frequencies whose different phases cannot coalesce.
     #[test]
     fn heterogeneous_shared_sketch_profiles_match_the_real_evaluator() {
-        use asap_logical_asap_optimization::per_computation_candidates::{
+        use asap_logical_asap_optimization::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
         };
         use asap_types::ir::schema::SketchAlgorithm;

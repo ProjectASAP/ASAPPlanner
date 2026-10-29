@@ -24,7 +24,9 @@ use asap_types::ir::{OperatorNode, QueryRoot};
 use super::candidates::CandidateMemo;
 use super::rules::reuse::replace;
 use super::MemoGroupId;
-use crate::per_computation_candidates::{recompose_guarantees, PerComputationCandidateError};
+use crate::pass1::per_computation_candidates::{
+    recompose_guarantees, PerComputationCandidateError,
+};
 
 /// One candidate (an index into `CandidateMemo::candidates[group]`) for each
 /// group it names. [`compose`] gives a group it does not name its first

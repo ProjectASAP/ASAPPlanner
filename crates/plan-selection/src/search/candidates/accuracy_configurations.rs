@@ -1,6 +1,6 @@
 //! Additional finite capacities for whole-result failure budgets.
 //! Original capacities remain available; final composed accuracy is still checked.
-use asap_logical_asap_optimization::memo::candidates::CandidateMemo;
+use asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo;
 use asap_types::ir::{properties::AccuracyScope, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 use std::{rc::Rc, time::Instant};

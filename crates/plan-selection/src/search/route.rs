@@ -1,9 +1,9 @@
 //! Driver integration for the explicit, bounded candidate-connection search.
 use crate::{CostModel, PlanningModels, SelectionError, Stage1ToStage3Search};
-use asap_logical_asap_optimization::memo::candidates::CandidateMemo;
-use asap_logical_asap_optimization::memo::enumeration::MemoChoice;
-use asap_logical_asap_optimization::memo::{LogicalMemo, MemoGroupId};
-use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates;
+use asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidates;
+use asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo;
+use asap_logical_asap_optimization::pass2::memo::enumeration::MemoChoice;
+use asap_logical_asap_optimization::pass2::memo::{LogicalMemo, MemoGroupId};
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 use std::rc::Rc;
@@ -55,16 +55,16 @@ struct DomainProgress {
     catalog_completed: bool,
     refinements: usize,
     report: Option<crate::CandidateConnectionReport>,
-    local_memo: Option<asap_logical_asap_optimization::memo::candidates::CandidateMemo>,
+    local_memo: Option<asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo>,
     /// The memo after Stage 0 and after Pass 1, kept with `local_memo`.
     pass1_steps: Option<(
-        asap_logical_asap_optimization::memo::candidates::CandidateMemo,
-        asap_logical_asap_optimization::memo::candidates::CandidateMemo,
+        asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo,
+        asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo,
     )>,
     /// This round's memo steps, with its selected plan's ID when it has one.
     memo_steps: Option<(Option<String>, crate::search::pipeline::MemoSteps)>,
     previous_domain:
-        Option<asap_logical_asap_optimization::memo::state_configurations::PaneWidthDomain>,
+        Option<asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain>,
 }
 
 /// Obtain an incumbent on seed grids, then progressively expose finer widths.
@@ -79,7 +79,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
 ) -> crate::search::pipeline::PlanSearchResult {
     let models = context.models;
     use crate::search::costing::calibration::CandidateCalibration;
-    use asap_logical_asap_optimization::memo::state_configurations::PaneWidthDomain;
+    use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
     use std::time::Instant;
 
     let started = Instant::now();
@@ -177,7 +177,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         .filter_map(|entry| entry.evaluation_grid_ms())
         .filter(|_| !initial.groups.is_empty());
     let mut frontier =
-        asap_logical_asap_optimization::memo::state_configurations::PaneWidthFrontier::new(
+        asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthFrontier::new(
             grids,
             global_deadline,
         );
@@ -703,7 +703,7 @@ fn search_domain<Id: Clone>(
     search: Stage1ToStage3Search,
     local_candidate_generation_ms: Option<f64>,
     archive: &mut CandidateArchive,
-    domain: asap_logical_asap_optimization::memo::state_configurations::PaneWidthDomain,
+    domain: asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain,
     progress: &mut DomainProgress,
 ) -> crate::search::pipeline::PlanSearchResult {
     let inventory = context.inventory;
@@ -719,8 +719,8 @@ fn search_domain<Id: Clone>(
     use crate::search::costing::calibration::CandidateCalibration;
     use crate::search::refinement::planner::CandidatePlanningContext;
     use crate::search::refinement::search::{CandidateSearchLimits, CandidateSearchStatus};
-    use asap_logical_asap_optimization::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::memo::state_groups::{
+    use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
+    use asap_logical_asap_optimization::pass2::memo::state_groups::{
         expand_concrete_summary_state_groups_before, StateGroupExpansionError,
     };
     use std::time::{Duration, Instant};
@@ -750,13 +750,13 @@ fn search_domain<Id: Clone>(
             // counts unset rather than inventing completed model statistics.
             let report = crate::CandidateConnectionReport {
                 pane_width_rounds: vec![format!("{domain:?}")],
-                pane_widths_pending: domain != asap_logical_asap_optimization::memo::state_configurations::PaneWidthDomain::Complete,
+                pane_widths_pending: domain != asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain::Complete,
                 status: "time_limit".into(),
                 catalog_scope: format!(
                     "planning stopped after {phase}, before solving; model statistics unavailable"
                 ),
                 full_catalog_completed: progress.catalog_completed
-                    && domain == asap_logical_asap_optimization::memo::state_configurations::PaneWidthDomain::Complete,
+                    && domain == asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain::Complete,
                 max_refinements: search.max_evaluations.unwrap_or(128),
                 time_limit_ms: search.milp_time_limit_ms.unwrap_or(30_000),
                 local_candidate_generation_ms,
@@ -886,7 +886,7 @@ fn search_domain<Id: Clone>(
         }
     };
     let deadline = Instant::now().checked_add(remaining());
-    asap_logical_asap_optimization::memo::window_candidates::extend_local_window_composition(
+    asap_logical_asap_optimization::pass2::memo::window_candidates::extend_local_window_composition(
         &mut memo,
         entries,
         progress.previous_domain,
@@ -954,7 +954,7 @@ fn search_domain<Id: Clone>(
     check_budget("physical candidate generation", progress)?;
     let context = CandidatePlanningContext {
         deadline,
-        refine_materialization: domain == asap_logical_asap_optimization::memo::state_configurations::PaneWidthDomain::SeedGrids,
+        refine_materialization: domain == asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain::SeedGrids,
         seed_separate_plans: first_round,
         original_roots: &roots,
         entries,
@@ -1111,12 +1111,12 @@ fn search_domain<Id: Clone>(
         supplier_sets: supplier_storage.unique_supplier_sets,
         stored_supplier_ids: supplier_storage.stored_supplier_ids,
         pane_width_rounds: vec![format!("{domain:?}")],
-        pane_widths_pending: domain != asap_logical_asap_optimization::memo::state_configurations::PaneWidthDomain::Complete,
+        pane_widths_pending: domain != asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain::Complete,
         rounded_down_cost_bounds: bound_metrics.rounded_down_candidates,
         seed_planning_ms: 0.0,
         full_planning_ms: planning_started.elapsed().as_secs_f64() * 1_000.0,
         seed_selected: false,
-        full_catalog_completed: domain == asap_logical_asap_optimization::memo::state_configurations::PaneWidthDomain::Complete,
+        full_catalog_completed: domain == asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain::Complete,
         seed_fallback_reason: None,
         independent_components: result.independent_components,
         catalog_exhausted: result.catalog_exhausted,
@@ -1314,7 +1314,7 @@ mod tests {
     fn generation_time_is_charged_before_search_starts() {
         let (roots, entries, data) = workload();
         let initial = LogicalMemo::from_roots(&roots);
-        let inventory = asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
+        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
         let error = candidate_connection_search(
             initial,
             &CandidateSearchContext {
@@ -1371,7 +1371,7 @@ mod tests {
     // Only an explicitly identified budget stop can use an already validated plan.
     #[test]
     fn validated_seed_survives_budget_stop_but_not_internal_failure() {
-        use asap_logical_asap_optimization::memo::state_configurations::PaneWidthDomain;
+        use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
         let (_, entries, data) = workload();
         let roots = vec![(
             0,
@@ -1380,7 +1380,7 @@ mod tests {
             )),
         )];
         let initial = LogicalMemo::from_roots(&roots);
-        let inventory = asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
+        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
         let seed = search_domain(
             initial.clone(),
             &CandidateSearchContext {
@@ -1450,7 +1450,7 @@ mod tests {
     fn invalid_generation_durations_are_rejected_before_seed_search() {
         let (roots, entries, data) = workload();
         let initial = LogicalMemo::from_roots(&roots);
-        let inventory = asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
+        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
         for invalid in [-1.0, f64::INFINITY, f64::NAN] {
             let error = candidate_connection_search(
                 initial.clone(),
@@ -1807,7 +1807,7 @@ mod tests {
             QueryRoot::Operator(lower_promql("latency[5m]", AccuracyTarget::exact())),
         )];
         let initial = LogicalMemo::from_roots(&roots);
-        let inventory = asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
+        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
         let error = candidate_connection_search(
             initial,
             &CandidateSearchContext {
@@ -1944,9 +1944,9 @@ mod tests {
     // Pane rewriting must preserve canonical inputs so equal chains can share state.
     #[test]
     fn local_pane_rules_expose_identical_chains_to_state_groups() {
-        use asap_logical_asap_optimization::memo::candidates::try_populate_pass1;
-        use asap_logical_asap_optimization::memo::state_groups::expand_concrete_summary_state_groups;
-        use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
+        use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
+        use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
+        use asap_logical_asap_optimization::pass2::memo::state_groups::expand_concrete_summary_state_groups;
         let (roots, mut entries, _) = workload();
         for entry in &mut entries {
             entry.recurrence =
@@ -1955,7 +1955,7 @@ mod tests {
         let initial = LogicalMemo::from_roots(&roots);
         let generated = generate_per_computation_candidates(roots).unwrap();
         let mut memo = try_populate_pass1(initial, &generated).unwrap();
-        asap_logical_asap_optimization::memo::window_candidates::add_local_window_composition(
+        asap_logical_asap_optimization::pass2::memo::window_candidates::add_local_window_composition(
             &mut memo, &entries,
         );
         let expanded = expand_concrete_summary_state_groups(memo).unwrap();

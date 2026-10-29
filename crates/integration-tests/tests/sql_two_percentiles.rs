@@ -303,11 +303,11 @@ async fn q1_with_one_exact_and_one_sketched_percentile_compiles_and_matches() {
 
 /// The id and query roots of every Stage 1 candidate of `queries`.
 async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
-    use asap_logical_asap_optimization::asap_aware_cse::{
-        pane_candidates, window_composition_pass2_candidates,
-    };
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    };
+    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+        pane_candidates, window_composition_pass2_candidates,
     };
     let workload = workload(queries);
     let entries: Vec<_> = workload.query_workload.entries().collect();

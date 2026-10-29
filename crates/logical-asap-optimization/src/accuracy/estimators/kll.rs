@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn local_guarantee_inverts_rank_sizing() {
-        use crate::realization::default_size_params;
+        use crate::pass1::realization::default_size_params;
         use asap_types::ir::operator::agg_intent::default_quantile;
         use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let q = default_quantile(0.99);
@@ -252,7 +252,7 @@ mod tests {
     /// larger than at δ = 0.01, and the guarantee meets ε = 0.01, δ = 0.001.
     #[test]
     fn sizing_meets_a_failure_probability_below_one_percent() {
-        use crate::realization::default_size_params;
+        use crate::pass1::realization::default_size_params;
         use asap_types::ir::operator::agg_intent::default_quantile;
         let q = default_quantile(0.99);
         let k = |delta| match default_size_params(SketchAlgorithm::Kll, &q, 0.01, delta) {
@@ -379,7 +379,7 @@ mod tests {
     /// KLL `k` inverts the rank-error fit: ε = 0.01 → 269, ε = 0.05 → 52.
     #[test]
     fn accuracy_target_drives_kll_k() {
-        use crate::realization::default_size_params;
+        use crate::pass1::realization::default_size_params;
         use asap_types::ir::operator::agg_intent::default_quantile;
         let q = default_quantile(0.99);
         assert_eq!(
@@ -401,7 +401,7 @@ mod tests {
     /// A zero ε saturates KLL `k` to the tightest buildable value.
     #[test]
     fn degenerate_epsilon_saturates_to_tightest_kll_params() {
-        use crate::realization::default_size_params;
+        use crate::pass1::realization::default_size_params;
         use asap_types::ir::operator::agg_intent::default_quantile;
         assert_eq!(
             default_size_params(SketchAlgorithm::Kll, &default_quantile(0.99), 0.0, 0.01),

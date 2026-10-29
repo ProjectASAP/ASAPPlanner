@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::per_computation_candidates::recompose_guarantees;
+use asap_logical_asap_optimization::pass1::per_computation_candidates::recompose_guarantees;
 use asap_types::ir::{OperatorNode, QueryRoot};
 
 use crate::search::candidates::graph::{
@@ -245,7 +245,7 @@ mod tests {
         PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
     };
     use crate::search::milp::model::select_candidates;
-    use asap_logical_asap_optimization::memo::MemoGroupId;
+    use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
     use asap_logical_asap_optimization::test_support::lower_promql;
 
     // Physical identity is reflexive for NaN, without equating different

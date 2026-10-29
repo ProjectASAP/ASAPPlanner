@@ -37,14 +37,14 @@ use std::rc::Rc;
 
 use asap_devtools::planning_stages::lower_promql_roots;
 use asap_integration_tests::planning::expanded_memo;
-use asap_logical_asap_optimization::memo::candidates::{
-    CandidateMemo, CandidateOrigin, ImplementationCandidate,
-};
-use asap_logical_asap_optimization::memo::enumeration::{compose, enumerate, MemoChoice};
-use asap_logical_asap_optimization::memo::MemoGroupId;
-use asap_logical_asap_optimization::per_computation_candidates::{
+use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     compose_logical_candidate, PerComputationCandidates,
 };
+use asap_logical_asap_optimization::pass2::memo::candidates::{
+    CandidateMemo, CandidateOrigin, ImplementationCandidate,
+};
+use asap_logical_asap_optimization::pass2::memo::enumeration::{compose, enumerate, MemoChoice};
+use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_plan_selection::{
     run_stage1_to_stage3_with, MemoSteps, PlanningModels, Stage1ToStage3Run, Stage1ToStage3Search,
 };
@@ -298,7 +298,7 @@ fn ratio_of_quantiles_production_memo() {
     }
     // The state-configuration rule rewrites a candidate's KLL to the size
     // the readers of a state share; the rewrite is a copy of the candidate
-    // (`derive` in `memo/rules/state_configurations.rs`), so it keeps its
+    // (`derive` in `pass2/memo/rules/shared_configuration_readers.rs`), so it keeps its
     // `budget_share`. In each quantile group the `budget_share` 1 KLL `k` 567
     // (sized for the whole result) gets copies at `k` 567, 1156 and 1184,
     // all with `budget_share` 1; the `budget_share` 2 KLL `k` 1184 keeps 2.
@@ -406,7 +406,7 @@ fn choices_whose_candidates_read_each_other_are_left_out() {
         .expect("a pair of groups whose candidates read each other");
     assert!(matches!(
         compose(memo, &mutual.into()),
-        Err(asap_logical_asap_optimization::memo::enumeration::ComposeError::Cycle { .. })
+        Err(asap_logical_asap_optimization::pass2::memo::enumeration::ComposeError::Cycle { .. })
     ));
     let enumeration = enumerate(memo, 2_000);
     assert!(!enumeration.choices.is_empty());

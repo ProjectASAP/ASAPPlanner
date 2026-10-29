@@ -1186,7 +1186,7 @@ fn implement_topk(
         return Err(unsupported("HAVING"));
     }
     let child = memo[&Rc::as_ptr(child)].clone();
-    let value = asap_logical_asap_optimization::realization::ranked_column(&child)
+    let value = asap_logical_asap_optimization::pass1::realization::ranked_column(&child)
         .map_err(|e| unsupported(&format!("no ranked column: {e}")))?;
     let sorted = Rc::new(
         OperatorNode::new(Operator::NonASAP(NonASAPOp::Sort {
@@ -1556,7 +1556,7 @@ mod tests {
             "topk by (job) (10, sum_over_time(m[1m]))",
             AccuracyTarget::max_error(0.01).failure_probability(0.001),
         );
-        let inventory = asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
+        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(
             vec![(0, QueryRoot::Operator(root))],
         )
         .unwrap();
@@ -1567,7 +1567,7 @@ mod tests {
             .map(|t| t.choice_count() - 1)
             .collect();
         let roots: Vec<_> =
-            asap_logical_asap_optimization::per_computation_candidates::compose_logical_candidate(
+            asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate(
                 &inventory, &choice,
             )
             .unwrap()
@@ -1602,7 +1602,7 @@ mod tests {
                 .failure_probability(0.001)
                 .accuracy_metric(asap_types::ir::properties::AccuracyMetric::Rank),
         );
-        let inventory = asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates(
+        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(
             vec![(0, QueryRoot::Operator(root))],
         )
         .unwrap();
@@ -1611,7 +1611,7 @@ mod tests {
             .iter()
             .map(|t| t.choice_count() - 1)
             .collect();
-        asap_logical_asap_optimization::per_computation_candidates::compose_logical_candidate(
+        asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate(
             &inventory, &choice,
         )
         .unwrap()
@@ -1622,13 +1622,14 @@ mod tests {
     /// `root` with its summary build in 1-min tumbling panes.
     fn in_panes(root: QueryRoot) -> QueryRoot {
         let roots = [root];
-        let rule_candidates = asap_logical_asap_optimization::asap_aware_cse::pane_candidates(
-            &roots,
-            &[Some(MINUTE)],
-        );
+        let rule_candidates =
+            asap_logical_asap_optimization::pass2::asap_aware_cse::pane_candidates(
+                &roots,
+                &[Some(MINUTE)],
+            );
         assert_eq!(rule_candidates.len(), 1, "{rule_candidates:?}");
         let mut pass2_candidates =
-            asap_logical_asap_optimization::asap_aware_cse::window_composition_pass2_candidates(
+            asap_logical_asap_optimization::pass2::asap_aware_cse::window_composition_pass2_candidates(
                 &roots,
                 &rule_candidates,
             )

@@ -7,9 +7,9 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::memo::candidates::CandidateMemo;
-use asap_logical_asap_optimization::memo::enumeration::{compose, MemoChoice};
-use asap_logical_asap_optimization::memo::MemoGroupId;
+use asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo;
+use asap_logical_asap_optimization::pass2::memo::enumeration::{compose, MemoChoice};
+use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_physical_asap_optimization::optimize_physical_asap;
 use asap_plan_selection::{select_plan, PlanningModels, Selection, SelectionError};
 use asap_types::ir::{OperatorNode, QueryRoot};

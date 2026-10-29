@@ -66,7 +66,7 @@ fn every_column() -> serde_json::Value {
 /// Evaluate the exact computation and each supported local summary choice.
 /// These tests exercise group/error models, not a timed search's visited archive.
 fn run_group_choices(workload: &PlanningWorkload) -> Run {
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     let roots = lower_sql_roots(workload, &http_catalog()).expect("lowers");

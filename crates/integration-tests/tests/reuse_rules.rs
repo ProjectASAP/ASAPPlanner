@@ -17,7 +17,7 @@ use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::{
     cheapest_of, compose_memo_plan, expanded_memo, select_among,
 };
-use asap_logical_asap_optimization::memo::candidates::{CandidateMemo, CandidateOrigin};
+use asap_logical_asap_optimization::pass2::memo::candidates::{CandidateMemo, CandidateOrigin};
 use asap_plan_selection::PlanningModels;
 use asap_types::ir::physical_export::compile_physical_asap_dag;
 use asap_types::ir::properties::AccuracyTarget;

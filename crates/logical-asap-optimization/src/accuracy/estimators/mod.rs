@@ -56,7 +56,7 @@ fn bounded_guarantee(
 /// The built-in guarantee of reading `query` out of a summary of family
 /// `family` built over an **exact** input, derived from the family's
 /// committed parameters by inverting the same sizing formulas
-/// [`crate::realization::default_size_params`] uses. Exact for a plain value
+/// [`crate::pass1::realization::default_size_params`] uses. Exact for a plain value
 /// or an exact aggregate. `None` when a sketch does not answer `query` (its
 /// family-capability table row), and when the family has no error model
 /// (`SummarySample`, `Wavelet`, `StatModel`, and sketch evaluations without a

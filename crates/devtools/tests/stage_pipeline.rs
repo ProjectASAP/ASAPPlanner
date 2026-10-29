@@ -1735,7 +1735,7 @@ fn scans_projecting_different_labels_are_shared() {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.as_ref().unwrap();
     let roots = lower_promql_roots(&workload).unwrap();
-    use asap_logical_asap_optimization::asap_aware_cse::with_union_scan_labels;
+    use asap_logical_asap_optimization::pass2::asap_aware_cse::with_union_scan_labels;
     let widened = with_union_scan_labels(&roots).unwrap().unwrap();
     // Identical sub-DAGs made one node, as the memo's groups are: the
     // widened scan, and the two instant selectors' identical range.
@@ -2337,8 +2337,8 @@ fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
 #[test]
 fn composed_selected_choice_is_the_selected_stage1_dag() {
     use asap_devtools::planning_stages::run_default_search_over;
-    use asap_logical_asap_optimization::memo::enumeration::compose;
-    use asap_logical_asap_optimization::per_computation_candidates::recompose_guarantees;
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::recompose_guarantees;
+    use asap_logical_asap_optimization::pass2::memo::enumeration::compose;
     use asap_types::ir::flat::flatten;
     let ratio: PlanningWorkload =
         serde_json::from_str(&std::fs::read_to_string(MEMO_RATIO_OF_QUANTILES).unwrap()).unwrap();

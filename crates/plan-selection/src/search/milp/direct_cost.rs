@@ -752,7 +752,7 @@ mod tests {
     use crate::search::milp::model::{
         solve_direct_cost_proposal_with_metrics, CandidateSolveMetrics,
     };
-    use asap_logical_asap_optimization::memo::MemoGroupId;
+    use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 
     fn node(input: Option<usize>) -> PhysicalCandidate {
         PhysicalCandidate {

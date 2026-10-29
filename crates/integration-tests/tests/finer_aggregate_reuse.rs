@@ -4,13 +4,13 @@ use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, FuzzWorkload, Pl
 use asap_devtools::planning_stages::run_search_over;
 use asap_executor::values::Value;
 use asap_logical_asap_optimization::{
-    memo::{
+    pass1::per_computation_candidates::generate_per_computation_candidates,
+    pass2::memo::{
         candidates::{try_populate_pass1, CandidateMemo, CandidateOrigin, ImplementationCandidate},
-        state_configurations::PaneWidthDomain,
+        shared_configurations::PaneWidthDomain,
         state_groups::expand_concrete_summary_state_groups_in_domain,
         LogicalMemo,
     },
-    per_computation_candidates::generate_per_computation_candidates,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 use serde_json::json;

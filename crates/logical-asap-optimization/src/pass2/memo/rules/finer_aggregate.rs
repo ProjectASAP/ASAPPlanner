@@ -1,11 +1,11 @@
 //! Read a SQL aggregate from a finer aggregate's result
-//! ([`match_finer`](crate::finer_aggregate::match_finer)): filter the finer
+//! ([`match_finer`](crate::pass2::finer_aggregate::match_finer)): filter the finer
 //! rows, then merge them into the query's groups with each measure's rollup.
 use super::reuse::append_reader;
-use crate::finer_aggregate::match_finer;
-use crate::memo::candidates::{CandidateMemo, CandidateOrigin};
-use crate::memo::check_generation_deadline;
-use crate::memo::state_groups::StateGroupExpansionError;
+use crate::pass2::finer_aggregate::match_finer;
+use crate::pass2::memo::candidates::{CandidateMemo, CandidateOrigin};
+use crate::pass2::memo::check_generation_deadline;
+use crate::pass2::memo::state_groups::StateGroupExpansionError;
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::{NonASAPOp, Operator, OperatorNode, OperatorResultKind};
 use std::collections::HashMap;
@@ -70,7 +70,7 @@ fn value_rollup(measure: &AggIntent, col: usize, global: bool) -> Option<AggInte
     }
 }
 
-pub(in crate::memo) fn add_finer_aggregate_candidates(
+pub(in crate::pass2::memo) fn add_finer_aggregate_candidates(
     memo: &mut CandidateMemo,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {

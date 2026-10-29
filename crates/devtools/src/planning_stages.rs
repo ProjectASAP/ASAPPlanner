@@ -3,8 +3,8 @@
 //! tests, so both see the same candidates, ids and selection.
 
 use asap_frontend_sql::SqlCatalog;
-use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates;
-pub use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
+use asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidates;
+pub use asap_logical_asap_optimization::pass2::workload_candidates::Pass2Candidate;
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_plan_selection::pass::{run_stage1_to_stage3_with, Stage1ToStage3Search};
 pub use asap_plan_selection::pass::{LogicalCandidate, MemoSteps, PrunedCandidate};

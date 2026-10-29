@@ -118,7 +118,7 @@ fn grouped_filtered_quantile_plans() {
 /// #886: SQL count-ranked TopK offers a heap over raw rows, absorbing the count.
 #[test]
 fn sql_count_topk_has_a_fused_raw_row_heap() {
-    use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     let roots = Planner::new(FuzzSettings::default())
         .lower(&workload(886))
         .unwrap();
@@ -134,7 +134,7 @@ fn sql_count_topk_has_a_fused_raw_row_heap() {
         let mut selected = vec![0; inventory.targets.len()];
         selected[index] = choice;
         let composed =
-            asap_logical_asap_optimization::per_computation_candidates::compose_logical_candidate(
+            asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate(
                 &inventory, &selected,
             )
             .unwrap();
@@ -199,13 +199,13 @@ fn sql_count_topk_has_a_fused_raw_row_heap() {
 #[test]
 fn exact_rollup_catalog_crosses_identical_per_series_average() {
     use asap_logical_asap_optimization::{
-        memo::{
+        pass1::per_computation_candidates::generate_per_computation_candidates,
+        pass2::memo::{
             candidates::{try_populate_pass1, CandidateOrigin},
-            state_configurations::PaneWidthDomain,
+            shared_configurations::PaneWidthDomain,
             state_groups::expand_concrete_summary_state_groups_in_domain,
             LogicalMemo,
         },
-        per_computation_candidates::generate_per_computation_candidates,
     };
     let roots: Vec<_> = Planner::new(FuzzSettings::default())
         .lower(&workload(923))
@@ -240,13 +240,13 @@ mod physical_common;
 fn filtered_group_preserves_sql_empty_and_null_semantics() {
     use asap_executor::values::Value;
     use asap_logical_asap_optimization::{
-        memo::{
+        pass1::per_computation_candidates::generate_per_computation_candidates,
+        pass2::memo::{
             candidates::{try_populate_pass1, CandidateOrigin},
-            state_configurations::PaneWidthDomain,
+            shared_configurations::PaneWidthDomain,
             state_groups::expand_concrete_summary_state_groups_in_domain,
             LogicalMemo,
         },
-        per_computation_candidates::generate_per_computation_candidates,
     };
     use asap_types::ir::{operator::AggIntent, NonASAPOp};
     let roots: Vec<_> = Planner::new(FuzzSettings::default())
@@ -266,7 +266,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
         .expect("filtered group read candidate");
     // The same readout keeps a KLL's rank bound: it selects a whole group,
     // never predicates on an approximate value or combines populations.
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, recompose_guarantees, ComputationCandidate,
     };
     use asap_types::ir::{schema::SketchAlgorithm, QueryRoot};
@@ -393,13 +393,13 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
 fn sql_count_rollup_executes_with_integer_results() {
     use asap_executor::values::Value;
     use asap_logical_asap_optimization::{
-        memo::{
+        pass1::per_computation_candidates::generate_per_computation_candidates,
+        pass2::memo::{
             candidates::{try_populate_pass1, CandidateOrigin},
-            state_configurations::PaneWidthDomain,
+            shared_configurations::PaneWidthDomain,
             state_groups::expand_concrete_summary_state_groups_in_domain,
             LogicalMemo,
         },
-        per_computation_candidates::generate_per_computation_candidates,
     };
     use asap_types::ir::ASAPOp;
     let mut w = workload(902);
@@ -521,13 +521,13 @@ fn sql_sum_shares_nested_windows_and_slower_readers() {
 #[test]
 fn sketch_rollup_crosses_inner_range_function() {
     use asap_logical_asap_optimization::{
-        memo::{
+        pass1::per_computation_candidates::generate_per_computation_candidates,
+        pass2::memo::{
             candidates::{try_populate_pass1, CandidateOrigin},
-            state_configurations::PaneWidthDomain,
+            shared_configurations::PaneWidthDomain,
             state_groups::expand_concrete_summary_state_groups_in_domain,
             LogicalMemo,
         },
-        per_computation_candidates::generate_per_computation_candidates,
     };
     let mut w = workload(923);
     for (query, keys) in w.queries.iter_mut().zip(["job, region", "job"]) {
@@ -561,7 +561,7 @@ fn sketch_rollup_crosses_inner_range_function() {
 /// the exact counter and separately typed raw-row TopK fusion remain available.
 #[test]
 fn sql_grouped_count_sketches_are_not_offered() {
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         generate_per_computation_candidates, ComputationCandidate, PruneReason,
     };
     use asap_types::ir::{operator::AggIntent, NonASAPOp};

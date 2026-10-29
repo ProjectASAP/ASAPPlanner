@@ -15,7 +15,7 @@ use asap_executor::sources::InMemoryDataStore;
 use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::{explicit_local_candidates, explicit_summary_candidate};
-use asap_logical_asap_optimization::asap_aware_cse::{
+use asap_logical_asap_optimization::pass2::asap_aware_cse::{
     pane_candidates, window_composition_pass2_candidates,
     window_composition_shared_chain_candidates,
 };

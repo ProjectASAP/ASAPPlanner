@@ -22,7 +22,7 @@ fn initialized(
 
 use crate::search::candidates::graph::*;
 #[cfg(test)]
-use asap_logical_asap_optimization::memo::MemoGroupId;
+use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use good_lp::solvers::highs::highs;
 use good_lp::solvers::{ResolutionError, SolutionStatus};
 use good_lp::{

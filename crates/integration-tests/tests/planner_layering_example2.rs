@@ -162,12 +162,12 @@ async fn lower_sql(workload: &PlanningWorkload) -> Vec<QueryRoot> {
 // all/pairwise UnivMon consumers needed by compatibility and cost assertions.
 // Production optimization is tested separately; this is not a Cartesian search.
 fn rule_fixture(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
-    use asap_logical_asap_optimization::asap_aware_cse::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    };
+    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
         capability_sharing_candidates, pane_candidates, summary_capability_pass2_candidates,
         window_composition_pass2_candidates,
-    };
-    use asap_logical_asap_optimization::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
     };
     let local =
         generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
@@ -287,7 +287,7 @@ fn pipeline_with_distinct_bound(bound: Option<u64>) -> Run {
 /// queries, those queries reading it.
 fn memo_pipeline() -> Run {
     use asap_integration_tests::planning::{compose_memo_plan, expanded_memo, own_choices};
-    use asap_logical_asap_optimization::memo::candidates::{
+    use asap_logical_asap_optimization::pass2::memo::candidates::{
         CandidateOrigin, ImplementationCandidate,
     };
     use asap_types::ir::schema::FieldDataType;

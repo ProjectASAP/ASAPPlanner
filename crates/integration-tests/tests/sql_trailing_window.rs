@@ -101,11 +101,11 @@ async fn roots(workload: &PlanningWorkload) -> Vec<QueryRoot> {
 async fn run(deployment: &DeploymentCapabilities) -> Run {
     let workload = workload();
     let roots = roots(&workload).await;
-    use asap_logical_asap_optimization::asap_aware_cse::{
-        pane_candidates, window_composition_pass2_candidates,
-    };
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    };
+    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+        pane_candidates, window_composition_pass2_candidates,
     };
     let local =
         generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();

@@ -75,7 +75,7 @@ fn physical_candidates(
     workload: &PlanningWorkload,
 ) -> Vec<asap_physical_asap_optimization::PhysicalWorkloadPlan> {
     use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_physical_asap_optimization::optimize_physical_asap_chosen;
