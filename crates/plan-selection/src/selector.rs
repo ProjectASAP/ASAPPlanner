@@ -11,14 +11,16 @@ use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkloadEntry, RangeEvaluation};
 
+use crate::checks::{
+    accuracy_check, accuracy_targets, latency_violation, per_entity_aggregate_violation,
+    raw_data_violation, CheckFailure,
+};
 use crate::report::{
     AcceptedAccuracy, Rejection, RejectionCause, SearchReport, Selection, SelectionError,
 };
 use crate::{
-    accuracy_check, accuracy_targets, kept_pane_chains, latency_violation, node_map,
-    pane_retention_ms, per_entity_aggregate_violation, price_at_scale, query_reach,
-    raw_data_violation, sized_for_failure_probability, with_confirmed_weights, CheckFailure,
-    PlanningModels,
+    kept_pane_chains, node_map, pane_retention_ms, price_at_scale, query_reach,
+    sized_for_failure_probability, with_confirmed_weights, PlanningModels,
 };
 
 /// A cost per second for a rejection reason: three decimals, or three
