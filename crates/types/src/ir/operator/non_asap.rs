@@ -926,7 +926,7 @@ impl NonASAPOp {
     }
 
     /// The output category derived from this operator and its children.
-    pub fn output_kind(&self) -> OperatorResultKind {
+    pub(crate) fn output_kind(&self) -> OperatorResultKind {
         use NonASAPOp::*;
         match self {
             Scan { source, .. } => match source {

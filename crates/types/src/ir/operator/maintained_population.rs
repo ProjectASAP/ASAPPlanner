@@ -138,7 +138,7 @@ impl CurrentSeriesInput {
 
 impl MaintainedPopulation<crate::ir::OperatorNode> {
     /// Whether `input` is the maintenance input this population declares.
-    pub fn matches_node(&self, input: &crate::ir::OperatorNode) -> bool {
+    pub(crate) fn matches_node(&self, input: &crate::ir::OperatorNode) -> bool {
         use crate::ir::operator::Source;
         use crate::ir::schema::DataType;
         use crate::ir::{NonASAPOp, Operator};
@@ -173,7 +173,7 @@ impl MaintainedPopulation<crate::ir::OperatorNode> {
         }
     }
 
-    pub fn supports(&self, evaluation: &PopulationStatistic) -> bool {
+    pub(crate) fn supports(&self, evaluation: &PopulationStatistic) -> bool {
         match evaluation {
             PopulationStatistic::Quantile { q } => self.quantiles && q.is_finite(),
             PopulationStatistic::TopK { k } => *k <= self.max_k,

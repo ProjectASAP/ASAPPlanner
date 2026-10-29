@@ -250,7 +250,7 @@ impl SummaryCoverage {
     /// ([`MergeInputRule::MayOverlap`] in the family-capability
     /// table) may also merge overlapping selections, and a counter family
     /// ([`MergeInputRule::DisjointInTime`]) needs disjoint time windows.
-    pub fn derive(node: &OperatorNode) -> Result<Self, CoverageError> {
+    pub(crate) fn derive(node: &OperatorNode) -> Result<Self, CoverageError> {
         Self::derive_cached(node, &mut NodeToSummaryCoverageCache::new())
     }
 
