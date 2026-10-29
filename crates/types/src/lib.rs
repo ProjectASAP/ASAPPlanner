@@ -14,7 +14,7 @@
 //!   ([`workload::parsed_workload`]) and resource dimensions
 //!   ([`workload::resources`]).
 //! - [`physical`] — Stage 2 decision data: the materialization of a
-//!   sub-DAG ([`physical::Materialization`]) and window-summary panes.
+//!   sub-DAG ([`physical::Materialization`]).
 //!
 //! No execution logic lives in this crate (issue #190).
 pub mod ir;

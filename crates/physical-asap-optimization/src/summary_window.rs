@@ -5,7 +5,7 @@
 //! backend, or deployment instance; those choices belong to downstream
 //! physical compilation.
 
-use crate::workload::RepeatedDemand;
+use asap_types::workload::RepeatedDemand;
 use serde::{Deserialize, Serialize};
 
 /// Concrete pane phase recorded in a catalog layout or inventory snapshot.
@@ -79,7 +79,7 @@ pub fn validate_pane_coverage(
 /// interval has cadence but no phase, so it remains unknown. Every timestamp
 /// in an explicit schedule must have the same phase for one pane layout to
 /// serve all occurrences.
-pub fn plan_pane_phase(
+pub(crate) fn plan_pane_phase(
     demand: &RepeatedDemand,
     pane_width_ms: u64,
 ) -> Result<PaneLayout, PaneCoverageError> {
@@ -133,8 +133,8 @@ mod tests {
     #[test]
     fn repeated_dashboard_phase_selects_query_aligned_origin() {
         let demand = RepeatedDemand::FixedIntervalAt {
-            interval: crate::workload::RepetitionInterval(60_000),
-            evaluation_phase: crate::workload::TimestampMs(56_000),
+            interval: asap_types::workload::RepetitionInterval(60_000),
+            evaluation_phase: asap_types::workload::TimestampMs(56_000),
         };
         assert_eq!(
             plan_pane_phase(&demand, 60_000).unwrap(),
@@ -145,12 +145,31 @@ mod tests {
         );
         assert_eq!(
             plan_pane_phase(
-                &RepeatedDemand::FixedInterval(crate::workload::RepetitionInterval(60_000)),
+                &RepeatedDemand::FixedInterval(asap_types::workload::RepetitionInterval(60_000)),
                 60_000,
             )
             .unwrap()
             .pane_origin_ms,
             None
         );
+    }
+
+    // Renamed pane APIs still read and emit the deployed wire contract.
+    #[test]
+    fn window_edge_names_preserve_wire_values() {
+        let layout: PaneLayout = serde_json::from_value(serde_json::json!({
+            "pane_width_ms": 1000, "pane_origin_ms": 0
+        }))
+        .unwrap();
+        let json = serde_json::json!({
+            "kind": "exact_boundary_residual", "executor": "runtime", "source": "raw"
+        });
+        let coverage: WindowEdgeCoverage = serde_json::from_value(json.clone()).unwrap();
+        assert!(matches!(
+            coverage,
+            WindowEdgeCoverage::ExactWindowEdgeResidual { .. }
+        ));
+        assert_eq!(serde_json::to_value(&coverage).unwrap(), json);
+        assert!(validate_pane_coverage(&layout, Some(1500), &coverage).is_ok());
     }
 }

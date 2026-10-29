@@ -99,6 +99,8 @@
 //! candidate alone, with the error as its reason.
 //! A summary needs no rewrite: `SummaryAgg` → `SummaryEstimate` already is
 //! build → estimate. Every node keeps the guarantee Stage 1 composed for it.
+pub mod summary_window;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
@@ -116,12 +118,10 @@ use asap_types::ir::{
 };
 use asap_types::physical::Materialization;
 use asap_types::physical::Medium;
-use asap_types::physical::{
-    plan_pane_phase, validate_pane_coverage, PaneLayout, WindowEdgeCoverage,
-};
 use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
+use summary_window::{plan_pane_phase, validate_pane_coverage, PaneLayout, WindowEdgeCoverage};
 use thiserror::Error;
 
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
