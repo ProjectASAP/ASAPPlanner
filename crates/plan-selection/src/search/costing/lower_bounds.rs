@@ -280,10 +280,11 @@ pub(in crate::search) fn apply(
 /// panes). A query-time scan reads its readers' longest window, or every
 /// row held when no reader has one; both are at least the rows of this
 /// window capped by the rows held. `None` when no reader has a window, or
-/// when readers' windows differ: a bound at the shortest of them would also
-/// stand when only the longer ones read the scan, pricing a scan a short and
-/// a long window may share far below a scan for the long window alone, so
-/// the search would propose the shared scan first.
+/// when readers' windows differ: which window the scan reads then depends on
+/// the readers selected, so the scan is left uncertified like any other node
+/// without a sound fixed bound. (A bound at the shortest window was sound but
+/// priced a scan a short and a long window may share far below a scan for the
+/// long window alone, so the search proposed the shared scan first, #994.)
 fn common_reader_windows(configured: &CandidateConfigurationInventory) -> Vec<Option<u64>> {
     let graph = &configured.inventory.graph;
     let mut readers = vec![Vec::new(); graph.candidates.len()];
@@ -1705,6 +1706,11 @@ mod tests {
             assert_eq!(scans, 1, "{queries:?} share one scan");
             let scan = bound_of(&configured, is_scan);
             assert_eq!(scan > 0.0, scan_bounded, "{queries:?}: scan bound {scan}");
+            assert_eq!(
+                bound > 0.0,
+                scan_bounded,
+                "{queries:?}: build bound {bound}"
+            );
             assert!(
                 bound <= cost * (1.0 + 1e-9),
                 "{queries:?}: bound {bound} against cost {cost}"
