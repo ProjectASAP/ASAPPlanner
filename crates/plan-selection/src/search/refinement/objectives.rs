@@ -185,7 +185,7 @@ pub(in crate::search) fn optimize_objective_candidates_with_options(
                 refinements,
                 &mut rejections,
             ) {
-                Ok(MaterializationOutcome::Implemented(physical)) => Ok(Some(physical)),
+                Ok(MaterializationOutcome::Implemented(physical, _)) => Ok(Some(*physical)),
                 Ok(MaterializationOutcome::RejectedAssignment(reason)) => {
                     if options.keep_every_candidate {
                         stage2_rejected_assignments.push(Stage2RejectedAssignment {

@@ -1031,6 +1031,57 @@ mod tests {
         assert_eq!(result.status, CandidateSearchStatus::Optimal);
     }
 
+    // A size-independent rejection that stops at producers with an exact
+    // output excludes the failing root with every producer below it at once;
+    // the complete closure cut excludes one exact producer per evaluation.
+    #[test]
+    fn query_cut_above_exact_producers_excludes_every_producer_below() {
+        // Five exact sources (0-4); root 5 fails whatever source it reads,
+        // root 6 passes.
+        let mut graph = choices(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        for root in [5, 6] {
+            graph.candidates[root]
+                .producer_requirements
+                .push(ProducerRequirement {
+                    compatible_producers: (0..5)
+                        .map(PhysicalCandidateId)
+                        .collect::<Vec<_>>()
+                        .into(),
+                });
+        }
+        graph.query_roots = vec![QueryRootCandidates {
+            compatible_candidates: vec![PhysicalCandidateId(5), PhysicalCandidateId(6)],
+        }];
+        let rejections = |stop_at_exact: bool| {
+            let mut rejected = 0;
+            let result = search_candidates_with_feedback(&graph, limits(20), None, |selected| {
+                if !selected
+                    .query_roots
+                    .iter()
+                    .any(|root| root.candidate == PhysicalCandidateId(5))
+                {
+                    return Ok(Some(2.0).into());
+                }
+                rejected += 1;
+                let exact = |id: PhysicalCandidateId| id.0 < 5;
+                Ok(CandidateEvaluation {
+                    rejected_queries: vec![RejectedQuerySubgraph::from_query_outputs_above(
+                        selected,
+                        &[0],
+                        |id| stop_at_exact && exact(id),
+                    )?],
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+            assert_eq!(result.incumbent.unwrap().actual_cost, 2.0);
+            assert_eq!(result.status, CandidateSearchStatus::Optimal);
+            rejected
+        };
+        assert_eq!(rejections(true), 1);
+        assert_eq!(rejections(false), 5);
+    }
+
     // Structural node counts must never be reported as monetary lower bounds.
     #[test]
     fn structural_seed_uses_original_bound_and_favors_shared_nodes() {
