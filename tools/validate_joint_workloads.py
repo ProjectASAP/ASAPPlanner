@@ -50,7 +50,7 @@ def run(entry):
         '/usr/bin/time', '-v', '-o', str(timing),
         'timeout', '90s', str(binary),
         '--workload', str(repo / 'tools/dag-viewer' / entry['workload']),
-        '--search', 'candidate-connections', '--milp-time-limit-s', '30',
+        '--milp-time-limit-s', '30',
         '--cost-model', entry['cost_model'], '--enforce-accuracy-guarantees',
         '--deployment-capabilities', json.dumps(entry['deployment_capabilities']),
         '--out', str(plan_path),

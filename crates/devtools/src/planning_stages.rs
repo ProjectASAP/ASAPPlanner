@@ -144,7 +144,6 @@ pub fn run_planning_stages_over(
         models,
         Stage1ToStage3Search {
             max_evaluations: max_combinations,
-            search: asap_plan_selection::SearchAlgorithm::CandidateConnections,
             ..Stage1ToStage3Search::exhaustive()
         },
     )

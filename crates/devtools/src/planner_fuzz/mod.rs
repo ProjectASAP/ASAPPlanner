@@ -44,7 +44,7 @@ use serde_json::{json, Value};
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_physical_asap_optimization::optimize_physical_asap;
 use asap_plan_selection::pass::Stage1ToStage3Search;
-use asap_plan_selection::{select_plan, PlanSelectionSettings, PlanningModels, SearchAlgorithm};
+use asap_plan_selection::{select_plan, PlanSelectionSettings, PlanningModels};
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::sketch::SketchAlgorithm;
 use asap_types::ir::QueryRoot;
@@ -452,10 +452,7 @@ impl Planner {
                 &entries,
                 &data,
                 models,
-                Stage1ToStage3Search {
-                    search: SearchAlgorithm::CandidateConnections,
-                    ..Stage1ToStage3Search::default()
-                },
+                Stage1ToStage3Search::default(),
             ),
         }
         .map_err(|e| e.to_string())?;

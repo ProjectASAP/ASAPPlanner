@@ -184,7 +184,6 @@ async fn facade_plans_match_run_stage1_to_stage3() {
         facade.accepted[&facade.selected],
         selection.accepted[&selection.selected]
     );
-    assert_eq!(facade.search.algorithm, selection.search.algorithm);
     assert_eq!(output.roots(), selected.roots);
 }
 
