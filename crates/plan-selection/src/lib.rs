@@ -1613,11 +1613,11 @@ pub(crate) fn checked_candidate(
             size_independent: true,
         });
     }
-    if let Err(error) = sized.dag.check_raw_data_windows() {
+    if let Some(reason) = raw_data_window_violation(&sized.roots) {
         // The window's shape is the plan's own, which no summary size changes.
         return Err(CheckFailure {
             cause: RejectionCause::UnsupportedRawDataWindow,
-            reason: error.to_string(),
+            reason,
             size_independent: true,
         });
     }
@@ -4847,6 +4847,25 @@ fn raw_data_violation(
             scans.join(", ")
         )
     })
+}
+
+/// Why installation would refuse `roots`' raw-data windows, if it would: the
+/// plan timed and exported as installation times and exports it
+/// (`asap_planner::installable_plan_of`), then
+/// [`PhysicalASAPDAG::check_raw_data_windows`]. A plan that does not time or
+/// export is left to installation, which reports why.
+fn raw_data_window_violation(roots: &[QueryRoot]) -> Option<String> {
+    use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
+    use asap_types::ir::{apply_materialization_timings_to_roots, MaterializationAssignment};
+    let timed =
+        apply_materialization_timings_to_roots(roots, &MaterializationAssignment::default())
+            .ok()?;
+    let exported = compile_physical_asap_workload_with_node_ids(&timed).ok()?;
+    exported
+        .dag
+        .check_raw_data_windows()
+        .err()
+        .map(|error| error.to_string())
 }
 
 /// Why the executor cannot compile `dag`, if it cannot: an exact per-entity

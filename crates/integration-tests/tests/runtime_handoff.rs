@@ -304,8 +304,8 @@ async fn raw_data_windows_of_unsupported_shapes_are_refused() {
                 },
             ))) => assert_eq!(refused, reason, "{query}"),
             Err(error) => {
-                // Joint selection rejects uncompilable candidates before handoff;
-                // a no-plan diagnostic must preserve the concrete refusal reason.
+                // Stage 3 rejects a candidate with an unsupported raw-data
+                // window; its no-plan diagnostic keeps the concrete reason.
                 let diagnostic = error.to_string();
                 assert!(diagnostic.contains(reason), "{query}: {diagnostic}");
                 assert!(diagnostic.contains("raw-data window"), "{diagnostic}");
