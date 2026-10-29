@@ -1179,7 +1179,8 @@ mod tests {
 
     // A summary stored at ingestion time over a window ending at the
     // evaluation and one ending a minute before it cannot be built in one
-    // ingestion run, so the plan is refused, not built wrong.
+    // ingestion run, so the plan is refused, not built wrong. Two stored
+    // sums, one per window, over the same scan are built.
     #[test]
     fn an_ingestion_build_of_windows_at_different_offsets_is_refused() {
         use asap_types::ir::operator::operator_properties::TimeShift;
@@ -1292,6 +1293,31 @@ mod tests {
             )) => assert_eq!(end_offsets_ms, [0, 60_000]),
             other => panic!("{other:?}"),
         }
+        // One stored sum per window over the same scan (a scan shared by
+        // readers of different offsets): each build reads one offset.
+        let sum = |child| {
+            OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+                child,
+                family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+                input: SummaryUpdate::column(ColumnRef::Named("value".into())),
+                reduction: Reduction::by(vec![]),
+                grouping: Default::default(),
+                filter: None,
+            }))
+            .unwrap()
+        };
+        let (now, earlier) = (sum(window(0)), sum(window(60_000)));
+        let mut assignment = MaterializationAssignment::default();
+        assignment.set(&now, Materialization::MatAtIngestion(Medium::Memory));
+        assignment.set(&earlier, Materialization::MatAtIngestion(Medium::Memory));
+        let timed = asap_types::ir::apply_materialization_timings_to_roots(
+            &[QueryRoot::Operator(now), QueryRoot::Operator(earlier)],
+            &assignment,
+        )
+        .unwrap();
+        let dag = asap_types::ir::physical_export::compile_physical_asap_workload(&timed).unwrap();
+        let (stored, _) = runtime_inputs_of(&dag, &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(stored.len(), 2);
     }
 
     /// Unrestricted summaries become the executor's families; a caller's

@@ -60,7 +60,9 @@ pub enum CandidateOrigin {
     /// A top-k read from another group's ranking.
     TopKReuse,
     /// Its metric's scans widened to a shared label set, read through a
-    /// `Project` (scan widening).
+    /// `Project` (scan widening); or a windowed read of one scan of its
+    /// source shared with reads of other predicates and columns, through its
+    /// own window, a `Filter` and a `Project` (shared scans).
     WidenedScans,
 }
 

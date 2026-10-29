@@ -100,6 +100,7 @@ fn expand_with_state_index(
         return Err(StateGroupExpansionError::CyclicDependencies);
     }
     super::rules::scan_labels::add_scan_label_candidates(&mut memo, deadline)?;
+    super::rules::shared_scans::add_shared_scan_candidates(&mut memo, deadline)?;
     super::rules::summary_inputs::factor_summary_inputs(&mut memo, deadline)?;
     super::rules::topk::add_topk_candidates(&mut memo, deadline)?;
     super::rules::finer_aggregate::add_finer_aggregate_candidates(&mut memo, deadline)?;
@@ -660,7 +661,13 @@ mod tests {
         let count = original.groups.len();
         let expanded = expand_concrete_summary_state_groups(original).unwrap();
         assert!(expanded.state_groups.is_empty());
-        assert_eq!(expanded.memo.groups.len(), count);
+        // Only the shared read of both jobs' samples is added; no build.
+        assert!(expanded.memo.groups[count..].iter().all(|group| matches!(
+            group.node.non_asap(),
+            Some(
+                NonASAPOp::Scan { .. } | NonASAPOp::TimeShift { .. } | NonASAPOp::TimeRange { .. }
+            )
+        )));
     }
 
     fn with_local_panes(mut memo: CandidateMemo, grids: &[u64]) -> CandidateMemo {
