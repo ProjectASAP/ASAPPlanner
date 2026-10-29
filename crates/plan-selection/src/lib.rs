@@ -1003,9 +1003,6 @@ pub struct SearchReport {
     /// candidate costs the same, under cost model 3, or for a combination
     /// of components.
     pub runner_up_cost_per_second: Option<f64>,
-    /// The joint candidate selection engine used for this run.
-    #[serde(default)]
-    pub algorithm: SearchAlgorithm,
     /// The selected plan's cost per second (Stage 3's exact cost); `None`
     /// when no plan was selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1122,18 +1119,6 @@ pub struct CandidateConnectionReport {
     /// Up to eight representative failures, with bounded reason lengths.
     #[serde(default)]
     pub validation_rejection_examples: Vec<String>,
-}
-
-/// How the Stage 1 to Stage 3 search explores the plans
-/// ([`Stage1ToStage3Search::search`]).
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
-)]
-#[serde(rename_all = "kebab-case")]
-pub enum SearchAlgorithm {
-    /// Joint physical candidate activation and connection selection.
-    #[default]
-    CandidateConnections,
 }
 
 #[derive(Debug, Error)]

@@ -12,7 +12,7 @@ use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
     run_stage1_to_stage3_with, AccuracyModel, BuiltinAccuracyModel, ClusterLimits,
     ClusterObjective, CostModel, PlanSelectionSettings, PlanningModels, ResourceUnitCost,
-    SearchAlgorithm, Stage1ToStage3Run, Stage1ToStage3Search,
+    Stage1ToStage3Run, Stage1ToStage3Search,
 };
 use asap_types::ir::properties::{AccuracyGuarantee, AccuracyTarget};
 use asap_types::ir::QueryRoot;
@@ -84,7 +84,6 @@ fn run(
         data,
         models,
         Stage1ToStage3Search {
-            search: SearchAlgorithm::CandidateConnections,
             exhaustive,
             keep_every_candidate: exhaustive,
             milp_time_limit_ms: Some(budget_ms),

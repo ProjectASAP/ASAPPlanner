@@ -25,7 +25,6 @@
 // four planner stages, using the joint candidate-connection engine. The default
 // document keeps the selected plan; `--exhaustive` archives evaluated plans
 // and rejections from the same finite catalog, not an independent optimizer.
-// `--search candidate-connections` explicitly names this engine.
 // `--milp-time-limit-s` bounds planning in either mode; a timeout reports a
 // partial result, never an optimality claim for unexplored candidates.
 // Unlike `plan_installable`'s default settings, Stage 3 ignores accuracy
@@ -285,8 +284,8 @@ use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
     large_peak_memory_warning, ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCosts,
-    PlanSelectionSettings, PlanningModels, Rejection, ResourceUnitCost, ResourceUsage,
-    SearchAlgorithm, Selection, SelectionError, Stage1ToStage3Search,
+    PlanSelectionSettings, PlanningModels, Rejection, ResourceUnitCost, ResourceUsage, Selection,
+    SelectionError, Stage1ToStage3Search,
 };
 use asap_planner::installable_plan_of;
 use asap_types::ir::flat::{flatten, FlatDag, FlatNode, NodeId};
@@ -305,9 +304,8 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>] [--series-count <u64>] [--rows-per-second <f64>] [--rows-held <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
-[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search candidate-connections] [--milp-time-limit-s <f64>] [--max-displayed <n>] \
-[--no-memo] [--max-memo-candidates <n>] [--memo-enumeration-limit <n>] [--max-enumerated <n>] [--price-enumerated <n>] --out <file>\n\
---search candidate-connections is the default search.";
+[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>]] [--milp-time-limit-s <f64>] [--max-displayed <n>] \
+[--no-memo] [--max-memo-candidates <n>] [--memo-enumeration-limit <n>] [--max-enumerated <n>] [--price-enumerated <n>] --out <file>";
 
 /// Default evaluator-assignment budget for an exhaustive archive run.
 const MAX_COMBINATIONS: usize = 10_000;
@@ -395,9 +393,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut plan_selection_settings_path: Option<String> = None;
     let mut enforce_accuracy_guarantees = false;
     let mut exhaustive = false;
-    // `--search` explicitly names the candidate-connection engine;
     // `--milp-time-limit-s` limits the MILP search.
-    let mut search_algorithm: Option<SearchAlgorithm> = None;
     let mut milp_time_limit_ms: Option<u64> = None;
     let mut max_combinations_given = false;
     let mut write_memo = true;
@@ -481,16 +477,6 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--price-enumerated" => {
                 memo_caps.choices_to_price = value()?.parse().map_err(|e| format!("{e}"))?
             }
-            "--search" => {
-                search_algorithm = Some(match value()?.as_str() {
-                    "candidate-connections" => SearchAlgorithm::CandidateConnections,
-                    other => {
-                        return Err(
-                            format!("--search {other}: expected candidate-connections").into()
-                        )
-                    }
-                })
-            }
             "--milp-time-limit-s" => {
                 let seconds: f64 = value()?
                     .parse()
@@ -519,12 +505,6 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     if max_combinations_given && !exhaustive {
         return Err("--max-combinations limits the exhaustive search: it needs --exhaustive (bounds evaluated assignments)".into());
     }
-    if exhaustive && search_algorithm.is_some() {
-        return Err(
-            "--search picks the default search's algorithm: drop it with --exhaustive".into(),
-        );
-    }
-    let search_algorithm = search_algorithm.unwrap_or(SearchAlgorithm::CandidateConnections);
     if plan_selection_settings_path.is_some()
         && (cost_model.is_some()
             || cluster_memory.is_some()
@@ -756,7 +736,6 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         &data,
         models,
         Stage1ToStage3Search {
-            search: search_algorithm,
             exhaustive,
             keep_every_candidate: exhaustive,
             max_evaluations: exhaustive.then_some(max_combinations),
@@ -807,9 +786,10 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     }
     document["workload"]["data_workload"] =
         serde_json::to_value(&data).map_err(|e| e.to_string())?;
-    document["search"] = json!(match (exhaustive, search_algorithm) {
-        (true, _) => "exhaustive",
-        (false, SearchAlgorithm::CandidateConnections) => "candidate-connections",
+    document["search"] = json!(if exhaustive {
+        "exhaustive"
+    } else {
+        "candidate-connections"
     });
     document["accuracy_guarantees"] = json!(if enforce_accuracy_guarantees {
         "enforced"

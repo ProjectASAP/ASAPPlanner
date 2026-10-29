@@ -504,10 +504,6 @@ fn default_search_and_installation_validate_the_nine_query_workload() {
     );
     let report = report.unwrap();
     assert!(report.queries_accepted_without_guarantee.is_empty());
-    assert_eq!(
-        report.search.algorithm,
-        asap_plan_selection::SearchAlgorithm::CandidateConnections
-    );
     assert!(report
         .cost_per_second
         .is_some_and(|cost| cost.is_finite() && cost > 0.0));
@@ -1099,8 +1095,6 @@ fn milp_final_bound_keeps_the_bound_an_earlier_round_proved() {
         "--cost-model",
         "aws-fargate-us-east-1",
         "--enforce-accuracy-guarantees",
-        "--search",
-        "candidate-connections",
     ]);
     std::fs::remove_file(&path).unwrap();
     let selection = &document["stage3_plan_selection"];
@@ -1477,10 +1471,6 @@ fn check_workload_example(root: &std::path::Path, example: &Value) {
     };
     for table in &tables {
         args.extend(["--table", table.as_str()]);
-    }
-    let search = example.get("search").map(|s| s.as_str().unwrap());
-    if let Some(search) = search {
-        args.extend(["--search", search]);
     }
     let document = document_of(&args);
     let committed: Value = serde_json::from_str(
@@ -1905,26 +1895,26 @@ fn scans_projecting_different_labels_are_shared() {
     );
 }
 
-/// The public engine is candidate-connections; retired selectors are rejected.
+/// The default search is the candidate-connection search; its report has
+/// no legacy route.
 #[test]
-fn search_flag_picks_the_search_algorithm() {
-    let document = document_of(&["--promql", "sum(m)", "--search", "candidate-connections"]);
+fn default_search_reports_candidate_connections() {
+    let document = document_of(&["--promql", "sum(m)"]);
     assert_eq!(document["search"], "candidate-connections");
     let report = &document["stage3_plan_selection"]["search"];
     assert!(report["candidate_connections"].is_object(), "{report}");
     assert!(report.get("routed_to_legacy").is_none());
+    assert!(report.get("algorithm").is_none(), "{report}");
 }
 
-/// Unknown and retired engine names cannot silently fall back.
+/// There is one search: `--search` is not an option, so no engine name,
+/// current or retired, is accepted.
 #[test]
-fn search_flag_is_checked() {
-    for engine in ["legacy", "memo-milp", "memo-brute-force", "milp"] {
+fn search_flag_is_rejected() {
+    for engine in ["candidate-connections", "legacy", "memo-milp"] {
         let (status, stderr) = failure(&["--promql", "sum(m)", "--search", engine]);
         assert_eq!(status, Some(2));
-        assert!(
-            stderr.contains("expected candidate-connections"),
-            "{stderr}"
-        );
+        assert!(stderr.contains("unknown argument --search"), "{stderr}");
     }
 }
 
@@ -1959,8 +1949,6 @@ fn the_memo_search_document_names_the_selected_logical_candidate() {
         "quantile_over_time(0.9, data[5m])",
         "--sample-interval-ms",
         "15000",
-        "--search",
-        "candidate-connections",
     ]);
     assert_eq!(document["search"], "candidate-connections");
     let logical: HashSet<&str> = document["stage1_logical_asap_optimization"]["candidates"]

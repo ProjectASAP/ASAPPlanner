@@ -16,7 +16,7 @@ use asap_types::workload::{DataWorkload, QueryLanguage, QueryWorkloadEntry};
 
 use crate::search::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
 use crate::PlanningModels;
-use crate::{SearchAlgorithm, Selection, SelectionError};
+use crate::{Selection, SelectionError};
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     generate_per_computation_candidates_with_memo, PerComputationCandidateError,
     PerComputationCandidates,
@@ -128,8 +128,6 @@ pub struct Stage1ToStage3Search {
     /// Traverse all generated assignments, subject to the planning budgets.
     /// The report distinguishes complete traversal from a budget stop.
     pub exhaustive: bool,
-    /// The joint candidate selection engine.
-    pub search: SearchAlgorithm,
     /// Cooperative budget for candidate generation, solving and validation.
     /// Defaults to 30 seconds. A single evaluator call may exceed the remaining
     /// budget; a validated incumbent is retained, without claiming optimality.
@@ -144,17 +142,8 @@ impl Stage1ToStage3Search {
         Self {
             keep_every_candidate: true,
             exhaustive: true,
-            search: SearchAlgorithm::CandidateConnections,
             milp_time_limit_ms: None,
             max_evaluations: None,
-        }
-    }
-
-    /// The default search run with `algorithm`.
-    pub fn with_algorithm(algorithm: SearchAlgorithm) -> Self {
-        Self {
-            search: algorithm,
-            ..Self::default()
         }
     }
 }
@@ -249,13 +238,7 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
         local_candidate_generation_ms,
         &mut archive,
     );
-    let mut run = memo_run(
-        pruned,
-        found,
-        entries,
-        data,
-        SearchAlgorithm::CandidateConnections,
-    );
+    let mut run = memo_run(pruned, found, entries, data);
     run.stage1_logical_asap_optimization = archive.logical;
     run.stage2_physical_asap_optimization = archive.physical;
     run.stage2_pruned = archive.pruned;
@@ -263,7 +246,7 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
     run
 }
 
-/// The run of a memo search (`algorithm`) over `per_computation`, pruned
+/// The run of a memo search over `per_computation`, pruned
 /// for the deployment, that `found` the selection, its physical candidate
 /// and its logical roots, or why none is valid.
 fn memo_run<Id: Clone + std::fmt::Debug>(
@@ -271,14 +254,10 @@ fn memo_run<Id: Clone + std::fmt::Debug>(
     found: crate::search::pipeline::PlanSearchResult,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
-    algorithm: SearchAlgorithm,
 ) -> Stage1ToStage3Run<Id> {
     let combinations = per_computation.combinations();
     let (selection, selected, logical) = match found {
-        Ok((mut selection, selected, logical)) => {
-            selection.search.algorithm = algorithm;
-            (Ok(selection), Some(selected), Some(logical))
-        }
+        Ok((selection, selected, logical)) => (Ok(selection), Some(selected), Some(logical)),
         Err(error) => (Err(error), None, None),
     };
     let selected_logical = logical

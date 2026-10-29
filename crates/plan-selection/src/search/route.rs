@@ -1301,7 +1301,7 @@ fn selected_logical_roots(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{run_stage1_to_stage3_with, SearchAlgorithm};
+    use crate::run_stage1_to_stage3_with;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{
@@ -1324,7 +1324,6 @@ mod tests {
                 models: PlanningModels::builtin(),
             },
             Stage1ToStage3Search {
-                search: SearchAlgorithm::CandidateConnections,
                 milp_time_limit_ms: Some(1),
                 ..Default::default()
             },
@@ -1928,15 +1927,11 @@ mod tests {
             PlanningModels::builtin(),
             Stage1ToStage3Search {
                 milp_time_limit_ms: Some(10_000),
-                ..Stage1ToStage3Search::with_algorithm(SearchAlgorithm::CandidateConnections)
+                ..Default::default()
             },
         )
         .unwrap();
         let selection = run.stage3_plan_selection.unwrap();
-        assert_eq!(
-            selection.search.algorithm,
-            SearchAlgorithm::CandidateConnections
-        );
         let report = selection.search.candidate_connections.unwrap();
         assert!(report.catalog_scope.contains("finite capacity"));
         assert!(report.physical_configurations >= report.immediate_candidates);
@@ -2003,7 +1998,7 @@ mod tests {
             models,
             Stage1ToStage3Search {
                 milp_time_limit_ms: Some(10_000),
-                ..Stage1ToStage3Search::with_algorithm(SearchAlgorithm::CandidateConnections)
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2044,15 +2039,11 @@ mod tests {
             Stage1ToStage3Search {
                 exhaustive: true,
                 keep_every_candidate: true,
-                ..Stage1ToStage3Search::with_algorithm(SearchAlgorithm::CandidateConnections)
+                ..Default::default()
             },
         )
         .unwrap();
         let selection = run.stage3_plan_selection.unwrap();
-        assert_eq!(
-            selection.search.algorithm,
-            SearchAlgorithm::CandidateConnections
-        );
         assert_eq!(run.stage1_logical_asap_optimization.len(), 1);
         assert_eq!(run.stage2_physical_asap_optimization.len(), 1);
         assert_eq!(
