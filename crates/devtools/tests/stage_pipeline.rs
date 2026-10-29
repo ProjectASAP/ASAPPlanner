@@ -62,6 +62,18 @@ fn generate_bounded_example(example: &str, extra: &[&str]) -> Value {
     document
 }
 
+/// The document's Stage 2 candidates the search built, without the other
+/// materialization assignments listed after selection.
+fn searched_physical(document: &Value) -> Vec<Value> {
+    document["stage2_physical_asap_optimization"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c.get("materialization_alternative").is_none())
+        .cloned()
+        .collect()
+}
+
 fn validated_dag(value: &Value, queries: usize) {
     let dag: FlatDag = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(dag.roots.len(), queries);
@@ -117,9 +129,7 @@ fn example1_document_preserves_workload_and_validates_archived_plans() {
         }
     }
 
-    let physical = document["stage2_physical_asap_optimization"]["candidates"]
-        .as_array()
-        .unwrap();
+    let physical = searched_physical(&document);
     let pruned = document["stage2_physical_asap_optimization"]["pruned"]
         .as_array()
         .unwrap();
@@ -132,7 +142,7 @@ fn example1_document_preserves_workload_and_validates_archived_plans() {
         .map(|p| p["from_logical"].as_str().unwrap())
         .collect();
     assert_eq!(sources, composed);
-    for candidate in physical {
+    for candidate in &physical {
         assert!(candidate.get("cost").is_none(), "Stage 2 has no cost");
         let dag: PhysicalASAPDAG = serde_json::from_value(candidate["dag"].clone()).unwrap();
         assert_eq!(dag.roots.len(), queries);
@@ -189,9 +199,7 @@ fn display_cap_is_recorded_and_keeps_the_selection() {
                 document["stage3_plan_selection"]
             )
         });
-    let physical = document["stage2_physical_asap_optimization"]["candidates"]
-        .as_array()
-        .unwrap();
+    let physical = searched_physical(&document);
     assert_eq!(physical.len(), 1);
     assert_eq!(physical[0]["id"], selected);
     assert!(logical["candidates"]
@@ -463,9 +471,7 @@ fn default_search_and_installation_validate_the_nine_query_workload() {
     validated_dag(&document["stage0_query_language_frontends"]["dag"], queries);
     let selection = &document["stage3_plan_selection"];
     let selected = selection["selected"].as_str().unwrap();
-    let physical = document["stage2_physical_asap_optimization"]["candidates"]
-        .as_array()
-        .unwrap();
+    let physical = searched_physical(&document);
     assert_eq!(physical.len(), 1);
     assert_eq!(physical[0]["id"], selected);
     let dag: PhysicalASAPDAG = serde_json::from_value(physical[0]["dag"].clone()).unwrap();
@@ -1514,9 +1520,7 @@ fn promql_queries_carry_their_sampled_data_workload() {
 fn display_cap_shows_the_selected_then_valid_cheapest_then_each_cause() {
     let document = generate_example("planner-layering-3a", &["--max-displayed", "6"]);
     let selection = &document["stage3_plan_selection"];
-    let physical = document["stage2_physical_asap_optimization"]["candidates"]
-        .as_array()
-        .unwrap();
+    let physical = searched_physical(&document);
     assert_eq!(physical.len(), 6);
     let ids: HashSet<&str> = physical.iter().map(|p| p["id"].as_str().unwrap()).collect();
     assert!(ids.contains(selection["selected"].as_str().unwrap()));
@@ -2383,4 +2387,73 @@ fn composed_selected_choice_is_the_selected_stage1_dag() {
             );
         }
     }
+}
+
+/// After selection, the selected plan's Stage 1 candidate lists its other
+/// materialization assignments, the search's own first, each judged by
+/// Stage 3 with a cost or a rejection; `--max-physical-per-logical` caps the
+/// list, and the selection is the same either way.
+#[test]
+fn physical_candidates_of_a_logical_candidate_are_listed_and_capped() {
+    let queries = [
+        "--promql",
+        "sum(rate(m[1m]))",
+        "--promql",
+        "max(rate(m[1m]))",
+    ];
+    let listed = |cap: Option<&str>| {
+        let mut args = queries.to_vec();
+        if let Some(cap) = cap {
+            args.extend(["--max-physical-per-logical", cap]);
+        }
+        document_of(&args)
+    };
+    let full = listed(None);
+    let selected = full["stage3_plan_selection"]["selected"].as_str().unwrap();
+    let stage2 = &full["stage2_physical_asap_optimization"];
+    let candidates = stage2["candidates"].as_array().unwrap();
+    let logical = candidates[0]["from_logical"].as_str().unwrap();
+    // The shared rate accumulator and its finalization: each NotMaterialized
+    // or built once per evaluation (MatAtQuery), 2 × 2 assignments.
+    assert_eq!(
+        stage2["assignments_per_logical"][logical],
+        serde_json::json!({ "count": 4, "listed": 4, "capped": false })
+    );
+    assert_eq!(candidates.len(), 4);
+    assert_eq!(candidates[0]["id"], selected);
+    assert!(candidates[0].get("materialization_alternative").is_none());
+    let selected_cost = full["stage3_plan_selection"]["costs"][selected]["cost_per_second"]
+        .as_f64()
+        .unwrap();
+    // The search's own candidate, judged alone, costs what selection said.
+    assert_eq!(
+        candidates[0]["cost_per_second"].as_f64(),
+        Some(selected_cost)
+    );
+    for (k, candidate) in candidates.iter().enumerate().skip(1) {
+        assert_eq!(candidate["id"], format!("{selected}-m{k}"));
+        assert_eq!(candidate["from_logical"], logical);
+        assert_eq!(candidate["materialization_alternative"], true);
+        assert!(candidate["dag"]["nodes"].is_array());
+        assert!(candidate["materialization_label"].is_string());
+        assert!(candidate["cost_per_second"].as_f64().unwrap() >= selected_cost);
+        assert_eq!(candidate["rejection"], Value::Null);
+        assert_eq!(candidate["cheaper_than_selected"], false);
+    }
+    assert!(candidates
+        .iter()
+        .any(|c| c["materialization_label"] == "nothing materialized"));
+
+    let capped = listed(Some("2"));
+    let stage2 = &capped["stage2_physical_asap_optimization"];
+    assert_eq!(
+        stage2["assignments_per_logical"][logical],
+        serde_json::json!({ "count": 4, "listed": 2, "capped": true })
+    );
+    assert_eq!(stage2["candidates"].as_array().unwrap().len(), 2);
+    assert_eq!(stage2["candidates"][0]["id"], selected);
+    assert_eq!(
+        capped["stage3_plan_selection"]["selected"],
+        full["stage3_plan_selection"]["selected"]
+    );
 }

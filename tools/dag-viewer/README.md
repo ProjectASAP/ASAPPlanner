@@ -76,6 +76,17 @@ To run it, see [RUNNING.md](RUNNING.md).
   for the newest), a `TimeRange` of one pane and the pane's build with its
   window (`window t−40 s … t−20 s`), and clicking a pane folds them back.
   This is display only: the document keeps the chain.
+- **Physical candidates of the Stage 1 candidate**, in the Stage 2 lane
+  above its DAG: one row per physical candidate of the chosen Stage 1
+  candidate, the search's own first, then its other materialization
+  assignments (`stage_pipeline` lists them after selection, at most
+  `--max-physical-per-logical`, default 64). Each row shows its id, what it
+  materializes (`ingestion time: Kll for Q1, 5 × 1m panes`, or `nothing
+  materialized`), its cost per second or `✗ invalid` with the reason, and
+  `✓ selected` on the selected plan. A valid row cheaper than the selected
+  plan is red. The header says how many assignments there are and how many
+  are listed. Clicking a row draws that candidate in the Stage 2 lane. The
+  other assignments are not Stage 3 rows: the search did not judge them.
 - **Enumerated DAGs**, between the Stage 0 and Stage 1 lanes, shown only
   when the document has `memo.enumeration`: the complete candidate DAGs the
   memo stands for. The header counts them after each memo step (`Stage 0: 1 ·
@@ -360,6 +371,17 @@ are ignored, `stage_pipeline`'s default.
   physical candidates: the selected one, the other valid ones cheapest
   first, then the rejected ones taking each cause in turn, and the Stage 1
   candidates they come from.
+- After selection, each shown Stage 2 candidate's Stage 1 candidate is
+  implemented with its other materialization assignments (Stage 2's options
+  for each build, as the search's candidate inventory encodes them), at most
+  `--max-physical-per-logical` per Stage 1 candidate, the search's own
+  first; each other one is `<id>-m<k>` with `materialization_alternative:
+  true`. Every listed candidate has `materialization_label` and, judged
+  alone by Stage 3 on the selected plan's calibration scale,
+  `cost_per_second`, `rejection` and `rejection_reason` (null when valid)
+  and `cheaper_than_selected`; `assignments_per_logical` gives each Stage 1
+  candidate's `count`, `listed` and `capped`. Display only: selection never
+  reads them.
 - When Pass 1 fails, Stage 1 has `error` and no candidates. When selection
   fails, `selected` is null, with the rejections or with `error`.
 - `memo` (left out with `--no-memo`) is the memo the search built, from

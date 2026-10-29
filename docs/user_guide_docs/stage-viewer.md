@@ -54,7 +54,7 @@ From top to bottom:
 | Stage 3 · plans by cost | The selected plan (`✓ selected`) and the plans it beat: valid but costlier, or `✗ invalid` with the reason. Click a plan to draw it in the lanes. |
 | Stage 0 lane | The queries as lowered by the frontends. Data flows bottom-up. |
 | Enumerated DAGs | The complete candidate DAGs the memo stands for, one choice of candidate per group. The header counts them after each step. Each row names the groups where it differs from the selected plan. Click a row to draw that DAG in the Stage 1 lane; the Stage 2 lane is then empty, since an enumerated DAG has no physical plan. |
-| Stage 1 and Stage 2 lanes | The logical candidate, and the physical candidate with each node's timing and cost. |
+| Stage 1 and Stage 2 lanes | The logical candidate, and the physical candidate with each node's timing and cost. The Stage 2 lane lists the logical candidate's physical candidates, one per materialization choice, each with its cost or why it is invalid; click one to draw it. |
 | Materialized views | What a deployment would install for the selected plan, one row per Stage 2 node. |
 | Memo | The memo after each step, one tab per step (Stage 0, Pass 1 and two Pass 2 tabs). Each box is a memo group, with its candidates inside. A double border with `✚ new` marks candidates that step added. On the last tab, the selected plan's candidates are green. A group with many candidates shows one count per origin; click a count to list them. |
 

@@ -46,12 +46,25 @@
 //     candidates Pass 1 pruned per target, with reasons). A candidate that cannot be
 //     composed carries `error` instead of `dag`;
 //   - stage2_physical_asap_optimization: one physical candidate per composed logical
-//     candidate (operator implementation; every sub-DAG NotMaterialized), no
-//     cost; a composed logical candidate Stage 2 cannot implement is listed
-//     under `pruned` with the reason. The document shows at most
-//     `--max-displayed` (default 64) physical candidates: the selected one,
-//     the other valid ones cheapest first, then the rejected ones taking
-//     each cause in turn;
+//     candidate, as the search built it; a composed logical candidate Stage 2
+//     cannot implement is listed under `pruned` with the reason. The
+//     document shows at most `--max-displayed` (default 64) of these: the
+//     selected one, the other valid ones cheapest first, then the rejected
+//     ones taking each cause in turn. After selection, and for display
+//     only, each shown one's logical candidate is also implemented with
+//     every other materialization assignment Stage 2 offers its builds
+//     (the options the search's candidate inventory encodes; without raw
+//     data retained, none that scans raw data at query time), at most
+//     `--max-physical-per-logical` (default 64) listed per logical
+//     candidate, the search's own first; each other one is a candidate
+//     `<id>-m<k>` with `materialization_alternative: true`. Every listed
+//     candidate has its `materialization_label` and, judged alone by Stage
+//     3 on the selected plan's calibration scale
+//     (`memo_pricing::price_physical_plans`), its `cost_per_second`, its
+//     `rejection` and `rejection_reason` (null when valid) and
+//     `cheaper_than_selected`. `assignments_per_logical` maps each such
+//     logical candidate to `count` (its assignments), `listed` and
+//     `capped`;
 //   - stage3_plan_selection: the selected candidate, chosen among all candidates;
 //     the shown candidates' costs and accepted accuracy (per query: the
 //     target's metric or null when not set, the accepted guarantee's
@@ -259,8 +272,10 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_devtools::candidate_labels::{candidate_labels, computation_label, query_of_each_target};
-use asap_devtools::memo_pricing::{price_choices, SelectedBaseline};
+use asap_devtools::candidate_labels::{
+    candidate_labels, computation_label, physical_label, query_of_each_target,
+};
+use asap_devtools::memo_pricing::{price_choices, price_physical_plans, SelectedBaseline};
 use asap_devtools::planner_layering_examples::{
     example1, example2, pattern_a, pattern_b, PatternARecurrence, SHARED_ROWS_PER_SECOND,
 };
@@ -277,6 +292,10 @@ use asap_logical_asap_optimization::per_computation_candidates::{
     ComputationCandidate, PerComputationCandidates, PruneReason,
 };
 use asap_logical_asap_optimization::DeploymentCapabilities;
+use asap_physical_asap_optimization::{
+    optimize_physical_asap, optimize_physical_asap_without_query_time_raw_scans,
+    PhysicalWorkloadPlan,
+};
 use asap_plan_selection::{
     large_peak_memory_warning, ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCosts,
     PlanSelectionSettings, PlanningModels, Rejection, ResourceUnitCost, ResourceUsage,
@@ -300,7 +319,7 @@ const USAGE: &str =
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
 [--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search candidate-connections] [--milp-time-limit-s <f64>] [--max-displayed <n>] \
-[--no-memo] [--max-memo-candidates <n>] [--memo-enumeration-limit <n>] [--max-enumerated <n>] [--price-enumerated <n>] --out <file>\n\
+[--max-physical-per-logical <n>] [--no-memo] [--max-memo-candidates <n>] [--memo-enumeration-limit <n>] [--max-enumerated <n>] [--price-enumerated <n>] --out <file>\n\
 --search candidate-connections is the default search.";
 
 /// Default evaluator-assignment budget for an exhaustive archive run.
@@ -344,10 +363,17 @@ fn document_of(
     entries: &[QueryWorkloadEntry],
     result: Result<PlanningStagesRun, PlanningStagesError>,
     max_displayed: usize,
+    listing: &PhysicalListing<'_>,
 ) -> Result<Value, Failure> {
     let queries = with_default_metrics(queries, roots);
     match result {
-        Ok(run) => Ok(stage_pipeline(queries, entries, &run, max_displayed)),
+        Ok(run) => Ok(stage_pipeline(
+            queries,
+            entries,
+            &run,
+            max_displayed,
+            listing,
+        )),
         Err(PlanningStagesError::Pass1(error)) => Ok(json!({
             "format": "asap-stage-pipeline/v1",
             "workload": { "queries": queries },
@@ -379,6 +405,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         (None::<u64>, None::<f64>, None::<u64>);
     let mut accuracy_metric: Option<AccuracyMetric> = None;
     let mut max_displayed = 64usize;
+    let mut max_physical_per_logical = 64usize;
     let mut max_combinations = MAX_COMBINATIONS;
     let mut cost_model: Option<String> = None;
     let (mut cluster_memory, mut cluster_disk, mut cluster_cores) = (None, None, None);
@@ -438,6 +465,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--rows-per-second" => rows_per_second = Some(number(value()?)?),
             "--rows-held" => rows_held = Some(value()?.parse().map_err(|e| format!("{e}"))?),
             "--max-displayed" => max_displayed = value()?.parse().map_err(|e| format!("{e}"))?,
+            "--max-physical-per-logical" => {
+                max_physical_per_logical = value()?.parse().map_err(|e| format!("{e}"))?
+            }
             "--max-combinations" => {
                 max_combinations = value()?.parse().map_err(|e| format!("{e}"))?;
                 max_combinations_given = true;
@@ -795,7 +825,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             };
             memo_json(steps, &memo_caps, &pricing)
         });
-    let mut document = document_of(described, &roots, &entries, result, max_displayed)?;
+    let listing = PhysicalListing {
+        data: &data,
+        models,
+        max_per_logical: max_physical_per_logical,
+    };
+    let mut document = document_of(described, &roots, &entries, result, max_displayed, &listing)?;
     if let Some(memo) = memo {
         document["memo"] = memo;
     }
@@ -981,6 +1016,7 @@ fn stage_pipeline(
     entries: &[QueryWorkloadEntry],
     run: &PlanningStagesRun,
     max_displayed: usize,
+    listing: &PhysicalListing<'_>,
 ) -> Value {
     // The display keeps `max_displayed` physical candidates (plan selection
     // has already ranked all of them): the selected one, the other valid
@@ -1023,12 +1059,62 @@ fn stage_pipeline(
             }
         })
         .collect();
-    let physical: Vec<_> = run
+    // Each shown candidate, then the other materialization assignments of
+    // its logical candidate (display only: selection is already done).
+    let selected = run
+        .stage3_plan_selection
+        .as_ref()
+        .ok()
+        .map(SelectedBaseline::of);
+    let mut physical = Vec::new();
+    let mut assignments_per_logical = serde_json::Map::new();
+    for p in run
         .stage2_physical_asap_optimization
         .iter()
         .filter(|p| shown_physical.contains(p.id.as_str()))
-        .map(|p| json!({ "id": p.id, "from_logical": p.from_logical, "display_name": labels[&p.id], "dag": p.dag }))
-        .collect();
+    {
+        let logical_roots = run
+            .stage1_logical_asap_optimization
+            .iter()
+            .find(|c| c.id == p.from_logical)
+            .and_then(|c| c.roots.as_ref().ok());
+        let (alternatives, count) = match logical_roots {
+            Some(roots) => materialization_alternatives(p, roots, entries, listing),
+            None => Ok((Vec::new(), 1)),
+        }
+        .unwrap_or_else(|error| {
+            assignments_per_logical.insert(p.from_logical.clone(), json!({ "error": error }));
+            (Vec::new(), 1)
+        });
+        let listed: Vec<PhysicalWorkloadPlan> =
+            std::iter::once(p.clone()).chain(alternatives).collect();
+        let priced = price_physical_plans(&listed, entries, listing.data, listing.models, selected);
+        let entry = assignments_per_logical
+            .entry(p.from_logical.clone())
+            .or_insert_with(|| json!({}));
+        entry["count"] = json!(count);
+        entry["listed"] = json!(listed.len());
+        entry["capped"] = json!(listed.len() < count);
+        let logical_label = &labels[&p.from_logical];
+        for (k, (plan, priced)) in listed.iter().zip(priced).enumerate() {
+            let materialized = physical_label("", plan);
+            let mut value = json!({
+                "id": plan.id,
+                "from_logical": plan.from_logical,
+                "display_name": physical_label(logical_label, plan),
+                "materialization_label": materialized.strip_prefix(" · ").unwrap_or("nothing materialized"),
+                "dag": plan.dag,
+                "cost_per_second": priced.cost_per_second,
+                "rejection": priced.rejection,
+                "rejection_reason": priced.rejection_reason,
+                "cheaper_than_selected": priced.cheaper_than_selected,
+            });
+            if k > 0 {
+                value["materialization_alternative"] = json!(true);
+            }
+            physical.push(value);
+        }
+    }
     let pruned: Vec<_> = run
         .stage2_pruned
         .iter()
@@ -1061,14 +1147,76 @@ fn stage_pipeline(
         "stage0_query_language_frontends": { "dag": export(&run.stage0_query_language_frontends) },
         "stage1_logical_asap_optimization": {
             "combinations": run.stage1_logical_asap_optimization.len(),
-            "capped": physical.len() < run.stage2_physical_asap_optimization.len()
+            "capped": shown_physical.len() < run.stage2_physical_asap_optimization.len()
                 || candidates.len() < run.stage1_logical_asap_optimization.len(),
             "pass1_pruned": pass1_pruned_json(&run.stage1_pass1_per_computation),
             "candidates": candidates,
         },
-        "stage2_physical_asap_optimization": { "candidates": physical, "pruned": pruned },
+        "stage2_physical_asap_optimization": {
+            "candidates": physical,
+            "pruned": pruned,
+            "assignments_per_logical": assignments_per_logical,
+        },
         "stage3_plan_selection": stage3,
     })
+}
+
+/// What listing each shown logical candidate's materialization assignments
+/// needs: the run's data workload and models, and how many to list.
+struct PhysicalListing<'a> {
+    data: &'a DataWorkload,
+    models: PlanningModels<'a>,
+    max_per_logical: usize,
+}
+
+/// The materialization assignments of `logical_roots` (the logical
+/// candidate the search's `searched` implements) other than `searched`'s,
+/// as Stage 2 enumerates them, at most `max_per_logical - 1` named
+/// `<searched id>-m<k>`, with how many assignments there are in all
+/// (`searched`'s included). Without raw data retained, an assignment that
+/// scans raw data at query time is not one: the search's inventory offers
+/// none.
+fn materialization_alternatives(
+    searched: &PhysicalWorkloadPlan,
+    logical_roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
+    listing: &PhysicalListing<'_>,
+) -> Result<(Vec<PhysicalWorkloadPlan>, usize), String> {
+    let deployment = listing.models.deployment_capabilities;
+    let every = if deployment.raw_data_retained {
+        optimize_physical_asap(
+            &searched.from_logical,
+            logical_roots,
+            entries,
+            listing.data,
+            deployment,
+        )
+    } else {
+        optimize_physical_asap_without_query_time_raw_scans(
+            &searched.from_logical,
+            logical_roots,
+            entries,
+            listing.data,
+            deployment,
+        )
+        .map(|(candidates, _)| candidates.into_iter().map(|(_, plan)| plan).collect())
+    }
+    .map_err(|error| error.to_string())?;
+    let enumerated = every
+        .iter()
+        .any(|plan| plan.assignment == searched.assignment);
+    let count = every.len() + usize::from(!enumerated);
+    let alternatives = every
+        .into_iter()
+        .filter(|plan| plan.assignment != searched.assignment)
+        .take(listing.max_per_logical.saturating_sub(1))
+        .enumerate()
+        .map(|(k, mut plan)| {
+            plan.id = format!("{}-m{}", searched.id, k + 1);
+            plan
+        })
+        .collect();
+    Ok((alternatives, count))
 }
 
 /// The ids of the physical candidates the document shows: at most
@@ -2020,7 +2168,13 @@ mod tests {
         let run =
             run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
         let entries: Vec<_> = workload.query_workload.entries().collect();
-        let document = stage_pipeline(workload_queries(&workload), &entries, &run, 0);
+        let data = workload.data_workload.clone().unwrap();
+        let listing = PhysicalListing {
+            data: &data,
+            models: PlanningModels::builtin(),
+            max_per_logical: 1,
+        };
+        let document = stage_pipeline(workload_queries(&workload), &entries, &run, 0, &listing);
         let selected = document["stage3_plan_selection"]["selected"]
             .as_str()
             .unwrap();

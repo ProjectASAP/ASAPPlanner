@@ -68,6 +68,19 @@ def stage_pipeline(*args: str) -> dict:
         return json.loads(out.read_text())
 
 
+def with_alternative(doc: dict) -> dict:
+    """`doc` with one more materialization assignment of the selected
+    plan's Stage 1 candidate, as stage_pipeline lists it after selection:
+    valid and cheaper than the selected plan."""
+    selected = doc["stage3_plan_selection"]["selected"]
+    plan = next(c for c in doc["stage2_physical_asap_optimization"]["candidates"] if c["id"] == selected)
+    alternative = dict(plan, id=f"{selected}-m1", display_name="nothing materialized", materialization_label="nothing materialized",
+                       materialization_alternative=True, cost_per_second=1e-9, rejection=None, rejection_reason=None,
+                       cheaper_than_selected=True)
+    doc["stage2_physical_asap_optimization"]["candidates"].append(alternative)
+    return doc
+
+
 def stages_js():
     js = py_mini_racer.MiniRacer()
     js.eval((HERE / "node-style.js").read_text().replace("console.warn", "(() => {})"))
@@ -232,6 +245,24 @@ class CandidateRowTests(unittest.TestCase):
         physical = self.doc["stage2_physical_asap_optimization"]["candidates"]
         self.assertEqual(len(rows), len(physical))
         self.assertTrue(all(row["display_name"] and row["logical"] for row in rows))
+
+    def test_materialization_alternatives_are_listed_in_stage2_not_ranked(self):
+        """An assignment listed after selection keeps the document valid,
+        is not a Stage 3 row, and is a row of its Stage 1 candidate's
+        Stage 2 list with its own cost, after the search's own."""
+        doc = with_alternative(self.doc)
+        selected = doc["stage3_plan_selection"]["selected"]
+        self.assertEqual(self.js.call("validateStagePipeline", doc), [])
+        self.assertNotIn(f"{selected}-m1", [r["id"] for r in self.js.call("stageCandidateRows", doc)])
+        logical = next(c["from_logical"] for c in doc["stage2_physical_asap_optimization"]["candidates"] if c["id"] == selected)
+        view = self.js.call("physicalListView", doc, logical)
+        ids = [r["id"] for r in view["rows"]]
+        self.assertLess(ids.index(selected), ids.index(f"{selected}-m1"))
+        row = view["rows"][ids.index(f"{selected}-m1")]
+        self.assertEqual((row["label"], row["cost"], row["invalid"], row["selected"], row["cheaper"]),
+                         ("nothing materialized", 1e-9, False, False, True))
+        self.assertTrue(view["rows"][ids.index(selected)]["selected"])
+        self.assertIn("1 cheaper than the selected plan", view["meta"])
 
     def test_status_follows_the_rejection_cause_not_the_cost(self):
         """A candidate's row says "costlier" when it lost under the cost
@@ -957,6 +988,21 @@ class AppTests(unittest.TestCase):
         js.eval("__els.pick1.__on.change({ target: { value: 'L2' } })")
         self.assertEqual(js.eval("__els.pick2.value"), "P2")
         self.assertIn("from L2", self.text(js, "lane2-meta"))
+
+    def test_clicking_a_physical_row_draws_that_candidate_in_stage2(self):
+        """The Stage 2 lane lists the Stage 1 candidate's physical
+        candidates, the selected one marked; a click on a row draws it."""
+        doc = with_alternative(example1())
+        selected = doc["stage3_plan_selection"]["selected"]
+        js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
+        rows = js.eval("__els.physRows.innerHTML")
+        self.assertIn(f'data-id="{selected}" aria-pressed="true"', rows)
+        self.assertIn("✓ selected", rows)
+        self.assertIn(f'data-id="{selected}-m1" aria-pressed="false" class="cheaper"', rows)
+        js.eval(f"__els.physRows.__on.click({{ target: {{ closest() {{ return {{ dataset: {{ id: '{selected}-m1' }} }}; }} }} }})")
+        self.assertEqual(js.eval("__els.pick2.value"), f"{selected}-m1")
+        self.assertIn("judged alone by Stage 3", self.text(js, "lane2-meta"))
+        self.assertIn(f'data-id="{selected}-m1" aria-pressed="true"', js.eval("__els.physRows.innerHTML"))
 
     def test_choosing_an_uncomposed_stage1_candidate_clears_stage2(self):
         doc = example1()

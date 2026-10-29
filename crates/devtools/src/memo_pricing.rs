@@ -3,6 +3,8 @@
 //! (`optimize_physical_asap`, every materialization assignment) and Stage 3
 //! (`select_plan`, under the run's models), so a choice cheaper than the
 //! selected plan shows that the search missed a plan the memo stands for.
+//! [`price_physical_plans`] judges given Stage 2 candidates the same way,
+//! each alone.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -10,7 +12,7 @@ use std::rc::Rc;
 use asap_logical_asap_optimization::memo::candidates::CandidateMemo;
 use asap_logical_asap_optimization::memo::enumeration::{compose, MemoChoice};
 use asap_logical_asap_optimization::memo::MemoGroupId;
-use asap_physical_asap_optimization::optimize_physical_asap;
+use asap_physical_asap_optimization::{optimize_physical_asap, PhysicalWorkloadPlan};
 use asap_plan_selection::{select_plan, PlanningModels, Selection, SelectionError};
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
@@ -75,12 +77,8 @@ pub fn price_choices(
     models: PlanningModels<'_>,
     selected: Option<SelectedBaseline>,
 ) -> Vec<PricedChoice> {
-    let mut settings = models.plan_selection.clone();
-    if settings.frozen_calibration_factor.is_none() {
-        settings.frozen_calibration_factor = selected.and_then(|s| s.calibration_factor);
-    }
+    let settings = frozen_settings(models, selected);
     let models = models.with_plan_selection(&settings);
-    let selected_cost = selected.and_then(|s| s.cost_per_second);
     // Which root group each query's operator references name is the same
     // for every choice.
     let root_groups = root_groups_of_queries(memo, stage0_roots);
@@ -91,14 +89,56 @@ pub fn price_choices(
             let roots = compose(memo, choice)
                 .map_err(|error| error.to_string())
                 .and_then(|composed| query_roots(&composed, stage0_roots, &root_groups));
-            let mut priced = price_choice(roots, index, entries, data, models);
-            priced.cheaper_than_selected = match (priced.cost_per_second, selected_cost) {
-                (Some(cost), Some(selected)) => cost < selected - TIE_TOLERANCE * selected.abs(),
-                _ => false,
-            };
-            priced
+            compared(price_choice(roots, index, entries, data, models), selected)
         })
         .collect()
+}
+
+/// Each of `plans` (Stage 2 candidates) judged alone by Stage 3 under the
+/// run's models, on the selected plan's calibration scale, as
+/// [`price_choices`] judges a choice's physical plans. A report only: it
+/// does not change the run's selection.
+pub fn price_physical_plans(
+    plans: &[PhysicalWorkloadPlan],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    selected: Option<SelectedBaseline>,
+) -> Vec<PricedChoice> {
+    let settings = frozen_settings(models, selected);
+    let models = models.with_plan_selection(&settings);
+    plans
+        .iter()
+        .map(|plan| {
+            let judged = judge(std::slice::from_ref(plan), entries, data, models);
+            compared(judged, selected)
+        })
+        .collect()
+}
+
+/// The run's plan-selection settings with the calibration factor frozen to
+/// the selection's, unless the settings already freeze one.
+fn frozen_settings(
+    models: PlanningModels<'_>,
+    selected: Option<SelectedBaseline>,
+) -> asap_plan_selection::PlanSelectionSettings {
+    let mut settings = models.plan_selection.clone();
+    if settings.frozen_calibration_factor.is_none() {
+        settings.frozen_calibration_factor = selected.and_then(|s| s.calibration_factor);
+    }
+    settings
+}
+
+/// `priced` with `cheaper_than_selected` set against `selected`.
+fn compared(mut priced: PricedChoice, selected: Option<SelectedBaseline>) -> PricedChoice {
+    priced.cheaper_than_selected = match (
+        priced.cost_per_second,
+        selected.and_then(|s| s.cost_per_second),
+    ) {
+        (Some(cost), Some(selected)) => cost < selected - TIE_TOLERANCE * selected.abs(),
+        _ => false,
+    };
+    priced
 }
 
 /// One choice, its query roots composed (or why they do not compose),
@@ -134,7 +174,25 @@ fn price_choice(
     for (k, plan) in physical.iter_mut().enumerate() {
         plan.id = format!("{id}-{k}");
     }
-    match select_plan(&physical, entries, data, models) {
+    judge(&physical, entries, data, models)
+}
+
+/// Stage 3 over `physical`: valid with the selected plan's cost, or the
+/// first rejection.
+fn judge(
+    physical: &[PhysicalWorkloadPlan],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> PricedChoice {
+    let invalid = |cause: &str, reason: String| PricedChoice {
+        valid: false,
+        rejection: Some(cause.into()),
+        rejection_reason: Some(reason),
+        cost_per_second: None,
+        cheaper_than_selected: false,
+    };
+    match select_plan(physical, entries, data, models) {
         Ok(selection) => PricedChoice {
             valid: true,
             rejection: None,

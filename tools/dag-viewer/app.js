@@ -1,7 +1,8 @@
 // ASAPPlanner Stage Viewer: an asap-stage-pipeline/v1 document as a Stage 3
 // candidate list beside three DAG lanes stacked top to bottom (Stage 0,
 // then the Stage 1 candidate, then its Stage 2 candidate), details below.
-// Each lane shows the whole workload. Document checks, the candidate list
+// Each lane shows the whole workload; the Stage 2 lane also lists the
+// Stage 1 candidate's physical candidates. Document checks, the candidate list
 // and node labels live in stages.js (tested); node-style.js groups operator
 // kinds.
 (function () {
@@ -188,8 +189,24 @@
     current.physical = null;
     $('pick2').value = '';
     clearLane(2, 'no physical plan for this Stage 1 candidate');
+    renderPhysicalList();
     renderRanking();
   }
+
+  // The Stage 2 lane's list of the current Stage 1 candidate's physical
+  // candidates (stages.js physicalListView); a click draws one.
+  function renderPhysicalList() {
+    const view = current.logical ? physicalListView(doc, current.logical) : { meta: '', rows: [] };
+    $('phys-meta').textContent = view.meta;
+    $('physRows').innerHTML = view.rows.map((r) => `<li><button type="button" data-id="${esc(r.id)}" aria-pressed="${r.id === current.physical}"${r.cheaper ? ' class="cheaper"' : ''}>` +
+      `<span class="pid">${esc(r.id)}</span><span class="plabel">${esc(r.label)}</span><span class="ptotal">${r.cost === null ? '—' : fmtCost(r.cost)}</span>` +
+      `<span class="pstatus">${r.selected ? statusChip('selected') : ''}${r.cheaper ? '<span class="chip cheaper">cheaper than selected</span>' : ''}` +
+      `${r.invalid ? `${statusChip('rejected')}<span>${esc(r.reason)}</span>` : ''}</span></button></li>`).join('');
+  }
+  $('physRows').addEventListener('click', (event) => {
+    const button = event.target && event.target.closest ? event.target.closest('button[data-id]') : null;
+    if (button) selectPhysical(button.dataset.id);
+  });
 
   // Draw Stage 1 candidate `id` in lane 1.
   function showLogical(id) {
@@ -220,6 +237,7 @@
     $('lane1-meta').innerHTML = `enumerated DAG <b>${esc(id)}</b> · ${esc(description)} · ${dag.nodes.length} nodes` +
       (perQueryDag ? '' : ' · roots not matched to queries');
     clearLane(2, 'no physical plan for an enumerated DAG');
+    renderPhysicalList();
     renderRanking();
   }
 
@@ -233,13 +251,21 @@
     render(2, c.dag, true, cost ? cost.per_node : null);
     const row = rows.find((r) => rowKey(r) === `P:${id}`);
     const priced = rows.filter((r) => r.rank !== null).length;
-    $('lane2-meta').innerHTML = `${esc(c.display_name)} · from <b>${esc(c.from_logical)}</b> · ` +
-      (cost && cost.cost_per_second !== null ? `total <b>${fmtCost(cost.cost_per_second)}</b> ${esc(cost.cost_unit.replace(/_/g, ' '))} · rank ${row.rank} of ${priced}`
-        : cost ? 'no price (cost model 3)' : 'not priced') +
-      ` · ${statusChip(row.status)}` +
-      (row.accepted ? ` · <span class="accepted">${esc(row.accepted)}</span>` : '') +
-      (cost && cost.usage ? `<br>Stage 3 usage: ${esc(usageText(cost.usage))}` : '');
+    if (row) {
+      $('lane2-meta').innerHTML = `${esc(c.display_name)} · from <b>${esc(c.from_logical)}</b> · ` +
+        (cost && cost.cost_per_second !== null ? `total <b>${fmtCost(cost.cost_per_second)}</b> ${esc(cost.cost_unit.replace(/_/g, ' '))} · rank ${row.rank} of ${priced}`
+          : cost ? 'no price (cost model 3)' : 'not priced') +
+        ` · ${statusChip(row.status)}` +
+        (row.accepted ? ` · <span class="accepted">${esc(row.accepted)}</span>` : '') +
+        (cost && cost.usage ? `<br>Stage 3 usage: ${esc(usageText(cost.usage))}` : '');
+    } else {
+      // Another materialization assignment, judged alone after selection.
+      $('lane2-meta').innerHTML = `${esc(c.display_name)} · from <b>${esc(c.from_logical)}</b> · listed after selection, judged alone by Stage 3 · ` +
+        (c.rejection ? `${statusChip('rejected')} ${esc(c.rejection.replace(/_/g, ' '))}`
+          : typeof c.cost_per_second === 'number' ? `total <b>${fmtCost(c.cost_per_second)}</b>${c.cheaper_than_selected ? ' · <span class="chip cheaper">cheaper than selected</span>' : ''}` : 'no price (cost model 3)');
+    }
     if (c.from_logical !== current.logical) showLogical(c.from_logical);
+    renderPhysicalList();
     renderRanking();
   }
 
@@ -279,7 +305,7 @@
     const count = (status) => rows.filter((r) => r.status === status).length;
     $('counts').innerHTML = `Candidates per stage: <b>1</b> logical DAG → <b>${logical.combinations}</b> logical ASAP` +
       (logical.capped ? ` (<b>${logical.candidates.length}</b> shown)` : '') +
-      ` → <b>${physicalById.size}</b> physical` +
+      ` → <b>${rows.filter((r) => rowKey(r).startsWith('P')).length}</b> physical` +
       (selection.selected ? ` → <b>1</b> selected (${count('rejected')} invalid, ${count('costlier')} valid but costlier)` : ' → none selected');
     $('rank-meta').textContent = [stageCandidateHeader(doc), accuracyGuaranteesText(doc), searchText(doc)].filter(Boolean).join(' · ');
     renderDataWorkload();
@@ -287,9 +313,9 @@
     $('cost-unit').textContent = sel ? sel.cost_unit.replace(/_/g, ' ') : '';
 
     $('pick1').innerHTML = logical.candidates.map((c) => `<option value="${esc(c.id)}">${esc(c.id)} · ${esc(c.display_name)}</option>`).join('');
-    $('pick2').innerHTML = rows.filter((r) => rowKey(r).startsWith('P'))
+    $('pick2').innerHTML = physical.candidates.slice()
       .sort((a, b) => byPlanNumber(a.id, b.id))
-      .map((r) => `<option value="${esc(r.id)}">${esc(r.id)} · ${esc(r.display_name)}</option>`).join('');
+      .map((c) => `<option value="${esc(c.id)}">${esc(c.id)} · ${esc(c.display_name)}</option>`).join('');
 
     render(0, doc.stage0_query_language_frontends.dag, false, null);
     $('lane0-meta').innerHTML = `${doc.stage0_query_language_frontends.dag.nodes.length} nodes · roots for ${queryIds.map((q) => `<b>${esc(q)}</b>`).join(', ')}`;
@@ -300,6 +326,7 @@
     else {
       clearLane(1, 'no candidates');
       clearLane(2, 'no candidates');
+      renderPhysicalList();
       renderRanking();
     }
     renderMaterializedViews();

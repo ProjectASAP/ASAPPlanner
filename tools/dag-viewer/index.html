@@ -85,6 +85,8 @@ h1 { font-family: var(--font-display); font-weight: 600; font-size: 26px; letter
 .chip.costlier { color: var(--warn); background: var(--warn-soft); }
 /* Enumerated DAGs: a row cheaper than the selected plan is red. */
 #enumRows { max-height: 360px; }
+/* Stage 2: the chosen Stage 1 candidate's physical candidates. */
+#physRows { max-height: 240px; border-bottom: 1px solid var(--line); }
 .rank button.cheaper { border-color: var(--bad); background: var(--bad-soft); }
 .chip.cheaper { color: var(--bad); border: 1px solid var(--bad); }
 /* Stage 0, 1 and 2 stack top to bottom, each as wide as the page allows. */
@@ -237,6 +239,8 @@ tr.clickable:focus-visible td { outline: 2px solid var(--accent); outline-offset
           <div class="panel-head"><div><div class="eyebrow">Stage 2 · costs from Stage 3</div><h2 id="lane2-title">Physical ASAP candidate</h2></div>
             <label><span class="eyebrow" style="display:block">candidate</span><select id="pick2" aria-label="Physical ASAP candidate"></select></label></div>
           <div class="lane-meta" id="lane2-meta"></div>
+          <div class="lane-meta" id="phys-meta"></div>
+          <ol class="rank" id="physRows" aria-label="Physical candidates of the Stage 1 candidate"></ol>
           <div class="cy" id="cy2"></div>
         </section>
         <section class="panel" aria-labelledby="views-title">

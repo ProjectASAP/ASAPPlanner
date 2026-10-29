@@ -314,9 +314,12 @@ function validateStagePipeline(doc) {
   });
   errors.push(...validateDataWorkload(doc.workload.data_workload));
   if (errors.length) return errors;
-  const selectionErrors = validateSelection(stage3, physicalById);
+  // Stage 3 judged the search's candidates; the other materialization
+  // assignments stage_pipeline lists after selection carry their own cost.
+  const judged = new Map([...physicalById].filter(([, c]) => !isMaterializationAlternative(c)));
+  const selectionErrors = validateSelection(stage3, judged);
   if (selectionErrors.length) return selectionErrors;
-  return validateMaterializedViews(stage3, physicalById).concat(validateMemoPlan((stage3.search || {}).memo_plan, doc.workload.queries.length));
+  return validateMaterializedViews(stage3, judged).concat(validateMemoPlan((stage3.search || {}).memo_plan, doc.workload.queries.length));
 }
 
 // A query's accuracy target (`AccuracyTarget` JSON: `accuracy_metric`,
@@ -367,7 +370,7 @@ function stageCandidateRows(doc) {
   const rejected = new Map((selection.rejected || []).map((r) => [r.id, r]));
   const accepted = selection.accepted || {};
   const physical = doc.stage2_physical_asap_optimization || {};
-  const rows = (physical.candidates || []).map((candidate) => {
+  const rows = (physical.candidates || []).filter((c) => !isMaterializationAlternative(c)).map((candidate) => {
     const cost = costs[candidate.id];
     const rejection = rejected.get(candidate.id);
     // A rejection's cause says whether it failed a check or lost under
@@ -405,6 +408,50 @@ function stageCandidateRows(doc) {
   // under the cost model, whether or not the document carries their cost.
   rows.forEach((row) => { if (row.status === 'selected' || row.status === 'costlier') row.rank = ++rank; });
   return rows;
+}
+
+// Whether Stage 2 candidate `c` is one of the other materialization
+// assignments of its logical candidate, listed for display after selection
+// (Stage 3 did not judge it in the search).
+function isMaterializationAlternative(c) {
+  return !!c && c.materialization_alternative === true;
+}
+
+// The Stage 2 lane's list for Stage 1 candidate `logicalId`: `meta` (how
+// many materialization assignments it has, and how many are listed) and one
+// row per listed physical candidate, in document order (the search's own
+// first): `id`, `label` (what it materializes), `cost` (a number or null),
+// `invalid` with `reason`, `selected` and `cheaper` (valid and cheaper than
+// the selected plan). A document without the listing's fields takes the
+// cost and rejection from Stage 3.
+function physicalListView(doc, logicalId) {
+  const physical = doc.stage2_physical_asap_optimization || {};
+  const selection = doc.stage3_plan_selection || {};
+  const costs = selection.costs || {};
+  const rejected = new Map((selection.rejected || []).map((r) => [r.id, r]));
+  const rows = (physical.candidates || []).filter((c) => c.from_logical === logicalId).map((c) => {
+    const listed = 'rejection' in c;
+    const rejection = listed ? c.rejection : (rejected.has(c.id) && FAILED_CHECK_CAUSES.includes(rejected.get(c.id).cause) ? rejected.get(c.id).cause : null);
+    const reason = listed ? c.rejection_reason : (rejection ? rejected.get(c.id).reason : null);
+    const cost = listed ? c.cost_per_second : (costs[c.id] ? costs[c.id].cost_per_second : null);
+    return {
+      id: c.id,
+      label: c.materialization_label || c.display_name || c.id,
+      cost: typeof cost === 'number' ? cost : null,
+      invalid: !!rejection,
+      reason: rejection ? `${rejection.replace(/_/g, ' ')}${reason ? `: ${reason}` : ''}` : null,
+      selected: c.id === selection.selected,
+      cheaper: c.cheaper_than_selected === true,
+    };
+  });
+  const counted = (physical.assignments_per_logical || {})[logicalId];
+  let meta = `${rows.length} physical candidate${rows.length === 1 ? '' : 's'}`;
+  if (counted && counted.error) meta += ` · materialization assignments not listed: ${counted.error}`;
+  else if (counted && counted.capped) meta = `the first ${counted.listed} of ${counted.count} materialization assignments`;
+  else if (counted) meta = `all ${counted.count} materialization assignment${counted.count === 1 ? '' : 's'}`;
+  const cheaper = rows.filter((r) => r.cheaper).length;
+  if (cheaper) meta += ` · ${cheaper} cheaper than the selected plan`;
+  return { meta, rows };
 }
 
 // The candidate list's header: how many candidates Stage 1 enumerated, how
