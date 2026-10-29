@@ -112,7 +112,7 @@ fn row_bound(
 }
 
 /// An upper bound on the rows any operator of `root` sees or returns in one
-/// evaluation ([`row_bound`]), from the series count each source it reads
+/// evaluation (`row_bound`), from the series count each source it reads
 /// declares: the input row count of its folds, and `G` for a PromQL
 /// instant vector ([`values_per_result`]). A join or fold of one source
 /// counts it once; an `or` counts each branch. `None` when `root` reads no
@@ -136,13 +136,13 @@ pub fn series_read(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
 }
 
 /// How many values one evaluation of `root` returns at most (`G`): one for
-/// a scalar root and for a root of at most one row ([`at_most_one_row`]),
+/// a scalar root and for a root of at most one row (`at_most_one_row`),
 /// provable from the query. Otherwise the smaller of two bounds, either
 /// alone when the other is unknown: `series_read` ([`series_read`]) for a
 /// PromQL instant vector, which bounds the values it can return (each
 /// branch of an `or` adds its own), and, for a grouped root of any
 /// language, the groups its keys' declared distinct values allow
-/// ([`declared_group_bound`]), at most `series_read`. `None` when neither
+/// (`declared_group_bound`), at most `series_read`. `None` when neither
 /// applies: an ungrouped SQL result, a grouping with an undeclared key, a
 /// range vector.
 pub fn values_per_result(
