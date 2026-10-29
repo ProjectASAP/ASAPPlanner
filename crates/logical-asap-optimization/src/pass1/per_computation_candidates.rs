@@ -19,7 +19,10 @@
 //!   has its own candidates: the whole-expression top-k over a per-item
 //!   `sum` or `count` (`Summary` of a heap family) and the nested sum, a
 //!   grouped `sum` over a `sum` (`ExactAccumulator([Sum])`).
-//! - Summary candidates are unsized; they are sized after Pass 2 sharing.
+//! - Summary choices here are unsized families. Attaching them to memo
+//!   groups sizes each one per split of the accuracy budget
+//!   (`CandidateForMemoGroup::accuracy_budget_parts`); Pass 2 inherits sizes or
+//!   takes the strictest shared reader's, and Stage 3 only checks.
 //! - Candidates are pruned only when provably unable to meet the accuracy
 //!   requirement or to run, or when the exact candidate provably dominates
 //!   them (a PromQL top-k's heap over its instant vector, one row per item:
@@ -149,7 +152,8 @@ pub enum HowToComputeAggregateMeasure {
     /// `count`, `min`, `max`, `rate`, `irate` and `increase`; `[Sum, Count]`,
     /// divided, for `avg`.
     ExactAccumulator(Vec<ExactKind>),
-    /// An unsized summary family, sized later for the measure's accuracy.
+    /// An unsized summary family; sized for the measure's accuracy when Pass 1
+    /// attaches it to its memo group.
     Summary(SketchAlgorithm),
 }
 
