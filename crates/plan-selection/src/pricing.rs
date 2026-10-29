@@ -1231,7 +1231,7 @@ pub(crate) fn price_node<'a>(
 }
 
 /// [`price_at_scale`] of one candidate alone, its calibration factor fitted
-/// over its own measured nodes (as [`select_plan`] fits it over all).
+/// over its own measured nodes (as [`select_plan`](crate::select_plan) fits it over all).
 #[cfg(test)]
 pub(crate) fn price(
     dag: &PhysicalASAPDAG,

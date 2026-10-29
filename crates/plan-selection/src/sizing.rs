@@ -20,7 +20,7 @@ use crate::statistics::{series_read, values_per_result};
 /// for its queries' targets (#669b), before pricing, so that cost reflects
 /// the deeper sketch. A query with a target with failure probability `δ`,
 /// over `n` approximate inputs ([`approximate_inputs`]) and covering `V`
-/// values per evaluation ([`AccuracyScope::max_values_covered`]: 1 for a
+/// values per evaluation ([`AccuracyScope::max_values_covered`](asap_types::ir::properties::AccuracyScope::max_values_covered): 1 for a
 /// per-value target, at most `⌊1 / share⌋` for one over the groups holding
 /// a record share, `G` ([`values_per_result`]) for the whole result), needs
 /// each input to fail with probability at most `δ / (n · V)`: `n · V` such

@@ -32,7 +32,7 @@ pub(crate) fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
 }
 
 /// [`root_guarantee`] with the statistics Stage 1 left symbolic bound:
-/// - the input row count, `series` ([`series_read`] of `root`);
+/// - the input row count, `series` ([`series_read`](crate::statistics::series_read) of `root`);
 /// - each source's stream norm ([`source_norm_statistic`]), from the data
 ///   workload's per-source `stream_norms`;
 /// - classic HLL's failure probability and the chance a UnivMon's top layer
@@ -174,7 +174,7 @@ struct DomainOperation<'a> {
 /// any of them has no bound. Operations are found where the bound
 /// originates (the same rule Stage 1 uses), in vector arithmetic, a scalar
 /// root, and projection expressions. `series` is the root's input row
-/// count ([`series_read`]).
+/// count ([`series_read`](crate::statistics::series_read)).
 fn operand_domain_bounds(
     root: &QueryRoot,
     series: Option<u64>,

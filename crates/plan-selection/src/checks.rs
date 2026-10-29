@@ -326,7 +326,7 @@ pub(crate) fn family_name(family: &FieldDataType) -> String {
 /// of `dag` with the window it would read, as a rejection reason (`None`
 /// without one). Raw data samples are then not kept after they arrive, so no
 /// window of them is there to scan at query time: only ingestion-time work
-/// reads raw rows. `kept_chains` are `dag`'s ([`kept_pane_chains`]).
+/// reads raw rows. `kept_chains` are `dag`'s ([`kept_pane_chains`](crate::pricing::kept_pane_chains)).
 pub(crate) fn raw_data_violation(
     dag: &PhysicalASAPDAG,
     kept_chains: &HashSet<PhysicalASAPNodeId>,
