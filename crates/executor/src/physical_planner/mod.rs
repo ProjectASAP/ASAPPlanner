@@ -1746,10 +1746,11 @@ mod compilation_deadline_tests {
     /// (#993): in a debug build, 10,000 windows compiled in 5.4 s and 20,000
     /// in over 10 s before, 1.4 s and 3.1 s after.
     #[test]
-    #[ignore = "slow: run in release by hand"]
+    #[ignore = "slow: run by hand"]
     fn many_windows_over_one_scan_compile_in_linear_time() {
         let (dag, roots) = shifted_windows_over_one_scan(20_000);
-        compile_before(&dag, &[], &roots, None).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        compile_before(&dag, &[], &roots, Some(deadline)).unwrap();
     }
 
     #[test]
