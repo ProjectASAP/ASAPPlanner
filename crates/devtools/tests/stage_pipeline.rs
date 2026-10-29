@@ -1585,10 +1585,9 @@ const QUANTILE_BY_WORKLOAD: &str = r#"{"query_workload": {"language": "promql", 
  "data_workload": {"arrival": {"ingesting": {"rows_per_second": 666.67}},
   "sources": {"data": {"series_count": 10000, "metric_type": "gauge", "sample_interval": 15000}}}}"#;
 
-/// Every plan that answers an instant `quantile by (G)` exactly compiles,
-/// so Stage 3 prices the exact baseline next to the sketches: no physical
-/// evaluated plan is rejected as `executor_cannot_compile`, and accepted
-/// plans answer Q3 and Q4 exactly.
+/// Stage 3 prices the exact baseline of an instant `quantile by (G)` next
+/// to the sketches: every evaluated plan but the selected one is rejected
+/// only for its cost, and accepted plans answer Q3 and Q4 exactly.
 #[test]
 fn exact_grouped_quantile_plans_compile_and_are_compared() {
     let path = std::env::temp_dir().join(format!(
@@ -1606,10 +1605,6 @@ fn exact_grouped_quantile_plans_compile_and_are_compared() {
     let selection = &document["stage3_plan_selection"];
     assert_eq!(document["accuracy_guarantees"], "enforced");
     let by_cause = selection["rejected_by_cause"].as_object().unwrap();
-    assert!(
-        !by_cause.contains_key("executor_cannot_compile"),
-        "{by_cause:?}"
-    );
     // Every plan but the selected one is rejected only for its cost.
     assert!(
         by_cause

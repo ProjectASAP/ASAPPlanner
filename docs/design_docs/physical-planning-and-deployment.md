@@ -404,8 +404,8 @@ Every `Scan` leaf is a raw data slot, which the deployment's store reads at
 run time (§4). A compile check (the one `plan_installable` runs) therefore compiles the
 plan without a reader. That check compiles each materialized view's refresh
 as well as the query run. A plan the executor cannot refresh a view of fails
-the check, whether the view is refreshed at ingestion or on first read, so no
-materialization of an uncompilable computation is selected. SQL `now()` is the
+the check, whether the view is refreshed at ingestion or on first read, so
+`plan_installable` refuses it rather than returning it to install. SQL `now()` is the
 query's evaluation time (`Scope::Query`); it has no value in an ingestion run.
 
 A trailing window is a range `TimeRange(w)` over any `TimeShift`s (a tumbling

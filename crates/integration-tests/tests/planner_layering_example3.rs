@@ -110,8 +110,7 @@ fn run_b() -> Run {
 #[test]
 fn production_memo_covers_pattern_b_with_validated_accuracy() {
     let workload = pattern_b();
-    let run =
-        run_stages_with_compile_check(&workload, lower_promql(&workload), &Default::default());
+    let run = run_stages_under(&workload, lower_promql(&workload), &Default::default());
     assert_selects_cheapest_valid(&run);
     assert_eq!(run.selection.accepted[&run.selection.selected].len(), 1);
 }

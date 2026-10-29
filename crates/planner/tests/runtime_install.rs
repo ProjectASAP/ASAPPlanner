@@ -2170,6 +2170,9 @@ async fn plan_p99(
     let workload: PlanningWorkload = serde_json::from_value(json).unwrap();
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
+        // A DDSketch kernel fixture, not a comparison of sketch families.
+        supported_summaries: ignore_accuracy
+            .then(|| only_summary_family(SketchAlgorithm::DDSketch)),
         ..DeploymentCapabilities::default()
     };
     let settings = PlanSelectionSettings {
@@ -2498,7 +2501,10 @@ async fn check_compiles_reports_the_executors_error() {
         asap_executor::planner::ir::schema::DataType::Utf8,
     );
     let error = plan.check_compiles().unwrap_err();
-    assert!(error.starts_with("query run: "), "{error}");
+    assert!(
+        error.starts_with("the executor cannot compile the plan's query run: "),
+        "{error}"
+    );
 }
 
 /// `queries` every 10 s at `accuracy` (JSON) over six ingesting series of
@@ -2644,9 +2650,50 @@ fn heap_topk_workload(query: &str, metric: &str, facts: &str) -> PlanningWorkloa
     .unwrap()
 }
 
+/// The executor's support for `family` alone: a deployment whose only
+/// sketch family is `family` (exact plans stay allowed).
+fn only_summary_family(family: SketchAlgorithm) -> Vec<asap_planner::SupportedSummary> {
+    asap_executor::supported_summary_families()
+        .into_iter()
+        .filter(|supported| supported.family == family)
+        .collect()
+}
+
+/// A deployment's accuracy model that accepts, whatever its guarantee, only
+/// a query output that reads a heap of this algorithm, and no other output:
+/// it forces the cheapest plan with that heap, as a deployment that requires
+/// the heap would.
+struct HeapPlansOnly(SketchAlgorithm);
+
+impl asap_plan_selection::AccuracyModel for HeapPlansOnly {
+    fn satisfies(
+        &self,
+        _guarantee: &asap_types::ir::properties::AccuracyGuarantee,
+        _target: &asap_types::ir::properties::AccuracyTarget,
+    ) -> bool {
+        false
+    }
+
+    fn accepts_output_regardless_of_guarantee(
+        &self,
+        output: &QueryRoot,
+        _target: &asap_types::ir::properties::AccuracyTarget,
+    ) -> bool {
+        let QueryRoot::Operator(root) = output else {
+            return false;
+        };
+        OperatorNode::reachable(root).iter().any(|node| {
+            matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
+                | ASAPOp::PaneChain { family: FieldDataType::Sketch(kind, _), .. })
+                if *kind.algorithm() == self.0)
+        })
+    }
+}
+
 /// `workload` planned with accuracy guarantees ignored (a top-k estimate
-/// has none) on a deployment that keeps no raw samples; with `heap`, Stage
-/// 3 keeps only plans with a heap of that algorithm ([`SketchPlansOnly`]).
+/// has none) on a deployment that keeps no raw samples; with `heap`, the
+/// deployment's accuracy model accepts only outputs that read a heap of that
+/// algorithm ([`HeapPlansOnly`]).
 async fn plan_ignoring_guarantees(
     workload: &PlanningWorkload,
     heap: Option<SketchAlgorithm>,
@@ -2655,14 +2702,20 @@ async fn plan_ignoring_guarantees(
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
+    // The settings' override accepts every output, so a forced heap goes
+    // through the accuracy model instead.
     let settings = PlanSelectionSettings {
-        ignore_accuracy_guarantees: true,
+        ignore_accuracy_guarantees: heap.is_none(),
         ..PlanSelectionSettings::default()
     };
+    let heap_only = heap.map(HeapPlansOnly);
     let models = PlanningModels::builtin()
         .with_deployment_capabilities(&capabilities)
         .with_plan_selection(&settings);
-    let _ = heap;
+    let models = match &heap_only {
+        Some(model) => models.with_accuracy(model),
+        None => models,
+    };
     plan_installable(UserInput::new(
         workload,
         FrontendInput::Promql { histograms: None },

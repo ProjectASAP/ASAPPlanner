@@ -10,7 +10,6 @@ use asap_logical_asap_optimization::pass2::memo::candidates::{try_populate_pass1
 use asap_logical_asap_optimization::pass2::memo::enumeration::enumerate;
 use asap_logical_asap_optimization::pass2::memo::LogicalMemo;
 use asap_plan_selection::{PlanSelectionSettings, PlanningModels};
-use asap_planner::PlannerExecutorCompileCheck;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::QueryRoot;
 use asap_types::workload::{
@@ -88,8 +87,8 @@ fn planned(workload: &PlanningWorkload, series_identity: bool) -> Planned {
     }
 }
 
-/// `stage_pipeline`'s models: the executor's summary families and compile
-/// check, `settings` (accuracy guarantees ignored unless enforced).
+/// `stage_pipeline`'s models: the executor's summary families,
+/// `settings` (accuracy guarantees ignored unless enforced).
 fn models<'a>(
     settings: &'a PlanSelectionSettings,
     deployment: &'a DeploymentCapabilities,
@@ -97,7 +96,6 @@ fn models<'a>(
     PlanningModels::builtin()
         .with_plan_selection(settings)
         .with_deployment_capabilities(deployment)
-        .with_executor_compile_check(&PlannerExecutorCompileCheck)
 }
 
 fn deployment() -> DeploymentCapabilities {

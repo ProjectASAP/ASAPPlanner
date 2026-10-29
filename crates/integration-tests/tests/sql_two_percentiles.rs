@@ -67,7 +67,7 @@ fn workload(queries: &[&str]) -> PlanningWorkload {
     .unwrap()
 }
 
-/// Every stage over `queries`, with the executor's compile check.
+/// Every stage over `queries`.
 async fn run(queries: &[&str]) -> Run {
     let workload = workload(queries);
     let mut roots = Vec::new();

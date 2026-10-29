@@ -157,8 +157,6 @@ pub struct PredictedQueryUsage {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum InstallablePlanError {
-    #[error("planning deadline exceeded during installable-plan validation")]
-    DeadlineExceeded,
     /// Internal bug: the selected plan's timings do not hold, or it does
     /// not export; or, for the query-time reference, bad input: the plan
     /// cannot run at query time.
@@ -202,13 +200,17 @@ pub enum InstallablePlanError {
         node_id: PhysicalASAPNodeId,
         reason: String,
     },
+    /// Unsatisfiable request: the executor cannot compile the query run,
+    /// the roots over the views they read and the raw data they scan
+    /// (`reason`).
+    #[error("the executor cannot compile the plan's query run: {reason}")]
+    QueryRunNotExecutable { reason: String },
 }
 
 impl From<InstallableDagError> for InstallablePlanError {
     fn from(error: InstallableDagError) -> Self {
         match error {
             InstallableDagError::InvalidDag(e) => Self::InvalidDag(e),
-            InstallableDagError::DeadlineExceeded => Self::DeadlineExceeded,
             error => Self::Uninstallable(error),
         }
     }
@@ -320,63 +322,28 @@ impl InstallablePlan {
     /// over the views it reads and the `Scan`s it reads outside them. The
     /// DAG's own `TimeRange`s are compiled, so a window the executor cannot
     /// run fails here. `Err` holds the executor's error, or why the views
-    /// cannot be derived. Installation ([`plan_installable`]) already
-    /// compiles each view's refresh; Stage 3 does not call this.
+    /// cannot be derived. [`plan_installable`] runs the same compiles before
+    /// it returns a plan; this checks a plan read from a plan file.
     pub fn check_compiles(&self) -> Result<(), String> {
-        use asap_executor::physical_planner::compile;
         let views = self
             .materialized_views()
             .map_err(|error| error.to_string())?;
-        let dag = &self.dag;
-        let indexed = IndexedDag::new(dag);
-        let views_by_node: HashMap<PhysicalASAPNodeId, &MaterializedView> =
-            views.iter().map(|view| (view.node_id, view)).collect();
-        // The first refresh in the whole plan, which runs the executor's
-        // checks of the whole plan once; every other over the nodes below it.
-        for (position, view) in views.iter().enumerate() {
-            executor_refreshes(view, &views_by_node, &indexed, position == 0)
-                .map_err(|error| error.to_string())?;
-        }
-        // The query run reads the views it reaches from the roots without
-        // passing another, and the `Scan`s it reaches outside them, raw
-        // data slots the runtime's data store reads (a time series, or a
-        // SQL table read whole or through a window).
-        let mut read = Vec::new();
-        let mut pending = dag.roots.clone();
-        let mut seen = HashSet::new();
-        while let Some(id) = pending.pop() {
-            if !seen.insert(id) {
-                continue;
-            }
-            match views_by_node.get(&id) {
-                Some(view) => read.push((*view).clone()),
-                None => pending.extend(indexed.inputs.get(&id).into_iter().flatten().copied()),
-            }
-        }
-        let roots: Vec<u64> = dag.roots.iter().map(|&id| id as u64).collect();
-        compile(dag, &read, &roots)
-            .map(|_| ())
-            .map_err(|error| format!("query run: {error}"))
+        executor_compiles(&self.dag, &views).map_err(|error| error.to_string())
     }
 
     /// The plan of `dag`, with each view's and query-time scan's retention
-    /// set ([`PhysicalASAPDAG::set_retention`]) and each view's refresh
-    /// compiled.
+    /// set ([`PhysicalASAPDAG::set_retention`]), each view's refresh and the
+    /// query run compiled ([`executor_compiles`]): a plan the executor
+    /// cannot run is refused here, not installed.
     pub(crate) fn of_dag(
-        dag: PhysicalASAPDAG,
+        mut dag: PhysicalASAPDAG,
         query_texts: Vec<String>,
         pane_retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
         reader_span_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
     ) -> Result<Self, InstallablePlanError> {
-        let mut dag = dag;
         let views = dag.set_retention(pane_retention_ms_by_node, reader_span_ms_by_node, None)?;
-        let indexed = IndexedDag::new(&dag);
-        let views_by_node: HashMap<PhysicalASAPNodeId, &MaterializedView> =
-            views.iter().map(|view| (view.node_id, view)).collect();
-        for (position, view) in views.iter().enumerate() {
-            executor_refreshes(view, &views_by_node, &indexed, position == 0)?;
-        }
         check_queries(&dag, &query_texts)?;
+        executor_compiles(&dag, &views)?;
         let plan = InstallablePlan {
             wire_version: INSTALLABLE_PLAN_WIRE_VERSION,
             dag,
@@ -525,6 +492,53 @@ fn reader_span_ms_by_node(
         }
     }
     spans
+}
+
+/// Whether the executor compiles `dag` as a runtime runs it: each of
+/// `views`' refreshes ([`executor_refreshes`]), the first in the whole plan,
+/// which runs the executor's checks of the whole plan once, every other over
+/// the nodes below it; then the query run ([`executor_runs_queries`]).
+fn executor_compiles(
+    dag: &PhysicalASAPDAG,
+    views: &[MaterializedView],
+) -> Result<(), InstallablePlanError> {
+    let indexed = IndexedDag::new(dag);
+    let views_by_node: HashMap<PhysicalASAPNodeId, &MaterializedView> =
+        views.iter().map(|view| (view.node_id, view)).collect();
+    for (position, view) in views.iter().enumerate() {
+        executor_refreshes(view, &views_by_node, &indexed, position == 0)?;
+    }
+    executor_runs_queries(&indexed, &views_by_node)
+}
+
+/// Whether the executor compiles the query run: the roots over the views
+/// they reach without passing another (among `views_by_node`) and the
+/// `Scan`s they reach outside them, raw data slots the runtime's data store
+/// reads (a time series, or a SQL table read whole or through a window).
+fn executor_runs_queries(
+    indexed: &IndexedDag<'_>,
+    views_by_node: &HashMap<PhysicalASAPNodeId, &MaterializedView>,
+) -> Result<(), InstallablePlanError> {
+    use asap_executor::physical_planner::compile;
+    let dag = indexed.dag;
+    let mut read = Vec::new();
+    let mut pending = dag.roots.clone();
+    let mut seen = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        match views_by_node.get(&id) {
+            Some(view) => read.push((*view).clone()),
+            None => pending.extend(indexed.inputs.get(&id).into_iter().flatten().copied()),
+        }
+    }
+    let roots: Vec<u64> = dag.roots.iter().map(|&id| id as u64).collect();
+    compile(dag, &read, &roots).map(|_| ()).map_err(|error| {
+        InstallablePlanError::QueryRunNotExecutable {
+            reason: error.to_string(),
+        }
+    })
 }
 
 /// Whether the executor compiles `view`'s refresh with the views it reads
@@ -743,7 +757,7 @@ mod tests {
     /// whole plan's checks run once, so the nodes handed to the executor
     /// grow with the plan, not with the plan times its views (before, every
     /// refresh compiled the whole plan). The count
-    /// covers both `plan_installable`'s builds and Stage 3's compile check.
+    /// covers both `plan_installable`'s build and `check_compiles`.
     #[tokio::test]
     async fn view_refreshes_compile_only_the_nodes_below_them() {
         let workload: crate::PlanningWorkload = serde_json::from_str(
@@ -773,7 +787,7 @@ mod tests {
         let nodes = plan.dag.nodes.len();
         let views = plan.materialized_views().unwrap().len();
         assert!(views >= 300, "{views} materialized views");
-        // Measure one installation and one compile check, independently of
+        // Measure one installation and one `check_compiles`, independently of
         // how many candidates the optimizer explored before selecting this DAG.
         COMPILED_NODES.with(|count| count.set(0));
         let rebuilt = InstallablePlan::of_dag(

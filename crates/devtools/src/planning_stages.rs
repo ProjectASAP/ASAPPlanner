@@ -153,7 +153,7 @@ pub fn run_planning_stages_over(
 /// The same bounded candidate-connection search used by `plan_installable`.
 /// The run retains the selected logical and physical plans, validation
 /// diagnostics, and search metrics. Use the executor's summary capabilities
-/// and compile check in `models` when comparing with installation behavior.
+/// in `models` when comparing with installation behavior.
 pub fn run_default_search_over(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],

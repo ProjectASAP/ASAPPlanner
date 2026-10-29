@@ -267,7 +267,7 @@ fn an_ingestion_run_builds_the_window_ending_at_its_end() {
 }
 
 // A time-series window whose sample value is not Float64 has no native
-// operator: compiling it fails, so a compile check rejects the plan.
+// operator: compiling it fails, so installation refuses the plan.
 #[test]
 fn a_time_series_window_without_a_float_sample_value_does_not_compile() {
     let dag = window_over_rows(

@@ -91,8 +91,7 @@ fn rule_fixture(workload: &asap_types::workload::PlanningWorkload) -> Run {
 #[test]
 fn production_memo_selects_an_executable_accurate_example1_plan() {
     let workload = example1();
-    let run =
-        run_stages_with_compile_check(&workload, lower_promql(&workload), &Default::default());
+    let run = run_stages_under(&workload, lower_promql(&workload), &Default::default());
     assert_selects_cheapest_valid(&run);
     compile_in_runtime(run.physical(&run.selection.selected)).unwrap();
 }

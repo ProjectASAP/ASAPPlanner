@@ -16,7 +16,7 @@ use asap_executor::sources::InMemoryDataStore;
 use asap_executor::values::{Batch, Value};
 use asap_planner::{
     plan_installable, test_support::query_time_reference, FrontendInput, InstallablePlan,
-    PlanningModels, PlanningWorkload, SqlCatalog, UserInput,
+    InstallablePlanError, PlanningModels, PlanningWorkload, SqlCatalog, UserInput,
 };
 use asap_types::ir::operator::Source as DataSource;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
@@ -340,9 +340,8 @@ async fn an_exact_sql_top_5_answers_its_hosts() {
 }
 
 /// The issue's two queries under ε 0.01, δ 0.001: the plan Stage 3 selects
-/// installs, so the executor refreshes every materialized view it keeps; its
-/// compile check rejects a plan whose view it cannot refresh as it
-/// rejects one whose query run it cannot compile.
+/// installs, so the executor refreshes every materialized view it keeps and
+/// compiles its query run.
 #[tokio::test]
 async fn the_selected_approximate_plan_installs_and_compiles() {
     let plan = plan_sql(&[TOP_5_HOSTS, TOP_5_HOSTS_PER_CITY], APPROXIMATE).await;
@@ -351,11 +350,11 @@ async fn the_selected_approximate_plan_installs_and_compiles() {
 
 /// With `rn` selected, the per-city top 5 keeps its window function, which
 /// the executor does not run, so no plan of the workload compiles. Stage 3
-/// rejects each, wherever its summaries are built: a plan that builds its
-/// count sketch at ingestion time, which the executor cannot build either,
-/// is rejected like the same plan building it at query time, not selected.
+/// does not compile candidates; installation compiles the selected plan
+/// (each view's refresh, then the query run) and refuses it with the
+/// executor's reason rather than returning a plan a runtime cannot run.
 #[tokio::test]
-async fn a_plan_whose_materialized_view_does_not_refresh_is_rejected() {
+async fn a_plan_the_executor_cannot_run_is_refused_at_installation() {
     let with_rn =
         TOP_5_HOSTS_PER_CITY.replace("SELECT city, host, c FROM", "SELECT city, host, c, rn FROM");
     let catalog = SqlCatalog::new().with_table("metrics", metrics_schema());
@@ -370,20 +369,17 @@ async fn a_plan_whose_materialized_view_does_not_refresh_is_rejected() {
     ))
     .await;
     match planned {
-        Err(asap_planner::PlanError::Optimize(error)) => {
-            // Joint search keeps typed validation failures in its no-incumbent
-            // report, including when the search budget ends before exhaustion.
+        Err(asap_planner::PlanError::Installable(
+            error @ (InstallablePlanError::MaterializedViewNotExecutable { .. }
+            | InstallablePlanError::QueryRunNotExecutable { .. }),
+        )) => {
             let diagnostic = error.to_string();
-            assert!(
-                diagnostic.contains("executor_cannot_compile"),
-                "{diagnostic}"
-            );
             assert!(
                 diagnostic.contains("value operation has no native implementation"),
                 "{diagnostic}"
             );
         }
-        other => panic!("no plan is selected: {:?}", other.map(|_| ())),
+        other => panic!("no plan is installed: {:?}", other.map(|_| ())),
     }
 }
 
