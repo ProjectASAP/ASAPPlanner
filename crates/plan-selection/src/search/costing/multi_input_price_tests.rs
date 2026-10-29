@@ -43,6 +43,7 @@ fn append(
         });
     inventory.inventory.templates.push(Some(node.clone()));
     inventory.configurations.push(CandidateConfiguration {
+        may_keep_with_sole_reader: Vec::new(),
         source_candidate: id,
         materialization: Materialization::NotMaterialized,
         timing: ExecutionTiming::QueryTime,

@@ -370,10 +370,24 @@ fn project(
                 })
                 .collect(),
         },
+        // The component is planned over its own queries only, so per-query
+        // facts are re-indexed to `component.queries`.
         configurations: component
             .candidates
             .iter()
-            .map(|&id| configured.configurations[id])
+            .map(|&id| {
+                let mut configuration = configured.configurations[id].clone();
+                if !configuration.may_keep_with_sole_reader.is_empty() {
+                    configuration.may_keep_with_sole_reader = component
+                        .queries
+                        .iter()
+                        .map(|&query| {
+                            configured.configurations[id].may_keep_with_sole_reader[query]
+                        })
+                        .collect();
+                }
+                configuration
+            })
             .collect(),
     }
 }

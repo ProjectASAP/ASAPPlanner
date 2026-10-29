@@ -88,7 +88,7 @@ pub(in crate::search) fn expand_execution_scopes_before(
     let mut copies = vec![Vec::new(); count];
     for (id, candidate) in graph.candidates.iter().enumerate() {
         super::check_deadline(deadline)?;
-        let configuration = source.configurations[id];
+        let configuration = &source.configurations[id];
         let uses = *original_uses
             .get(configuration.source_candidate.0)
             .ok_or_else(|| {
@@ -154,7 +154,7 @@ pub(in crate::search) fn expand_execution_scopes_before(
                 );
             }
             copies[id].push(copy);
-            result.configurations.push(configuration);
+            result.configurations.push(configuration.clone());
             result
                 .inventory
                 .templates
@@ -340,6 +340,7 @@ mod tests {
             },
             configurations: (0..3)
                 .map(|id| CandidateConfiguration {
+                    may_keep_with_sole_reader: Vec::new(),
                     source_candidate: PhysicalCandidateId(id),
                     materialization: Materialization::NotMaterialized,
                     timing: ExecutionTiming::QueryTime,
@@ -463,6 +464,7 @@ mod tests {
             .group_candidates
             .push(vec![PhysicalCandidateId(3)]);
         source.configurations.push(CandidateConfiguration {
+            may_keep_with_sole_reader: Vec::new(),
             source_candidate: PhysicalCandidateId(3),
             materialization: Materialization::NotMaterialized,
             timing: ExecutionTiming::QueryTime,
@@ -528,6 +530,7 @@ mod tests {
             },
             configurations: (0..4)
                 .map(|i| CandidateConfiguration {
+                    may_keep_with_sole_reader: Vec::new(),
                     source_candidate: id(i),
                     materialization: Materialization::NotMaterialized,
                     timing: ExecutionTiming::QueryTime,

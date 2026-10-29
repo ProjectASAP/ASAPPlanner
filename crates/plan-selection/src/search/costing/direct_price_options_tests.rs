@@ -69,6 +69,7 @@ fn differing_supplier_statistics_keep_both_price_interfaces() {
         },
         configurations: (0..3)
             .map(|id| CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: PhysicalCandidateId(id),
                 materialization: Materialization::NotMaterialized,
                 timing: ExecutionTiming::QueryTime,
@@ -258,6 +259,7 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
         },
         configurations: (0..3)
             .map(|id| CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: PhysicalCandidateId(id),
                 materialization: Materialization::NotMaterialized,
                 timing: ExecutionTiming::QueryTime,
@@ -295,6 +297,7 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
         .templates
         .push(Some(downstream.clone()));
     configured.configurations.push(CandidateConfiguration {
+        may_keep_with_sole_reader: Vec::new(),
         source_candidate: PhysicalCandidateId(3),
         materialization: Materialization::NotMaterialized,
         timing: ExecutionTiming::QueryTime,
@@ -417,6 +420,7 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
             .map_children(|child| inputs.push(append(child.clone(), configured, ingestion, mode)));
         let id = PhysicalCandidateId(configured.configurations.len());
         configured.configurations.push(CandidateConfiguration {
+            may_keep_with_sole_reader: Vec::new(),
             source_candidate: id,
             materialization: if pane {
                 mode
@@ -559,6 +563,7 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
     let projected_supplier = PhysicalCandidateId(configured.configurations.len());
     configured.inventory.templates.push(Some(projected));
     configured.configurations.push(CandidateConfiguration {
+        may_keep_with_sole_reader: Vec::new(),
         source_candidate: projected_supplier,
         materialization: Materialization::NotMaterialized,
         timing: ExecutionTiming::IngestionTime,
@@ -763,6 +768,7 @@ fn mixed_schedule_joint_prices_match_the_real_evaluator() {
         },
         configurations: (0..3)
             .map(|id| CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: PhysicalCandidateId(id),
                 materialization: Materialization::NotMaterialized,
                 timing: ExecutionTiming::QueryTime,
