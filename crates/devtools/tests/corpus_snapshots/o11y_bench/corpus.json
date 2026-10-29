@@ -1,0 +1,133 @@
+{
+  "source": "crates/frontend-promql/tests/observability/data/o11y_bench_promql.txt",
+  "stage_pipeline_args": [
+    "--enforce-accuracy-guarantees"
+  ],
+  "query_workload": {
+    "language": "promql",
+    "repeating_query": {
+      "demand": {
+        "fixed_interval": 60000
+      },
+      "requirements": {
+        "accuracy": {
+          "max_error": 0.01,
+          "failure_probability": 0.001
+        }
+      },
+      "predictability": {
+        "predictable": {
+          "known_at": null
+        }
+      },
+      "range_evaluation": {
+        "step_ms": 60000,
+        "span_ms": 3600000
+      }
+    }
+  },
+  "data_workload": {
+    "sources": {
+      "http_requests_total": {
+        "sample_interval": 1000,
+        "series_count": 1000,
+        "metric_type": "counter"
+      },
+      "http_request_duration_seconds_bucket": {
+        "sample_interval": 1000,
+        "series_count": 1000,
+        "metric_type": "counter"
+      },
+      "service_cache_refresh_lag_seconds": {
+        "sample_interval": 1000,
+        "series_count": 1000,
+        "metric_type": "gauge"
+      },
+      "service_retry_queue_depth": {
+        "sample_interval": 1000,
+        "series_count": 1000,
+        "metric_type": "gauge"
+      },
+      "process_resident_memory_bytes": {
+        "sample_interval": 1000,
+        "series_count": 1000,
+        "metric_type": "gauge"
+      },
+      "process_cpu_seconds_total": {
+        "sample_interval": 1000,
+        "series_count": 1000,
+        "metric_type": "counter"
+      },
+      "up": {
+        "sample_interval": 1000,
+        "series_count": 1000,
+        "metric_type": "gauge"
+      }
+    },
+    "arrival": {
+      "ingesting": {
+        "rows_per_second": 7000.0
+      }
+    }
+  },
+  "queries": [
+    {
+      "id": "q02",
+      "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"order-service\"}[5m])) by (le))"
+    },
+    {
+      "id": "q05",
+      "query": "max_over_time((sum(rate(http_requests_total{job=\"order-service\",status=~\"5..\"}[5m])) / sum(rate(http_requests_total{job=\"order-service\"}[5m])))[6h:1m])"
+    },
+    {
+      "id": "q06",
+      "query": "max_over_time(histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"user-service\"}[5m])) by (le))[12h:1m])"
+    },
+    {
+      "id": "q11",
+      "query": "max_over_time(sum(process_resident_memory_bytes)[6h:1m])"
+    },
+    {
+      "id": "q12",
+      "query": "service_cache_refresh_lag_seconds{job=\"user-service\"}"
+    },
+    {
+      "id": "q18",
+      "query": "sum(increase(http_requests_total{job=\"payment-service\",status=~\"5..\"}[1h] offset 6h)) / sum(increase(http_requests_total{job=\"payment-service\"}[1h] offset 6h))",
+      "skip_reason": "planning runs past the time limit on main (#1023)"
+    },
+    {
+      "id": "q19",
+      "query": "sum(increase(http_requests_total{job=\"payment-service\",status=~\"5..\"}[1h])) / sum(increase(http_requests_total{job=\"payment-service\"}[1h]))"
+    },
+    {
+      "id": "q20",
+      "query": "sum(process_resident_memory_bytes)"
+    },
+    {
+      "id": "q21",
+      "query": "sum(rate(http_requests_total{job=\"order-service\"}[5m] offset 1h))",
+      "skip_reason": "a pane round can end on its wall-clock budget (status time_limit), so the result depends on machine speed; about 70 s and 400 MB on one core"
+    },
+    {
+      "id": "q22",
+      "query": "sum(rate(http_requests_total{job=\"order-service\"}[5m]))"
+    },
+    {
+      "id": "q23",
+      "query": "sum(rate(http_requests_total{job=~\"user-service|order-service|payment-service\"}[5m]))"
+    },
+    {
+      "id": "q25",
+      "query": "sum(rate(http_requests_total{status=~\"5..\",job=~\"user-service|order-service|payment-service\"}[1h])) / sum(rate(http_requests_total{job=~\"user-service|order-service|payment-service\"}[1h]))"
+    },
+    {
+      "id": "q26",
+      "query": "sum(rate(process_cpu_seconds_total[1h]))"
+    },
+    {
+      "id": "q27",
+      "query": "sum(up)"
+    }
+  ]
+}

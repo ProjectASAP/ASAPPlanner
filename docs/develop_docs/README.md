@@ -13,6 +13,7 @@ formats, evidence, and verification workflows.
 - [Offline sketch evidence](offline-sketch-evidence.md)
 - [Metrics-observability corpora](metrics-observability-corpora.md)
 - [Physical compile coverage for deployment computation](physical-compile-coverage.md)
+- [Planner snapshots](planner-snapshots.md)
 
 Historical records of removed APIs:
 

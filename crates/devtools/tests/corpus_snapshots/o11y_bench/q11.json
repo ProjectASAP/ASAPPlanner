@@ -1,0 +1,8 @@
+{
+  "accuracy_guarantees": "enforced",
+  "error": "MILP solver: candidate-connections: generated candidate catalog is infeasible under the configured model.",
+  "query": "max_over_time(sum(process_resident_memory_bytes)[6h:1m])",
+  "rejected": [],
+  "search_rejected": [],
+  "selected": null
+}

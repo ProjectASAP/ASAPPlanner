@@ -1,0 +1,8 @@
+{
+  "accuracy_guarantees": "enforced",
+  "error": "MILP solver: candidate-connections: planning budget ended before either seed or complete search found a validated incumbent.",
+  "query": "max_over_time(histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"user-service\"}[5m])) by (le))[12h:1m])",
+  "rejected": [],
+  "search_rejected": [],
+  "selected": null
+}

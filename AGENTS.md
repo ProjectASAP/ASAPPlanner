@@ -28,6 +28,9 @@
   Explicitly describe **Before this PR** and **After this PR**, using an
   end-to-end example, screenshot, measurement, or diagram appropriate to the
   change.
+- A PR that changes planner snapshots
+  (`crates/devtools/tests/corpus_snapshots/`) says under **Snapshot changes**
+  which queries changed and why; a person confirms the why.
 - Agents must not complete fields reserved for human judgment, approval, or
   attestation.
 - Do not create, push, or publish commits or pull requests unless the user has
