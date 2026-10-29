@@ -582,6 +582,11 @@ pub(in crate::search) fn optimize_independent_components(
     };
     let mut rejections = CandidateRejectionSummary::default();
     let mut sum_cost = 0.0;
+    // Each component searches until its share of the time is spent, so an
+    // eighth is kept to validate the combined plan afterwards; without it
+    // the components use the whole budget and the combined plan, valid in
+    // every component, misses the deadline and the search ends without a plan.
+    let search_time = limits.wall_time.mul_f64(0.875);
     for (index, component) in parts.iter().enumerate() {
         let local = project(configured, component);
         let roots: Vec<_> = component
@@ -609,8 +614,7 @@ pub(in crate::search) fn optimize_independent_components(
             &local,
             &local_context,
             CandidateSearchLimits {
-                wall_time: limits.wall_time.saturating_sub(started.elapsed())
-                    / remaining_parts as u32,
+                wall_time: search_time.saturating_sub(started.elapsed()) / remaining_parts as u32,
                 max_refinements: limits.max_refinements.saturating_sub(summary.refinements)
                     / remaining_parts,
             },
