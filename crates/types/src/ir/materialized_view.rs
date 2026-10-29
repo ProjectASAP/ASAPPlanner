@@ -364,10 +364,10 @@ impl PhysicalASAPDAG {
                 }
             }
         }
-        let no_chains = HashSet::new();
+        let scan_windows = self.query_time_scan_windows();
         for node in self.nodes.iter().filter(|node| is_query_time_scan(node)) {
             check_deadline(deadline)?;
-            let window_ms = self.scan_window(node.id, &no_chains).lookback_ms();
+            let window_ms = scan_windows[&node.id].lookback_ms();
             let retention_ms = window_ms.map(|window_ms| {
                 let span_ms = reader_span_ms_by_node.get(&node.id).copied().unwrap_or(0);
                 let views_ms = view_need_ms_by_scan.get(&node.id).copied().unwrap_or(0);
@@ -391,13 +391,13 @@ impl PhysicalASAPDAG {
     /// that each scan reading a bounded window ([`Self::scan_window`]) has a
     /// retention covering it.
     pub fn raw_data_retention(&self) -> Result<Vec<RawDataRetention>, InstallableDagError> {
-        let no_chains = HashSet::new();
+        let scan_windows = self.query_time_scan_windows();
         let mut retention: Vec<RawDataRetention> = Vec::new();
         for node in self.nodes.iter().filter(|node| is_query_time_scan(node)) {
             let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload else {
                 continue;
             };
-            let window_ms = self.scan_window(node.id, &no_chains).lookback_ms();
+            let window_ms = scan_windows[&node.id].lookback_ms();
             let lookback_ms = match (window_ms, node.retention_ms) {
                 (None, _) => None,
                 (Some(window_ms), Some(kept_ms)) if kept_ms >= window_ms => Some(kept_ms),
@@ -419,6 +419,17 @@ impl PhysicalASAPDAG {
             }
         }
         Ok(retention)
+    }
+
+    /// [`Self::scan_window`] of each query-time `Scan`, with no chain kept,
+    /// by id.
+    fn query_time_scan_windows(&self) -> HashMap<PhysicalASAPNodeId, ScanWindow> {
+        let scans = self
+            .nodes
+            .iter()
+            .filter(|node| is_query_time_scan(node))
+            .map(|node| node.id);
+        self.scan_windows(scans, &HashSet::new())
     }
 
     /// Checks that every raw-data window the DAG reads (each `TimeRange`,

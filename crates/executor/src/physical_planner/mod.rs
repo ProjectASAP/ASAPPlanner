@@ -187,6 +187,17 @@ fn compile_internal(
             }
         }
     }
+    // Each view's and each `Scan`'s window, the DAG indexed once for all:
+    // a materialized pane chain has a view per pane.
+    let view_windows = dag.view_windows(views.iter().map(|view| view.node_id));
+    let scan_windows = dag.scan_windows(
+        dag.nodes
+            .iter()
+            .filter(|node| matches!(node.payload, Payload::NonASAP(NonASAPOp::Scan { .. })))
+            .map(|node| node.id),
+        &Default::default(),
+    );
+    let compile_roots: BTreeSet<NodeId> = roots.iter().copied().collect();
     let mut physical_dag = CompiledPhysicalDAG::new(roots.to_vec());
     for id in ordered {
         check_compile_deadline(deadline)?;
@@ -197,7 +208,7 @@ fn compile_internal(
         if let Some(view) = views_by_node.get(&id) {
             // A view read is exact for the window its state summarizes, so
             // that window must be bounded.
-            let window = dag.view_window(view.node_id);
+            let window = view_windows[&view.node_id];
             if window == ScanWindow::Unbounded {
                 return Err(invalid(format!(
                     "materialized view {id} summarizes an unbounded window"
@@ -235,8 +246,8 @@ fn compile_internal(
                 .map_err(|error| invalid(format!("scan {id}: {error}")))?;
             // The rows its readers read; a compile root reads them all.
             let window = match output.time_index {
-                Some(_) if !roots.contains(&id) => {
-                    dag.scan_window(id as PhysicalASAPNodeId, &Default::default())
+                Some(_) if !compile_roots.contains(&id) => {
+                    scan_windows[&(id as PhysicalASAPNodeId)]
                 }
                 _ => ScanWindow::Unbounded,
             };
@@ -1630,56 +1641,48 @@ mod compilation_deadline_tests {
         );
     }
 
-    /// 20,000 one-minute windows, the `i`-th shifted `i` minutes back, over
-    /// one table `Scan` (the shape of a pane-expanded DAG), each window a
-    /// root, compile within 10 s. A search over every node per window, and
-    /// over every root per reader of the `Scan`, made the compile quadratic
-    /// in the number of windows (#993).
-    #[test]
-    fn many_windows_over_one_scan_compile_in_linear_time() {
+    /// `window_count` one-minute windows over one table `Scan`, the `i`-th
+    /// shifted `i` minutes back, each window a root (the shape of a
+    /// pane-expanded DAG), with the roots' node ids.
+    fn shifted_windows_over_one_scan(window_count: i64) -> (PhysicalASAPDAG, Vec<NodeId>) {
         use planner_types::ir::operator::{Source, TimeShift};
         use planner_types::ir::physical_export::compile_physical_asap_workload;
-        use planner_types::ir::schema::Field;
+        use planner_types::ir::schema::{Field, Schema};
         use planner_types::ir::{
-            apply_materialization_timings, MaterializationAssignment, QueryRoot, TimingMemo,
+            apply_materialization_timings, MaterializationAssignment, Operator, QueryRoot,
+            TimingMemo,
         };
-        let window_count = 20_000;
         let minute_ms = 60_000;
-        let scan =
-            OperatorNode::new_shared(planner_types::ir::Operator::NonASAP(NonASAPOp::Scan {
-                source: Source::Table {
-                    table_ref: "t".into(),
-                },
-                predicates: vec![],
-                schema: planner_types::ir::schema::Schema::with_time_index(
-                    vec![
-                        Field::plain("ts", DataType::Timestamp, false),
-                        Field::plain("value", DataType::Float64, false),
-                    ],
-                    0,
-                    vec![],
-                ),
-            }))
-            .unwrap();
+        let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::Table {
+                table_ref: "t".into(),
+            },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                ],
+                0,
+                vec![],
+            ),
+        }))
+        .unwrap();
         let windows: Vec<_> = (0..window_count)
             .map(|i| {
-                let shifted = OperatorNode::new_shared(planner_types::ir::Operator::NonASAP(
-                    NonASAPOp::TimeShift {
-                        shift: TimeShift {
-                            offset_ms: i * minute_ms,
-                            at: None,
-                        },
-                        child: std::rc::Rc::clone(&scan),
+                let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
+                    shift: TimeShift {
+                        offset_ms: i * minute_ms,
+                        at: None,
                     },
-                ))
+                    child: std::rc::Rc::clone(&scan),
+                }))
                 .unwrap();
-                OperatorNode::new_shared(planner_types::ir::Operator::NonASAP(
-                    NonASAPOp::TimeRange {
-                        range: Duration::from_millis(minute_ms as u64),
-                        kind: TimeRangeKind::Range,
-                        child: shifted,
-                    },
-                ))
+                OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+                    range: Duration::from_millis(minute_ms as u64),
+                    kind: TimeRangeKind::Range,
+                    child: shifted,
+                }))
                 .unwrap()
             })
             .collect();
@@ -1699,9 +1702,54 @@ mod compilation_deadline_tests {
             })
             .collect();
         let dag = compile_physical_asap_workload(&roots).unwrap();
-        let roots: Vec<NodeId> = dag.roots.iter().map(|&id| id as NodeId).collect();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        compile_before(&dag, &[], &roots, Some(deadline)).unwrap();
+        let roots = dag.roots.iter().map(|&id| id as NodeId).collect();
+        (dag, roots)
+    }
+
+    /// Three one-minute windows shifted 0, 1 and 2 minutes back over one
+    /// `Scan`: the `Scan` reads the union `(T - 3m, T]`, and each window's
+    /// `TimeRange` ends its shift before `T` and is one minute wide.
+    #[test]
+    fn shifted_windows_over_one_scan_compile_to_their_windows() {
+        let (dag, roots) = shifted_windows_over_one_scan(3);
+        let compiled = serde_json::to_value(compile(&dag, &[], &roots).unwrap()).unwrap();
+        let nodes = compiled["nodes"].as_object().unwrap();
+        let scan_windows: Vec<_> = nodes
+            .values()
+            .filter_map(|node| node.get("RawData"))
+            .map(|slot| slot["window"].clone())
+            .collect();
+        assert_eq!(
+            scan_windows,
+            [serde_json::json!({"Within": {"end_offset_ms": 0, "width_ms": 180_000}})]
+        );
+        let mut time_ranges: Vec<(i64, i64)> = nodes
+            .values()
+            .filter_map(|node| node.pointer("/Operator/operator/kind/TimeRange"))
+            .map(|kind| {
+                (
+                    kind["end_offset_ms"].as_i64().unwrap(),
+                    kind["width_ms"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        time_ranges.sort();
+        assert_eq!(
+            time_ranges,
+            [(0, 60_000), (60_000, 60_000), (120_000, 60_000)]
+        );
+    }
+
+    /// 20,000 shifted windows over one `Scan` compile in linear time. A
+    /// search over every node per window, and over every root per reader of
+    /// the `Scan`, made the compile quadratic in the number of windows
+    /// (#993): in a debug build, 10,000 windows compiled in 5.4 s and 20,000
+    /// in over 10 s before, 1.4 s and 3.1 s after.
+    #[test]
+    #[ignore = "slow: run in release by hand"]
+    fn many_windows_over_one_scan_compile_in_linear_time() {
+        let (dag, roots) = shifted_windows_over_one_scan(20_000);
+        compile_before(&dag, &[], &roots, None).unwrap();
     }
 
     #[test]
