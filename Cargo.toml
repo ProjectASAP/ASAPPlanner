@@ -6,6 +6,7 @@ members = [
     "crates/sql-function-catalog",
     "crates/logical-asap-optimization",
     "crates/physical-asap-optimization",
+    "crates/cost",
     "crates/plan-selection",
     "crates/frontend-promql",
     "crates/frontend-metricsql",

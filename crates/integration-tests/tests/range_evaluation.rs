@@ -78,7 +78,7 @@ fn run_explicit_for(workload: &PlanningWorkload, deployment: &DeploymentCapabili
             .roots
             .unwrap(),
     );
-    let settings = asap_plan_selection::PlanSelectionSettings::default();
+    let settings = asap_cost::CostInputs::default();
     run_explicit_candidates(
         workload,
         roots,

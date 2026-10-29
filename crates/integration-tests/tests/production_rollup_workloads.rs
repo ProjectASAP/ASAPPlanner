@@ -4,12 +4,11 @@
 //! builds over the raw rows.
 use std::rc::Rc;
 
+use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
 use asap_executor::physical_planner::promql_rows;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_plan_selection::{
-    CostModel, PlanSelectionSettings, PlanningModels, ResourceUnitCost, Stage1ToStage3Run,
-};
+use asap_plan_selection::{PlanningModels, Stage1ToStage3Run};
 use asap_types::ir::properties::{AccuracyMetric, AccuracyScope, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
@@ -71,7 +70,7 @@ fn production(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
 ) -> Stage1ToStage3Run<usize> {
-    let mut settings = PlanSelectionSettings::default();
+    let mut settings = CostInputs::default();
     settings.cost_model = CostModel::UsageOverTime(ResourceUnitCost::aws_fargate_us_east_1(
         settings.resource_speed,
     ));
@@ -277,7 +276,7 @@ fn independent_kll_cost(
         .into_iter()
         .map(|(_, root)| root)
         .collect();
-    let mut settings = PlanSelectionSettings::default();
+    let mut settings = CostInputs::default();
     settings.cost_model = CostModel::UsageOverTime(ResourceUnitCost::aws_fargate_us_east_1(
         settings.resource_speed,
     ));

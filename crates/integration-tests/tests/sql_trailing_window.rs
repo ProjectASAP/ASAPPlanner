@@ -6,9 +6,9 @@
 
 use crate::planner_layering_common;
 
+use asap_cost::CostInputs;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_logical_asap_optimization::DeploymentCapabilities;
-use asap_plan_selection::PlanSelectionSettings;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyScope, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, Operator, QueryRoot};
@@ -153,7 +153,7 @@ async fn run(deployment: &DeploymentCapabilities) -> Run {
             .filter(|candidate| candidate.pane_candidates.len() == panes.len())
             .map(|candidate| candidate.roots.unwrap()),
     );
-    let settings = PlanSelectionSettings::default();
+    let settings = CostInputs::default();
     run_explicit_candidates(
         &workload,
         roots,

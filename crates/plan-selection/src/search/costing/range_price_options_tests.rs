@@ -158,7 +158,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
                 range_evaluation: Some(RangeEvaluation { span_ms, step_ms }),
             })
             .collect();
-        let mut settings = crate::PlanSelectionSettings::default();
+        let mut settings = asap_cost::CostInputs::default();
         settings.resource_speed.ms_per_cpu_op *= 1000.0;
         settings.resource_speed.ms_per_scanned_byte *= 1000.0;
         settings.measured_operation_costs.ns_per_evaluation = 1_000_000.0;
@@ -178,7 +178,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
                 deployment_capabilities: &deployment,
                 ..crate::PlanningModels::builtin()
             },
-            calibration: crate::CalibrationFit::default(),
+            calibration: asap_cost::CalibrationFit::default(),
         };
         let profile = extract_price_options(&configured, &context)
             .unwrap()

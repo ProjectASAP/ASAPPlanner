@@ -13,6 +13,7 @@ asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-sql = { path = "../frontend-sql" }
 asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
 asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
+asap-cost = { path = "../cost" }
 asap-plan-selection = { path = "../plan-selection" }
 # The installable plan of the selected candidate (`installable_plan_of`),
 # whose stored outputs `stage_pipeline` writes.

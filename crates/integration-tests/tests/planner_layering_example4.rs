@@ -10,11 +10,9 @@ use crate::planner_layering_common;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel, ResourceUnitCost};
 use asap_logical_asap_optimization::DeploymentCapabilities;
-use asap_plan_selection::{
-    ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings, RejectionCause,
-    ResourceUnitCost,
-};
+use asap_plan_selection::RejectionCause;
 use asap_types::ir::flat::NodeId;
 use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::workload::{DataArrival, PlanningWorkload};
@@ -321,7 +319,7 @@ fn keeping_query_time_results() -> DeploymentCapabilities {
 fn stage2_physical_asap_optimization_b_tumbling_kll_has_three_materialization_options() {
     let run = run_pattern_b_fixture(
         &pattern_b(),
-        &PlanSelectionSettings::default(),
+        &CostInputs::default(),
         &keeping_query_time_results(),
     );
     let found: BTreeSet<_> = options_of(&run, tumbling(), 1).into_keys().collect();
@@ -336,7 +334,7 @@ fn stage2_physical_asap_optimization_b_tumbling_kll_has_three_materialization_op
 fn stage2_physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_query_time() {
     let run = run_pattern_b_fixture(
         &pattern_b(),
-        &PlanSelectionSettings::default(),
+        &CostInputs::default(),
         &DeploymentCapabilities::default(),
     );
     let (id, build) = options_of(&run, tumbling(), 1)[&MatAtIngestion].clone();
@@ -367,7 +365,7 @@ fn stage2_physical_asap_optimization_b_b1_builds_at_ingestion_and_merges_at_quer
 fn stage2_physical_asap_optimization_b_tumbling_kll_has_b1_and_b2() {
     let run = run_pattern_b_fixture(
         &pattern_b(),
-        &PlanSelectionSettings::default(),
+        &CostInputs::default(),
         &DeploymentCapabilities::default(),
     );
     let options = options_of(&run, tumbling(), 1);
@@ -390,7 +388,7 @@ fn stage2_physical_asap_optimization_b_tumbling_kll_has_b1_and_b2() {
 fn stage2_physical_asap_optimization_b_b3_keeps_query_time_windows() {
     let run = run_pattern_b_fixture(
         &pattern_b(),
-        &PlanSelectionSettings::default(),
+        &CostInputs::default(),
         &keeping_query_time_results(),
     );
     let options = options_of(&run, tumbling(), 1);
@@ -412,7 +410,7 @@ fn stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_optio
     let found: BTreeSet<_> = options_of(
         &run_pattern_b_fixture(
             &pattern_b(),
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
             &DeploymentCapabilities::default(),
         ),
         sliding(),
@@ -429,7 +427,7 @@ fn stage2_physical_asap_optimization_b_sliding_kll_has_two_materialization_optio
 fn pattern_b_under(cost_model: CostModel) -> Run {
     run_pattern_b_fixture(
         &pattern_b(),
-        &PlanSelectionSettings {
+        &CostInputs {
             cost_model,
             ..Default::default()
         },

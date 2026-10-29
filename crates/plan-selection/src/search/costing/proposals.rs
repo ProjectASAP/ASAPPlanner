@@ -44,7 +44,7 @@ pub(in crate::search) fn estimate_costs(
         .entries
         .iter()
         .filter_map(|entry| {
-            crate::cost::execution_demand::evaluation_rate(
+            asap_cost::execution_demand::evaluation_rate(
                 [(&entry.recurrence, entry.range_evaluation)],
                 context
                     .models
@@ -182,7 +182,8 @@ mod tests {
     use super::*;
     use crate::search::candidates::configurations::enumerate_candidate_configurations;
     use crate::search::candidates::inventory::build_candidate_inventory;
-    use crate::{CalibrationFit, PlanningModels};
+    use crate::PlanningModels;
+    use asap_cost::CalibrationFit;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
     use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};

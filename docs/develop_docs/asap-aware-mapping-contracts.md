@@ -108,7 +108,7 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
   `TiedLostOnEnumerationOrder`). A candidate that cannot be resized for its failure
   probability is rejected alone.
 - Usage (`ResourceUsage`) is measured without prices; the `CostModel` in
-  `PlanSelectionSettings` turns it into a choice. Ties keep enumeration order
+  `CostInputs` turns it into a choice. Ties keep enumeration order
   under every cost model.
 - `Selection.plan` is the selected candidate's roots with the weight
   requirements Stage 3 confirmed from the data facts.
@@ -122,5 +122,5 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 | What is shared, split into panes or reused | Pass 2 |
 | When each build runs and whether it is kept | Stage 2 |
 | Which plan is valid and which is chosen | Stage 3 |
-| What the executor can build, retain and how it is priced | the deployment, through `PlanningModels` (`DeploymentCapabilities`, `PlanSelectionSettings`, `AccuracyModel`) |
+| What the executor can build, retain and how it is priced | the deployment, through `PlanningModels` (`DeploymentCapabilities`, `CostInputs`, `AccuracyModel`) |
 | Running the plan | the executor (`asap-executor`), outside the planner |

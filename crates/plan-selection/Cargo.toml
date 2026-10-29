@@ -4,11 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 # #509 Stage 3, plan selection: the only stage that prices plans, with the
-# planning models (cost and accuracy) and the Stage 1 to Stage 3 driver.
+# planning models (accuracy here; cost from `asap-cost`) and the Stage 1 to
+# Stage 3 driver.
 # Depends on Stages 1 and 2, never on the executor.
 [dependencies]
 asap_sketchlib = { workspace = true }
 asap-types = { path = "../types" }
+asap-cost = { path = "../cost" }
 asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
 asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
 thiserror = "2"
@@ -24,4 +26,3 @@ asap-logical-asap-optimization = { path = "../logical-asap-optimization", featur
 asap-frontend-promql = { path = "../frontend-promql" }
 # The executor's charge for each summary state, checked against the bytes
 # plan selection prices for it plus the accumulator's own fields (#947).
-asap-executor = { path = "../executor" }

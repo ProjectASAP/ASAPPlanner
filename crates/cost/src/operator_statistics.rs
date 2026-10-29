@@ -96,7 +96,7 @@ pub struct PartitionStatistics {
 }
 
 /// Workload-dependent evidence for one operator in an already-lowered
-/// physical DAG. [`PhysicalOperator`](crate::cost::analytical::PhysicalOperator)
+/// physical DAG. [`PhysicalOperator`](crate::analytical::PhysicalOperator)
 /// is the authoritative operator vocabulary: every one of its variants has a
 /// matching statistics variant here.
 ///

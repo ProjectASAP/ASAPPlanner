@@ -1,6 +1,6 @@
 //! Converts sketch-bench's per-operation cost table (`rqe_atomic_costs.json`)
 //! into plan selection's measured table
-//! ([`PlanSelectionSettings::measured_operation_costs`]).
+//! ([`CostInputs::measured_operation_costs`]).
 //!
 //! sketch-bench writes one row per sketch configuration:
 //!
@@ -22,9 +22,9 @@
 //! the reason: exact accumulators, Hydra structures (shared across groups,
 //! measured at one label width) and sketch names with no planner sketch.
 //!
-//! [`PlanSelectionSettings::measured_operation_costs`]: asap_plan_selection::PlanSelectionSettings::measured_operation_costs
+//! [`CostInputs::measured_operation_costs`]: asap_cost::CostInputs::measured_operation_costs
 
-use asap_plan_selection::{MeasuredOperationCost, SummaryOperation};
+use asap_cost::{MeasuredOperationCost, SummaryOperation};
 use asap_types::ir::schema::SketchParams;
 use serde_json::Value;
 

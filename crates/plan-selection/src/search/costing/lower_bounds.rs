@@ -10,7 +10,8 @@ use asap_types::physical::Materialization;
 
 use crate::search::candidates::configurations::CandidateConfigurationInventory;
 use crate::search::refinement::planner::CandidatePlanningContext;
-use crate::{price_node, CostModel, PricedNode, ProducerOutput, StateFamily};
+use crate::{price_node, PricedNode, ProducerOutput, StateFamily};
+use asap_cost::CostModel;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(in crate::search) struct LowerBoundMetrics {
@@ -51,7 +52,7 @@ pub(in crate::search) fn apply(
                 .entries
                 .iter()
                 .try_fold(f64::INFINITY, |minimum, entry| {
-                    crate::cost::execution_demand::evaluation_rate(
+                    asap_cost::execution_demand::evaluation_rate(
                         [(&entry.recurrence, None)],
                         context
                             .models
@@ -369,7 +370,7 @@ fn template_price_is_a_floor(build: &ASAPOp, context: &CandidatePlanningContext<
 /// above it get a size-based bound.
 fn measured_family(
     params: &SketchParams,
-    table: &crate::cost::measured::MeasuredOperationCosts,
+    table: &asap_cost::measured::MeasuredOperationCosts,
 ) -> bool {
     table.operators.iter().any(|entry| {
         entry.sketch.as_ref().is_some_and(|measured| {
@@ -747,7 +748,8 @@ mod tests {
     use crate::search::candidates::inventory::CandidateInventory;
     use crate::search::candidates::physical::materialize_selected_candidates;
     use crate::search::milp::model::{solve_candidate_proposal, ObservedAssignment};
-    use crate::{CalibrationFit, PlanSelector, PlanningModels};
+    use crate::{PlanSelector, PlanningModels};
+    use asap_cost::CalibrationFit;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::asap_aware_cse::{
         pane_candidates, window_composition_pass2_candidates,
@@ -1248,7 +1250,7 @@ mod tests {
                     step_ms: 120_000,
                 });
             }
-            let mut settings = crate::PlanSelectionSettings::default();
+            let mut settings = asap_cost::CostInputs::default();
             if measured {
                 settings.measured_operation_costs = serde_json::from_value(serde_json::json!({"operators": [{"operator": "PaneChain", "phase": "ingestion_time", "sketch": {"DDSketch": {"alpha": 0.1}}, "ns_per_unit": 300.0, "ns_per_invocation": 200.0, "memory_bytes_per_state": 1000.0}, {"operator": "SummaryMerge", "phase": "query_time", "sketch": {"DDSketch": {"alpha": 0.1}}, "ns_per_unit": 500.0, "ns_per_invocation": 100.0}, {"operator": "SummaryEstimate", "phase": "query_time", "sketch": {"DDSketch": {"alpha": 0.1}}, "ns_per_unit": 900.0, "ns_per_invocation": 400.0}]})).unwrap();
             }
@@ -1260,10 +1262,7 @@ mod tests {
                 ]})).unwrap();
             }
             let models = PlanningModels::builtin().with_plan_selection(&settings);
-            let calibration = CalibrationFit {
-                measured_ms_per_second: 2.0,
-                formula_ms_per_second: 1.0,
-            };
+            let calibration = CalibrationFit::from_factor(2.0).unwrap();
             let context = CandidatePlanningContext {
                 deadline: None,
                 refine_materialization: false,
@@ -1454,7 +1453,7 @@ mod tests {
         queries: &[&str],
         built_for: AccuracyTarget,
         evaluated_for: AccuracyTarget,
-        settings: &crate::PlanSelectionSettings,
+        settings: &asap_cost::CostInputs,
         pick: fn(&OperatorNode) -> bool,
     ) -> (CandidateConfigurationInventory, f64, f64) {
         let roots_with_ids: Vec<_> = queries
@@ -1644,7 +1643,7 @@ mod tests {
                 &[query],
                 AccuracyTarget::exact(),
                 AccuracyTarget::exact(),
-                &crate::PlanSelectionSettings::default(),
+                &asap_cost::CostInputs::default(),
                 |node| {
                     matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(..), child, .. })
                         if matches!(child.non_asap(), Some(NonASAPOp::TimeRange { .. })))
@@ -1694,7 +1693,7 @@ mod tests {
                 queries,
                 AccuracyTarget::exact(),
                 AccuracyTarget::exact(),
-                &crate::PlanSelectionSettings::default(),
+                &asap_cost::CostInputs::default(),
                 pick,
             );
             let scans = configured
@@ -1735,7 +1734,7 @@ mod tests {
                 &["quantile_over_time(0.9, latency[5m])"],
                 built_for.clone(),
                 AccuracyTarget::max_error(0.01).failure_probability(failure_probability),
-                &crate::PlanSelectionSettings::default(),
+                &asap_cost::CostInputs::default(),
                 is_kll_build,
             );
             assert!(bound_of(&configured, is_kll_build) > 0.0);
@@ -1755,7 +1754,7 @@ mod tests {
     // measured entries gets no certified bound.
     #[test]
     fn a_measured_kll_build_is_not_certified() {
-        let settings = crate::PlanSelectionSettings {
+        let settings = asap_cost::CostInputs {
             measured_operation_costs: serde_json::from_value(serde_json::json!({"operators": [
             {"operator": "SummaryAgg", "phase": "query_time", "sketch": {"Kll": {"k": 200}}, "ns_per_unit": 300.0, "ns_per_invocation": 200.0}
         ]}))
@@ -1778,7 +1777,7 @@ mod tests {
     // stays below the evaluated cost.
     #[test]
     fn a_measured_kll_estimate_keeps_the_bound_below_the_cost() {
-        let settings = crate::PlanSelectionSettings {
+        let settings = asap_cost::CostInputs {
             measured_operation_costs: serde_json::from_value(serde_json::json!({"operators": [
             {"operator": "SummaryEstimate", "phase": "query_time", "sketch": {"Kll": {"k": 8}}, "ns_per_unit": 0.0, "ns_per_invocation": 5.0e9},
             {"operator": "SummaryEstimate", "phase": "query_time", "sketch": {"Kll": {"k": 20000}}, "ns_per_unit": 0.0, "ns_per_invocation": 1.0}

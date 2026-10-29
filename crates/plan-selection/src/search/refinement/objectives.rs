@@ -18,7 +18,8 @@ use crate::search::refinement::planner::{
     MaterializationOutcome,
 };
 use crate::search::refinement::search::{CandidateSearchLimits, CandidateSearchStatus};
-use crate::{CalibrationFit, PlanSelector, Selection, SelectionError};
+use crate::{PlanSelector, Selection, SelectionError};
+use asap_cost::CalibrationFit;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(in crate::search) struct ObjectiveSearchOptions {
@@ -396,9 +397,8 @@ mod tests {
     use crate::search::candidates::configurations::enumerate_candidate_configurations;
     use crate::search::candidates::inventory::build_candidate_inventory;
     use crate::search::milp::model::solve_candidate_proposal;
-    use crate::{
-        ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings, PlanningModels,
-    };
+    use crate::PlanningModels;
+    use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel};
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
     use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};
@@ -524,7 +524,7 @@ mod tests {
             ClusterObjective::LeastMemory,
             ClusterObjective::ParetoFront,
         ] {
-            let settings = PlanSelectionSettings {
+            let settings = CostInputs {
                 cost_model: CostModel::ClusterCapacity(ClusterLimits {
                     memory_bytes: u64::MAX,
                     disk_bytes: u64::MAX,
@@ -583,7 +583,7 @@ mod tests {
     #[test]
     fn partial_cluster_front_has_valid_selected_physical_plan() {
         let (configured, roots, entries, data) = fixture();
-        let settings = PlanSelectionSettings {
+        let settings = CostInputs {
             cost_model: CostModel::ClusterCapacity(ClusterLimits {
                 memory_bytes: u64::MAX,
                 disk_bytes: u64::MAX,
@@ -625,7 +625,7 @@ mod tests {
         );
     }
 
-    fn measured_settings() -> PlanSelectionSettings {
+    fn measured_settings() -> CostInputs {
         serde_json::from_value(serde_json::json!({"measured_operation_costs":{"operators":[{"operator":"Scan", "ns_per_unit":100.0}]}})).unwrap()
     }
 
@@ -728,7 +728,7 @@ mod tests {
     #[test]
     fn infeasible_archive_preserves_capacity_rejections_and_unique_logical_ids() {
         let (configured, roots, entries, data) = fixture();
-        let settings = PlanSelectionSettings {
+        let settings = CostInputs {
             cost_model: CostModel::ClusterCapacity(ClusterLimits {
                 memory_bytes: 0,
                 disk_bytes: 0,
@@ -888,7 +888,7 @@ mod tests {
             assert!(CalibrationFit::from_factor(invalid).is_err());
         }
         let (configured, roots, entries, data) = fixture();
-        let settings = PlanSelectionSettings {
+        let settings = CostInputs {
             frozen_calibration_factor: Some(3.0),
             ..measured_settings()
         };

@@ -314,9 +314,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "asap-cost"
+version = "0.1.0"
+dependencies = [
+ "asap-executor",
+ "asap-types",
+ "asap_sketchlib",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "asap-devtools"
 version = "0.1.0"
 dependencies = [
+ "asap-cost",
  "asap-executor",
  "asap-frontend-promql",
  "asap-frontend-sql",
@@ -402,6 +415,7 @@ dependencies = [
 name = "asap-integration-tests"
 version = "0.1.0"
 dependencies = [
+ "asap-cost",
  "asap-devtools",
  "asap-executor",
  "asap-frontend-promql",
@@ -445,7 +459,7 @@ dependencies = [
 name = "asap-plan-selection"
 version = "0.1.0"
 dependencies = [
- "asap-executor",
+ "asap-cost",
  "asap-frontend-promql",
  "asap-logical-asap-optimization",
  "asap-physical-asap-optimization",
@@ -464,6 +478,7 @@ name = "asap-planner"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "asap-cost",
  "asap-executor",
  "asap-frontend-metricsql",
  "asap-frontend-promql",

@@ -1424,7 +1424,8 @@ mod tests {
     // label, decides feasibility. Oversizing one remaining estimate stays legal.
     #[test]
     fn ratio_accuracy_is_validated_after_selecting_concrete_budget_shares() {
-        use crate::{CalibrationFit, PlanSelector, PlanningModels, SelectionError};
+        use crate::{PlanSelector, PlanningModels, SelectionError};
+        use asap_cost::CalibrationFit;
         use asap_logical_asap_optimization::accuracy::satisfies;
         use asap_logical_asap_optimization::test_support::entry_with;
         use asap_physical_asap_optimization::optimize_physical_asap_chosen;

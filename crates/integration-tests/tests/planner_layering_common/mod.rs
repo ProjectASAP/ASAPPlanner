@@ -15,10 +15,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+use asap_cost::CostInputs;
 use asap_devtools::planning_stages::{lower_promql_roots, run_default_search_over};
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
-use asap_plan_selection::PlanSelectionSettings;
 use asap_plan_selection::Selection;
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
@@ -38,7 +38,7 @@ pub fn run_promql(workload: &PlanningWorkload) -> Run {
 
 /// Lower and plan a PromQL workload, selecting under `settings` (a cost
 /// model other than the default).
-pub fn run_promql_under(workload: &PlanningWorkload, settings: &PlanSelectionSettings) -> Run {
+pub fn run_promql_under(workload: &PlanningWorkload, settings: &CostInputs) -> Run {
     run_stages_under(workload, lower_promql(workload), settings)
 }
 
@@ -48,7 +48,7 @@ pub fn run_promql_for(workload: &PlanningWorkload, deployment: &DeploymentCapabi
     run_stages_with(
         workload,
         lower_promql(workload),
-        &PlanSelectionSettings::default(),
+        &CostInputs::default(),
         deployment,
     )
 }
@@ -218,14 +218,14 @@ fn logical(id: String, roots: Vec<QueryRoot>) -> Logical {
 /// and search diagnostics. Tests that require a particular algorithm or window
 /// use `run_explicit_candidates` instead of assuming it appears in the archive.
 pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
-    run_stages_under(workload, roots, &PlanSelectionSettings::default())
+    run_stages_under(workload, roots, &CostInputs::default())
 }
 
 /// [`run_stages`], selecting under `settings`.
 pub fn run_stages_under(
     workload: &PlanningWorkload,
     roots: Vec<QueryRoot>,
-    settings: &PlanSelectionSettings,
+    settings: &CostInputs,
 ) -> Run {
     run_stages_with(
         workload,
@@ -240,7 +240,7 @@ pub fn run_stages_under(
 pub fn run_stages_with(
     workload: &PlanningWorkload,
     roots: Vec<QueryRoot>,
-    settings: &PlanSelectionSettings,
+    settings: &CostInputs,
     deployment: &DeploymentCapabilities,
 ) -> Run {
     let models = asap_plan_selection::PlanningModels::builtin()
@@ -353,7 +353,7 @@ pub fn run_explicit_candidates(
 
 pub fn run_pattern_b_fixture(
     workload: &PlanningWorkload,
-    settings: &PlanSelectionSettings,
+    settings: &CostInputs,
     deployment: &DeploymentCapabilities,
 ) -> Run {
     run_explicit_candidates(

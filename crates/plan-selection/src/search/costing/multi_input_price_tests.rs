@@ -102,7 +102,7 @@ fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
             entries: &entries,
             data: &data,
             models: crate::PlanningModels::builtin(),
-            calibration: crate::CalibrationFit::default(),
+            calibration: asap_cost::CalibrationFit::default(),
         };
         let profile = extract_price_options(&configured, &context)
             .unwrap()
@@ -258,7 +258,7 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
         entries: &entries,
         data: &data,
         models: crate::PlanningModels::builtin(),
-        calibration: crate::CalibrationFit::default(),
+        calibration: asap_cost::CalibrationFit::default(),
     };
     let profile = extract_price_options(&configured, &context)
         .unwrap()

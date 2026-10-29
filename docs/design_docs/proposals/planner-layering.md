@@ -1294,7 +1294,7 @@ consumers.
 Selection first measures each valid candidate's resource usage, with no
 prices (`ResourceUsage`: CPU operations and scanned bytes per second, average
 and peak memory, disk, peak CPU cores and each query's latency). The
-deployment's cost model (`CostModel`, in `PlanSelectionSettings`) then turns
+deployment's cost model (`CostModel`, in `CostInputs`) then turns
 usage into a choice:
 
 | Cost model | Deployment | How the plan is chosen |

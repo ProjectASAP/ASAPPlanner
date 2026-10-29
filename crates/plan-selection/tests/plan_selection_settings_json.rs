@@ -1,15 +1,14 @@
 //! A deployment passes its Stage 3 cost-model settings as JSON (issue #749).
 
-use asap_plan_selection::{
-    ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings, ResourceSpeed,
-    ResourceUnitCost,
+use asap_cost::{
+    ClusterLimits, ClusterObjective, CostInputs, CostModel, ResourceSpeed, ResourceUnitCost,
 };
 
 /// Cost model 2 with the deployment's own prices and speed; the fields left
 /// out keep their defaults.
 #[test]
 fn settings_load_from_json_with_defaults_for_omitted_fields() {
-    let settings: PlanSelectionSettings = serde_json::from_str(
+    let settings: CostInputs = serde_json::from_str(
         r#"{
           "cost_model": {"provisioned_capacity": {
             "cost_per_cpu_op": 2e-6,
@@ -25,7 +24,7 @@ fn settings_load_from_json_with_defaults_for_omitted_fields() {
     .unwrap();
     assert_eq!(
         settings,
-        PlanSelectionSettings {
+        CostInputs {
             cost_model: CostModel::ProvisionedCapacity(ResourceUnitCost {
                 cost_per_cpu_op: 2e-6,
                 cost_per_scanned_byte: 1e-7,
@@ -38,34 +37,34 @@ fn settings_load_from_json_with_defaults_for_omitted_fields() {
                 ms_per_cpu_op: 2e-6,
                 ms_per_scanned_byte: 1e-7,
             },
-            ..PlanSelectionSettings::default()
+            ..CostInputs::default()
         }
     );
     settings.validate().unwrap();
-    let empty: PlanSelectionSettings = serde_json::from_str("{}").unwrap();
-    assert_eq!(empty, PlanSelectionSettings::default());
+    let empty: CostInputs = serde_json::from_str("{}").unwrap();
+    assert_eq!(empty, CostInputs::default());
 }
 
 /// Every cost model round-trips, and a misspelled field is refused rather
 /// than silently defaulted.
 #[test]
 fn settings_round_trip_and_refuse_unknown_fields() {
-    let cluster = PlanSelectionSettings {
+    let cluster = CostInputs {
         cost_model: CostModel::ClusterCapacity(ClusterLimits {
             memory_bytes: 64 << 30,
             disk_bytes: 1 << 40,
             cpu_cores: None,
             objective: ClusterObjective::ParetoFront,
         }),
-        ..PlanSelectionSettings::default()
+        ..CostInputs::default()
     };
-    for settings in [PlanSelectionSettings::default(), cluster] {
+    for settings in [CostInputs::default(), cluster] {
         let json = serde_json::to_string(&settings).unwrap();
-        let back: PlanSelectionSettings = serde_json::from_str(&json).unwrap();
+        let back: CostInputs = serde_json::from_str(&json).unwrap();
         assert_eq!(back, settings);
     }
-    assert!(serde_json::from_str::<PlanSelectionSettings>(r#"{"costmodel": {}}"#).is_err());
-    assert!(serde_json::from_str::<PlanSelectionSettings>(
+    assert!(serde_json::from_str::<CostInputs>(r#"{"costmodel": {}}"#).is_err());
+    assert!(serde_json::from_str::<CostInputs>(
         r#"{"resource_speed": {"ms_per_cpu_op": 1e-6, "ms_per_scanned_byte": 1e-7, "x": 1}}"#
     )
     .is_err());
