@@ -1,6 +1,7 @@
 //! Calibration policy for candidate selection. Unknown calibration is never
 //! fitted to a timeout-dependent subset and then treated as a fixed price model.
-use crate::{CalibrationFit, PlanningModels};
+use crate::PlanningModels;
+use asap_cost::CalibrationFit;
 
 #[derive(Debug, Clone, Copy)]
 pub(in crate::search) enum CandidateCalibration {

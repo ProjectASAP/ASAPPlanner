@@ -4,11 +4,11 @@
 //! separate. Plan selection (Stage 3) turns them into one objective with
 //! [`crate::ResourceUnitCost`].
 
+pub use crate::resources::ModeledCpu;
 use asap_types::ir::schema::{SketchAlgorithm, SketchParams};
-pub use asap_types::workload::resources::ModeledCpu;
 use serde::{Deserialize, Serialize};
 
-use crate::cost::operator_statistics::{
+use crate::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PromqlEdgeStatistics, PromqlValueKind,
 };
 
@@ -17,7 +17,7 @@ use crate::cost::operator_statistics::{
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(from = "ResourceEstimateWire", into = "ResourceEstimateWire")]
 pub struct ResourceEstimate {
-    resources: asap_types::workload::resources::PhysicalResources<ModeledCpu, u64>,
+    resources: crate::resources::PhysicalResources<ModeledCpu, u64>,
 }
 
 // Keep the established three-field JSON format. Required fields make a missing
@@ -48,7 +48,7 @@ impl From<ResourceEstimate> for ResourceEstimateWire {
 impl ResourceEstimate {
     pub const fn new(cpu_ops: f64, peak_memory_bytes: u64, scan_bytes: u64) -> Self {
         Self {
-            resources: asap_types::workload::resources::PhysicalResources {
+            resources: crate::resources::PhysicalResources {
                 cpu: ModeledCpu { cpu_ops },
                 peak_memory_bytes: Some(peak_memory_bytes),
                 retained_memory_bytes: None,
@@ -75,9 +75,7 @@ impl ResourceEstimate {
             .expect("analytical scan bytes are required by construction")
     }
 
-    pub fn resources(
-        &self,
-    ) -> &asap_types::workload::resources::PhysicalResources<ModeledCpu, u64> {
+    pub fn resources(&self) -> &crate::resources::PhysicalResources<ModeledCpu, u64> {
         &self.resources
     }
 }
@@ -303,7 +301,7 @@ fn checked_cpu_product(rows: u64, operations_per_row: u64) -> Result<f64, Analyt
 }
 
 fn partitioned_order_estimate(
-    partitioning: &crate::cost::operator_statistics::PartitionStatistics,
+    partitioning: &crate::operator_statistics::PartitionStatistics,
     comparison_operations: u64,
     row_operations: u64,
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
@@ -324,7 +322,7 @@ fn partitioned_order_estimate(
 
 fn validate_partitioning(
     input: EdgeStatistics,
-    partitioning: &crate::cost::operator_statistics::PartitionStatistics,
+    partitioning: &crate::operator_statistics::PartitionStatistics,
     partitioned: bool,
 ) -> Result<(), AnalyticalCostError> {
     let inconsistent = |reason| Err(AnalyticalCostError::InconsistentOperatorStatistics(reason));
@@ -1225,8 +1223,8 @@ pub(crate) fn validate_operator_semantics(
 }
 
 fn require_promql_unary(
-    edges: &crate::cost::operator_statistics::UnaryEdgeStatistics,
-) -> Result<crate::cost::operator_statistics::PromqlUnaryEdgeStatistics, AnalyticalCostError> {
+    edges: &crate::operator_statistics::UnaryEdgeStatistics,
+) -> Result<crate::operator_statistics::PromqlUnaryEdgeStatistics, AnalyticalCostError> {
     let promql = edges.promql.ok_or(AnalyticalCostError::MissingOrStale(
         "promql_edge_statistics",
     ))?;
@@ -1236,8 +1234,8 @@ fn require_promql_unary(
 }
 
 fn require_promql_binary(
-    edges: &crate::cost::operator_statistics::BinaryEdgeStatistics,
-) -> Result<crate::cost::operator_statistics::PromqlBinaryEdgeStatistics, AnalyticalCostError> {
+    edges: &crate::operator_statistics::BinaryEdgeStatistics,
+) -> Result<crate::operator_statistics::PromqlBinaryEdgeStatistics, AnalyticalCostError> {
     let promql = edges.promql.ok_or(AnalyticalCostError::MissingOrStale(
         "promql_edge_statistics",
     ))?;
@@ -1248,7 +1246,7 @@ fn require_promql_binary(
 }
 
 fn validate_promql_cardinality_preserving_shape(
-    promql: crate::cost::operator_statistics::PromqlUnaryEdgeStatistics,
+    promql: crate::operator_statistics::PromqlUnaryEdgeStatistics,
 ) -> Result<(), AnalyticalCostError> {
     validate_promql_edge(promql.input)?;
     validate_promql_edge(promql.output)?;
@@ -1262,7 +1260,7 @@ fn validate_promql_cardinality_preserving_shape(
 }
 
 fn validate_promql_filter_shape(
-    promql: crate::cost::operator_statistics::PromqlUnaryEdgeStatistics,
+    promql: crate::operator_statistics::PromqlUnaryEdgeStatistics,
 ) -> Result<(), AnalyticalCostError> {
     validate_promql_edge(promql.input)?;
     validate_promql_edge(promql.output)?;
@@ -1328,7 +1326,7 @@ fn validate_promql_edge_shape(
 
 fn validate_promql_bridge(
     operator: PhysicalOperator,
-    edges: &crate::cost::operator_statistics::UnaryEdgeStatistics,
+    edges: &crate::operator_statistics::UnaryEdgeStatistics,
 ) -> Result<(), AnalyticalCostError> {
     let promql = require_promql_unary(edges)?;
     let valid = match operator {
@@ -1362,7 +1360,7 @@ fn validate_promql_binary(
     cardinality: PromqlVectorCardinality,
     build_side: Option<HashJoinBuildSide>,
     matching_key_bytes: u64,
-    edges: &crate::cost::operator_statistics::BinaryEdgeStatistics,
+    edges: &crate::operator_statistics::BinaryEdgeStatistics,
 ) -> Result<(), AnalyticalCostError> {
     let promql = require_promql_binary(edges)?;
     validate_instant_vector_rows(edges.output, promql.output)?;
@@ -1431,7 +1429,7 @@ fn validate_promql_series_sample(
     grouping_key_count: u64,
     group_count: u64,
     key_bytes: u64,
-    edges: &crate::cost::operator_statistics::UnaryEdgeStatistics,
+    edges: &crate::operator_statistics::UnaryEdgeStatistics,
 ) -> Result<(), AnalyticalCostError> {
     let promql = require_promql_unary(edges)?;
     validate_instant_vector_rows(edges.output, promql.output)?;
@@ -1537,7 +1535,7 @@ fn checked_bytes(parts: &[u64]) -> Result<u64, AnalyticalCostError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cost::operator_statistics::{
+    use crate::operator_statistics::{
         BinaryEdgeStatistics, EdgeStatistics, OperatorStatistics, PartitionStatistics,
         PromqlBinaryEdgeStatistics, PromqlEdgeStatistics, PromqlUnaryEdgeStatistics,
         PromqlValueKind, UnaryEdgeStatistics,
@@ -1551,8 +1549,7 @@ mod tests {
         assert_eq!(estimate.cpu_ops(), 12.5);
         assert_eq!(estimate.peak_memory_bytes(), u64::MAX);
         assert_eq!(estimate.scan_bytes(), 0);
-        let shared: &asap_types::workload::resources::PhysicalResources<ModeledCpu, u64> =
-            estimate.resources();
+        let shared: &crate::resources::PhysicalResources<ModeledCpu, u64> = estimate.resources();
         assert_eq!(shared.cpu.cpu_ops, 12.5);
         assert_eq!(shared.peak_memory_bytes, Some(u64::MAX));
         assert_eq!(shared.scan_bytes, Some(0));

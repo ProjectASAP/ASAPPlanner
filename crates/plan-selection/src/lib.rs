@@ -112,7 +112,7 @@
 //! node computed at ingestion time is a streaming operator holding one row,
 //! and is not charged.)
 //!
-//! Prices come from [`crate::cost::analytical::estimate_operator`] over edge
+//! Prices come from [`asap_cost::analytical::estimate_operator`] over edge
 //! statistics derived from the [`DataWorkload`] and a fixed default group
 //! count; summary build and estimation are priced as rows × sketch depth and
 //! groups × k. A query-time scan reads the longest window above it (a time
@@ -129,13 +129,13 @@
 //! illustrative, not calibrated: a binary, join or concat node is priced from
 //! its first input only (MVP; follow-up).
 //! A cost error on any candidate aborts selection; it is reachable only from
-//! bad declared rates or bad [`PlanSelectionSettings`].
+//! bad declared rates or bad [`CostInputs`].
 //!
 //! ## Measured operation costs
 //!
 //! A deployment whose runtime measured its own costs gives them per
-//! operator ([`PlanSelectionSettings::measured_operation_costs`],
-//! [`MeasuredOperationCosts`]): for an operator kind at ingestion or query
+//! operator ([`CostInputs::measured_operation_costs`],
+//! [`MeasuredOperationCosts`](asap_cost::MeasuredOperationCosts)): for an operator kind at ingestion or query
 //! time (and, for a summary operator, its sketch or exact accumulator; for
 //! an aggregate, each measure), CPU ns per unit and per computation. A node
 //! with an entry takes `units × ns_per_unit + ns_per_invocation` per
@@ -166,14 +166,14 @@
 //! Only a table covering every operator kind the candidates use makes the
 //! choice the measured one. Each node reports how it was priced
 //! ([`NodePriceSource`]).
-//! Measured times count as CPU operations of [`ResourceSpeed`], so latency
+//! Measured times count as CPU operations of [`ResourceSpeed`](asap_cost::ResourceSpeed), so latency
 //! and all three cost models read them like any other operation.
 //!
 //! ## Cost models
 //!
-//! [`PlanSelectionSettings::cost_model`] (in [`PlanningModels`]) chooses how
+//! [`CostInputs::cost_model`] (in [`PlanningModels`]) chooses how
 //! usage becomes a choice; the default is cost model 1 with
-//! [`ResourceUnitCost::illustrative`]:
+//! [`ResourceUnitCost::illustrative`](asap_cost::ResourceUnitCost::illustrative):
 //!
 //! * [`CostModel::UsageOverTime`] (cost model 1, pay-as-you-go): each
 //!   node's CPU operations, scanned bytes and memory byte-seconds per second
@@ -206,7 +206,7 @@
 //! window of an ingestion-time state it reads, then its own query-time
 //! work. Its own work is the sum, over every query-time node it reaches
 //! (shared ones included, each once), of one computation's CPU operations
-//! and scanned bytes timed by [`ResourceSpeed`]'s `ms_per_cpu_op` and
+//! and scanned bytes timed by [`ResourceSpeed`](asap_cost::ResourceSpeed)'s `ms_per_cpu_op` and
 //! `ms_per_scanned_byte`. A state whose ingestion work needs `k` cores keeps
 //! `k` partial copies of its newest window, and compacting them takes
 //! `(k − 1)` merges for each of its states per window, each one operation
@@ -247,11 +247,9 @@ use asap_types::ir::physical_export::{
 use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric, ExecutionTiming};
 use asap_types::ir::properties::{AccuracyScope, AccuracyTarget};
 use asap_types::ir::scalar::ScalarValue;
-use asap_types::ir::schema::sketch::KLL_MAX_K;
-use asap_types::ir::schema::{DataType, Schema};
+use asap_types::ir::schema::Schema;
 use asap_types::ir::schema::{
     FieldDataType, GroupingStrategy, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
-    EXACT_ACCUMULATOR_STATE_BYTES,
 };
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot,
@@ -265,11 +263,19 @@ use asap_types::workload::{
 };
 use thiserror::Error;
 
-use crate::cost::analytical::{
+use asap_cost::analytical::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceEstimate,
 };
-use crate::cost::operator_statistics::{
+use asap_cost::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
+};
+use asap_cost::state_bytes::{
+    keeps_every_value, row_bytes, sketch_shape, summary_shape, StateInputRows,
+};
+use asap_cost::{
+    CalibrationFit, CandidateCost, ClusterLimits, ClusterObjective, CostInputs, CostModel,
+    NodeCost, NodePriceSource, OperatorKind, QueryLatency, ResourceUsage, COST_SOURCE, COST_UNIT,
+    MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
 };
 use asap_logical_asap_optimization::accuracy::composition::{
     parse_raw_data_samples_sign_statistic, parse_source_norm_statistic, INPUT_ROW_COUNT,
@@ -289,9 +295,8 @@ pub mod accuracy;
 pub use accuracy::{
     AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, NoAccuracyEvidence,
 };
-use cost::execution_demand::{computations, evaluation_rate, query_starts};
+use asap_cost::execution_demand::{computations, evaluation_rate, query_starts};
 
-pub mod cost;
 /// The Stage 1 to Stage 3 driver and the optimization-pass interface.
 pub mod search;
 pub use search as pass;
@@ -302,334 +307,7 @@ pub use search::{
     Stage1ToStage3Search,
 };
 
-use cost::measured::{aggregate_lookup, lookup, StateFamily};
-pub use cost::measured::{
-    CostTableProvenance, MeasuredOperationCost, MeasuredOperationCosts, NodePriceSource,
-    OperatorCost, OperatorKind, SummaryOperation,
-};
-
-/// Cost per second of wall time; one unit is one CPU-millisecond under
-/// [`ResourceUnitCost::illustrative`].
-pub const COST_UNIT: &str = "cost_per_second";
-/// [`CandidateCost::source`] when every node is priced from the formulas.
-pub const COST_SOURCE: &str = "analytical-cost-v2 (illustrative statistics)";
-/// [`CandidateCost::source`] when every node is priced from the measured
-/// table.
-pub const MEASURED_COST_SOURCE: &str = "measured operation costs (illustrative statistics)";
-/// [`CandidateCost::source`] when some nodes are priced from the measured
-/// table and the others from the formulas.
-pub const MIXED_COST_SOURCE: &str =
-    "measured operation costs and analytical-cost-v2 (illustrative statistics)";
-
-/// Seconds over which non-repeating queries (one-off, scheduled and
-/// unknown) are spread by default: one hour.
-pub const DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS: f64 = 3_600.0;
-
-/// What one candidate uses, per second of wall time unless the name says
-/// otherwise, without prices: its nodes' CPU, scans, kept memory and disk
-/// added up, with the candidate's peak cores and per-query latency. Every [`CostModel`] reads
-/// it.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ResourceUsage {
-    /// CPU operations per second: ingestion-time and query-time work.
-    pub cpu_ops_per_second: f64,
-    /// Bytes scanned per second.
-    pub scanned_bytes_per_second: f64,
-    /// Memory held between computations, averaged over time: retained
-    /// byte-seconds per second (ingestion-time state always, query-time
-    /// state while its evaluation runs).
-    pub average_memory_bytes: f64,
-    /// The most memory live at once, assuming every evaluation overlaps:
-    /// in-memory kept state plus each computation's working memory, once
-    /// per consumer that recomputes it.
-    pub peak_memory_bytes: u64,
-    /// Bytes kept on disk: state materialized on `Medium::Disk`, plus the
-    /// raw data query-time scans read (the longest window of each source).
-    pub disk_bytes: u64,
-    /// CPU cores to provision for the peak: the ingestion work's cores plus
-    /// one per query evaluating at once.
-    pub peak_cpu_cores: u32,
-    /// One per query, in workload order: its latency per evaluation.
-    pub latency_per_query: Vec<QueryLatency>,
-}
-
-/// The price of one unit of each resource, per second of wall time. Cost
-/// model 1 reads the usage prices (CPU, scan, memory byte-seconds, disk);
-/// cost model 2 the provisioned prices (memory, CPU cores) and disk.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResourceUnitCost {
-    /// Price of one CPU operation.
-    pub cost_per_cpu_op: f64,
-    /// Price of scanning one byte.
-    pub cost_per_scanned_byte: f64,
-    /// Price of holding one byte of memory for one second (cost model 1).
-    pub cost_per_memory_byte_second: f64,
-    /// Price of provisioning one byte of memory for one second (cost model 2).
-    pub cost_per_provisioned_memory_byte_second: f64,
-    /// Price of provisioning one CPU core for one second (cost model 2).
-    pub cost_per_provisioned_cpu_core_second: f64,
-    /// Price of keeping one byte on disk for one second (both models).
-    pub cost_per_disk_byte_second: f64,
-}
-
-impl ResourceUnitCost {
-    /// The prices plan selection uses until a deployment is calibrated:
-    /// 1 ns of CPU per operation, 0.1 ns per scanned byte, 1 GB kept for a
-    /// second costs 1/8 vCPU (125 CPU-ms), held or provisioned alike; one
-    /// provisioned core-second is 1,000 CPU-ms. Disk is not priced (0).
-    pub fn illustrative() -> Self {
-        Self {
-            cost_per_cpu_op: 1e-6,
-            cost_per_scanned_byte: 1e-7,
-            cost_per_memory_byte_second: 1.25e-7,
-            cost_per_provisioned_memory_byte_second: 1.25e-7,
-            cost_per_provisioned_cpu_core_second: 1_000.0,
-            cost_per_disk_byte_second: 0.0,
-        }
-    }
-
-    /// AWS Fargate on-demand prices, US East (N. Virginia), Linux/x86, for
-    /// cost model 1 ([`CostModel::UsageOverTime`]); one cost unit is one
-    /// US dollar. Source: <https://aws.amazon.com/fargate/pricing/>, checked
-    /// 2026-10-18 (Pricing Example 1 there: $0.000011244 per vCPU-second,
-    /// $0.000001235 per GB-second of memory, $0.0000000308 per GB-second of
-    /// ephemeral storage beyond the 20 GB included). Prices change: re-check
-    /// the page before relying on them.
-    ///
-    /// `speed` is the deployment's [`PlanSelectionSettings::resource_speed`],
-    /// the speed Stage 3 uses for latency, so the CPU prices charge the core
-    /// time latency counts. At [`ResourceSpeed::illustrative`] (1e-6 ms per
-    /// CPU operation, i.e. 1e9 operations per core-second; 1e-7 ms per
-    /// scanned byte):
-    ///
-    /// * `cost_per_cpu_op` = $0.000011244 per vCPU-second ×
-    ///   `ms_per_cpu_op` / 1,000 (1e-9 s per operation) = $1.1244e-14.
-    /// * `cost_per_scanned_byte` = $0.000011244 per vCPU-second ×
-    ///   `ms_per_scanned_byte` / 1,000 (1e-10 s per byte) = $1.1244e-15:
-    ///   Fargate has no scan price, but a scan occupies the vCPU-seconds it
-    ///   bills, for the time latency charges.
-    /// * `cost_per_memory_byte_second` = $0.000001235 per GB-second ÷ 2^30
-    ///   bytes per GB ≈ $1.1502e-15: the page says "on this page GB =
-    ///   1024^3 bytes".
-    /// * `cost_per_disk_byte_second` = 0: Fargate bills only ephemeral
-    ///   storage configured beyond the 20 GB every task gets, which a
-    ///   per-byte price cannot express, and the disk bytes plan selection
-    ///   counts (the raw data query-time scans read) are held by the data
-    ///   source, not by the task.
-    /// * `cost_per_provisioned_memory_byte_second` and
-    ///   `cost_per_provisioned_cpu_core_second` = 0: they belong to cost
-    ///   model 2, and Fargate's per-task billing is cost model 1. Under
-    ///   [`CostModel::ProvisionedCapacity`] every price this preset gives
-    ///   is 0, which [`PlanSelectionSettings::validate`] refuses.
-    ///
-    /// Not expressed by these per-second prices: the 1-minute billing
-    /// minimum per task ("Pricing is calculated per second with a 1-minute
-    /// minimum"), and the fixed task sizes a task is billed for (from 0.25
-    /// vCPU with 0.5 GB up), which round usage up to the next size.
-    pub fn aws_fargate_us_east_1(speed: ResourceSpeed) -> Self {
-        // US dollars per vCPU-second and per GB-second of memory, from the
-        // page above.
-        const DOLLARS_PER_VCPU_SECOND: f64 = 0.000_011_244;
-        const DOLLARS_PER_MEMORY_GB_SECOND: f64 = 0.000_001_235;
-        const BYTES_PER_GIB: f64 = (1u64 << 30) as f64;
-        Self {
-            cost_per_cpu_op: DOLLARS_PER_VCPU_SECOND * speed.ms_per_cpu_op / 1_000.0,
-            cost_per_scanned_byte: DOLLARS_PER_VCPU_SECOND * speed.ms_per_scanned_byte / 1_000.0,
-            cost_per_memory_byte_second: DOLLARS_PER_MEMORY_GB_SECOND / BYTES_PER_GIB,
-            cost_per_provisioned_memory_byte_second: 0.0,
-            cost_per_provisioned_cpu_core_second: 0.0,
-            cost_per_disk_byte_second: 0.0,
-        }
-    }
-}
-
-/// How fast one core does work; the latency check reads it.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResourceSpeed {
-    /// Milliseconds one CPU operation takes on one core.
-    pub ms_per_cpu_op: f64,
-    /// Milliseconds scanning one byte takes on one core.
-    pub ms_per_scanned_byte: f64,
-}
-
-impl ResourceSpeed {
-    /// 1 ns per operation and 0.1 ns per scanned byte, the times
-    /// [`ResourceUnitCost::illustrative`] prices: one cost unit is one
-    /// millisecond of one core.
-    pub fn illustrative() -> Self {
-        Self {
-            ms_per_cpu_op: 1e-6,
-            ms_per_scanned_byte: 1e-7,
-        }
-    }
-}
-
-/// How plan selection turns each valid candidate's [`ResourceUsage`] into a
-/// choice. Chosen by the deployment ([`PlanSelectionSettings::cost_model`]).
-/// In JSON, `{"usage_over_time": {...}}`, `{"provisioned_capacity": {...}}`
-/// or `{"cluster_capacity": {...}}`.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CostModel {
-    /// Cost model 1, pay-as-you-go: Σ unit cost × usage per second (CPU
-    /// operations, scanned bytes, memory byte-seconds, disk byte-seconds);
-    /// the cheapest valid candidate wins.
-    UsageOverTime(ResourceUnitCost),
-    /// Cost model 2, provisioned: unit cost × peak memory, peak CPU cores
-    /// and disk, per second; the cheapest valid candidate wins.
-    ProvisionedCapacity(ResourceUnitCost),
-    /// Cost model 3, the deployment's own cluster: no prices; memory, disk
-    /// and (when set) CPU cores are hard limits, and the objective chooses
-    /// among the candidates that fit.
-    ClusterCapacity(ClusterLimits),
-}
-
-/// A fixed cluster's capacity (cost model 3) and how to choose within it.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClusterLimits {
-    /// Memory available; a candidate whose peak memory is above it is invalid.
-    pub memory_bytes: u64,
-    /// Disk available; a candidate keeping more on disk is invalid.
-    pub disk_bytes: u64,
-    /// CPU cores available; `None` leaves cores unchecked.
-    pub cpu_cores: Option<u32>,
-    /// How to choose among the candidates that fit.
-    pub objective: ClusterObjective,
-}
-
-/// What cost model 3 optimizes among the candidates that fit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClusterObjective {
-    /// The smallest worst-query latency; ties by peak memory, then disk.
-    LowestLatency,
-    /// The smallest peak memory; ties by disk, then worst-query latency.
-    LeastMemory,
-    /// Report every candidate no other beats on peak memory, disk and
-    /// worst-query latency at once ([`Selection::front`]); select the
-    /// front's lowest-latency member.
-    ParetoFront,
-}
-
-/// The deployment's choices for plan selection (Stage 3): the cost model,
-/// how fast a core works, and how long one-off queries are spread over.
-/// Loadable from JSON (`stage_pipeline --plan-selection-settings <file>`);
-/// an omitted field takes its default, an unknown one is refused.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct PlanSelectionSettings {
-    /// How candidates are compared; default cost model 1 with
-    /// [`ResourceUnitCost::illustrative`].
-    pub cost_model: CostModel,
-    /// Time per operation and per scanned byte, for latency and cores;
-    /// default [`ResourceSpeed::illustrative`].
-    pub resource_speed: ResourceSpeed,
-    /// Seconds one-off, scheduled and unknown queries are spread over
-    /// (`invocations / horizon` per second); default 3,600.
-    pub non_repeating_query_horizon_seconds: f64,
-    /// The deployment's measured CPU time per unit of each operator; a node
-    /// with an entry is priced from it, every other node from the formulas
-    /// scaled by the calibration factor (module doc, "Measured operation
-    /// costs"). Also loads the earlier array of [`MeasuredOperationCost`].
-    /// Default empty: every node is priced from the formulas.
-    pub measured_operation_costs: MeasuredOperationCosts,
-    /// Externally established formula-to-measurement scale, held constant across
-    /// candidates. Must be finite and positive. None fits the complete generated
-    /// candidate catalog before pricing, preserving the default calibration policy.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub frozen_calibration_factor: Option<f64>,
-    /// Accept every query output regardless of its accuracy guarantee:
-    /// planning uses an accuracy model that accepts every output in place
-    /// of [`PlanningModels::accuracy`]. This field is the one built-in way
-    /// to ignore guarantees.
-    /// For comparing candidates on cost alone, e.g. a benchmark of sketch
-    /// plans with no analytical guarantee. Executability checks still apply.
-    /// Each output accepted only because of it, i.e. whose guarantee check
-    /// fails, is marked in the report
-    /// ([`AcceptedAccuracy::guarantee_check_rejection`]). JSON:
-    /// `"ignore_accuracy_guarantees": true`. Default `false`.
-    pub ignore_accuracy_guarantees: bool,
-}
-
-impl Default for PlanSelectionSettings {
-    fn default() -> Self {
-        Self {
-            cost_model: CostModel::UsageOverTime(ResourceUnitCost::illustrative()),
-            resource_speed: ResourceSpeed::illustrative(),
-            non_repeating_query_horizon_seconds: DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS,
-            measured_operation_costs: MeasuredOperationCosts::default(),
-            frozen_calibration_factor: None,
-            ignore_accuracy_guarantees: false,
-        }
-    }
-}
-
-impl PlanSelectionSettings {
-    /// Bad input: a negative or non-finite speed, a horizon that is not
-    /// positive, a bad measured table ([`MeasuredOperationCosts`]: a
-    /// negative or non-finite time or size, an entry naming two families,
-    /// a duplicate entry, or `ms_per_cpu_op` 0), or a price the chosen cost model reads that is negative or
-    /// not finite, or every such price 0 (cost model 3 reads none).
-    pub fn validate(&self) -> Result<(), AnalyticalCostError> {
-        if let Some(factor) = self.frozen_calibration_factor {
-            CalibrationFit::from_factor(factor)?;
-        }
-        for (name, value) in [
-            ("ms_per_cpu_op", self.resource_speed.ms_per_cpu_op),
-            (
-                "ms_per_scanned_byte",
-                self.resource_speed.ms_per_scanned_byte,
-            ),
-        ] {
-            if !value.is_finite() || value < 0.0 {
-                return Err(AnalyticalCostError::InvalidCalibration(name, value));
-            }
-        }
-        let horizon = self.non_repeating_query_horizon_seconds;
-        if !horizon.is_finite() || horizon <= 0.0 {
-            return Err(AnalyticalCostError::InvalidCalibration(
-                "non_repeating_query_horizon_seconds",
-                horizon,
-            ));
-        }
-        cost::measured::validate(
-            &self.measured_operation_costs,
-            self.resource_speed.ms_per_cpu_op,
-        )?;
-        let read = match &self.cost_model {
-            CostModel::UsageOverTime(p) => vec![
-                ("cost_per_cpu_op", p.cost_per_cpu_op),
-                ("cost_per_scanned_byte", p.cost_per_scanned_byte),
-                ("cost_per_memory_byte_second", p.cost_per_memory_byte_second),
-                ("cost_per_disk_byte_second", p.cost_per_disk_byte_second),
-            ],
-            CostModel::ProvisionedCapacity(p) => vec![
-                (
-                    "cost_per_provisioned_memory_byte_second",
-                    p.cost_per_provisioned_memory_byte_second,
-                ),
-                (
-                    "cost_per_provisioned_cpu_core_second",
-                    p.cost_per_provisioned_cpu_core_second,
-                ),
-                ("cost_per_disk_byte_second", p.cost_per_disk_byte_second),
-            ],
-            CostModel::ClusterCapacity(_) => return Ok(()),
-        };
-        for &(name, value) in &read {
-            if !value.is_finite() || value < 0.0 {
-                return Err(AnalyticalCostError::InvalidCalibration(name, value));
-            }
-        }
-        if read.iter().all(|(_, value)| *value == 0.0) {
-            return Err(AnalyticalCostError::ZeroCalibration);
-        }
-        Ok(())
-    }
-}
+use asap_cost::measured::{aggregate_lookup, lookup, StateFamily};
 
 /// A cost per second for a rejection reason: three decimals, or three
 /// significant digits in scientific notation when it is nonzero and below
@@ -640,80 +318,6 @@ fn display_cost(cost_per_second: f64) -> String {
         format!("{cost_per_second:.3e}")
     } else {
         format!("{cost_per_second:.3}")
-    }
-}
-
-/// One node's price per second of wall time, with how it was measured. A
-/// node is one operator node of the candidate's physical plan DAG
-/// (`PhysicalASAPDAG`), keyed by its [`PhysicalASAPNodeId`] in
-/// [`CandidateCost::per_node`]; not a machine.
-#[derive(Debug, Clone, PartialEq)]
-pub struct NodeCost {
-    /// Its operator, as the measured table names it.
-    pub operator: OperatorKind,
-    /// When it runs: ingestion or query time.
-    pub timing: ExecutionTiming,
-    /// Its price per second under cost model 1; `None` under cost models 2
-    /// and 3, which price (or limit) the whole candidate's peaks.
-    pub cost_per_second: Option<f64>,
-    /// Core-seconds of CPU it takes per second of wall time: its CPU
-    /// operations and scanned bytes timed by [`ResourceSpeed`], what a
-    /// runtime measures it against. A query's fixed per-request cost
-    /// ([`MeasuredOperationCosts::ns_per_evaluation`]) is counted on the
-    /// node the query reads first.
-    pub cpu_core_seconds_per_second: f64,
-    /// The number of consumers it is computed for (1 when materialized,
-    /// [`computations`]).
-    pub multiplier: u64,
-    /// How it was measured, e.g. "scan 1000 samples; x 1.0000/s; keeps
-    /// ... bytes": one computation's work, the times it is computed per
-    /// second and what it keeps.
-    pub detail: String,
-    /// Whether its CPU operations were priced from the measured table or
-    /// from the formulas.
-    pub price_source: NodePriceSource,
-}
-
-/// One candidate's usage and price over the whole workload: `usage` is
-/// the whole candidate's, `per_node` one price per operator node of its
-/// physical plan DAG.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CandidateCost {
-    pub usage: ResourceUsage,
-    /// Its price per second under cost model 1 or 2 (under cost model 1, the
-    /// sum of its nodes' charges plus request overhead for queries without
-    /// operator nodes); `None` under cost model 3.
-    pub cost_per_second: Option<f64>,
-    /// The unit of `cost_per_second`: always [`COST_UNIT`].
-    pub cost_unit: &'static str,
-    /// Where its prices came from, from its nodes' [`NodeCost::price_source`]:
-    /// [`COST_SOURCE`] (all formulas), [`MEASURED_COST_SOURCE`] (all
-    /// measured) or [`MIXED_COST_SOURCE`].
-    pub source: &'static str,
-    /// Each operator node of the candidate's physical plan DAG, by its id
-    /// in that DAG, with its price.
-    pub per_node: BTreeMap<PhysicalASAPNodeId, NodeCost>,
-}
-
-/// One query's latency per evaluation, its longest chain of work (module
-/// doc, "Latency"): the compaction of the newest window of a state it reads
-/// from ingestion time, then the query's own work, each on a full core.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct QueryLatency {
-    /// Milliseconds to merge the ingest workers' partial copies of the
-    /// newest window of the largest ingestion-time state the query reads;
-    /// 0 when ingestion fits on one core or the query reads none.
-    pub compaction_ms: f64,
-    /// Milliseconds of the query-time work the query reaches, each node
-    /// once.
-    pub query_ms: f64,
-}
-
-impl QueryLatency {
-    /// `compaction_ms + query_ms`: what is checked against the query's
-    /// `max_latency_ms`.
-    pub fn total_ms(&self) -> f64 {
-        self.compaction_ms + self.query_ms
     }
 }
 
@@ -910,7 +514,7 @@ pub struct AcceptedAccuracy {
     /// ([`RejectionCause::NoAccuracyGuarantee`] or
     /// [`RejectionCause::AccuracyTargetMissed`]): the output was accepted
     /// only because of the accuracy model (e.g.
-    /// [`PlanSelectionSettings::ignore_accuracy_guarantees`]). `None` when
+    /// [`CostInputs::ignore_accuracy_guarantees`]). `None` when
     /// its guarantee meets the target.
     pub guarantee_check_rejection: Option<RejectionCause>,
     /// The sketch algorithms the query's output reads, in plan order
@@ -1127,7 +731,7 @@ pub enum SelectionError {
     #[error("candidate evaluation deadline exceeded")]
     EvaluationDeadlineExceeded,
     /// Bad input: the deployment's plan selection settings
-    /// ([`PlanSelectionSettings::validate`]).
+    /// ([`CostInputs::validate`]).
     #[error("plan selection settings: {0}")]
     InvalidSettings(AnalyticalCostError),
     /// Bad input: the caller gave a different number of workload entries
@@ -3201,7 +2805,7 @@ fn price_at_scale(
     recurrence: &[QueryRecurrence],
     range_evaluations: &[Option<RangeEvaluation>],
     data: &DataWorkload,
-    settings: &PlanSelectionSettings,
+    settings: &CostInputs,
     formula_scale: f64,
 ) -> Result<(CandidateCost, CalibrationFit), (PhysicalASAPNodeId, AnalyticalCostError)> {
     let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
@@ -3511,7 +3115,7 @@ pub(crate) fn price_each_node<'a>(
     recurrence: &[QueryRecurrence],
     range_evaluations: &[Option<RangeEvaluation>],
     data: &DataWorkload,
-    settings: &'a PlanSelectionSettings,
+    settings: &'a CostInputs,
     formula_scale: f64,
     root_scan_lookback_ms: Option<u64>,
     root_rates: Option<&[f64]>,
@@ -3683,7 +3287,7 @@ pub(crate) fn price_node<'a>(
     retained_pane_count: u64,
     ingestion_window_ms: Option<u64>,
     data: &DataWorkload,
-    settings: &'a PlanSelectionSettings,
+    settings: &'a CostInputs,
     formula_scale: f64,
 ) -> Result<PricedNode<'a>, AnalyticalCostError> {
     let table = &settings.measured_operation_costs;
@@ -4386,7 +3990,7 @@ fn price(
     recurrence: &[QueryRecurrence],
     range_evaluations: &[Option<RangeEvaluation>],
     data: &DataWorkload,
-    settings: &PlanSelectionSettings,
+    settings: &CostInputs,
 ) -> Result<CandidateCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
     let at = |formula_scale| {
         price_at_scale(
@@ -4402,46 +4006,6 @@ fn price(
     };
     let (_, fit) = at(1.0)?;
     Ok(at(fit.factor())?.0)
-}
-
-/// The CPU time of the nodes priced from the measured table, per second of
-/// wall time: as measured, and as the formulas would price them. Their
-/// ratio is the calibration factor for the nodes without an entry.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct CalibrationFit {
-    measured_ms_per_second: f64,
-    formula_ms_per_second: f64,
-}
-
-impl CalibrationFit {
-    /// A validated externally established scale, without fitting candidate data.
-    pub fn from_factor(factor: f64) -> Result<Self, AnalyticalCostError> {
-        if !factor.is_finite() || factor <= 0.0 {
-            return Err(AnalyticalCostError::InvalidCalibration(
-                "frozen_calibration_factor",
-                factor,
-            ));
-        }
-        Ok(Self {
-            measured_ms_per_second: factor,
-            formula_ms_per_second: 1.0,
-        })
-    }
-
-    /// Add `other`'s CPU time to this fit.
-    pub fn add(&mut self, other: CalibrationFit) {
-        self.measured_ms_per_second += other.measured_ms_per_second;
-        self.formula_ms_per_second += other.formula_ms_per_second;
-    }
-
-    /// Measured ÷ formula time, 1 without measured nodes (or with only
-    /// nodes the formulas price free).
-    pub(crate) fn factor(self) -> f64 {
-        match self.formula_ms_per_second > 0.0 && self.measured_ms_per_second > 0.0 {
-            true => self.measured_ms_per_second / self.formula_ms_per_second,
-            false => 1.0,
-        }
-    }
 }
 
 /// [`CandidateCost::source`] for nodes priced as `per_node` says.
@@ -4906,276 +4470,18 @@ fn split(input: EdgeStatistics, partitions: u64) -> PartitionStatistics {
     }
 }
 
-/// Plain values are 8 bytes, strings 16; summary columns are sized apart.
-fn row_bytes(schema: &Schema) -> u64 {
-    schema
-        .fields
-        .iter()
-        .map(|f| match &f.dtype {
-            FieldDataType::Plain(DataType::Utf8) => 16,
-            _ => 8,
-        })
-        .sum::<u64>()
-        .max(1)
-}
-
-/// Exact state that keeps every value or item of its group, so grows with
-/// the data; other exact accumulators are fixed-size.
-fn keeps_every_value(measure: &AggIntent) -> bool {
-    matches!(
-        measure,
-        AggIntent::Quantile { .. }
-            | AggIntent::TopK { .. }
-            | AggIntent::Cardinality { .. }
-            | AggIntent::FrequencyL2 { .. }
-            | AggIntent::FrequencyEntropy { .. }
-    )
-}
-
-/// Update operations per input row and bytes per state, from the sketch's
-/// parameters and `input_rows` (the rows one state folds). The bytes are
-/// `asap_sketchlib`'s `estimated_memory_bytes` for the type the executor
-/// builds (Count-Min and Count Sketch over `f64` counters), given what the
-/// state is assumed to hold:
-/// - a Count-Min / Count Sketch top-k heap full of keys of
-///   [`ASSUMED_HEAP_KEY_BYTES`]; each UnivMon layer's heap full of keys of
-///   [`ASSUMED_VALUE_KEY_BYTES`];
-/// - DDSketch and KMV: the rows the state folds, at least one (any number
-///   when unknown), each a distinct item for KMV; a DDSketch's values span
-///   [`DDSKETCH_ASSUMED_VALUE_RANGE`] and fill its negative store too
-///   unless proven non-negative.
-///
-/// KLL is priced without the library's estimate: its fixed bytes
-/// ([`kll_fixed_bytes`]: the struct and its level array) plus the 8-byte
-/// item array as `asap_sketchlib` grows it for the rows the state folds, at
-/// most its full capacity ([`kll_buffer_items`]).
-///
-/// An exact accumulator's state is the executor's per-group state,
-/// [`EXACT_ACCUMULATOR_STATE_BYTES`] for every kind.
-///
-/// Update operations per input row: one counter per row of depth for
-/// Count-Min and Count-Sketch, plus one heap update for their top-k variants;
-/// for UnivMon, the same per layer it updates ([`univmon_expected_layers`]);
-/// 1 for every other sketch.
-fn summary_shape(family: &FieldDataType, input_rows: StateInputRows) -> (f64, u64) {
-    match family {
-        FieldDataType::Sketch(kind, _) => sketch_shape(kind.params(), input_rows),
-        FieldDataType::ExactAggregate(..) => (1.0, EXACT_ACCUMULATOR_STATE_BYTES),
-        _ => (1.0, 8),
-    }
-}
-
-/// What one summary state's bytes depend on besides its parameters (only
-/// a KLL's, a DDSketch's and a KMV's do): the input rows it folds and the
-/// sign of their values.
-/// The rows are whatever its producer emits (raw data samples, rates, sums),
-/// not a summary sample.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct StateInputRows {
-    /// Input rows one state folds, the average over its states rounded up;
-    /// `None` when unknown, which sizes it for every value it can be assumed
-    /// to see.
-    rows_per_state: Option<u64>,
-    /// Whether every value folded is proven non-negative (raw data samples of
-    /// sources declared non-negative), so a DDSketch fills no negative store.
-    non_negative: bool,
-}
-
-impl StateInputRows {
-    /// Unknown rows of unknown sign: the most a state is assumed to hold.
-    const UNKNOWN: Self = Self {
-        rows_per_state: None,
-        non_negative: false,
-    };
-}
-
-/// [`summary_shape`] of one sketch: its update operations per row and its
-/// bytes per state. With [`StateInputRows::UNKNOWN`], the bytes are also the
-/// size the measured table interpolates between
-/// ([`cost::measured`]).
-fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, u64) {
-    use asap_sketchlib::{
-        Classic, CountMinF64, CountMinSketchWithHeap, CountSketch, CountSketchWithHeap, DataInput,
-        DdSketch, HyperLogLog, Kmv, RegularPath, UnivMon, Vector2D,
-    };
-    let heap_key = DataInput::Bytes(&[0; ASSUMED_HEAP_KEY_BYTES]);
-    let rows = input_rows.rows_per_state.map_or(usize::MAX, |rows| {
-        usize::try_from(rows.max(1)).unwrap_or(usize::MAX)
-    });
-    match params {
-        SketchParams::Cms { width, depth } => (
-            f64::from(*depth),
-            CountMinF64::estimated_memory_bytes(*depth as usize, *width as usize) as u64,
-        ),
-        SketchParams::CountSketch { width, depth } => (
-            f64::from(*depth),
-            CountSketch::<Vector2D<f64>, RegularPath>::estimated_memory_bytes(
-                *depth as usize,
-                *width as usize,
-            ) as u64,
-        ),
-        SketchParams::CmsWithHeap {
-            width,
-            depth,
-            heap_size,
-        } => (
-            f64::from(*depth) + 1.0,
-            CountMinSketchWithHeap::<Vector2D<f64>, RegularPath>::estimated_memory_bytes(
-                *depth as usize,
-                *width as usize,
-                *heap_size as usize,
-                &heap_key,
-            ) as u64,
-        ),
-        SketchParams::CountSketchWithHeap {
-            width,
-            depth,
-            heap_size,
-        } => (
-            f64::from(*depth) + 1.0,
-            CountSketchWithHeap::<Vector2D<f64>, RegularPath>::estimated_memory_bytes(
-                *depth as usize,
-                *width as usize,
-                *heap_size as usize,
-                &heap_key,
-            ) as u64,
-        ),
-        SketchParams::Kll { k, .. } => (
-            1.0,
-            kll_fixed_bytes() + 8 * kll_buffer_items(*k, input_rows),
-        ),
-        // The executor builds no DDSketch outside α in (0, 1), where
-        // sketchlib's estimate panics: priced as an empty one.
-        SketchParams::DDSketch { alpha } if !(*alpha > 0.0 && *alpha < 1.0) => {
-            (1.0, std::mem::size_of::<DdSketch>() as u64)
-        }
-        SketchParams::DDSketch { alpha } => (
-            1.0,
-            DdSketch::estimated_memory_bytes(
-                *alpha,
-                rows,
-                1.0,
-                DDSKETCH_ASSUMED_VALUE_RANGE,
-                !input_rows.non_negative,
-            ) as u64,
-        ),
-        SketchParams::Hll { precision, .. } => (
-            1.0,
-            HyperLogLog::<Classic>::estimated_memory_bytes(usize::from(*precision)) as u64,
-        ),
-        SketchParams::Kmv { k, .. } => (1.0, Kmv::estimated_memory_bytes(*k as usize, rows) as u64),
-        SketchParams::UnivMon {
-            heap_size,
-            sketch_rows,
-            sketch_cols,
-            layers,
-            ..
-        } => (
-            univmon_expected_layers(*layers) * (f64::from(*sketch_rows) + 1.0),
-            UnivMon::estimated_memory_bytes(
-                *heap_size as usize,
-                *sketch_rows as usize,
-                *sketch_cols as usize,
-                usize::from(*layers),
-                &DataInput::Bytes(&[0; ASSUMED_VALUE_KEY_BYTES]),
-            ) as u64,
-        ),
-    }
-}
-
-/// Levels `asap_sketchlib`'s KLL has room for (`MAX_LEVELS`).
-const KLL_MAX_LEVELS: usize = 61;
-
-/// Bytes every `asap_sketchlib` KLL state holds whatever its samples: the
-/// struct and the 8-byte level-boundary array of `KLL_MAX_LEVELS + 1` entries it
-/// allocates on creation (`Kll::init_internal`). 744 bytes, an empty
-/// sketch's `memory_bytes()`.
-fn kll_fixed_bytes() -> u64 {
-    (std::mem::size_of::<asap_sketchlib::Kll<f64>>() + 8 * (KLL_MAX_LEVELS + 1)) as u64
-}
-
-/// The most items `asap_sketchlib`'s KLL holds for `k`, the capacity its item
-/// array grows to (`Kll::init_internal` → `compute_max_capacity(k, 8)`): over its
-/// [`KLL_MAX_LEVELS`] levels,
-/// `max(ceil(k · (2/3)^i), 8)` each, with `k` capped at [`KLL_MAX_K`] as the
-/// library caps it. 1,206 items at `k` = 269.
-fn kll_capacity_items(k: u32) -> u64 {
-    const MIN_LEVEL_CAPACITY: f64 = 8.0;
-    let k = f64::from(k.min(KLL_MAX_K));
-    let mut scale = 1.0_f64;
-    let mut total = 0;
-    for _ in 0..KLL_MAX_LEVELS {
-        total += (k * scale).ceil().max(MIN_LEVEL_CAPACITY) as u64;
-        scale *= 2.0 / 3.0;
-    }
-    total
-}
-
-/// Items `asap_sketchlib`'s KLL for `k` allocates over `input_rows`: its
-/// item array starts empty and grows when full, to at least twice its
-/// length and at least 16 items (`INITIAL_BUFFER_ITEMS`), at most its full
-/// capacity ([`kll_capacity_items`]). So `n` rows take the smallest
-/// `16 · 2^j` ≥ `n`, capped at the capacity: exactly what the library holds
-/// up to `max(k, 8)` rows, before anything compacts; 16 items for one row,
-/// the capacity when the rows are unknown. Past that, compaction keeps the
-/// array within this size, but the library also holds merge scratch space,
-/// not modelled here, that adds up to about a fifth. A state is assumed to
-/// fold at least one row, as a DDSketch's is.
-fn kll_buffer_items(k: u32, input_rows: StateInputRows) -> u64 {
-    const INITIAL_BUFFER_ITEMS: u64 = 16;
-    let capacity = kll_capacity_items(k);
-    match input_rows.rows_per_state {
-        None => capacity,
-        Some(rows_per_state) => {
-            let grown = rows_per_state
-                .max(1)
-                .div_ceil(INITIAL_BUFFER_ITEMS)
-                .next_power_of_two();
-            grown.saturating_mul(INITIAL_BUFFER_ITEMS).min(capacity)
-        }
-    }
-}
-
-/// Bytes of the key one Count-Min / Count Sketch top-k heap slot holds: an
-/// assumption, since the workload declares no label sizes. Such a key is a
-/// label set in the executor's tuple-key encoding, a tag byte and a 4-byte
-/// length before each value; this assumes three labels of 16 bytes, the
-/// size [`row_bytes`] gives a string.
-const ASSUMED_HEAP_KEY_BYTES: usize = 3 * (1 + 4 + 16);
-
-/// Bytes of the key one UnivMon heap slot holds: an assumption, since the
-/// workload declares no label sizes. UnivMon counts the values of one
-/// column, the executor keys each by its type tag and bytes, and a label
-/// value is assumed to be 16 bytes, the size [`row_bytes`] gives a string.
-/// A sample value's key owns no bytes, so this bounds it too.
-const ASSUMED_VALUE_KEY_BYTES: usize = 1 + 16;
-
-/// Layers a UnivMon row updates in expectation. `asap_sketchlib` updates
-/// layers `0..=b`, with bottom layer `b` the index of the first zero among
-/// hash bits `1..layers`, capped at `layers - 1`; so it reaches layer `j`
-/// with probability `2^-j`, and the expectation is
-/// `sum_{j < layers} 2^-j = 2 - 2^(1 - layers)`.
-fn univmon_expected_layers(layers: u8) -> f64 {
-    2.0 - 2f64.powi(1 - i32::from(layers.max(1)))
-}
-
-/// Ratio of the largest to the smallest value magnitude a DDSketch is
-/// assumed to see: nine decades, e.g. latencies from 1 ns to 1 s, priced as
-/// magnitudes in `[1, 1e9]` (its bins depend on the ratio alone). An
-/// assumption, not workload evidence: the data workload declares no value
-/// range.
-const DDSKETCH_ASSUMED_VALUE_RANGE: f64 = 1e9;
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asap_cost::{MeasuredOperationCosts, OperatorCost, ResourceUnitCost};
+    use asap_types::ir::schema::DataType;
 
     /// [`super::price`] with `dag`'s node map and kept pane chains.
     fn price(
         dag: &PhysicalASAPDAG,
         recurrence: &[QueryRecurrence],
         data: &DataWorkload,
-        settings: &PlanSelectionSettings,
+        settings: &CostInputs,
     ) -> Result<CandidateCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
         super::price(
             dag,
@@ -5197,55 +4503,6 @@ mod tests {
     use asap_types::ir::schema::{GroupingStrategy, SketchKind};
     use asap_types::ir::{ExprSemantics, ScalarExpr};
     use asap_types::workload::{DataArrival, LabelSetDistinctValues, MetricType, SourceFacts};
-
-    /// The AWS Fargate preset holds the page's prices converted as its doc
-    /// says at the given speed: per vCPU-second × seconds per operation or
-    /// per scanned byte (1e-9 and 1e-10 at the illustrative speed; twice
-    /// that at half the speed), per GB-second ÷ 2^30; disk and the
-    /// provisioned prices 0. It validates under cost model 1 and is
-    /// refused under cost model 2, where every price it gives is 0.
-    #[test]
-    fn aws_fargate_us_east_1_converts_the_page_prices() {
-        let preset = ResourceUnitCost::aws_fargate_us_east_1(ResourceSpeed::illustrative());
-        let close = |actual: f64, expected: f64| {
-            assert!(
-                ((actual - expected) / expected).abs() < 1e-12,
-                "{actual} != {expected}"
-            )
-        };
-        close(preset.cost_per_cpu_op, 1.1244e-14);
-        close(preset.cost_per_scanned_byte, 1.1244e-15);
-        close(
-            preset.cost_per_memory_byte_second,
-            1.235e-6 / 1_073_741_824.0,
-        );
-        assert_eq!(preset.cost_per_disk_byte_second, 0.0);
-        assert_eq!(preset.cost_per_provisioned_memory_byte_second, 0.0);
-        assert_eq!(preset.cost_per_provisioned_cpu_core_second, 0.0);
-        // A core twice as slow takes twice the vCPU-seconds per operation and per byte.
-        let slower = ResourceUnitCost::aws_fargate_us_east_1(ResourceSpeed {
-            ms_per_cpu_op: 2e-6,
-            ms_per_scanned_byte: 2e-7,
-        });
-        close(slower.cost_per_cpu_op, 2.2488e-14);
-        close(slower.cost_per_scanned_byte, 2.2488e-15);
-        close(
-            slower.cost_per_memory_byte_second,
-            preset.cost_per_memory_byte_second,
-        );
-        let settings = |cost_model| PlanSelectionSettings {
-            cost_model,
-            ..PlanSelectionSettings::default()
-        };
-        assert_eq!(
-            settings(CostModel::UsageOverTime(preset.clone())).validate(),
-            Ok(())
-        );
-        assert_eq!(
-            settings(CostModel::ProvisionedCapacity(preset)).validate(),
-            Err(AnalyticalCostError::ZeroCalibration)
-        );
-    }
 
     /// `G` of `root` over `data` ([`values_per_result`]).
     fn values_of(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
@@ -5793,9 +5050,9 @@ mod tests {
             cluster(ClusterObjective::LeastMemory),
             cluster(ClusterObjective::ParetoFront),
         ] {
-            let settings = PlanSelectionSettings {
+            let settings = CostInputs {
                 cost_model,
-                ..PlanSelectionSettings::default()
+                ..CostInputs::default()
             };
             let models = PlanningModels::builtin().with_plan_selection(&settings);
             let all = select_plan(candidates, &entries, &data, models).unwrap();
@@ -6587,7 +5844,7 @@ mod tests {
             &exact_dag(&["sum(rate(m[5m]))"], &data),
             &recurrences(1),
             &data,
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
         )
         .unwrap_err()
         .1;
@@ -6608,13 +5865,7 @@ mod tests {
         let scan_of = |query: &str| {
             let dag = exact_dag(&[query], &data());
             let scan = node_of(&dag, is_scan);
-            let cost = price(
-                &dag,
-                &recurrences(1),
-                &data(),
-                &PlanSelectionSettings::default(),
-            )
-            .unwrap();
+            let cost = price(&dag, &recurrences(1), &data(), &CostInputs::default()).unwrap();
             let detail = &cost.per_node[&scan].detail;
             let kept_bytes: u64 = detail
                 .split("; keeps ")
@@ -6655,7 +5906,7 @@ mod tests {
             &exact_dag(&["sum(rate(m[5m]))"], &data),
             &recurrences(1),
             &data,
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
         )
         .unwrap();
         let details: Vec<String> = node_prices(&cost)
@@ -6683,7 +5934,7 @@ mod tests {
             &exact_dag(&["sum(rate(m[5m]))"], &data),
             &recurrences(1),
             &data,
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
         )
         .unwrap();
         let details: Vec<String> = node_prices(&cost)
@@ -6718,7 +5969,7 @@ mod tests {
                 })
                 .collect(),
         };
-        let settings = PlanSelectionSettings::default();
+        let settings = CostInputs::default();
         let on_a = "sum(sum_over_time(a[1m]))";
         let alone = ingesting(100_000.0);
         let alone = price(
@@ -6766,7 +6017,7 @@ mod tests {
                 &exact_dag(&["topk by (job) (3, m)"], &data),
                 &recurrences(1),
                 &data,
-                &PlanSelectionSettings::default(),
+                &CostInputs::default(),
             )
             .unwrap();
             node_prices(&cost)
@@ -6848,7 +6099,7 @@ mod tests {
                 &exact_dag(&[query], &data),
                 &recurrences(1),
                 &data,
-                &PlanSelectionSettings::default(),
+                &CostInputs::default(),
             )
             .unwrap();
             node_prices(&cost)
@@ -7197,9 +6448,9 @@ mod tests {
             .failure_probability(0.001)
             .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
         let gauge = with_metric_types(data(), &[("m", MetricType::Gauge)]);
-        let settings = PlanSelectionSettings {
+        let settings = CostInputs {
             ignore_accuracy_guarantees: true,
-            ..PlanSelectionSettings::default()
+            ..CostInputs::default()
         };
         let selection = select_plan(
             &candidates(),
@@ -7228,9 +6479,9 @@ mod tests {
             .failure_probability(0.001)
             .accuracy_metric(AccuracyMetric::ABSOLUTE);
         let entries = [entry_with(target, repeating(10_000))];
-        let settings = PlanSelectionSettings {
+        let settings = CostInputs {
             ignore_accuracy_guarantees: true,
-            ..PlanSelectionSettings::default()
+            ..CostInputs::default()
         };
         let builtin =
             select_plan(&candidates(), &entries, &data(), PlanningModels::builtin()).unwrap();
@@ -7550,567 +6801,6 @@ mod tests {
             aggregate_cost("l2_over_time(x[5m])"),
             aggregate_cost("quantile_over_time(0.99, x[5m])")
         );
-    }
-
-    /// An exact accumulator's state is priced at the executor's per-group
-    /// state, 56 bytes for every kind (a counter's state alone is 48), so a
-    /// pane chain of exact sums keeps 56 bytes per pane and group.
-    #[test]
-    fn exact_state_is_priced_at_the_executors_state_size() {
-        use asap_types::ir::schema::{ExactKind, ExactParams};
-        for (kind, params) in [
-            (ExactKind::Sum, ExactParams::Sum),
-            (ExactKind::Increase, ExactParams::Increase),
-            (ExactKind::Rate, ExactParams::Rate),
-        ] {
-            assert_eq!(
-                summary_shape(
-                    &FieldDataType::ExactAggregate(kind, params),
-                    StateInputRows::UNKNOWN
-                ),
-                (1.0, 56)
-            );
-        }
-        assert_eq!(asap_types::ir::schema::EXACT_ACCUMULATOR_STATE_BYTES, 56);
-    }
-
-    /// The bytes `asap_sketchlib`'s DDSketch holds after adding `values`.
-    fn library_ddsketch_bytes(alpha: f64, values: &[f64]) -> u64 {
-        let mut sketch = asap_sketchlib::sketches::DdSketch::new(alpha);
-        for value in values {
-            sketch.add(value);
-        }
-        sketch.memory_bytes() as u64
-    }
-
-    /// A DDSketch is priced for what `asap_sketchlib` can hold after its
-    /// rows: at least what it holds for a few samples, for samples of either
-    /// sign, and for many samples over nine decades; a store less for values
-    /// declared non-negative. Many rows are priced as unknown ones.
-    #[test]
-    fn ddsketch_state_bytes_bound_the_library() {
-        let alpha = 0.05;
-        let priced = |rows_per_state, non_negative| {
-            sketch_shape(
-                &SketchParams::DDSketch { alpha },
-                StateInputRows {
-                    rows_per_state,
-                    non_negative,
-                },
-            )
-            .1
-        };
-        // Ten Pareto(2) samples (scale 1), one 1 s pane of a 10 Hz series.
-        let pareto: Vec<f64> = (0..10)
-            .map(|i| (1.0 - (f64::from(i) + 0.5) / 10.0).powf(-0.5))
-            .collect();
-        let signed: Vec<f64> = pareto.iter().map(|v| -v).chain(pareto.clone()).collect();
-        let decades: Vec<f64> = (0..10_000)
-            .map(|i| 10f64.powf(9.0 * f64::from((i * 7_919) % 10_000) / 10_000.0))
-            .collect();
-        let signed_decades: Vec<f64> = decades
-            .iter()
-            .enumerate()
-            .map(|(i, v)| if i % 2 == 0 { -v } else { *v })
-            .collect();
-        for (values, non_negative) in [
-            (&pareto[..], true),
-            (&[-2.0][..], false),
-            (&[2.0][..], false),
-            (&[-2.0, 2.0][..], false),
-            (&signed[..], false),
-            (&decades[..], true),
-            (&signed_decades[..], false),
-        ] {
-            let rows = Some(values.len() as u64);
-            assert!(
-                library_ddsketch_bytes(alpha, values) <= priced(rows, non_negative),
-                "{} values, non-negative: {non_negative}",
-                values.len()
-            );
-        }
-        assert!(priced(Some(10_000), true) < priced(Some(10_000), false));
-        assert_eq!(priced(Some(10_000), false), priced(None, false));
-    }
-
-    /// DDSketch state grows as its relative accuracy α tightens.
-    #[test]
-    fn ddsketch_state_grows_as_alpha_shrinks() {
-        let bytes = |alpha| {
-            summary_shape(
-                &FieldDataType::Sketch(
-                    SketchKind::new(SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }),
-                    GroupingStrategy::default(),
-                ),
-                StateInputRows::UNKNOWN,
-            )
-            .1
-        };
-        assert!(
-            bytes(0.1) < bytes(0.01),
-            "{} vs {}",
-            bytes(0.1),
-            bytes(0.01)
-        );
-        assert!(
-            bytes(0.01) < bytes(0.001),
-            "{} vs {}",
-            bytes(0.01),
-            bytes(0.001)
-        );
-    }
-
-    /// Every sketch family's state is sized from its parameters, as
-    /// `asap_sketchlib` allocates it: an HLL's registers, a KMV's `k`
-    /// hashes once it has seen `k` distinct items, and a UnivMon's layers
-    /// once keys of the assumed size have churned through every heap.
-    #[test]
-    fn summary_state_is_sized_from_sketch_params() {
-        use asap_sketchlib::DataInput;
-        let bytes = |algorithm, params| {
-            summary_shape(
-                &FieldDataType::Sketch(
-                    SketchKind::new(algorithm, params),
-                    GroupingStrategy::default(),
-                ),
-                StateInputRows::UNKNOWN,
-            )
-            .1
-        };
-        assert_eq!(
-            bytes(
-                SketchAlgorithm::Hll,
-                SketchParams::Hll {
-                    precision: 14,
-                    relative_error: None
-                }
-            ),
-            asap_sketchlib::HyperLogLog::<asap_sketchlib::Classic>::new().memory_bytes() as u64
-        );
-        let mut kmv: asap_sketchlib::Kmv = asap_sketchlib::Kmv::new(1_000);
-        for i in 0..2_000u64 {
-            kmv.update(&DataInput::U64(i));
-        }
-        assert_eq!(
-            bytes(
-                SketchAlgorithm::Kmv,
-                SketchParams::Kmv {
-                    k: 1_000,
-                    relative_error: None
-                }
-            ),
-            kmv.memory_bytes() as u64
-        );
-        let mut univmon = asap_sketchlib::UnivMon::new(8, 3, 64, 2);
-        for i in 0..10_000u64 {
-            let mut key = [0; ASSUMED_VALUE_KEY_BYTES];
-            key[..8].copy_from_slice(&i.to_le_bytes());
-            univmon.update_weighted(&DataInput::Bytes(&key), 1);
-        }
-        assert_eq!(
-            bytes(
-                SketchAlgorithm::UnivMon,
-                SketchParams::UnivMon {
-                    heap_size: 8,
-                    sketch_rows: 3,
-                    sketch_cols: 64,
-                    layers: 2,
-                    distinct_failure_probability: None,
-                }
-            ),
-            univmon.memory_bytes() as u64
-        );
-    }
-
-    /// KLL state whose samples are unknown is charged its fixed 744 bytes
-    /// and the item array at the capacity `asap_sketchlib` grows it to:
-    /// `compute_max_capacity(k, 8)` 8-byte items, with `k` capped at 26 602.
-    #[test]
-    fn kll_state_is_sized_as_asap_sketchlib_allocates_it() {
-        let bytes = |k| {
-            summary_shape(
-                &FieldDataType::Sketch(
-                    SketchKind::new(
-                        SketchAlgorithm::Kll,
-                        SketchParams::Kll {
-                            k,
-                            failure_probability: None,
-                        },
-                    ),
-                    GroupingStrategy::default(),
-                ),
-                StateInputRows::UNKNOWN,
-            )
-            .1
-        };
-        assert_eq!(bytes(269), 744 + 8 * 1_206);
-        assert_eq!(bytes(26_602), 744 + 8 * 80_118);
-        assert_eq!(bytes(30_000), 744 + 8 * 80_118);
-    }
-
-    /// A KLL state is charged what `asap_sketchlib` allocates for the
-    /// samples it sees, not its full capacity: its fixed struct and level
-    /// array, plus the item array the library starts empty and doubles from
-    /// 16 items as samples arrive, up to `compute_max_capacity(k, 8)`. E.g.
-    /// a 10 s pane of a series sampled every 15 s sees one sample: 744 + 128
-    /// = 872 bytes, where the full capacity at `k` = 269 is 1,206 items.
-    #[test]
-    fn kll_state_bytes_grow_with_the_samples_it_sees() {
-        let k = 269;
-        // The library's bytes after `n` samples.
-        let library_bytes = |n: u32| {
-            let mut sketch = asap_sketchlib::Kll::<f64>::with_k(k as i32);
-            for i in 0..n {
-                sketch.update(&f64::from(i));
-            }
-            sketch.memory_bytes() as u64
-        };
-        let model_bytes = |rows_per_state| {
-            sketch_shape(
-                &SketchParams::Kll {
-                    k,
-                    failure_probability: None,
-                },
-                StateInputRows {
-                    rows_per_state,
-                    non_negative: true,
-                },
-            )
-            .1
-        };
-        // An empty sketch holds its fixed bytes; one sample adds 16 items.
-        assert_eq!(library_bytes(0), kll_fixed_bytes());
-        assert_eq!(library_bytes(0), 744);
-        assert_eq!(library_bytes(1), 872);
-        // Up to `k` samples nothing compacts, so the library holds exactly
-        // the fixed bytes and the grown array (and no merge scratch space).
-        for n in [1, 4, 16, 17, 100, k] {
-            assert_eq!(
-                model_bytes(Some(u64::from(n))),
-                library_bytes(n),
-                "{n} samples"
-            );
-        }
-        // Many samples are charged the full capacity, the most the array
-        // grows to.
-        assert_eq!(model_bytes(Some(5_000)), 744 + 8 * 1_206);
-        // A state assumed to see no sample holds at least one, as a
-        // DDSketch's does; unknown samples fill the full capacity.
-        assert_eq!(model_bytes(Some(0)), 872);
-        assert_eq!(model_bytes(None), 744 + 8 * 1_206);
-    }
-
-    /// Plan selection prices each state the executor builds per group at
-    /// what the executor charges for it (#947). Each family is built
-    /// through the executor's factory and fed `n` rows shaped as the
-    /// pricing assumes: signed values over [`DDSKETCH_ASSUMED_VALUE_RANGE`],
-    /// label values of [`ASSUMED_VALUE_KEY_BYTES`] keys for UnivMon, or
-    /// keyed rows whose tuple keys are [`ASSUMED_HEAP_KEY_BYTES`] long. The
-    /// heap families' shapes are dominated by their heaps. The charge is
-    /// the sketch's bytes plus the accumulator's own fields, named per
-    /// family. It equals the priced bytes where `asap_sketchlib`'s estimate
-    /// is exact (Count-Min, Count Sketch, HLL, KMV at `n` distinct items) and
-    /// for KLL up to `k` rows. For DDSketch, the heap sketches and UnivMon
-    /// the price bounds it, by at most 1.5 times once the state is full;
-    /// UnivMon's price also bounds the bytes its sketch holds.
-    /// KLL past `k` rows is checked only loosely: the planner's formula
-    /// leaves out the compaction scratch space, a known gap until a
-    /// sketchlib estimate without the CDF cache can price KLL.
-    ///
-    /// HydraCms is left out: plan selection prices an independent Count-Min
-    /// per group, the executor one shared grid, so the two agree only at
-    /// about 79 groups for a 5 × 32 grid of 64 × 3 cells (a follow-up).
-    #[test]
-    fn state_bytes_bound_the_executors_charge() {
-        use asap_executor::factory::create_planner_accumulator;
-        use asap_executor::summary_kernels::univmon::UnivMonAccumulator;
-        use asap_executor::summary_kernels::weighted_frequency::WeightedFrequency;
-        use asap_executor::summary_kernels::HllSketchAccumulator;
-        use asap_executor::values::Value;
-        use asap_types::ir::scalar::expr_ir::ColumnRef;
-        use asap_types::ir::schema::{
-            NonNegativeWeightProof, SummaryInputExpr, SummaryUpdate, WeightDomain,
-        };
-        use std::mem::{align_of, size_of};
-        use SketchAlgorithm as A;
-        /// How the priced bytes relate to the sketch's.
-        enum Priced {
-            Exact,
-            /// Exact up to `k` rows; past them at most the formula's
-            /// missing compaction scratch space over it.
-            Kll {
-                k: u32,
-            },
-            /// At least, and at most 1.5 times once the state is full.
-            Bound,
-        }
-        /// The rows a family is fed.
-        enum Rows {
-            /// Signed values over the assumed range.
-            Values,
-            /// One label value a row, as Pass 1 feeds UnivMon a column.
-            Labels,
-            /// A label set and a weight a row.
-            Keyed,
-        }
-        // (family, parameters, rows fed, how it is priced, the
-        // accumulator's own fields, rows at which the state is full: four
-        // times the heap for the heap sketches, so each heap churns).
-        //
-        // The accumulators' own fields, beside the sketch each wraps:
-        // Count-Min / Count Sketch's width, depth and capacity, padded to
-        // the struct's alignment; HLL's precision tag; UnivMon's two key
-        // bounds.
-        let weighted_frequency_shape =
-            (3 * size_of::<usize>()).next_multiple_of(align_of::<WeightedFrequency>());
-        let hll_precision_tag = size_of::<HllSketchAccumulator>()
-            - size_of::<asap_sketchlib::HyperLogLog<asap_sketchlib::Classic>>();
-        let univmon_key_bounds = 2 * size_of::<usize>();
-        let families = [
-            (
-                A::Kll,
-                SketchParams::Kll {
-                    k: 200,
-                    failure_probability: None,
-                },
-                Rows::Values,
-                Priced::Kll { k: 200 },
-                0,
-                10_000,
-            ),
-            (
-                A::DDSketch,
-                SketchParams::DDSketch { alpha: 0.01 },
-                Rows::Values,
-                Priced::Bound,
-                0,
-                10_000,
-            ),
-            (
-                A::Cms,
-                SketchParams::Cms {
-                    width: 1_024,
-                    depth: 5,
-                },
-                Rows::Keyed,
-                Priced::Exact,
-                0,
-                10_000,
-            ),
-            (
-                A::CountSketch,
-                SketchParams::CountSketch {
-                    width: 1_024,
-                    depth: 5,
-                },
-                Rows::Keyed,
-                Priced::Exact,
-                weighted_frequency_shape,
-                10_000,
-            ),
-            (
-                A::CmsWithHeap,
-                SketchParams::CmsWithHeap {
-                    width: 16,
-                    depth: 1,
-                    heap_size: 256,
-                },
-                Rows::Keyed,
-                Priced::Bound,
-                weighted_frequency_shape,
-                1_024,
-            ),
-            (
-                A::CountSketchWithHeap,
-                SketchParams::CountSketchWithHeap {
-                    width: 16,
-                    depth: 1,
-                    heap_size: 256,
-                },
-                Rows::Keyed,
-                Priced::Bound,
-                weighted_frequency_shape,
-                1_024,
-            ),
-            (
-                A::Hll,
-                SketchParams::Hll {
-                    precision: 12,
-                    relative_error: None,
-                },
-                Rows::Values,
-                Priced::Exact,
-                hll_precision_tag,
-                10_000,
-            ),
-            (
-                A::Kmv,
-                SketchParams::Kmv {
-                    k: 1_024,
-                    relative_error: None,
-                },
-                Rows::Values,
-                Priced::Exact,
-                0,
-                10_000,
-            ),
-            // Its top layer sees one row in eight: 4 096 labels fill and
-            // churn every layer's heap.
-            (
-                A::UnivMon,
-                SketchParams::UnivMon {
-                    heap_size: 256,
-                    sketch_rows: 1,
-                    sketch_cols: 16,
-                    layers: 4,
-                    distinct_failure_probability: None,
-                },
-                Rows::Labels,
-                Priced::Bound,
-                univmon_key_bounds,
-                4_096,
-            ),
-        ];
-        let value = SummaryUpdate::column(ColumnRef::SampleValue);
-        let item = Some(SummaryInputExpr::Column(ColumnRef::Named("item".into())));
-        let keyed = SummaryUpdate {
-            item: item.clone(),
-            ..value.clone()
-        };
-        let labeled = SummaryUpdate {
-            item,
-            weight: SummaryInputExpr::Constant(1.0),
-            weight_domain: WeightDomain::NonNegative {
-                proof: NonNegativeWeightProof::UnitCount,
-            },
-        };
-        // A 16-byte label value: its key has the assumed size.
-        let label = |i: u32| format!("{i:016}");
-        assert_eq!(
-            Value::Utf8(label(0).into()).key().unwrap().len(),
-            ASSUMED_VALUE_KEY_BYTES
-        );
-        // Three 16-byte labels: a tuple key of the assumed size.
-        let labels = |i: u32| {
-            [
-                label(i),
-                "service-frontend".to_string(),
-                "region-us-east-1".to_string(),
-            ]
-        };
-        let key = asap_sketchlib::TupleKey::new(
-            labels(0)
-                .into_iter()
-                .map(asap_sketchlib::KeyColumn::String)
-                .collect(),
-        );
-        assert_eq!(key.to_bytes().unwrap().len(), ASSUMED_HEAP_KEY_BYTES);
-        for (algorithm, params, rows, priced_as, fields, full) in &families {
-            for n in [1, 100, *full] {
-                let family = FieldDataType::Sketch(
-                    SketchKind::new(*algorithm, params.clone()),
-                    GroupingStrategy::default(),
-                );
-                let input = match rows {
-                    Rows::Values => &value,
-                    Rows::Labels => &labeled,
-                    Rows::Keyed => &keyed,
-                };
-                let mut updater =
-                    create_planner_accumulator(&family, input, &GroupingStrategy::default())
-                        .unwrap();
-                for i in 0..n {
-                    match rows {
-                        // Distinct magnitudes over the assumed range, in a
-                        // scrambled order, alternating in sign.
-                        Rows::Values => {
-                            let at = f64::from(i * 7_919 % n) / f64::from(n);
-                            let magnitude = DDSKETCH_ASSUMED_VALUE_RANGE.powf(at);
-                            let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
-                            updater.update_single(sign * magnitude, 0).unwrap();
-                        }
-                        Rows::Labels => updater
-                            .update_value(&Value::Utf8(label(i).into()), 0)
-                            .unwrap(),
-                        Rows::Keyed => updater.update_keyed(&labels(i), 1.0, 0).unwrap(),
-                    }
-                }
-                let state = updater.into_accumulator();
-                let charged = state.approx_memory_bytes();
-                let priced = fields
-                    + sketch_shape(
-                        params,
-                        StateInputRows {
-                            rows_per_state: Some(u64::from(n)),
-                            non_negative: false,
-                        },
-                    )
-                    .1 as usize;
-                let context = format!("{algorithm:?} after {n} rows: {priced} priced");
-                match priced_as {
-                    Priced::Exact => assert_eq!(charged, priced, "{context}"),
-                    Priced::Kll { k } if n <= *k => assert_eq!(charged, priced, "{context}"),
-                    // sketchlib bounds KLL's compaction scratch space at
-                    // 2 (k - 1) items.
-                    Priced::Kll { k } => assert!(
-                        charged <= priced + 8 * 2 * (*k as usize - 1),
-                        "{context}, {charged} charged"
-                    ),
-                    Priced::Bound => {
-                        assert!(charged <= priced, "{context}, {charged} charged");
-                        if n == *full {
-                            assert!(
-                                priced as f64 <= 1.5 * charged as f64,
-                                "{context}, {charged} charged"
-                            );
-                        }
-                    }
-                }
-                // UnivMon charges sketchlib's estimate itself, since its
-                // `memory_bytes` walks the heaps: the sketch holds no more.
-                // The estimate is a heap whose digest index has grown once
-                // more under churn, which the test's labels do not reach: a
-                // full heap holds about two thirds of it (1.52 times less
-                // here), so this bound is 1.6 times rather than 1.5.
-                if let Some(univmon) = state.as_any().downcast_ref::<UnivMonAccumulator>() {
-                    let held = fields + univmon.sketch().memory_bytes();
-                    assert!(held <= charged, "{context}, {held} held");
-                    if n == *full {
-                        assert!(priced as f64 <= 1.6 * held as f64, "{context}, {held} held");
-                    }
-                }
-            }
-        }
-    }
-
-    /// A UnivMon row updates layers `0..=b`, where its bottom layer `b` is
-    /// geometric (`asap_sketchlib`'s `bottom_layer_for_hash`), so
-    /// `2 - 2^(1 - layers)` layers in expectation; each updates one counter
-    /// per sketch row and its heap.
-    #[test]
-    fn univmon_update_cost_is_expected_layers_times_rows_and_heap() {
-        let ops = |layers| {
-            summary_shape(
-                &FieldDataType::Sketch(
-                    SketchKind::new(
-                        SketchAlgorithm::UnivMon,
-                        SketchParams::UnivMon {
-                            heap_size: 256,
-                            sketch_rows: 5,
-                            sketch_cols: 1_024,
-                            layers,
-                            distinct_failure_probability: None,
-                        },
-                    ),
-                    GroupingStrategy::default(),
-                ),
-                StateInputRows::UNKNOWN,
-            )
-            .0
-        };
-        assert_eq!(ops(1), 6.0);
-        assert_eq!(ops(2), 1.5 * 6.0);
-        assert_eq!(ops(16), (2.0 - 2f64.powi(-15)) * 6.0);
     }
 
     /// Kept exact distinct-count state keeps every item of its group: over
@@ -9090,16 +7780,16 @@ mod tests {
     }
 
     fn priced(dag: &PhysicalASAPDAG, recurrence: &[QueryRecurrence]) -> CandidateCost {
-        price(dag, recurrence, &data(), &PlanSelectionSettings::default()).unwrap()
+        price(dag, recurrence, &data(), &CostInputs::default()).unwrap()
     }
 
     /// The default settings with cost model 1's unit costs edited.
-    fn unit_costs(edit: impl FnOnce(&mut ResourceUnitCost)) -> PlanSelectionSettings {
+    fn unit_costs(edit: impl FnOnce(&mut ResourceUnitCost)) -> CostInputs {
         let mut prices = ResourceUnitCost::illustrative();
         edit(&mut prices);
-        PlanSelectionSettings {
+        CostInputs {
             cost_model: CostModel::UsageOverTime(prices),
-            ..PlanSelectionSettings::default()
+            ..CostInputs::default()
         }
     }
 
@@ -9412,7 +8102,7 @@ mod tests {
         .unwrap()
         .remove(0)
         .dag;
-        let horizon = PlanSelectionSettings::default().non_repeating_query_horizon_seconds;
+        let horizon = CostInputs::default().non_repeating_query_horizon_seconds;
         assert_eq!(horizon, 3_600.0);
         let per_evaluation = priced(&dag, &[repeating(1_000)]).cost_per_second.unwrap();
         let once = priced(
@@ -9441,7 +8131,7 @@ mod tests {
     #[test]
     fn invalid_settings_are_rejected() {
         let candidates = pane_candidates(10_000.0);
-        let select = |settings: &PlanSelectionSettings| {
+        let select = |settings: &CostInputs| {
             select_plan(
                 &candidates,
                 &[every_minute()],
@@ -9459,9 +8149,9 @@ mod tests {
         for settings in [
             unit_costs(|c| c.cost_per_memory_byte_second = -1.0),
             under(CostModel::UsageOverTime(only_provisioned.clone())),
-            PlanSelectionSettings {
+            CostInputs {
                 non_repeating_query_horizon_seconds: 0.0,
-                ..PlanSelectionSettings::default()
+                ..CostInputs::default()
             },
         ] {
             assert!(
@@ -9630,7 +8320,7 @@ mod tests {
             ))
         );
         let recurrence = [repeating(MINUTE)];
-        let settings = PlanSelectionSettings::default();
+        let settings = CostInputs::default();
         let kept = price(b3, &recurrence, &arriving(10_000.0), &settings).unwrap();
         let rebuilt = price(b2, &recurrence, &arriving(10_000.0), &settings).unwrap();
         let scan = node_of(b3, is_scan);
@@ -9873,7 +8563,7 @@ mod tests {
             dag,
             &recurrence,
             &arriving(10_000.0),
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
         )
         .unwrap()
         .per_node[&chain];
@@ -9901,7 +8591,7 @@ mod tests {
                 &c.dag,
                 &[repeating(MINUTE)],
                 &arriving(10_000.0),
-                &PlanSelectionSettings::default(),
+                &CostInputs::default(),
             )
             .unwrap();
             cost.usage.latency_per_query[0]
@@ -9951,7 +8641,7 @@ mod tests {
                 &c.dag,
                 &[repeating(MINUTE)],
                 &arriving(rows_per_s),
-                &PlanSelectionSettings::default(),
+                &CostInputs::default(),
             )
             .unwrap()
             .usage
@@ -10096,7 +8786,7 @@ mod tests {
                 &candidates[1].dag,
                 &[repeating(MINUTE)],
                 &arriving(rows_per_s),
-                &PlanSelectionSettings::default(),
+                &CostInputs::default(),
             )
             .unwrap()
             .usage
@@ -10156,11 +8846,11 @@ mod tests {
 
     // ── Cost models ──────────────────────────────────────────────────────
 
-    /// [`PlanSelectionSettings`] with `cost_model`.
-    fn under(cost_model: CostModel) -> PlanSelectionSettings {
-        PlanSelectionSettings {
+    /// [`CostInputs`] with `cost_model`.
+    fn under(cost_model: CostModel) -> CostInputs {
+        CostInputs {
             cost_model,
-            ..PlanSelectionSettings::default()
+            ..CostInputs::default()
         }
     }
 
@@ -10180,9 +8870,9 @@ mod tests {
                 cost_per_disk_byte_second: 0.0,
             };
             set(&mut prices);
-            PlanSelectionSettings {
+            CostInputs {
                 cost_model: CostModel::UsageOverTime(prices),
-                ..PlanSelectionSettings::default()
+                ..CostInputs::default()
             }
         };
         // Each resource's unit price and the candidate's usage of it.
@@ -10598,7 +9288,7 @@ mod tests {
             .collect();
         assert_eq!(chains.len(), 1);
         let recurrence = [repeating(MINUTE), repeating(MINUTE)];
-        let settings = PlanSelectionSettings::default();
+        let settings = CostInputs::default();
         let cost = price(&shared.dag, &recurrence, &arriving(rows_per_s), &settings).unwrap();
         let states_read = |newest: Option<u32>| -> u64 {
             let merge = shared
@@ -10659,7 +9349,7 @@ mod tests {
             })
         ));
         let recurrence = [repeating(MINUTE), repeating(5 * MINUTE)];
-        let settings = PlanSelectionSettings::default();
+        let settings = CostInputs::default();
         let cost = price(&shared.dag, &recurrence, &arriving(rows_per_s), &settings).unwrap();
         let separate = shared_windows_at_ingestion(queries, false, rows_per_s);
         let separate_cost =
@@ -10721,7 +9411,7 @@ mod tests {
         ));
         let separate = shared_windows_at_ingestion(queries, false, rows_per_s);
         let recurrence = [repeating(MINUTE), repeating(45_000)];
-        let settings = PlanSelectionSettings::default();
+        let settings = CostInputs::default();
         let price_of = |candidate: &PhysicalWorkloadPlan| {
             price(
                 &candidate.dag,
@@ -10754,7 +9444,7 @@ mod tests {
             &b1.dag,
             &[repeating(MINUTE)],
             &arriving(rows_per_s),
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
         )
         .unwrap();
         let detail = &cost.per_node[&chain].detail;
@@ -10874,13 +9564,13 @@ mod tests {
     }
 
     /// Settings pricing from `operators`.
-    fn measured(operators: Vec<OperatorCost>) -> PlanSelectionSettings {
-        PlanSelectionSettings {
+    fn measured(operators: Vec<OperatorCost>) -> CostInputs {
+        CostInputs {
             measured_operation_costs: MeasuredOperationCosts {
                 operators,
                 ..MeasuredOperationCosts::default()
             },
-            ..PlanSelectionSettings::default()
+            ..CostInputs::default()
         }
     }
 
@@ -10895,7 +9585,7 @@ mod tests {
         let (candidate, build, sketch) = kll_build();
         // Scanning is free here, so each node's time is its CPU, which the
         // factor scales (it leaves scanned bytes unscaled).
-        let cpu_time_only = |mut settings: PlanSelectionSettings| {
+        let cpu_time_only = |mut settings: CostInputs| {
             settings.resource_speed.ms_per_scanned_byte = 0.0;
             settings
         };
@@ -10903,7 +9593,7 @@ mod tests {
             &candidate.dag,
             &recurrences(1),
             &data(),
-            &cpu_time_only(PlanSelectionSettings::default()),
+            &cpu_time_only(CostInputs::default()),
         )
         .unwrap();
         let settings = cpu_time_only(measured(vec![sketch_entry(
@@ -11100,8 +9790,8 @@ mod tests {
 
     /// Cost model 1 pricing CPU only (1 per ms of one core): the tests
     /// below compare plans by the CPU their tables price.
-    fn cpu_only(operators: Vec<OperatorCost>) -> PlanSelectionSettings {
-        PlanSelectionSettings {
+    fn cpu_only(operators: Vec<OperatorCost>) -> CostInputs {
+        CostInputs {
             cost_model: CostModel::UsageOverTime(ResourceUnitCost {
                 cost_per_cpu_op: 1e-6,
                 cost_per_scanned_byte: 1e-7,
@@ -11116,10 +9806,7 @@ mod tests {
 
     /// The candidate Stage 3 selects among `candidates` for one p99 every
     /// minute over 10,000 rows per second.
-    fn selected(
-        candidates: &[PhysicalWorkloadPlan],
-        settings: &PlanSelectionSettings,
-    ) -> Selection {
+    fn selected(candidates: &[PhysicalWorkloadPlan], settings: &CostInputs) -> Selection {
         select_plan(
             candidates,
             &[every_minute()],
@@ -11131,10 +9818,7 @@ mod tests {
 
     /// The candidate cheapest when every node without an entry keeps its
     /// formulas' price (no calibration), as Stage 3 priced before.
-    fn cheapest_uncalibrated(
-        candidates: &[PhysicalWorkloadPlan],
-        settings: &PlanSelectionSettings,
-    ) -> String {
+    fn cheapest_uncalibrated(candidates: &[PhysicalWorkloadPlan], settings: &CostInputs) -> String {
         let cost = |candidate: &PhysicalWorkloadPlan| {
             price_at_scale(
                 &candidate.dag,
@@ -11282,7 +9966,7 @@ mod tests {
             &candidate.dag,
             &recurrences(1),
             &data(),
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
         )
         .unwrap();
         let settings = measured(vec![sketch_entry(OperatorKind::SummaryAgg, sketch, 0.01)]);
@@ -11310,7 +9994,7 @@ mod tests {
         let (candidate, _, _) = kll_build();
         let free_memory = unit_costs(|c| c.cost_per_memory_byte_second = 0.0);
         let before = price(&candidate.dag, &recurrences(1), &data(), &free_memory).unwrap();
-        let settings = PlanSelectionSettings {
+        let settings = CostInputs {
             measured_operation_costs: MeasuredOperationCosts {
                 ns_per_evaluation: 1e6,
                 ..MeasuredOperationCosts::default()
@@ -11363,7 +10047,7 @@ mod tests {
         .unwrap()
         .remove(0);
         assert!(candidate.dag.nodes.is_empty());
-        let mut settings = PlanSelectionSettings::default();
+        let mut settings = CostInputs::default();
         settings.measured_operation_costs.ns_per_evaluation = 2_000_000.0;
         for range in [
             None,
@@ -11508,7 +10192,7 @@ mod tests {
     /// an update both a `SummaryAgg` and a `PaneChain` entry.
     #[test]
     fn the_earlier_table_format_still_loads() {
-        let settings: PlanSelectionSettings = serde_json::from_str(
+        let settings: CostInputs = serde_json::from_str(
             r#"{"measured_operation_costs": [
                  {"sketch": {"Kll": {"k": 200}}, "operation": "update", "cpu_ns_per_operation": 120.0},
                  {"sketch": {"Kll": {"k": 200}}, "operation": "merge", "cpu_ns_per_operation": 900.0}]}"#,
@@ -11559,7 +10243,7 @@ mod tests {
             &candidate.dag,
             &recurrences(1),
             &data(),
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
         )
         .unwrap();
         let other = measured(vec![
@@ -11621,7 +10305,7 @@ mod tests {
             validate(vec![entry(1.0)], 0.0),
             Err(AnalyticalCostError::MeasuredCostsWithoutCpuSpeed(0.0))
         );
-        let mut empty = PlanSelectionSettings::default();
+        let mut empty = CostInputs::default();
         empty.resource_speed.ms_per_cpu_op = 0.0;
         assert!(
             empty.validate().is_ok(),

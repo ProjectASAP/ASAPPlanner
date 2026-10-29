@@ -16,7 +16,8 @@ use crate::search::refinement::search::{
     search_candidates_with_direct_feedback, CandidateEvaluation, CandidateSearchLimits,
     CandidateSearchResult, CandidateSearchStatus, DirectPriceModel, EvaluatedCandidate,
 };
-use crate::{CalibrationFit, CostModel, PlanSelector, PlanningModels, Selection, SelectionError};
+use crate::{PlanSelector, PlanningModels, Selection, SelectionError};
+use asap_cost::{CalibrationFit, CostModel};
 
 /// The share of a search's time a search spends before a final validation
 /// it must still afford: a search runs until its time is spent, so the rest
@@ -1618,7 +1619,7 @@ mod tests {
             "both whole and composed capacities remain in the catalog"
         );
         assert_eq!(configured.inventory.graph.candidates.len(), original_count);
-        let settings = crate::PlanSelectionSettings {
+        let settings = asap_cost::CostInputs {
             ignore_accuracy_guarantees: true,
             ..Default::default()
         };
@@ -1868,7 +1869,7 @@ mod tests {
         assert!(excluded.contains(&projected[0]));
         assert!(!excluded.contains(&projected[1]));
         assert!(!excluded.contains(&source));
-        let ignored = crate::PlanSelectionSettings {
+        let ignored = asap_cost::CostInputs {
             ignore_accuracy_guarantees: true,
             ..Default::default()
         };
@@ -1898,7 +1899,7 @@ mod tests {
     #[test]
     fn accuracy_policy_does_not_penalize_summary_candidates() {
         let (configured, roots, entries, data) = fixture();
-        let settings = crate::PlanSelectionSettings {
+        let settings = asap_cost::CostInputs {
             ignore_accuracy_guarantees: true,
             ..Default::default()
         };
@@ -2161,7 +2162,7 @@ mod tests {
     fn real_kll_search_cost_matches_independent_plan_selector_evaluation() {
         let (configured, roots, entries, data) = fixture();
         for provisioned in [false, true] {
-            let mut settings = crate::PlanSelectionSettings::default();
+            let mut settings = asap_cost::CostInputs::default();
             if provisioned {
                 let CostModel::UsageOverTime(prices) = settings.cost_model.clone() else {
                     unreachable!()
@@ -2372,12 +2373,12 @@ mod tests {
     #[test]
     fn scalar_price_search_does_not_scalarize_cluster_objectives() {
         let (configured, roots, entries, data) = fixture();
-        let settings = crate::PlanSelectionSettings {
-            cost_model: CostModel::ClusterCapacity(crate::ClusterLimits {
+        let settings = asap_cost::CostInputs {
+            cost_model: CostModel::ClusterCapacity(asap_cost::ClusterLimits {
                 memory_bytes: u64::MAX,
                 disk_bytes: u64::MAX,
                 cpu_cores: None,
-                objective: crate::ClusterObjective::ParetoFront,
+                objective: asap_cost::ClusterObjective::ParetoFront,
             }),
             ..Default::default()
         };

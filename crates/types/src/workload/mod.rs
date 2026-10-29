@@ -1,5 +1,4 @@
 pub mod parsed_workload;
-pub mod resources;
 
 use std::collections::BTreeMap;
 

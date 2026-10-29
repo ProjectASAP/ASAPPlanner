@@ -227,7 +227,7 @@
 // others from the formulas times the calibration factor, and each node's
 // `price_source` says `measured` or `analytical`.
 // `--plan-selection-settings <file>` reads all of Stage 3's settings from
-// one JSON file (`PlanSelectionSettings`: `cost_model`, e.g.
+// one JSON file (`CostInputs`: `cost_model`, e.g.
 // `{"usage_over_time": {"cost_per_cpu_op": 1e-6, ...}}` with the
 // deployment's own unit costs, `resource_speed`,
 // `non_repeating_query_horizon_seconds` and `measured_operation_costs`;
@@ -240,7 +240,7 @@
 // alone; executability checks still apply. `--enforce-accuracy-guarantees`
 // clears it, and Stage 3 rejects an output whose guarantee does not meet
 // its query's target, as `plan_installable` does with the default
-// `PlanSelectionSettings`. The document's top-level `accuracy_guarantees` is
+// `CostInputs`. The document's top-level `accuracy_guarantees` is
 // `"ignored"` or `"enforced"`.
 // `--sample-interval-ms` is the sample interval declared for every metric the
 // PromQL queries read (default 15000). `--series-count <n>`,
@@ -260,6 +260,10 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
+use asap_cost::{
+    ClusterLimits, ClusterObjective, CostInputs, CostModel, MeasuredOperationCosts,
+    ResourceUnitCost, ResourceUsage,
+};
 use asap_devtools::candidate_labels::{candidate_labels, computation_label, query_of_each_target};
 use asap_devtools::memo_pricing::{price_choices, SelectedBaseline};
 use asap_devtools::planner_layering_examples::{
@@ -283,9 +287,8 @@ use asap_logical_asap_optimization::pass2::memo::enumeration::{
 use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
-    large_peak_memory_warning, ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCosts,
-    PlanSelectionSettings, PlanningModels, Rejection, ResourceUnitCost, ResourceUsage, Selection,
-    SelectionError, Stage1ToStage3Search,
+    large_peak_memory_warning, PlanningModels, Rejection, Selection, SelectionError,
+    Stage1ToStage3Search,
 };
 use asap_planner::installable_plan_of;
 use asap_types::ir::flat::{flatten, FlatDag, FlatNode, NodeId};
@@ -522,7 +525,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let cluster = (cluster_memory, cluster_disk, cluster_objective.as_deref());
     // The settings every flag below leaves at its default; the Fargate
     // preset converts its prices at their `resource_speed`.
-    let default_settings = PlanSelectionSettings::default();
+    let default_settings = CostInputs::default();
     let cost_model = match (cost_model.as_deref(), cluster) {
         (None | Some("usage-over-time"), (None, None, None)) if cluster_cores.is_none() => {
             CostModel::UsageOverTime(ResourceUnitCost::illustrative())
@@ -569,14 +572,14 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         }
         None => MeasuredOperationCosts::default(),
     };
-    let mut plan_selection: PlanSelectionSettings = match &plan_selection_settings_path {
+    let mut plan_selection: CostInputs = match &plan_selection_settings_path {
         Some(path) => {
             let text = std::fs::read_to_string(path)
                 .map_err(|e| format!("--plan-selection-settings {path}: {e}"))?;
             serde_json::from_str(&text)
                 .map_err(|e| format!("--plan-selection-settings {path}: {e}"))?
         }
-        None => PlanSelectionSettings {
+        None => CostInputs {
             cost_model,
             measured_operation_costs,
             ..default_settings

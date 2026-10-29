@@ -474,10 +474,10 @@ fn default_search_and_installation_validate_the_nine_query_workload() {
 
     let text = std::fs::read_to_string(&path).unwrap();
     let workload: asap_types::workload::PlanningWorkload = serde_json::from_str(&text).unwrap();
-    let defaults = asap_plan_selection::PlanSelectionSettings::default();
-    let settings = asap_plan_selection::PlanSelectionSettings {
-        cost_model: asap_plan_selection::CostModel::UsageOverTime(
-            asap_plan_selection::ResourceUnitCost::aws_fargate_us_east_1(defaults.resource_speed),
+    let defaults = asap_cost::CostInputs::default();
+    let settings = asap_cost::CostInputs {
+        cost_model: asap_cost::CostModel::UsageOverTime(
+            asap_cost::ResourceUnitCost::aws_fargate_us_east_1(defaults.resource_speed),
         ),
         ..defaults
     };
@@ -1216,7 +1216,7 @@ fn workload_file_with_a_range_evaluation_is_planned() {
             })
         })
         .expect("a plan keeps its panes across evaluations");
-        let settings = asap_plan_selection::PlanSelectionSettings::default();
+        let settings = asap_cost::CostInputs::default();
         let priced = asap_plan_selection::select_plan(
             std::slice::from_ref(&kept),
             &entries,
@@ -1261,9 +1261,9 @@ fn plan_selection_settings_flag_loads_the_settings_from_json() {
         "stage_pipeline_{}_plan_selection_settings.json",
         std::process::id()
     ));
-    let settings = asap_plan_selection::PlanSelectionSettings {
-        cost_model: asap_plan_selection::CostModel::ProvisionedCapacity(
-            asap_plan_selection::ResourceUnitCost::illustrative(),
+    let settings = asap_cost::CostInputs {
+        cost_model: asap_cost::CostModel::ProvisionedCapacity(
+            asap_cost::ResourceUnitCost::illustrative(),
         ),
         ..Default::default()
     };

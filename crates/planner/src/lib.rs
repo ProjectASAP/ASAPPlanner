@@ -78,16 +78,17 @@ pub mod test_support {
 
 // What a deployment runtime needs to build a `UserInput` and read an
 // `InstallablePlan`, so it depends on this crate and `asap-executor` alone.
+pub use asap_cost::{
+    ClusterLimits, ClusterObjective, CostInputs, CostModel, CostTableProvenance,
+    MeasuredOperationCost, MeasuredOperationCosts, NodePriceSource, OperatorCost, OperatorKind,
+    ResourceSpeed, ResourceUnitCost, SummaryOperation,
+};
 #[cfg(feature = "promql")]
 pub use asap_frontend_promql::{HistogramCatalog, HistogramKind};
 #[cfg(feature = "sql")]
 pub use asap_frontend_sql::SqlCatalog;
 pub use asap_logical_asap_optimization::{DeploymentCapabilities, SupportedSummary};
-pub use asap_plan_selection::{
-    ClusterLimits, ClusterObjective, CostModel, CostTableProvenance, MeasuredOperationCost,
-    MeasuredOperationCosts, NodePriceSource, OperatorCost, OperatorKind, PlanSelectionSettings,
-    RejectionCause, ResourceSpeed, ResourceUnitCost, SearchReport, SummaryOperation,
-};
+pub use asap_plan_selection::{RejectionCause, SearchReport};
 pub use asap_types::ir::materialized_view::{
     InstallableDagError, MaterializedView, MaterializedViewInputs, MaterializedViewRefresh,
     RawDataRetention, RawDataWindow, ViewCoverage,

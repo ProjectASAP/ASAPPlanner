@@ -18,7 +18,7 @@ Preserve supported accuracy semantics, physical eligibility, cost objectives, sc
 | Candidate dependency inventory | `plan-selection/src/search/candidates` | Local `PhysicalCandidate`, `ProducerRequirement`, compatible suppliers, execution scopes, selected connections, and reconstruction. |
 | Solver | `plan-selection/src/search/milp` | Activation, producer/root assignment, reachability, acyclicity, resource constraints, and solver warm starts. |
 | Search and validation | `plan-selection/src/search/refinement` | Actual evaluator checks, sound cuts, objective-specific ranking, certified component splitting, and structural pruning. |
-| Pricing support | `plan-selection/src/search/costing` | Certified local bounds and consistent calibration. Production execution demand is owned by `plan-selection/src/cost/execution_demand.rs`; the search demand reference is test-only. |
+| Pricing support | `plan-selection/src/search/costing` | Certified local bounds and consistent calibration. Production execution demand is owned by `cost/src/execution_demand.rs`; the search demand reference is test-only. |
 | Pipeline and lifecycle | `plan-selection/src/search/{pipeline,route}` | Initial groups, generation accounting, seed/full search budgets, archives, reports, and selected workload outputs. |
 
 `PhysicalCandidate` is a local selectable computation. `PhysicalWorkloadPlan` is a complete Stage 2 workload DAG; they are not interchangeable. Physical candidate configuration in selection invokes the authoritative Stage 2 legality code rather than duplicating its rules. Logical rules do not depend on the solver crate.

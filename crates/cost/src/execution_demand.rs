@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// and every 30 s meet every 60 s); estimated rates add. One-off, scheduled and unknown queries run as one
 /// batch: the most evaluations among them, spread over
 /// `non_repeating_query_horizon_seconds`.
-pub(crate) fn evaluation_rate<'r>(
+pub fn evaluation_rate<'r>(
     queries: impl IntoIterator<Item = (&'r QueryRecurrence, Option<RangeEvaluation>)>,
     non_repeating_query_horizon_seconds: f64,
 ) -> Result<f64, AnalyticalCostError> {
@@ -124,7 +124,7 @@ pub(crate) fn evaluation_rate<'r>(
 /// `{k * step | k * step <= span}`. A checked LCM beyond the shortest span
 /// means only offset zero is shared. Kept in costing so both evaluator and
 /// MILP demand atoms use the same integer arithmetic without layer inversion.
-pub(crate) fn offset_intersection_count(geometries: &[(u64, u64)]) -> i128 {
+pub fn offset_intersection_count(geometries: &[(u64, u64)]) -> i128 {
     fn gcd(mut a: u64, mut b: u64) -> u64 {
         while b != 0 {
             let remainder = a % b;
@@ -189,7 +189,7 @@ fn distinct_instants_per_request(longest_span_ms_by_step_ms: &BTreeMap<u64, u64>
 
 /// The nodes each query reads first, in query order: query `i` is the scalar
 /// root keyed `i` when there is one, else the next operator root.
-pub(crate) fn query_starts(dag: &PhysicalASAPDAG) -> Vec<Vec<PhysicalASAPNodeId>> {
+pub fn query_starts(dag: &PhysicalASAPDAG) -> Vec<Vec<PhysicalASAPNodeId>> {
     let mut roots = dag.roots.iter();
     (0..dag.roots.len() + dag.scalar_roots.len())
         .map(|query| {
@@ -218,7 +218,7 @@ pub(crate) fn query_starts(dag: &PhysicalASAPDAG) -> Vec<Vec<PhysicalASAPNodeId>
 /// that node's rate; a walk stops at the first materialized node it meets,
 /// and a node read several times within one consumer's walk counts once for
 /// it. Its `multiplier` is that number of consumers.
-pub(crate) fn computations(
+pub fn computations(
     dag: &PhysicalASAPDAG,
     recurrence: &[QueryRecurrence],
     range_evaluations: &[Option<RangeEvaluation>],

@@ -41,10 +41,11 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use asap_cost::CostInputs;
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_physical_asap_optimization::optimize_physical_asap;
 use asap_plan_selection::pass::Stage1ToStage3Search;
-use asap_plan_selection::{select_plan, PlanSelectionSettings, PlanningModels};
+use asap_plan_selection::{select_plan, PlanningModels};
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::sketch::SketchAlgorithm;
 use asap_types::ir::QueryRoot;
@@ -398,10 +399,10 @@ impl Planner {
         }
     }
 
-    fn plan_selection_settings(&self) -> PlanSelectionSettings {
-        PlanSelectionSettings {
+    fn plan_selection_settings(&self) -> CostInputs {
+        CostInputs {
             ignore_accuracy_guarantees: !self.settings.enforce_accuracy_guarantees,
-            ..PlanSelectionSettings::default()
+            ..CostInputs::default()
         }
     }
 

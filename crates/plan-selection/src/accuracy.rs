@@ -90,7 +90,7 @@ impl AccuracyModel for BuiltinAccuracyModel {
 /// Accepts every query output regardless of its guarantee, for comparing
 /// candidates on cost alone (e.g. a benchmark of sketch plans that have no
 /// analytical guarantee); [`Self::satisfies`] is the built-in rule. Selected
-/// by [`PlanSelectionSettings::ignore_accuracy_guarantees`](crate::PlanSelectionSettings::ignore_accuracy_guarantees).
+/// by [`CostInputs::ignore_accuracy_guarantees`](asap_cost::CostInputs::ignore_accuracy_guarantees).
 /// Executability checks still run: Count-Min over update weights not proven
 /// non-negative, and exact per-series aggregates the executor has no kernel
 /// for, are rejected.

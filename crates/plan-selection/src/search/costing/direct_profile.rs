@@ -8,7 +8,8 @@ use crate::search::candidates::configurations::CandidateConfigurationInventory;
 use crate::search::candidates::graph::PhysicalCandidateId;
 use crate::search::milp::direct_cost::{DirectCostProfile, NodeCostProfile, QueryScheduleRates};
 use crate::search::refinement::planner::CandidatePlanningContext;
-use crate::{CostModel, PricedNode, ProducerOutput};
+use crate::{PricedNode, ProducerOutput};
+use asap_cost::CostModel;
 use asap_types::ir::physical_export::PhysicalASAPDAGNode;
 use asap_types::ir::properties::execution_data_state::{DataPrimitive, ExecutionDataState};
 use asap_types::ir::properties::{AccuracyScope, ExecutionTiming};
@@ -128,7 +129,7 @@ fn prepare_profile(
         .entries
         .iter()
         .map(|entry| {
-            crate::cost::execution_demand::evaluation_rate(
+            asap_cost::execution_demand::evaluation_rate(
                 [(&entry.recurrence, entry.range_evaluation)],
                 settings.non_repeating_query_horizon_seconds,
             )
@@ -148,7 +149,7 @@ fn prepare_profile(
         .entries
         .iter()
         .map(|entry| {
-            crate::cost::execution_demand::evaluation_rate(
+            asap_cost::execution_demand::evaluation_rate(
                 [(&entry.recurrence, None)],
                 settings.non_repeating_query_horizon_seconds,
             )
@@ -988,7 +989,7 @@ fn state_compaction_seconds(
     let settings = context.models.plan_selection;
     let measured = crate::lookup(
         &settings.measured_operation_costs,
-        crate::OperatorKind::SummaryMerge,
+        asap_cost::OperatorKind::SummaryMerge,
         ExecutionTiming::QueryTime,
         priced.family,
         |params| crate::sketch_shape(params, crate::StateInputRows::UNKNOWN).1 as f64,
@@ -1243,7 +1244,7 @@ mod tests {
             entries: &entries,
             data: &data,
             models: crate::PlanningModels::builtin(),
-            calibration: crate::CalibrationFit::default(),
+            calibration: asap_cost::CalibrationFit::default(),
         };
         let extracted = extract(&configured, &context).unwrap().unwrap();
         assert!(extracted.supported[exact_id.0] && extracted.supported[estimate_id.0]);
@@ -1375,7 +1376,7 @@ mod tests {
                     entries: &entries,
                     data: &data,
                     models: crate::PlanningModels::builtin(),
-                    calibration: crate::CalibrationFit::default(),
+                    calibration: asap_cost::CalibrationFit::default(),
                 };
                 let extracted = extract(&configured, &context).unwrap().unwrap();
                 assert!(
@@ -1631,7 +1632,7 @@ mod tests {
                         range_evaluation,
                     }];
                     entries.push(entries[0].clone());
-                    let mut settings = crate::PlanSelectionSettings::default();
+                    let mut settings = asap_cost::CostInputs::default();
                     if range_evaluation.is_some() {
                         settings.measured_operation_costs.ns_per_evaluation = 1_000_000.0;
                     }
@@ -1652,7 +1653,7 @@ mod tests {
                             deployment_capabilities: &deployment,
                             ..crate::PlanningModels::builtin().with_plan_selection(&settings)
                         },
-                        calibration: crate::CalibrationFit::default(),
+                        calibration: asap_cost::CalibrationFit::default(),
                     };
                     let extracted = extract(&configured, &context).unwrap().unwrap();
                     assert!(
@@ -1800,8 +1801,8 @@ mod tests {
                             };
                             let mut measured = settings.clone();
                             measured.measured_operation_costs.operators.push(
-                                crate::cost::measured::OperatorCost {
-                                    operator: crate::OperatorKind::SummaryMerge,
+                                asap_cost::measured::OperatorCost {
+                                    operator: asap_cost::OperatorKind::SummaryMerge,
                                     phase: Some(ExecutionTiming::QueryTime),
                                     sketch: Some(kind.params().clone()),
                                     exact: None,
@@ -2158,7 +2159,7 @@ mod tests {
                     entries: &entries,
                     data: &data,
                     models: crate::PlanningModels::builtin(),
-                    calibration: crate::CalibrationFit::default(),
+                    calibration: asap_cost::CalibrationFit::default(),
                 };
                 let extracted = extract(&configured, &context).unwrap().unwrap();
                 assert!(extracted.supported.iter().all(|supported| *supported));
@@ -2298,7 +2299,7 @@ mod tests {
             entries: &entries,
             data: &data,
             models: crate::PlanningModels::builtin(),
-            calibration: crate::CalibrationFit::default(),
+            calibration: asap_cost::CalibrationFit::default(),
         };
         let extracted = extract(&configured, &context).unwrap().unwrap();
         assert_eq!(extracted.supported, vec![true, true, true]);

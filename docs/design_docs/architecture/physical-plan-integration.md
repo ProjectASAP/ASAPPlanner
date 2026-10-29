@@ -26,7 +26,7 @@ logical variant.
 Current state: no code lowers a whole candidate to a `PhysicalOperator` DAG.
 The recursive lowering and the physical-DAG estimator that priced its output
 were deleted with no remaining reader. Stage 3 prices each node of a physical
-candidate with `estimate_operator` (`cost/analytical.rs`) over the
+candidate with `estimate_operator` (`asap-cost`, `analytical.rs`) over the
 `OperatorStatistics` it derives for that node. The lowering obligations and
 comparison rules below are the contract a whole-DAG lowering must meet.
 

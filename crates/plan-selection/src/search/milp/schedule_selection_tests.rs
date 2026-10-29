@@ -4,7 +4,7 @@ use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
 
 fn union(queries: &[QueryRecurrence], mask: usize) -> f64 {
-    crate::cost::execution_demand::evaluation_rate(
+    asap_cost::execution_demand::evaluation_rate(
         queries
             .iter()
             .enumerate()

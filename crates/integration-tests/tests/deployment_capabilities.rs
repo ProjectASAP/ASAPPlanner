@@ -4,9 +4,9 @@
 
 use crate::planner_layering_common;
 
+use asap_cost::CostInputs;
 use asap_devtools::planning_stages::lower_sql_roots;
 use asap_logical_asap_optimization::{DeploymentCapabilities, SupportedSummary};
-use asap_plan_selection::PlanSelectionSettings;
 use asap_types::ir::flat::FlatDag;
 use asap_types::ir::schema::{SketchAlgorithm, StatisticKind};
 use asap_types::ir::{ASAPOp, Operator};
@@ -175,7 +175,7 @@ fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
         .remove(0)
         .roots
         .unwrap();
-    let settings = PlanSelectionSettings::default();
+    let settings = CostInputs::default();
     run_explicit_candidates(
         &workload,
         original,

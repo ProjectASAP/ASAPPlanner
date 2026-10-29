@@ -315,7 +315,7 @@ are ignored, `stage_pipeline`'s default.
   names the cause the guarantee check would have rejected it with, or is
   null when its guarantee met the target) or
   `enforced` (`--enforce-accuracy-guarantees`, as `plan_installable` plans
-  with the default `PlanSelectionSettings`). The Stage 3 header shows it;
+  with the default `CostInputs`). The Stage 3 header shows it;
   an older document without it is still valid, any other value is not.
 - `search` is `candidate-connections`, or `exhaustive` for traversal of the
   same finite catalog with evaluated plans and rejections archived. Exhaustive

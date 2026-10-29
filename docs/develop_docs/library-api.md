@@ -26,7 +26,8 @@ artifact, while preserving the checks required by its intended consumer.
 Inside this workspace, depend on the frontend you need, the stage crates
 (`asap-logical-asap-optimization` for Stage 1, `asap-physical-asap-optimization`
 for Stage 2, `asap-plan-selection` for Stage 3 and the Stage 1 to Stage 3
-driver), and `asap-types`, or on `asap-planner`, which wraps every frontend and
+driver), `asap-cost` for the cost model and its inputs (`CostInputs`), and
+`asap-types`, or on `asap-planner`, which wraps every frontend and
 the planning stages. External users can use Git dependencies pinned to a
 compatible revision; use the same revision across these crates, and pick a
 revision at least as new as the APIs you call. Replace `REV` below with a
@@ -38,6 +39,7 @@ For the examples below:
 asap-planner = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
 asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
 asap-plan-selection = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
+asap-cost = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
 asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
 # For the async e2e_plan example:
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
@@ -178,9 +180,9 @@ asap_plan_selection::run_stage1_to_stage3<Id>(
 | Input or output | Meaning |
 | --- | --- |
 | `PlanningModels::new(accuracy, evidence)` | Your `&dyn AccuracyModel` and `&dyn AccuracyEvidenceProvider`, with default plan selection settings and deployment capabilities; `with_accuracy` and `with_evidence` replace one of them |
-| `PlanningModels::builtin()` | Built-in accuracy model (`DefaultAccuracyModel`) and no extra evidence (`NoAccuracyEvidence`). `with_plan_selection(&settings)` sets the deployment's `PlanSelectionSettings`; `with_deployment_capabilities(&capabilities)` sets its `DeploymentCapabilities` (field `deployment_capabilities`) |
+| `PlanningModels::builtin()` | Built-in accuracy model (`DefaultAccuracyModel`) and no extra evidence (`NoAccuracyEvidence`). `with_plan_selection(&settings)` sets the deployment's `CostInputs`; `with_deployment_capabilities(&capabilities)` sets its `DeploymentCapabilities` (field `deployment_capabilities`) |
 | `DeploymentCapabilities` (`asap_logical_asap_optimization::deployment_capabilities`) | What the executor supports: `supported_summaries` (`None`, the default, supports every summary the planner builds; otherwise `SupportedSummary { family: SketchAlgorithm, readouts: Vec<StatisticKind> }` entries; Pass 1 prunes others with `PruneReason::UnsupportedByDeployment`), `raw_data_retained` (default `true`; when `false`, a candidate that scans raw data at query time is invalid, and stored data is refused with `SelectionError::InvalidDeploymentCapabilities`) and `query_time_results_retained` (default `false`; when `true`, Stage 2 offers `MatAtQueryKeptAcrossEvaluations` for tumbling panes) |
-| `PlanSelectionSettings` (`asap_plan_selection`) | `cost_model`, `resource_speed` (`ms_per_cpu_op`, `ms_per_scanned_byte`), `non_repeating_query_horizon_seconds` (default 3,600) and `measured_operation_costs` (`MeasuredOperationCosts`, default empty: `operators`, one `OperatorCost { operator, phase, sketch / exact / measure, ns_per_unit, ns_per_invocation, memory_bytes_per_state }` per measured operator kind, phase and family; `ns_per_evaluation` per query request; `provenance` (executor version, machine). A node with an entry is priced from it, a sketch between the two nearest measured sizes; every other node from the formulas times one calibration factor fitted from the measured nodes; each node's `NodeCost::price_source` says which. The earlier JSON array of `MeasuredOperationCost { sketch, operation, cpu_ns_per_operation }` still loads) |
+| `CostInputs` (`asap_cost`) | `cost_model`, `resource_speed` (`ms_per_cpu_op`, `ms_per_scanned_byte`), `non_repeating_query_horizon_seconds` (default 3,600) and `measured_operation_costs` (`MeasuredOperationCosts`, default empty: `operators`, one `OperatorCost { operator, phase, sketch / exact / measure, ns_per_unit, ns_per_invocation, memory_bytes_per_state }` per measured operator kind, phase and family; `ns_per_evaluation` per query request; `provenance` (executor version, machine). A node with an entry is priced from it, a sketch between the two nearest measured sizes; every other node from the formulas times one calibration factor fitted from the measured nodes; each node's `NodeCost::price_source` says which. The earlier JSON array of `MeasuredOperationCost { sketch, operation, cpu_ns_per_operation }` still loads) |
 | `CostModel::UsageOverTime(ResourceUnitCost)` | Cost model 1 (default, `ResourceUnitCost::illustrative()`): unit cost × usage per second; the cheapest valid candidate wins |
 | `CostModel::ProvisionedCapacity(ResourceUnitCost)` | Cost model 2: unit cost × peak memory, peak CPU cores and disk; the cheapest valid candidate wins |
 | `CostModel::ClusterCapacity(ClusterLimits)` | Cost model 3: memory, disk and optional CPU cores are hard limits; `ClusterObjective::{LowestLatency, LeastMemory, ParetoFront}` chooses among the candidates that fit |
@@ -262,11 +264,9 @@ rejected heap top-k candidates, `P2` and `P3`, each with the reason
 model 3 instead:
 
 ```rust
-use asap_plan_selection::{
-    ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings,
-};
+use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel};
 
-let settings = PlanSelectionSettings {
+let settings = CostInputs {
     cost_model: CostModel::ClusterCapacity(ClusterLimits {
         memory_bytes: 64 << 30,
         disk_bytes: 1 << 40,
@@ -330,7 +330,7 @@ distinct-value counts positive.
 | `QueryRequirements::default()` | `AccuracyTarget::exact()`, no latency bound (`max_latency_ms: None`) | Pass approximation explicitly on each workload entry |
 | `DataWorkload::default()` | Unknown arrival, no source facts | Supply facts needed for the requested comparisons |
 | `SourceFacts::default()` | Every fact unknown | Unknown facts are not zero; drop facts that no longer hold before planning |
-| `PlanSelectionSettings::default()` | Cost model 1 with the illustrative `ResourceUnitCost`, no measured operation costs | Supply the deployment's unit costs, speed and measurements for calibrated comparisons |
+| `CostInputs::default()` | Cost model 1 with the illustrative `ResourceUnitCost`, no measured operation costs | Supply the deployment's unit costs, speed and measurements for calibrated comparisons |
 | `DeploymentCapabilities::default()` | Every summary supported, raw data retained, query-time results not kept | Declare what the executor supports |
 
 `Default` is a Rust constructor contract, not a general serde omission rule.

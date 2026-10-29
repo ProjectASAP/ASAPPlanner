@@ -1,5 +1,6 @@
 //! Driver integration for the explicit, bounded candidate-connection search.
-use crate::{CostModel, PlanningModels, SelectionError, Stage1ToStage3Search};
+use crate::{PlanningModels, SelectionError, Stage1ToStage3Search};
+use asap_cost::CostModel;
 use asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidates;
 use asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo;
 use asap_logical_asap_optimization::pass2::memo::enumeration::ChosenCandidatePerMemoGroup;
@@ -44,7 +45,7 @@ struct RouteOutcome {
     )>,
     lower_bound: Option<f64>,
     relative_gap: Option<f64>,
-    calibration: crate::CalibrationFit,
+    calibration: asap_cost::CalibrationFit,
     calibration_scope: &'static str,
 }
 
@@ -962,7 +963,7 @@ fn search_domain<Id: Clone>(
         models,
         calibration: match calibration_policy {
             CandidateCalibration::Frozen(fit) => fit,
-            CandidateCalibration::CompleteCatalog => crate::CalibrationFit::default(),
+            CandidateCalibration::CompleteCatalog => asap_cost::CalibrationFit::default(),
         },
     };
     let bound_metrics = crate::search::costing::lower_bounds::apply(&mut configured, &context)
@@ -1473,7 +1474,7 @@ mod tests {
     // Calibration over all assignments must never be fitted to a restricted seed.
     #[test]
     fn complete_catalog_calibration_skips_seed_domain() {
-        let settings: crate::PlanSelectionSettings = serde_json::from_value(serde_json::json!({
+        let settings: asap_cost::CostInputs = serde_json::from_value(serde_json::json!({
             "measured_operation_costs": {"operators": [{"operator":"Scan", "ns_per_unit":100.0}]}
         }))
         .unwrap();
@@ -1490,13 +1491,13 @@ mod tests {
     // Joint phases retain valid frontier metadata under the exact configured ranking.
     #[test]
     fn pane_free_pareto_uses_complete_domain_and_frozen_fit() {
-        let settings = crate::PlanSelectionSettings {
+        let settings = asap_cost::CostInputs {
             frozen_calibration_factor: Some(3.0),
-            cost_model: CostModel::ClusterCapacity(crate::ClusterLimits {
+            cost_model: CostModel::ClusterCapacity(asap_cost::ClusterLimits {
                 memory_bytes: 1_000_000,
                 disk_bytes: 1_000_000,
                 cpu_cores: Some(8),
-                objective: crate::ClusterObjective::ParetoFront,
+                objective: asap_cost::ClusterObjective::ParetoFront,
             }),
             ..Default::default()
         };
@@ -1695,7 +1696,7 @@ mod tests {
     fn repeated_round_ids_preserve_all_cost_and_accuracy_records() {
         let make = |price| {
             let run = scalar_run(
-                &crate::PlanSelectionSettings::default(),
+                &asap_cost::CostInputs::default(),
                 Stage1ToStage3Search {
                     max_evaluations: Some(1),
                     ..Default::default()
@@ -1730,12 +1731,12 @@ mod tests {
         assert_eq!(prices, vec![1.0, 2.0, 3.0]);
         assert_eq!(merged.0.selected, merged.1.id);
         assert_eq!(merged.0.costs[&merged.1.id].cost_per_second, Some(1.0));
-        let settings = crate::PlanSelectionSettings {
-            cost_model: CostModel::ClusterCapacity(crate::ClusterLimits {
+        let settings = asap_cost::CostInputs {
+            cost_model: CostModel::ClusterCapacity(asap_cost::ClusterLimits {
                 memory_bytes: 1_000_000,
                 disk_bytes: 1_000_000,
                 cpu_cores: Some(8),
-                objective: crate::ClusterObjective::ParetoFront,
+                objective: asap_cost::ClusterObjective::ParetoFront,
             }),
             ..Default::default()
         };
@@ -1775,7 +1776,7 @@ mod tests {
     #[test]
     fn literal_workload_does_not_repeat_identical_width_models() {
         let run = scalar_run(
-            &crate::PlanSelectionSettings::default(),
+            &asap_cost::CostInputs::default(),
             Stage1ToStage3Search::default(),
         );
         let selection = run.stage3_plan_selection.unwrap();
@@ -1846,7 +1847,7 @@ mod tests {
     }
 
     fn scalar_run(
-        settings: &crate::PlanSelectionSettings,
+        settings: &asap_cost::CostInputs,
         search: Stage1ToStage3Search,
     ) -> crate::Stage1ToStage3Run<usize> {
         let (_, entries, data) = workload();

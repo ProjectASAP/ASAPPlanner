@@ -1,7 +1,8 @@
 //! Original issue workloads against the production candidate-connection planner.
+use asap_cost::CostInputs;
 use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, FuzzWorkload, Planner};
 use asap_devtools::planning_stages::run_search_over;
-use asap_plan_selection::{PlanSelectionSettings, PlanningModels, Stage1ToStage3Search};
+use asap_plan_selection::{PlanningModels, Stage1ToStage3Search};
 use serde_json::json;
 use std::path::Path;
 
@@ -27,7 +28,7 @@ fn cost(w: &FuzzWorkload) -> f64 {
     let roots = Planner::new(FuzzSettings::default()).lower(w).unwrap();
     let planning = w.planning_workload();
     let entries: Vec<_> = planning.query_workload.entries().collect();
-    let settings = PlanSelectionSettings::default();
+    let settings = CostInputs::default();
     let deployment = w.deployment();
     let models = PlanningModels::builtin()
         .with_plan_selection(&settings)

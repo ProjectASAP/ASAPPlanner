@@ -9,11 +9,11 @@ use std::collections::{BTreeSet, HashSet};
 use asap_types::physical::Materialization;
 use asap_types::workload::QueryWorkloadEntry;
 
-use crate::cost::execution_demand::evaluation_rate;
 use crate::search::candidates::graph::{
     validate_selected_graph, CandidateDependencyGraph, PhysicalCandidateId, SelectedCandidateGraph,
 };
-use crate::PlanSelectionSettings;
+use asap_cost::execution_demand::evaluation_rate;
+use asap_cost::CostInputs;
 
 /// A computation boundary, not merely a rate: equal-rate materialized states
 /// still trigger separate upstream computations when their inputs are not kept.
@@ -46,7 +46,7 @@ pub(in crate::search) fn derive_candidate_demand(
     materializations: &[Option<Materialization>],
     output_queries: &[usize],
     entries: &[QueryWorkloadEntry],
-    settings: &PlanSelectionSettings,
+    settings: &CostInputs,
 ) -> Result<Vec<Option<CandidateDemand>>, String> {
     graph.validate().map_err(|e| e.to_string())?;
     validate_selected_graph(graph, selected)?;
@@ -260,7 +260,7 @@ mod tests {
             &modes.iter().copied().map(Some).collect::<Vec<_>>(),
             outputs,
             entries,
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
         )
         .unwrap()
     }
@@ -382,7 +382,7 @@ mod tests {
                 modes,
                 outputs,
                 &entries,
-                &PlanSelectionSettings::default(),
+                &CostInputs::default(),
             )
         };
         assert!(derive(&[plain, ingestion, plain], &[0, 1])

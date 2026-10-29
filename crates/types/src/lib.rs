@@ -10,9 +10,8 @@
 //!   summary coverage), the flat DAG
 //!   form ([`ir::flat`]) and the physical ASAP DAG ([`ir::physical_export`]).
 //! - [`workload`] — the planner inputs (#509): the query and data
-//!   workloads, the parsed workload the query-language frontends produce
-//!   ([`workload::parsed_workload`]) and resource dimensions
-//!   ([`workload::resources`]).
+//!   workloads and the parsed workload the query-language frontends produce
+//!   ([`workload::parsed_workload`]).
 //! - [`physical`] — Stage 2 decision data: the materialization of a
 //!   sub-DAG ([`physical::Materialization`]).
 //!

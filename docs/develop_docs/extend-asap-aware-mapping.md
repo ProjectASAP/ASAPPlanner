@@ -36,7 +36,7 @@ A new sketch that Pass 1 can offer for an intent.
    for the type the executor builds; KLL keeps the planner's own formula)
    and per-operation CPU in `sketch_shape`
    (`crates/plan-selection/src/lib.rs`), and accept its parameters in
-   `crates/plan-selection/src/cost/measured.rs` if deployments measure it.
+   `crates/cost/src/measured.rs` if deployments measure it.
 6. **Executor.** Wrap the `asap_sketchlib` implementation in
    `crates/executor/src/summary_kernels/` and register it in
    `factory.rs` and `capability.rs`. Gaps in the library are fixed upstream,
@@ -97,7 +97,7 @@ tests in `planner_layering_example4.rs`.
   `RejectionCause` variant (listed in `RejectionCause::failed_a_check`); it never fails the whole selection
   unless the input itself is bad (a new `SelectionError` variant, documented
   as bad input).
-- A new pricing input goes in `PlanSelectionSettings` (validated in its
+- A new pricing input goes in `CostInputs` (validated in its
   `validate`); a new statement about the executor goes in
   `DeploymentCapabilities`. Both reach every stage through `PlanningModels`.
 - Expose it in `stage_pipeline` and in the

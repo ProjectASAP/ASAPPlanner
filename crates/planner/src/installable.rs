@@ -26,8 +26,9 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use asap_cost::{NodePriceSource, OperatorKind};
 use asap_logical_asap_optimization::DeploymentCapabilities;
-use asap_plan_selection::{NodePriceSource, OperatorKind, SearchReport, Selection};
+use asap_plan_selection::{SearchReport, Selection};
 use asap_types::ir::materialized_view::{InstallableDagError, MaterializedView, RawDataRetention};
 use asap_types::ir::operator::pane_chain::expand_pane_chains_in_workload;
 use asap_types::ir::physical_export::{
@@ -84,7 +85,7 @@ pub struct SelectedPlanReport {
     pub search: SearchReport,
     /// The workload queries (entry indices) whose output Stage 3 accepted
     /// only because the accuracy model accepts it regardless of its
-    /// guarantee (e.g. `PlanSelectionSettings::ignore_accuracy_guarantees`):
+    /// guarantee (e.g. `CostInputs::ignore_accuracy_guarantees`):
     /// the guarantee check would have rejected it. Empty when every
     /// output's guarantee meets its target; omitted from JSON then.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

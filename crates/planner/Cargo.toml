@@ -14,6 +14,7 @@ edition = "2021"
 # #430) depends on `asap-plan-selection` alone and never pulls in DataFusion.
 [dependencies]
 asap-types = { path = "../types" }
+asap-cost = { path = "../cost" }
 asap-plan-selection = { path = "../plan-selection" }
 asap-frontend-sql = { path = "../frontend-sql", optional = true }
 asap-frontend-promql = { path = "../frontend-promql", optional = true }
