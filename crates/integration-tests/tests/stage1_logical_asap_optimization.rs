@@ -13,7 +13,7 @@ use asap_executor::{
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    compose_logical_candidate, generate_per_computation_candidates, HowToComputeAggregateMeasure,
 };
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::properties::AccuracyTarget;
@@ -403,7 +403,7 @@ async fn avg_as_sum_and_count(
                 .candidates
                 .iter()
                 .position(|c| {
-                    *c == ComputationCandidate::ExactAccumulator(vec![
+                    *c == HowToComputeAggregateMeasure::ExactAccumulator(vec![
                         ExactKind::Sum,
                         ExactKind::Count,
                     ])
@@ -529,7 +529,7 @@ fn promql_avg_divides_sum_and_count_vectors() {
         generate_per_computation_candidates(vec![(0, promql("avg by (job) (m)"))]).unwrap();
     assert_eq!(
         inventory.targets[0].choices.candidates[0],
-        ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum, ExactKind::Count])
+        HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum, ExactKind::Count])
     );
     let composed = compose_logical_candidate(&inventory, &[0]).unwrap();
     let QueryRoot::Operator(root) = &composed[0].1 else {
@@ -561,7 +561,7 @@ async fn every_candidate(
     catalog: &SqlCatalog,
     query: &str,
 ) -> Vec<(
-    ComputationCandidate,
+    HowToComputeAggregateMeasure,
     Result<
         Vec<(i32, QueryRoot)>,
         asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidateError,

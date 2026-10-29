@@ -17,13 +17,15 @@ use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::{
     cheapest_of, compose_memo_plan, expanded_memo, select_among,
 };
-use asap_logical_asap_optimization::pass2::memo::candidates::{CandidateMemo, CandidateOrigin};
+use asap_logical_asap_optimization::pass2::memo::candidates::{
+    CandidateMemo, OriginOfCandidateForMemoGroup,
+};
 use asap_plan_selection::PlanningModels;
 use asap_types::ir::physical_export::compile_physical_asap_dag;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, OperatorNode,
-    QueryRoot, TimingMemo,
+    apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
+    NonASAPOp, OperatorNode, QueryRoot,
 };
 use asap_types::physical::Materialization;
 use asap_types::workload::{
@@ -116,7 +118,7 @@ fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
     let timed = apply_materialization_timings(
         root,
         &MaterializationAssignment::default(),
-        &mut TimingMemo::new(),
+        &mut NodeToTimedNodeCache::new(),
     )
     .unwrap();
     // Tumbling panes run as their panes, each over its own window.
@@ -163,7 +165,7 @@ fn summary_builds(root: &Rc<OperatorNode>) -> usize {
 /// the group it implements; groups that answer a query or aggregate only.
 fn candidates_of<'a>(
     memo: &'a CandidateMemo,
-    origins: &'a [CandidateOrigin],
+    origins: &'a [OriginOfCandidateForMemoGroup],
 ) -> impl Iterator<Item = (usize, &'a Rc<OperatorNode>)> + 'a {
     memo.candidates
         .iter()
@@ -237,7 +239,7 @@ fn select(
 }
 
 /// `(group, candidate index)` of every candidate [`candidates_of`] yields.
-fn choices(memo: &CandidateMemo, origins: &[CandidateOrigin]) -> Vec<(usize, usize)> {
+fn choices(memo: &CandidateMemo, origins: &[OriginOfCandidateForMemoGroup]) -> Vec<(usize, usize)> {
     candidates_of(memo, origins)
         .map(|(group, node)| {
             let index = memo.candidates[group]
@@ -253,7 +255,7 @@ fn choices(memo: &CandidateMemo, origins: &[CandidateOrigin]) -> Vec<(usize, usi
 /// node.
 fn own_candidates<'a>(
     memo: &'a CandidateMemo,
-    origins: &'a [CandidateOrigin],
+    origins: &'a [OriginOfCandidateForMemoGroup],
 ) -> impl Iterator<Item = (usize, &'a Rc<OperatorNode>)> + 'a {
     candidates_of(memo, origins)
         .filter(|(group, node)| !Rc::ptr_eq(node, &memo.groups[*group].node))
@@ -268,7 +270,7 @@ fn nested_sum_merge_is_selected_and_answers_as_the_nested_sums() {
     // Evaluated once, so no tumbling-pane candidates.
     let query = "sum by (job) (sum_over_time(m[5m]))";
     let memo = memo(&exact_queries(&[query]), QueryRecurrence::Unknown);
-    let variants: Vec<_> = choices(&memo, &[CandidateOrigin::Pass1])
+    let variants: Vec<_> = choices(&memo, &[OriginOfCandidateForMemoGroup::Pass1])
         .into_iter()
         .map(|(group, index)| BTreeMap::from([(group, index)]))
         .collect();
@@ -299,7 +301,7 @@ fn shared_kinds(roots: &[Rc<OperatorNode>]) -> BTreeSet<String> {
 /// candidates (the `i`-th of each group that has some, together). Stage 2
 /// offers each computation two queries read built once per evaluation
 /// (`MatAtQuery`); the reuse plan is selected and is cheaper than without it.
-fn selected_reuse(queries: &[&str], origin: CandidateOrigin) -> BTreeSet<String> {
+fn selected_reuse(queries: &[&str], origin: OriginOfCandidateForMemoGroup) -> BTreeSet<String> {
     let memo = memo(&exact_queries(queries), repeating());
     let mut by_group: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (group, index) in choices(&memo, std::slice::from_ref(&origin)) {
@@ -332,7 +334,7 @@ fn selected_reuse(queries: &[&str], origin: CandidateOrigin) -> BTreeSet<String>
 fn rollup_is_selected_when_the_finer_sums_are_computed_once() {
     let shared = selected_reuse(
         &["sum by (job) (m)", "sum by (job, instance) (m)"],
-        CandidateOrigin::Rollup,
+        OriginOfCandidateForMemoGroup::Rollup,
     );
     // The coarse sum reads the finer sums' state or finalized values.
     assert!(
@@ -351,7 +353,7 @@ fn exact_topk_reuse_is_selected_when_the_ranking_is_computed_once() {
             "topk by (job) (5, rate(m[1m]))",
             "topk by (job) (10, rate(m[1m]))",
         ],
-        CandidateOrigin::TopKReuse,
+        OriginOfCandidateForMemoGroup::TopKReuse,
     );
     assert!(shared.contains("Sort"), "{shared:?}");
 }
@@ -379,7 +381,7 @@ fn every_candidate_answers_alike(query: &str) {
     let memo = memo(&exact_queries(&[query]), QueryRecurrence::Unknown);
     let entry = exact(QueryRecurrence::Unknown);
     let mut checked = 0;
-    for (group, node) in own_candidates(&memo, &[CandidateOrigin::Pass1]) {
+    for (group, node) in own_candidates(&memo, &[OriginOfCandidateForMemoGroup::Pass1]) {
         assert_eq!(
             execute_implemented(node, &entry),
             execute_implemented(&memo.groups[group].node, &entry),
@@ -413,8 +415,13 @@ fn reuse_answers_alike_in(
 ) {
     let entry = exact(repeating());
     let mut checked = 0;
-    for (group, node) in candidates_of(memo, &[CandidateOrigin::Rollup, CandidateOrigin::TopKReuse])
-    {
+    for (group, node) in candidates_of(
+        memo,
+        &[
+            OriginOfCandidateForMemoGroup::Rollup,
+            OriginOfCandidateForMemoGroup::TopKReuse,
+        ],
+    ) {
         if memo.groups[group]
             .queries
             .iter()
@@ -542,7 +549,7 @@ fn a_rollup_over_a_shared_summary_candidate_answers_as_without_it() {
         })
         .collect();
     let without = compose_memo_plan(&memo, queries.len(), &sharing);
-    let (group, index) = choices(&memo, &[CandidateOrigin::Rollup])
+    let (group, index) = choices(&memo, &[OriginOfCandidateForMemoGroup::Rollup])
         .into_iter()
         .find(|(group, _)| memo.groups[*group].queries == [0])
         .expect("a rollup of the coarse sum");

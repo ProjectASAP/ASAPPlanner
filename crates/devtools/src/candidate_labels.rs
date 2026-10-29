@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    ComputationCandidate, PerComputationCandidates,
+    HowToComputeAggregateMeasure, PerComputationCandidates,
 };
 use asap_logical_asap_optimization::pass2::asap_aware_cse::PaneCandidate;
 use asap_logical_asap_optimization::pass2::workload_candidates::Pass2Candidate;
@@ -136,14 +136,14 @@ pub fn query_of_each_target<Id>(inventory: &PerComputationCandidates<Id>) -> Vec
 }
 
 /// A Pass 1 per-computation candidate, e.g. "exact", "Sum acc" or "Kll".
-pub fn computation_label(candidate: &ComputationCandidate) -> String {
+pub fn computation_label(candidate: &HowToComputeAggregateMeasure) -> String {
     match candidate {
-        ComputationCandidate::Exact => "exact".to_string(),
-        ComputationCandidate::ExactAccumulator(kinds) => {
+        HowToComputeAggregateMeasure::Exact => "exact".to_string(),
+        HowToComputeAggregateMeasure::ExactAccumulator(kinds) => {
             let kinds: Vec<String> = kinds.iter().map(|kind| format!("{kind:?}")).collect();
             format!("{} acc", kinds.join("/"))
         }
-        ComputationCandidate::Summary(algorithm) => sketch_name(algorithm),
+        HowToComputeAggregateMeasure::Summary(algorithm) => sketch_name(algorithm),
     }
 }
 
@@ -177,8 +177,8 @@ pub fn choice_label<Id>(inventory: &PerComputationCandidates<Id>, choice: &[usiz
                     continue;
                 }
                 match candidate {
-                    ComputationCandidate::Exact => {}
-                    ComputationCandidate::ExactAccumulator(kinds) => {
+                    HowToComputeAggregateMeasure::Exact => {}
+                    HowToComputeAggregateMeasure::ExactAccumulator(kinds) => {
                         // e.g. "Sum acc", "Sum/Count acc" for an avg, or
                         // "nested Sum acc" for a fused nested sum.
                         let kinds: Vec<String> =
@@ -186,7 +186,7 @@ pub fn choice_label<Id>(inventory: &PerComputationCandidates<Id>, choice: &[usiz
                         let nested = if absorbs.is_some() { "nested " } else { "" };
                         accumulators.push(format!("{nested}{} acc", kinds.join("/")))
                     }
-                    ComputationCandidate::Summary(algorithm) => {
+                    HowToComputeAggregateMeasure::Summary(algorithm) => {
                         sketches.push(sketch_name(algorithm))
                     }
                 }
@@ -747,7 +747,9 @@ mod tests {
                     .choices
                     .candidates
                     .iter()
-                    .position(|c| *c == ComputationCandidate::Summary(SketchAlgorithm::DDSketch))
+                    .position(|c| {
+                        *c == HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch)
+                    })
                     .expect("a DDSketch candidate")
             })
             .collect();

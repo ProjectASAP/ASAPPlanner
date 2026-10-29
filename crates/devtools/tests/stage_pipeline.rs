@@ -2419,7 +2419,7 @@ fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
 fn composed_selected_choice_is_the_selected_stage1_dag() {
     use asap_devtools::planning_stages::run_default_search_over;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::recompose_guarantees;
-    use asap_logical_asap_optimization::pass2::memo::enumeration::compose;
+    use asap_logical_asap_optimization::pass2::memo::enumeration::build_logical_asap_dags_from_chosen_candidates;
     use asap_types::ir::flat::flatten;
     let ratio: PlanningWorkload =
         serde_json::from_str(&std::fs::read_to_string(MEMO_RATIO_OF_QUANTILES).unwrap()).unwrap();
@@ -2435,9 +2435,9 @@ fn composed_selected_choice_is_the_selected_stage1_dag() {
         )
         .unwrap();
         let steps = run.memo_steps.as_ref().unwrap();
-        let choice = steps.selected_choice.as_ref().unwrap();
+        let choice = steps.selected_chosen_candidates.as_ref().unwrap();
         let memo = &steps.concrete_states;
-        let composed = compose(memo, choice).unwrap();
+        let composed = build_logical_asap_dags_from_chosen_candidates(memo, choice).unwrap();
         let composed: Vec<_> = (0..entries.len())
             .map(|query| {
                 let (_, node) = composed

@@ -1649,8 +1649,8 @@ mod compilation_deadline_tests {
         use planner_types::ir::physical_export::compile_physical_asap_workload;
         use planner_types::ir::schema::{Field, Schema};
         use planner_types::ir::{
-            apply_materialization_timings, MaterializationAssignment, Operator, QueryRoot,
-            TimingMemo,
+            apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
+            Operator, QueryRoot,
         };
         let minute_ms = 60_000;
         let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
@@ -1686,16 +1686,16 @@ mod compilation_deadline_tests {
                 .unwrap()
             })
             .collect();
-        // One timing memo, so every window reads the one `Scan`. The memo is
+        // One timing cache, so every window reads the one `Scan`. The cache is
         // keyed by node address, so `windows` stays alive while it runs.
-        let mut memo = TimingMemo::new();
+        let mut cache = NodeToTimedNodeCache::new();
         let roots: Vec<_> = windows
             .iter()
             .map(|window| {
                 let timed = apply_materialization_timings(
                     window,
                     &MaterializationAssignment::default(),
-                    &mut memo,
+                    &mut cache,
                 )
                 .unwrap();
                 QueryRoot::Operator(timed)

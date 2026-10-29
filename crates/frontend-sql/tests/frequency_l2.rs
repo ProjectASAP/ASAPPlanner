@@ -150,7 +150,7 @@ async fn batch_lowering_recognizes_frequency_l2() {
 #[tokio::test]
 async fn stage1_offers_exact_and_summary_l2_candidates() {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        generate_per_computation_candidates, ComputationCandidate,
+        generate_per_computation_candidates, HowToComputeAggregateMeasure,
     };
     use asap_types::ir::QueryRoot;
     let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
@@ -168,14 +168,14 @@ async fn stage1_offers_exact_and_summary_l2_candidates() {
     assert!(
         candidates.iter().any(|c| matches!(
             c,
-            ComputationCandidate::Exact | ComputationCandidate::ExactAccumulator(_)
+            HowToComputeAggregateMeasure::Exact | HowToComputeAggregateMeasure::ExactAccumulator(_)
         )),
         "{candidates:?}"
     );
     assert!(
         candidates
             .iter()
-            .any(|c| matches!(c, ComputationCandidate::Summary(_))),
+            .any(|c| matches!(c, HowToComputeAggregateMeasure::Summary(_))),
         "{candidates:?}"
     );
 }

@@ -3,7 +3,7 @@
 use super::reuse::{append_producer, append_reader, eligible, replace};
 use super::shared_producer::{add_shared_producer_candidates, Reader, SharedProducer};
 use crate::pass2::asap_aware_cse::topk_reuse_candidates;
-use crate::pass2::memo::candidates::{CandidateMemo, CandidateOrigin};
+use crate::pass2::memo::candidates::{CandidateMemo, OriginOfCandidateForMemoGroup};
 use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::state_groups::StateGroupExpansionError;
 use crate::pass2::memo::MemoGroupId;
@@ -135,8 +135,13 @@ impl SharedProducer for TopKRankings {
         let sort = covering.ranking.children()[0]
             .with_new_children(|_| Rc::clone(&input))
             .map_err(|error| StateGroupExpansionError::ReuseRule(error.to_string()))?;
-        let sort_group =
-            append_producer(memo, Rc::new(sort), &queries, CandidateOrigin::TopKReuse, 1)?;
+        let sort_group = append_producer(
+            memo,
+            Rc::new(sort),
+            &queries,
+            OriginOfCandidateForMemoGroup::TopKReuse,
+            1,
+        )?;
         let sort = Rc::clone(&memo.groups[sort_group.0 as usize].node);
         let ranking = covering
             .ranking
@@ -146,7 +151,7 @@ impl SharedProducer for TopKRankings {
             memo,
             Rc::new(ranking),
             &queries,
-            CandidateOrigin::TopKReuse,
+            OriginOfCandidateForMemoGroup::TopKReuse,
             1,
         )?;
         let ranking = Rc::clone(&memo.groups[ranking_group.0 as usize].node);
@@ -188,7 +193,7 @@ impl SharedProducer for TopKRankings {
             owner,
             &original,
             reader,
-            CandidateOrigin::TopKReuse,
+            OriginOfCandidateForMemoGroup::TopKReuse,
         )?))
     }
 }
@@ -273,7 +278,13 @@ fn exact_input_group(
         AccuracyGuarantee::exact("only exact implementations and exact inputs"),
     )));
     let queries = memo.groups[group.0 as usize].queries.clone();
-    let id = append_producer(memo, node, &queries, CandidateOrigin::TopKReuse, 1)?;
+    let id = append_producer(
+        memo,
+        node,
+        &queries,
+        OriginOfCandidateForMemoGroup::TopKReuse,
+        1,
+    )?;
     for candidate in &mut candidates {
         candidate.implements = vec![id];
     }

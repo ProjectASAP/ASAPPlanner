@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 
-use super::candidates::{CandidateMemo, CandidateOrigin, ImplementationCandidate};
+use super::candidates::{CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup};
 use super::{MemoGroup, MemoGroupId};
 
 #[derive(Debug)]
@@ -170,11 +170,11 @@ fn expand_with_state_index(
             queries,
             roots_of: Vec::new(),
         });
-        memo.candidates.push(vec![ImplementationCandidate {
+        memo.candidates.push(vec![CandidateForMemoGroup {
             implements: vec![state_group],
             node: Rc::clone(&build.build),
             children: build.children,
-            origin: CandidateOrigin::SharedBuild,
+            origin: OriginOfCandidateForMemoGroup::SharedBuild,
             budget_share: 1,
         }]);
         for (group, index, own_build) in build.readers {
@@ -204,7 +204,7 @@ fn expand_with_state_index(
             .collect();
         reader.node = super::rules::reuse::replace(&reader.node, &replacements);
         reader.children = boundary_groups(&reader.node, &boundaries);
-        reader.origin = CandidateOrigin::SharedBuild;
+        reader.origin = OriginOfCandidateForMemoGroup::SharedBuild;
         memo.candidates[group].push(reader);
         added_reader_candidates += 1;
     }
@@ -301,7 +301,7 @@ fn validate_references(memo: &CandidateMemo) -> Result<(), StateGroupExpansionEr
 
 pub(super) fn simple_build(
     memo: &CandidateMemo,
-    candidate: &ImplementationCandidate,
+    candidate: &CandidateForMemoGroup,
 ) -> Option<(Rc<OperatorNode>, Vec<MemoGroupId>)> {
     let mut builds = direct_input_builds(memo, candidate);
     (builds.len() == 1).then(|| builds.remove(0))
@@ -309,15 +309,15 @@ pub(super) fn simple_build(
 
 pub(super) fn direct_input_builds(
     memo: &CandidateMemo,
-    candidate: &ImplementationCandidate,
+    candidate: &CandidateForMemoGroup,
 ) -> Vec<(Rc<OperatorNode>, Vec<MemoGroupId>)> {
     if !matches!(
         candidate.origin,
-        CandidateOrigin::Pass1
-            | CandidateOrigin::Panes
-            | CandidateOrigin::WidenedScans
-            | CandidateOrigin::Rollup
-            | CandidateOrigin::SummaryResult
+        OriginOfCandidateForMemoGroup::Pass1
+            | OriginOfCandidateForMemoGroup::Panes
+            | OriginOfCandidateForMemoGroup::WidenedScans
+            | OriginOfCandidateForMemoGroup::Rollup
+            | OriginOfCandidateForMemoGroup::SummaryResult
     ) || candidate.implements.is_empty()
         || candidate.budget_share == 0
     {
@@ -482,7 +482,7 @@ mod tests {
     use super::*;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use crate::pass2::memo::candidates::try_populate_pass1;
-    use crate::pass2::memo::LogicalMemo;
+    use crate::pass2::memo::DagOfLogicalMemoGroups;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::QueryRoot;
 
@@ -504,7 +504,7 @@ mod tests {
         assert_eq!(indexed.state_groups, linear.state_groups);
         assert_eq!(indexed.memo.groups.len(), linear.memo.groups.len());
         for (left, right) in indexed.memo.candidates.iter().zip(&linear.memo.candidates) {
-            let signatures = |candidates: &[ImplementationCandidate]| {
+            let signatures = |candidates: &[CandidateForMemoGroup]| {
                 candidates
                     .iter()
                     .map(|candidate| {
@@ -568,7 +568,7 @@ mod tests {
                 (id, QueryRoot::Operator(root))
             })
             .collect();
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = generate_per_computation_candidates(roots).unwrap();
         try_populate_pass1(initial, &inventory).unwrap()
     }
@@ -699,7 +699,7 @@ mod tests {
                 let mut pane = candidate;
                 pane.node = Rc::clone(&node);
                 pane.children = boundary_groups(&node, &boundaries);
-                pane.origin = CandidateOrigin::Panes;
+                pane.origin = OriginOfCandidateForMemoGroup::Panes;
                 memo.candidates[group].push(pane);
             }
         }
@@ -897,7 +897,7 @@ mod tests {
             .candidates
             .iter()
             .flatten()
-            .filter(|candidate| candidate.origin == CandidateOrigin::Panes)
+            .filter(|candidate| candidate.origin == OriginOfCandidateForMemoGroup::Panes)
             .count();
         assert!(local_panes >= 2);
         let expanded = expand_concrete_summary_state_groups(original.clone()).unwrap();
@@ -1009,8 +1009,10 @@ mod tests {
             .enumerate()
             .filter(|(group, _)| *group != fine)
             .flat_map(|(_, candidates)| candidates)
-            .any(|candidate| candidate.origin == CandidateOrigin::Rollup
-                && candidate.children.contains(&MemoGroupId(fine as u32))));
+            .any(
+                |candidate| candidate.origin == OriginOfCandidateForMemoGroup::Rollup
+                    && candidate.children.contains(&MemoGroupId(fine as u32))
+            ));
         assert!(memo.topological_order().is_some());
     }
 
@@ -1028,16 +1030,18 @@ mod tests {
             .candidates
             .iter()
             .flatten()
-            .any(|candidate| candidate.origin == CandidateOrigin::SharedBuild
-                && OperatorNode::reachable(&candidate.node)
-                    .iter()
-                    .any(|node| matches!(
-                        node.asap(),
-                        Some(ASAPOp::SummaryMerge {
-                            group_by: Some(_),
-                            ..
-                        })
-                    ))));
+            .any(
+                |candidate| candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild
+                    && OperatorNode::reachable(&candidate.node)
+                        .iter()
+                        .any(|node| matches!(
+                            node.asap(),
+                            Some(ASAPOp::SummaryMerge {
+                                group_by: Some(_),
+                                ..
+                            })
+                        ))
+            ));
         assert!(expanded.memo.topological_order().is_some());
     }
 
@@ -1059,7 +1063,7 @@ mod tests {
             .candidates
             .iter()
             .flatten()
-            .any(|candidate| candidate.origin == CandidateOrigin::TopKReuse));
+            .any(|candidate| candidate.origin == OriginOfCandidateForMemoGroup::TopKReuse));
         assert!(expanded.memo.topological_order().is_some());
     }
 
@@ -1097,7 +1101,7 @@ mod tests {
             .filter(|(_, group)| matches!(group.node.non_asap(), Some(NonASAPOp::Scan { .. })))
             .filter(|(group, _)| {
                 expanded.memo.candidates[*group].iter().any(|candidate| {
-                    candidate.origin == CandidateOrigin::WidenedScans
+                    candidate.origin == OriginOfCandidateForMemoGroup::WidenedScans
                         && candidate.children.contains(&union)
                 })
             })
@@ -1128,7 +1132,7 @@ mod tests {
         let reader = expanded.memo.candidates[average]
             .iter()
             .find(|candidate| {
-                candidate.origin == CandidateOrigin::SharedBuild
+                candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild
                     && candidate
                         .children
                         .iter()
@@ -1205,7 +1209,7 @@ mod tests {
                 )),
             ),
         ];
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let generated = generate_per_computation_candidates(roots).unwrap();
         let memo = with_local_panes(
             try_populate_pass1(initial, &generated).unwrap(),
@@ -1217,23 +1221,25 @@ mod tests {
             .candidates
             .iter()
             .flatten()
-            .any(|candidate| candidate.origin == CandidateOrigin::SharedBuild
-                && OperatorNode::reachable(&candidate.node)
-                    .iter()
-                    .any(|node| matches!(
-                        node.asap(),
-                        Some(ASAPOp::SummaryMerge {
-                            group_by: Some(_),
+            .any(
+                |candidate| candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild
+                    && OperatorNode::reachable(&candidate.node)
+                        .iter()
+                        .any(|node| matches!(
+                            node.asap(),
+                            Some(ASAPOp::SummaryMerge {
+                                group_by: Some(_),
+                                ..
+                            })
+                        ))
+                    && candidate.children.iter().any(|group| matches!(
+                        expanded.memo.groups[group.0 as usize].node.asap(),
+                        Some(ASAPOp::PaneChain {
+                            pane_count: 120,
                             ..
                         })
                     ))
-                && candidate.children.iter().any(|group| matches!(
-                    expanded.memo.groups[group.0 as usize].node.asap(),
-                    Some(ASAPOp::PaneChain {
-                        pane_count: 120,
-                        ..
-                    })
-                ))));
+            ));
     }
 
     // Private identity projections retain their full typed contract, but no
@@ -1309,7 +1315,9 @@ mod tests {
                 && group.children.iter().any(|input| {
                     expanded.memo.candidates[input.0 as usize]
                         .iter()
-                        .any(|candidate| candidate.origin == CandidateOrigin::SummaryInput)
+                        .any(|candidate| {
+                            candidate.origin == OriginOfCandidateForMemoGroup::SummaryInput
+                        })
                 })
         }));
         assert!(expanded.memo.topological_order().is_some());
@@ -1430,7 +1438,7 @@ mod tests {
             owner,
             &base,
             strict,
-            CandidateOrigin::Rollup
+            OriginOfCandidateForMemoGroup::Rollup
         )
         .unwrap());
         assert_eq!(memo.candidates[owner].len(), 2);
@@ -1489,8 +1497,10 @@ mod tests {
             .contains(&MemoGroupId(owner as u32)));
         assert!(expanded.memo.candidates[owner]
             .iter()
-            .any(|candidate| candidate.origin == CandidateOrigin::SharedBuild
-                && candidate.children.contains(&state)));
+            .any(
+                |candidate| candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild
+                    && candidate.children.contains(&state)
+            ));
     }
 
     // Public expansion rejects malformed IDs before indexing dependency arrays.

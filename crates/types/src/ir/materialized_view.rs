@@ -848,18 +848,18 @@ fn with_replaced(
         node: &Rc<OperatorNode>,
         old: &Rc<OperatorNode>,
         new: &Rc<OperatorNode>,
-        memo: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+        cache: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
     ) -> Rc<OperatorNode> {
         if Rc::ptr_eq(node, old) {
             return Rc::clone(new);
         }
-        if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+        if let Some(done) = cache.get(&Rc::as_ptr(node)) {
             return Rc::clone(done);
         }
         let children = node.children();
         let replaced: Vec<Rc<OperatorNode>> = children
             .iter()
-            .map(|child| replace(child, old, new, memo))
+            .map(|child| replace(child, old, new, cache))
             .collect();
         let result = if children
             .iter()
@@ -875,7 +875,7 @@ fn with_replaced(
                 .map_children(|_| next.next().expect("one per child"));
             Rc::new(copy)
         };
-        memo.insert(Rc::as_ptr(node), Rc::clone(&result));
+        cache.insert(Rc::as_ptr(node), Rc::clone(&result));
         result
     }
     replace(node, old, new, &mut HashMap::new())

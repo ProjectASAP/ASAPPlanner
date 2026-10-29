@@ -163,7 +163,8 @@ async fn lower_sql(workload: &PlanningWorkload) -> Vec<QueryRoot> {
 // Production optimization is tested separately; this is not a Cartesian search.
 fn rule_fixture(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        compose_logical_candidate, generate_per_computation_candidates,
+        HowToComputeAggregateMeasure,
     };
     use asap_logical_asap_optimization::pass2::asap_aware_cse::{
         capability_sharing_candidates, pane_candidates, summary_capability_pass2_candidates,
@@ -184,7 +185,10 @@ fn rule_fixture(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
         if let Some(option) = (0..options.choice_count()).find(|&choice| {
             matches!(
                 options.computation_for(choice),
-                Some((ComputationCandidate::Summary(SketchAlgorithm::UnivMon), _))
+                Some((
+                    HowToComputeAggregateMeasure::Summary(SketchAlgorithm::UnivMon),
+                    _
+                ))
             )
         }) {
             univmon[target] = option;
@@ -288,7 +292,7 @@ fn pipeline_with_distinct_bound(bound: Option<u64>) -> Run {
 fn memo_pipeline() -> Run {
     use asap_integration_tests::planning::{compose_memo_plan, expanded_memo, own_choices};
     use asap_logical_asap_optimization::pass2::memo::candidates::{
-        CandidateOrigin, ImplementationCandidate,
+        CandidateForMemoGroup, OriginOfCandidateForMemoGroup,
     };
     use asap_types::ir::schema::FieldDataType;
     use asap_types::ir::{ASAPOp, OperatorNode};
@@ -303,13 +307,13 @@ fn memo_pipeline() -> Run {
         }) if *kind.algorithm() == SketchAlgorithm::UnivMon)
     };
     // Query `q`'s topmost own group's first candidate `keep` accepts.
-    let own = |q: usize, keep: &dyn Fn(&ImplementationCandidate) -> bool| {
+    let own = |q: usize, keep: &dyn Fn(&CandidateForMemoGroup) -> bool| {
         own_choices(&memo, q, keep).into_iter().next()
     };
     let mut choices = vec![BTreeMap::new()];
     for q in 0..queries {
         if let Some(choice) = own(q, &|c| {
-            c.origin == CandidateOrigin::Pass1
+            c.origin == OriginOfCandidateForMemoGroup::Pass1
                 && OperatorNode::reachable(&c.node).iter().any(is_univmon)
         }) {
             choices.push(BTreeMap::from([choice]));

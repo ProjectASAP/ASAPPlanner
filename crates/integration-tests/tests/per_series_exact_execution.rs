@@ -18,7 +18,8 @@ use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPOpe
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{Schema, PROMQL_SERIES_IDENTITY};
 use asap_types::ir::{
-    apply_materialization_timings, MaterializationAssignment, NonASAPOp, OperatorNode, TimingMemo,
+    apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache, NonASAPOp,
+    OperatorNode,
 };
 use futures::{executor::block_on, StreamExt};
 
@@ -98,7 +99,7 @@ fn execute(query: &str, samples: &[RawDataSample]) -> Vec<(String, f64)> {
     let timed = apply_materialization_timings(
         &per_entity_plan(query),
         &MaterializationAssignment::default(),
-        &mut TimingMemo::new(),
+        &mut NodeToTimedNodeCache::new(),
     )
     .unwrap();
     let dag = compile_physical_asap_dag(&timed).unwrap();

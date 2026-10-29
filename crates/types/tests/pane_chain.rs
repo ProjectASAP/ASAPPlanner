@@ -177,7 +177,9 @@ fn expansion_merges_the_panes() {
 #[test]
 fn expansion_carries_the_chains_timing_onto_its_panes() {
     use asap_types::ir::properties::ExecutionTiming;
-    use asap_types::ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo};
+    use asap_types::ir::{
+        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
+    };
     use asap_types::physical::{Materialization, Medium};
     let at_ingestion = Materialization::MatAtIngestion(Medium::Memory);
     for (materialization, timing) in [
@@ -193,7 +195,8 @@ fn expansion_carries_the_chains_timing_onto_its_panes() {
         let mut assignment = MaterializationAssignment::default();
         assignment.set(&chain, materialization);
         let timed =
-            apply_materialization_timings(&estimate, &assignment, &mut TimingMemo::new()).unwrap();
+            apply_materialization_timings(&estimate, &assignment, &mut NodeToTimedNodeCache::new())
+                .unwrap();
         let expanded = expand_pane_chains(&timed).unwrap();
         let merged = expanded.children()[0];
         assert_eq!(merged.timing, Some(ExecutionTiming::QueryTime));

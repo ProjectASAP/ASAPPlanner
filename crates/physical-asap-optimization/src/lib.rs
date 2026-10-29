@@ -111,8 +111,8 @@ use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
 use asap_types::ir::schema::{ExactKind, FieldDataType};
 use asap_types::ir::{
     apply_materialization_timings, is_filtered_build, split_shared_by_timing, ASAPOp,
-    MaterializationAssignment, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr,
-    SchemaDerivationError, SortKey, TimingMemo,
+    MaterializationAssignment, NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode, QueryRoot,
+    ScalarExpr, SchemaDerivationError, SortKey,
 };
 use asap_types::physical::Materialization;
 use asap_types::physical::Medium;
@@ -431,7 +431,7 @@ pub(crate) fn builds_one_pane_per_evaluation<'a>(
 /// first. `entries[i]` is the workload entry of query `i` (`roots[i]`):
 /// its recurrence and predictability decide whether state may be kept from
 /// ingestion time; a missing entry is unknown. `id` is left empty for the
-/// caller to name. Sharing between `roots` is preserved: one memo serves the
+/// caller to name. Sharing between `roots` is preserved: one cache serves the
 /// whole workload. `deployment` says whether a query-time result may be
 /// kept across evaluations.
 pub fn optimize_physical_asap(
@@ -441,8 +441,8 @@ pub fn optimize_physical_asap(
     data: &DataWorkload,
     deployment: &DeploymentCapabilities,
 ) -> Result<Vec<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
-    let mut memo = HashMap::new();
-    let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
+    let mut cache = HashMap::new();
+    let implemented = map_roots(roots, &mut |node| implement(node, &mut cache))?;
     let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
     check_panes_on_range_steps(&mat_candidates, entries)?;
     materialization_assignments(&mat_candidates)
@@ -467,8 +467,8 @@ pub fn optimize_physical_asap_without_query_time_raw_scans(
     data: &DataWorkload,
     deployment: &DeploymentCapabilities,
 ) -> Result<(Vec<(usize, PhysicalWorkloadPlan)>, usize), PhysicalASAPOptimizationError> {
-    let mut memo = HashMap::new();
-    let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
+    let mut cache = HashMap::new();
+    let implemented = map_roots(roots, &mut |node| implement(node, &mut cache))?;
     let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
     check_panes_on_range_steps(&mat_candidates, entries)?;
     let mut skipped = 0;
@@ -497,8 +497,8 @@ pub fn every_assignment_scans_raw_at_query_time(
     data: &DataWorkload,
     deployment: &DeploymentCapabilities,
 ) -> bool {
-    let mut memo = HashMap::new();
-    let Ok(implemented) = map_roots(roots, &mut |node| implement(node, &mut memo)) else {
+    let mut cache = HashMap::new();
+    let Ok(implemented) = map_roots(roots, &mut |node| implement(node, &mut cache)) else {
         return false;
     };
     let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
@@ -557,8 +557,8 @@ pub fn optimize_physical_asap_assigned(
     deployment: &DeploymentCapabilities,
     choose: &mut dyn FnMut(&[usize]) -> Option<Materialization>,
 ) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
-    let mut memo = HashMap::new();
-    let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
+    let mut cache = HashMap::new();
+    let implemented = map_roots(roots, &mut |node| implement(node, &mut cache))?;
     let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
     check_panes_on_range_steps(&mat_candidates, entries)?;
     let mut assignment = Vec::with_capacity(mat_candidates.len());
@@ -598,9 +598,9 @@ pub fn optimize_physical_asap_chosen(
     deployment: &DeploymentCapabilities,
     choose: &mut ChooseMaterialization<'_>,
 ) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
-    let mut memo = HashMap::new();
-    let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
-    let logical_of: HashMap<*const OperatorNode, *const OperatorNode> = memo
+    let mut cache = HashMap::new();
+    let implemented = map_roots(roots, &mut |node| implement(node, &mut cache))?;
+    let logical_of: HashMap<*const OperatorNode, *const OperatorNode> = cache
         .iter()
         .map(|(logical, implemented)| (Rc::as_ptr(implemented), *logical))
         .collect();
@@ -657,7 +657,7 @@ fn assigned_candidate(
     let split_roots = map_roots(implemented, &mut |node| {
         Ok(replaced[&Rc::as_ptr(node)].clone())
     })?;
-    let mut timing = TimingMemo::new();
+    let mut timing = NodeToTimedNodeCache::new();
     let timed = map_roots(&split_roots, &mut |node| {
         Ok(apply_materialization_timings(node, &options, &mut timing)?)
     })?;
@@ -692,8 +692,8 @@ pub fn physical_candidate_count(
     data: &DataWorkload,
     deployment: &DeploymentCapabilities,
 ) -> Result<usize, PhysicalASAPOptimizationError> {
-    let mut memo = HashMap::new();
-    let implemented = map_roots(roots, &mut |node| implement(node, &mut memo))?;
+    let mut cache = HashMap::new();
+    let implemented = map_roots(roots, &mut |node| implement(node, &mut cache))?;
     let mat_candidates = materialization_candidates(&implemented, entries, data, deployment);
     check_panes_on_range_steps(&mat_candidates, entries)?;
     Ok(materialization_assignments(&mat_candidates).count())
@@ -815,7 +815,7 @@ pub(crate) fn materialization_candidates(
             for &v in below[c].iter().chain([&c]) {
                 trial.set(&nodes[v], Materialization::MatAtIngestion(Medium::Memory));
             }
-            apply_materialization_timings(node, &trial, &mut TimingMemo::new())
+            apply_materialization_timings(node, &trial, &mut NodeToTimedNodeCache::new())
                 .map(|_| ())
                 .map_err(|e| IngestionPruneReason::UpstreamAtQueryTime(e.to_string()))
         });
@@ -1129,27 +1129,27 @@ pub fn implement_candidate_operators(
 }
 
 /// Each node's implementation.
-type Memo = HashMap<*const OperatorNode, Rc<OperatorNode>>;
+type NodeToImplementedNodeCache = HashMap<*const OperatorNode, Rc<OperatorNode>>;
 
 fn implement(
     node: &Rc<OperatorNode>,
-    memo: &mut Memo,
+    cache: &mut NodeToImplementedNodeCache,
 ) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
-    if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+    if let Some(done) = cache.get(&Rc::as_ptr(node)) {
         return Ok(done.clone());
     }
     for child in node.children() {
-        implement(child, memo)?;
+        implement(child, cache)?;
     }
     let implemented = match node.non_asap() {
         Some(NonASAPOp::Aggregate { measures, .. })
             if measures.iter().any(|m| matches!(m, AggIntent::TopK { .. })) =>
         {
-            implement_topk(node, memo)?
+            implement_topk(node, cache)?
         }
-        _ => rebuilt(node, memo)?,
+        _ => rebuilt(node, cache)?,
     };
-    memo.insert(Rc::as_ptr(node), implemented.clone());
+    cache.insert(Rc::as_ptr(node), implemented.clone());
     Ok(implemented)
 }
 
@@ -1159,7 +1159,7 @@ fn implement(
 /// and a node reading the top-k resolved its columns against them.
 fn implement_topk(
     node: &Rc<OperatorNode>,
-    memo: &Memo,
+    cache: &NodeToImplementedNodeCache,
 ) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
     let unsupported = |why: &str| PhysicalASAPOptimizationError::ExactTopK(why.to_string());
     let Some(NonASAPOp::Aggregate {
@@ -1185,7 +1185,7 @@ fn implement_topk(
     if having.is_some() {
         return Err(unsupported("HAVING"));
     }
-    let child = memo[&Rc::as_ptr(child)].clone();
+    let child = cache[&Rc::as_ptr(child)].clone();
     let value = asap_logical_asap_optimization::pass1::realization::ranked_column(&child)
         .map_err(|e| unsupported(&format!("no ranked column: {e}")))?;
     let sorted = Rc::new(
@@ -1229,9 +1229,9 @@ fn implement_topk(
 /// `node` over its implemented children; the same `Rc` when none changed.
 fn rebuilt(
     node: &Rc<OperatorNode>,
-    memo: &Memo,
+    cache: &NodeToImplementedNodeCache,
 ) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
-    let input = |child: &Rc<OperatorNode>| memo[&Rc::as_ptr(child)].clone();
+    let input = |child: &Rc<OperatorNode>| cache[&Rc::as_ptr(child)].clone();
     let changed = node
         .children()
         .iter()
@@ -1852,10 +1852,10 @@ mod tests {
             ..every_minute()
         };
         let at_ingestion = |demands: [QueryWorkloadEntry; 2]| {
-            let mut memo = HashMap::new();
+            let mut cache = HashMap::new();
             // One chain read by both queries.
             let implemented = map_roots(&[root.clone(), root.clone()], &mut |n| {
-                implement(n, &mut memo)
+                implement(n, &mut cache)
             })
             .unwrap();
             materialization_candidates(
@@ -1916,8 +1916,8 @@ mod tests {
             )
             .unwrap();
             assert_eq!(candidates.len(), 1, "{why:?}");
-            let mut memo = HashMap::new();
-            let implemented = map_roots(&roots, &mut |n| implement(n, &mut memo)).unwrap();
+            let mut cache = HashMap::new();
+            let implemented = map_roots(&roots, &mut |n| implement(n, &mut cache)).unwrap();
             let mat_candidates = materialization_candidates(
                 &implemented,
                 &[demand],
@@ -1937,8 +1937,8 @@ mod tests {
     fn counter_panes_over_ingesting_promql_data_run_at_ingestion_time() {
         for query in ["rate(m[5m])", "increase(m[5m])"] {
             let roots = [in_panes(summary_root(query))];
-            let mut memo = HashMap::new();
-            let implemented = map_roots(&roots, &mut |n| implement(n, &mut memo)).unwrap();
+            let mut cache = HashMap::new();
+            let implemented = map_roots(&roots, &mut |n| implement(n, &mut cache)).unwrap();
             let mat_candidates = materialization_candidates(
                 &implemented,
                 &[every_minute()],
@@ -1977,8 +1977,8 @@ mod tests {
         };
         for (root, data) in [(table, arriving()), (root.clone(), mixed)] {
             let roots = [root];
-            let mut memo = HashMap::new();
-            let implemented = map_roots(&roots, &mut |n| implement(n, &mut memo)).unwrap();
+            let mut cache = HashMap::new();
+            let implemented = map_roots(&roots, &mut |n| implement(n, &mut cache)).unwrap();
             let mat_candidates = materialization_candidates(
                 &implemented,
                 &[every_minute()],
@@ -2028,9 +2028,11 @@ mod tests {
         };
         let at = |interval_ms: u32| at_phase(interval_ms, 0);
         let mat_candidates = |root: &QueryRoot, demand: QueryWorkloadEntry| {
-            let mut memo = HashMap::new();
-            let implemented =
-                map_roots(std::slice::from_ref(root), &mut |n| implement(n, &mut memo)).unwrap();
+            let mut cache = HashMap::new();
+            let implemented = map_roots(std::slice::from_ref(root), &mut |n| {
+                implement(n, &mut cache)
+            })
+            .unwrap();
             materialization_candidates(
                 &implemented,
                 &[demand],
@@ -2063,8 +2065,8 @@ mod tests {
         // undeclared one agree; two declared phases, or two intervals, do not.
         let mat_candidates_of = |demands: &[QueryWorkloadEntry]| {
             let roots = vec![root.clone(); demands.len()];
-            let mut memo = HashMap::new();
-            let implemented = map_roots(&roots, &mut |n| implement(n, &mut memo)).unwrap();
+            let mut cache = HashMap::new();
+            let implemented = map_roots(&roots, &mut |n| implement(n, &mut cache)).unwrap();
             materialization_candidates(
                 &implemented,
                 demands,
@@ -2162,9 +2164,9 @@ mod tests {
             ..every_minute()
         };
         let at_ingestion = |entry: QueryWorkloadEntry| {
-            let mut memo = HashMap::new();
+            let mut cache = HashMap::new();
             let implemented = map_roots(std::slice::from_ref(&root), &mut |n| {
-                implement(n, &mut memo)
+                implement(n, &mut cache)
             })
             .unwrap();
             materialization_candidates(

@@ -7,7 +7,7 @@ use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{
     apply_materialization_timings, physical_export::compile_physical_asap_dag,
-    MaterializationAssignment, NonASAPOp, OperatorNode, ScalarExpr, TimingMemo,
+    MaterializationAssignment, NodeToTimedNodeCache, NonASAPOp, OperatorNode, ScalarExpr,
 };
 
 fn catalog() -> SqlCatalog {
@@ -182,7 +182,7 @@ async fn corr_survives_exact_plan_compilation() {
     let timed = apply_materialization_timings(
         plan,
         &MaterializationAssignment::default(),
-        &mut TimingMemo::new(),
+        &mut NodeToTimedNodeCache::new(),
     )
     .unwrap();
     compile_physical_asap_dag(&timed).unwrap();

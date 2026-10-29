@@ -58,7 +58,7 @@ use std::time::Duration;
 use asap_types::ir::operator::agg_intent::AggIntent;
 use asap_types::ir::operator::operator_properties::{GroupKeys, Reduction, Source};
 use asap_types::ir::properties::timing::{
-    apply_materialization_timings, MaterializationAssignment, TimingMemo,
+    apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
 };
 use asap_types::ir::schema::{ColumnId, DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, Predicate, ScalarExpr, TimeRangeKind};
@@ -175,7 +175,7 @@ pub fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
     apply_materialization_timings(
         root,
         &MaterializationAssignment::default(),
-        &mut TimingMemo::new(),
+        &mut NodeToTimedNodeCache::new(),
     )
     .expect("default materialization timings apply")
 }
@@ -185,7 +185,7 @@ pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
     apply_materialization_timings(
         root,
         &MaterializationAssignment::with_default(Materialization::MatAtIngestion(Medium::Memory)),
-        &mut TimingMemo::new(),
+        &mut NodeToTimedNodeCache::new(),
     )
     .expect("at-ingestion materialization timings apply")
 }

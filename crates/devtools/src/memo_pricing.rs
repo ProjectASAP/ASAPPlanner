@@ -1,5 +1,5 @@
 //! Price a memo's enumerated choices as the selected plan is priced: each
-//! choice's composed DAG (`memo::enumeration::compose`) goes through Stage 2
+//! choice's composed DAG (`memo::enumeration::build_logical_asap_dags_from_chosen_candidates`) goes through Stage 2
 //! (`optimize_physical_asap`, every materialization assignment) and Stage 3
 //! (`select_plan`, under the run's models), and the plan Stage 3 selects for
 //! it is installed as `plan_installable` installs one (`installable_plan_of`,
@@ -10,7 +10,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo;
-use asap_logical_asap_optimization::pass2::memo::enumeration::{compose, MemoChoice};
+use asap_logical_asap_optimization::pass2::memo::enumeration::{
+    build_logical_asap_dags_from_chosen_candidates, ChosenCandidatePerMemoGroup,
+};
 use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_physical_asap_optimization::optimize_physical_asap;
 use asap_plan_selection::{select_plan, PlanningModels, Selection, SelectionError};
@@ -77,7 +79,7 @@ const TIE_TOLERANCE: f64 = 1e-9;
 /// references are replaced by their root groups' composed DAGs.
 pub fn price_choices(
     memo: &CandidateMemo,
-    choices: &[MemoChoice],
+    choices: &[ChosenCandidatePerMemoGroup],
     stage0_roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
@@ -97,7 +99,7 @@ pub fn price_choices(
         .iter()
         .enumerate()
         .map(|(index, choice)| {
-            let roots = compose(memo, choice)
+            let roots = build_logical_asap_dags_from_chosen_candidates(memo, choice)
                 .map_err(|error| error.to_string())
                 .and_then(|composed| query_roots(&composed, stage0_roots, &root_groups));
             let mut priced = price_choice(roots, index, entries, data, models);

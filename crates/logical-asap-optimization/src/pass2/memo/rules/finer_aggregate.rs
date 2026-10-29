@@ -3,7 +3,7 @@
 //! rows, then merge them into the query's groups with each measure's rollup.
 use super::reuse::append_reader;
 use crate::pass2::finer_aggregate::match_finer;
-use crate::pass2::memo::candidates::{CandidateMemo, CandidateOrigin};
+use crate::pass2::memo::candidates::{CandidateMemo, OriginOfCandidateForMemoGroup};
 use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::state_groups::StateGroupExpansionError;
 use asap_types::ir::operator::{AggIntent, Reduction};
@@ -158,7 +158,7 @@ fn add_read(
     .map_err(reuse_error)?;
     let Some(original) = memo.candidates[owner]
         .iter()
-        .find(|c| c.origin == CandidateOrigin::Pass1)
+        .find(|c| c.origin == OriginOfCandidateForMemoGroup::Pass1)
         .cloned()
     else {
         return Ok(0);
@@ -179,6 +179,6 @@ fn add_read(
         owner,
         &original,
         reader,
-        CandidateOrigin::Rollup,
+        OriginOfCandidateForMemoGroup::Rollup,
     )?))
 }

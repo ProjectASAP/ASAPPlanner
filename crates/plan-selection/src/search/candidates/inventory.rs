@@ -14,7 +14,9 @@ use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_types::ir::OperatorNode;
 use asap_types::physical::Materialization;
 
-use crate::search::candidates::factoring::{CompatibilityKey, CompatibilityMemo};
+use crate::search::candidates::factoring::{
+    MemoGroupOutputKey, MemoGroupOutputToCompatibleProducersCache,
+};
 use crate::search::candidates::graph::{
     CandidateDependencyGraph, PhysicalCandidate, PhysicalCandidateId, ProducerRequirement,
     QueryRootCandidates,
@@ -75,12 +77,12 @@ pub(in crate::search) fn build_candidate_inventory_before(
     node_local_cost: impl FnMut(&OperatorNode) -> Result<f64, String>,
     deadline: Option<std::time::Instant>,
 ) -> Result<(CandidateInventory, Vec<Vec<PhysicalCandidateId>>), CandidateInventoryError> {
-    let mut inventory = build_with_compatibility_memo(
+    let mut inventory = build_with_compatible_producers_cache(
         memo,
         output_groups,
         node_local_cost,
         deadline,
-        &mut CompatibilityMemo::default(),
+        &mut MemoGroupOutputToCompatibleProducersCache::default(),
     )?;
     let mut memo_candidate_roots = inventory.group_candidates.clone();
     crate::search::candidates::factoring::factor_terminal_readers(
@@ -91,12 +93,12 @@ pub(in crate::search) fn build_candidate_inventory_before(
     Ok((inventory, memo_candidate_roots))
 }
 
-fn build_with_compatibility_memo(
+fn build_with_compatible_producers_cache(
     memo: &CandidateMemo,
     output_groups: &[MemoGroupId],
     mut node_local_cost: impl FnMut(&OperatorNode) -> Result<f64, String>,
     deadline: Option<std::time::Instant>,
-    compatibility: &mut CompatibilityMemo,
+    compatible_producers_cache: &mut MemoGroupOutputToCompatibleProducersCache,
 ) -> Result<CandidateInventory, CandidateInventoryError> {
     super::check_deadline(deadline)?;
     let invalid = |message: &str| CandidateInventoryError::InvalidMemo(message.into());
@@ -207,7 +209,7 @@ fn build_with_compatibility_memo(
             }
             let mut builder = ImmediateCandidateBuilder {
                 inventory: &mut inventory,
-                compatibility: &mut *compatibility,
+                compatible_producers_cache: &mut *compatible_producers_cache,
                 boundaries,
                 private_nodes: HashMap::new(),
                 used_boundaries: HashSet::new(),
@@ -258,7 +260,7 @@ fn build_with_compatibility_memo(
 
 struct ImmediateCandidateBuilder<'a, F> {
     inventory: &'a mut CandidateInventory,
-    compatibility: &'a mut CompatibilityMemo,
+    compatible_producers_cache: &'a mut MemoGroupOutputToCompatibleProducersCache,
     boundaries: HashMap<*const OperatorNode, MemoGroupId>,
     private_nodes: HashMap<*const OperatorNode, PhysicalCandidateId>,
     used_boundaries: HashSet<MemoGroupId>,
@@ -294,9 +296,9 @@ impl<F: FnMut(&OperatorNode) -> Result<f64, String>> ImmediateCandidateBuilder<'
         for input in inputs {
             let producers = if let Some(&group) = self.boundaries.get(&Rc::as_ptr(&input)) {
                 self.used_boundaries.insert(group);
-                let key = CompatibilityKey::new(group, &input)
+                let key = MemoGroupOutputKey::new(group, &input)
                     .map_err(CandidateInventoryError::InvalidMemo)?;
-                if let Some(compatible) = self.compatibility.get(&key) {
+                if let Some(compatible) = self.compatible_producers_cache.get(&key) {
                     compatible
                 } else {
                     let mut compatible = Vec::new();
@@ -314,7 +316,7 @@ impl<F: FnMut(&OperatorNode) -> Result<f64, String>> ImmediateCandidateBuilder<'
                             compatible.push(candidate);
                         }
                     }
-                    self.compatibility.remember(key, compatible)
+                    self.compatible_producers_cache.remember(key, compatible)
                 }
             } else {
                 vec![self.add(&input, None)?].into()
@@ -364,7 +366,7 @@ mod tests {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
     use asap_logical_asap_optimization::pass2::memo::state_groups::expand_concrete_summary_state_groups;
-    use asap_logical_asap_optimization::pass2::memo::LogicalMemo;
+    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
@@ -384,7 +386,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let output_groups = (0..2)
             .map(|query| {
                 MemoGroupId(
@@ -410,19 +412,25 @@ mod tests {
     fn compatibility_memo_preserves_complete_candidate_graph_and_optimum() {
         let (memo, outputs) = quantile_memo();
         let cost = |node: &OperatorNode| Ok(if is_kll(node) { 8.0 } else { 1.0 });
-        let mut compatibility = CompatibilityMemo::default();
-        let cached =
-            build_with_compatibility_memo(&memo, &outputs, cost, None, &mut compatibility).unwrap();
-        assert!(
-            compatibility.hits() > 0,
-            "repeated typed supplier checks were actually reused"
-        );
-        let uncached = build_with_compatibility_memo(
+        let mut compatible_producers_cache = MemoGroupOutputToCompatibleProducersCache::default();
+        let cached = build_with_compatible_producers_cache(
             &memo,
             &outputs,
             cost,
             None,
-            &mut CompatibilityMemo::disabled(),
+            &mut compatible_producers_cache,
+        )
+        .unwrap();
+        assert!(
+            compatible_producers_cache.hits() > 0,
+            "repeated typed supplier checks were actually reused"
+        );
+        let uncached = build_with_compatible_producers_cache(
+            &memo,
+            &outputs,
+            cost,
+            None,
+            &mut MemoGroupOutputToCompatibleProducersCache::disabled(),
         )
         .unwrap();
         assert_eq!(
@@ -615,7 +623,7 @@ mod tests {
                 )
             })
             .collect();
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let outputs: Vec<_> = (0..roots.len())
             .map(|query| {
                 MemoGroupId(
@@ -821,7 +829,7 @@ mod tests {
                 .enumerate()
                 .map(|(id, query)| (id, QueryRoot::Operator(lower_promql(query, target.clone()))))
                 .collect();
-            let initial = LogicalMemo::from_roots(&roots);
+            let initial = DagOfLogicalMemoGroups::from_roots(&roots);
             let outputs: Vec<_> = (0..2)
                 .map(|query| {
                     MemoGroupId(
@@ -862,7 +870,7 @@ mod tests {
             .unwrap();
             if matches!(kind, "ranking" | "sketch") {
                 for (output, group) in inventory.graph.query_roots.iter_mut().zip(&outputs) {
-                    output.compatible_candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| memo.candidates[group.0 as usize][index].origin == if kind == "ranking" { asap_logical_asap_optimization::pass2::memo::candidates::CandidateOrigin::TopKReuse } else { asap_logical_asap_optimization::pass2::memo::candidates::CandidateOrigin::SharedBuild }));
+                    output.compatible_candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| memo.candidates[group.0 as usize][index].origin == if kind == "ranking" { asap_logical_asap_optimization::pass2::memo::candidates::OriginOfCandidateForMemoGroup::TopKReuse } else { asap_logical_asap_optimization::pass2::memo::candidates::OriginOfCandidateForMemoGroup::SharedBuild }));
                     assert!(
                         !output.compatible_candidates.is_empty(),
                         "{kind} reader generated"
@@ -946,7 +954,7 @@ mod tests {
     // one or both states can serve external queries without a configuration product.
     #[test]
     fn factored_summary_results_choose_independent_capacities_and_sharing() {
-        use asap_logical_asap_optimization::pass2::memo::candidates::CandidateOrigin;
+        use asap_logical_asap_optimization::pass2::memo::candidates::OriginOfCandidateForMemoGroup;
         use asap_logical_asap_optimization::test_support::entry_with;
         use asap_types::ir::schema::sketch::SketchParams;
         use asap_types::workload::{
@@ -977,7 +985,7 @@ mod tests {
                     )
                 })
                 .collect();
-            let initial = LogicalMemo::from_roots(&roots);
+            let initial = DagOfLogicalMemoGroups::from_roots(&roots);
             let outputs: Vec<_> = (0..roots.len())
                 .map(|query| {
                     MemoGroupId(
@@ -1042,8 +1050,8 @@ mod tests {
             {
                 output.compatible_candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| {
                     let candidate = &memo.candidates[group.0 as usize][index];
-                    if query == 0 { candidate.origin == CandidateOrigin::SummaryResult } else {
-                        candidate.origin == CandidateOrigin::SharedBuild && OperatorNode::reachable(&candidate.node).iter().any(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg {family: FieldDataType::Sketch(kind, _), ..}) if kind.algorithm() == &SketchAlgorithm::DDSketch))
+                    if query == 0 { candidate.origin == OriginOfCandidateForMemoGroup::SummaryResult } else {
+                        candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild && OperatorNode::reachable(&candidate.node).iter().any(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg {family: FieldDataType::Sketch(kind, _), ..}) if kind.algorithm() == &SketchAlgorithm::DDSketch))
                     }
                 }));
                 assert!(
@@ -1146,7 +1154,7 @@ mod tests {
         );
         assert!(root.schema.unique_keys.is_empty());
         let roots = vec![(0, QueryRoot::Operator(Rc::clone(&root)))];
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let output = initial.group_for_node(&root).unwrap();
         let original_input = Rc::clone(
             &initial.groups[initial.groups[output.0 as usize].children[0].0 as usize].node,
@@ -1215,7 +1223,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let outputs = (0..queries.len())
             .map(|query| {
                 MemoGroupId(
@@ -1234,12 +1242,12 @@ mod tests {
     #[test]
     fn terminal_reader_factoring_reconstructs_the_same_minimum_cost_computation() {
         let (memo, outputs) = nested_sum_memo(false);
-        let original = build_with_compatibility_memo(
+        let original = build_with_compatible_producers_cache(
             &memo,
             &outputs,
             |_| Ok(1.0),
             None,
-            &mut CompatibilityMemo::default(),
+            &mut MemoGroupOutputToCompatibleProducersCache::default(),
         )
         .unwrap();
         let compact = build_candidate_inventory(&memo, &outputs, |_| Ok(1.0)).unwrap();
@@ -1275,12 +1283,12 @@ mod tests {
             .position(|candidate| candidate.implements.len() > 1)
             .expect("nested sum has an absorbed computation");
         let absorbed = memo.candidates[owner][fused_index].implements[1];
-        let mut inventory = build_with_compatibility_memo(
+        let mut inventory = build_with_compatible_producers_cache(
             &memo,
             &outputs,
             |_| Ok(1.0),
             None,
-            &mut CompatibilityMemo::default(),
+            &mut MemoGroupOutputToCompatibleProducersCache::default(),
         )
         .unwrap();
         let fused = inventory.group_candidates[owner][fused_index];
@@ -1322,12 +1330,12 @@ mod tests {
                 candidate.node.contains_asap() && !candidate.children.contains(&inner)
             })
             .expect("fusion can privately recompute the shared inner work");
-        let mut inventory = build_with_compatibility_memo(
+        let mut inventory = build_with_compatible_producers_cache(
             &memo,
             &outputs,
             |_| Ok(1.0),
             None,
-            &mut CompatibilityMemo::default(),
+            &mut MemoGroupOutputToCompatibleProducersCache::default(),
         )
         .unwrap();
         let fused = inventory.group_candidates[owner][fused_index];
@@ -1423,7 +1431,7 @@ mod tests {
         let target = AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Relative);
         let query = "quantile_over_time(0.99, m[1m]) / quantile_over_time(0.5, m[1m])";
         let roots = vec![(0, QueryRoot::Operator(lower_promql(query, target.clone())))];
-        let logical = LogicalMemo::from_roots(&roots);
+        let logical = DagOfLogicalMemoGroups::from_roots(&roots);
         let output = MemoGroupId(
             logical
                 .groups

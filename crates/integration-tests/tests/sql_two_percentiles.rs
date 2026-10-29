@@ -294,7 +294,8 @@ async fn q1_with_one_exact_and_one_sketched_percentile_compiles_and_matches() {
 /// The id and query roots of every Stage 1 candidate of `queries`.
 async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        compose_logical_candidate, generate_per_computation_candidates,
+        HowToComputeAggregateMeasure,
     };
     use asap_logical_asap_optimization::pass2::asap_aware_cse::{
         pane_candidates, window_composition_pass2_candidates,
@@ -331,7 +332,7 @@ async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
     }
     for algorithm in [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch] {
         let together: Option<Vec<_>> = local.targets.iter().map(|target| target.choices.candidates.iter()
-            .position(|candidate| matches!(candidate, ComputationCandidate::Summary(family) if *family == algorithm))).collect();
+            .position(|candidate| matches!(candidate, HowToComputeAggregateMeasure::Summary(family) if *family == algorithm))).collect();
         if let Some(choice) = together {
             choices.insert(choice);
         }

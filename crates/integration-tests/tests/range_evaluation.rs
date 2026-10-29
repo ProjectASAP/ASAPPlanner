@@ -31,7 +31,8 @@ const LAST_HOUR_BY_MINUTE: RangeEvaluation = RangeEvaluation {
 /// of every legal materialization or a stable source of P1/P2 identifiers.
 fn run_explicit_for(workload: &PlanningWorkload, deployment: &DeploymentCapabilities) -> Run {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        compose_logical_candidate, generate_per_computation_candidates,
+        HowToComputeAggregateMeasure,
     };
     use asap_logical_asap_optimization::pass2::asap_aware_cse::{
         pane_candidates, window_composition_pass2_candidates,
@@ -56,7 +57,7 @@ fn run_explicit_for(workload: &PlanningWorkload, deployment: &DeploymentCapabili
         .position(|candidate| {
             matches!(
                 candidate,
-                ComputationCandidate::Summary(SketchAlgorithm::Kll)
+                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)
             )
         })
     {

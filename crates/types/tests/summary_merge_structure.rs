@@ -10,8 +10,8 @@ use asap_types::ir::schema::{
     StatisticKind, SummaryUpdate, WaveletKind, WaveletParams,
 };
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, ExprSemantics, MaterializationAssignment, NonASAPOp,
-    Operator, OperatorNode, Predicate, ScalarExpr, TimingMemo,
+    apply_materialization_timings, ASAPOp, ExprSemantics, MaterializationAssignment,
+    NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr,
 };
 use asap_types::physical::{Materialization, Medium};
 use std::rc::Rc;
@@ -704,7 +704,8 @@ fn summary_merge_timing() {
     let root = merge(panes.to_vec()).unwrap();
     let timings = |assignment: &MaterializationAssignment| {
         let timed =
-            apply_materialization_timings(&root, assignment, &mut TimingMemo::new()).unwrap();
+            apply_materialization_timings(&root, assignment, &mut NodeToTimedNodeCache::new())
+                .unwrap();
         let children = timed.children();
         (
             timed.timing.unwrap(),
@@ -732,7 +733,10 @@ fn summary_merge_timing() {
     // stored at ingestion time needs its panes there too.
     let mut only_merge = MaterializationAssignment::default();
     only_merge.set(&root, at_ingestion);
-    assert!(apply_materialization_timings(&root, &only_merge, &mut TimingMemo::new()).is_err());
+    assert!(
+        apply_materialization_timings(&root, &only_merge, &mut NodeToTimedNodeCache::new())
+            .is_err()
+    );
     let mut stored_merge = MaterializationAssignment::with_default(at_ingestion);
     stored_merge.set(&root, at_ingestion);
     assert_eq!(

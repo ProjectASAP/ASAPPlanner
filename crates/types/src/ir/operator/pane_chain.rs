@@ -228,7 +228,7 @@ fn without_deadline(error: PaneChainExpansionError) -> SchemaDerivationError {
 pub fn expand_pane_chains(
     root: &Rc<OperatorNode>,
 ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
-    expand(root, &mut ExpansionMemo::default()).map_err(without_deadline)
+    expand(root, &mut NodeToExpandedNodeCache::default()).map_err(without_deadline)
 }
 
 /// A workload with its pane chains expanded
@@ -258,7 +258,7 @@ pub struct ExpandedPaneChain {
     pub panes: Vec<Rc<OperatorNode>>,
 }
 
-/// [`expand_pane_chains`] over every root of one workload, with one memo, so
+/// [`expand_pane_chains`] over every root of one workload, with one cache, so
 /// a node several roots share stays one node and a chain several merges
 /// read expands into one set of panes. A standalone scalar root has the
 /// operators it reads expanded. Also returns each chain's panes, so a
@@ -275,19 +275,19 @@ pub fn expand_pane_chains_in_workload_before(
     roots: &[QueryRoot],
     deadline: Option<Instant>,
 ) -> Result<PaneChainExpansion, PaneChainExpansionError> {
-    let mut memo = ExpansionMemo {
+    let mut cache = NodeToExpandedNodeCache {
         deadline,
         ..Default::default()
     };
-    memo.check_deadline()?;
+    cache.check_deadline()?;
     let roots = roots
         .iter()
         .map(|root| match root {
-            QueryRoot::Operator(node) => expand(node, &mut memo).map(QueryRoot::Operator),
+            QueryRoot::Operator(node) => expand(node, &mut cache).map(QueryRoot::Operator),
             QueryRoot::Scalar(expr) => {
                 let mut error = None;
                 let expr = expr.map_operator_refs(&mut |node| {
-                    expand(node, &mut memo).unwrap_or_else(|e| {
+                    expand(node, &mut cache).unwrap_or_else(|e| {
                         error.get_or_insert(e);
                         Rc::clone(node)
                     })
@@ -299,7 +299,7 @@ pub fn expand_pane_chains_in_workload_before(
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let chains = memo
+    let chains = cache
         .chains
         .into_iter()
         .map(|chain| {
@@ -308,7 +308,7 @@ pub fn expand_pane_chains_in_workload_before(
                 _ => unreachable!("only chains are recorded"),
             };
             let panes = (0..pane_count)
-                .map_while(|index| memo.panes.get(&(Rc::as_ptr(&chain), index)).cloned())
+                .map_while(|index| cache.pane_of.get(&(Rc::as_ptr(&chain), index)).cloned())
                 .collect();
             ExpandedPaneChain { chain, panes }
         })
@@ -320,7 +320,7 @@ pub fn expand_pane_chains_in_workload_before(
     Ok(PaneChainExpansion {
         roots,
         chains,
-        expanded_nodes: memo.expanded,
+        expanded_nodes: cache.expanded,
     })
 }
 
@@ -344,17 +344,17 @@ fn timed_like(node: &Rc<OperatorNode>, timing: ExecutionTiming) -> OperatorNode 
 /// address, and each pane by its chain's address and index, so a chain two
 /// merges read expands into one set of panes.
 #[derive(Default)]
-struct ExpansionMemo {
+struct NodeToExpandedNodeCache {
     deadline: Option<Instant>,
-    nodes: HashMap<*const OperatorNode, Rc<OperatorNode>>,
-    panes: HashMap<(*const OperatorNode, u32), Rc<OperatorNode>>,
+    expanded_node_of: HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    pane_of: HashMap<(*const OperatorNode, u32), Rc<OperatorNode>>,
     /// Each chain expanded, in the order first reached.
     chains: Vec<Rc<OperatorNode>>,
     /// Each expanded node with its input, in the order expanded.
     expanded: Vec<(Rc<OperatorNode>, Rc<OperatorNode>)>,
 }
 
-impl ExpansionMemo {
+impl NodeToExpandedNodeCache {
     fn check_deadline(&self) -> Result<(), PaneChainExpansionError> {
         if self
             .deadline
@@ -369,10 +369,10 @@ impl ExpansionMemo {
 
 fn expand(
     node: &Rc<OperatorNode>,
-    memo: &mut ExpansionMemo,
+    cache: &mut NodeToExpandedNodeCache,
 ) -> Result<Rc<OperatorNode>, PaneChainExpansionError> {
-    memo.check_deadline()?;
-    if let Some(done) = memo.nodes.get(&Rc::as_ptr(node)) {
+    cache.check_deadline()?;
+    if let Some(done) = cache.expanded_node_of.get(&Rc::as_ptr(node)) {
         return Ok(Rc::clone(done));
     }
     let out = match &node.operator {
@@ -389,9 +389,9 @@ fn expand(
                 match child.asap() {
                     Some(ASAPOp::PaneChain { pane_count, .. }) => {
                         for index in 0..newest_panes.unwrap_or(*pane_count) {
-                            memo.check_deadline()?;
+                            cache.check_deadline()?;
                             let key = (Rc::as_ptr(child), index);
-                            if let Some(done) = memo.panes.get(&key) {
+                            if let Some(done) = cache.pane_of.get(&key) {
                                 inputs.push(Rc::clone(done));
                                 continue;
                             }
@@ -404,13 +404,13 @@ fn expand(
                                 None => pane,
                             };
                             if index == 0 {
-                                memo.chains.push(Rc::clone(child));
+                                cache.chains.push(Rc::clone(child));
                             }
-                            memo.panes.insert(key, Rc::clone(&pane));
+                            cache.pane_of.insert(key, Rc::clone(&pane));
                             inputs.push(pane);
                         }
                     }
-                    _ => inputs.push(expand(child, memo)?),
+                    _ => inputs.push(expand(child, cache)?),
                 }
             }
             let merge = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
@@ -429,7 +429,7 @@ fn expand(
             let mut changed = false;
             let mut children = HashMap::new();
             for child in node.children() {
-                let new = expand(child, memo)?;
+                let new = expand(child, cache)?;
                 changed |= !Rc::ptr_eq(&new, child);
                 children.insert(Rc::as_ptr(child), new);
             }
@@ -449,7 +449,9 @@ fn expand(
             }
         }
     };
-    memo.nodes.insert(Rc::as_ptr(node), Rc::clone(&out));
-    memo.expanded.push((Rc::clone(node), Rc::clone(&out)));
+    cache
+        .expanded_node_of
+        .insert(Rc::as_ptr(node), Rc::clone(&out));
+    cache.expanded.push((Rc::clone(node), Rc::clone(&out)));
     Ok(out)
 }

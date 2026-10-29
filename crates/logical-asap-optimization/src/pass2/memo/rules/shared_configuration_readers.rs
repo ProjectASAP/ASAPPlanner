@@ -479,7 +479,7 @@ fn compatible(left: &StateNeed, right: &StateNeed) -> bool {
 mod tests {
     use super::*;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::{candidates::try_populate_pass1, LogicalMemo};
+    use crate::pass2::memo::{candidates::try_populate_pass1, DagOfLogicalMemoGroups};
     use crate::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
@@ -502,7 +502,7 @@ mod tests {
                 )
             })
             .collect();
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = generate_per_computation_candidates(roots).unwrap();
         let mut memo = try_populate_pass1(initial, &inventory).unwrap();
         let entries = vec![

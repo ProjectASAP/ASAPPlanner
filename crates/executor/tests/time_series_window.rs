@@ -12,8 +12,8 @@ use planner_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAP
 use planner_types::ir::scalar::{CompareOpKind, ScalarValue};
 use planner_types::ir::schema::{DataType, Field, Schema, PROMQL_SERIES_IDENTITY};
 use planner_types::ir::{
-    apply_materialization_timings, ExprSemantics, MaterializationAssignment, NonASAPOp, Operator,
-    OperatorNode, Predicate, ScalarExpr, TimeRangeKind, TimingMemo,
+    apply_materialization_timings, ExprSemantics, MaterializationAssignment, NodeToTimedNodeCache,
+    NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr, TimeRangeKind,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -87,7 +87,7 @@ fn window_over_rows(
     let timed = apply_materialization_timings(
         &range,
         &MaterializationAssignment::default(),
-        &mut TimingMemo::new(),
+        &mut NodeToTimedNodeCache::new(),
     )
     .unwrap();
     compile_physical_asap_dag(&timed).unwrap()

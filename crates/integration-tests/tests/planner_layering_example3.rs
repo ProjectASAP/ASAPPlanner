@@ -20,7 +20,8 @@ use planner_layering_common::*;
 // of a time-bounded production search's archived incumbents.
 fn run_a() -> Run {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        compose_logical_candidate, generate_per_computation_candidates,
+        HowToComputeAggregateMeasure,
     };
     let workload = pattern_a(
         PatternARecurrence::OnceAdHoc,
@@ -42,7 +43,10 @@ fn run_a() -> Run {
                         .find(|&choice| {
                             matches!(
                                 target.computation_for(choice),
-                                Some((ComputationCandidate::Summary(SketchAlgorithm::Kll), _))
+                                Some((
+                                    HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll),
+                                    _
+                                ))
                             )
                         })
                         .unwrap()
@@ -69,7 +73,8 @@ fn run_a() -> Run {
 
 fn run_b() -> Run {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        compose_logical_candidate, generate_per_computation_candidates,
+        HowToComputeAggregateMeasure,
     };
     use asap_logical_asap_optimization::pass2::asap_aware_cse::{
         pane_candidates, window_composition_pass2_candidates,
@@ -82,7 +87,7 @@ fn run_b() -> Run {
     for option in 0..local.targets[0].choice_count() {
         if !matches!(
             local.targets[0].computation_for(option),
-            Some((ComputationCandidate::Summary(_), _))
+            Some((HowToComputeAggregateMeasure::Summary(_), _))
         ) {
             continue;
         }

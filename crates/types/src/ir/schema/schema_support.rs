@@ -17,15 +17,15 @@ pub fn with_promql_series_identity(
     use std::{collections::HashMap, rc::Rc};
     fn visit(
         node: &Rc<OperatorNode>,
-        memo: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+        cache: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
     ) -> Result<Rc<OperatorNode>, String> {
-        if let Some(found) = memo.get(&Rc::as_ptr(node)) {
+        if let Some(found) = cache.get(&Rc::as_ptr(node)) {
             return Ok(Rc::clone(found));
         }
         let mut error = None;
         let mut operator = node
             .operator
-            .map_children(|child| match visit(child, memo) {
+            .map_children(|child| match visit(child, cache) {
                 Ok(child) => child,
                 Err(e) => {
                     error = Some(e);
@@ -49,7 +49,7 @@ pub fn with_promql_series_identity(
                     if !schema.has_promql_series_identity() {
                         return Err("invalid physical series identity".into());
                     }
-                    memo.insert(Rc::as_ptr(node), Rc::clone(node));
+                    cache.insert(Rc::as_ptr(node), Rc::clone(node));
                     return Ok(Rc::clone(node));
                 }
                 if schema.closed {
@@ -95,7 +95,7 @@ pub fn with_promql_series_identity(
         rebuilt.timing = node.timing;
         rebuilt.materialization = node.materialization;
         let rebuilt = Rc::new(rebuilt);
-        memo.insert(Rc::as_ptr(node), Rc::clone(&rebuilt));
+        cache.insert(Rc::as_ptr(node), Rc::clone(&rebuilt));
         Ok(rebuilt)
     }
     visit(root, &mut HashMap::new())

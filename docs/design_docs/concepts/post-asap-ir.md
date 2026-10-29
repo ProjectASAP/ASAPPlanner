@@ -120,7 +120,7 @@ node may be named: a summary state, a population, or, as in #509 Example 4,
 the tumbling-window panes a query reads. `set(node, materialization)` assigns
 one, and every other sub-DAG is `NotMaterialized`. Choosing the options is
 Stage 2's job (#604); until then the planner materializes nothing.
-`apply_materialization_timings(root, &assignment, &mut TimingMemo)` then writes a
+`apply_materialization_timings(root, &assignment, &mut NodeToTimedNodeCache)` then writes a
 timing and a materialization into every node, top-down:
 
 - `SummaryEstimate` and `EvaluatePopulation` run at query time;

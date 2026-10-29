@@ -1209,10 +1209,10 @@ mod tests {
     use crate::search::refinement::search::CandidateSearchStatus;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::memo::candidates::{
-        try_populate_pass1, CandidateOrigin,
+        try_populate_pass1, OriginOfCandidateForMemoGroup,
     };
     use asap_logical_asap_optimization::pass2::memo::state_groups::expand_concrete_summary_state_groups;
-    use asap_logical_asap_optimization::pass2::memo::{LogicalMemo, MemoGroupId};
+    use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
@@ -1244,7 +1244,7 @@ mod tests {
                 )
             })
             .collect();
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let outputs: Vec<_> = (0..2)
             .map(|q| {
                 MemoGroupId(
@@ -1264,7 +1264,7 @@ mod tests {
         // Keep the real generated shared KLL readers to bound this evaluator
         // integration test; materialization configurations still remain choices.
         for candidates in &mut memo.candidates {
-            let shared: Vec<_> = candidates.iter().filter(|candidate| candidate.origin == CandidateOrigin::SharedBuild && OperatorNode::reachable(&candidate.node).iter().any(|node|
+            let shared: Vec<_> = candidates.iter().filter(|candidate| candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild && OperatorNode::reachable(&candidate.node).iter().any(|node|
                 matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if *kind.algorithm() == SketchAlgorithm::Kll)))
                 .cloned().collect();
             if !shared.is_empty() {
@@ -1439,7 +1439,7 @@ mod tests {
         }
         let roots = vec![original[0].clone(), original[0].clone()];
         let identified: Vec<_> = roots.iter().cloned().enumerate().collect();
-        let initial = LogicalMemo::from_roots(&identified);
+        let initial = DagOfLogicalMemoGroups::from_roots(&identified);
         let output = MemoGroupId(
             initial
                 .groups
@@ -1548,7 +1548,7 @@ mod tests {
             target.clone(),
         ));
         let identified = vec![(0, root.clone())];
-        let initial = LogicalMemo::from_roots(&identified);
+        let initial = DagOfLogicalMemoGroups::from_roots(&identified);
         let output = MemoGroupId(
             initial
                 .groups
@@ -1645,7 +1645,7 @@ mod tests {
         .enumerate()
         .map(|(id, query)| (id, QueryRoot::Operator(lower_promql(query, target.clone()))))
         .collect();
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let outputs: Vec<_> = (0..roots.len())
             .map(|query| {
                 MemoGroupId(
@@ -2012,7 +2012,7 @@ mod tests {
             )),
         )];
         let memo = try_populate_pass1(
-            LogicalMemo::from_roots(&exact),
+            DagOfLogicalMemoGroups::from_roots(&exact),
             &generate_per_computation_candidates(exact).unwrap(),
         )
         .unwrap();

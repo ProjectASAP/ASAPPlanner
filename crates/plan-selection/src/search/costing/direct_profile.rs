@@ -807,18 +807,18 @@ fn failure_budget(
                 node: &std::rc::Rc<asap_types::ir::OperatorNode>,
                 maximum_source: u64,
                 deadline: Option<std::time::Instant>,
-                memo: &mut std::collections::HashMap<usize, u64>,
+                cache: &mut std::collections::HashMap<usize, u64>,
             ) -> Option<u64> {
                 if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
                     return None;
                 }
                 let identity = std::rc::Rc::as_ptr(node) as usize;
-                if let Some(bound) = memo.get(&identity) {
+                if let Some(bound) = cache.get(&identity) {
                     return Some(*bound);
                 }
                 let mut children = Vec::new();
                 node.operator.map_children(|child| {
-                    children.push(bound(child, maximum_source, deadline, memo))
+                    children.push(bound(child, maximum_source, deadline, cache))
                 });
                 let children: Vec<_> = children.into_iter().collect::<Option<_>>()?;
                 let value = if children.is_empty() {
@@ -838,16 +838,16 @@ fn failure_budget(
                         .try_fold(1u64, |product, child| product.checked_mul(*child))?;
                     sum.max(product)
                 };
-                memo.insert(identity, value);
+                cache.insert(identity, value);
                 Some(value)
             }
-            let mut memo = std::collections::HashMap::new();
+            let mut cache = std::collections::HashMap::new();
             context
                 .original_roots
                 .iter()
                 .map(|root| match root {
                     QueryRoot::Operator(node) => {
-                        bound(node, maximum_source, context.deadline, &mut memo)
+                        bound(node, maximum_source, context.deadline, &mut cache)
                     }
                     _ => None,
                 })
@@ -1258,7 +1258,8 @@ mod tests {
     #[test]
     fn fixed_sketch_profiles_match_the_real_evaluator() {
         use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-            compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+            compose_logical_candidate, generate_per_computation_candidates,
+            HowToComputeAggregateMeasure,
         };
         use asap_types::ir::schema::SketchAlgorithm;
         use std::rc::Rc;
@@ -1317,7 +1318,7 @@ mod tests {
                 )])
                 .unwrap();
                 let choice = generated.targets[0].choices.candidates.iter().position(|candidate|
-                    matches!(candidate, ComputationCandidate::Summary(found) if *found == algorithm)).unwrap();
+                    matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == algorithm)).unwrap();
                 let roots: Vec<_> = compose_logical_candidate(&generated, &[choice])
                     .unwrap()
                     .into_iter()
@@ -1483,7 +1484,8 @@ mod tests {
         range_evaluation: Option<asap_types::workload::RangeEvaluation>,
     ) {
         use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-            compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+            compose_logical_candidate, generate_per_computation_candidates,
+            HowToComputeAggregateMeasure,
         };
         use asap_types::ir::schema::SketchAlgorithm;
         use std::rc::Rc;
@@ -1565,7 +1567,7 @@ mod tests {
                     )])
                     .unwrap();
                     let choice = generated.targets[0].choices.candidates.iter().position(|candidate|
-                    matches!(candidate, ComputationCandidate::Summary(found) if *found == algorithm)).unwrap();
+                    matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == algorithm)).unwrap();
                     let roots: Vec<_> = compose_logical_candidate(&generated, &[choice])
                         .unwrap()
                         .into_iter()
@@ -2004,7 +2006,8 @@ mod tests {
     #[test]
     fn heterogeneous_shared_sketch_profiles_match_the_real_evaluator() {
         use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-            compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+            compose_logical_candidate, generate_per_computation_candidates,
+            HowToComputeAggregateMeasure,
         };
         use asap_types::ir::schema::SketchAlgorithm;
         use asap_types::workload::TimestampMs;
@@ -2071,7 +2074,7 @@ mod tests {
                 )
                 .unwrap();
                 let choices: Vec<_> = generated.targets.iter().map(|target| target.choices.candidates.iter().position(|candidate|
-                    matches!(candidate,ComputationCandidate::Summary(found) if *found==algorithm)).unwrap()).collect();
+                    matches!(candidate,HowToComputeAggregateMeasure::Summary(found) if *found==algorithm)).unwrap()).collect();
                 let roots: Vec<_> = compose_logical_candidate(&generated, &choices)
                     .unwrap()
                     .into_iter()

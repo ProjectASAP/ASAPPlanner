@@ -23,7 +23,7 @@
 //! into `n` equal shares, so a summary's size depends on its readers: each
 //! sketch candidate is offered once per share `1..=n`, `n` the most
 //! approximate inputs a query reaching the group can have
-//! ([`ImplementationCandidate::budget_share`]). This records the sizing
+//! ([`CandidateForMemoGroup::budget_share`]). This records the sizing
 //! configuration used during generation; the concrete sketch parameters carry
 //! the resulting error contract. The connection planner may select a conservative
 //! larger configuration, and validates the recomposed query-root guarantee.
@@ -31,15 +31,16 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use super::LogicalMemo;
+use super::DagOfLogicalMemoGroups;
 use crate::pass1::per_computation_candidates::{
-    compose_logical_candidate_with_budget_share, ComputationCandidate, PerComputationCandidates,
+    compose_logical_candidate_with_budget_share, HowToComputeAggregateMeasure,
+    PerComputationCandidates,
 };
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 
 use super::candidates::{
-    CandidateMemo, CandidateOrigin, CandidatePopulationError, ImplementationCandidate,
+    CandidateForMemoGroup, CandidateMemo, CandidatePopulationError, OriginOfCandidateForMemoGroup,
 };
 use super::{MemoGroup, MemoGroupId};
 
@@ -47,7 +48,7 @@ use super::{MemoGroup, MemoGroupId};
 /// The inventory must retain the original ordered root dependencies. This phase
 /// consumes existing Pass 1 choices; it does not yet generate rules per group.
 pub fn try_populate_pass1<Id: Clone>(
-    initial: LogicalMemo,
+    initial: DagOfLogicalMemoGroups,
     per_computation: &PerComputationCandidates<Id>,
 ) -> Result<CandidateMemo, CandidatePopulationError> {
     if !initial.matches_root_dependencies(&per_computation.roots) {
@@ -92,8 +93,8 @@ fn reach(groups: &[MemoGroup], g: MemoGroupId, reached: &mut HashSet<MemoGroupId
 fn pass1_candidates<Id: Clone>(
     per_computation: &PerComputationCandidates<Id>,
     groups: &[MemoGroup],
-    group_of: &LogicalMemo,
-) -> Vec<Vec<ImplementationCandidate>> {
+    group_of: &DagOfLogicalMemoGroups,
+) -> Vec<Vec<CandidateForMemoGroup>> {
     // Each target aggregate group's targets, one per measure (identical
     // aggregates of several queries are one group with one target each).
     let mut targets_of: HashMap<MemoGroupId, Vec<usize>> = HashMap::new();
@@ -109,18 +110,20 @@ fn pass1_candidates<Id: Clone>(
             targets.push(t);
         }
     }
-    let own = |g: usize| ImplementationCandidate {
+    let own = |g: usize| CandidateForMemoGroup {
         implements: vec![MemoGroupId(g as u32)],
         node: Rc::clone(&groups[g].node),
         children: groups[g].children.clone(),
-        origin: CandidateOrigin::Pass1,
+        origin: OriginOfCandidateForMemoGroup::Pass1,
         budget_share: 1,
     };
     // Each query's most approximate inputs: its targets that offer a
     // summary, each one sketch state at most.
     let offers_a_summary = |t: usize| {
         let target = &per_computation.targets[t];
-        let summary = |c: &ComputationCandidate| matches!(c, ComputationCandidate::Summary(_));
+        let summary = |c: &HowToComputeAggregateMeasure| {
+            matches!(c, HowToComputeAggregateMeasure::Summary(_))
+        };
         target.choices.candidates.iter().any(summary)
             || target
                 .fused
@@ -163,27 +166,27 @@ fn pass1_candidates<Id: Clone>(
 fn target_candidates<Id: Clone>(
     per_computation: &PerComputationCandidates<Id>,
     groups: &[MemoGroup],
-    group_of: &LogicalMemo,
+    group_of: &DagOfLogicalMemoGroups,
     g: MemoGroupId,
     targets: &[usize],
     max_budget_share: usize,
-) -> Option<Vec<ImplementationCandidate>> {
+) -> Option<Vec<CandidateForMemoGroup>> {
     let aggregate = Rc::clone(&per_computation.targets[targets[0]].aggregate);
     // The groups a candidate's private nodes may bottom out at, by key.
     let mut below = HashSet::new();
     for &child in &groups[g.0 as usize].children {
         reach(groups, child, &mut below);
     }
-    let mut keys = NodeKeys::default();
+    let mut structural_ids = NodeToStructuralIdCache::default();
     let mut descendant: HashMap<u64, MemoGroupId> = HashMap::new();
     let mut ordered: Vec<MemoGroupId> = below.into_iter().collect();
     ordered.sort_unstable();
     for d in ordered {
         descendant
-            .entry(keys.key(&groups[d.0 as usize].node))
+            .entry(structural_ids.structural_id(&groups[d.0 as usize].node))
             .or_insert(d);
     }
-    let own_key = keys.key(&groups[g.0 as usize].node);
+    let own_key = structural_ids.structural_id(&groups[g.0 as usize].node);
     let mut candidates = Vec::new();
     let mut choice = vec![0; per_computation.targets.len()];
     loop {
@@ -214,7 +217,7 @@ fn target_candidates<Id: Clone>(
             if budget_share > 1 && !builds_a_sketch(&root) {
                 break;
             }
-            let (node, children) = if keys.key(&root) == own_key {
+            let (node, children) = if structural_ids.structural_id(&root) == own_key {
                 (
                     Rc::clone(&groups[g.0 as usize].node),
                     groups[g.0 as usize].children.clone(),
@@ -224,7 +227,7 @@ fn target_candidates<Id: Clone>(
                 let node = over_groups(
                     &root,
                     groups,
-                    &mut keys,
+                    &mut structural_ids,
                     &descendant,
                     &mut children,
                     &mut HashMap::new(),
@@ -248,11 +251,11 @@ fn target_candidates<Id: Clone>(
                 };
                 (node, children)
             };
-            candidates.push(ImplementationCandidate {
+            candidates.push(CandidateForMemoGroup {
                 implements: implements.clone(),
                 node,
                 children,
-                origin: CandidateOrigin::Pass1,
+                origin: OriginOfCandidateForMemoGroup::Pass1,
                 budget_share,
             });
         }
@@ -354,7 +357,7 @@ fn compose_alone<Id: Clone>(
 fn over_groups(
     node: &Rc<OperatorNode>,
     groups: &[MemoGroup],
-    keys: &mut NodeKeys,
+    structural_ids: &mut NodeToStructuralIdCache,
     descendant: &HashMap<u64, MemoGroupId>,
     children: &mut Vec<MemoGroupId>,
     rebuilt: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
@@ -365,7 +368,7 @@ fn over_groups(
         if replaced.contains_key(&key) {
             continue;
         }
-        let new = match descendant.get(&keys.key(child)) {
+        let new = match descendant.get(&structural_ids.structural_id(child)) {
             Some(&group) => {
                 if !children.contains(&group) {
                     children.push(group);
@@ -375,7 +378,8 @@ fn over_groups(
             None => match rebuilt.get(&key) {
                 Some(done) => Rc::clone(done),
                 None => {
-                    let done = over_groups(child, groups, keys, descendant, children, rebuilt);
+                    let done =
+                        over_groups(child, groups, structural_ids, descendant, children, rebuilt);
                     rebuilt.insert(key, Rc::clone(&done));
                     done
                 }
@@ -418,23 +422,23 @@ fn builds_a_sketch(node: &Rc<OperatorNode>) -> bool {
 
 /// Interned structural identities: the operator over its children's identities,
 /// without the schema, guarantee, timing and materialization composition
-/// derives. Memoized per node (the memo keeps each node alive, so its
+/// derives. Memoized per node (the cache keeps each node alive, so its
 /// address is not reused).
 #[derive(Default)]
-pub struct NodeKeys {
-    memo: HashMap<*const OperatorNode, (Rc<OperatorNode>, u64)>,
-    operators: HashMap<Vec<u8>, u64>,
+pub struct NodeToStructuralIdCache {
+    id_of_node: HashMap<*const OperatorNode, (Rc<OperatorNode>, u64)>,
+    id_of_encoded_operator: HashMap<Vec<u8>, u64>,
 }
 
-impl NodeKeys {
-    pub fn key(&mut self, node: &Rc<OperatorNode>) -> u64 {
-        if let Some((_, key)) = self.memo.get(&Rc::as_ptr(node)) {
+impl NodeToStructuralIdCache {
+    pub fn structural_id(&mut self, node: &Rc<OperatorNode>) -> u64 {
+        if let Some((_, key)) = self.id_of_node.get(&Rc::as_ptr(node)) {
             return *key;
         }
         let children: HashMap<*const OperatorNode, u64> = node
             .children()
             .into_iter()
-            .map(|child| (Rc::as_ptr(child), self.key(child)))
+            .map(|child| (Rc::as_ptr(child), self.structural_id(child)))
             .collect();
         let operator = node.operator.map_children(|c| children[&Rc::as_ptr(c)]);
         // MessagePack preserves non-finite floats and signed zero. HashMap
@@ -442,9 +446,10 @@ impl NodeKeys {
         // different computations. Cloned/recomposed NaN literals retain identity.
         let encoded =
             rmp_serde::to_vec(&operator).expect("an IR operator over child IDs must serialize");
-        let next = self.operators.len() as u64;
-        let key = *self.operators.entry(encoded).or_insert(next);
-        self.memo.insert(Rc::as_ptr(node), (Rc::clone(node), key));
+        let next = self.id_of_encoded_operator.len() as u64;
+        let key = *self.id_of_encoded_operator.entry(encoded).or_insert(next);
+        self.id_of_node
+            .insert(Rc::as_ptr(node), (Rc::clone(node), key));
         key
     }
 }
@@ -517,28 +522,40 @@ mod tests {
             ))
             .unwrap()
         };
-        let mut keys = NodeKeys::default();
+        let mut structural_ids = NodeToStructuralIdCache::default();
         for (left, right) in [
             (f64::NAN, f64::INFINITY),
             (f64::INFINITY, f64::NEG_INFINITY),
             (0.0, -0.0),
         ] {
-            assert_ne!(keys.key(&literal(left)), keys.key(&literal(right)));
+            assert_ne!(
+                structural_ids.structural_id(&literal(left)),
+                structural_ids.structural_id(&literal(right))
+            );
         }
-        assert_eq!(keys.key(&literal(1.0)), keys.key(&literal(1.0)));
+        assert_eq!(
+            structural_ids.structural_id(&literal(1.0)),
+            structural_ids.structural_id(&literal(1.0))
+        );
         let node = literal(f64::NAN);
-        assert_eq!(keys.key(&node), keys.key(&literal(f64::NAN)));
+        assert_eq!(
+            structural_ids.structural_id(&node),
+            structural_ids.structural_id(&literal(f64::NAN))
+        );
     }
 
     fn populate_pass1<Id: Clone>(
-        initial: LogicalMemo,
+        initial: DagOfLogicalMemoGroups,
         inventory: &PerComputationCandidates<Id>,
     ) -> CandidateMemo {
         try_populate_pass1(initial, inventory).unwrap()
     }
 
     fn memo_of<Id: Clone>(inventory: &PerComputationCandidates<Id>) -> CandidateMemo {
-        populate_pass1(LogicalMemo::from_roots(&inventory.roots), inventory)
+        populate_pass1(
+            DagOfLogicalMemoGroups::from_roots(&inventory.roots),
+            inventory,
+        )
     }
     use crate::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
@@ -558,7 +575,7 @@ mod tests {
                 AccuracyTarget::max_error(0.01),
             )),
         )];
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let other_roots = vec![(
             0,
             QueryRoot::Operator(lower_promql(
@@ -583,7 +600,7 @@ mod tests {
                 AccuracyTarget::max_error(0.01),
             )),
         )];
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = generate_per_computation_candidates(roots).unwrap();
         let mut invalid_measure = inventory.clone();
         invalid_measure.targets[0].measure = usize::MAX;
@@ -619,7 +636,7 @@ mod tests {
             )
         })
         .collect();
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let original_groups = initial.groups.clone();
         let inventory = generate_per_computation_candidates(roots).unwrap();
         let expanded = populate_pass1(initial.clone(), &inventory);
@@ -676,7 +693,7 @@ mod tests {
     }
 
     /// The summary algorithms a candidate's private nodes build.
-    fn algorithms(candidate: &ImplementationCandidate) -> Vec<String> {
+    fn algorithms(candidate: &CandidateForMemoGroup) -> Vec<String> {
         OperatorNode::reachable(&candidate.node)
             .iter()
             .filter_map(|node| match node.asap() {
@@ -735,7 +752,7 @@ mod tests {
         for candidate in candidates {
             assert_eq!(candidate.implements, vec![MemoGroupId(quantile as u32)]);
             assert_eq!(candidate.children, input);
-            assert_eq!(candidate.origin, CandidateOrigin::Pass1);
+            assert_eq!(candidate.origin, OriginOfCandidateForMemoGroup::Pass1);
         }
     }
 
@@ -821,7 +838,7 @@ mod tests {
                     .candidates
                     .iter()
                     .position(|c| {
-                        matches!(c, ComputationCandidate::Summary(a) if format!("{a:?}") == algorithm)
+                        matches!(c, HowToComputeAggregateMeasure::Summary(a) if format!("{a:?}") == algorithm)
                     })
                     .unwrap()
             })

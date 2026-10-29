@@ -3253,7 +3253,8 @@ mod tests {
     #[test]
     fn a_count_from_count_min_panes_keeps_its_guarantee() {
         use crate::pass1::per_computation_candidates::{
-            compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+            compose_logical_candidate, generate_per_computation_candidates,
+            HowToComputeAggregateMeasure,
         };
         let root = lower_promql(
             "count_over_time(m[5m])",
@@ -3271,7 +3272,7 @@ mod tests {
                 t.choices
                     .candidates
                     .iter()
-                    .position(|c| *c == ComputationCandidate::Summary(SketchAlgorithm::Cms))
+                    .position(|c| *c == HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Cms))
                     .expect("Count-Min is offered for a count")
             })
             .collect();
@@ -3297,15 +3298,17 @@ mod tests {
     /// The composed candidate of `queries` (each at its own ε, δ = 0.01)
     /// in which every target chose `family`.
     fn chose(queries: &[(&str, f64)], family: SketchAlgorithm) -> Vec<QueryRoot> {
-        use crate::pass1::per_computation_candidates::ComputationCandidate;
-        chose_where(queries, |c| *c == ComputationCandidate::Summary(family))
+        use crate::pass1::per_computation_candidates::HowToComputeAggregateMeasure;
+        chose_where(queries, |c| {
+            *c == HowToComputeAggregateMeasure::Summary(family)
+        })
     }
 
     /// The composed candidate of `queries` (each at its own ε, δ = 0.01)
     /// in which every target chose the first candidate `pick` accepts.
     fn chose_where(
         queries: &[(&str, f64)],
-        pick: impl Fn(&crate::pass1::per_computation_candidates::ComputationCandidate) -> bool,
+        pick: impl Fn(&crate::pass1::per_computation_candidates::HowToComputeAggregateMeasure) -> bool,
     ) -> Vec<QueryRoot> {
         use crate::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates,
@@ -3678,9 +3681,10 @@ mod tests {
     /// the last two samples of the window, does not.
     #[test]
     fn exact_accumulators_that_merge_get_panes() {
-        use crate::pass1::per_computation_candidates::ComputationCandidate;
-        let accumulator =
-            |c: &ComputationCandidate| matches!(c, ComputationCandidate::ExactAccumulator(_));
+        use crate::pass1::per_computation_candidates::HowToComputeAggregateMeasure;
+        let accumulator = |c: &HowToComputeAggregateMeasure| {
+            matches!(c, HowToComputeAggregateMeasure::ExactAccumulator(_))
+        };
         for query in [
             "rate(m[5m])",
             "increase(m[5m])",
@@ -4147,7 +4151,7 @@ mod tests {
     /// The composed candidate of `queries` with every target at its exact
     /// option (an exact accumulator, or plain exact execution).
     fn exact(queries: &[&str]) -> Vec<QueryRoot> {
-        use crate::pass1::per_computation_candidates::ComputationCandidate as C;
+        use crate::pass1::per_computation_candidates::HowToComputeAggregateMeasure as C;
         let queries: Vec<(&str, f64)> = queries.iter().map(|q| (*q, 0.01)).collect();
         chose_where(&queries, |c| matches!(c, C::Exact | C::ExactAccumulator(_)))
     }
@@ -4606,7 +4610,7 @@ mod tests {
         }
         use crate::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates,
-            ComputationCandidate as C,
+            HowToComputeAggregateMeasure as C,
         };
         let inventory = generate_per_computation_candidates(
             [

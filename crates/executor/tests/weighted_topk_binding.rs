@@ -267,8 +267,8 @@ fn rate_updates_cannot_enter_integer_heap_factory() {
 /// it upstream of a query-time node, so the pin is lifted first.
 fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) -> PhysicalASAPDAG {
     use planner_types::ir::{
-        apply_materialization_timings, MaterializationAssignment, Operator as IrOperator,
-        OperatorNode, TimingMemo,
+        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
+        Operator as IrOperator, OperatorNode,
     };
     use planner_types::physical::{Materialization, Medium};
     fn unpinned(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
@@ -290,6 +290,7 @@ fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) 
         }
     }
     let timed =
-        apply_materialization_timings(&candidate, &assignment, &mut TimingMemo::new()).unwrap();
+        apply_materialization_timings(&candidate, &assignment, &mut NodeToTimedNodeCache::new())
+            .unwrap();
     planner_types::ir::physical_export::compile_physical_asap_dag(&timed).unwrap()
 }

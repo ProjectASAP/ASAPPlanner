@@ -1885,18 +1885,18 @@ impl RowBound {
 /// [`RowBound`] of `node`: a scan returns its source's series once; a union
 /// (PromQL `or`, SQL `UNION`, `Concat`) the rows of all its branches; a
 /// constant vector one row and `VALUES` its rows; any other operator at
-/// most as many as its largest input. `memo` holds the shared nodes' bounds.
+/// most as many as its largest input. `cache` holds the shared nodes' bounds.
 fn row_bound(
     node: &Rc<OperatorNode>,
-    memo: &mut HashMap<*const OperatorNode, RowBound>,
+    cache: &mut HashMap<*const OperatorNode, RowBound>,
 ) -> RowBound {
-    if let Some(bound) = memo.get(&Rc::as_ptr(node)) {
+    if let Some(bound) = cache.get(&Rc::as_ptr(node)) {
         return bound.clone();
     }
     let inputs: Vec<RowBound> = node
         .children()
         .into_iter()
-        .map(|child| row_bound(child, memo))
+        .map(|child| row_bound(child, cache))
         .collect();
     let bound = match node.non_asap() {
         Some(NonASAPOp::Scan { source, .. }) => RowBound {
@@ -1929,7 +1929,7 @@ fn row_bound(
         }
         _ => RowBound::largest(&inputs),
     };
-    memo.insert(Rc::as_ptr(node), bound.clone());
+    cache.insert(Rc::as_ptr(node), bound.clone());
     bound
 }
 
@@ -1940,10 +1940,10 @@ fn row_bound(
 /// counts it once; an `or` counts each branch. `None` when `root` reads no
 /// source, or a source it reads declares no series count.
 fn series_read(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
-    let mut memo = HashMap::new();
+    let mut cache = HashMap::new();
     let inputs: Vec<RowBound> = root_operators(root)
         .into_iter()
-        .map(|node| row_bound(node, &mut memo))
+        .map(|node| row_bound(node, &mut cache))
         .collect();
     let bound = RowBound::largest(&inputs);
     if bound.copies_per_source.is_empty() {
@@ -2602,14 +2602,14 @@ pub fn with_confirmed_weights(roots: &[QueryRoot], data: &DataWorkload) -> Vec<Q
     fn confirm(
         node: &Rc<OperatorNode>,
         data: &DataWorkload,
-        memo: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+        cache: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
     ) -> Rc<OperatorNode> {
-        if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+        if let Some(done) = cache.get(&Rc::as_ptr(node)) {
             return Rc::clone(done);
         }
         let mut changed = false;
         let mut operator = node.operator.map_children(|child| {
-            let rebuilt = confirm(child, data, memo);
+            let rebuilt = confirm(child, data, cache);
             changed |= !Rc::ptr_eq(&rebuilt, child);
             rebuilt
         });
@@ -2632,16 +2632,16 @@ pub fn with_confirmed_weights(roots: &[QueryRoot], data: &DataWorkload) -> Vec<Q
         } else {
             Rc::clone(node)
         };
-        memo.insert(Rc::as_ptr(node), Rc::clone(&rebuilt));
+        cache.insert(Rc::as_ptr(node), Rc::clone(&rebuilt));
         rebuilt
     }
-    let mut memo = HashMap::new();
+    let mut cache = HashMap::new();
     roots
         .iter()
         .map(|root| match root {
-            QueryRoot::Operator(n) => QueryRoot::Operator(confirm(n, data, &mut memo)),
+            QueryRoot::Operator(n) => QueryRoot::Operator(confirm(n, data, &mut cache)),
             QueryRoot::Scalar(expr) => {
-                QueryRoot::Scalar(expr.map_operator_refs(&mut |n| confirm(n, data, &mut memo)))
+                QueryRoot::Scalar(expr.map_operator_refs(&mut |n| confirm(n, data, &mut cache)))
             }
         })
         .collect()
@@ -8654,7 +8654,8 @@ mod tests {
                     .candidates
                     .iter()
                     .position(|candidate| {
-                        *candidate == pcc::ComputationCandidate::Summary(SketchAlgorithm::DDSketch)
+                        *candidate
+                            == pcc::HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch)
                     })
                     .unwrap_or(0)
             })
@@ -8664,7 +8665,7 @@ mod tests {
             .iter()
             .zip(&choices)
             .any(|(target, &choice)| target.choices.candidates[choice]
-                == pcc::ComputationCandidate::Summary(SketchAlgorithm::DDSketch)));
+                == pcc::HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch)));
         let outputs = pcc::compose_logical_candidate(&inventory, &choices).unwrap();
         let output = &outputs[0].1;
         let guarantee = root_guarantee(output).expect("a symbolic bound");
@@ -8977,7 +8978,7 @@ mod tests {
     /// state materialized as `materialization`.
     fn kll_dag(materialization: Materialization) -> PhysicalASAPDAG {
         use asap_types::ir::{
-            apply_materialization_timings, MaterializationAssignment, TimingMemo,
+            apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
         };
         let root = lower_promql(
             "quantile_over_time(0.99, m[1m])",
@@ -8995,7 +8996,7 @@ mod tests {
                     .candidates
                     .iter()
                     .position(|c| {
-                        *c == asap_logical_asap_optimization::pass1::per_computation_candidates::ComputationCandidate::Summary(
+                        *c == asap_logical_asap_optimization::pass1::per_computation_candidates::HowToComputeAggregateMeasure::Summary(
                             SketchAlgorithm::Kll,
                         )
                     })
@@ -9018,7 +9019,8 @@ mod tests {
             MaterializationAssignment::with_default(Materialization::NotMaterialized);
         assignment.set(&state, materialization);
         let timed =
-            apply_materialization_timings(root, &assignment, &mut TimingMemo::new()).unwrap();
+            apply_materialization_timings(root, &assignment, &mut NodeToTimedNodeCache::new())
+                .unwrap();
         asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids(&[
             QueryRoot::Operator(timed),
         ])
@@ -9548,7 +9550,7 @@ mod tests {
             .position(|c| {
                 matches!(
                     c,
-                    asap_logical_asap_optimization::pass1::per_computation_candidates::ComputationCandidate::Summary(
+                    asap_logical_asap_optimization::pass1::per_computation_candidates::HowToComputeAggregateMeasure::Summary(
                         SketchAlgorithm::Kll
                     )
                 )
@@ -10541,7 +10543,10 @@ mod tests {
                     .candidates
                     .iter()
                     .position(|c| {
-                        matches!(c, pcc::ComputationCandidate::Summary(SketchAlgorithm::Kll))
+                        matches!(
+                            c,
+                            pcc::HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)
+                        )
                     })
                     .unwrap()
             })

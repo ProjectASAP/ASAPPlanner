@@ -102,7 +102,8 @@ fn composed_summary_candidates(
     asap_plan_selection::Selection,
 ) {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        compose_logical_candidate, generate_per_computation_candidates,
+        HowToComputeAggregateMeasure,
     };
     let workload = promql_workload(queries);
     let roots = lower_promql_query_workload(&workload).expect("lowers");
@@ -118,7 +119,9 @@ fn composed_summary_candidates(
                     .choices
                     .candidates
                     .iter()
-                    .position(|candidate| *candidate == ComputationCandidate::Summary(family))
+                    .position(|candidate| {
+                        *candidate == HowToComputeAggregateMeasure::Summary(family)
+                    })
                     .unwrap_or(0)
             })
             .collect();

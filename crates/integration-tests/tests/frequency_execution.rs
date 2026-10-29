@@ -14,8 +14,8 @@ use asap_types::ir::physical_export::{compile_physical_asap_dag, PhysicalASAPOpe
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, OperatorNode,
-    TimingMemo,
+    apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
+    NonASAPOp, OperatorNode,
 };
 
 mod physical_common;
@@ -39,7 +39,7 @@ fn execute(candidate: &Rc<OperatorNode>) -> Vec<f64> {
     let timed = apply_materialization_timings(
         candidate,
         &MaterializationAssignment::default(),
-        &mut TimingMemo::new(),
+        &mut NodeToTimedNodeCache::new(),
     )
     .unwrap();
     let dag = compile_physical_asap_dag(&timed).unwrap();

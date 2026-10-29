@@ -249,7 +249,8 @@ fn independent_kll_cost(
     data: &DataWorkload,
 ) -> f64 {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+        compose_logical_candidate, generate_per_computation_candidates,
+        HowToComputeAggregateMeasure,
     };
     let inventory = generate_per_computation_candidates(roots).unwrap();
     let choices: Vec<_> = inventory
@@ -263,7 +264,9 @@ fn independent_kll_cost(
                 .position(|c| {
                     matches!(
                         c,
-                        ComputationCandidate::Summary(asap_types::ir::schema::SketchAlgorithm::Kll)
+                        HowToComputeAggregateMeasure::Summary(
+                            asap_types::ir::schema::SketchAlgorithm::Kll
+                        )
                     )
                 })
                 .unwrap()

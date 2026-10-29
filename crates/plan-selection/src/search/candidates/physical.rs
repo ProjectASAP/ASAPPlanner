@@ -207,7 +207,7 @@ mod tests {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
     use asap_logical_asap_optimization::pass2::memo::state_groups::expand_concrete_summary_state_groups;
-    use asap_logical_asap_optimization::pass2::memo::{LogicalMemo, MemoGroupId};
+    use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
@@ -238,7 +238,7 @@ mod tests {
             .enumerate()
             .map(|(id, query)| (id, QueryRoot::Operator(lower_promql(query, target.clone()))))
             .collect::<Vec<_>>();
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let output_groups = (0..2)
             .map(|query| {
                 MemoGroupId(

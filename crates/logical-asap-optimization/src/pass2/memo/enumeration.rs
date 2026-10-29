@@ -29,22 +29,22 @@ use crate::pass1::per_computation_candidates::{
 };
 
 /// One candidate (an index into `CandidateMemo::candidates[group]`) for each
-/// group it names. [`compose`] gives a group it does not name its first
+/// group it names. [`build_logical_asap_dags_from_chosen_candidates`] gives a group it does not name its first
 /// candidate.
-pub type MemoChoice = BTreeMap<MemoGroupId, usize>;
+pub type ChosenCandidatePerMemoGroup = BTreeMap<MemoGroupId, usize>;
 
 /// The choices [`enumerate`] found, in depth-first order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MemoEnumeration {
+pub struct AllChosenCandidatesPerMemoGroup {
     /// Each choice names exactly the groups it needs.
-    pub choices: Vec<MemoChoice>,
+    pub all_chosen_candidates: Vec<ChosenCandidatePerMemoGroup>,
     /// False when the limit stopped the enumeration before every choice was found.
     pub complete: bool,
 }
 
 /// A choice that does not compose.
 #[derive(Debug, thiserror::Error)]
-pub enum ComposeError {
+pub enum ErrorBuildingLogicalAsapDagsFromChosenCandidates {
     #[error("group {group:?} has no candidate {candidate}")]
     NoSuchCandidate {
         group: MemoGroupId,
@@ -68,24 +68,24 @@ pub enum ComposeError {
 /// Every choice of one candidate per needed group, starting from the query
 /// roots, stopping after `limit` choices. A choice whose candidates read
 /// each other in a cycle composes no DAG and is left out.
-pub fn enumerate(memo: &CandidateMemo, limit: usize) -> MemoEnumeration {
+pub fn enumerate(memo: &CandidateMemo, limit: usize) -> AllChosenCandidatesPerMemoGroup {
     fn walk(
         memo: &CandidateMemo,
         mut pending: Vec<MemoGroupId>,
-        choice: &mut MemoChoice,
+        chosen_candidates: &mut ChosenCandidatePerMemoGroup,
         limit: usize,
-        choices: &mut Vec<MemoChoice>,
+        all_chosen_candidates: &mut Vec<ChosenCandidatePerMemoGroup>,
     ) -> bool {
         let group = loop {
             match pending.pop() {
                 None => {
-                    if choices.len() == limit {
+                    if all_chosen_candidates.len() == limit {
                         return false;
                     }
-                    choices.push(choice.clone());
+                    all_chosen_candidates.push(chosen_candidates.clone());
                     return true;
                 }
-                Some(group) if !choice.contains_key(&group) => break group,
+                Some(group) if !chosen_candidates.contains_key(&group) => break group,
                 Some(_) => {}
             }
         };
@@ -95,15 +95,15 @@ pub fn enumerate(memo: &CandidateMemo, limit: usize) -> MemoEnumeration {
             if candidate
                 .children
                 .iter()
-                .any(|&child| reaches(memo, choice, child, group))
+                .any(|&child| reaches(memo, chosen_candidates, child, group))
             {
                 continue;
             }
-            choice.insert(group, index);
+            chosen_candidates.insert(group, index);
             let mut next = pending.clone();
             next.extend(candidate.children.iter().rev());
-            let finished = walk(memo, next, choice, limit, choices);
-            choice.remove(&group);
+            let finished = walk(memo, next, chosen_candidates, limit, all_chosen_candidates);
+            chosen_candidates.remove(&group);
             if !finished {
                 return false;
             }
@@ -111,42 +111,51 @@ pub fn enumerate(memo: &CandidateMemo, limit: usize) -> MemoEnumeration {
         true
     }
     let roots = root_groups(memo).rev().collect();
-    let mut choices = Vec::new();
-    let complete = walk(memo, roots, &mut MemoChoice::new(), limit, &mut choices);
-    MemoEnumeration { choices, complete }
+    let mut all_chosen_candidates = Vec::new();
+    let complete = walk(
+        memo,
+        roots,
+        &mut ChosenCandidatePerMemoGroup::new(),
+        limit,
+        &mut all_chosen_candidates,
+    );
+    AllChosenCandidatesPerMemoGroup {
+        all_chosen_candidates,
+        complete,
+    }
 }
 
-/// Each root group (one with a query's root) and its DAG under `choice`:
+/// Each root group (one with a query's root) and its DAG under `chosen_candidates`:
 /// each needed group implemented by its chosen candidate over its children's
 /// composed DAGs, a group read several times composed once and shared. Every
 /// node is then rebuilt with its derived schema and composed guarantee, as
 /// in plan reconstruction. A scalar query's expression is not rebuilt: its
 /// operator roots are root groups like any other query's.
-pub fn compose(
+pub fn build_logical_asap_dags_from_chosen_candidates(
     memo: &CandidateMemo,
-    choice: &MemoChoice,
-) -> Result<Vec<(MemoGroupId, Rc<OperatorNode>)>, ComposeError> {
+    chosen_candidates: &ChosenCandidatePerMemoGroup,
+) -> Result<Vec<(MemoGroupId, Rc<OperatorNode>)>, ErrorBuildingLogicalAsapDagsFromChosenCandidates>
+{
     fn composed(
         memo: &CandidateMemo,
         group: MemoGroupId,
-        choice: &MemoChoice,
+        chosen_candidates: &ChosenCandidatePerMemoGroup,
         done: &mut HashMap<MemoGroupId, Rc<OperatorNode>>,
         composing: &mut HashSet<MemoGroupId>,
-    ) -> Result<Rc<OperatorNode>, ComposeError> {
+    ) -> Result<Rc<OperatorNode>, ErrorBuildingLogicalAsapDagsFromChosenCandidates> {
         if let Some(found) = done.get(&group) {
             return Ok(Rc::clone(found));
         }
         if !composing.insert(group) {
-            return Err(ComposeError::Cycle { group });
+            return Err(ErrorBuildingLogicalAsapDagsFromChosenCandidates::Cycle { group });
         }
-        let index = choice.get(&group).copied().unwrap_or(0);
-        let candidate =
-            memo.candidates[group.0 as usize]
-                .get(index)
-                .ok_or(ComposeError::NoSuchCandidate {
-                    group,
-                    candidate: index,
-                })?;
+        let index = chosen_candidates.get(&group).copied().unwrap_or(0);
+        let candidate = memo.candidates[group.0 as usize].get(index).ok_or(
+            ErrorBuildingLogicalAsapDagsFromChosenCandidates::NoSuchCandidate {
+                group,
+                candidate: index,
+            },
+        )?;
         let own_nodes: HashSet<_> = OperatorNode::reachable(&candidate.node)
             .iter()
             .map(Rc::as_ptr)
@@ -155,15 +164,17 @@ pub fn compose(
         for &child in &candidate.children {
             let old = &memo.groups[child.0 as usize].node;
             if !own_nodes.contains(&Rc::as_ptr(old)) {
-                return Err(ComposeError::ChildNotInCandidate {
-                    group,
-                    candidate: index,
-                    child,
-                });
+                return Err(
+                    ErrorBuildingLogicalAsapDagsFromChosenCandidates::ChildNotInCandidate {
+                        group,
+                        candidate: index,
+                        child,
+                    },
+                );
             }
             replacements.insert(
                 Rc::as_ptr(old),
-                composed(memo, child, choice, done, composing)?,
+                composed(memo, child, chosen_candidates, done, composing)?,
             );
         }
         let node = replace(&candidate.node, &replacements);
@@ -176,10 +187,16 @@ pub fn compose(
         .map(|group| {
             Ok((
                 group,
-                QueryRoot::Operator(composed(memo, group, choice, &mut done, &mut composing)?),
+                QueryRoot::Operator(composed(
+                    memo,
+                    group,
+                    chosen_candidates,
+                    &mut done,
+                    &mut composing,
+                )?),
             ))
         })
-        .collect::<Result<Vec<_>, ComposeError>>()?
+        .collect::<Result<Vec<_>, ErrorBuildingLogicalAsapDagsFromChosenCandidates>>()?
         .into_iter()
         .unzip();
     let roots = recompose_guarantees(&roots)?;
@@ -193,8 +210,13 @@ pub fn compose(
         .collect())
 }
 
-/// Whether `from` is `to` or reads it through the candidates `choice` names.
-fn reaches(memo: &CandidateMemo, choice: &MemoChoice, from: MemoGroupId, to: MemoGroupId) -> bool {
+/// Whether `from` is `to` or reads it through the candidates `chosen_candidates` names.
+fn reaches(
+    memo: &CandidateMemo,
+    chosen_candidates: &ChosenCandidatePerMemoGroup,
+    from: MemoGroupId,
+    to: MemoGroupId,
+) -> bool {
     let mut pending = vec![from];
     let mut seen = HashSet::new();
     while let Some(group) = pending.pop() {
@@ -204,7 +226,7 @@ fn reaches(memo: &CandidateMemo, choice: &MemoChoice, from: MemoGroupId, to: Mem
         if !seen.insert(group) {
             continue;
         }
-        if let Some(&index) = choice.get(&group) {
+        if let Some(&index) = chosen_candidates.get(&group) {
             pending.extend(&memo.candidates[group.0 as usize][index].children);
         }
     }

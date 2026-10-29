@@ -3,7 +3,7 @@ use super::reuse::{
     append_producer, append_reader, combined_inputs, eligible, replace, restore_inputs,
 };
 use crate::pass2::asap_aware_cse::{rollup_candidate_for, rollup_pass2_candidates};
-use crate::pass2::memo::candidates::{CandidateMemo, CandidateOrigin};
+use crate::pass2::memo::candidates::{CandidateMemo, OriginOfCandidateForMemoGroup};
 use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::state_groups::{simple_build, StateGroupExpansionError};
 use asap_types::ir::schema::FieldDataType;
@@ -27,7 +27,8 @@ pub(in crate::pass2::memo) fn add_rollup_candidates(
             if eligible(candidate)
                 && matches!(
                     candidate.origin,
-                    CandidateOrigin::Pass1 | CandidateOrigin::WidenedScans
+                    OriginOfCandidateForMemoGroup::Pass1
+                        | OriginOfCandidateForMemoGroup::WidenedScans
                 )
             {
                 if let Some((build, _)) = simple_build(memo, candidate) {
@@ -99,14 +100,14 @@ pub(in crate::pass2::memo) fn add_rollup_candidates(
                     *coarse_group,
                     coarse,
                     coarse_node,
-                    CandidateOrigin::Rollup,
+                    OriginOfCandidateForMemoGroup::Rollup,
                 )?);
                 added += usize::from(append_reader(
                     memo,
                     *fine_group,
                     fine,
                     fine_node,
-                    CandidateOrigin::Rollup,
+                    OriginOfCandidateForMemoGroup::Rollup,
                 )?);
             } else {
                 let Some(value) =
@@ -154,7 +155,7 @@ pub(in crate::pass2::memo) fn add_rollup_candidates(
                         *coarse_group,
                         coarse,
                         coarse_node,
-                        CandidateOrigin::Rollup,
+                        OriginOfCandidateForMemoGroup::Rollup,
                     )?);
                     continue;
                 }
@@ -166,7 +167,7 @@ pub(in crate::pass2::memo) fn add_rollup_candidates(
                     memo,
                     Rc::clone(&value),
                     &queries,
-                    CandidateOrigin::Rollup,
+                    OriginOfCandidateForMemoGroup::Rollup,
                     1,
                 )?;
                 let canonical = Rc::clone(&memo.groups[producer.0 as usize].node);
@@ -179,7 +180,7 @@ pub(in crate::pass2::memo) fn add_rollup_candidates(
                     *coarse_group,
                     coarse,
                     coarse_node,
-                    CandidateOrigin::Rollup,
+                    OriginOfCandidateForMemoGroup::Rollup,
                 )?);
                 if let Some(own_value) = OperatorNode::reachable(&fine_node)
                     .into_iter()
@@ -212,7 +213,7 @@ pub(in crate::pass2::memo) fn add_rollup_candidates(
                         *fine_group,
                         fine,
                         fine_reader,
-                        CandidateOrigin::Rollup,
+                        OriginOfCandidateForMemoGroup::Rollup,
                     )?);
                 }
             }
@@ -235,10 +236,9 @@ pub(in crate::pass2::memo) fn add_window_rollup_candidates(
     let mut grids = vec![std::collections::BTreeSet::new(); memo.groups.len()];
     for (group, candidates) in memo.candidates.iter().enumerate() {
         check_generation_deadline(deadline)?;
-        for candidate in candidates
-            .iter()
-            .filter(|candidate| candidate.origin == CandidateOrigin::Panes && eligible(candidate))
-        {
+        for candidate in candidates.iter().filter(|candidate| {
+            candidate.origin == OriginOfCandidateForMemoGroup::Panes && eligible(candidate)
+        }) {
             if let Some((build, _)) = simple_build(memo, candidate) {
                 if let Some(ASAPOp::PaneChain { pane_width_ms, .. }) = build.asap() {
                     grids[group].insert(*pane_width_ms);
@@ -254,7 +254,7 @@ pub(in crate::pass2::memo) fn add_window_rollup_candidates(
             candidates
                 .iter()
                 .filter(|candidate| {
-                    eligible(candidate) && candidate.origin == CandidateOrigin::Pass1
+                    eligible(candidate) && candidate.origin == OriginOfCandidateForMemoGroup::Pass1
                 })
                 .map(move |candidate| (group, candidate.clone()))
         })
@@ -307,14 +307,14 @@ pub(in crate::pass2::memo) fn add_window_rollup_candidates(
                         *coarse_group,
                         coarse,
                         coarse_node,
-                        CandidateOrigin::Rollup,
+                        OriginOfCandidateForMemoGroup::Rollup,
                     )?);
                     added += usize::from(append_reader(
                         memo,
                         *fine_group,
                         fine,
                         fine_node,
-                        CandidateOrigin::Rollup,
+                        OriginOfCandidateForMemoGroup::Rollup,
                     )?);
                 }
             }
@@ -327,9 +327,9 @@ pub(in crate::pass2::memo) fn add_window_rollup_candidates(
 #[cfg(test)]
 mod tests {
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::candidates::{try_populate_pass1, CandidateOrigin};
+    use crate::pass2::memo::candidates::{try_populate_pass1, OriginOfCandidateForMemoGroup};
     use crate::pass2::memo::state_groups::expand_concrete_summary_state_groups;
-    use crate::pass2::memo::LogicalMemo;
+    use crate::pass2::memo::DagOfLogicalMemoGroups;
     use crate::test_support::lower_promql;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::QueryRoot;
@@ -350,7 +350,7 @@ mod tests {
                 )
             })
             .collect();
-        let initial = LogicalMemo::from_roots(&roots);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = generate_per_computation_candidates(roots).unwrap();
         let memo =
             expand_concrete_summary_state_groups(try_populate_pass1(initial, &inventory).unwrap())
@@ -365,7 +365,7 @@ mod tests {
         let (coarse, fine) = (root_of(0), root_of(1));
         assert!(
             memo.candidates[coarse].iter().any(|candidate| {
-                candidate.origin == CandidateOrigin::Rollup
+                candidate.origin == OriginOfCandidateForMemoGroup::Rollup
                     && candidate
                         .children
                         .iter()
@@ -376,7 +376,7 @@ mod tests {
         assert!(
             !memo.candidates[fine]
                 .iter()
-                .any(|candidate| candidate.origin == CandidateOrigin::Rollup),
+                .any(|candidate| candidate.origin == OriginOfCandidateForMemoGroup::Rollup),
             "the finer query needs no reader of a separate producer"
         );
     }

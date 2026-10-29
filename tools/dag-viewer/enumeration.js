@@ -17,8 +17,8 @@ function memoStepName(step) {
 const enumerationIsObject = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
 const enumerationIsCount = (value) => Number.isInteger(value) && value >= 0;
 
-// A `MemoChoice`: group id (a string of digits) → candidate index.
-function isMemoChoice(choice) {
+// A `ChosenCandidatePerMemoGroup`: group id (a string of digits) → candidate index.
+function isChosenCandidatePerMemoGroup(choice) {
   return enumerationIsObject(choice) && Object.entries(choice).every(([group, index]) => /^\d+$/.test(group) && enumerationIsCount(index));
 }
 
@@ -58,7 +58,7 @@ function validateMemoEnumeration(doc) {
   enumeration.choices.forEach((entry, index) => {
     if (!enumerationIsObject(entry)) return;
     const where = `${at}.choices[${index}]`;
-    if (!isMemoChoice(entry.choice)) errors.push(`${where}.choice must map group ids to candidate indices`);
+    if (!isChosenCandidatePerMemoGroup(entry.choice)) errors.push(`${where}.choice must map group ids to candidate indices`);
     // A choice that does not compose has no DAG but its error. Otherwise one
     // root per root group (which need not be one per query), each an index
     // into memo.nodes.
@@ -161,7 +161,7 @@ function enumerationView(doc) {
     ? `every group's candidate (no selected choice${memo.selected_choice_unavailable ? `: ${memo.selected_choice_unavailable}` : ''})`
     : sameStep ? 'groups whose candidate differs from the selected plan’s choice'
       : `groups whose candidate differs from the selected plan’s choice, which is over the ${memoStepName(lastStep)} memo: its group ids and candidate indices may not match ${name}'s, and “selected” is not meaningful`;
-  // `compose` writes one root per root group, in increasing group id: root k
+  // `build_logical_asap_dags_from_chosen_candidates` writes one root per root group, in increasing group id: root k
   // is the k-th group with `roots_of`, the query positions it answers. Null
   // when the enumerated step's memo is not in the document.
   const rootQueries = step && Array.isArray(step.groups)

@@ -255,12 +255,14 @@ fn current_series_topk() -> Rc<OperatorNode> {
 /// Time `root` under the default materialization assignment, which runs the
 /// data-state and population-contract validation, and export it.
 fn compile_physical_asap_dag(root: &Rc<OperatorNode>) -> Result<(), String> {
-    use asap_types::ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo};
+    use asap_types::ir::{
+        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
+    };
     root.validate_structure().map_err(|e| e.to_string())?;
     let timed = apply_materialization_timings(
         root,
         &MaterializationAssignment::default(),
-        &mut TimingMemo::new(),
+        &mut NodeToTimedNodeCache::new(),
     )
     .map_err(|e| format!("{e:?}"))?;
     asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
@@ -334,7 +336,9 @@ fn a_current_series_population_matches_only_its_selectors_lookback() {
 fn population_timing_follows_its_materialization() {
     use asap_types::ir::physical_export::compile_physical_asap_dag as export_timed;
     use asap_types::ir::properties::ExecutionTiming::{IngestionTime, QueryTime};
-    use asap_types::ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo};
+    use asap_types::ir::{
+        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
+    };
     use asap_types::physical::{Materialization, Medium};
     let candidate = current_series_topk();
     let Some(ASAPOp::EvaluatePopulation {
@@ -354,8 +358,12 @@ fn population_timing_follows_its_materialization() {
         ),
         (at_ingestion, IngestionTime, on_disk),
     ] {
-        let timed =
-            apply_materialization_timings(&candidate, &assignment, &mut TimingMemo::new()).unwrap();
+        let timed = apply_materialization_timings(
+            &candidate,
+            &assignment,
+            &mut NodeToTimedNodeCache::new(),
+        )
+        .unwrap();
         let dag = export_timed(&timed).unwrap();
         let [population, evaluation] = &dag.nodes[dag.nodes.len() - 2..] else {
             unreachable!()

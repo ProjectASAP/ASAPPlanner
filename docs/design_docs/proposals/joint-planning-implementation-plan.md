@@ -12,7 +12,7 @@ Preserve supported accuracy semantics, physical eligibility, cost objectives, sc
 
 | Scope | Current implementation | Responsibility |
 | --- | --- | --- |
-| Logical identity | `logical-asap-optimization/src/pass2/memo.rs` | `LogicalMemo`, `MemoGroup`, stable initial query/group references. |
+| Logical identity | `logical-asap-optimization/src/pass2/memo.rs` | `DagOfLogicalMemoGroups`, `MemoGroup`, stable initial query/group references. |
 | Computation and sharing rules | `logical-asap-optimization/src/pass2/memo/{candidates,rules,state_groups,shared_configurations,window_candidates}` | Populate groups, retain local candidates, expose shared states and compatible rewrites. |
 | Physical legality | `physical-asap-optimization` | Executable operators, timing, materialization eligibility, and `PhysicalWorkloadPlan`. |
 | Candidate dependency inventory | `plan-selection/src/search/candidates` | Local `PhysicalCandidate`, `ProducerRequirement`, compatible suppliers, execution scopes, selected connections, and reconstruction. |

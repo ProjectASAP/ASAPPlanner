@@ -10,7 +10,7 @@
 //! Pass 1 does not consider sharing across computations; that is Pass 2.
 //!
 //! - A candidate says how a target is computed: exact or a summary
-//!   ([`ComputationCandidate`]). Each target has exactly one exact option:
+//!   ([`HowToComputeAggregateMeasure`]). Each target has exactly one exact option:
 //!   its exact accumulator states (`ExactAccumulator`; `[Sum, Count]` for
 //!   `avg`) when they can be built, otherwise plain `Exact`. Whether they are
 //!   materialized is decided in Stage 2.
@@ -140,7 +140,7 @@ use crate::pass1::realization::{
 /// computed is the target's ([`ComputationTarget`]) or its fused
 /// computation's ([`FusedComputation`]).
 #[derive(Debug, Clone, PartialEq)]
-pub enum ComputationCandidate {
+pub enum HowToComputeAggregateMeasure {
     /// Plain exact execution of the original sub-DAG; the exact option only
     /// when the intent has no exact accumulator form or that form is pruned.
     Exact,
@@ -199,28 +199,33 @@ pub enum PruneReason {
 /// Unranked candidates of one measure and the candidates pruned for it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputationChoices {
-    pub candidates: Vec<ComputationCandidate>,
-    pub pruned: Vec<(ComputationCandidate, PruneReason)>,
+    pub candidates: Vec<HowToComputeAggregateMeasure>,
+    pub pruned: Vec<(HowToComputeAggregateMeasure, PruneReason)>,
 }
 
 impl ComputationChoices {
     /// Prune matching candidates; a pruned exact accumulator form is replaced by
     /// plain `Exact`, so the target keeps one exact option.
-    fn prune(&mut self, reason: PruneReason, applies: impl Fn(&ComputationCandidate) -> bool) {
+    fn prune(
+        &mut self,
+        reason: PruneReason,
+        applies: impl Fn(&HowToComputeAggregateMeasure) -> bool,
+    ) {
         let (pruned, kept): (Vec<_>, _) = std::mem::take(&mut self.candidates)
             .into_iter()
-            .partition(|choice| *choice != ComputationCandidate::Exact && applies(choice));
+            .partition(|choice| *choice != HowToComputeAggregateMeasure::Exact && applies(choice));
         self.candidates = kept;
         if pruned
             .iter()
-            .any(|choice| matches!(choice, ComputationCandidate::ExactAccumulator(_)))
+            .any(|choice| matches!(choice, HowToComputeAggregateMeasure::ExactAccumulator(_)))
         {
-            self.candidates.insert(0, ComputationCandidate::Exact);
+            self.candidates
+                .insert(0, HowToComputeAggregateMeasure::Exact);
         }
         self.pruned.extend(
             pruned
                 .into_iter()
-                .map(|choice: ComputationCandidate| (choice, reason)),
+                .map(|choice: HowToComputeAggregateMeasure| (choice, reason)),
         );
     }
 }
@@ -300,11 +305,11 @@ pub struct FusedComputation {
     /// How the fused computation is computed: exact or a summary. Empty
     /// when Pass 1 pruned every one ([`Self::pruned`]); the fusion is then
     /// not offered.
-    pub candidates: Vec<ComputationCandidate>,
+    pub candidates: Vec<HowToComputeAggregateMeasure>,
     /// The candidates Pass 1 pruned from the fused computation, with their
     /// reasons (today only [`PruneReason::UnsupportedByDeployment`]); empty
     /// by default.
-    pub pruned: Vec<(ComputationCandidate, PruneReason)>,
+    pub pruned: Vec<(HowToComputeAggregateMeasure, PruneReason)>,
 }
 
 impl ComputationTarget {
@@ -325,7 +330,7 @@ impl ComputationTarget {
     pub fn computation_for(
         &self,
         index: usize,
-    ) -> Option<(&ComputationCandidate, Option<&[usize]>)> {
+    ) -> Option<(&HowToComputeAggregateMeasure, Option<&[usize]>)> {
         let own = self.choices.candidates.len();
         match self.choices.candidates.get(index) {
             Some(candidate) => Some((candidate, None)),
@@ -421,8 +426,8 @@ impl<Id> PerComputationCandidates<Id> {
             else {
                 continue;
             };
-            let unsupported = |candidate: &ComputationCandidate| {
-                matches!(candidate, ComputationCandidate::Summary(family)
+            let unsupported = |candidate: &HowToComputeAggregateMeasure| {
+                matches!(candidate, HowToComputeAggregateMeasure::Summary(family)
                     if !deployment.supports(family, readout))
             };
             target
@@ -510,9 +515,9 @@ pub fn computation_candidates_for_intent(
         _ => vec![],
     };
     let exact = if states.is_empty() {
-        ComputationCandidate::Exact
+        HowToComputeAggregateMeasure::Exact
     } else {
-        ComputationCandidate::ExactAccumulator(states)
+        HowToComputeAggregateMeasure::ExactAccumulator(states)
     };
     let mut choices = ComputationChoices {
         candidates: vec![exact],
@@ -533,21 +538,21 @@ pub fn computation_candidates_for_intent(
         if matches!(intent, AggIntent::Quantile { q, .. } if !(0.0..=1.0).contains(q)) {
             choices.pruned.extend(summaries.map(|algorithm| {
                 (
-                    ComputationCandidate::Summary(algorithm),
+                    HowToComputeAggregateMeasure::Summary(algorithm),
                     PruneReason::QuantileOutsideUnitInterval,
                 )
             }));
         } else if target.is_exact() {
             choices.pruned.extend(summaries.map(|algorithm| {
                 (
-                    ComputationCandidate::Summary(algorithm),
+                    HowToComputeAggregateMeasure::Summary(algorithm),
                     PruneReason::RequiresExact,
                 )
             }));
         } else {
             choices
                 .candidates
-                .extend(summaries.map(ComputationCandidate::Summary));
+                .extend(summaries.map(HowToComputeAggregateMeasure::Summary));
         }
     }
     Ok(choices)
@@ -602,7 +607,7 @@ fn placement(below: bool) -> HavingPlacement {
 pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
 ) -> Result<PerComputationCandidates<Id>, PerComputationCandidateError> {
-    generate_with_local_candidate_cache(roots, None, &mut HashMap::new())
+    generate_with_computation_choices_cache(roots, None, &mut HashMap::new())
 }
 
 /// Expand consumer-independent local rules once per logical group and measure.
@@ -610,20 +615,21 @@ pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
 /// occurrence-specific. Cached choices are cloned before any contextual pruning.
 pub fn generate_per_computation_candidates_with_memo<Id: std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
-    memo: &crate::pass2::memo::LogicalMemo,
+    memo: &crate::pass2::memo::DagOfLogicalMemoGroups,
 ) -> Result<PerComputationCandidates<Id>, PerComputationCandidateError> {
     if !memo.matches_root_dependencies(&roots) {
         return Err(PerComputationCandidateError::MemoRootsChanged);
     }
-    generate_with_local_candidate_cache(roots, Some(memo), &mut HashMap::new())
+    generate_with_computation_choices_cache(roots, Some(memo), &mut HashMap::new())
 }
 
-type LocalCandidateCache = HashMap<(crate::pass2::memo::MemoGroupId, usize), ComputationChoices>;
+type MemoGroupMeasureToComputationChoicesCache =
+    HashMap<(crate::pass2::memo::MemoGroupId, usize), ComputationChoices>;
 
-fn generate_with_local_candidate_cache<Id: std::fmt::Debug>(
+fn generate_with_computation_choices_cache<Id: std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
-    memo: Option<&crate::pass2::memo::LogicalMemo>,
-    local_candidates: &mut LocalCandidateCache,
+    memo: Option<&crate::pass2::memo::DagOfLogicalMemoGroups>,
+    computation_choices_cache: &mut MemoGroupMeasureToComputationChoicesCache,
 ) -> Result<PerComputationCandidates<Id>, PerComputationCandidateError> {
     let mut seen = HashSet::new();
     // Each aggregate with the first root that reaches it.
@@ -710,7 +716,7 @@ fn generate_with_local_candidate_cache<Id: std::fmt::Debug>(
                 .and_then(|memo| memo.group_for_node(&node))
                 .map(|group| (group, measure));
             let cached = group_measure
-                .and_then(|key| local_candidates.get(&key))
+                .and_then(|key| computation_choices_cache.get(&key))
                 .cloned();
             let mut choices = cached
                 .map_or_else(|| computation_candidates_for_intent(intent), Ok)
@@ -724,23 +730,25 @@ fn generate_with_local_candidate_cache<Id: std::fmt::Debug>(
                     error => error,
                 })?;
             if let Some(key) = group_measure {
-                local_candidates
+                computation_choices_cache
                     .entry(key)
                     .or_insert_with(|| choices.clone());
             }
-            if choices.candidates == [ComputationCandidate::Exact] && choices.pruned.is_empty() {
+            if choices.candidates == [HowToComputeAggregateMeasure::Exact]
+                && choices.pruned.is_empty()
+            {
                 continue;
             }
             if matches!(intent, AggIntent::Avg { .. }) && nullable_avg_input(&node, intent) {
                 choices.prune(PruneReason::NullableAvgInput, |choice| {
-                    matches!(choice, ComputationCandidate::ExactAccumulator(_))
+                    matches!(choice, HowToComputeAggregateMeasure::ExactAccumulator(_))
                 });
             }
             if matches!(intent, AggIntent::Count { .. })
                 && node.children()[0].result_kind == OperatorResultKind::Relation
             {
                 choices.prune(PruneReason::NoRelationalCountSketchRealization, |choice| {
-                    matches!(choice, ComputationCandidate::Summary(_))
+                    matches!(choice, HowToComputeAggregateMeasure::Summary(_))
                 });
             }
             targets.push(ComputationTarget {
@@ -840,7 +848,7 @@ fn add_nested_sum_targets(
             continue;
         }
         absorbed.insert(inner);
-        let merge = ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum]);
+        let merge = HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum]);
         targets[t].fused = Some(FusedComputation {
             absorbs: vec![inner],
             candidates: vec![merge],
@@ -984,7 +992,7 @@ fn add_whole_expression_targets(
             .iter()
             .cloned()
             .partition(|candidate| {
-                matches!(candidate, ComputationCandidate::Summary(family)
+                matches!(candidate, HowToComputeAggregateMeasure::Summary(family)
                     if family.capability().answers(StatisticKind::TopK))
             });
         if heaps.is_empty() {
@@ -1022,7 +1030,7 @@ fn prune_topk_heaps_over_one_row_per_item(targets: &mut [ComputationTarget]) {
         target
             .choices
             .prune(PruneReason::TopKHeapOverOneRowPerItem, |candidate| {
-                matches!(candidate, ComputationCandidate::Summary(family)
+                matches!(candidate, HowToComputeAggregateMeasure::Summary(family)
                     if family.capability().answers(StatisticKind::TopK))
             });
     }
@@ -1387,12 +1395,12 @@ pub fn bind_guarantees(
     fn walk(
         node: &Rc<OperatorNode>,
         bind: &dyn Fn(&AccuracyGuarantee) -> AccuracyGuarantee,
-        memo: &mut Memo,
+        cache: &mut NodeToRewrittenNodeCache,
     ) -> Rc<OperatorNode> {
-        if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+        if let Some(done) = cache.get(&Rc::as_ptr(node)) {
             return done.clone();
         }
-        let operator = node.operator.map_children(|child| walk(child, bind, memo));
+        let operator = node.operator.map_children(|child| walk(child, bind, cache));
         let mut rebuilt = OperatorNode::with_schema(operator, node.schema.clone())
             .with_timing(node.timing)
             .with_materialization(node.materialization);
@@ -1402,14 +1410,14 @@ pub fn bind_guarantees(
             .map(bind)
             .or_else(|| composed_guarantee(&rebuilt).as_ref().map(bind));
         let rebuilt = Rc::new(rebuilt);
-        memo.insert(Rc::as_ptr(node), rebuilt.clone());
+        cache.insert(Rc::as_ptr(node), rebuilt.clone());
         rebuilt
     }
-    let mut memo = HashMap::new();
+    let mut cache = HashMap::new();
     let bound = match root {
-        QueryRoot::Operator(node) => QueryRoot::Operator(walk(node, bind, &mut memo)),
+        QueryRoot::Operator(node) => QueryRoot::Operator(walk(node, bind, &mut cache)),
         QueryRoot::Scalar(expr) => {
-            QueryRoot::Scalar(expr.map_operator_refs(&mut |node| walk(node, bind, &mut memo)))
+            QueryRoot::Scalar(expr.map_operator_refs(&mut |node| walk(node, bind, &mut cache)))
         }
     };
     root_guarantee(&bound)
@@ -1428,18 +1436,18 @@ pub fn with_resized_summaries(
     fn walk(
         node: &Rc<OperatorNode>,
         resize: &dyn Fn(&OperatorNode, &SketchParams) -> Option<SketchParams>,
-        memo: &mut Memo,
+        cache: &mut NodeToRewrittenNodeCache,
     ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
-        if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+        if let Some(done) = cache.get(&Rc::as_ptr(node)) {
             return Ok(done.clone());
         }
         for child in node.children() {
-            walk(child, resize, memo)?;
+            walk(child, resize, cache)?;
         }
         let mut changed = node
             .children()
             .iter()
-            .any(|child| !Rc::ptr_eq(child, &memo[&Rc::as_ptr(child)]));
+            .any(|child| !Rc::ptr_eq(child, &cache[&Rc::as_ptr(child)]));
         let mut operator = node.operator.clone();
         if let Operator::ASAP(
             ASAPOp::SummaryAgg {
@@ -1463,7 +1471,7 @@ pub fn with_resized_summaries(
                 ..(**node).clone()
             };
             let mut rebuilt =
-                template.with_new_children(|child| memo[&Rc::as_ptr(child)].clone())?;
+                template.with_new_children(|child| cache[&Rc::as_ptr(child)].clone())?;
             rebuilt.guarantee = node
                 .guarantee
                 .as_ref()
@@ -1476,19 +1484,19 @@ pub fn with_resized_summaries(
         } else {
             node.clone()
         };
-        memo.insert(Rc::as_ptr(node), rebuilt.clone());
+        cache.insert(Rc::as_ptr(node), rebuilt.clone());
         Ok(rebuilt)
     }
-    let mut memo = HashMap::new();
+    let mut cache = HashMap::new();
     roots
         .iter()
         .map(|root| {
             Ok(match root {
-                QueryRoot::Operator(node) => QueryRoot::Operator(walk(node, resize, &mut memo)?),
+                QueryRoot::Operator(node) => QueryRoot::Operator(walk(node, resize, &mut cache)?),
                 QueryRoot::Scalar(expr) => {
                     let mut rebuilt = HashMap::new();
                     for node in expr.operator_refs() {
-                        rebuilt.insert(Rc::as_ptr(node), walk(node, resize, &mut memo)?);
+                        rebuilt.insert(Rc::as_ptr(node), walk(node, resize, &mut cache)?);
                     }
                     QueryRoot::Scalar(
                         expr.map_operator_refs(&mut |node| rebuilt[&Rc::as_ptr(node)].clone()),
@@ -1520,9 +1528,9 @@ fn compose_roots<Id: Clone>(
     pushed_below: &HashSet<*const OperatorNode>,
     sizing: &Sizing,
 ) -> Result<Vec<(Id, QueryRoot)>, PerComputationCandidateError> {
-    let (mut memo, mut guaranteed) = (HashMap::new(), HashMap::new());
+    let (mut cache, mut guaranteed) = (HashMap::new(), HashMap::new());
     let mut rewrite = |node: &Rc<OperatorNode>| {
-        let node = rewrite(node, chosen, pushed_below, sizing, &mut memo)?;
+        let node = rewrite(node, chosen, pushed_below, sizing, &mut cache)?;
         with_guarantees(&node, &mut guaranteed)
     };
     let roots = inventory
@@ -1561,7 +1569,7 @@ struct ChosenComputation<'a> {
     /// The target whose measure it computes.
     target: &'a ComputationTarget,
     /// How it is computed.
-    candidate: &'a ComputationCandidate,
+    candidate: &'a HowToComputeAggregateMeasure,
     /// Whether the candidate is the target's fused computation's, which
     /// absorbs the targets beneath; `false` for one of its own candidates.
     fused: bool,
@@ -1569,14 +1577,14 @@ struct ChosenComputation<'a> {
 
 /// Each aggregate's targets with their chosen computations.
 type Chosen<'a> = HashMap<*const OperatorNode, Vec<ChosenComputation<'a>>>;
-type Memo = HashMap<*const OperatorNode, Rc<OperatorNode>>;
+type NodeToRewrittenNodeCache = HashMap<*const OperatorNode, Rc<OperatorNode>>;
 
 /// Whether any measure of the aggregate is substituted by something other than
 /// its plain exact computation.
 fn substituted(targets: &[ChosenComputation<'_>]) -> bool {
     targets
         .iter()
-        .any(|chosen| *chosen.candidate != ComputationCandidate::Exact)
+        .any(|chosen| *chosen.candidate != HowToComputeAggregateMeasure::Exact)
 }
 
 fn rewrite(
@@ -1584,27 +1592,27 @@ fn rewrite(
     chosen: &Chosen<'_>,
     pushed_below: &HashSet<*const OperatorNode>,
     sizing: &Sizing,
-    memo: &mut Memo,
+    cache: &mut NodeToRewrittenNodeCache,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
-    if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+    if let Some(done) = cache.get(&Rc::as_ptr(node)) {
         return Ok(done.clone());
     }
     for child in node.children() {
-        rewrite(child, chosen, pushed_below, sizing, memo)?;
+        rewrite(child, chosen, pushed_below, sizing, cache)?;
     }
     let changed = node
         .children()
         .iter()
-        .any(|child| !Rc::ptr_eq(child, &memo[&Rc::as_ptr(child)]));
+        .any(|child| !Rc::ptr_eq(child, &cache[&Rc::as_ptr(child)]));
     let rebuilt = match (chosen.get(&Rc::as_ptr(node)), node.non_asap()) {
-        (Some(targets), _) if substituted(targets) => substitute(node, targets, sizing, memo)?,
+        (Some(targets), _) if substituted(targets) => substitute(node, targets, sizing, cache)?,
         (_, Some(NonASAPOp::Filter { child, .. })) if pushed_below.contains(&Rc::as_ptr(node)) => {
-            memo[&Rc::as_ptr(child)].clone()
+            cache[&Rc::as_ptr(child)].clone()
         }
-        _ if changed => Rc::new(node.with_new_children(|child| memo[&Rc::as_ptr(child)].clone())?),
+        _ if changed => Rc::new(node.with_new_children(|child| cache[&Rc::as_ptr(child)].clone())?),
         _ => node.clone(),
     };
-    memo.insert(Rc::as_ptr(node), rebuilt.clone());
+    cache.insert(Rc::as_ptr(node), rebuilt.clone());
     Ok(rebuilt)
 }
 
@@ -1615,18 +1623,20 @@ fn rewrite(
 pub fn recompose_guarantees(
     roots: &[QueryRoot],
 ) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
-    let mut memo = HashMap::new();
+    let mut cache = HashMap::new();
     roots
         .iter()
         .map(|root| {
             Ok(match root {
-                QueryRoot::Operator(node) => QueryRoot::Operator(with_guarantees(node, &mut memo)?),
+                QueryRoot::Operator(node) => {
+                    QueryRoot::Operator(with_guarantees(node, &mut cache)?)
+                }
                 QueryRoot::Scalar(expr) => {
                     for node in expr.operator_refs() {
-                        with_guarantees(node, &mut memo)?;
+                        with_guarantees(node, &mut cache)?;
                     }
                     QueryRoot::Scalar(
-                        expr.map_operator_refs(&mut |node| memo[&Rc::as_ptr(node)].clone()),
+                        expr.map_operator_refs(&mut |node| cache[&Rc::as_ptr(node)].clone()),
                     )
                 }
             })
@@ -1637,18 +1647,18 @@ pub fn recompose_guarantees(
 /// `node` and everything below it, each node with its [`composed_guarantee`].
 fn with_guarantees(
     node: &Rc<OperatorNode>,
-    memo: &mut Memo,
+    cache: &mut NodeToRewrittenNodeCache,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
-    if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+    if let Some(done) = cache.get(&Rc::as_ptr(node)) {
         return Ok(done.clone());
     }
     for child in node.children() {
-        with_guarantees(child, memo)?;
+        with_guarantees(child, cache)?;
     }
-    let mut rebuilt = node.with_new_children(|child| memo[&Rc::as_ptr(child)].clone())?;
+    let mut rebuilt = node.with_new_children(|child| cache[&Rc::as_ptr(child)].clone())?;
     rebuilt.guarantee = composed_guarantee(&rebuilt);
     let rebuilt = Rc::new(rebuilt);
-    memo.insert(Rc::as_ptr(node), rebuilt.clone());
+    cache.insert(Rc::as_ptr(node), rebuilt.clone());
     Ok(rebuilt)
 }
 
@@ -3033,7 +3043,7 @@ fn substitute(
     target: &Rc<OperatorNode>,
     targets: &[ChosenComputation<'_>],
     sizing: &Sizing,
-    memo: &Memo,
+    cache: &NodeToRewrittenNodeCache,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
     let Some(NonASAPOp::Aggregate {
         child,
@@ -3055,10 +3065,10 @@ fn substitute(
     let rewritten = |pred: &Predicate| {
         Predicate(
             pred.0
-                .map_operator_refs(&mut |node| memo[&Rc::as_ptr(node)].clone()),
+                .map_operator_refs(&mut |node| cache[&Rc::as_ptr(node)].clone()),
         )
     };
-    let mut input = memo[&Rc::as_ptr(child)].clone();
+    let mut input = cache[&Rc::as_ptr(child)].clone();
     for entry in having {
         if entry.placement == HavingPlacement::BelowAggregate {
             let keys = reduction.group_keys().map_or(&[][..], |by| by.keys());
@@ -3078,29 +3088,34 @@ fn substitute(
             let (candidate, raw_data_samples_of, fused) = targets
                 .iter()
                 .find(|chosen| chosen.target.measure == measure)
-                .map_or((&ComputationCandidate::Exact, None, false), |chosen| {
-                    (
-                        chosen.candidate,
-                        chosen.target.raw_data_samples_of.as_deref(),
-                        chosen.fused,
-                    )
-                });
+                .map_or(
+                    (&HowToComputeAggregateMeasure::Exact, None, false),
+                    |chosen| {
+                        (
+                            chosen.candidate,
+                            chosen.target.raw_data_samples_of.as_deref(),
+                            chosen.fused,
+                        )
+                    },
+                );
             let filter = filters.get(measure).and_then(Option::as_ref).map(rewritten);
             let key = (Rc::as_ptr(target), measure);
             if fused {
                 return match candidate {
-                    ComputationCandidate::ExactAccumulator(_) => nested_sum(target, memo),
-                    ComputationCandidate::Summary(algorithm) => whole_expression(
+                    HowToComputeAggregateMeasure::ExactAccumulator(_) => nested_sum(target, cache),
+                    HowToComputeAggregateMeasure::Summary(algorithm) => whole_expression(
                         target,
                         intent,
                         algorithm,
                         raw_data_samples_of,
                         (sizing, key),
-                        memo,
+                        cache,
                     ),
-                    ComputationCandidate::Exact => Err(PerComputationCandidateError::Unsupported(
-                        "plain exact execution of a fused computation",
-                    )),
+                    HowToComputeAggregateMeasure::Exact => {
+                        Err(PerComputationCandidateError::Unsupported(
+                            "plain exact execution of a fused computation",
+                        ))
+                    }
                 };
             }
             substitute_measure(
@@ -3200,13 +3215,13 @@ fn whole_expression(
     algorithm: &SketchAlgorithm,
     raw_data_samples_of: Option<&str>,
     (sizing, key): (&Sizing, MeasureKey),
-    memo: &Memo,
+    cache: &NodeToRewrittenNodeCache,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
     let (input, update, partitions) = whole_expression_input(target).ok_or(
         PerComputationCandidateError::Unsupported("whole-expression top-k input"),
     )?;
     let state = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
-        child: memo[&Rc::as_ptr(&input)].clone(),
+        child: cache[&Rc::as_ptr(&input)].clone(),
         input: with_raw_data_samples_requirement(update, raw_data_samples_of),
         family: FieldDataType::Sketch(
             sized(algorithm, intent, sizing.share(key)),
@@ -3280,7 +3295,7 @@ fn ranked_as_topk(
 /// `target`, finalized.
 fn nested_sum(
     target: &OperatorNode,
-    memo: &Memo,
+    cache: &NodeToRewrittenNodeCache,
 ) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
     let (rows, intent, reduction) = nested_sum_input(target).ok_or(
         PerComputationCandidateError::Unsupported("nested-sum merge input"),
@@ -3288,7 +3303,7 @@ fn nested_sum(
     let state = exact_accumulator(
         ExactKind::Sum,
         &intent,
-        &memo[&Rc::as_ptr(&rows)],
+        &cache[&Rc::as_ptr(&rows)],
         reduction,
     )?;
     Ok(OperatorNode::new_shared(Operator::ASAP(
@@ -3322,7 +3337,7 @@ pub(crate) fn exact_accumulator(
 fn substitute_measure(
     target: &OperatorNode,
     intent: &AggIntent,
-    candidate: &ComputationCandidate,
+    candidate: &HowToComputeAggregateMeasure,
     filter: Option<Predicate>,
     input: &Rc<OperatorNode>,
     raw_data_samples_of: Option<&str>,
@@ -3358,7 +3373,7 @@ fn substitute_measure(
         ))?)
     };
     Ok(match candidate {
-        ComputationCandidate::Exact => {
+        HowToComputeAggregateMeasure::Exact => {
             OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Aggregate {
                 child: input.clone(),
                 reduction: reduction.clone(),
@@ -3370,11 +3385,11 @@ fn substitute_measure(
                 having: None,
             }))?
         }
-        ComputationCandidate::ExactAccumulator(kinds) if kinds.len() == 1 => {
+        HowToComputeAggregateMeasure::ExactAccumulator(kinds) if kinds.len() == 1 => {
             let read = measure_input(intent, input, filter.as_ref())?;
             finalized(&kinds[0], intent, read)?
         }
-        ComputationCandidate::Summary(algorithm) => {
+        HowToComputeAggregateMeasure::Summary(algorithm) => {
             let family = FieldDataType::Sketch(
                 sized(algorithm, intent, sizing.share(key)),
                 GroupingStrategy::default(),
@@ -3396,7 +3411,7 @@ fn substitute_measure(
                 _ => estimate,
             }
         }
-        ComputationCandidate::ExactAccumulator(kinds) => {
+        HowToComputeAggregateMeasure::ExactAccumulator(kinds) => {
             let (AggIntent::Avg { col }, [ExactKind::Sum, ExactKind::Count]) =
                 (intent, kinds.as_slice())
             else {
@@ -3918,12 +3933,14 @@ mod tests {
         })
         .unwrap()
         .candidates;
-        assert!(!choices.contains(&ComputationCandidate::Exact));
+        assert!(!choices.contains(&HowToComputeAggregateMeasure::Exact));
         assert_eq!(
             choices[0],
-            ComputationCandidate::ExactAccumulator(vec![ExactKind::Count])
+            HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Count])
         );
-        assert!(choices.contains(&ComputationCandidate::Summary(SketchAlgorithm::UnivMon)));
+        assert!(choices.contains(&HowToComputeAggregateMeasure::Summary(
+            SketchAlgorithm::UnivMon
+        )));
     }
 
     /// Count Sketch's signed counters give no total, so Pass 1 offers no
@@ -3936,13 +3953,15 @@ mod tests {
         })
         .unwrap()
         .candidates;
-        assert!(!choices.contains(&ComputationCandidate::Summary(SketchAlgorithm::CountSketch)));
+        assert!(!choices.contains(&HowToComputeAggregateMeasure::Summary(
+            SketchAlgorithm::CountSketch
+        )));
         let total = sketch_statistic(&AggIntent::Count {
             accuracy: AccuracyTarget::exact(),
         })
         .unwrap();
         for choice in &choices {
-            if let ComputationCandidate::Summary(algorithm) = choice {
+            if let HowToComputeAggregateMeasure::Summary(algorithm) = choice {
                 assert!(
                     asap_types::ir::schema::FamilyCapability::of_per_instance_sketch(algorithm)
                         .answers(&total),
@@ -4623,10 +4642,11 @@ mod tests {
                 (id, inventory.roots[0].1.clone())
             })
             .collect();
-        let memo = crate::pass2::memo::LogicalMemo::from_roots(&roots);
+        let memo = crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots);
         let baseline = generate_per_computation_candidates(roots.clone()).unwrap();
-        let mut cache = LocalCandidateCache::new();
-        let cached = generate_with_local_candidate_cache(roots, Some(&memo), &mut cache).unwrap();
+        let mut cache = MemoGroupMeasureToComputationChoicesCache::new();
+        let cached =
+            generate_with_computation_choices_cache(roots, Some(&memo), &mut cache).unwrap();
         assert!(
             cache.len() < cached.targets.len(),
             "repeated eligible groups reuse local rules"
@@ -4666,7 +4686,7 @@ mod tests {
     fn composed_with(
         inventory: &PerComputationCandidates<usize>,
         t: usize,
-    ) -> Vec<(ComputationCandidate, Rc<OperatorNode>)> {
+    ) -> Vec<(HowToComputeAggregateMeasure, Rc<OperatorNode>)> {
         (0..inventory.targets[t].choice_count())
             .map(|c| {
                 let mut choice = vec![0; inventory.targets.len()];
@@ -4717,20 +4737,23 @@ mod tests {
         let inventory = inventory("topk by (job) (10, sum_over_time(m[1m]))");
         let topk = topk_target(&inventory);
         let target = &inventory.targets[topk];
-        assert_eq!(target.choices.candidates, [ComputationCandidate::Exact]);
+        assert_eq!(
+            target.choices.candidates,
+            [HowToComputeAggregateMeasure::Exact]
+        );
         let fused = target.fused.as_ref().expect("a fused computation");
         assert_eq!(
             fused.candidates,
             [
-                ComputationCandidate::Summary(SketchAlgorithm::CmsWithHeap),
-                ComputationCandidate::Summary(SketchAlgorithm::CountSketchWithHeap),
+                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CmsWithHeap),
+                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CountSketchWithHeap),
             ]
         );
         let inner = fused.absorbs[0];
         assert_eq!(inventory.targets[inner].choices.candidates.len(), 1);
         assert_eq!(inventory.combinations(), 3);
         for (candidate, root) in composed_with(&inventory, topk) {
-            if candidate == ComputationCandidate::Exact {
+            if candidate == HowToComputeAggregateMeasure::Exact {
                 continue;
             }
             assert!(
@@ -4772,7 +4795,7 @@ mod tests {
         for (candidate, root) in composed_with(&inventory, topk) {
             // The top-k's own candidate is exact; its summaries are the
             // fused computation's.
-            if !matches!(candidate, ComputationCandidate::Summary(_)) {
+            if !matches!(candidate, HowToComputeAggregateMeasure::Summary(_)) {
                 continue;
             }
             for state in heap_states(&root) {
@@ -4868,15 +4891,15 @@ mod tests {
             let target = &inventory.targets[topk];
             assert_eq!(
                 target.choices.candidates,
-                [ComputationCandidate::Exact],
+                [HowToComputeAggregateMeasure::Exact],
                 "{query}"
             );
             let fused = target.fused.as_ref().expect("a fused computation");
             assert_eq!(
                 fused.candidates,
                 [
-                    ComputationCandidate::Summary(SketchAlgorithm::CmsWithHeap),
-                    ComputationCandidate::Summary(SketchAlgorithm::CountSketchWithHeap),
+                    HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CmsWithHeap),
+                    HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CountSketchWithHeap),
                 ],
                 "{query}"
             );
@@ -4888,7 +4911,7 @@ mod tests {
             );
             let mut heaps = 0;
             for (candidate, root) in composed_with(&inventory, topk) {
-                if candidate == ComputationCandidate::Exact {
+                if candidate == HowToComputeAggregateMeasure::Exact {
                     continue;
                 }
                 assert!(
@@ -5007,17 +5030,15 @@ mod tests {
         let mut inventory = inventory("avg by (job) (m)");
         assert_eq!(
             inventory.targets[0].choices.candidates,
-            [ComputationCandidate::ExactAccumulator(vec![
+            [HowToComputeAggregateMeasure::ExactAccumulator(vec![
                 ExactKind::Sum,
                 ExactKind::Count
             ])]
         );
         assert!(compose_logical_candidate(&inventory, &[0]).is_ok());
-        inventory.targets[0].choices.candidates =
-            vec![ComputationCandidate::ExactAccumulator(vec![
-                ExactKind::Count,
-                ExactKind::Sum,
-            ])];
+        inventory.targets[0].choices.candidates = vec![
+            HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Count, ExactKind::Sum]),
+        ];
         assert!(matches!(
             compose_logical_candidate(&inventory, &[0]),
             Err(PerComputationCandidateError::Unsupported(_))
@@ -5026,7 +5047,7 @@ mod tests {
 
     /// The target whose fused computation is a nested-sum merge.
     fn nested_sum_target(inventory: &PerComputationCandidates<usize>) -> Option<usize> {
-        let merge = ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum]);
+        let merge = HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum]);
         inventory.targets.iter().position(|t| {
             t.fused
                 .as_ref()
@@ -5044,7 +5065,7 @@ mod tests {
         let inventory = inventory("sum by (job) (sum_over_time(m[5m]))");
         let outer = nested_sum_target(&inventory).expect("a nested-sum merge");
         let target = &inventory.targets[outer];
-        let sum = ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum]);
+        let sum = HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum]);
         assert_eq!(target.choices.candidates, std::slice::from_ref(&sum));
         let fused = target.fused.as_ref().expect("a fused computation");
         assert_eq!(fused.candidates, [sum]);
@@ -5404,7 +5425,7 @@ mod tests {
     /// candidates)` returns the position of.
     fn composed_picking(
         query: &str,
-        pick: impl Fn(usize, &[ComputationCandidate]) -> usize,
+        pick: impl Fn(usize, &[HowToComputeAggregateMeasure]) -> usize,
     ) -> Rc<OperatorNode> {
         let inventory = inventory(query);
         let choice: Vec<usize> = inventory
@@ -5420,7 +5441,10 @@ mod tests {
         root.clone()
     }
 
-    fn position_of(candidates: &[ComputationCandidate], candidate: ComputationCandidate) -> usize {
+    fn position_of(
+        candidates: &[HowToComputeAggregateMeasure],
+        candidate: HowToComputeAggregateMeasure,
+    ) -> usize {
         candidates
             .iter()
             .position(|c| *c == candidate)
@@ -5440,7 +5464,10 @@ mod tests {
     #[test]
     fn approximate_inputs_of_a_combination_share_the_budget_equally() {
         let both = composed_picking("count by (job) (a) - count by (job) (b)", |_, c| {
-            position_of(c, ComputationCandidate::Summary(SketchAlgorithm::Cms))
+            position_of(
+                c,
+                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Cms),
+            )
         });
         assert!(both.guarantee.as_ref().is_some_and(|g| !g.is_exact()));
         assert_eq!(sketch_params(&both), vec![cms(0.005, 0.0005); 2]);
@@ -5452,7 +5479,10 @@ mod tests {
     fn an_exact_input_takes_no_share_of_the_budget() {
         let one = composed_picking("count by (job) (a) - count by (job) (b)", |t, c| {
             if t == 0 {
-                position_of(c, ComputationCandidate::Summary(SketchAlgorithm::Cms))
+                position_of(
+                    c,
+                    HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Cms),
+                )
             } else {
                 0
             }
@@ -5632,14 +5662,14 @@ mod tests {
         assert_eq!(
             target.choices.candidates,
             [
-                ComputationCandidate::Exact,
-                ComputationCandidate::Summary(SketchAlgorithm::Kll)
+                HowToComputeAggregateMeasure::Exact,
+                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)
             ]
         );
         assert_eq!(
             target.choices.pruned,
             [(
-                ComputationCandidate::Summary(SketchAlgorithm::DDSketch),
+                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch),
                 PruneReason::UnsupportedByDeployment
             )]
         );
@@ -5666,14 +5696,14 @@ mod tests {
         assert_eq!(
             target.choices.candidates,
             [
-                ComputationCandidate::ExactAccumulator(vec![ExactKind::Count]),
-                ComputationCandidate::Summary(SketchAlgorithm::Cms),
+                HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Count]),
+                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Cms),
             ]
         );
         assert_eq!(
             target.choices.pruned,
             [(
-                ComputationCandidate::Summary(SketchAlgorithm::UnivMon),
+                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::UnivMon),
                 PruneReason::UnsupportedByDeployment
             )]
         );
@@ -5693,14 +5723,14 @@ mod tests {
         let topk = topk_target(&one_heap);
         assert_eq!(
             one_heap.targets[topk].fused.as_ref().unwrap().candidates,
-            [ComputationCandidate::Summary(
+            [HowToComputeAggregateMeasure::Summary(
                 SketchAlgorithm::CountSketchWithHeap
             )]
         );
         assert_eq!(
             one_heap.targets[topk].fused.as_ref().unwrap().pruned,
             [(
-                ComputationCandidate::Summary(SketchAlgorithm::CmsWithHeap),
+                HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CmsWithHeap),
                 PruneReason::UnsupportedByDeployment
             )]
         );
@@ -5717,18 +5747,18 @@ mod tests {
             fused.pruned,
             [
                 (
-                    ComputationCandidate::Summary(SketchAlgorithm::CmsWithHeap),
+                    HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CmsWithHeap),
                     PruneReason::UnsupportedByDeployment
                 ),
                 (
-                    ComputationCandidate::Summary(SketchAlgorithm::CountSketchWithHeap),
+                    HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CountSketchWithHeap),
                     PruneReason::UnsupportedByDeployment
                 ),
             ]
         );
         assert_eq!(
             none.targets[topk].choices.candidates,
-            [ComputationCandidate::Exact]
+            [HowToComputeAggregateMeasure::Exact]
         );
         assert_eq!(none.combinations(), 1);
     }
@@ -5739,7 +5769,7 @@ mod tests {
         use asap_types::ir::operator::agg_intent::{MathFunc, TimeFunc};
         use AggIntent as A;
         use ExactKind as E;
-        let accumulator = |kinds: Vec<E>| ComputationCandidate::ExactAccumulator(kinds);
+        let accumulator = |kinds: Vec<E>| HowToComputeAggregateMeasure::ExactAccumulator(kinds);
         let exact_count = A::Count {
             accuracy: AccuracyTarget::exact(),
         };
@@ -5772,7 +5802,7 @@ mod tests {
                     .iter()
                     .map(|a| {
                         (
-                            ComputationCandidate::Summary(*a),
+                            HowToComputeAggregateMeasure::Summary(*a),
                             PruneReason::RequiresExact,
                         )
                     })
@@ -5826,7 +5856,7 @@ mod tests {
             (
                 intent,
                 ComputationChoices {
-                    candidates: vec![ComputationCandidate::Exact],
+                    candidates: vec![HowToComputeAggregateMeasure::Exact],
                     pruned: vec![],
                 },
             )
@@ -5893,7 +5923,7 @@ mod tests {
         let (_, root) = composed_with(inventory, topk)
             .into_iter()
             .skip(own)
-            .find(|(candidate, _)| *candidate == ComputationCandidate::Summary(algorithm))
+            .find(|(candidate, _)| *candidate == HowToComputeAggregateMeasure::Summary(algorithm))
             .unwrap_or_else(|| panic!("a fused {algorithm:?} candidate"));
         let [state] = &heap_states(&root)[..] else {
             panic!("one heap: {root:#?}")
@@ -5929,7 +5959,9 @@ mod tests {
             .expect("a fused heap");
         assert!(fused
             .candidates
-            .contains(&ComputationCandidate::Summary(SketchAlgorithm::CmsWithHeap)));
+            .contains(&HowToComputeAggregateMeasure::Summary(
+                SketchAlgorithm::CmsWithHeap
+            )));
         let (estimate, state) = fused_heap(&inventory, SketchAlgorithm::CmsWithHeap);
         assert_eq!(estimate, SketchStatistic::TopK { k: 10 });
         let update = heap_update(&state);
@@ -6062,8 +6094,8 @@ mod tests {
     /// A KLL quantile over an exact sum accumulator composes per node, the sum adding no error.
     #[test]
     fn nested_quantile_over_an_exact_sum_composes_per_node() {
-        let sum = ComputationCandidate::ExactAccumulator(vec![ExactKind::Sum]);
-        let kll = ComputationCandidate::Summary(SketchAlgorithm::Kll);
+        let sum = HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum]);
+        let kll = HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll);
         let inventory = inventory_at(
             "quantile(0.9, sum by (job) (m))",
             AccuracyTarget::max_error(0.01).failure_probability(0.01),

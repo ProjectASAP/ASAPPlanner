@@ -9,8 +9,8 @@ use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::schema::{ExactKind, ExactParams, SummaryUpdate};
 use asap_types::ir::{
-    apply_materialization_timings, ASAPOp, MaterializationAssignment, NonASAPOp, Operator,
-    OperatorNode, QueryRoot, TimingMemo,
+    apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
+    NonASAPOp, Operator, OperatorNode, QueryRoot,
 };
 use asap_types::physical::{Materialization, Medium};
 use std::rc::Rc;
@@ -50,7 +50,7 @@ fn timed_at_ingestion() -> Rc<OperatorNode> {
     let root = plan();
     let mut assignment = MaterializationAssignment::default();
     assignment.set(root.children()[0], ON_DISK);
-    apply_materialization_timings(&root, &assignment, &mut TimingMemo::new()).unwrap()
+    apply_materialization_timings(&root, &assignment, &mut NodeToTimedNodeCache::new()).unwrap()
 }
 
 /// A summary materialized at ingestion time is read at query time, and the
@@ -137,10 +137,10 @@ fn batch_shares_the_summary_and_keeps_one_root_per_query() {
     }))
     .unwrap();
     let assignment = MaterializationAssignment::default();
-    let mut memo = TimingMemo::new();
+    let mut cache = NodeToTimedNodeCache::new();
     let timed: Vec<_> = [first, second]
         .iter()
-        .map(|root| apply_materialization_timings(root, &assignment, &mut memo).unwrap())
+        .map(|root| apply_materialization_timings(root, &assignment, &mut cache).unwrap())
         .collect();
     let roots: Vec<QueryRoot> = timed.into_iter().map(QueryRoot::Operator).collect();
     let dag = compile_physical_asap_workload(&roots).unwrap();
@@ -158,7 +158,7 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
     let timed = apply_materialization_timings(
         &plan(),
         &MaterializationAssignment::default(),
-        &mut TimingMemo::new(),
+        &mut NodeToTimedNodeCache::new(),
     )
     .unwrap();
     let scalar = ScalarExpr::Arithmetic {
@@ -279,7 +279,7 @@ fn a_reference_read_twice_is_one_scalar_ref_edge() {
     let timed = apply_materialization_timings(
         &project,
         &MaterializationAssignment::default(),
-        &mut TimingMemo::new(),
+        &mut NodeToTimedNodeCache::new(),
     )
     .unwrap();
     let dag = compile_physical_asap_dag(&timed).unwrap();
@@ -321,7 +321,7 @@ fn swapped_edge_roles_are_rejected() {
     let timed = apply_materialization_timings(
         &join,
         &MaterializationAssignment::default(),
-        &mut TimingMemo::new(),
+        &mut NodeToTimedNodeCache::new(),
     )
     .unwrap();
     let mut dag = compile_physical_asap_dag(&timed).unwrap();
@@ -390,14 +390,14 @@ fn exports_summary_over_summary_as_typed_precompute_edges() {
         child: outer,
     }))
     .unwrap();
-    let mut memo = TimingMemo::new();
+    let mut cache = NodeToTimedNodeCache::new();
     let at_ingestion =
         MaterializationAssignment::with_default(Materialization::MatAtIngestion(Medium::Memory));
-    let timed = apply_materialization_timings(&root, &at_ingestion, &mut memo).unwrap();
+    let timed = apply_materialization_timings(&root, &at_ingestion, &mut cache).unwrap();
     let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
     assert_eq!(compiled.node_ids.node_id(&timed), Some(3));
     assert_eq!(
-        compiled.node_ids.node_id(memo.timed(&inner).unwrap()),
+        compiled.node_ids.node_id(cache.timed(&inner).unwrap()),
         Some(1)
     );
     let dag = compiled.dag;
@@ -515,7 +515,7 @@ fn every_node_at_query_time_keeps_the_operators_and_stores_nothing() {
     let at_query_time = apply_materialization_timings(
         &plan(),
         &MaterializationAssignment::default(),
-        &mut TimingMemo::new(),
+        &mut NodeToTimedNodeCache::new(),
     )
     .unwrap();
     assert_eq!(
@@ -568,12 +568,12 @@ fn exported_with_scan(
     asap_types::ir::physical_export::PhysicalASAPDAG,
     asap_types::ir::physical_export::PhysicalASAPNodeId,
 ) {
-    // One timing memo, so the roots keep sharing their `Scan`.
-    let mut memo = TimingMemo::new();
+    // One timing cache, so the roots keep sharing their `Scan`.
+    let mut cache = NodeToTimedNodeCache::new();
     let timed: Vec<_> = roots
         .into_iter()
         .map(|root| {
-            apply_materialization_timings(&root, &MaterializationAssignment::default(), &mut memo)
+            apply_materialization_timings(&root, &MaterializationAssignment::default(), &mut cache)
                 .unwrap()
         })
         .map(QueryRoot::Operator)

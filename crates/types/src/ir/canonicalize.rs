@@ -52,7 +52,11 @@ use crate::ir::SchemaDerivationError;
 /// sub-DAG keeps its pointer identity, and a shared sub-DAG that is rewritten
 /// stays shared.
 pub fn canonicalize(root: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
-    canon(&root, &mut Memo::new(), &read_by_position(&root))
+    canon(
+        &root,
+        &mut NodeToCanonicalNodeCache::new(),
+        &read_by_position(&root),
+    )
 }
 
 /// The nodes under `root` some consumer reads by column position: every
@@ -89,14 +93,14 @@ fn read_by_position(root: &Rc<OperatorNode>) -> HashSet<*const OperatorNode> {
 /// Already-canonicalized nodes, by pointer. The recursion needs this table so
 /// a shared sub-DAG is rewritten once and stays shared; `canonicalize` hides
 /// it from callers.
-type Memo = HashMap<*const OperatorNode, Rc<OperatorNode>>;
+type NodeToCanonicalNodeCache = HashMap<*const OperatorNode, Rc<OperatorNode>>;
 
 fn canon(
     node: &Rc<OperatorNode>,
-    memo: &mut Memo,
+    cache: &mut NodeToCanonicalNodeCache,
     read_by_position: &HashSet<*const OperatorNode>,
 ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
-    if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+    if let Some(done) = cache.get(&Rc::as_ptr(node)) {
         return Ok(Rc::clone(done));
     }
 
@@ -121,7 +125,7 @@ fn canon(
     let mut rebuilt: Vec<(*const OperatorNode, Rc<OperatorNode>)> = Vec::new();
     let mut changed = false;
     for child in node.operator.children() {
-        let new = canon(child, memo, read_by_position)?;
+        let new = canon(child, cache, read_by_position)?;
         changed |= !Rc::ptr_eq(&new, child);
         rebuilt.push((Rc::as_ptr(child), new));
     }
@@ -157,9 +161,9 @@ fn canon(
     }
 
     let columns_may_change = !read_by_position.contains(&Rc::as_ptr(node));
-    let current = apply_local_rules(current, columns_may_change, memo, read_by_position)?;
+    let current = apply_local_rules(current, columns_may_change, cache, read_by_position)?;
 
-    memo.insert(Rc::as_ptr(node), Rc::clone(&current));
+    cache.insert(Rc::as_ptr(node), Rc::clone(&current));
     Ok(current)
 }
 
@@ -172,7 +176,7 @@ fn canon(
 fn apply_local_rules(
     mut current: Rc<OperatorNode>,
     columns_may_change: bool,
-    memo: &mut Memo,
+    cache: &mut NodeToCanonicalNodeCache,
     read_by_position: &HashSet<*const OperatorNode>,
 ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
     loop {
@@ -184,7 +188,7 @@ fn apply_local_rules(
             next
         } else if let Some(next) = promoted()? {
             next
-        } else if let Some(next) = try_lower_subquery_conjunct(&current, memo, read_by_position)? {
+        } else if let Some(next) = try_lower_subquery_conjunct(&current, cache, read_by_position)? {
             next
         } else {
             break;
@@ -507,7 +511,7 @@ fn is_join_conjunct(conjunct: &ScalarExpr) -> bool {
 /// conjunct per call; the fixpoint loop picks up the next.
 fn try_lower_subquery_conjunct(
     node: &OperatorNode,
-    memo: &mut Memo,
+    cache: &mut NodeToCanonicalNodeCache,
     read_by_position: &HashSet<*const OperatorNode>,
 ) -> Result<Option<Rc<OperatorNode>>, SchemaDerivationError> {
     let Some(NonASAPOp::Filter {
@@ -552,7 +556,7 @@ fn try_lower_subquery_conjunct(
         kind,
         pred: join_pred,
         left: Rc::clone(child),
-        right: canon(subquery, memo, read_by_position)?,
+        right: canon(subquery, cache, read_by_position)?,
     }))?;
     let mut rest: Vec<ScalarExpr> = conjuncts
         .iter()

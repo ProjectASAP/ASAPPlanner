@@ -73,11 +73,13 @@ pub fn promql_scalar(node: &ScalarExpr) -> Option<f64> {
 pub fn physical_asap_dag(
     root: &Rc<OperatorNode>,
 ) -> asap_types::ir::physical_export::PhysicalASAPDAG {
-    use asap_types::ir::{apply_materialization_timings, MaterializationAssignment, TimingMemo};
+    use asap_types::ir::{
+        apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
+    };
     let timed = apply_materialization_timings(
         root,
         &MaterializationAssignment::default(),
-        &mut TimingMemo::new(),
+        &mut NodeToTimedNodeCache::new(),
     )
     .expect("default materialization timings");
     asap_types::ir::physical_export::compile_physical_asap_dag(&timed)
