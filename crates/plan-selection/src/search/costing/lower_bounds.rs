@@ -1262,10 +1262,7 @@ mod tests {
                 ]})).unwrap();
             }
             let models = PlanningModels::builtin().with_plan_selection(&settings);
-            let calibration = CalibrationFit {
-                measured_ms_per_second: 2.0,
-                formula_ms_per_second: 1.0,
-            };
+            let calibration = CalibrationFit::from_factor(2.0).unwrap();
             let context = CandidatePlanningContext {
                 deadline: None,
                 refine_materialization: false,

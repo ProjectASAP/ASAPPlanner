@@ -885,10 +885,7 @@ mod tests {
             entries: &entries,
             data: &data,
             models: PlanningModels::builtin().with_plan_selection(&settings),
-            calibration: CalibrationFit {
-                measured_ms_per_second: 2.0,
-                formula_ms_per_second: 1.0,
-            },
+            calibration: CalibrationFit::from_factor(2.0).unwrap(),
         };
         let parts = components(&configured, &context).unwrap();
         assert_eq!(

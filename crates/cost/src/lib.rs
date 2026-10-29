@@ -435,8 +435,8 @@ impl QueryLatency {
 /// ratio is the calibration factor for the nodes without an entry.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CalibrationFit {
-    pub measured_ms_per_second: f64,
-    pub formula_ms_per_second: f64,
+    measured_ms_per_second: f64,
+    formula_ms_per_second: f64,
 }
 
 impl CalibrationFit {
@@ -452,6 +452,13 @@ impl CalibrationFit {
             measured_ms_per_second: factor,
             formula_ms_per_second: 1.0,
         })
+    }
+
+    /// Record one measured node: its measured and formula CPU time per
+    /// second of wall time.
+    pub fn record(&mut self, measured_ms_per_second: f64, formula_ms_per_second: f64) {
+        self.measured_ms_per_second += measured_ms_per_second;
+        self.formula_ms_per_second += formula_ms_per_second;
     }
 
     /// Add `other`'s CPU time to this fit.

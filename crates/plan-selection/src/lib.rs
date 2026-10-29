@@ -3809,8 +3809,7 @@ pub(crate) fn price_node<'a>(
         Some(unit) => {
             price_source = NodePriceSource::Measured;
             let measured_ms = (units as f64 * unit.ns_per_unit + unit.ns_per_invocation) * 1e-6;
-            fit.measured_ms_per_second += measured_ms * per_second;
-            fit.formula_ms_per_second += formula_ms * per_second;
+            fit.record(measured_ms * per_second, formula_ms * per_second);
             detail += &format!(
                 "; measured {units} x {:.3} ns + {:.3} ns",
                 unit.ns_per_unit, unit.ns_per_invocation

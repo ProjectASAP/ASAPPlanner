@@ -26,4 +26,3 @@ asap-logical-asap-optimization = { path = "../logical-asap-optimization", featur
 asap-frontend-promql = { path = "../frontend-promql" }
 # The executor's charge for each summary state, checked against the bytes
 # plan selection prices for it plus the accumulator's own fields (#947).
-asap-executor = { path = "../executor" }
