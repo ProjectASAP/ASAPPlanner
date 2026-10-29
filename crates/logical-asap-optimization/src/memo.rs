@@ -235,8 +235,10 @@ fn pair(
 mod tests {
     use super::*;
     use crate::test_support::lower_promql;
+    use asap_types::ir::operator::operator_properties::BinaryOpKind;
     use asap_types::ir::properties::AccuracyTarget;
-    use asap_types::ir::ScalarExpr;
+    use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
+    use asap_types::ir::{NonASAPOp, ScalarExpr};
 
     fn query(text: &str) -> QueryRoot {
         QueryRoot::Operator(lower_promql(text, AccuracyTarget::max_error(0.01)))
@@ -271,6 +273,34 @@ mod tests {
                     .contains(&MemoGroupId(index as u32)));
             }
         }
+    }
+
+    /// A per-series quantile has no provable unique key, but it is
+    /// deterministic: both operands of `G2 / G2` read the same rows, so the
+    /// two equal sub-expressions are one group read twice.
+    #[test]
+    fn equal_keyless_deterministic_results_share_one_group() {
+        let roots = vec![(
+            0,
+            QueryRoot::Operator(lower_promql(
+                "avg by (job) (quantile_over_time(0.5, data[5m]) / quantile_over_time(0.5, data[5m]) + quantile_over_time(0.9, data[5m]))",
+                AccuracyTarget::max_error(0.01).failure_probability(0.001),
+            )),
+        )];
+        let memo = LogicalMemo::from_roots(&roots);
+        let division = memo
+            .groups
+            .iter()
+            .find(|group| {
+                matches!(group.node.non_asap(), Some(NonASAPOp::BinaryOp { operator, .. })
+                    if operator.kind == BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
+            })
+            .expect("a `G2 / G3` group");
+        assert_eq!(
+            division.children[0], division.children[1],
+            "both operands of the division are one group"
+        );
+        assert_eq!(memo.groups.len(), 7);
     }
 
     /// Scalar references are roots of their query; literals need no invented node.

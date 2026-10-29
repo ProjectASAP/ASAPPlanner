@@ -286,14 +286,18 @@ lists `LogicalMemo::from_roots` with Pass 1. `LogicalMemo::from_roots` runs
 `share_common_sub_dags` (`crates/types/src/ir/cse.rs`) over the frontends'
 roots and numbers the shared nodes as groups. Two structurally equal nodes
 become one group only when sharing them is legal, that is, when every reader
-of the shared node reads the rows it would read alone:
+of the shared node reads the rows it would read alone. Equal nodes are
+interned children first, so they always read one input, and a node is legal
+to share when every execution over the same input rows returns the same
+output rows (`NonASAPOp::is_shareable_when_equal`). A unique
+key is not needed.
 
 | Equal nodes | Share one group |
 |---|---|
 | ASAP nodes (summary states and their evaluations) | Always (equal operator, schema and guarantee) |
-| `Scan`s | Always: they read the same source rows |
-| Windows directly over a scan, global scalar reductions, exact top-k keeping the series identity | Always: their rows keep a stable identity |
-| Any other non-ASAP node | Only when its output schema has a provable unique key (`Schema::has_unique_key`) |
+| Non-ASAP nodes that compute their output from the input rows' values: scans, windows, filters, projections, aggregates (exact top-k included), joins, binary operators, `limitk` | Always |
+| A `Sort` keeps tied rows in input order (a stable sort); a `Limit` over a `Sort` and an exact top-k rank with that order | Always: the tie order counts as fixed |
+| A `Limit` or offset not over a `Sort`, a `Dedup` on some but not all columns, a window function that reads row positions (`ROW_NUMBER`, `LAG`, `FIRST_VALUE`, a `ROWS` frame) without an `ORDER BY` | Never: they pick rows by input order alone, so two copies may return different rows |
 
 Equal nodes that may not share stay separate groups, also within one query.
 They may still read one shared child group.
@@ -356,11 +360,10 @@ avg by (job) (quantile_over_time(0.5, data[5m]) / quantile_over_time(0.5, data[5
 
 G1 is one group for its two readers, because a window directly over a scan
 may be shared. The two `quantile_over_time(0.5, data[5m])` are one group, G2:
-the PromQL frontend adds a series-identity column (`$promql_series_identity`)
-to every series, so the per-series quantile's output has a unique key
-(series identity and timestamp), and equal non-ASAP nodes with a unique key
-share one group. A non-ASAP node without a unique key, such as a
-`without(..)` grouping, would stay one group per reader.
+both compute the same rows from the same input, so one copy serves both
+operands. A unique key is not needed (the PromQL planning path happens to
+give this output one, series identity and timestamp); an unordered `LIMIT`
+would stay one group per reader.
 
 **Step 2, Stage 1 Pass 1.** `try_populate_pass1` gives G2 and G4 seven
 candidates each. G0, G1, G3 and G5 get one each, their own node. G6 gets

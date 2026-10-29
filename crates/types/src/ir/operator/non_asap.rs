@@ -10,7 +10,8 @@ use super::node::{OperatorNode, OperatorResultKind};
 use crate::ir::operator::agg_intent::AggIntent;
 use crate::ir::operator::operator_properties::{
     BinaryOpKind, ConcatDiscriminatorKey, GroupKeys, InfoMatcher, JoinKind, Reduction,
-    RelationalSetOpKind, SampleKind, Source, TimeShift, VectorMatch, WindowFrame, WindowFuncKind,
+    RelationalSetOpKind, SampleKind, Source, TimeShift, VectorMatch, WindowFrame, WindowFrameUnits,
+    WindowFuncKind,
 };
 use crate::ir::scalar::{Predicate, ProjectItem, ScalarExpr, SortKey};
 use crate::ir::schema::aggregate_schema::aggregate_output_schema;
@@ -500,6 +501,93 @@ impl<C> NonASAPOp<C> {
 }
 
 impl NonASAPOp {
+    /// Whether two structurally equal copies of this node may be one shared
+    /// node: every execution over the same input rows returns the same
+    /// output rows, so one copy over their one input can be computed (or
+    /// stored) once and read by both readers.
+    ///
+    /// Ties are the one place the input order decides: a `Sort` keeps tied
+    /// rows in input order (a stable sort), and an exact top-k ranks with that
+    /// sort. That tie order counts as fixed. An operator that picks rows by
+    /// input order alone does not return the same rows:
+    /// - a `Limit` or `OFFSET` whose child is not a `Sort` with the same
+    ///   partitions (`LIMIT 10` may return any 10 rows);
+    /// - a `Dedup` on some but not all columns (which row of each key
+    ///   survives is unspecified);
+    /// - a window function that reads row positions (`ROW_NUMBER`, `LAG`,
+    ///   `FIRST_VALUE`, a `ROWS` frame, …) without an `ORDER BY`.
+    ///
+    /// Every other operator computes its output from the input rows' values
+    /// only. `limitk` and `limit_ratio` pick the same series on every
+    /// evaluation by definition ([`SampleKind`]). This assumes every scalar
+    /// function the IR accepts is deterministic (no `random()`; unregistered
+    /// SQL functions are rejected) and that a deployment's
+    /// `AggIntent::Extension` returns the same rows for the same input.
+    pub fn is_shareable_when_equal(&self) -> bool {
+        use NonASAPOp::*;
+        match self {
+            Limit {
+                n,
+                offset,
+                partition_by,
+                child,
+            } => {
+                (n.is_none() && *offset == 0)
+                    || matches!(child.non_asap(), Some(Sort { partition_by: sorted_by, .. })
+                        if sorted_by == partition_by)
+            }
+            // Empty `cols` means every column.
+            Dedup { cols, child } => {
+                cols.is_empty()
+                    || cols.iter().collect::<std::collections::BTreeSet<_>>().len()
+                        == child.schema.fields.len()
+            }
+            SQLWindowFunc {
+                func,
+                order_by,
+                frame,
+                ..
+            } => {
+                let reads_row_positions = match func {
+                    WindowFuncKind::RowNumber
+                    | WindowFuncKind::Lag
+                    | WindowFuncKind::Lead
+                    | WindowFuncKind::LagInFrame
+                    | WindowFuncKind::LeadInFrame
+                    | WindowFuncKind::FirstValue
+                    | WindowFuncKind::LastValue
+                    | WindowFuncKind::NthValue(_) => true,
+                    WindowFuncKind::Rank | WindowFuncKind::DenseRank => false,
+                    WindowFuncKind::Sum
+                    | WindowFuncKind::Avg
+                    | WindowFuncKind::Count
+                    | WindowFuncKind::Min
+                    | WindowFuncKind::Max => frame
+                        .as_ref()
+                        .is_some_and(|frame| frame.units == WindowFrameUnits::Rows),
+                };
+                !reads_row_positions || !order_by.is_empty()
+            }
+            Scan { .. }
+            | Values { .. }
+            | Filter { .. }
+            | Project { .. }
+            | Aggregate { .. }
+            | Join { .. }
+            | SetOp { .. }
+            | Concat { .. }
+            | Sort { .. }
+            | BinaryOp { .. }
+            | TimeRange { .. }
+            | TimeShift { .. }
+            | PromqlVectorFromScalar(_)
+            | PromqlRelabel { .. }
+            | PromqlInfoEnrich { .. }
+            | PromqlSeriesSample { .. }
+            | PromqlSubquery { .. } => true,
+        }
+    }
+
     /// Output schema derived from this operator's parameters and its
     /// children's (already derived) schemas.
     pub fn output_schema(&self) -> Result<Schema, SchemaDerivationError> {

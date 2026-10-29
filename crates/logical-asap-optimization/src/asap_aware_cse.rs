@@ -12,7 +12,8 @@
 //! A *sharing candidate* ([`SharingCandidate`]) of a whole-workload
 //! candidate is a set of two or more of its nodes with identical input and
 //! computation semantics that are legal to share: the `ir::cse` interning
-//! merges only ASAP nodes, scans, and nodes with a unique key.
+//! merges ASAP nodes and non-ASAP nodes that return the same rows for the
+//! same input rows.
 //! [`identical_expression_pass2_candidates`] returns one Pass 2 candidate
 //! per non-empty subset of the sharing candidates (Algorithm 2, line 31):
 //! each sharing candidate in the subset becomes one node serving every

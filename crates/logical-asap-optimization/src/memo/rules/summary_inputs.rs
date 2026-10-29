@@ -80,9 +80,9 @@ fn canonical_preprocessing(
         return Ok(true);
     }
     if boundaries.contains(&Rc::as_ptr(node)) {
-        // Logical TimeRange groups can remain distinct because their rows lack
-        // a unique key. The existing state-sharing rule nevertheless permits
-        // identical range descriptors over the same canonical source.
+        // Logical TimeRange groups can remain distinct when their inputs
+        // differ structurally. The existing state-sharing rule nevertheless
+        // permits identical range descriptors over the same canonical source.
         if let Some(group) = memo
             .groups
             .iter()

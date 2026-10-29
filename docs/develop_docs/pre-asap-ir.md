@@ -87,9 +87,10 @@ state and only appear below an ASAP operator; a scalar expression that reads suc
 typing error (`ScalarExpr::scalar_type`), because state must be read out before a value can use
 it. Column references are positional `ColumnId`s (indexes into the input schema), never names.
 
-`Schema::has_unique_key()` is the legality gate CSE uses: a non-ASAP producer is only shared
-across consumers when its row identity is provable. A `Scan` is shared without one: equal scans
-read the same source rows, a SQL table's keyless rows included.
+CSE shares a non-ASAP producer across consumers when every execution over the same input rows
+returns the same output rows (`NonASAPOp::is_shareable_when_equal`); a unique key
+is not needed. An unordered `Limit`, a `Dedup` on some but not all columns and a window function
+that reads row positions without an `ORDER BY` are never shared.
 
 ## Scalar expressions
 
@@ -154,7 +155,7 @@ The result is `Rc<OperatorNode>`. `lower_promql_workload`, `lower_sql` / `lower_
 Workload search then runs structural CSE (`asap_types::ir::cse::share_common_sub_dags`) once
 across every root: bottom-up hash-consing where the structural hash is only a filter and the
 typed `PartialEq` decides sharing, following scalar references like any other input, and
-gated by `Schema::has_unique_key()` for non-ASAP producers other than scans.
+gated by `NonASAPOp::is_shareable_when_equal` for non-ASAP producers.
 
 ## Fields and column references
 
