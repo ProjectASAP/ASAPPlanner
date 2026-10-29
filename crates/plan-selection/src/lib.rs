@@ -237,7 +237,6 @@ use asap_types::workload::RepeatedDemand;
 
 use asap_cost::analytical::AnalyticalCostError;
 use asap_cost::state_bytes::{sketch_shape, summary_shape, StateInputRows};
-use asap_logical_asap_optimization::pass1::per_computation_candidates::with_resized_summaries;
 
 mod accuracy;
 mod accuracy_binding;
