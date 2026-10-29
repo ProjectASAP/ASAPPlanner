@@ -427,9 +427,9 @@ impl AccuracyGuarantee {
         bound
     }
 
-    /// Optimistic lower bound used only to reject an impossible target.
-    /// Replacing unknown non-negative contributions by zero cannot certify
-    /// this candidate; the original guarantee remains unresolved.
+    /// Optimistic lower bound (tests only): unknown non-negative
+    /// contributions count as zero, so it cannot certify a candidate; the
+    /// original guarantee remains unresolved.
     #[cfg(test)]
     fn optimistic_floor(&self) -> Self {
         let mut floor = self.clone();
