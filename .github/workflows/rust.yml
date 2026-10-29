@@ -42,33 +42,20 @@ jobs:
         toolchain: stable
         components: rustfmt, clippy
 
-    - name: Run sccache-cache
-      uses: mozilla-actions/sccache-action@v0.0.4
-
-    - name: Cache cargo
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+    # Caches the registry and compiled dependencies, keyed per job.
+    - uses: Swatinem/rust-cache@v2
 
     - name: Check formatting
       run: cargo fmt --all -- --check
 
     - name: Run clippy
       run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      env:
-        RUSTC_WRAPPER: sccache
 
     # A deployment runtime uses only the facade's and the executor's public
     # APIs. asap-planner's tests check that, but only when the executor links
     # without its `test-support` feature, which a workspace build turns on.
     - name: Check the runtime tests against the public APIs alone
       run: cargo check -p asap-planner --tests --locked
-      env:
-        RUSTC_WRAPPER: sccache
 
   test:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
@@ -96,22 +83,11 @@ jobs:
       with:
         toolchain: stable
 
-    - name: Run sccache-cache
-      uses: mozilla-actions/sccache-action@v0.0.4
-
-    - name: Cache cargo
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+    # Caches the registry and compiled dependencies, keyed per job.
+    - uses: Swatinem/rust-cache@v2
 
     - name: Run all workspace tests
       run: cargo test --workspace --locked
-      env:
-        RUSTC_WRAPPER: sccache
 
     # The viewer's Python tests run its JavaScript in V8 through py_mini_racer;
     # the ones that plan a query run target/debug/stage_pipeline, which the
@@ -138,19 +114,13 @@ jobs:
       run: node --test tools/dag-viewer/stages.test.mjs tools/dag-viewer/enumeration.test.mjs tools/dag-viewer/memo.test.mjs
 
     # A PromQL-only runtime builds asap-planner without DataFusion or MetricsQL.
+    # The workspace step already ran the planner's tests; this builds them all
+    # and runs only the one that exists for this build.
     - name: Check and test asap-planner with the PromQL frontend alone
-      run: |
-        cargo check -p asap-planner --no-default-features --features promql --locked
-        cargo test -p asap-planner --no-default-features --features promql --locked
-      env:
-        RUSTC_WRAPPER: sccache
+      run: cargo test -p asap-planner --no-default-features --features promql --locked -- a_sql_workload_without_the_sql_feature_names_the_missing_feature
 
     - name: Verify MetricsQL frontend as a stable external dependency
       run: bash tools/verify_metricsql_external_consumer.sh
-      env:
-        RUSTC_WRAPPER: sccache
 
     - name: Verify vendored MetricsQL parser baseline
       run: python3 tools/verify_metricsql_vendored_baseline.py
-      env:
-        RUSTC_WRAPPER: sccache
