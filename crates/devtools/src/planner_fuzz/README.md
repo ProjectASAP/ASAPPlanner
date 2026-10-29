@@ -108,8 +108,7 @@ never from a guess:
 1. Stage 2 and Stage 3 implement and price the witness the same way they price
    any candidate. Each materialization assignment goes through
    `optimize_physical_asap` and `select_plan`, using the same cost model,
-   deployment capabilities, accuracy checks and executor compile check as the
-   search. The cheapest assignment is kept.
+   deployment capabilities and accuracy checks as the search. The cheapest assignment is kept.
 2. `W`'s selected logical plan is priced the same way. This gives the witness
    a reference point on the same footing.
 3. `derive_cost` is the difference between the two. Under cost model 1, a

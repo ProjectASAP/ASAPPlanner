@@ -1,6 +1,6 @@
 //! A runtime plans a SQL workload over a table with `plan_installable` and
 //! runs it with the Planner's executor, binding the table in a data store:
-//! the plan compiles with the table's scans (the compile check sees them),
+//! the plan compiles with the table's scans (`check_compiles` sees them),
 //! `now()` is the evaluation time, `COUNT(DISTINCT)` over an `Int64` id
 //! column answers with the type the Planner gives it, from a distinct-count
 //! sketch or exactly. A plan that keeps panes at ingestion time runs as a

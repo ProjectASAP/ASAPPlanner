@@ -39,16 +39,15 @@ use asap_frontend_sql::{lower_sql_dialect, SqlError};
 // configures the same models and reads the same output whether it goes through
 // `e2e_plan` or straight to `optimize`.
 pub use asap_plan_selection::pass::{
-    optimize, run_stage1_to_stage3, ExecutorCompileCheck, ExecutorCompileError, OptimizationInput,
-    OptimizationPass, OptimizeError, PassRegistry, PlanOutput, PlanningModels, QueryPlan,
-    Stage1ToStage3Pass, Stage1ToStage3Run,
+    optimize, run_stage1_to_stage3, OptimizationInput, OptimizationPass, OptimizeError,
+    PassRegistry, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Pass, Stage1ToStage3Run,
 };
 
 mod installable;
 pub use installable::{
     installable_plan_of, plan_installable, InstallablePlan, InstallablePlanError,
-    PlannerExecutorCompileCheck, PredictedNodeUsage, PredictedQueryUsage, PredictedUsage,
-    SelectedPlanReport, INSTALLABLE_PLAN_WIRE_VERSION,
+    PredictedNodeUsage, PredictedQueryUsage, PredictedUsage, SelectedPlanReport,
+    INSTALLABLE_PLAN_WIRE_VERSION,
 };
 
 /// Helpers for a runtime's correctness tests (feature `test-support`).

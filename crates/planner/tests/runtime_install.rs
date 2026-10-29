@@ -12,11 +12,10 @@ use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, Value};
 mod time_series;
 use asap_planner::{
-    plan_installable, DeploymentCapabilities, ExecutorCompileCheck, FrontendInput, InstallablePlan,
-    InstallablePlanError, MaterializedView, MaterializedViewRefresh, OperatorKind,
-    OptimizationInput, OptimizationPass, OptimizeError, PhysicalASAPDAG, PlanOutput,
-    PlanSelectionSettings, PlannerExecutorCompileCheck, PlanningModels, PlanningWorkload,
-    SelectedPlanReport, SelectionBox, Stage1ToStage3Pass, UserInput,
+    plan_installable, DeploymentCapabilities, FrontendInput, InstallablePlan, InstallablePlanError,
+    MaterializedView, MaterializedViewRefresh, OperatorKind, OptimizationInput, OptimizationPass,
+    OptimizeError, PhysicalASAPDAG, PlanOutput, PlanSelectionSettings, PlanningModels,
+    PlanningWorkload, SelectedPlanReport, SelectionBox, Stage1ToStage3Pass, UserInput,
 };
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::ir::{
@@ -905,42 +904,6 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
     let answered = answers(&run(dag, BTreeMap::new(), &samples, &query_roots(&plan), query)[0]);
     assert_eq!(answered.len(), 1);
     assert_eq!(answered[0].1, 110.0);
-}
-
-// The compile check compiles a plan's time-series windows: an instant
-// selector whose samples are not Float64 (so no stale marker can be told
-// apart) has no native window, and the check rejects the plan.
-#[test]
-fn the_compile_check_rejects_a_time_series_window_the_executor_cannot_run() {
-    use asap_types::ir::operator::Source;
-    use asap_types::ir::schema::{DataType, Field, Schema};
-    use asap_types::ir::{NonASAPOp, Operator, TimeRangeKind};
-    let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
-        source: Source::TimeSeries {
-            metric: "latency_ms".into(),
-        },
-        predicates: vec![],
-        schema: Schema::with_time_index(
-            vec![
-                Field::plain("ts", DataType::Timestamp, false),
-                Field::plain("value", DataType::Int64, false),
-                Field::plain("instance", DataType::Utf8, false),
-            ],
-            0,
-            vec![],
-        ),
-    }))
-    .unwrap();
-    let instant = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
-        range: std::time::Duration::from_secs(1),
-        kind: TimeRangeKind::Instant,
-        child: scan,
-    }))
-    .unwrap();
-    let error = PlannerExecutorCompileCheck
-        .compiles(&[QueryRoot::Operator(instant)])
-        .unwrap_err();
-    assert!(error.contains("Float64"), "{error}");
 }
 
 /// A deployment that keeps raw data samples and query-time results across
@@ -2207,22 +2170,18 @@ async fn plan_p99(
     let workload: PlanningWorkload = serde_json::from_value(json).unwrap();
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
+        // A DDSketch kernel fixture, not a comparison of sketch families.
+        supported_summaries: ignore_accuracy
+            .then(|| only_summary_family(SketchAlgorithm::DDSketch)),
         ..DeploymentCapabilities::default()
     };
     let settings = PlanSelectionSettings {
         ignore_accuracy_guarantees: ignore_accuracy,
         ..PlanSelectionSettings::default()
     };
-    let only_dds = SketchPlansOnly(SketchAlgorithm::DDSketch);
     let models = PlanningModels::builtin()
         .with_deployment_capabilities(&capabilities)
         .with_plan_selection(&settings);
-    let models = if ignore_accuracy {
-        // This is a DDS kernel fixture, not a comparison of sketch families.
-        models.with_executor_compile_check(&only_dds)
-    } else {
-        models
-    };
     plan_installable(UserInput::new(
         &workload,
         FrontendInput::Promql { histograms: None },
@@ -2542,7 +2501,10 @@ async fn check_compiles_reports_the_executors_error() {
         asap_executor::planner::ir::schema::DataType::Utf8,
     );
     let error = plan.check_compiles().unwrap_err();
-    assert!(error.starts_with("query run: "), "{error}");
+    assert!(
+        error.starts_with("the executor cannot compile the plan's query run: "),
+        "{error}"
+    );
 }
 
 /// `queries` every 10 s at `accuracy` (JSON) over six ingesting series of
@@ -2688,53 +2650,50 @@ fn heap_topk_workload(query: &str, metric: &str, facts: &str) -> PlanningWorkloa
     .unwrap()
 }
 
-/// Stage 3's executor check for a deployment requiring this sketch
-/// algorithm. Other plans are refused, and an accepted plan must compile
-/// with the Planner's executor
-/// ([`PlannerExecutorCompileCheck`]). It forces the cheapest such plan that
-/// compiles.
-struct SketchPlansOnly(SketchAlgorithm);
+/// The executor's support for `family` alone: a deployment whose only
+/// sketch family is `family` (exact plans stay allowed).
+fn only_summary_family(family: SketchAlgorithm) -> Vec<asap_planner::SupportedSummary> {
+    asap_executor::supported_summary_families()
+        .into_iter()
+        .filter(|supported| supported.family == family)
+        .collect()
+}
 
-impl ExecutorCompileCheck for SketchPlansOnly {
-    fn compiles(&self, roots: &[QueryRoot]) -> Result<(), String> {
-        self.compiles_before(roots, None)
-            .map_err(|error| error.to_string())
+/// A deployment's accuracy model that accepts, whatever its guarantee, only
+/// a query output that reads a heap of this algorithm, and no other output:
+/// it forces the cheapest plan with that heap, as a deployment that requires
+/// the heap would.
+struct HeapPlansOnly(SketchAlgorithm);
+
+impl asap_plan_selection::AccuracyModel for HeapPlansOnly {
+    fn satisfies(
+        &self,
+        _guarantee: &asap_types::ir::properties::AccuracyGuarantee,
+        _target: &asap_types::ir::properties::AccuracyTarget,
+    ) -> bool {
+        false
     }
 
-    fn compiles_before(
+    fn accepts_output_regardless_of_guarantee(
         &self,
-        roots: &[QueryRoot],
-        deadline: Option<std::time::Instant>,
-    ) -> Result<(), asap_plan_selection::pass::ExecutorCompileError> {
-        use asap_plan_selection::pass::ExecutorCompileError;
-        if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
-            return Err(ExecutorCompileError::DeadlineExceeded);
-        }
-        let supported_sketch = roots
-            .iter()
-            .filter_map(|root| match root {
-                QueryRoot::Operator(node) => Some(node),
-                QueryRoot::Scalar(_) => None,
-            })
-            .flat_map(OperatorNode::reachable)
-            .any(|node| {
-                matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
-                    | ASAPOp::PaneChain { family: FieldDataType::Sketch(kind, _), .. })
-                    if *kind.algorithm() == self.0)
-            });
-        if !supported_sketch {
-            return Err(ExecutorCompileError::Rejected(format!(
-                "this deployment requires a {:?} sketch",
-                self.0
-            )));
-        }
-        PlannerExecutorCompileCheck.compiles_before(roots, deadline)
+        output: &QueryRoot,
+        _target: &asap_types::ir::properties::AccuracyTarget,
+    ) -> bool {
+        let QueryRoot::Operator(root) = output else {
+            return false;
+        };
+        OperatorNode::reachable(root).iter().any(|node| {
+            matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
+                | ASAPOp::PaneChain { family: FieldDataType::Sketch(kind, _), .. })
+                if *kind.algorithm() == self.0)
+        })
     }
 }
 
 /// `workload` planned with accuracy guarantees ignored (a top-k estimate
-/// has none) on a deployment that keeps no raw samples; with `heap`, Stage
-/// 3 keeps only plans with a heap of that algorithm ([`SketchPlansOnly`]).
+/// has none) on a deployment that keeps no raw samples; with `heap`, the
+/// deployment's accuracy model accepts only outputs that read a heap of that
+/// algorithm ([`HeapPlansOnly`]).
 async fn plan_ignoring_guarantees(
     workload: &PlanningWorkload,
     heap: Option<SketchAlgorithm>,
@@ -2743,16 +2702,18 @@ async fn plan_ignoring_guarantees(
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
+    // The settings' override accepts every output, so a forced heap goes
+    // through the accuracy model instead.
     let settings = PlanSelectionSettings {
-        ignore_accuracy_guarantees: true,
+        ignore_accuracy_guarantees: heap.is_none(),
         ..PlanSelectionSettings::default()
     };
+    let heap_only = heap.map(HeapPlansOnly);
     let models = PlanningModels::builtin()
         .with_deployment_capabilities(&capabilities)
         .with_plan_selection(&settings);
-    let check = heap.map(SketchPlansOnly);
-    let models = match &check {
-        Some(check) => models.with_executor_compile_check(check),
+    let models = match &heap_only {
+        Some(model) => models.with_accuracy(model),
         None => models,
     };
     plan_installable(UserInput::new(
@@ -2888,8 +2849,8 @@ fn skewed_series_samples() -> (Vec<RawDataSample>, BTreeMap<String, BTreeMap<Str
     (samples, truth)
 }
 
-/// `workload`'s plan with only `algorithm`'s heap plans allowed (guarantees
-/// ignored): it builds that heap, compiles as a runtime compiles it, and
+/// `workload`'s plan with only `algorithm`'s heap plans accepted
+/// ([`HeapPlansOnly`] forces the heap; guarantees are not ignored): it builds that heap, compiles as a runtime compiles it, and
 /// both it and its query-time reference answer `samples` with the true top
 /// `k` per partition, each named by its labels and within the heap's bound
 /// of `truth` ([`assert_heap_topk_answers`]).

@@ -35,7 +35,6 @@ fn sql(queries: &[String]) -> FuzzWorkload {
 fn cost(queries: &[String]) -> f64 {
     use asap_devtools::planning_stages::run_search_over;
     use asap_plan_selection::{PlanSelectionSettings, PlanningModels, Stage1ToStage3Search};
-    use asap_planner::PlannerExecutorCompileCheck;
     let w = sql(queries);
     let roots = Planner::new(FuzzSettings::default()).lower(&w).unwrap();
     let planning = w.planning_workload();
@@ -44,8 +43,7 @@ fn cost(queries: &[String]) -> f64 {
     let deployment = w.deployment();
     let models = PlanningModels::builtin()
         .with_plan_selection(&settings)
-        .with_deployment_capabilities(&deployment)
-        .with_executor_compile_check(&PlannerExecutorCompileCheck);
+        .with_deployment_capabilities(&deployment);
     let run = run_search_over(
         roots,
         &entries,

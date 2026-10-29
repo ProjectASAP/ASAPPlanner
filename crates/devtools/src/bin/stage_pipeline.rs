@@ -65,8 +65,8 @@
 //     summary), and every other shown candidate under `rejected` with
 //     its `cause`: a failed check (`failure_probability_resize_failed`,
 //     `accuracy_target_missed`, `count_min_weights_not_proven_non_negative`,
-//     `per_entity_aggregate_not_executable`, `executor_cannot_compile`,
-//     `no_accuracy_guarantee`, `raw_data_not_retained`,
+//     `per_entity_aggregate_not_executable`, `no_accuracy_guarantee`,
+//     `raw_data_not_retained`,
 //     `latency_bound_exceeded`, `latency_over_repeat_interval`,
 //     `over_cluster_capacity`) or a loss under
 //     the cost model (`costlier`, `slower`, `more_memory`,
@@ -142,10 +142,12 @@
 // compose), `budget_share_1` (every chosen candidate sized for the whole
 // budget) and `selected` (it is `selected_choice`). With
 // `--price-enumerated <n>` (off by default), each of the first `n` listed
-// choices is also run through Stage 2 and Stage 3 as the selected plan is
-// (`memo_pricing::price_choices`, under the run's models): `valid`,
-// `rejection` (a Stage 3 rejection cause, or `compose_failed`,
-// `invalid_structure`, `stage2_failed`, `stage3_failed`, `rejected`) with
+// choices is also run through Stage 2 and Stage 3 as the selected plan is,
+// and its selected plan installed (`memo_pricing::price_choices`, under the
+// run's models): `valid`, `rejection` (a Stage 3 rejection cause, or
+// `compose_failed`, `invalid_structure`, `stage2_failed`, `stage3_failed`,
+// `rejected`, `not_executable` (the executor cannot compile the selected
+// plan), `not_installable` (installation refuses it otherwise)) with
 // `rejection_reason`,
 // `cost_per_second` (its cheapest valid physical plan's) and
 // `cheaper_than_selected` (valid and cheaper than the selected plan); and
@@ -282,7 +284,7 @@ use asap_plan_selection::{
     PlanSelectionSettings, PlanningModels, Rejection, ResourceUnitCost, ResourceUsage,
     SearchAlgorithm, Selection, SelectionError, Stage1ToStage3Search,
 };
-use asap_planner::{installable_plan_of, PlannerExecutorCompileCheck};
+use asap_planner::installable_plan_of;
 use asap_types::ir::flat::{flatten, FlatDag, FlatNode, NodeId};
 use asap_types::ir::operator::node::OperatorNode;
 use asap_types::ir::properties::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
@@ -736,17 +738,14 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             )
         }
     };
-    // Plan with the models `plan_installable` plans with: the executor's
-    // summary families when the deployment declares none, and the
-    // executor's compile check.
+    // Plan with the executor's summary families when the deployment declares none.
     if deployment_capabilities.supported_summaries.is_none() {
         deployment_capabilities.supported_summaries =
             Some(asap_executor::supported_summary_families());
     }
     let models = PlanningModels::builtin()
         .with_plan_selection(&plan_selection)
-        .with_deployment_capabilities(&deployment_capabilities)
-        .with_executor_compile_check(&PlannerExecutorCompileCheck);
+        .with_deployment_capabilities(&deployment_capabilities);
     let result = run_search_over(
         roots.clone(),
         &entries,

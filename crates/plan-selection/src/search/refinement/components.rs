@@ -1,7 +1,7 @@
 //! Exact decomposition only when the candidate graph and evaluator are separable.
 //! Potential dependencies, not just the incumbent's edges, determine components.
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use asap_types::ir::{NonASAPOp, QueryRoot};
 
@@ -17,7 +17,7 @@ use crate::search::milp::model::CandidateSolveMetrics;
 use crate::search::refinement::planner::evaluate_configured_candidate;
 use crate::search::refinement::planner::{
     evaluate_configured_candidate_before, optimize_configured_candidates, CandidatePlanningContext,
-    CandidatePlanningResult, CandidateRejectionSummary,
+    CandidatePlanningResult, CandidateRejectionSummary, SEARCH_SHARE_BEFORE_FINAL_VALIDATION,
 };
 use crate::search::refinement::search::{
     CandidateSearchLimits, CandidateSearchResult, CandidateSearchStatus, EvaluatedCandidate,
@@ -72,13 +72,11 @@ fn components(
         }]
     };
     // Cluster capacities and provisioned billing couple peaks/rounding globally.
-    // An external executor check can impose arbitrary workload-wide constraints.
     let CostModel::UsageOverTime(prices) = &context.models.plan_selection.cost_model else {
         return Ok(whole());
     };
     let builtin = crate::PlanningModels::builtin();
     if !graph.resource_budgets.is_empty()
-        || context.models.executor_compile_check.is_some()
         || !std::ptr::eq(context.models.accuracy, builtin.accuracy)
         || !std::ptr::eq(context.models.evidence, builtin.evidence)
     {
@@ -610,8 +608,11 @@ pub(in crate::search) fn optimize_independent_components(
             &local,
             &local_context,
             CandidateSearchLimits {
-                wall_time: limits.wall_time.saturating_sub(started.elapsed())
-                    / remaining_parts as u32,
+                wall_time: component_wall_time(
+                    limits.wall_time,
+                    started.elapsed(),
+                    remaining_parts,
+                ),
                 max_refinements: limits.max_refinements.saturating_sub(summary.refinements)
                     / remaining_parts,
             },
@@ -727,9 +728,47 @@ pub(in crate::search) fn optimize_independent_components(
     })
 }
 
+/// The time the next of `remaining_parts` components may search, `elapsed`
+/// into a search of `wall_time`: an equal share of the time left before the
+/// combined plan's validation
+/// ([`SEARCH_SHARE_BEFORE_FINAL_VALIDATION`]). Each component searches until
+/// its share is spent, so without that reserve the components use the whole
+/// budget and the combined plan, valid in every component, misses the
+/// deadline: the search ends without a plan.
+fn component_wall_time(wall_time: Duration, elapsed: Duration, remaining_parts: usize) -> Duration {
+    wall_time
+        .mul_f64(SEARCH_SHARE_BEFORE_FINAL_VALIDATION)
+        .saturating_sub(elapsed)
+        / remaining_parts.max(1) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two components that each search until their whole share is spent
+    /// (as the component search does, ending at its time limit) still leave
+    /// an eighth of the search's time to validate their combined plan. Without
+    /// the reserve they spent all of it, so the combined plan, valid in each
+    /// component, missed the deadline and the search ended without a plan.
+    #[test]
+    fn components_spending_their_shares_leave_time_to_validate_the_combined_plan() {
+        let wall_time = Duration::from_millis(4_000);
+        let parts = 2;
+        let mut elapsed = Duration::ZERO;
+        for index in 0..parts {
+            let share = component_wall_time(wall_time, elapsed, parts - index);
+            assert!(share > Duration::ZERO);
+            elapsed += share;
+        }
+        assert_eq!(elapsed, Duration::from_millis(3_500));
+        assert_eq!(wall_time - elapsed, wall_time / 8);
+        // An overrun of the first component is taken from the second's
+        // share, not from the validation's.
+        let first = component_wall_time(wall_time, Duration::ZERO, 2) + Duration::from_millis(200);
+        let second = component_wall_time(wall_time, first, 1);
+        assert_eq!(wall_time - (first + second), wall_time / 8);
+    }
     use crate::search::candidates::configurations::enumerate_candidate_configurations;
     use crate::search::candidates::graph::{
         PhysicalCandidate, QueryRootCandidates, ResourceBudget,

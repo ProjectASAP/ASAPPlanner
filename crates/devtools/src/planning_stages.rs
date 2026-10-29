@@ -126,7 +126,7 @@ pub fn run_planning_stages(
 /// languages: query `i` is `roots[i]`, with workload entry `entries[i]`
 /// (its accuracy target, latency bound, recurrence and predictability).
 /// Plan selection compares candidates under `models.plan_selection`'s cost
-/// model and rejects those `models.executor_compile_check` does not compile.
+/// model and applies the deployment capabilities.
 /// `models.deployment_capabilities` is what the executor can run and keep:
 /// Pass 1 offers only the summaries it supports, and Stages 2 and 3 read its
 /// retention.
@@ -153,7 +153,7 @@ pub fn run_planning_stages_over(
 /// The same bounded candidate-connection search used by `plan_installable`.
 /// The run retains the selected logical and physical plans, validation
 /// diagnostics, and search metrics. Use the executor's summary capabilities
-/// and compile check in `models` when comparing with installation behavior.
+/// in `models` when comparing with installation behavior.
 pub fn run_default_search_over(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],

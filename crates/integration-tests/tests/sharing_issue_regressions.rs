@@ -2,7 +2,6 @@
 use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, FuzzWorkload, Planner};
 use asap_devtools::planning_stages::run_search_over;
 use asap_plan_selection::{PlanSelectionSettings, PlanningModels, Stage1ToStage3Search};
-use asap_planner::PlannerExecutorCompileCheck;
 use serde_json::json;
 use std::path::Path;
 
@@ -43,8 +42,7 @@ fn cost(w: &FuzzWorkload) -> f64 {
     let deployment = w.deployment();
     let models = PlanningModels::builtin()
         .with_plan_selection(&settings)
-        .with_deployment_capabilities(&deployment)
-        .with_executor_compile_check(&PlannerExecutorCompileCheck);
+        .with_deployment_capabilities(&deployment);
     let run = run_search_over(
         roots,
         &entries,

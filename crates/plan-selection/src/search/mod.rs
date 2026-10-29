@@ -84,53 +84,6 @@ pub struct PlanningModels<'a> {
     /// whether it keeps query-time results across evaluations (Stage 2);
     /// default [`DeploymentCapabilities::default`].
     pub deployment_capabilities: &'a DeploymentCapabilities,
-    /// Whether the deployment's executor compiles a candidate's plan; Stage
-    /// 3 rejects a candidate it does not
-    /// ([`RejectionCause::ExecutorCannotCompile`](crate::RejectionCause::ExecutorCannotCompile)).
-    /// `None` (the default) checks nothing; `asap_planner::plan_installable`
-    /// sets the Planner's executor when the caller leaves it `None`.
-    pub executor_compile_check: Option<&'a dyn ExecutorCompileCheck>,
-}
-
-/// Compiler rejection and incomplete validation have different search semantics.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ExecutorCompileError {
-    #[error("{0}")]
-    Rejected(String),
-    #[error("planning deadline exceeded during executor validation")]
-    DeadlineExceeded,
-}
-
-impl From<String> for ExecutorCompileError {
-    fn from(reason: String) -> Self {
-        Self::Rejected(reason)
-    }
-}
-
-/// The deployment executor's compiler, asked by Stage 3 whether it compiles
-/// a candidate's plan, so selection and execution cannot drift.
-pub trait ExecutorCompileCheck {
-    /// `Err` with the executor's reason when it cannot compile the plan of
-    /// `roots`: one candidate's timed query roots, in workload order.
-    fn compiles(&self, roots: &[asap_types::ir::QueryRoot]) -> Result<(), String>;
-
-    /// Cooperative deadline-aware validation. Custom checkers can override this
-    /// to interrupt expensive work; timeout is not proof of an invalid plan.
-    fn compiles_before(
-        &self,
-        roots: &[asap_types::ir::QueryRoot],
-        deadline: Option<std::time::Instant>,
-    ) -> Result<(), ExecutorCompileError> {
-        let expired = || deadline.is_some_and(|limit| std::time::Instant::now() >= limit);
-        if expired() {
-            return Err(ExecutorCompileError::DeadlineExceeded);
-        }
-        let result = self.compiles(roots);
-        if expired() {
-            return Err(ExecutorCompileError::DeadlineExceeded);
-        }
-        result.map_err(ExecutorCompileError::Rejected)
-    }
 }
 
 impl<'a> PlanningModels<'a> {
@@ -145,7 +98,6 @@ impl<'a> PlanningModels<'a> {
             evidence,
             plan_selection: &DEFAULT_PLAN_SELECTION,
             deployment_capabilities: &DEFAULT_DEPLOYMENT,
-            executor_compile_check: None,
         }
     }
 
@@ -156,7 +108,6 @@ impl<'a> PlanningModels<'a> {
             evidence: &NO_ACCURACY_EVIDENCE,
             plan_selection: &DEFAULT_PLAN_SELECTION,
             deployment_capabilities: &DEFAULT_DEPLOYMENT,
-            executor_compile_check: None,
         }
     }
 
@@ -186,12 +137,6 @@ impl<'a> PlanningModels<'a> {
     /// model, resource speed, non-repeating query horizon).
     pub fn with_plan_selection(mut self, plan_selection: &'a PlanSelectionSettings) -> Self {
         self.plan_selection = plan_selection;
-        self
-    }
-
-    /// These models with the deployment executor's compile check.
-    pub fn with_executor_compile_check(mut self, check: &'a dyn ExecutorCompileCheck) -> Self {
-        self.executor_compile_check = Some(check);
         self
     }
 

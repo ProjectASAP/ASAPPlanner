@@ -18,6 +18,13 @@ use crate::search::refinement::search::{
 };
 use crate::{CalibrationFit, CostModel, PlanSelector, PlanningModels, Selection, SelectionError};
 
+/// The share of a search's time a search spends before a final validation
+/// it must still afford: a search runs until its time is spent, so the rest
+/// (an eighth) is kept to evaluate a plan found outside it (the queries'
+/// separate plans combined, or independent components' plans combined)
+/// before the deadline.
+pub(in crate::search) const SEARCH_SHARE_BEFORE_FINAL_VALIDATION: f64 = 0.875;
+
 #[derive(Clone, Copy)]
 pub(in crate::search) struct CandidatePlanningContext<'a> {
     pub deadline: Option<std::time::Instant>,
@@ -282,11 +289,14 @@ pub(in crate::search) fn optimize_configured_candidates(
     let mut search = search_candidates_with_direct_feedback(
         &configured.inventory.graph,
         CandidateSearchLimits {
-            // An eighth is kept to evaluate the separate plans afterwards.
             wall_time: limits
                 .wall_time
                 .saturating_sub(weighting_started.elapsed())
-                .mul_f64(if separate.is_some() { 0.875 } else { 1.0 }),
+                .mul_f64(if separate.is_some() {
+                    SEARCH_SHARE_BEFORE_FINAL_VALIDATION
+                } else {
+                    1.0
+                }),
             ..limits
         },
         &weights,

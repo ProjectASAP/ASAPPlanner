@@ -10,7 +10,6 @@ use asap_logical_asap_optimization::pass2::memo::candidates::{try_populate_pass1
 use asap_logical_asap_optimization::pass2::memo::enumeration::enumerate;
 use asap_logical_asap_optimization::pass2::memo::LogicalMemo;
 use asap_plan_selection::{PlanSelectionSettings, PlanningModels};
-use asap_planner::PlannerExecutorCompileCheck;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::QueryRoot;
 use asap_types::workload::{
@@ -88,8 +87,8 @@ fn planned(workload: &PlanningWorkload, series_identity: bool) -> Planned {
     }
 }
 
-/// `stage_pipeline`'s models: the executor's summary families and compile
-/// check, `settings` (accuracy guarantees ignored unless enforced).
+/// `stage_pipeline`'s models: the executor's summary families,
+/// `settings` (accuracy guarantees ignored unless enforced).
 fn models<'a>(
     settings: &'a PlanSelectionSettings,
     deployment: &'a DeploymentCapabilities,
@@ -97,7 +96,6 @@ fn models<'a>(
     PlanningModels::builtin()
         .with_plan_selection(settings)
         .with_deployment_capabilities(deployment)
-        .with_executor_compile_check(&PlannerExecutorCompileCheck)
 }
 
 fn deployment() -> DeploymentCapabilities {
@@ -231,7 +229,7 @@ fn ratio_of_quantiles_no_listed_choice_is_cheaper_than_the_selected_plan() {
 /// key but return the same rows, so they are still one group: 5 × 5 = 25
 /// DAGs (two distinct approximate inputs), 9 of them sized for the whole
 /// budget. The executor compiles none of their per-series summaries without
-/// the series identity, so only the exact DAG is valid. Its price is not
+/// the series identity, so only the exact DAG compiles and is valid. Its price is not
 /// compared with the plan selected for the series-identity lowering: its
 /// rows carry no identity column, so it prices lower than the same exact
 /// DAG with the identity (#1035).
@@ -328,4 +326,49 @@ fn scalar_root_choices_are_composed_and_priced() {
         assert_ne!(p.rejection.as_deref(), Some("compose_failed"), "{p:?}");
     }
     assert!(priced.iter().any(|p| p.valid));
+}
+
+/// A choice whose selected plan installation refuses for a reason other
+/// than the executor (here a raw-data window under a subquery, which no
+/// runtime can place) is `not_installable`, never valid, so it is never
+/// flagged cheaper than the selected plan.
+#[test]
+fn a_choice_installation_refuses_is_not_installable() {
+    let mut workload = ratio_of_quantiles();
+    workload.query_workload.repeating_queries.as_mut().unwrap()[0].query =
+        Query("max_over_time(rate(data[5m])[1h:1m])".into());
+    workload
+        .query_workload
+        .repeating_queries
+        .as_mut()
+        .unwrap()
+        .truncate(1);
+    let planned = planned(&workload, true);
+    let (settings, deployment) = (settings(false), deployment());
+    let enumeration = enumerate(&planned.memo, 100_000);
+    let priced = price_choices(
+        &planned.memo,
+        &enumeration.choices,
+        &planned.roots,
+        &planned.entries,
+        &planned.data,
+        models(&settings, &deployment),
+        None,
+    );
+    assert!(!priced.is_empty());
+    for p in &priced {
+        assert!(!p.valid && !p.cheaper_than_selected, "{p:?}");
+    }
+    let refused: Vec<_> = priced
+        .iter()
+        .filter(|p| p.rejection.as_deref() == Some("not_installable"))
+        .collect();
+    assert!(!refused.is_empty(), "{priced:?}");
+    for p in refused {
+        let reason = p.rejection_reason.as_deref().unwrap();
+        assert!(
+            reason.contains("a subquery or a TimeShift above the range"),
+            "{reason}"
+        );
+    }
 }
