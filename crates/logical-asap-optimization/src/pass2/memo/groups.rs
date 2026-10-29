@@ -112,7 +112,7 @@ fn pass1_candidates<Id: Clone>(
         }
     }
     let own = |g: usize| CandidateForMemoGroup {
-        implements: vec![MemoGroupId(g as u32)],
+        fused_groups: Vec::new(),
         root_node: Rc::clone(&groups[g].logical_node),
         input_groups: groups[g].child_groups.clone(),
         origin: OriginOfCandidateForMemoGroup::Pass1,
@@ -254,7 +254,7 @@ fn target_candidates<Id: Clone>(
                 (node, children)
             };
             candidates.push(CandidateForMemoGroup {
-                implements: implements.clone(),
+                fused_groups: implements[1..].to_vec(),
                 root_node: node,
                 input_groups: children,
                 origin: OriginOfCandidateForMemoGroup::Pass1,
@@ -761,7 +761,7 @@ mod tests {
         assert!(algorithms(&candidates[1])[0].contains("Kll"));
         assert!(algorithms(&candidates[2])[0].contains("DDSketch"));
         for candidate in candidates {
-            assert_eq!(candidate.implements, vec![MemoGroupId(quantile as u32)]);
+            assert!(candidate.fused_groups.is_empty());
             assert_eq!(candidate.input_groups, input);
             assert_eq!(candidate.origin, OriginOfCandidateForMemoGroup::Pass1);
         }
@@ -783,11 +783,11 @@ mod tests {
         assert_eq!(candidates[0].input_groups, vec![sums]);
         let fused: Vec<_> = candidates
             .iter()
-            .filter(|c| c.implements.len() > 1)
+            .filter(|c| !c.fused_groups.is_empty())
             .collect();
         assert!(!fused.is_empty());
         for candidate in fused {
-            assert_eq!(candidate.implements, vec![MemoGroupId(topk as u32), sums]);
+            assert_eq!(candidate.fused_groups, vec![sums]);
             assert_eq!(candidate.input_groups, sums_input);
             assert!(algorithms(candidate)[0].contains("Heap"));
         }
@@ -1172,7 +1172,7 @@ mod tests {
                         memo.candidates[g]
                             .iter()
                             .filter(|c| {
-                                c.accuracy_budget_parts == 1 && (c.implements.len() > 1) == fused
+                                c.accuracy_budget_parts == 1 && !c.fused_groups.is_empty() == fused
                             })
                             .count()
                     };

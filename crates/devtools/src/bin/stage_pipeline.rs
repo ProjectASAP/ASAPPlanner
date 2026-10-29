@@ -1729,7 +1729,9 @@ fn memo_groups_json(
                         .collect();
                     json!({
                         "index": index,
-                        "implements": ids(&candidate.implements),
+                        "implements": std::iter::once(id as u32)
+                            .chain(candidate.fused_groups.iter().map(|g| g.0))
+                            .collect::<Vec<_>>(),
                         "children": ids(&candidate.input_groups),
                         "origin": origin_name(&candidate.origin),
                         "budget_share": candidate.accuracy_budget_parts,

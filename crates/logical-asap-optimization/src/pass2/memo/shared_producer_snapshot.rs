@@ -92,7 +92,9 @@ fn fingerprint(memo: &CandidateMemo) -> (usize, u64) {
                     "{:?}|{}|{:?}|{:?}|{}",
                     candidate.origin,
                     candidate.accuracy_budget_parts,
-                    candidate.implements,
+                    std::iter::once(super::MemoGroupId(index as u32))
+                        .chain(candidate.fused_groups.iter().copied())
+                        .collect::<Vec<_>>(),
                     candidate.input_groups,
                     signature(&candidate.root_node)
                 )

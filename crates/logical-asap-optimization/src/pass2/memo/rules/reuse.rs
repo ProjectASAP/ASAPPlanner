@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 pub(in crate::pass2::memo) fn eligible(candidate: &CandidateForMemoGroup) -> bool {
-    !candidate.implements.is_empty() && candidate.accuracy_budget_parts > 0
+    candidate.accuracy_budget_parts > 0
 }
 
 pub(in crate::pass2::memo) fn restore_inputs(
@@ -130,7 +130,7 @@ pub(in crate::pass2::memo) fn append_producer(
         queries: queries.to_vec(),
     });
     memo.candidates.push(vec![CandidateForMemoGroup {
-        implements: vec![id],
+        fused_groups: Vec::new(),
         root_node: node,
         input_groups: children,
         origin,

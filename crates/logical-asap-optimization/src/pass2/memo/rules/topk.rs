@@ -286,7 +286,7 @@ fn exact_input_group(
         1,
     )?;
     for candidate in &mut candidates {
-        candidate.implements = vec![id];
+        candidate.fused_groups = Vec::new();
     }
     memo.candidates[id.0 as usize] = candidates;
     known.insert(group, Some(id));
