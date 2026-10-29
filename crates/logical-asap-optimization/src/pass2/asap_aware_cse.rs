@@ -2634,9 +2634,9 @@ pub fn rollup_pass2_candidates(
     Ok(subsets(&rollup_choices(candidates), "rollup")?
         .into_iter()
         .map(|choices| {
-            let chosen: Vec<RollupCandidate> = choices.iter().flatten().cloned().collect();
-            let values: HashMap<*const OperatorNode, &RollupCandidate> = chosen
+            let values: HashMap<*const OperatorNode, &RollupCandidate> = choices
                 .iter()
+                .flatten()
                 .filter(|candidate| !is_sketch_build(&candidate.finer))
                 .map(|candidate| (Rc::as_ptr(&candidate.coarse), candidate))
                 .collect();
@@ -2932,7 +2932,8 @@ pub fn topk_reuse_pass2_candidates(
     roots: &[QueryRoot],
     candidates: &[TopKReuseCandidate],
 ) -> Result<Vec<TopKReusePass2Candidate>, PerComputationCandidateError> {
-    Ok(subsets(candidates, "top-k reuse")?
+    let candidates: Vec<&TopKReuseCandidate> = candidates.iter().collect();
+    Ok(subsets(&candidates, "top-k reuse")?
         .into_iter()
         .map(|chosen| {
             let mut replaced = HashMap::new();

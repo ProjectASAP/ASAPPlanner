@@ -260,6 +260,8 @@ mod tests {
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use crate::test_support::lower_promql;
     use asap_types::ir::schema::schema_support::with_promql_series_identity;
+    use asap_types::ir::{ASAPOp, OperatorNode};
+    use std::rc::Rc;
 
     /// The composed candidate of `queries`, every target at its first
     /// (exact) candidate.
@@ -338,34 +340,39 @@ mod tests {
                 }
             }
         }
-        // Every rollup candidate's roots with the finer build in panes.
-        let grid: Vec<_> = entries
-            .iter()
-            .map(QueryWorkloadEntry::evaluation_grid_ms)
-            .collect();
-        let composed: Vec<_> = compose_logical_candidate(&inventory, &choice)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
-        let rolled_in_panes: Vec<_> =
-            rollup_pass2_candidates(&composed, &rollup_candidates(&composed))
-                .unwrap()
-                .into_iter()
-                .filter_map(|rolled| rolled.roots.ok())
-                .flat_map(|rolled| {
-                    let panes = pane_candidates(&rolled, &grid);
-                    window_composition_pass2_candidates(&rolled, &panes).unwrap()
-                })
-                .filter_map(|paned| paned.roots.ok())
-                .map(|roots| flatten(&roots).0)
-                .collect();
-        assert!(!rolled_in_panes.is_empty());
+        // Rolled up and in panes: the fine sum's one build is a pane chain,
+        // and the coarse sum reads that same node (rolling up its values).
+        // Without the rollup the coarse sum reads only its own build;
+        // without panes the fine build is a `SummaryAgg`.
+        let rolled_in_panes = |roots: &[QueryRoot]| {
+            let builds = |root: &QueryRoot| -> Vec<Rc<OperatorNode>> {
+                let QueryRoot::Operator(node) = root else {
+                    return Vec::new();
+                };
+                OperatorNode::reachable(node)
+                    .into_iter()
+                    .filter(|n| {
+                        matches!(
+                            n.asap(),
+                            Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+                        )
+                    })
+                    .collect()
+            };
+            let [fine, coarse] = roots else { return false };
+            match builds(fine).as_slice() {
+                [chain] => {
+                    matches!(chain.asap(), Some(ASAPOp::PaneChain { .. }))
+                        && builds(coarse).iter().any(|b| Rc::ptr_eq(b, chain))
+                }
+                _ => false,
+            }
+        };
         assert!(
             stage1_candidates_of_choice(&inventory, &entries, &choice, &|_| true)
                 .into_iter()
                 .filter_map(Result::ok)
-                .any(|roots| rolled_in_panes.contains(&flatten(&roots).0))
+                .any(|roots| rolled_in_panes(&roots))
         );
     }
 
