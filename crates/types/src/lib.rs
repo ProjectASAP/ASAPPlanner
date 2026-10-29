@@ -7,7 +7,7 @@
 //!   [`ir::scalar`] (§2.2 scalar expressions), [`ir::schema`] (§2.1 the
 //!   per-edge schema and the summary-state types it carries) and
 //!   [`ir::properties`] (§2.2–2.3 accuracy, guarantee, execution timing and
-//!   summary coverage), plus its passes (canonicalize, CSE), the flat DAG
+//!   summary coverage), plus its CSE pass, the flat DAG
 //!   form ([`ir::flat`]) and the physical ASAP DAG ([`ir::physical_export`]).
 //! - [`workload`] — the planner inputs (#509): the query and data
 //!   workloads, the parsed workload the query-language frontends produce

@@ -16,7 +16,7 @@
 //! their tests.
 //!
 //! Post-lowering **canonicalization** is *not* here: it lives in
-//! `asap_types::ir::canonicalize`, run inside `asap_frontend_common`'s shared
+//! `asap_frontend_common::canonicalize`, run inside that crate's shared
 //! `resolve_root` so every front end normalizes before the IR leaves resolution
 //! (issue #34, closed).
 //!
