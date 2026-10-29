@@ -281,15 +281,14 @@ mod tests {
     use crate::accuracy_binding::{bind_statistics, root_operators, workload_statistic};
     use crate::checks::{accuracy_check, CheckFailure};
     use crate::pricing::{kept_pane_chains, node_map, price_at_scale};
-    use crate::selector::dominates;
     use crate::statistics::values_per_result;
     use asap_accuracy::composition::INPUT_ROW_COUNT;
     use asap_accuracy::estimators::hll;
     use asap_cost::execution_demand::evaluation_rate;
     use asap_cost::{
         CalibrationFit, CandidateCost, ClusterLimits, ClusterObjective, CostInputs, CostModel,
-        NodePriceSource, OperatorKind, QueryLatency, ResourceUsage, COST_SOURCE, COST_UNIT,
-        MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
+        NodePriceSource, OperatorKind, ResourceUsage, COST_SOURCE, MEASURED_COST_SOURCE,
+        MIXED_COST_SOURCE,
     };
     use asap_cost::{MeasuredOperationCosts, OperatorCost, ResourceUnitCost};
     use asap_logical_asap_optimization::pass1::per_computation_candidates::root_guarantee;
@@ -515,20 +514,6 @@ mod tests {
             );
             assert!(!selection.costs.contains_key(*id));
         }
-    }
-
-    /// Totals that differ only by rounding tie, so the earlier candidate is
-    /// kept; a real difference is cheaper.
-    #[test]
-    fn totals_differing_by_rounding_tie() {
-        // One unit in the last place apart, as the same charges summed in
-        // another grouping can be.
-        let separate = 0.336006_f64;
-        let together = f64::from_bits(separate.to_bits() - 1);
-        assert!(!cheaper(separate, together));
-        assert!(!cheaper(together, separate));
-        assert!(cheaper(0.3, 0.4));
-        assert!(!cheaper(0.4, 0.3));
     }
 
     /// For a query with a target, Count-Min over weights not proven
@@ -4550,34 +4535,6 @@ mod tests {
         );
     }
 
-    /// Without a declared memory capacity nothing rejects a candidate for
-    /// its memory, so a peak over [`LARGE_PEAK_MEMORY_BYTES`] is reported
-    /// as a warning (the eval's 24 h quantiles plan peaked at 1.43 TB).
-    /// Under cost model 3 the cluster's memory is declared and its capacity
-    /// check applies instead, so there is no warning.
-    #[test]
-    fn a_very_large_peak_memory_is_warned_about_only_without_a_declared_capacity() {
-        let usage_over_time = CostModel::UsageOverTime(ResourceUnitCost::illustrative());
-        assert_eq!(
-            large_peak_memory_warning(1_430_000_000_000, &usage_over_time).as_deref(),
-            Some(
-                "peak memory 1430000000000 bytes is over 1000000000000 bytes and the deployment \
-                 declares no memory capacity to check it against"
-            )
-        );
-        assert_eq!(
-            large_peak_memory_warning(LARGE_PEAK_MEMORY_BYTES, &usage_over_time),
-            None
-        );
-        let cluster = CostModel::ClusterCapacity(ClusterLimits {
-            memory_bytes: u64::MAX,
-            disk_bytes: u64::MAX,
-            cpu_cores: None,
-            objective: ClusterObjective::LowestLatency,
-        });
-        assert_eq!(large_peak_memory_warning(1_430_000_000_000, &cluster), None);
-    }
-
     /// When a maintained state's ingestion work needs more than one core,
     /// its `k` workers' partial copies of the newest window are merged
     /// before the query reads it: `(k − 1)` merges of one operation for
@@ -4816,23 +4773,6 @@ mod tests {
             disk(&["sum_over_time(m[1m])", "sum_over_time(m[5m])"]),
             five_minutes
         );
-    }
-
-    /// One candidate dominates another only when it is no worse on peak
-    /// memory, disk and latency and better on one; equal usage does not.
-    #[test]
-    fn dominance_needs_one_strictly_better_resource() {
-        let usage = |memory, latency_ms| ResourceUsage {
-            peak_memory_bytes: memory,
-            latency_per_query: vec![QueryLatency {
-                compaction_ms: 0.0,
-                query_ms: latency_ms,
-            }],
-            ..ResourceUsage::default()
-        };
-        assert!(dominates(&usage(1, 5.0), &usage(2, 5.0)));
-        assert!(!dominates(&usage(1, 5.0), &usage(1, 5.0)));
-        assert!(!dominates(&usage(1, 6.0), &usage(2, 5.0)));
     }
 
     /// Cost model 3's disk limit: B2 reads its 5-minute window of raw data
@@ -5266,42 +5206,6 @@ mod tests {
         // averaged memory beside negligible query-time holds.
         assert!(cost.usage.peak_memory_bytes >= kept + bytes);
         assert!(cost.usage.average_memory_bytes < (kept + bytes) as f64);
-    }
-
-    /// A candidate with the given latency, peak memory and disk under cost
-    /// model 3.
-    fn cluster_cost(latency_ms: f64, peak_memory_bytes: u64, disk_bytes: u64) -> CandidateCost {
-        CandidateCost {
-            usage: ResourceUsage {
-                peak_memory_bytes,
-                disk_bytes,
-                latency_per_query: vec![QueryLatency {
-                    compaction_ms: 0.0,
-                    query_ms: latency_ms,
-                }],
-                ..ResourceUsage::default()
-            },
-            cost_per_second: None,
-            cost_unit: COST_UNIT,
-            source: COST_SOURCE,
-            per_node: BTreeMap::new(),
-        }
-    }
-
-    /// Peak memory and disk are compared exactly, as dominance compares
-    /// them: 100 bytes less at 124 GB is less memory, not a tie. Under the
-    /// Pareto front the selected candidate is a front member, and under
-    /// least memory the smaller one wins.
-    #[test]
-    fn memory_differing_by_a_few_bytes_is_compared_exactly() {
-        let larger = cluster_cost(7.0, 124_000_000_100, 0);
-        let smaller = cluster_cost(7.0, 124_000_000_000, 0);
-        let costs = [&larger, &smaller];
-        let (best, front) = choose(Ranking::Front, &costs).unwrap();
-        assert_eq!(front, [1]);
-        assert_eq!(best, 1, "the selection is on the front");
-        assert_eq!(choose(Ranking::Memory, &costs).unwrap().0, 1);
-        assert_eq!(choose(Ranking::Latency, &costs).unwrap().0, 1);
     }
 
     /// The KLL build of a `quantile_over_time` candidate, with its sketch

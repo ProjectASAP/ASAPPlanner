@@ -552,7 +552,7 @@ fn capacity_violation(usage: &ResourceUsage, limits: &ClusterLimits) -> Option<S
 
 /// Whether `a` is at least as good as `b` on peak memory, disk and
 /// worst-query latency, and better on one of them.
-pub(crate) fn dominates(a: &ResourceUsage, b: &ResourceUsage) -> bool {
+fn dominates(a: &ResourceUsage, b: &ResourceUsage) -> bool {
     dominates_at((a, worst_latency_ms(a)), (b, worst_latency_ms(b)))
 }
 
@@ -700,4 +700,77 @@ fn describe_usage(usage: &ResourceUsage) -> String {
         usage.peak_memory_bytes,
         usage.disk_bytes
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asap_cost::COST_SOURCE;
+
+    /// Totals that differ only by rounding tie, so the earlier candidate is
+    /// kept; a real difference is cheaper.
+    #[test]
+    fn totals_differing_by_rounding_tie() {
+        // One unit in the last place apart, as the same charges summed in
+        // another grouping can be.
+        let separate = 0.336006_f64;
+        let together = f64::from_bits(separate.to_bits() - 1);
+        assert!(!cheaper(separate, together));
+        assert!(!cheaper(together, separate));
+        assert!(cheaper(0.3, 0.4));
+        assert!(!cheaper(0.4, 0.3));
+    }
+
+    /// One candidate dominates another only when it is no worse on peak
+    /// memory, disk and latency and better on one; equal usage does not.
+    #[test]
+    fn dominance_needs_one_strictly_better_resource() {
+        let usage = |memory, latency_ms| ResourceUsage {
+            peak_memory_bytes: memory,
+            latency_per_query: vec![QueryLatency {
+                compaction_ms: 0.0,
+                query_ms: latency_ms,
+            }],
+            ..ResourceUsage::default()
+        };
+        assert!(dominates(&usage(1, 5.0), &usage(2, 5.0)));
+        assert!(!dominates(&usage(1, 5.0), &usage(1, 5.0)));
+        assert!(!dominates(&usage(1, 6.0), &usage(2, 5.0)));
+    }
+
+    /// A candidate with the given latency, peak memory and disk under cost
+    /// model 3.
+    fn cluster_cost(latency_ms: f64, peak_memory_bytes: u64, disk_bytes: u64) -> CandidateCost {
+        CandidateCost {
+            usage: ResourceUsage {
+                peak_memory_bytes,
+                disk_bytes,
+                latency_per_query: vec![QueryLatency {
+                    compaction_ms: 0.0,
+                    query_ms: latency_ms,
+                }],
+                ..ResourceUsage::default()
+            },
+            cost_per_second: None,
+            cost_unit: COST_UNIT,
+            source: COST_SOURCE,
+            per_node: BTreeMap::new(),
+        }
+    }
+
+    /// Peak memory and disk are compared exactly, as dominance compares
+    /// them: 100 bytes less at 124 GB is less memory, not a tie. Under the
+    /// Pareto front the selected candidate is a front member, and under
+    /// least memory the smaller one wins.
+    #[test]
+    fn memory_differing_by_a_few_bytes_is_compared_exactly() {
+        let larger = cluster_cost(7.0, 124_000_000_100, 0);
+        let smaller = cluster_cost(7.0, 124_000_000_000, 0);
+        let costs = [&larger, &smaller];
+        let (best, front) = choose(Ranking::Front, &costs).unwrap();
+        assert_eq!(front, [1]);
+        assert_eq!(best, 1, "the selection is on the front");
+        assert_eq!(choose(Ranking::Memory, &costs).unwrap().0, 1);
+        assert_eq!(choose(Ranking::Latency, &costs).unwrap().0, 1);
+    }
 }
