@@ -1816,12 +1816,14 @@ fn scans_projecting_different_labels_are_shared() {
         .as_f64()
         .unwrap();
     // Offering maximal sharing must not force a costlier plan. The historical
-    // partial-sharing/rollup plan remains the production quality upper bound.
+    // partial-sharing plan remains the production quality upper bound: a
+    // narrow 5 m scan plus a wide 15 s scan, 0.16006 at asap_sketchlib's
+    // DDSketch state bytes (the widened scan costs 0.2184).
     assert!(
         selected_cost <= shared_cost,
         "{selected_cost} > {shared_cost}"
     );
-    assert!(selected_cost <= 0.1518, "{selected_cost}");
+    assert!(selected_cost <= 0.1601, "{selected_cost}");
 }
 
 /// The public engine is candidate-connections; retired selectors are rejected.
