@@ -1149,7 +1149,6 @@ fn workload_file_with_a_range_evaluation_is_planned() {
     ));
     std::fs::write(&path, workload.to_string()).unwrap();
     let document = document_of(&[
-        "--exhaustive",
         "--workload",
         path.to_str().unwrap(),
         "--deployment-capabilities",
@@ -1164,9 +1163,80 @@ fn workload_file_with_a_range_evaluation_is_planned() {
     let cost = selection["costs"][selected]["cost_per_second"]
         .as_f64()
         .unwrap();
+    // The reference: the window merged from panes kept across evaluations,
+    // priced under the same models. Its absolute cost is pinned in
+    // integration-tests/tests/range_evaluation.rs.
+    let kept_panes = {
+        use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+            compose_logical_candidate, generate_per_computation_candidates, recompose_guarantees,
+        };
+        use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+            pane_candidates, window_composition_pass2_candidates,
+        };
+        use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
+        use asap_types::ir::ASAPOp;
+        use asap_types::physical::{Materialization, Medium};
+        let parsed: PlanningWorkload = serde_json::from_value(workload.clone()).unwrap();
+        let entries: Vec<_> = parsed.query_workload.entries().collect();
+        let data = parsed.data_workload.clone().unwrap();
+        let inventory = generate_per_computation_candidates(
+            lower_promql_roots(&parsed)
+                .unwrap()
+                .into_iter()
+                .enumerate()
+                .collect(),
+        )
+        .unwrap();
+        let exact: Vec<_> = compose_logical_candidate(&inventory, &[0])
+            .unwrap()
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect();
+        let grids: Vec<_> = entries.iter().map(|e| e.evaluation_grid_ms()).collect();
+        let panes = pane_candidates(&exact, &grids);
+        let paned = window_composition_pass2_candidates(&exact, &panes)
+            .unwrap()
+            .remove(0)
+            .roots
+            .unwrap();
+        let deployment = asap_planner::DeploymentCapabilities {
+            query_time_results_retained: true,
+            ..Default::default()
+        };
+        let kept = asap_physical_asap_optimization::optimize_physical_asap(
+            "kept-panes",
+            &recompose_guarantees(&paned).unwrap(),
+            &entries,
+            &data,
+            &deployment,
+        )
+        .unwrap()
+        .into_iter()
+        .find(|plan| {
+            plan.dag.nodes.iter().any(|n| {
+                matches!(
+                    n.payload,
+                    PhysicalASAPOperatorPayload::ASAP(ASAPOp::PaneChain { .. })
+                ) && n.materialization
+                    == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
+            })
+        })
+        .expect("a plan keeps its panes across evaluations");
+        let settings = asap_plan_selection::PlanSelectionSettings::default();
+        let priced = asap_plan_selection::select_plan(
+            std::slice::from_ref(&kept),
+            &entries,
+            &data,
+            asap_plan_selection::PlanningModels::builtin()
+                .with_plan_selection(&settings)
+                .with_deployment_capabilities(&deployment),
+        )
+        .unwrap();
+        priced.costs[&priced.selected].cost_per_second.unwrap()
+    };
     assert!(
-        cost <= 460.042,
-        "historical retained-pane feasible cost: {cost}"
+        cost <= kept_panes * (1.0 + 1e-9),
+        "selected {selected} costs {cost}, more than the kept panes' {kept_panes}"
     );
     assert!(selection["pane_retention_ms"]
         .as_object()
