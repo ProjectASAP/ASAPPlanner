@@ -238,25 +238,29 @@ impl ScanWindow {
     }
 }
 
-/// The window of the `TimeRange` `time_range`
-/// ([`PhysicalASAPDAG::time_range_window`]), with `payload` giving each
-/// node's operator.
-fn time_range_window_of<'a>(
+/// The rows the `TimeRange` `time_range` keeps, back from the evaluation
+/// time `T`: `(T - s - w, T - s]` for a `TimeRange(w)` over `TimeShift`s
+/// whose offsets sum to `s`, the window [`PhysicalASAPDAG::scan_window`]
+/// counts for it. `Unbounded` when one of those shifts has an `@` anchor,
+/// or `time_range` is not a `TimeRange`. `payload_of` gives each node's
+/// operator by id; an indexed lookup keeps this O(shifts), so a caller
+/// asking for every `TimeRange` of a pane-expanded DAG stays linear.
+pub fn time_range_window<'a>(
     time_range: PhysicalASAPNodeId,
-    payload: impl Fn(PhysicalASAPNodeId) -> Option<&'a PhysicalASAPOperatorPayload>,
+    payload_of: impl Fn(PhysicalASAPNodeId) -> Option<&'a PhysicalASAPOperatorPayload>,
 ) -> ScanWindow {
-    let Some(Operator::NonASAP(NonASAPOp::TimeRange { range, child, .. })) = payload(time_range)
+    let Some(Operator::NonASAP(NonASAPOp::TimeRange { range, child, .. })) = payload_of(time_range)
     else {
         return ScanWindow::Unbounded;
     };
     let mut end_offset_ms = 0i64;
-    let mut below = payload(*child);
+    let mut below = payload_of(*child);
     while let Some(Operator::NonASAP(NonASAPOp::TimeShift { shift, child })) = below {
         if shift.at.is_some() {
             return ScanWindow::Unbounded;
         }
         end_offset_ms = end_offset_ms.saturating_add(shift.offset_ms);
-        below = payload(*child);
+        below = payload_of(*child);
     }
     ScanWindow::Within {
         end_offset_ms,
@@ -347,12 +351,17 @@ impl PhysicalASAPDAG {
         scan: PhysicalASAPNodeId,
         kept_chains: &HashSet<PhysicalASAPNodeId>,
     ) -> ScanWindow {
-        // Indexed once per call: O(nodes + edges), not a search per edge.
-        let payloads: HashMap<PhysicalASAPNodeId, &PhysicalASAPOperatorPayload> = self
-            .nodes
-            .iter()
-            .map(|node| (node.id, &node.payload))
-            .collect();
+        self.scan_windows([scan], kept_chains)[&scan]
+    }
+
+    /// [`Self::scan_window`] of each of `scans`, by id, with the DAG
+    /// indexed once for all of them: O(nodes + edges + the readers walked).
+    pub fn scan_windows(
+        &self,
+        scans: impl IntoIterator<Item = PhysicalASAPNodeId>,
+        kept_chains: &HashSet<PhysicalASAPNodeId>,
+    ) -> HashMap<PhysicalASAPNodeId, ScanWindow> {
+        let payloads = self.payloads_by_id();
         let mut consumers: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
         for edge in &self.edges {
             consumers
@@ -360,91 +369,102 @@ impl PhysicalASAPDAG {
                 .or_default()
                 .push(edge.consumer);
         }
-        let payload = |id: PhysicalASAPNodeId| payloads.get(&id).copied();
-        let mut window: Option<ScanWindow> = None;
-        let mut pending = vec![(scan, 0i64)];
-        while let Some((id, end_offset_ms)) = pending.pop() {
-            if self.roots.contains(&id) {
-                return ScanWindow::Unbounded;
+        let roots: HashSet<PhysicalASAPNodeId> = self.roots.iter().copied().collect();
+        let window_of = |scan: PhysicalASAPNodeId| {
+            let mut window: Option<ScanWindow> = None;
+            let mut pending = vec![(scan, 0i64)];
+            while let Some((id, end_offset_ms)) = pending.pop() {
+                if roots.contains(&id) {
+                    return ScanWindow::Unbounded;
+                }
+                for &consumer in consumers.get(&id).into_iter().flatten() {
+                    let width_ms = match payloads.get(&consumer) {
+                        Some(Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }))
+                            if shift.at.is_none() =>
+                        {
+                            pending.push((consumer, end_offset_ms.saturating_add(shift.offset_ms)));
+                            continue;
+                        }
+                        Some(Operator::NonASAP(NonASAPOp::TimeRange { range, .. })) => {
+                            range.as_millis()
+                        }
+                        Some(Operator::ASAP(ASAPOp::PaneChain { pane_width_ms, .. }))
+                            if kept_chains.contains(&consumer) =>
+                        {
+                            u128::from(*pane_width_ms)
+                        }
+                        Some(Operator::ASAP(ASAPOp::PaneChain {
+                            pane_width_ms,
+                            pane_count,
+                            ..
+                        })) => u128::from(*pane_width_ms) * u128::from(*pane_count),
+                        _ => return ScanWindow::Unbounded,
+                    };
+                    let read = ScanWindow::Within {
+                        end_offset_ms,
+                        width_ms: i64::try_from(width_ms).unwrap_or(i64::MAX),
+                    };
+                    window = Some(window.map_or(read, |window| window.union(read)));
+                }
             }
-            for &consumer in consumers.get(&id).into_iter().flatten() {
-                let width_ms = match payload(consumer) {
-                    Some(Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }))
-                        if shift.at.is_none() =>
-                    {
-                        pending.push((consumer, end_offset_ms.saturating_add(shift.offset_ms)));
-                        continue;
-                    }
-                    Some(Operator::NonASAP(NonASAPOp::TimeRange { range, .. })) => {
-                        range.as_millis()
-                    }
-                    Some(Operator::ASAP(ASAPOp::PaneChain { pane_width_ms, .. }))
-                        if kept_chains.contains(&consumer) =>
-                    {
-                        u128::from(*pane_width_ms)
-                    }
-                    Some(Operator::ASAP(ASAPOp::PaneChain {
-                        pane_width_ms,
-                        pane_count,
-                        ..
-                    })) => u128::from(*pane_width_ms) * u128::from(*pane_count),
-                    _ => return ScanWindow::Unbounded,
-                };
-                let read = ScanWindow::Within {
-                    end_offset_ms,
-                    width_ms: i64::try_from(width_ms).unwrap_or(i64::MAX),
-                };
-                window = Some(window.map_or(read, |window| window.union(read)));
-            }
-        }
-        window.unwrap_or(ScanWindow::Unbounded)
-    }
-
-    /// The rows the `TimeRange` `time_range` keeps, back from the
-    /// evaluation time `T`: `(T - s - w, T - s]` for a `TimeRange(w)` over
-    /// `TimeShift`s whose offsets sum to `s`, the window
-    /// [`Self::scan_window`] counts for it. `Unbounded` when one of those
-    /// shifts has an `@` anchor, or `time_range` is not a `TimeRange`.
-    pub fn time_range_window(&self, time_range: PhysicalASAPNodeId) -> ScanWindow {
-        time_range_window_of(time_range, |id| {
-            self.nodes
-                .iter()
-                .find(|node| node.id == id)
-                .map(|node| &node.payload)
-        })
+            window.unwrap_or(ScanWindow::Unbounded)
+        };
+        scans
+            .into_iter()
+            .map(|scan| (scan, window_of(scan)))
+            .collect()
     }
 
     /// The interval of data the output of `node` summarizes, back from the
     /// evaluation time `T`: the union of the windows
-    /// ([`Self::time_range_window`]) of every `TimeRange` below it. For an
+    /// ([`time_range_window`]) of every `TimeRange` below it. For an
     /// expanded pane, its pane; for a view built from panes, all of them.
     /// `Unbounded` when no `TimeRange` is below it or one of them is
     /// unbounded (a whole SQL table, an `@` anchor). O(nodes + edges).
     pub fn view_window(&self, node: PhysicalASAPNodeId) -> ScanWindow {
-        let payloads: HashMap<PhysicalASAPNodeId, &PhysicalASAPOperatorPayload> = self
-            .nodes
-            .iter()
-            .map(|node| (node.id, &node.payload))
-            .collect();
+        self.view_windows([node])[&node]
+    }
+
+    /// [`Self::view_window`] of each of `nodes`, by id, with the DAG indexed
+    /// once for all of them: O(nodes + edges + the nodes walked below each).
+    pub fn view_windows(
+        &self,
+        nodes: impl IntoIterator<Item = PhysicalASAPNodeId>,
+    ) -> HashMap<PhysicalASAPNodeId, ScanWindow> {
+        let payloads = self.payloads_by_id();
         let mut inputs: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
         for edge in &self.edges {
             inputs.entry(edge.consumer).or_default().push(edge.producer);
         }
-        let mut seen = HashSet::new();
-        let mut pending = vec![node];
-        let mut window: Option<ScanWindow> = None;
-        while let Some(id) = pending.pop() {
-            if !seen.insert(id) {
-                continue;
+        let window_of = |node: PhysicalASAPNodeId| {
+            let mut seen = HashSet::new();
+            let mut pending = vec![node];
+            let mut window: Option<ScanWindow> = None;
+            while let Some(id) = pending.pop() {
+                if !seen.insert(id) {
+                    continue;
+                }
+                if let Some(Operator::NonASAP(NonASAPOp::TimeRange { .. })) = payloads.get(&id) {
+                    let read = time_range_window(id, |id| payloads.get(&id).copied());
+                    window = Some(window.map_or(read, |window| window.union(read)));
+                    continue;
+                }
+                pending.extend(inputs.get(&id).into_iter().flatten());
             }
-            if let Some(Operator::NonASAP(NonASAPOp::TimeRange { .. })) = payloads.get(&id) {
-                let read = time_range_window_of(id, |id| payloads.get(&id).copied());
-                window = Some(window.map_or(read, |window| window.union(read)));
-                continue;
-            }
-            pending.extend(inputs.get(&id).into_iter().flatten());
-        }
-        window.unwrap_or(ScanWindow::Unbounded)
+            window.unwrap_or(ScanWindow::Unbounded)
+        };
+        nodes
+            .into_iter()
+            .map(|node| (node, window_of(node)))
+            .collect()
+    }
+
+    /// Each node's operator, by id.
+    fn payloads_by_id(&self) -> HashMap<PhysicalASAPNodeId, &PhysicalASAPOperatorPayload> {
+        self.nodes
+            .iter()
+            .map(|node| (node.id, &node.payload))
+            .collect()
     }
 
     /// The IR this DAG exports, one root per query in batch order, every
