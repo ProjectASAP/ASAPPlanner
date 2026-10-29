@@ -610,7 +610,7 @@ mod tests {
     /// the candidates of the intents that read it, with no other edit.
     #[test]
     fn a_dropped_readout_drops_the_family() {
-        // Count-Min's row is Count-Min-with-heap's less its top-k.
+        // Count-Min-with-heap answered from Count-Min's row: no top-k readout.
         let heap_without_top_k = |family: &SketchAlgorithm| {
             FamilyCapability::of_per_instance_sketch(match family {
                 SketchAlgorithm::CmsWithHeap => &SketchAlgorithm::Cms,

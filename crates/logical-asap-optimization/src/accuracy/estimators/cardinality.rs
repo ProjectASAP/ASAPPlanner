@@ -1,4 +1,4 @@
-//! KMV's provable distinct-count bound and Theta's Chebyshev calibration.
+//! KMV's provable distinct-count bound.
 //!
 //! # KMV (#694)
 //!
