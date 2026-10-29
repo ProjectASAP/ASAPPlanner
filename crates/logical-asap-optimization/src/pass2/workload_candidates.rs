@@ -485,7 +485,7 @@ mod tests {
             .targets
             .iter()
             .map(|target| {
-                if target.fused.is_some() {
+                if target.fused_computation.is_some() {
                     target.choices.candidates.len()
                 } else {
                     0
@@ -493,8 +493,8 @@ mod tests {
             })
             .collect();
         for target in &inventory.targets {
-            if let Some(fused) = &target.fused {
-                for &absorbed in &fused.absorbs {
+            if let Some(fused) = &target.fused_computation {
+                for &absorbed in &fused.absorbed_targets {
                     choice[absorbed] = 0;
                 }
             }

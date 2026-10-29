@@ -104,7 +104,7 @@ async fn check_every_choice(
                     else {
                         return false;
                     };
-                    matches!(measures[t.measure], AggIntent::TopK { .. })
+                    matches!(measures[t.measure_index], AggIntent::TopK { .. })
                         && t.computation_for(i).map(|(c, _)| c)
                             != Some(&HowToComputeAggregateMeasure::Exact)
                 });

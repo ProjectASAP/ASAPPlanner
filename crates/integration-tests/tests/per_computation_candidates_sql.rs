@@ -33,7 +33,7 @@ async fn targets(sql: &str) -> Vec<ComputationTarget> {
 fn placements(targets: &[ComputationTarget]) -> Vec<HavingPlacement> {
     targets
         .iter()
-        .flat_map(|target| target.having.iter().map(|entry| entry.placement))
+        .flat_map(|target| target.having_filters.iter().map(|entry| entry.placement))
         .collect()
 }
 

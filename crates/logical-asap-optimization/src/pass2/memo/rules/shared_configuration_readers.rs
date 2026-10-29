@@ -152,7 +152,7 @@ impl SharedProducer for SummaryStates {
                     _ => unreachable!(),
                 };
                 let merge = if matches!(build.asap(), Some(ASAPOp::PaneChain { .. })) {
-                    let merges: Vec<_> = OperatorNode::reachable(&entry.node).into_iter().filter(|node| {
+                    let merges: Vec<_> = OperatorNode::reachable(&entry.root_node).into_iter().filter(|node| {
                         matches!(node.asap(), Some(ASAPOp::SummaryMerge {children, group_by: None, ..})
                             if children.len() == 1 && Rc::ptr_eq(&children[0], &build))
                     }).collect();
@@ -189,9 +189,9 @@ impl SharedProducer for SummaryStates {
             for candidate in candidates {
                 check_generation_deadline(deadline)?;
                 self.known
-                    .entry((group, graph_signature(&candidate.node)?))
+                    .entry((group, graph_signature(&candidate.root_node)?))
                     .or_default()
-                    .push(Rc::clone(&candidate.node));
+                    .push(Rc::clone(&candidate.root_node));
             }
         }
         let mut layouts: Vec<(usize, usize, FlatDag)> = Vec::new();
@@ -269,7 +269,7 @@ impl SharedProducer for SummaryStates {
             return Ok(0);
         }
         let original = memo.candidates[reader.group][need.candidate].clone();
-        let roots = [QueryRoot::Operator(Rc::clone(&original.node))];
+        let roots = [QueryRoot::Operator(Rc::clone(&original.root_node))];
         let result = match covering {
             StateCovering::Panes {
                 configuration_index,
@@ -302,21 +302,21 @@ impl SharedProducer for SummaryStates {
             }
         };
         let boundaries: HashSet<_> = original
-            .children
+            .input_groups
             .iter()
-            .map(|group| Rc::as_ptr(&memo.groups[group.0 as usize].node))
+            .map(|group| Rc::as_ptr(&memo.groups[group.0 as usize].logical_node))
             .collect();
         let roots = result
             .map_err(|error| StateGroupExpansionError::StateConfiguration(error.to_string()))?;
         let [QueryRoot::Operator(node)] = roots.as_slice() else {
             unreachable!("operator rewrite")
         };
-        let node = with_child_nodes(&original.node, node, &boundaries, &mut HashMap::new());
+        let node = with_child_nodes(&original.root_node, node, &boundaries, &mut HashMap::new());
         // Resizing affects internal state types, never public output fields.
-        if original.node.schema.fields != node.schema.fields
-            || original.node.schema.time_index != node.schema.time_index
-            || original.node.schema.unique_keys != node.schema.unique_keys
-            || (original.node.schema.closed && !node.schema.closed)
+        if original.root_node.schema.fields != node.schema.fields
+            || original.root_node.schema.time_index != node.schema.time_index
+            || original.root_node.schema.unique_keys != node.schema.unique_keys
+            || (original.root_node.schema.closed && !node.schema.closed)
         {
             return Err(StateGroupExpansionError::StateConfiguration(
                 "state rewrite changed the reader output contract".into(),
@@ -331,7 +331,7 @@ impl SharedProducer for SummaryStates {
         }
         previous.push(Rc::clone(&node));
         let mut candidate = original;
-        candidate.node = node;
+        candidate.root_node = node;
         memo.candidates[reader.group].push(candidate);
         Ok(1)
     }
@@ -365,7 +365,7 @@ fn assign_normalized_layouts(
         };
         let need = &reader.need;
         let original = &memo.candidates[reader.group][need.candidate];
-        let roots = [QueryRoot::Operator(Rc::clone(&original.node))];
+        let roots = [QueryRoot::Operator(Rc::clone(&original.root_node))];
         let normalized = with_pane_chain(
             &roots,
             need.merge.as_ref().unwrap(),
@@ -383,9 +383,9 @@ fn assign_normalized_layouts(
             let previous_candidate = &memo.candidates[*group][*candidate];
             previous == &flat
                 && previous_candidate.origin == original.origin
-                && previous_candidate.children == original.children
+                && previous_candidate.input_groups == original.input_groups
                 && previous_candidate.implements == original.implements
-                && previous_candidate.budget_share == original.budget_share
+                && previous_candidate.accuracy_budget_parts == original.accuracy_budget_parts
         });
         reader.need.normalized_layout = Some(existing.unwrap_or_else(|| {
             let index = layouts.len();
@@ -529,7 +529,7 @@ mod tests {
                 .map(|candidates| {
                     candidates
                         .iter()
-                        .map(|candidate| graph_signature(&candidate.node).unwrap())
+                        .map(|candidate| graph_signature(&candidate.root_node).unwrap())
                         .collect()
                 })
                 .collect()
@@ -539,7 +539,7 @@ mod tests {
             .candidates
             .iter()
             .flatten()
-            .flat_map(|candidate| OperatorNode::reachable(&candidate.node))
+            .flat_map(|candidate| OperatorNode::reachable(&candidate.root_node))
             .filter_map(|node| match node.asap() {
                 Some(ASAPOp::PaneChain { pane_width_ms, .. }) => Some(*pane_width_ms),
                 _ => None,

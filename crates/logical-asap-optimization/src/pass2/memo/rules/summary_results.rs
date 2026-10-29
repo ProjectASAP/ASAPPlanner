@@ -36,11 +36,11 @@ pub(in crate::pass2::memo) fn factor_summary_results(
         let build_pointers: HashSet<_> =
             builds.iter().map(|(build, _)| Rc::as_ptr(build)).collect();
         let boundaries: HashSet<_> = original
-            .children
+            .input_groups
             .iter()
-            .map(|group| Rc::as_ptr(&memo.groups[group.0 as usize].node))
+            .map(|group| Rc::as_ptr(&memo.groups[group.0 as usize].logical_node))
             .collect();
-        let mut pending = vec![Rc::clone(&original.node)];
+        let mut pending = vec![Rc::clone(&original.root_node)];
         let mut seen = HashSet::new();
         let mut readouts = Vec::new();
         while let Some(node) = pending.pop() {
@@ -48,7 +48,7 @@ pub(in crate::pass2::memo) fn factor_summary_results(
             if boundaries.contains(&Rc::as_ptr(&node)) || !seen.insert(Rc::as_ptr(&node)) {
                 continue;
             }
-            if !Rc::ptr_eq(&node, &original.node)
+            if !Rc::ptr_eq(&node, &original.root_node)
                 && matches!(
                     node.asap(),
                     Some(ASAPOp::SummaryEstimate { .. } | ASAPOp::FinalizeExactAccumulator { .. })
@@ -77,16 +77,16 @@ pub(in crate::pass2::memo) fn factor_summary_results(
                 Rc::clone(&readout),
                 &queries,
                 OriginOfCandidateForMemoGroup::SummaryResult,
-                original.budget_share,
+                original.accuracy_budget_parts,
             )?;
             // The original reader's allocation was used to generate these
             // parameters; lifting the boundary must not reset that provenance.
             replacements.insert(
                 Rc::as_ptr(&readout),
-                Rc::clone(&memo.groups[group.0 as usize].node),
+                Rc::clone(&memo.groups[group.0 as usize].logical_node),
             );
         }
-        let reader = replace(&original.node, &replacements);
+        let reader = replace(&original.root_node, &replacements);
         added += usize::from(append_reader(
             memo,
             owner,

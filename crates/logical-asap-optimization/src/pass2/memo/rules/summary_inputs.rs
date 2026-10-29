@@ -29,11 +29,11 @@ pub(in crate::pass2::memo) fn factor_summary_inputs(
     for (owner, original) in originals {
         check_generation_deadline(deadline)?;
         let boundaries: HashSet<_> = original
-            .children
+            .input_groups
             .iter()
-            .map(|group| Rc::as_ptr(&memo.groups[group.0 as usize].node))
+            .map(|group| Rc::as_ptr(&memo.groups[group.0 as usize].logical_node))
             .collect();
-        let mut pending = vec![Rc::clone(&original.node)];
+        let mut pending = vec![Rc::clone(&original.root_node)];
         let mut seen = HashSet::new();
         let mut inputs = Vec::new();
         while let Some(node) = pending.pop() {
@@ -61,7 +61,7 @@ pub(in crate::pass2::memo) fn factor_summary_inputs(
             canonical_preprocessing(memo, &input, &boundaries, &queries, &mut replacements)?;
         }
         if !replacements.is_empty() {
-            let reader = replace(&original.node, &replacements);
+            let reader = replace(&original.root_node, &replacements);
             append_reader(memo, owner, &original, reader, original.origin.clone())?;
         }
     }
@@ -83,12 +83,10 @@ fn canonical_preprocessing(
         // Logical TimeRange groups can remain distinct when their inputs
         // differ structurally. The existing state-sharing rule nevertheless
         // permits identical range descriptors over the same canonical source.
-        if let Some(group) = memo
-            .groups
-            .iter()
-            .find(|group| crate::pass2::memo::state_groups::same_range_input(&group.node, node))
-        {
-            replacements.insert(Rc::as_ptr(node), Rc::clone(&group.node));
+        if let Some(group) = memo.groups.iter().find(|group| {
+            crate::pass2::memo::state_groups::same_range_input(&group.logical_node, node)
+        }) {
+            replacements.insert(Rc::as_ptr(node), Rc::clone(&group.logical_node));
         }
         return Ok(true);
     }
@@ -117,7 +115,7 @@ fn canonical_preprocessing(
     )?;
     replacements.insert(
         Rc::as_ptr(node),
-        Rc::clone(&memo.groups[group.0 as usize].node),
+        Rc::clone(&memo.groups[group.0 as usize].logical_node),
     );
     Ok(true)
 }

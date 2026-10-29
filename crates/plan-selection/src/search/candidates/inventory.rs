@@ -144,31 +144,31 @@ fn build_with_compatible_producers_cache(
             // charges that work; independent consumers of an absorbed group
             // still select one of that group's own candidates. Reverse support
             // leaves unused absorbed groups inactive without exclusion rules.
-            if candidate.budget_share == 0 {
+            if candidate.accuracy_budget_parts == 0 {
                 return Err(unsupported("zero accuracy budget share"));
             }
             if candidate
-                .children
+                .input_groups
                 .iter()
                 .any(|child| child.0 as usize >= memo.groups.len())
             {
                 return Err(invalid("candidate references missing input group"));
             }
             let inputs = candidate
-                .children
+                .input_groups
                 .iter()
-                .map(|child| Rc::clone(&memo.groups[child.0 as usize].node))
+                .map(|child| Rc::clone(&memo.groups[child.0 as usize].logical_node))
                 .collect::<Vec<_>>();
             if inputs
                 .iter()
-                .any(|input| Rc::ptr_eq(input, &candidate.node))
+                .any(|input| Rc::ptr_eq(input, &candidate.root_node))
             {
                 return Err(unsupported(
                     "root aliases an input group without an operator",
                 ));
             }
             let implemented = asap_physical_asap_optimization::implement_candidate_operators(
-                &candidate.node,
+                &candidate.root_node,
                 &inputs,
             )
             .map_err(|error| CandidateInventoryError::PhysicalImplementation {
@@ -191,8 +191,8 @@ fn build_with_compatible_producers_cache(
         for (index, candidate) in candidates.iter().enumerate() {
             super::check_deadline(deadline)?;
             let mut boundaries = HashMap::new();
-            for &child in &candidate.children {
-                let pointer = Rc::as_ptr(&memo.groups[child.0 as usize].node);
+            for &child in &candidate.input_groups {
+                let pointer = Rc::as_ptr(&memo.groups[child.0 as usize].logical_node);
                 if boundaries
                     .insert(pointer, child)
                     .is_some_and(|previous| previous != child)
@@ -200,7 +200,7 @@ fn build_with_compatible_producers_cache(
                     return Err(invalid("one boundary node names different input groups"));
                 }
             }
-            if boundaries.contains_key(&Rc::as_ptr(&candidate.node)) {
+            if boundaries.contains_key(&Rc::as_ptr(&candidate.root_node)) {
                 return Err(CandidateInventoryError::Unsupported {
                     group,
                     candidate: index,
@@ -225,7 +225,7 @@ fn build_with_compatible_producers_cache(
                 .ok_or_else(|| invalid("missing implemented root template"))?;
             builder.add(&implemented, Some(root_id))?;
             if candidate
-                .children
+                .input_groups
                 .iter()
                 .any(|group| !builder.used_boundaries.contains(group))
             {
@@ -236,7 +236,7 @@ fn build_with_compatible_producers_cache(
         }
     }
     for group in output_groups {
-        let expected = &memo.groups[group.0 as usize].node;
+        let expected = &memo.groups[group.0 as usize].logical_node;
         let mut compatible_candidates = Vec::new();
         for &id in &inventory.group_candidates[group.0 as usize] {
             let template = inventory.templates[id.0]
@@ -1001,25 +1001,25 @@ mod tests {
             let mut memo = try_populate_pass1(initial, &generated).unwrap();
             let owner = outputs[0].0 as usize;
             let mut fused = memo.candidates[owner][0].clone();
-            let original_inputs = fused.children.clone();
+            let original_inputs = fused.input_groups.clone();
             assert_eq!(original_inputs.len(), 2);
             let mut replacements = HashMap::new();
             let mut raw_inputs = Vec::new();
             for input in &original_inputs {
-                let selected = memo.candidates[input.0 as usize].iter().filter(|candidate| OperatorNode::reachable(&candidate.node).iter().any(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg {family: FieldDataType::Sketch(kind, _), ..}) if kind.algorithm() == &SketchAlgorithm::DDSketch))).max_by_key(|candidate| candidate.budget_share).unwrap();
+                let selected = memo.candidates[input.0 as usize].iter().filter(|candidate| OperatorNode::reachable(&candidate.root_node).iter().any(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg {family: FieldDataType::Sketch(kind, _), ..}) if kind.algorithm() == &SketchAlgorithm::DDSketch))).max_by_key(|candidate| candidate.accuracy_budget_parts).unwrap();
                 replacements.insert(
-                    Rc::as_ptr(&memo.groups[input.0 as usize].node),
-                    Rc::clone(&selected.node),
+                    Rc::as_ptr(&memo.groups[input.0 as usize].logical_node),
+                    Rc::clone(&selected.root_node),
                 );
-                for raw in &selected.children {
+                for raw in &selected.input_groups {
                     if !raw_inputs.contains(raw) {
                         raw_inputs.push(*raw);
                     }
                 }
             }
-            fused.node = Rc::new(
+            fused.root_node = Rc::new(
                 fused
-                    .node
+                    .root_node
                     .with_new_children(|child| {
                         replacements
                             .get(&Rc::as_ptr(child))
@@ -1028,9 +1028,9 @@ mod tests {
                     })
                     .unwrap(),
             );
-            fused.children = raw_inputs;
+            fused.input_groups = raw_inputs;
             fused.implements.extend(original_inputs);
-            fused.budget_share = 2;
+            fused.accuracy_budget_parts = 2;
             memo.candidates[owner].push(fused);
             let memo = expand_concrete_summary_state_groups(memo).unwrap().memo;
             let mut inventory = build_candidate_inventory(&memo, &outputs, |node| {
@@ -1051,7 +1051,7 @@ mod tests {
                 output.compatible_candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| {
                     let candidate = &memo.candidates[group.0 as usize][index];
                     if query == 0 { candidate.origin == OriginOfCandidateForMemoGroup::SummaryResult } else {
-                        candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild && OperatorNode::reachable(&candidate.node).iter().any(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg {family: FieldDataType::Sketch(kind, _), ..}) if kind.algorithm() == &SketchAlgorithm::DDSketch))
+                        candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild && OperatorNode::reachable(&candidate.root_node).iter().any(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg {family: FieldDataType::Sketch(kind, _), ..}) if kind.algorithm() == &SketchAlgorithm::DDSketch))
                     }
                 }));
                 assert!(
@@ -1157,7 +1157,8 @@ mod tests {
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let output = initial.group_for_node(&root).unwrap();
         let original_input = Rc::clone(
-            &initial.groups[initial.groups[output.0 as usize].children[0].0 as usize].node,
+            &initial.groups[initial.groups[output.0 as usize].child_groups[0].0 as usize]
+                .logical_node,
         );
         let generated = generate_per_computation_candidates(roots.clone()).unwrap();
         let memo = try_populate_pass1(initial, &generated).unwrap();
@@ -1263,7 +1264,7 @@ mod tests {
             roots[0].validate_structure().unwrap();
             assert!(
                 crate::search::candidates::reconstruction::output_contract_satisfied(
-                    &memo.groups[outputs[0].0 as usize].node,
+                    &memo.groups[outputs[0].0 as usize].logical_node,
                     &roots[0]
                 )
                 .unwrap()
@@ -1323,11 +1324,11 @@ mod tests {
         let (memo, outputs) = nested_sum_memo(true);
         let owner = outputs[0].0 as usize;
         let inner = outputs[1];
-        assert_eq!(memo.groups[owner].children, vec![inner]);
+        assert_eq!(memo.groups[owner].child_groups, vec![inner]);
         let fused_index = memo.candidates[owner]
             .iter()
             .position(|candidate| {
-                candidate.node.contains_asap() && !candidate.children.contains(&inner)
+                candidate.root_node.contains_asap() && !candidate.input_groups.contains(&inner)
             })
             .expect("fusion can privately recompute the shared inner work");
         let mut inventory = build_with_compatible_producers_cache(
@@ -1357,11 +1358,15 @@ mod tests {
         assert!(!Rc::ptr_eq(&rebuilt[0], &rebuilt[1]));
         assert_eq!(
             rebuilt[0].schema.fields.len(),
-            memo.groups[owner].node.schema.fields.len()
+            memo.groups[owner].logical_node.schema.fields.len()
         );
         assert_eq!(
             rebuilt[1].schema.fields.len(),
-            memo.groups[inner.0 as usize].node.schema.fields.len()
+            memo.groups[inner.0 as usize]
+                .logical_node
+                .schema
+                .fields
+                .len()
         );
     }
 
@@ -1370,8 +1375,9 @@ mod tests {
     fn rejects_root_alias_instead_of_duplicating_boundary_work() {
         let (mut memo, outputs) = quantile_memo();
         let group = outputs[0].0 as usize;
-        let boundary = memo.candidates[group][0].children[0];
-        memo.candidates[group][0].node = Rc::clone(&memo.groups[boundary.0 as usize].node);
+        let boundary = memo.candidates[group][0].input_groups[0];
+        memo.candidates[group][0].root_node =
+            Rc::clone(&memo.groups[boundary.0 as usize].logical_node);
         assert!(matches!(
             build_candidate_inventory(&memo, &outputs, |_| Ok(1.0)),
             Err(CandidateInventoryError::Unsupported {
@@ -1400,7 +1406,7 @@ mod tests {
     #[test]
     fn rejects_zero_accuracy_share_and_invalid_costs() {
         let (mut memo, outputs) = quantile_memo();
-        memo.candidates[0][0].budget_share = 0;
+        memo.candidates[0][0].accuracy_budget_parts = 0;
         assert!(matches!(
             build_candidate_inventory(&memo, &outputs, |_| Ok(1.0)),
             Err(CandidateInventoryError::Unsupported {
@@ -1408,7 +1414,7 @@ mod tests {
                 ..
             })
         ));
-        memo.candidates[0][0].budget_share = 1;
+        memo.candidates[0][0].accuracy_budget_parts = 1;
         assert!(matches!(
             build_candidate_inventory(&memo, &outputs, |_| Ok(f64::NAN)),
             Err(CandidateInventoryError::Cost(_))
@@ -1445,7 +1451,7 @@ mod tests {
             .candidates
             .iter()
             .flatten()
-            .any(|candidate| candidate.budget_share == 2));
+            .any(|candidate| candidate.accuracy_budget_parts == 2));
         // The complete generated inventory must no longer fail merely because
         // it includes composed-budget sizes alongside whole-budget sizes.
         build_candidate_inventory(&original, &[output], |_| Ok(0.0)).unwrap();
@@ -1474,8 +1480,8 @@ mod tests {
             let mut made_exact = false;
             let mut approximate_groups = 0;
             for candidates in &mut memo.candidates {
-                let sized: Vec<_> = candidates.iter().filter(|candidate| candidate.budget_share == share
-                    && OperatorNode::reachable(&candidate.node).iter().any(|node|
+                let sized: Vec<_> = candidates.iter().filter(|candidate| candidate.accuracy_budget_parts == share
+                    && OperatorNode::reachable(&candidate.root_node).iter().any(|node|
                         matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if *kind.algorithm() == SketchAlgorithm::DDSketch)))
                     .cloned().collect();
                 if sized.is_empty() {
@@ -1483,7 +1489,7 @@ mod tests {
                 }
                 approximate_groups += 1;
                 if one_exact && !made_exact {
-                    candidates.retain(|candidate| !candidate.node.contains_asap());
+                    candidates.retain(|candidate| !candidate.root_node.contains_asap());
                     assert!(!candidates.is_empty());
                     made_exact = true;
                 } else {

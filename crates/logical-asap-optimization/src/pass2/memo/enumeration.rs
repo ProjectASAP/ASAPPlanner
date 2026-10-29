@@ -93,7 +93,7 @@ pub fn enumerate(memo: &CandidateMemo, limit: usize) -> AllChosenCandidatesPerMe
             // A candidate reading a group that already reads this one closes
             // a cycle; every edge is checked as its group is chosen.
             if candidate
-                .children
+                .input_groups
                 .iter()
                 .any(|&child| reaches(memo, chosen_candidates, child, group))
             {
@@ -101,7 +101,7 @@ pub fn enumerate(memo: &CandidateMemo, limit: usize) -> AllChosenCandidatesPerMe
             }
             chosen_candidates.insert(group, index);
             let mut next = pending.clone();
-            next.extend(candidate.children.iter().rev());
+            next.extend(candidate.input_groups.iter().rev());
             let finished = walk(memo, next, chosen_candidates, limit, all_chosen_candidates);
             chosen_candidates.remove(&group);
             if !finished {
@@ -156,13 +156,13 @@ pub fn build_logical_asap_dags_from_chosen_candidates(
                 candidate: index,
             },
         )?;
-        let own_nodes: HashSet<_> = OperatorNode::reachable(&candidate.node)
+        let own_nodes: HashSet<_> = OperatorNode::reachable(&candidate.root_node)
             .iter()
             .map(Rc::as_ptr)
             .collect();
         let mut replacements = HashMap::new();
-        for &child in &candidate.children {
-            let old = &memo.groups[child.0 as usize].node;
+        for &child in &candidate.input_groups {
+            let old = &memo.groups[child.0 as usize].logical_node;
             if !own_nodes.contains(&Rc::as_ptr(old)) {
                 return Err(
                     ErrorBuildingLogicalAsapDagsFromChosenCandidates::ChildNotInCandidate {
@@ -177,7 +177,7 @@ pub fn build_logical_asap_dags_from_chosen_candidates(
                 composed(memo, child, chosen_candidates, done, composing)?,
             );
         }
-        let node = replace(&candidate.node, &replacements);
+        let node = replace(&candidate.root_node, &replacements);
         done.insert(group, Rc::clone(&node));
         Ok(node)
     }
@@ -227,7 +227,7 @@ fn reaches(
             continue;
         }
         if let Some(&index) = chosen_candidates.get(&group) {
-            pending.extend(&memo.candidates[group.0 as usize][index].children);
+            pending.extend(&memo.candidates[group.0 as usize][index].input_groups);
         }
     }
     false

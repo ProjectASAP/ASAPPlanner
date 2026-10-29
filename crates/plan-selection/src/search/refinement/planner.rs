@@ -1264,7 +1264,7 @@ mod tests {
         // Keep the real generated shared KLL readers to bound this evaluator
         // integration test; materialization configurations still remain choices.
         for candidates in &mut memo.candidates {
-            let shared: Vec<_> = candidates.iter().filter(|candidate| candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild && OperatorNode::reachable(&candidate.node).iter().any(|node|
+            let shared: Vec<_> = candidates.iter().filter(|candidate| candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild && OperatorNode::reachable(&candidate.root_node).iter().any(|node|
                 matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if *kind.algorithm() == SketchAlgorithm::Kll)))
                 .cloned().collect();
             if !shared.is_empty() {
@@ -2020,7 +2020,7 @@ mod tests {
             .candidates
             .iter()
             .flatten()
-            .flat_map(|candidate| OperatorNode::reachable(&candidate.node))
+            .flat_map(|candidate| OperatorNode::reachable(&candidate.root_node))
             .find(|node| {
                 matches!(
                     node.asap(),

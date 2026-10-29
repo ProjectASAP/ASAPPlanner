@@ -59,7 +59,7 @@ impl SharedProducer for TopKRankings {
         let mut roots = Vec::new();
         for (group, entry) in memo.groups.iter().enumerate() {
             check_generation_deadline(deadline)?;
-            let [input] = entry.node.children()[..] else {
+            let [input] = entry.logical_node.children()[..] else {
                 continue;
             };
             let exact = Rc::new(
@@ -69,7 +69,7 @@ impl SharedProducer for TopKRankings {
                         "exact input candidate group",
                     ))),
             );
-            let Ok(copy) = entry.node.with_new_children(|_| Rc::clone(&exact)) else {
+            let Ok(copy) = entry.logical_node.with_new_children(|_| Rc::clone(&exact)) else {
                 continue;
             };
             let copy = Rc::new(copy);
@@ -114,7 +114,7 @@ impl SharedProducer for TopKRankings {
         // Interning the ranking is idempotent, so every reader of the set
         // reads the producer the first one interned.
         let Some(input_group) = memo.groups[covering.reader_groups[0]]
-            .children
+            .child_groups
             .first()
             .copied()
         else {
@@ -124,7 +124,7 @@ impl SharedProducer for TopKRankings {
         else {
             return Ok(0);
         };
-        let input = Rc::clone(&memo.groups[exact_input.0 as usize].node);
+        let input = Rc::clone(&memo.groups[exact_input.0 as usize].logical_node);
         let queries: Vec<_> = covering
             .reader_groups
             .iter()
@@ -142,7 +142,7 @@ impl SharedProducer for TopKRankings {
             OriginOfCandidateForMemoGroup::TopKReuse,
             1,
         )?;
-        let sort = Rc::clone(&memo.groups[sort_group.0 as usize].node);
+        let sort = Rc::clone(&memo.groups[sort_group.0 as usize].logical_node);
         let ranking = covering
             .ranking
             .with_new_children(|_| Rc::clone(&sort))
@@ -154,9 +154,9 @@ impl SharedProducer for TopKRankings {
             OriginOfCandidateForMemoGroup::TopKReuse,
             1,
         )?;
-        let ranking = Rc::clone(&memo.groups[ranking_group.0 as usize].node);
+        let ranking = Rc::clone(&memo.groups[ranking_group.0 as usize].logical_node);
         let owner = reader.group;
-        let logical = Rc::clone(&memo.groups[owner].node);
+        let logical = Rc::clone(&memo.groups[owner].logical_node);
         let Some(NonASAPOp::Aggregate {
             reduction: Reduction::Reduce(keys),
             measures,
@@ -168,7 +168,7 @@ impl SharedProducer for TopKRankings {
         let [AggIntent::TopK { k, .. }] = measures.as_slice() else {
             return Ok(0);
         };
-        let Some(original) = memo.candidates[owner].iter().find(|candidate| eligible(candidate) && matches!(candidate.node.non_asap(), Some(NonASAPOp::Aggregate {measures, ..}) if matches!(measures.as_slice(), [AggIntent::TopK {..}]))).cloned() else { return Ok(0) };
+        let Some(original) = memo.candidates[owner].iter().find(|candidate| eligible(candidate) && matches!(candidate.root_node.non_asap(), Some(NonASAPOp::Aggregate {measures, ..}) if matches!(measures.as_slice(), [AggIntent::TopK {..}]))).cloned() else { return Ok(0) };
         let limited = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Limit {
             n: Some(*k),
             offset: 0,
@@ -211,7 +211,7 @@ fn exact_input_group(
     let originals = memo.candidates[group.0 as usize].clone();
     let original_children: Vec<_> = originals
         .iter()
-        .map(|candidate| candidate.children.clone())
+        .map(|candidate| candidate.input_groups.clone())
         .collect();
     let mut candidates = Vec::new();
     for mut candidate in originals {
@@ -219,11 +219,11 @@ fn exact_input_group(
             continue;
         }
         let boundaries: HashSet<_> = candidate
-            .children
+            .input_groups
             .iter()
-            .map(|id| Rc::as_ptr(&memo.groups[id.0 as usize].node))
+            .map(|id| Rc::as_ptr(&memo.groups[id.0 as usize].logical_node))
             .collect();
-        let mut pending = vec![Rc::clone(&candidate.node)];
+        let mut pending = vec![Rc::clone(&candidate.root_node)];
         let mut seen = HashSet::new();
         let mut exact = true;
         while let Some(node) = pending.pop() {
@@ -242,22 +242,22 @@ fn exact_input_group(
         }
         let mut replacements = HashMap::new();
         let mut children = Vec::new();
-        for child in &candidate.children {
+        for child in &candidate.input_groups {
             let Some(exact_child) = exact_input_group(memo, *child, known)? else {
                 exact = false;
                 break;
             };
             replacements.insert(
-                Rc::as_ptr(&memo.groups[child.0 as usize].node),
-                Rc::clone(&memo.groups[exact_child.0 as usize].node),
+                Rc::as_ptr(&memo.groups[child.0 as usize].logical_node),
+                Rc::clone(&memo.groups[exact_child.0 as usize].logical_node),
             );
             children.push(exact_child);
         }
         if !exact {
             continue;
         }
-        candidate.node = replace(&candidate.node, &replacements);
-        candidate.children = children;
+        candidate.root_node = replace(&candidate.root_node, &replacements);
+        candidate.input_groups = children;
         candidates.push(candidate);
     }
     if candidates.is_empty() {
@@ -267,14 +267,14 @@ fn exact_input_group(
         && candidates
             .iter()
             .zip(&original_children)
-            .all(|(candidate, children)| candidate.children == *children)
+            .all(|(candidate, children)| candidate.input_groups == *children)
     {
         // An already exact-only group remains the shared source for ordinary
         // consumers too; cloning it would unnecessarily split scan/state reuse.
         known.insert(group, Some(group));
         return Ok(Some(group));
     }
-    let node = Rc::new((*candidates[0].node).clone().with_guarantee(Some(
+    let node = Rc::new((*candidates[0].root_node).clone().with_guarantee(Some(
         AccuracyGuarantee::exact("only exact implementations and exact inputs"),
     )));
     let queries = memo.groups[group.0 as usize].queries.clone();

@@ -398,7 +398,7 @@ fn multi_measure_aggregate_has_one_target_per_measure() {
     assert_eq!(
         candidates
             .iter()
-            .map(|target| target.measure)
+            .map(|target| target.measure_index)
             .collect::<Vec<_>>(),
         vec![0, 1]
     );
@@ -445,10 +445,10 @@ fn filtered_measure_keeps_candidates_and_records_its_filter() {
     assert_eq!(targets.len(), 2);
     for target in &targets {
         assert_sql_count_choices(&target.choices);
-        assert!(target.having.is_empty());
+        assert!(target.having_filters.is_empty());
     }
-    assert_eq!(targets[0].filter, Some(always()));
-    assert_eq!(targets[1].filter, None);
+    assert_eq!(targets[0].measure_filter, Some(always()));
+    assert_eq!(targets[1].measure_filter, None);
 }
 
 fn assert_sql_count_choices(
@@ -532,7 +532,7 @@ fn key_only_having_is_pushed_below_and_keeps_candidates() {
     assert_eq!(targets.len(), 1);
     assert!(Rc::ptr_eq(&targets[0].aggregate, &node));
     assert_eq!(
-        targets[0].having,
+        targets[0].having_filters,
         vec![HavingEntry {
             filter: Some(root.clone()),
             predicate: equals(0, ScalarValue::Utf8("a".into())),
@@ -558,7 +558,11 @@ fn value_having_stays_above_output_and_keeps_candidates() {
     .targets;
     assert_eq!(targets.len(), 2);
     for target in &targets {
-        let placements: Vec<_> = target.having.iter().map(|entry| entry.placement).collect();
+        let placements: Vec<_> = target
+            .having_filters
+            .iter()
+            .map(|entry| entry.placement)
+            .collect();
         assert_eq!(placements, vec![HavingPlacement::AboveOutput]);
         assert_sql_count_choices(&target.choices);
     }
@@ -616,7 +620,7 @@ fn having_on_one_consumer_of_a_shared_aggregate_stays_above() {
     .targets;
     assert_eq!(targets.len(), 1);
     assert_eq!(
-        targets[0].having,
+        targets[0].having_filters,
         vec![HavingEntry {
             filter: Some(filtered),
             predicate: key.clone(),
@@ -634,10 +638,10 @@ fn having_on_one_consumer_of_a_shared_aggregate_stays_above() {
     .unwrap()
     .targets;
     assert!(targets[0]
-        .having
+        .having_filters
         .iter()
         .all(|entry| entry.placement == HavingPlacement::BelowAggregate));
-    assert_eq!(targets[0].having.len(), 2);
+    assert_eq!(targets[0].having_filters.len(), 2);
 }
 
 /// A scalar reference to a grouped aggregate (`Filter(scan, EXISTS G)` as a
@@ -666,7 +670,7 @@ fn a_scalar_reference_consumer_keeps_a_key_only_having_above() {
         .find(|target| Rc::ptr_eq(&target.aggregate, &node))
         .expect("the grouped count's target");
     assert_eq!(
-        target.having,
+        target.having_filters,
         vec![HavingEntry {
             filter: Some(filtered),
             predicate: key,
@@ -688,7 +692,7 @@ fn only_the_adjacent_of_stacked_filters_is_having() {
         .targets;
     assert_eq!(targets.len(), 1);
     assert_eq!(
-        targets[0].having,
+        targets[0].having_filters,
         vec![HavingEntry {
             filter: Some(inner),
             predicate: inner_key,
@@ -724,7 +728,11 @@ fn global_aggregate_having_stays_above() {
     .targets;
     assert_eq!(targets.len(), 2);
     for target in &targets {
-        let placements: Vec<_> = target.having.iter().map(|entry| entry.placement).collect();
+        let placements: Vec<_> = target
+            .having_filters
+            .iter()
+            .map(|entry| entry.placement)
+            .collect();
         assert_eq!(placements, vec![HavingPlacement::AboveOutput]);
     }
 }
@@ -775,11 +783,11 @@ fn having_of(
     let target = targets
         .iter()
         .find(|target| match target.aggregate.non_asap() {
-            Some(NonASAPOp::Aggregate { measures, .. }) => is(&measures[target.measure]),
+            Some(NonASAPOp::Aggregate { measures, .. }) => is(&measures[target.measure_index]),
             _ => false,
         })
         .expect("target");
-    target.having.clone()
+    target.having_filters.clone()
 }
 
 /// `Column(column) > ScalarSubquery(subquery)`.
@@ -808,7 +816,11 @@ fn scalar_reference_filter_is_not_having() {
         .targets;
     assert_eq!(targets.len(), 1);
     assert!(Rc::ptr_eq(&targets[0].aggregate, &agg));
-    assert!(targets[0].having.is_empty(), "{:?}", targets[0].having);
+    assert!(
+        targets[0].having_filters.is_empty(),
+        "{:?}",
+        targets[0].having_filters
+    );
 
     let agg = aggregate_over(scan(false), count(), vec![], None);
     let root = having_filter(agg.clone(), above_scalar(0, agg.clone()));
@@ -817,7 +829,7 @@ fn scalar_reference_filter_is_not_having() {
         .targets;
     assert_eq!(targets.len(), 1);
     assert_eq!(
-        targets[0].having,
+        targets[0].having_filters,
         vec![HavingEntry {
             filter: Some(root),
             predicate: above_scalar(0, agg),
@@ -835,7 +847,11 @@ fn promql_scalar_operand_is_not_having() {
         .targets;
     assert!(!targets.is_empty());
     for target in &targets {
-        assert!(target.having.is_empty(), "{:?}", target.having);
+        assert!(
+            target.having_filters.is_empty(),
+            "{:?}",
+            target.having_filters
+        );
     }
 
     let roots = exact_promql("sum by (job) (x) > scalar(count(x))");
@@ -871,7 +887,7 @@ fn having_shared_with_a_project_consumer_stays_above() {
     .targets;
     assert_eq!(targets.len(), 1);
     let placements: Vec<_> = targets[0]
-        .having
+        .having_filters
         .iter()
         .map(|entry| entry.placement)
         .collect();
@@ -905,7 +921,7 @@ fn without_and_per_entity_having_stays_above() {
             .targets;
         assert_eq!(targets.len(), 1, "{reduction:?}");
         let placements: Vec<_> = targets[0]
-            .having
+            .having_filters
             .iter()
             .map(|entry| entry.placement)
             .collect();
@@ -1350,13 +1366,13 @@ fn memo_cached_rules_preserve_occurrence_specific_having() {
     let cached = generate_per_computation_candidates_with_memo(roots, &memo).unwrap();
     assert_eq!(cached.targets.len(), 2);
     assert_ne!(
-        cached.targets[0].having[0].placement,
-        cached.targets[1].having[0].placement
+        cached.targets[0].having_filters[0].placement,
+        cached.targets[1].having_filters[0].placement
     );
     for (before, after) in baseline.targets.iter().zip(&cached.targets) {
         assert_eq!(before.choices, after.choices);
-        assert_eq!(before.having, after.having);
-        assert_eq!(before.fused, after.fused);
+        assert_eq!(before.having_filters, after.having_filters);
+        assert_eq!(before.fused_computation, after.fused_computation);
     }
     for target in 0..baseline.targets.len() {
         for choice in 0..baseline.targets[target].choice_count() {

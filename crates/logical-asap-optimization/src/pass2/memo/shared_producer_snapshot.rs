@@ -64,7 +64,7 @@ fn one_sum_over_time_group_for(memo: &CandidateMemo, metric: &str, queries: &[us
     use asap_types::ir::operator::Source;
     use asap_types::ir::NonASAPOp;
     memo.groups.iter().any(|group| {
-        let Some(NonASAPOp::Aggregate { child, .. }) = group.node.non_asap() else {
+        let Some(NonASAPOp::Aggregate { child, .. }) = group.logical_node.non_asap() else {
             return false;
         };
         let Some(NonASAPOp::TimeRange { child: scan, .. }) = child.non_asap() else {
@@ -91,17 +91,17 @@ fn fingerprint(memo: &CandidateMemo) -> (usize, u64) {
                 format!(
                     "{:?}|{}|{:?}|{:?}|{}",
                     candidate.origin,
-                    candidate.budget_share,
+                    candidate.accuracy_budget_parts,
                     candidate.implements,
-                    candidate.children,
-                    signature(&candidate.node)
+                    candidate.input_groups,
+                    signature(&candidate.root_node)
                 )
             })
             .collect();
         entries.push(format!(
             "{}|{:?}|{:?}|{:?}|{:?}=>{:?}",
-            signature(&group.node),
-            group.children,
+            signature(&group.logical_node),
+            group.child_groups,
             group.parents,
             group.queries,
             group.roots_of,
@@ -160,7 +160,7 @@ fn shared_pane_candidates_are_unchanged() {
         60_000,
     );
     assert!(memo.candidates.iter().flatten().any(|candidate| {
-        asap_types::ir::OperatorNode::reachable(&candidate.node)
+        asap_types::ir::OperatorNode::reachable(&candidate.root_node)
             .iter()
             .any(|node| matches!(node.asap(), Some(asap_types::ir::ASAPOp::PaneChain { .. })))
     }));

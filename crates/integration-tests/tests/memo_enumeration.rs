@@ -19,7 +19,7 @@
 //!
 //! **The memo and the whole-workload plans.** After Pass 1 the memo's
 //! choices whose candidates are all sized for the whole accuracy budget
-//! (`budget_share` 1) and the plans `compose_logical_candidate` builds from
+//! (`accuracy_budget_parts` 1) and the plans `compose_logical_candidate` builds from
 //! the Pass 1 inventory's assignments are not equal sets:
 //! - A whole-workload plan is a memo DAG exactly when targets that compute
 //!   the same thing take the same choice. With series identity the two
@@ -178,7 +178,7 @@ fn chosen<'a>(
 
 /// The KLL parameters of the summaries `candidate` builds.
 fn kll(candidate: &CandidateForMemoGroup) -> Vec<(u32, Option<f64>)> {
-    OperatorNode::reachable(&candidate.node)
+    OperatorNode::reachable(&candidate.root_node)
         .iter()
         .filter_map(|node| match node.asap() {
             Some(ASAPOp::SummaryAgg {
@@ -227,7 +227,7 @@ fn assert_pass1_memo_and_whole_workload_plans(
         .all_chosen_candidates
         .iter()
         .zip(&plans)
-        .filter(|(choice, _)| chosen(memo, choice).all(|c| c.budget_share == 1))
+        .filter(|(choice, _)| chosen(memo, choice).all(|c| c.accuracy_budget_parts == 1))
         .collect();
     let inventory = &run.stage1_pass1_per_computation;
     let whole = whole_workload_plans(inventory);
@@ -236,7 +236,7 @@ fn assert_pass1_memo_and_whole_workload_plans(
         .flat_map(|a| (a + 1..inventory.targets.len()).map(move |b| (a, b)))
         .filter(|&(a, b)| {
             let (a, b) = (&inventory.targets[a], &inventory.targets[b]);
-            a.aggregate == b.aggregate && a.measure == b.measure
+            a.aggregate == b.aggregate && a.measure_index == b.measure_index
         })
         .collect();
     for (assignment, plan) in &whole {
@@ -265,7 +265,7 @@ fn assert_pass1_memo_and_whole_workload_plans(
     (plans.len(), whole_budget.len(), whole.len(), both)
 }
 
-/// The example's memo after each production step, and the `budget_share`
+/// The example's memo after each production step, and the `accuracy_budget_parts`
 /// of the state-configuration rule's rewrites (one test: one 11 s run).
 #[test]
 fn ratio_of_quantiles_production_memo() {
@@ -303,11 +303,11 @@ fn ratio_of_quantiles_production_memo() {
     // The state-configuration rule rewrites a candidate's KLL to the size
     // the readers of a state share; the rewrite is a copy of the candidate
     // (`derive` in `pass2/memo/rules/shared_configuration_readers.rs`), so it keeps its
-    // `budget_share`. In each quantile group the `budget_share` 1 KLL `k` 567
+    // `accuracy_budget_parts`. In each quantile group the `accuracy_budget_parts` 1 KLL `k` 567
     // (sized for the whole result) gets copies at `k` 567, 1156 and 1184,
-    // all with `budget_share` 1; the `budget_share` 2 KLL `k` 1184 keeps 2.
-    // The `k` 1184 copy with `budget_share` 1 composes the same DAG as the
-    // `budget_share` 2 candidate: one sketch, sized for half the budget,
+    // all with `accuracy_budget_parts` 1; the `accuracy_budget_parts` 2 KLL `k` 1184 keeps 2.
+    // The `k` 1184 copy with `accuracy_budget_parts` 1 composes the same DAG as the
+    // `accuracy_budget_parts` 2 candidate: one sketch, sized for half the budget,
     // which also meets the whole budget, so the label is sound.
     let pass1 = &steps.pass1;
     let quantile_groups: Vec<_> = (0..pass1.groups.len())
@@ -319,7 +319,7 @@ fn ratio_of_quantiles_production_memo() {
             candidates
                 .iter()
                 .filter(|c| c.origin == OriginOfCandidateForMemoGroup::Pass1)
-                .filter_map(|c| kll(c).first().map(|&(k, _)| (k, c.budget_share)))
+                .filter_map(|c| kll(c).first().map(|&(k, _)| (k, c.accuracy_budget_parts)))
                 .collect::<Vec<_>>()
         };
         assert_eq!(
@@ -344,7 +344,7 @@ fn ratio_of_quantiles_production_memo() {
                 .iter()
                 .position(|c| {
                     c.origin == OriginOfCandidateForMemoGroup::Pass1
-                        && c.budget_share == share
+                        && c.accuracy_budget_parts == share
                         && kll(c).first().is_some_and(|&(kk, _)| kk == k)
                 })
                 .unwrap()
@@ -397,12 +397,12 @@ fn choices_whose_candidates_read_each_other_are_left_out() {
         .flat_map(|group| (0..memo.candidates[group].len()).map(move |index| (group, index)))
         .find_map(|(group, index)| {
             memo.candidates[group][index]
-                .children
+                .input_groups
                 .iter()
                 .find_map(|&child| {
                     memo.candidates[child.0 as usize]
                         .iter()
-                        .position(|c| c.children.contains(&MemoGroupId(group as u32)))
+                        .position(|c| c.input_groups.contains(&MemoGroupId(group as u32)))
                         .map(|back| (child, back))
                 })
                 .map(|(child, back)| [(MemoGroupId(group as u32), index), (child, back)])

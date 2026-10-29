@@ -30,9 +30,9 @@ pub(in crate::pass2::memo) fn add_scan_label_candidates(
             // Source-group candidates expose scan reuse to every downstream
             // operator, including exact/non-summary computations. Their public
             // schemas stay narrow through the existing projection rewrite.
-            if is_source_chain(&candidate.node) && super::reuse::eligible(candidate) {
+            if is_source_chain(&candidate.root_node) && super::reuse::eligible(candidate) {
                 owners.push((group, index));
-                roots.push(QueryRoot::Operator(Rc::clone(&candidate.node)));
+                roots.push(QueryRoot::Operator(Rc::clone(&candidate.root_node)));
                 continue;
             }
             let Some((build, children)) = simple_build(memo, candidate) else {
@@ -52,17 +52,17 @@ pub(in crate::pass2::memo) fn add_scan_label_candidates(
                     }
                 )
             ) || candidate
-                .children
+                .input_groups
                 .iter()
                 .any(|child| !children.contains(child))
                 || children
                     .iter()
-                    .any(|child| !is_source_chain(&memo.groups[child.0 as usize].node))
+                    .any(|child| !is_source_chain(&memo.groups[child.0 as usize].logical_node))
             {
                 continue;
             }
             owners.push((group, index));
-            roots.push(QueryRoot::Operator(Rc::clone(&candidate.node)));
+            roots.push(QueryRoot::Operator(Rc::clone(&candidate.root_node)));
         }
     }
     let Some(widened) = crate::pass2::asap_aware_cse::with_union_scan_labels(&roots)
@@ -78,7 +78,7 @@ pub(in crate::pass2::memo) fn add_scan_label_candidates(
             unreachable!("operator readers")
         };
         let original = memo.candidates[group][index].clone();
-        if *node == *original.node || !same_output_contract(&original.node, &node) {
+        if *node == *original.root_node || !same_output_contract(&original.root_node, &node) {
             continue;
         }
         let queries = memo.groups[group].queries.clone();
@@ -86,7 +86,7 @@ pub(in crate::pass2::memo) fn add_scan_label_candidates(
         if memo
             .groups
             .iter()
-            .any(|group| Rc::ptr_eq(&group.node, &node))
+            .any(|group| Rc::ptr_eq(&group.logical_node, &node))
         {
             // Interning an equivalent range/source can return another group's
             // canonical value. Keep a concrete reader instead of a root alias.
@@ -106,7 +106,7 @@ pub(in crate::pass2::memo) fn add_scan_label_candidates(
                     child: node,
                 }))
                 .map_err(|error| StateGroupExpansionError::ScanLabelWidening(error.to_string()))?;
-            if !same_output_contract(&original.node, &node) {
+            if !same_output_contract(&original.root_node, &node) {
                 continue;
             }
         }
@@ -114,16 +114,16 @@ pub(in crate::pass2::memo) fn add_scan_label_candidates(
             .groups
             .iter()
             .enumerate()
-            .map(|(id, group)| (Rc::as_ptr(&group.node), MemoGroupId(id as u32)))
+            .map(|(id, group)| (Rc::as_ptr(&group.logical_node), MemoGroupId(id as u32)))
             .collect();
         let mut reader = original;
-        reader.node = node;
-        reader.children = boundary_groups(&reader.node, &boundaries);
+        reader.root_node = node;
+        reader.input_groups = boundary_groups(&reader.root_node, &boundaries);
         reader.origin = OriginOfCandidateForMemoGroup::WidenedScans;
         if memo.candidates[group].iter().any(|known| {
             known.origin == OriginOfCandidateForMemoGroup::WidenedScans
-                && known.children == reader.children
-                && *known.node == *reader.node
+                && known.input_groups == reader.input_groups
+                && *known.root_node == *reader.root_node
         }) {
             continue;
         }
@@ -195,9 +195,9 @@ fn intern_inputs(
         if let Some(existing) = memo
             .groups
             .iter()
-            .find(|group| same_source_node(&group.node, &rewritten))
+            .find(|group| same_source_node(&group.logical_node, &rewritten))
         {
-            Rc::clone(&existing.node)
+            Rc::clone(&existing.logical_node)
         } else {
             let group = MemoGroupId(
                 u32::try_from(memo.groups.len())
@@ -211,7 +211,7 @@ fn intern_inputs(
                     MemoGroupId(
                         memo.groups
                             .iter()
-                            .position(|group| Rc::ptr_eq(child, &group.node))
+                            .position(|group| Rc::ptr_eq(child, &group.logical_node))
                             .expect("source-chain children were interned")
                             as u32,
                     )
@@ -219,18 +219,18 @@ fn intern_inputs(
                 .filter(|input| seen.insert(*input))
                 .collect();
             memo.groups.push(MemoGroup {
-                node: Rc::clone(&rewritten),
-                children: inputs.clone(),
+                logical_node: Rc::clone(&rewritten),
+                child_groups: inputs.clone(),
                 parents: Vec::new(),
                 queries: queries.to_vec(),
                 roots_of: Vec::new(),
             });
             memo.candidates.push(vec![CandidateForMemoGroup {
                 implements: vec![group],
-                node: Rc::clone(&rewritten),
-                children: inputs,
+                root_node: Rc::clone(&rewritten),
+                input_groups: inputs,
                 origin: OriginOfCandidateForMemoGroup::WidenedScans,
-                budget_share: 1,
+                accuracy_budget_parts: 1,
             }]);
             rewritten
         }

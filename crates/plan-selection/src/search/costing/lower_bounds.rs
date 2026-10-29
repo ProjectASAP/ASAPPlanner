@@ -817,11 +817,11 @@ mod tests {
                 .position(|group| group.roots_of.contains(&0))
                 .unwrap();
             let candidate = memo.candidates[root_group].iter().find(|candidate|
-                OperatorNode::reachable(&candidate.node).iter().any(|node| if exact {
+                OperatorNode::reachable(&candidate.root_node).iter().any(|node| if exact {
                     matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(..), child, .. }) if !grouped || matches!(child.non_asap(), Some(NonASAPOp::TimeRange { .. })))
                 } else { matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if matches!(kind.params(), SketchParams::DDSketch { .. })) })
             ).unwrap();
-            let input = vec![QueryRoot::Operator(Rc::clone(&candidate.node))];
+            let input = vec![QueryRoot::Operator(Rc::clone(&candidate.root_node))];
             let panes = pane_candidates(&input, &[Some(60_000)]);
             roots.push(
                 window_composition_pass2_candidates(&input, &panes)
@@ -1482,7 +1482,7 @@ mod tests {
                 memo.candidates[root_group]
                     .iter()
                     .find(|candidate| {
-                        OperatorNode::reachable(&candidate.node)
+                        OperatorNode::reachable(&candidate.root_node)
                             .iter()
                             .any(|node| pick(node))
                     })
@@ -1538,7 +1538,7 @@ mod tests {
             id
         }
         for candidate in &picked {
-            let root = intern(&candidate.node, &mut configured);
+            let root = intern(&candidate.root_node, &mut configured);
             configured
                 .inventory
                 .graph
@@ -1549,7 +1549,7 @@ mod tests {
         }
         let roots: Vec<_> = picked
             .iter()
-            .map(|candidate| QueryRoot::Operator(Rc::clone(&candidate.node)))
+            .map(|candidate| QueryRoot::Operator(Rc::clone(&candidate.root_node)))
             .collect();
         let entries: Vec<_> = queries
             .iter()

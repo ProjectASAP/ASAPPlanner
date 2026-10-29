@@ -94,12 +94,12 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
     // mode; recurrence alone does not make a window-free workload pane-capable.
     let has_pane_window = initial.groups.iter().any(|group| {
         matches!(
-            group.node.non_asap(),
+            group.logical_node.non_asap(),
             Some(asap_types::ir::NonASAPOp::TimeRange {
                 kind: asap_types::ir::TimeRangeKind::Range, range, ..
             }) if !range.is_zero()
         ) || matches!(
-            group.node.asap(),
+            group.logical_node.asap(),
             Some(asap_types::ir::ASAPOp::PaneChain { .. })
         )
     });
@@ -1229,7 +1229,7 @@ fn selected_chosen_candidates(
                 read.iter().all(|&child| {
                     child == group
                         || memo.candidates[group.0 as usize][index]
-                            .children
+                            .input_groups
                             .contains(&child)
                 })
             })
@@ -1265,7 +1265,7 @@ fn selected_chosen_candidates(
                 group.0
             )
         })?;
-        pending.extend(&memo.candidates[group.0 as usize][*index].children);
+        pending.extend(&memo.candidates[group.0 as usize][*index].input_groups);
     }
     Ok(chosen_candidates)
 }
@@ -1971,7 +1971,7 @@ mod tests {
             expanded.state_groups.iter().any(|group| {
                 let state = &expanded.memo.groups[group.0 as usize];
                 matches!(
-                    state.node.asap(),
+                    state.logical_node.asap(),
                     Some(asap_types::ir::ASAPOp::PaneChain { .. })
                 ) && state.queries == vec![0, 1]
             }),

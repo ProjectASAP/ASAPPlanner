@@ -214,7 +214,7 @@ fn group_of(
     node: &Rc<OperatorNode>,
     query: usize,
 ) -> Result<MemoGroupId, String> {
-    let node_of = |g: &&MemoGroupId| &memo.groups[g.0 as usize].node;
+    let node_of = |g: &&MemoGroupId| &memo.groups[g.0 as usize].logical_node;
     groups
         .iter()
         .find(|g| Rc::ptr_eq(node_of(g), node))
