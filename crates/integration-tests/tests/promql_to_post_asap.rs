@@ -701,7 +701,7 @@ fn ddsketch_ratio_selection(
     for facts in data.sources.values_mut() {
         facts.values_non_negative = non_negative;
     }
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         generate_per_computation_candidates, ComputationCandidate,
     };
     let inventory =
@@ -733,7 +733,7 @@ fn ddsketch_ratio_selection(
     }];
     // Pass 1 choices composed and implemented by Stage 2; one query, so no
     // sharing rule applies.
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, recompose_guarantees,
     };
     let models = asap_plan_selection::PlanningModels::builtin();

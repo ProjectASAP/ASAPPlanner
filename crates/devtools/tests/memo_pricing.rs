@@ -5,10 +5,10 @@ use asap_devtools::memo_pricing::{price_choices, PricedChoice, SelectedBaseline}
 use asap_devtools::planner_layering_examples::example1;
 use asap_devtools::planning_stages::{lower_promql_roots, run_default_search_over};
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
-use asap_logical_asap_optimization::memo::candidates::{try_populate_pass1, CandidateMemo};
-use asap_logical_asap_optimization::memo::enumeration::enumerate;
-use asap_logical_asap_optimization::memo::LogicalMemo;
-use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
+use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
+use asap_logical_asap_optimization::pass2::memo::candidates::{try_populate_pass1, CandidateMemo};
+use asap_logical_asap_optimization::pass2::memo::enumeration::enumerate;
+use asap_logical_asap_optimization::pass2::memo::LogicalMemo;
 use asap_plan_selection::{PlanSelectionSettings, PlanningModels};
 use asap_planner::PlannerExecutorCompileCheck;
 use asap_types::ir::properties::AccuracyTarget;

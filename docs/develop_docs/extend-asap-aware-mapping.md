@@ -54,12 +54,12 @@ estimator; an execution test in `crates/integration-tests/tests/` such as
 A new way for computations of one Pass 1 candidate to share, split or reuse
 work.
 
-1. In `crates/logical-asap-optimization/src/asap_aware_cse.rs`, add the part it can choose as a `*Candidate` type
+1. In `crates/logical-asap-optimization/src/pass2/asap_aware_cse.rs`, add the part it can choose as a `*Candidate` type
    with a finder (for example `rollup_candidates(roots)`), and the function
    that applies a set of them and returns `*Pass2Candidate`s (for example
    `rollup_pass2_candidates`). Read summary families only through
    `FamilyCapability`.
-2. In `crates/logical-asap-optimization/src/workload_candidates.rs`, call it
+2. In `crates/logical-asap-optimization/src/pass2/workload_candidates.rs`, call it
    from Stage 1 enumeration after the
    existing rules and record what it applied in a new `Pass2Candidate` field.
 3. Rebuild its label from that field in `asap_devtools::candidate_labels`.
@@ -69,7 +69,7 @@ work.
 A rule must keep every Pass 1 candidate, must not add a family or a readout,
 and must keep the composed DAG's meaning. Stage 3 decides whether it pays off.
 
-Tests: unit tests beside the rule in `asap_aware_cse.rs` for when it applies
+Tests: unit tests beside the rule in `pass2/asap_aware_cse.rs` for when it applies
 and when it must not; an end-to-end test like
 `crates/integration-tests/tests/reuse_rules.rs` that the planned workload
 contains the candidate and that Stage 3 prices it.

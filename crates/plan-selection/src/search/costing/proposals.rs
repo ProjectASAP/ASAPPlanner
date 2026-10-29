@@ -183,9 +183,9 @@ mod tests {
     use crate::search::candidates::configurations::enumerate_candidate_configurations;
     use crate::search::candidates::inventory::build_candidate_inventory;
     use crate::{CalibrationFit, PlanningModels};
-    use asap_logical_asap_optimization::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::memo::{LogicalMemo, MemoGroupId};
-    use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
+    use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
+    use asap_logical_asap_optimization::pass2::memo::{LogicalMemo, MemoGroupId};
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};

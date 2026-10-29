@@ -5,11 +5,11 @@
 //! group: the readers' shared `sum_over_time` is now one group, not one per
 //! reader.
 use super::candidates::{try_populate_pass1, CandidateMemo, CandidateOrigin};
-use super::state_configurations::PaneWidthDomain;
+use super::shared_configurations::PaneWidthDomain;
 use super::state_groups::expand_concrete_summary_state_groups_in_domain;
 use super::window_candidates::add_local_window_composition;
 use super::LogicalMemo;
-use crate::per_computation_candidates::generate_per_computation_candidates;
+use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
 use crate::test_support::{entry_with, lower_promql};
 use asap_types::ir::flat::flatten;
 use asap_types::ir::properties::AccuracyTarget;

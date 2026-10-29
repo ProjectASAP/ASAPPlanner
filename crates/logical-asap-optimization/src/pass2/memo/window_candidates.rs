@@ -2,11 +2,11 @@
 //! connections, not the union of potential consumers, determine eligibility.
 use super::candidates::{CandidateMemo as Memo, CandidateOrigin, ImplementationCandidate};
 #[cfg(test)]
-use super::state_configurations::pane_width_divisors;
-use super::state_configurations::{pane_width_domain_before, PaneWidthDomain};
+use super::shared_configurations::pane_width_divisors;
+use super::shared_configurations::{pane_width_domain_before, PaneWidthDomain};
 use super::{check_generation_deadline, CandidateGenerationTimeout};
 use super::{MemoGroup, MemoGroupId as GroupId};
-use crate::asap_aware_cse::{pane_candidates, window_composition_pass2_candidates};
+use crate::pass2::asap_aware_cse::{pane_candidates, window_composition_pass2_candidates};
 use asap_types::ir::flat::flatten;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::QueryWorkloadEntry;
@@ -247,7 +247,7 @@ fn restore_scan_boundaries(
 // Nongridded potential consumers do not veto a repeated reader's panes.
 #[cfg(test)]
 fn compatible_reader_grids(group: &MemoGroup, entries: &[QueryWorkloadEntry]) -> Vec<u64> {
-    super::state_configurations::pane_width_domain(
+    super::shared_configurations::pane_width_domain(
         group
             .queries
             .iter()
@@ -323,8 +323,8 @@ fn candidate_signature(candidate: &ImplementationCandidate) -> Result<String, se
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memo::{candidates::try_populate_pass1, LogicalMemo};
-    use crate::per_computation_candidates::generate_per_computation_candidates;
+    use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
+    use crate::pass2::memo::{candidates::try_populate_pass1, LogicalMemo};
     use crate::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};

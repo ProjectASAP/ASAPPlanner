@@ -6,9 +6,9 @@
 
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::memo::candidates::CandidateMemo;
-use asap_logical_asap_optimization::memo::enumeration::MemoChoice;
-use asap_logical_asap_optimization::memo::LogicalMemo;
+use asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo;
+use asap_logical_asap_optimization::pass2::memo::enumeration::MemoChoice;
+use asap_logical_asap_optimization::pass2::memo::LogicalMemo;
 
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
@@ -17,11 +17,11 @@ use asap_types::workload::{DataWorkload, QueryLanguage, QueryWorkloadEntry};
 use crate::search::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryPlan};
 use crate::PlanningModels;
 use crate::{SearchAlgorithm, Selection, SelectionError};
-use asap_logical_asap_optimization::per_computation_candidates::{
+use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     generate_per_computation_candidates_with_memo, PerComputationCandidateError,
     PerComputationCandidates,
 };
-use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
+use asap_logical_asap_optimization::pass2::workload_candidates::Pass2Candidate;
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 
 /// A selected execution plan and the logical roots from which it was built.

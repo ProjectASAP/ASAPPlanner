@@ -270,12 +270,12 @@ use asap_devtools::planning_stages::{
 };
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{counter_function_over_gauge_warnings, promql_metric_names};
-use asap_logical_asap_optimization::memo::candidates::{CandidateMemo, CandidateOrigin};
-use asap_logical_asap_optimization::memo::enumeration::{compose, enumerate, MemoChoice};
-use asap_logical_asap_optimization::memo::MemoGroupId;
-use asap_logical_asap_optimization::per_computation_candidates::{
+use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     ComputationCandidate, PerComputationCandidates, PruneReason,
 };
+use asap_logical_asap_optimization::pass2::memo::candidates::{CandidateMemo, CandidateOrigin};
+use asap_logical_asap_optimization::pass2::memo::enumeration::{compose, enumerate, MemoChoice};
+use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
     large_peak_memory_warning, ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCosts,

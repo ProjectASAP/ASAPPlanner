@@ -11,6 +11,7 @@ pub mod budget;
 pub mod composition;
 pub mod estimators;
 pub mod evidence;
+pub(crate) mod function_rules;
 
 pub use budget::per_input_target;
 pub use evidence::{OperandDomain, PropagationStats};

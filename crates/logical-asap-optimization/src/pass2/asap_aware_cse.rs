@@ -128,7 +128,7 @@
 //! read only the finer keys (`… WHERE city IN ('NYC', 'SF')` from a build
 //! by `city`), is answered by first keeping the finer states that pass
 //! those conjuncts, a compensating `Filter` over the states
-//! ([`filtered_finer`], [`match_finer`](crate::finer_aggregate)), then
+//! ([`filtered_finer`], [`match_finer`](crate::pass2::finer_aggregate)), then
 //! merging them. A SQL aggregate's finer *result* is read the same way by
 //! the memo rule `memo::rules::finer_aggregate`.
 //!
@@ -168,7 +168,9 @@ use asap_types::ir::{
 };
 
 use crate::accuracy::estimators::size_for_all_readers;
-use crate::per_computation_candidates::{recompose_guarantees, PerComputationCandidateError};
+use crate::pass1::per_computation_candidates::{
+    recompose_guarantees, PerComputationCandidateError,
+};
 
 /// A Pass 2 candidate of the identical-expression rule: the candidate's
 /// roots with each of `sharing_candidates` made one node.
@@ -2373,7 +2375,7 @@ fn filtered_finer(coarse: &OperatorNode, fine: &OperatorNode) -> Option<(usize, 
         return None;
     }
     let matched =
-        crate::finer_aggregate::match_finer(child, by.keys(), fine_child, fine_by.keys())?;
+        crate::pass2::finer_aggregate::match_finer(child, by.keys(), fine_child, fine_by.keys())?;
     // The filter reads the finer keys as the state's columns of those names.
     let state_columns = fine_by
         .keys()
@@ -2485,7 +2487,7 @@ fn rolled_up(
     finer: &Rc<OperatorNode>,
     coarse_value: &OperatorNode,
 ) -> Option<Rc<OperatorNode>> {
-    use crate::per_computation_candidates::{exact_accumulator, partitions_over};
+    use crate::pass1::per_computation_candidates::{exact_accumulator, partitions_over};
     let Some(ASAPOp::SummaryAgg {
         child,
         family,
@@ -2909,7 +2911,7 @@ fn ranking(child: &Rc<OperatorNode>, by: &Reduction, k: usize) -> Option<Rc<Oper
     let Reduction::Reduce(keys) = by else {
         return None;
     };
-    let value = crate::realization::ranked_column(child).ok()?;
+    let value = crate::pass1::realization::ranked_column(child).ok()?;
     let sorted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Sort {
         keys: vec![SortKey {
             expr: ScalarExpr::Column(value),
@@ -3250,7 +3252,7 @@ mod tests {
     /// offers Count-Min for counts, and its merged counters add.
     #[test]
     fn a_count_from_count_min_panes_keeps_its_guarantee() {
-        use crate::per_computation_candidates::{
+        use crate::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
         };
         let root = lower_promql(
@@ -3295,7 +3297,7 @@ mod tests {
     /// The composed candidate of `queries` (each at its own ε, δ = 0.01)
     /// in which every target chose `family`.
     fn chose(queries: &[(&str, f64)], family: SketchAlgorithm) -> Vec<QueryRoot> {
-        use crate::per_computation_candidates::ComputationCandidate;
+        use crate::pass1::per_computation_candidates::ComputationCandidate;
         chose_where(queries, |c| *c == ComputationCandidate::Summary(family))
     }
 
@@ -3303,9 +3305,9 @@ mod tests {
     /// in which every target chose the first candidate `pick` accepts.
     fn chose_where(
         queries: &[(&str, f64)],
-        pick: impl Fn(&crate::per_computation_candidates::ComputationCandidate) -> bool,
+        pick: impl Fn(&crate::pass1::per_computation_candidates::ComputationCandidate) -> bool,
     ) -> Vec<QueryRoot> {
-        use crate::per_computation_candidates::{
+        use crate::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates,
         };
         let roots = queries
@@ -3676,7 +3678,7 @@ mod tests {
     /// the last two samples of the window, does not.
     #[test]
     fn exact_accumulators_that_merge_get_panes() {
-        use crate::per_computation_candidates::ComputationCandidate;
+        use crate::pass1::per_computation_candidates::ComputationCandidate;
         let accumulator =
             |c: &ComputationCandidate| matches!(c, ComputationCandidate::ExactAccumulator(_));
         for query in [
@@ -4145,7 +4147,7 @@ mod tests {
     /// The composed candidate of `queries` with every target at its exact
     /// option (an exact accumulator, or plain exact execution).
     fn exact(queries: &[&str]) -> Vec<QueryRoot> {
-        use crate::per_computation_candidates::ComputationCandidate as C;
+        use crate::pass1::per_computation_candidates::ComputationCandidate as C;
         let queries: Vec<(&str, f64)> = queries.iter().map(|q| (*q, 0.01)).collect();
         chose_where(&queries, |c| matches!(c, C::Exact | C::ExactAccumulator(_)))
     }
@@ -4602,7 +4604,7 @@ mod tests {
                 "{queries:?}"
             );
         }
-        use crate::per_computation_candidates::{
+        use crate::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates,
             ComputationCandidate as C,
         };

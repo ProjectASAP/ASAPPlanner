@@ -1,17 +1,17 @@
 //! Shared boundary handling for producer-level reuse rules. Rule outputs retain
 //! canonical input identities after guarantee recomposition rebuilds their DAGs.
-use crate::memo::candidates::{CandidateMemo, CandidateOrigin, ImplementationCandidate};
-use crate::memo::state_groups::{boundary_groups, StateGroupExpansionError};
-use crate::memo::{MemoGroup, MemoGroupId};
+use crate::pass2::memo::candidates::{CandidateMemo, CandidateOrigin, ImplementationCandidate};
+use crate::pass2::memo::state_groups::{boundary_groups, StateGroupExpansionError};
+use crate::pass2::memo::{MemoGroup, MemoGroupId};
 use asap_types::ir::OperatorNode;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-pub(in crate::memo) fn eligible(candidate: &ImplementationCandidate) -> bool {
+pub(in crate::pass2::memo) fn eligible(candidate: &ImplementationCandidate) -> bool {
     !candidate.implements.is_empty() && candidate.budget_share > 0
 }
 
-pub(in crate::memo) fn restore_inputs(
+pub(in crate::pass2::memo) fn restore_inputs(
     node: &Rc<OperatorNode>,
     memo: &CandidateMemo,
     inputs: &[MemoGroupId],
@@ -56,7 +56,7 @@ pub(in crate::memo) fn restore_inputs(
     visit(node, &canonical, &mut HashMap::new())
 }
 
-pub(in crate::memo) fn same_node(
+pub(in crate::pass2::memo) fn same_node(
     left: &OperatorNode,
     right: &OperatorNode,
     guarantees: bool,
@@ -91,7 +91,7 @@ pub(in crate::memo) fn same_node(
         && (!guarantees || left.guarantee == right.guarantee)
 }
 
-pub(in crate::memo) fn append_producer(
+pub(in crate::pass2::memo) fn append_producer(
     memo: &mut CandidateMemo,
     node: Rc<OperatorNode>,
     queries: &[usize],
@@ -137,7 +137,7 @@ pub(in crate::memo) fn append_producer(
     Ok(id)
 }
 
-pub(in crate::memo) fn append_reader(
+pub(in crate::pass2::memo) fn append_reader(
     memo: &mut CandidateMemo,
     owner: usize,
     original: &ImplementationCandidate,
@@ -179,7 +179,7 @@ pub(in crate::memo) fn append_reader(
     Ok(true)
 }
 
-pub(in crate::memo) fn replace(
+pub(in crate::pass2::memo) fn replace(
     node: &Rc<OperatorNode>,
     replacements: &HashMap<*const OperatorNode, Rc<OperatorNode>>,
 ) -> Rc<OperatorNode> {
@@ -214,7 +214,7 @@ pub(in crate::memo) fn replace(
     visit(node, replacements, &mut HashMap::new())
 }
 
-pub(in crate::memo) fn combined_inputs(
+pub(in crate::pass2::memo) fn combined_inputs(
     left: &ImplementationCandidate,
     right: &ImplementationCandidate,
 ) -> Vec<MemoGroupId> {

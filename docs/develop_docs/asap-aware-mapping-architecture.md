@@ -57,10 +57,10 @@ same pipeline behind the `OptimizationPass` trait that `asap-planner` calls.
 
 | Concern | Where it lives |
 | --- | --- |
-| Pass 1: which computations a query has (`ComputationTarget`), how each can be computed (`ComputationCandidate`: `Exact`, `ExactAccumulator`, `Summary`), fused computations (`FusedComputation`), pruning (`PruneReason`) and composing one choice into a logical DAG (`compose_logical_candidate`) | `asap-logical-asap-optimization`, `per_computation_candidates.rs` |
-| Which summary families serve an intent (`summary_candidates`), the intent's accuracy target and (ε, δ) budget, default sizing | `asap-logical-asap-optimization`, `realization.rs` |
-| Pass 2 rules: identical-expression, summary-capability, window-composition (tumbling panes), rollup and exact top-k reuse; each produces `*Candidate` parts and `*Pass2Candidate` whole-workload plans | `asap-logical-asap-optimization`, `asap_aware_cse.rs` |
-| Enumeration of Stage 1 candidates (the Cartesian product of Pass 1 choices, each followed by its Pass 2 candidates) | `asap-logical-asap-optimization`, `workload_candidates.rs` |
+| Pass 1: which computations a query has (`ComputationTarget`), how each can be computed (`ComputationCandidate`: `Exact`, `ExactAccumulator`, `Summary`), fused computations (`FusedComputation`), pruning (`PruneReason`) and composing one choice into a logical DAG (`compose_logical_candidate`) | `asap-logical-asap-optimization`, `pass1/per_computation_candidates.rs` |
+| Which summary families serve an intent (`summary_candidates`), the intent's accuracy target and (ε, δ) budget, default sizing | `asap-logical-asap-optimization`, `pass1/realization.rs` |
+| Pass 2 rules: identical-expression, summary-capability, window-composition (tumbling panes), rollup and exact top-k reuse; each produces `*Candidate` parts and `*Pass2Candidate` whole-workload plans | `asap-logical-asap-optimization`, `pass2/asap_aware_cse.rs` |
+| Enumeration of Stage 1 candidates (the Cartesian product of Pass 1 choices, each followed by its Pass 2 candidates) | `asap-logical-asap-optimization`, `pass2/workload_candidates.rs` |
 | What each summary family can merge and answer (`FamilyCapability::of`: `merge_inputs`, `readouts`) | `asap-types`, `ir/schema/family_capability.rs` |
 | Stage 2: materialization options per summary build (`NotMaterialized`, `MatAtIngestion`, `MatAtQuery`, `MatAtQueryKeptAcrossEvaluations`), ingestion-time eligibility, physical operator implementation | `asap-physical-asap-optimization` |
 | Timing and data-state edge rules applied from a `MaterializationAssignment` | `asap-types`, `ir/properties/timing.rs` and `ir/properties/execution_data_state.rs`; `Materialization` in `physical/materialization.rs` |

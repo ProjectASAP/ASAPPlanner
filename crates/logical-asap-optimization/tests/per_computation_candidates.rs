@@ -1,5 +1,5 @@
 //! Frontend-to-Pass-1 acceptance: candidate discovery precedes empirical selection.
-use asap_logical_asap_optimization::per_computation_candidates::{
+use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     computation_candidates_for_intent, generate_per_computation_candidates, ComputationCandidate,
     HavingEntry, HavingPlacement, PerComputationCandidateError, PruneReason,
 };
@@ -448,7 +448,7 @@ fn filtered_measure_keeps_candidates_and_records_its_filter() {
 }
 
 fn assert_sql_count_choices(
-    choices: &asap_logical_asap_optimization::per_computation_candidates::ComputationChoices,
+    choices: &asap_logical_asap_optimization::pass1::per_computation_candidates::ComputationChoices,
 ) {
     assert_eq!(
         choices.candidates,
@@ -763,7 +763,7 @@ fn example_1_exact_q2_prunes_topk_heaps() {
 
 /// The `HAVING` entries of the target whose measure satisfies `is`.
 fn having_of(
-    targets: &[asap_logical_asap_optimization::per_computation_candidates::ComputationTarget],
+    targets: &[asap_logical_asap_optimization::pass1::per_computation_candidates::ComputationTarget],
     is: impl Fn(&AggIntent) -> bool,
 ) -> Vec<HavingEntry> {
     let target = targets
@@ -916,7 +916,7 @@ fn without_and_per_entity_having_stays_above() {
 /// with an exact guarantee.
 #[test]
 fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
-    use asap_logical_asap_optimization::per_computation_candidates::compose_logical_candidate;
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate;
     let producer = aggregate(AggIntent::Cardinality {
         cols: vec![0],
         accuracy: approximate(),
@@ -955,7 +955,7 @@ fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
 
 /// The one root of the workload candidate composed from `roots` and `choice`.
 fn composed(roots: Vec<Rc<OperatorNode>>, choice: &[usize]) -> Vec<Rc<OperatorNode>> {
-    use asap_logical_asap_optimization::per_computation_candidates::compose_logical_candidate;
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate;
     let inventory = generate_per_computation_candidates(
         roots
             .into_iter()
@@ -1010,7 +1010,7 @@ fn summary_agg(node: &OperatorNode) -> &ASAPOp {
 /// measure's accuracy requirement.
 #[test]
 fn composed_summary_is_sized_for_its_measure() {
-    use asap_logical_asap_optimization::realization::default_size_params;
+    use asap_logical_asap_optimization::pass1::realization::default_size_params;
     let intent = quantile();
     let [root] = <[_; 1]>::try_from(composed(vec![aggregate(intent.clone())], &[1])).unwrap();
     let ASAPOp::SummaryAgg {
@@ -1222,7 +1222,7 @@ fn composed_guarantees() {
 /// a subquery in it reads the subquery's substitution.
 #[test]
 fn own_having_subquery_is_substituted() {
-    use asap_logical_asap_optimization::per_computation_candidates::compose_logical_candidate;
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate;
     let inner = aggregate(quantile());
     let outer = grouped_quantile(Some(above_scalar(1, inner.clone())));
     let inventory =
@@ -1324,10 +1324,10 @@ fn grouped_avg_composition_preserves_the_whole_schema() {
 // Cached local rules preserve filtered and unfiltered consumers independently.
 #[test]
 fn memo_cached_rules_preserve_occurrence_specific_having() {
-    use asap_logical_asap_optimization::memo::LogicalMemo;
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates_with_memo,
     };
+    use asap_logical_asap_optimization::pass2::memo::LogicalMemo;
     let shared = grouped_count(None);
     let other = grouped_count(None);
     let key = equals(0, ScalarValue::Utf8("a".into()));

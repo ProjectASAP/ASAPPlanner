@@ -4,19 +4,19 @@
 //! from it as one more candidate; its own candidates stay, so plan selection
 //! decides. Identical expressions are the trivial case, shared by memo group
 //! identity, and add no candidates here.
-use crate::memo::candidates::CandidateMemo;
-use crate::memo::check_generation_deadline;
-use crate::memo::state_groups::StateGroupExpansionError;
+use crate::pass2::memo::candidates::CandidateMemo;
+use crate::pass2::memo::check_generation_deadline;
+use crate::pass2::memo::state_groups::StateGroupExpansionError;
 use std::time::Instant;
 
 /// One reader of a kind of shared producer: its memo group and its need.
-pub(in crate::memo) struct Reader<N> {
+pub(in crate::pass2::memo) struct Reader<N> {
     pub group: usize,
     pub need: N,
 }
 
 /// A kind of producer several readers can share.
-pub(in crate::memo) trait SharedProducer {
+pub(in crate::pass2::memo) trait SharedProducer {
     /// What one reader requires of the producer.
     type Need;
     /// A producer's need that serves several readers at once.
@@ -46,13 +46,13 @@ pub(in crate::memo) trait SharedProducer {
 
 /// Whether `set`'s readers belong to two or more groups; a set inside one
 /// group shares nothing.
-pub(in crate::memo) fn spans_groups<N>(set: &[Reader<N>]) -> bool {
+pub(in crate::pass2::memo) fn spans_groups<N>(set: &[Reader<N>]) -> bool {
     set.iter().any(|reader| reader.group != set[0].group)
 }
 
 /// Gives every reader of a set spanning two or more groups its derivation
 /// from each of the set's coverings; the number of candidates added.
-pub(in crate::memo) fn add_shared_producer_candidates<P: SharedProducer>(
+pub(in crate::pass2::memo) fn add_shared_producer_candidates<P: SharedProducer>(
     memo: &mut CandidateMemo,
     producer: &mut P,
     deadline: Option<Instant>,

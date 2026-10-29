@@ -193,8 +193,8 @@ pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
 /// The Count-Min summary of a Stage 1 candidate of `query`.
 pub fn cms_summary(query: &str) -> OperatorNode {
     use crate::deployment_capabilities::DeploymentCapabilities;
-    use crate::per_computation_candidates::compose_logical_candidate;
-    use crate::per_computation_candidates::generate_per_computation_candidates;
+    use crate::pass1::per_computation_candidates::compose_logical_candidate;
+    use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::{ASAPOp, QueryRoot};
     let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);

@@ -19,7 +19,7 @@ use planner_layering_common::*;
 // Fixed algorithm/window fixtures keep numerical evaluator checks independent
 // of a time-bounded production search's archived incumbents.
 fn run_a() -> Run {
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
     };
     let workload = pattern_a(
@@ -68,11 +68,11 @@ fn run_a() -> Run {
 }
 
 fn run_b() -> Run {
-    use asap_logical_asap_optimization::asap_aware_cse::{
-        pane_candidates, window_composition_pass2_candidates,
-    };
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    };
+    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+        pane_candidates, window_composition_pass2_candidates,
     };
     let workload = pattern_b();
     let roots = lower_promql(&workload);

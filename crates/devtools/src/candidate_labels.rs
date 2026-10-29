@@ -6,11 +6,11 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::asap_aware_cse::PaneCandidate;
-use asap_logical_asap_optimization::per_computation_candidates::{
+use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     ComputationCandidate, PerComputationCandidates,
 };
-use asap_logical_asap_optimization::workload_candidates::Pass2Candidate;
+use asap_logical_asap_optimization::pass2::asap_aware_cse::PaneCandidate;
+use asap_logical_asap_optimization::pass2::workload_candidates::Pass2Candidate;
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
@@ -661,7 +661,7 @@ mod tests {
     use super::*;
     use crate::planner_layering_examples::example1;
     use crate::planning_stages::lower_promql_roots;
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
 
@@ -712,10 +712,10 @@ mod tests {
     /// have the same family and pane count (6 × 10s for Q1, 6 × 30s for Q2).
     #[test]
     fn physical_labels_name_the_pane_chain_maintained_at_ingestion() {
-        use asap_logical_asap_optimization::asap_aware_cse::{
+        use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
+        use asap_logical_asap_optimization::pass2::asap_aware_cse::{
             pane_candidates, window_composition_pass2_candidates,
         };
-        use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
         use asap_physical_asap_optimization::optimize_physical_asap;
         use asap_types::workload::PlanningWorkload;
 

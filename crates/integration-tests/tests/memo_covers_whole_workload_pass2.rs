@@ -13,7 +13,7 @@ use asap_devtools::planner_layering_examples::{
 use asap_executor::physical_planner::promql_rows;
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::explicit_assignment_plans;
-use asap_logical_asap_optimization::per_computation_candidates::{
+use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     generate_per_computation_candidates, PerComputationCandidates,
 };
 use asap_plan_selection::{

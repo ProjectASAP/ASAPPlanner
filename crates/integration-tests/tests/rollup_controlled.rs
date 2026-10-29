@@ -1,10 +1,10 @@
 //! Controlled plans for the viewer's actual distinct-count rollup workload.
 use asap_integration_tests::planning::{builds_and_rollups, expanded_memo, select_rollup};
 use asap_logical_asap_optimization::{
-    asap_aware_cse::{rollup_candidates, rollup_pass2_candidates},
-    per_computation_candidates::{
+    pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
     },
+    pass2::asap_aware_cse::{rollup_candidates, rollup_pass2_candidates},
 };
 use asap_plan_selection::{CostModel, PlanSelectionSettings, PlanningModels, ResourceUnitCost};
 use asap_types::{

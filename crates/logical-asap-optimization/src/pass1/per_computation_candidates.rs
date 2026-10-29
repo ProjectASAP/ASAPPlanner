@@ -124,10 +124,10 @@ use crate::accuracy::composition::{
 };
 use crate::accuracy::estimators::local_guarantee;
 use crate::accuracy::estimators::{hll, univmon};
+use crate::accuracy::function_rules::approximate_input_composition;
 use crate::accuracy::{per_input_target, PropagationStats};
 use crate::deployment_capabilities::DeploymentCapabilities;
-use crate::function_rules::approximate_input_composition;
-use crate::realization::{
+use crate::pass1::realization::{
     accuracy_budget, default_size_params, sizing_target, sketch_statistic, summary_candidates,
 };
 
@@ -610,7 +610,7 @@ pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
 /// occurrence-specific. Cached choices are cloned before any contextual pruning.
 pub fn generate_per_computation_candidates_with_memo<Id: std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
-    memo: &crate::memo::LogicalMemo,
+    memo: &crate::pass2::memo::LogicalMemo,
 ) -> Result<PerComputationCandidates<Id>, PerComputationCandidateError> {
     if !memo.matches_root_dependencies(&roots) {
         return Err(PerComputationCandidateError::MemoRootsChanged);
@@ -618,11 +618,11 @@ pub fn generate_per_computation_candidates_with_memo<Id: std::fmt::Debug>(
     generate_with_local_candidate_cache(roots, Some(memo), &mut HashMap::new())
 }
 
-type LocalCandidateCache = HashMap<(crate::memo::MemoGroupId, usize), ComputationChoices>;
+type LocalCandidateCache = HashMap<(crate::pass2::memo::MemoGroupId, usize), ComputationChoices>;
 
 fn generate_with_local_candidate_cache<Id: std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
-    memo: Option<&crate::memo::LogicalMemo>,
+    memo: Option<&crate::pass2::memo::LogicalMemo>,
     local_candidates: &mut LocalCandidateCache,
 ) -> Result<PerComputationCandidates<Id>, PerComputationCandidateError> {
     let mut seen = HashSet::new();
@@ -1044,7 +1044,7 @@ fn reads_only_time_series(node: &OperatorNode) -> bool {
 fn whole_expression_input(
     target: &OperatorNode,
 ) -> Option<(Rc<OperatorNode>, SummaryUpdate, Reduction)> {
-    use crate::realization::realize_keyed_additive_summary_input;
+    use crate::pass1::realization::realize_keyed_additive_summary_input;
     let Some(NonASAPOp::Aggregate {
         child,
         reduction,
@@ -1119,8 +1119,9 @@ pub(crate) fn partitions_over(
     if keys.is_without() {
         return None;
     }
-    let column =
-        |schema: &Schema, index: usize| crate::realization::column_ref(&schema.fields[index]);
+    let column = |schema: &Schema, index: usize| {
+        crate::pass1::realization::column_ref(&schema.fields[index])
+    };
     let keys = keys
         .keys()
         .iter()
@@ -1655,7 +1656,7 @@ fn with_guarantees(
 /// an aggregate whose measures are all `MIN`/`MAX` over a (possibly
 /// filtered) grouped estimate, where every column of a unique key of the
 /// estimate is a group key or pinned to one value by the filter
-/// ([`crate::finer_aggregate`]'s same-level read). Unlike a general
+/// ([`crate::pass2::finer_aggregate`]'s same-level read). Unlike a general
 /// aggregate over rank estimates, this does not change the population to
 /// which the input's error bound refers.
 fn selected_group_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
@@ -1686,7 +1687,7 @@ fn selected_group_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
         NonASAPOp::Filter { pred, child } => (Some(&pred.0), child),
         _ => (None, child),
     };
-    let pinned = pred.map_or_else(Vec::new, crate::finer_aggregate::pinned_columns);
+    let pinned = pred.map_or_else(Vec::new, crate::pass2::finer_aggregate::pinned_columns);
     // The filter may read only key columns: a predicate on an estimate
     // would decide by an approximate value which groups are kept.
     let reads = pred.map_or_else(Vec::new, ScalarExpr::columns_referenced);
@@ -3720,13 +3721,13 @@ fn measure_input(
         }
         // A top-k ranks its child's aggregate output, not a column of its own.
         AggIntent::TopK { .. } => SummaryInputExpr::Column(
-            crate::realization::ranked_value(input)
+            crate::pass1::realization::ranked_value(input)
                 .map_err(|_| {
                     PerComputationCandidateError::Unsupported("Top-K has no ranked column")
                 })?
                 .1,
         ),
-        _ => crate::realization::summarised_input(intent, schema).ok_or(
+        _ => crate::pass1::realization::summarised_input(intent, schema).ok_or(
             PerComputationCandidateError::Unsupported("input column outside child schema"),
         )?,
     };
@@ -3767,7 +3768,12 @@ fn counted_column(
                 .then_some(id)
             })
     };
-    let reference = |id: usize| schema.fields.get(id).map(crate::realization::column_ref);
+    let reference = |id: usize| {
+        schema
+            .fields
+            .get(id)
+            .map(crate::pass1::realization::column_ref)
+    };
     filter
         .map_or_else(Vec::new, |filter| not_null(&filter.0))
         .into_iter()
@@ -3829,7 +3835,7 @@ fn summary_update(
                     .enumerate()
                     .filter(|(index, _)| *index != value && !groups.contains(index))
                     .map(|(_, field)| {
-                        SummaryInputExpr::Column(crate::realization::column_ref(field))
+                        SummaryInputExpr::Column(crate::pass1::realization::column_ref(field))
                     })
                     .collect();
                 if items.is_empty() {
@@ -3842,7 +3848,7 @@ fn summary_update(
                 let excluding = groups
                     .iter()
                     .filter_map(|&index| child.fields.get(index))
-                    .map(crate::realization::column_ref)
+                    .map(crate::pass1::realization::column_ref)
                     .collect();
                 SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet { excluding })
             };
@@ -4617,7 +4623,7 @@ mod tests {
                 (id, inventory.roots[0].1.clone())
             })
             .collect();
-        let memo = crate::memo::LogicalMemo::from_roots(&roots);
+        let memo = crate::pass2::memo::LogicalMemo::from_roots(&roots);
         let baseline = generate_per_computation_candidates(roots.clone()).unwrap();
         let mut cache = LocalCandidateCache::new();
         let cached = generate_with_local_candidate_cache(roots, Some(&memo), &mut cache).unwrap();

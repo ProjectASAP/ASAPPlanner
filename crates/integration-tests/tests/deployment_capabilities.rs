@@ -71,12 +71,12 @@ fn assert_removes_exactly(
     roots: Vec<asap_types::ir::QueryRoot>,
     deployment: &DeploymentCapabilities,
 ) {
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     let local =
         generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
-    let enumerate_local = |inventory: &asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidates<usize>| {
+    let enumerate_local = |inventory: &asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidates<usize>| {
         let mut result = Vec::new();
         for (target, options) in inventory.targets.iter().enumerate() {
             for choice in 0..options.choice_count() {
@@ -126,11 +126,11 @@ fn pattern_b_with_p50() -> asap_types::workload::PlanningWorkload {
 
 /// One explicitly shared KLL pane chain, passed through normal physical rules.
 fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
-    use asap_logical_asap_optimization::asap_aware_cse::{
-        pane_candidates, window_composition_pass2_candidates,
-    };
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    };
+    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+        pane_candidates, window_composition_pass2_candidates,
     };
     use asap_types::ir::QueryRoot;
     let workload = pattern_b_with_p50();

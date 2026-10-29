@@ -324,7 +324,7 @@ pub fn run_explicit_candidates(
             .enumerate()
             .map(|(index, roots)| {
                 logical(format!("P{}", index + 1),
-            asap_logical_asap_optimization::per_computation_candidates::recompose_guarantees(&roots)
+            asap_logical_asap_optimization::pass1::per_computation_candidates::recompose_guarantees(&roots)
                 .expect("explicit fixture contracts compose"))
             })
             .collect();
@@ -384,11 +384,11 @@ pub fn run_pattern_b_fixture(
 /// Three fixed Pattern-B computations used by cost/retention fixtures:
 /// exact, whole-window KLL, and a KLL chain of sixty-second panes.
 pub fn pattern_b_computations(workload: &PlanningWorkload) -> Vec<Vec<QueryRoot>> {
-    use asap_logical_asap_optimization::asap_aware_cse::{
-        pane_candidates, window_composition_pass2_candidates,
-    };
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
+    };
+    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+        pane_candidates, window_composition_pass2_candidates,
     };
     let roots = lower_promql(workload);
     let local =

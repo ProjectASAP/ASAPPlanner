@@ -11,7 +11,7 @@
 //!
 //! A Pass 1 target's aggregate group gets one candidate per combination of
 //! its measures' Pass 1 candidates: the aggregate alone composed by
-//! [`crate::per_computation_candidates::compose_logical_candidate`] with that choice, every target beneath it
+//! [`crate::pass1::per_computation_candidates::compose_logical_candidate`] with that choice, every target beneath it
 //! exact. Its local nodes are the composed nodes above the first node
 //! equal to one of the group's descendant groups, which are its children.
 //! The local nodes read each child group through its node (the same
@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::LogicalMemo;
-use crate::per_computation_candidates::{
+use crate::pass1::per_computation_candidates::{
     compose_logical_candidate_with_budget_share, ComputationCandidate, PerComputationCandidates,
 };
 use asap_types::ir::schema::FieldDataType;
@@ -307,8 +307,10 @@ fn compose_alone<Id: Clone>(
     targets: &[usize],
     choice: &[usize],
     budget_share: usize,
-) -> Result<Vec<(usize, QueryRoot)>, crate::per_computation_candidates::PerComputationCandidateError>
-{
+) -> Result<
+    Vec<(usize, QueryRoot)>,
+    crate::pass1::per_computation_candidates::PerComputationCandidateError,
+> {
     let mut kept: Vec<usize> = targets.to_vec();
     for &t in targets {
         if let Some((_, Some(absorbs))) = per_computation.targets[t].computation_for(choice[t]) {
@@ -538,7 +540,7 @@ mod tests {
     fn memo_of<Id: Clone>(inventory: &PerComputationCandidates<Id>) -> CandidateMemo {
         populate_pass1(LogicalMemo::from_roots(&inventory.roots), inventory)
     }
-    use crate::per_computation_candidates::{
+    use crate::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use crate::test_support::lower_promql;
@@ -592,7 +594,7 @@ mod tests {
         let mut invalid_absorption = inventory;
         let missing = invalid_absorption.targets.len();
         invalid_absorption.targets[0].fused =
-            Some(crate::per_computation_candidates::FusedComputation {
+            Some(crate::pass1::per_computation_candidates::FusedComputation {
                 absorbs: vec![missing],
                 candidates: Vec::new(),
                 pruned: Vec::new(),
@@ -798,7 +800,7 @@ mod tests {
     }
 
     /// The sketch summaries of the first query of `queries` composed with
-    /// every target at its `algorithm` summary, by [`crate::per_computation_candidates::compose_logical_candidate`]:
+    /// every target at its `algorithm` summary, by [`crate::pass1::per_computation_candidates::compose_logical_candidate`]:
     /// as the exhaustive search sizes them.
     fn composed_sketches(
         queries: &[&str],

@@ -38,7 +38,7 @@ use crate::accuracy::{
 };
 use crate::{PlanSelectionSettings, Selection, SelectionError};
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
-use asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError;
+use asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidateError;
 
 pub use pipeline::{
     run_stage1_to_stage3, run_stage1_to_stage3_from_pass1, run_stage1_to_stage3_with,

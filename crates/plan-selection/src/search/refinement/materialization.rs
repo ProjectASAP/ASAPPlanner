@@ -114,7 +114,7 @@ mod tests {
         search_candidates_with_restricted_feedback, CandidateEvaluation, CandidateSearchLimits,
         CandidateSearchStatus,
     };
-    use asap_logical_asap_optimization::memo::MemoGroupId;
+    use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
     use std::time::Duration;
 
     fn graph(readers: usize) -> CandidateDependencyGraph {

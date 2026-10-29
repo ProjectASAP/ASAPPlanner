@@ -1,6 +1,6 @@
 //! Scan-label widening for explicit memo state sharing. Reuses the existing
 //! Pass 2 widening rule; only its source-chain boundaries are interned here.
-use crate::memo::check_generation_deadline;
+use crate::pass2::memo::check_generation_deadline;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
@@ -8,13 +8,13 @@ use std::time::Instant;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot};
 
-use crate::memo::candidates::{CandidateMemo, CandidateOrigin, ImplementationCandidate};
-use crate::memo::state_groups::{boundary_groups, simple_build, StateGroupExpansionError};
-use crate::memo::{MemoGroup, MemoGroupId};
+use crate::pass2::memo::candidates::{CandidateMemo, CandidateOrigin, ImplementationCandidate};
+use crate::pass2::memo::state_groups::{boundary_groups, simple_build, StateGroupExpansionError};
+use crate::pass2::memo::{MemoGroup, MemoGroupId};
 
 /// Preserve local implementations and append readers over union-label inputs.
 /// Parent/query reachability is rebuilt by the enclosing state-group expansion.
-pub(in crate::memo) fn add_scan_label_candidates(
+pub(in crate::pass2::memo) fn add_scan_label_candidates(
     memo: &mut CandidateMemo,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {
@@ -63,7 +63,7 @@ pub(in crate::memo) fn add_scan_label_candidates(
             roots.push(QueryRoot::Operator(Rc::clone(&candidate.node)));
         }
     }
-    let Some(widened) = crate::asap_aware_cse::with_union_scan_labels(&roots)
+    let Some(widened) = crate::pass2::asap_aware_cse::with_union_scan_labels(&roots)
         .map_err(|error| StateGroupExpansionError::ScanLabelWidening(error.to_string()))?
     else {
         return Ok(0);

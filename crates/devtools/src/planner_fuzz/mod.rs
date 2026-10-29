@@ -508,7 +508,7 @@ impl Planner {
                 .map_err(|e| format!("witness validation: {e}"))?;
         }
         let mut roots =
-            asap_logical_asap_optimization::per_computation_candidates::recompose_guarantees(roots)
+            asap_logical_asap_optimization::pass1::per_computation_candidates::recompose_guarantees(roots)
                 .map_err(|e| format!("witness guarantees: {e}"))?;
         if let (true, Some(last)) = (last_root_is_key_filter, roots.last_mut()) {
             let filter = last.as_operator().ok_or("a scalar root")?;

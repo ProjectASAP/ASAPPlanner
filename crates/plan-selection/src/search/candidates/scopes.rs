@@ -280,7 +280,7 @@ mod tests {
     use crate::search::candidates::configurations::CandidateConfiguration;
     use crate::search::candidates::graph::PhysicalCandidate;
     use crate::search::milp::model::select_candidates;
-    use asap_logical_asap_optimization::memo::MemoGroupId;
+    use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
     use asap_types::ir::properties::ExecutionTiming;
     use asap_types::physical::Materialization;
 

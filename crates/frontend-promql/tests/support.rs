@@ -183,7 +183,7 @@ pub fn logical_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
 }
 
 fn local_computation_candidates(root: Rc<OperatorNode>) -> Result<Vec<Rc<OperatorNode>>, String> {
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_types::ir::QueryRoot;

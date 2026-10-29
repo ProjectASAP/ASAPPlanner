@@ -248,7 +248,7 @@ fn independent_kll_cost(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
 ) -> f64 {
-    use asap_logical_asap_optimization::per_computation_candidates::{
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
     };
     let inventory = generate_per_computation_candidates(roots).unwrap();

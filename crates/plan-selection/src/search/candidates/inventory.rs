@@ -9,8 +9,8 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::memo::candidates::CandidateMemo;
-use asap_logical_asap_optimization::memo::MemoGroupId;
+use asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo;
+use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_types::ir::OperatorNode;
 use asap_types::physical::Materialization;
 
@@ -32,7 +32,9 @@ pub(in crate::search) struct CandidateInventory {
 #[derive(Debug, thiserror::Error)]
 pub(in crate::search) enum CandidateInventoryError {
     #[error(transparent)]
-    DeadlineExceeded(#[from] asap_logical_asap_optimization::memo::CandidateGenerationTimeout),
+    DeadlineExceeded(
+        #[from] asap_logical_asap_optimization::pass2::memo::CandidateGenerationTimeout,
+    ),
     #[error("invalid candidate memo: {0}")]
     InvalidMemo(String),
     #[error("unsupported candidate {candidate} in group {group}: {reason}")]
@@ -359,10 +361,10 @@ mod tests {
     use super::*;
     use crate::search::candidates::reconstruction::reconstruct_candidate_outputs;
     use crate::search::milp::model::select_candidates;
-    use asap_logical_asap_optimization::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::memo::state_groups::expand_concrete_summary_state_groups;
-    use asap_logical_asap_optimization::memo::LogicalMemo;
-    use asap_logical_asap_optimization::per_computation_candidates::generate_per_computation_candidates;
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
+    use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
+    use asap_logical_asap_optimization::pass2::memo::state_groups::expand_concrete_summary_state_groups;
+    use asap_logical_asap_optimization::pass2::memo::LogicalMemo;
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
@@ -639,7 +641,7 @@ mod tests {
                 entry
             })
             .collect();
-        asap_logical_asap_optimization::memo::window_candidates::add_local_window_composition(
+        asap_logical_asap_optimization::pass2::memo::window_candidates::add_local_window_composition(
             &mut memo, &entries,
         );
         let memo = expand_concrete_summary_state_groups(memo).unwrap().memo;
@@ -860,7 +862,7 @@ mod tests {
             .unwrap();
             if matches!(kind, "ranking" | "sketch") {
                 for (output, group) in inventory.graph.query_roots.iter_mut().zip(&outputs) {
-                    output.compatible_candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| memo.candidates[group.0 as usize][index].origin == if kind == "ranking" { asap_logical_asap_optimization::memo::candidates::CandidateOrigin::TopKReuse } else { asap_logical_asap_optimization::memo::candidates::CandidateOrigin::SharedBuild }));
+                    output.compatible_candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| memo.candidates[group.0 as usize][index].origin == if kind == "ranking" { asap_logical_asap_optimization::pass2::memo::candidates::CandidateOrigin::TopKReuse } else { asap_logical_asap_optimization::pass2::memo::candidates::CandidateOrigin::SharedBuild }));
                     assert!(
                         !output.compatible_candidates.is_empty(),
                         "{kind} reader generated"
@@ -944,7 +946,7 @@ mod tests {
     // one or both states can serve external queries without a configuration product.
     #[test]
     fn factored_summary_results_choose_independent_capacities_and_sharing() {
-        use asap_logical_asap_optimization::memo::candidates::CandidateOrigin;
+        use asap_logical_asap_optimization::pass2::memo::candidates::CandidateOrigin;
         use asap_logical_asap_optimization::test_support::entry_with;
         use asap_types::ir::schema::sketch::SketchParams;
         use asap_types::workload::{

@@ -2,11 +2,11 @@
 //! flags are required: only exact implementations can supply these inputs.
 use super::reuse::{append_producer, append_reader, eligible, replace};
 use super::shared_producer::{add_shared_producer_candidates, Reader, SharedProducer};
-use crate::asap_aware_cse::topk_reuse_candidates;
-use crate::memo::candidates::{CandidateMemo, CandidateOrigin};
-use crate::memo::check_generation_deadline;
-use crate::memo::state_groups::StateGroupExpansionError;
-use crate::memo::MemoGroupId;
+use crate::pass2::asap_aware_cse::topk_reuse_candidates;
+use crate::pass2::memo::candidates::{CandidateMemo, CandidateOrigin};
+use crate::pass2::memo::check_generation_deadline;
+use crate::pass2::memo::state_groups::StateGroupExpansionError;
+use crate::pass2::memo::MemoGroupId;
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::properties::AccuracyGuarantee;
 use asap_types::ir::schema::FieldDataType;
@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 
-pub(in crate::memo) fn add_topk_candidates(
+pub(in crate::pass2::memo) fn add_topk_candidates(
     memo: &mut CandidateMemo,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {

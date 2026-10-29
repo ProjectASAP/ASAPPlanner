@@ -12,7 +12,7 @@ use asap_executor::{
     values::{Batch, Value},
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_logical_asap_optimization::per_computation_candidates::{
+use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
 };
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
@@ -564,9 +564,9 @@ async fn every_candidate(
     ComputationCandidate,
     Result<
         Vec<(i32, QueryRoot)>,
-        asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError,
+        asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidateError,
     >,
-)> {
+)>{
     let root = lower_sql(query, catalog, accuracy()).await.unwrap();
     let inventory =
         generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
@@ -727,7 +727,7 @@ async fn sql_count_star_without_a_non_null_column_is_unsupported() {
             every_candidate(&catalog, "SELECT k, count(*) FROM t GROUP BY k").await
         {
             match composed {
-                Err(asap_logical_asap_optimization::per_computation_candidates::PerComputationCandidateError::Unsupported(_)) => {}
+                Err(asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidateError::Unsupported(_)) => {}
                 other => panic!("{columns:?} {candidate:?}: {other:?}"),
             }
         }

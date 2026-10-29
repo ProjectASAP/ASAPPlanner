@@ -8,15 +8,15 @@ use asap_types::ir::flat::flatten;
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
 use asap_types::workload::QueryWorkloadEntry;
 
-use crate::asap_aware_cse::{
+use crate::pass1::per_computation_candidates::{
+    compose_logical_candidate, PerComputationCandidateError, PerComputationCandidates,
+};
+use crate::pass2::asap_aware_cse::{
     capability_sharing_candidates, identical_expression_pass2_candidates, pane_candidates,
     rollup_candidates, rollup_choices, rollup_pass2_candidates, sharing_candidates,
     summary_capability_pass2_candidates, topk_reuse_candidates, topk_reuse_pass2_candidates,
     window_composition_pass2_candidates, with_union_scan_labels, PaneCandidate, RollupCandidate,
     SharedPaneChain, SharingCandidate, TopKReuseCandidate, MAX_REUSE_CANDIDATES,
-};
-use crate::per_computation_candidates::{
-    compose_logical_candidate, PerComputationCandidateError, PerComputationCandidates,
 };
 
 /// What a Pass 2 candidate changed of the Pass 1 candidate it derives
@@ -418,7 +418,7 @@ impl Pass2List<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::per_computation_candidates::generate_per_computation_candidates;
+    use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use crate::test_support::lower_promql;
     use asap_types::ir::schema::schema_support::with_promql_series_identity;
 

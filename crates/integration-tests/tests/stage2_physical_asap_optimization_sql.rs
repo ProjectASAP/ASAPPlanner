@@ -5,7 +5,7 @@
 //! then the group keys naming each ranked item.
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_logical_asap_optimization::per_computation_candidates::{
+use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, ComputationCandidate,
 };
 use asap_physical_asap_optimization::optimize_physical_asap;

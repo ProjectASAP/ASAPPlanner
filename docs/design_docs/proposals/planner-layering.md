@@ -311,16 +311,16 @@ rule's origin, and gives each reader a candidate that reads that group.
 
 | `CandidateOrigin` | Added by | Candidates |
 |---|---|---|
-| `Pass1` | `try_populate_pass1` (`memo/groups.rs`) | Every Pass 1 choice of the group's measures: exact, exact accumulator, each summary family and size, and fused computations. Each summary choice comes at every `budget_share` from 1 to the most approximate inputs a query reaching the group has. A fused candidate implements the groups it absorbs only when no other reader needs them; otherwise they stay groups of their own. |
-| `Panes` | Window composition: `add_local_window_composition` and `extend_local_window_composition` (`memo/window_candidates.rs`) | A window summary computed from tumbling panes, at each pane width the reader's evaluation grid allows. The pane chain stays private to the candidate. |
-| `WidenedScans` | Scan widening: `add_scan_label_candidates` (`memo/rules/scan_labels.rs`) | A reader of a metric's scans widened to a shared label set, read through a `Project`. |
-| `SummaryInput` | `factor_summary_inputs` (`memo/rules/summary_inputs.rs`) | Canonical value preprocessing feeding a summary build. |
-| `TopKReuse` | Exact top-k reuse: `add_topk_candidates` (`memo/rules/topk.rs`) | One ranking (`Limit(k_max)` over `Sort`), and each top-k reading its first `k` rows from it. |
-| `Rollup` | Rollup: `add_finer_aggregate_candidates` (`memo/rules/finer_aggregate.rs`), `add_rollup_candidates` and `add_window_rollup_candidates` (`memo/rules/rollup.rs`) | A coarse group computed from a finer group's values or states. |
-| `SummaryResult` | `factor_summary_results` (`memo/rules/summary_results.rs`) | A summary readout factored out of a composite implementation, so that other readers can read it. |
-| `SharedBuild` | Summary capability: `expand_concrete_summary_state_groups_before` (`memo/state_groups.rs`) | For each build made two or more times (by different candidates, or twice within one), one concrete summary-state group with one `SharedBuild` candidate; and for each candidate making such builds, one `SharedBuild` copy that reads the groups instead of building its own states. |
+| `Pass1` | `try_populate_pass1` (`pass2/memo/groups.rs`) | Every Pass 1 choice of the group's measures: exact, exact accumulator, each summary family and size, and fused computations. Each summary choice comes at every `budget_share` from 1 to the most approximate inputs a query reaching the group has. A fused candidate implements the groups it absorbs only when no other reader needs them; otherwise they stay groups of their own. |
+| `Panes` | Window composition: `add_local_window_composition` and `extend_local_window_composition` (`pass2/memo/window_candidates.rs`) | A window summary computed from tumbling panes, at each pane width the reader's evaluation grid allows. The pane chain stays private to the candidate. |
+| `WidenedScans` | Scan widening: `add_scan_label_candidates` (`pass2/memo/rules/scan_labels.rs`) | A reader of a metric's scans widened to a shared label set, read through a `Project`. |
+| `SummaryInput` | `factor_summary_inputs` (`pass2/memo/rules/summary_inputs.rs`) | Canonical value preprocessing feeding a summary build. |
+| `TopKReuse` | Exact top-k reuse: `add_topk_candidates` (`pass2/memo/rules/topk.rs`) | One ranking (`Limit(k_max)` over `Sort`), and each top-k reading its first `k` rows from it. |
+| `Rollup` | Rollup: `add_finer_aggregate_candidates` (`pass2/memo/rules/finer_aggregate.rs`), `add_rollup_candidates` and `add_window_rollup_candidates` (`pass2/memo/rules/rollup.rs`) | A coarse group computed from a finer group's values or states. |
+| `SummaryResult` | `factor_summary_results` (`pass2/memo/rules/summary_results.rs`) | A summary readout factored out of a composite implementation, so that other readers can read it. |
+| `SharedBuild` | Summary capability: `expand_concrete_summary_state_groups_before` (`pass2/memo/state_groups.rs`) | For each build made two or more times (by different candidates, or twice within one), one concrete summary-state group with one `SharedBuild` candidate; and for each candidate making such builds, one `SharedBuild` copy that reads the groups instead of building its own states. |
 
-The state-configuration rule (`memo/rules/state_configurations.rs`) runs just
+The state-configuration rule (`pass2/memo/rules/shared_configuration_readers.rs`) runs just
 before the shared builds are found. It rewrites readers to each shared size
 and to the newest panes of each pane chain layout they may read, so that
 equal builds appear, and a rewrite keeps the origin of the candidate it
@@ -435,7 +435,7 @@ The production search never lists the candidate DAGs (see
 [How the search uses the memo](#how-the-search-uses-the-memo)). Tests, the DAG
 viewer and cross-checks of the search need them: the memo must stand for
 the same candidate DAGs as the vector of whole-workload candidates the stage
-table describes. `memo::enumeration` converts a memo after any step into
+table describes. `pass2::memo::enumeration` converts a memo after any step into
 that vector.
 
 - **`MemoChoice`** maps each needed group to one candidate index in
@@ -523,12 +523,12 @@ The memo types and rules are in `crates/logical-asap-optimization/src/`
 
 | Step | Entry point | Path |
 |---|---|---|
-| Stage 0 | `LogicalMemo::from_roots`, `MemoGroup`, `MemoGroupId` | `memo.rs`; hash-consing is `share_common_sub_dags` in `crates/types/src/ir/cse.rs` |
-| Pass 1 | `generate_per_computation_candidates_with_memo`; `try_populate_pass1` (exported from `memo::candidates`) | `per_computation_candidates.rs`; `memo/groups.rs` |
-| Memo types | `CandidateMemo`, `ImplementationCandidate`, `CandidateOrigin` | `memo/candidates.rs` |
-| Pass 2 window composition | `add_local_window_composition`, `extend_local_window_composition` | `memo/window_candidates.rs` |
-| Pass 2 rules and concrete summary-state groups | `expand_concrete_summary_state_groups_before`, which runs the rules in `memo/rules/` in this order: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; then the shared builds | `memo/state_groups.rs`, `memo/rules/`, `memo/state_configurations.rs` |
-| Memo to candidate DAGs | `enumerate`, `compose`, `MemoChoice`, `MemoEnumeration`, `ComposeError` | `memo/enumeration.rs` (module `memo::enumeration`) |
+| Stage 0 | `LogicalMemo::from_roots`, `MemoGroup`, `MemoGroupId` | `pass2/memo.rs`; hash-consing is `share_common_sub_dags` in `crates/types/src/ir/cse.rs` |
+| Pass 1 | `generate_per_computation_candidates_with_memo`; `try_populate_pass1` (exported from `pass2::memo::candidates`) | `pass1/per_computation_candidates.rs`; `pass2/memo/groups.rs` |
+| Memo types | `CandidateMemo`, `ImplementationCandidate`, `CandidateOrigin` | `pass2/memo/candidates.rs` |
+| Pass 2 window composition | `add_local_window_composition`, `extend_local_window_composition` | `pass2/memo/window_candidates.rs` |
+| Pass 2 rules and concrete summary-state groups | `expand_concrete_summary_state_groups_before`, which runs the rules in `pass2/memo/rules/` in this order: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; then the shared builds | `pass2/memo/state_groups.rs`, `pass2/memo/rules/`, `pass2/memo/shared_configurations.rs` |
+| Memo to candidate DAGs | `enumerate`, `compose`, `MemoChoice`, `MemoEnumeration`, `ComposeError` | `pass2/memo/enumeration.rs` (module `pass2::memo::enumeration`) |
 | Production memo build and search | `run_stage1_to_stage3_with` and `run_stage1_to_stage3_from_pass1` build the logical memo (`pipeline.rs`); `candidate_connection_search` (`route.rs`) builds the candidate memo for each pane-width round: query pruning (first round), `try_populate_pass1`, the accuracy-scoped candidates, `extend_local_window_composition`, `expand_concrete_summary_state_groups_before`; then `candidates/`, `milp/` and `refinement/` | `crates/plan-selection/src/search/` |
 
 ## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies
@@ -571,7 +571,7 @@ the memo path's entry points.
 |---|---|---|---|
 | 0. Frontends | Query text, language → one logical root per query, carrying its accuracy target | Same: a `QueryRoot` per query | `lower_promql_workload`, `lower_sql_dialect` (`asap-frontend-*`); `plan_installable` (`asap_planner`) runs the frontends and Stages 1–3 on the user input |
 | 1, Pass 1 | Logical roots; the deployment's supported summaries → the Pass 1 inventory, every computation's candidates (`PerComputationCandidates`) | Logical roots → `LogicalMemo` (hash-consed `MemoGroup`s); with the Pass 1 inventory, less the summaries the deployment does not support → `CandidateMemo`: each group's `ImplementationCandidate`s | `LogicalMemo::from_roots`, `generate_per_computation_candidates_with_memo`, `try_populate_pass1` |
-| 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (`Pass2Candidate`, `stage1_candidates_of_choice`) | `CandidateMemo`; the entries' recurrence and range steps → the same memo with each rule's candidates added to the groups they implement | the memo rules (`memo/rules/`), `memo::window_candidates` |
+| 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (`Pass2Candidate`, `stage1_candidates_of_choice`) | `CandidateMemo`; the entries' recurrence and range steps → the same memo with each rule's candidates added to the groups they implement | the memo rules (`pass2/memo/rules/`), `pass2::memo::window_candidates` |
 | 1, concrete summary-state groups | (part of Pass 2) | `CandidateMemo` → the memo with concrete summary-state groups: one group per shared size or pane layout that readers can read | `expand_concrete_summary_state_groups_before` |
 | 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per materialization assignment | Each implementation candidate, on demand → its physical operators and its allowed materializations | `implement_candidate_operators`, `summary_materialization_eligibility` (called from Stage 3) |
 | 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model, raw-data retention, executor compile check → one plan | The expanded memo's candidates and their configurations; the same inputs → one candidate per needed group, connected into one plan | `run_stage1_to_stage3_with`, `candidate_connection_search`; output `Stage1ToStage3Run`, which holds the selected `PhysicalWorkloadPlan` and the selection |
