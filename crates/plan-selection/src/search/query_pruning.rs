@@ -310,7 +310,7 @@ pub(crate) fn next_digits<Id>(
 /// joint planning does: its composed candidate and every Pass 2 candidate
 /// of it (the rules a single query can apply, such as window composition),
 /// each in every Stage 2 materialization, fail the checks, each failure
-/// independent of summary sizes ([`CheckFailure::size_independent`](crate::CheckFailure::size_independent)), which
+/// independent of summary sizes ([`CheckFailure::size_independent`](crate::checks::CheckFailure::size_independent)), which
 /// sharing with another query can change. `None` when one passes, one
 /// fails a check a larger summary might pass, or none composes or is
 /// implemented (the whole-workload candidates are then checked as usual).
