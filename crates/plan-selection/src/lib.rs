@@ -22,7 +22,7 @@
 //! query's latency bound, or than its repeat interval, is rejected as
 //! invalid too ("Latency" below).
 //! Every valid candidate's resource usage is measured node by node over its
-//! physical DAG ([`ResourceUsage`]), and the deployment's [`CostModel`]
+//! physical DAG ([`ResourceUsage`](asap_cost::ResourceUsage)), and the deployment's [`CostModel`](asap_cost::CostModel)
 //! chooses among them ("Cost models" below). The rest are reported valid
 //! but costlier (or slower, or larger).
 //! Candidate-connection MILP search selects and validates workload DAGs
@@ -31,16 +31,16 @@
 //!
 //! ## Cost model: cost per second of wall time
 //!
-//! A candidate's cost is what running it costs per second ([`COST_UNIT`]),
+//! A candidate's cost is what running it costs per second ([`COST_UNIT`](asap_cost::COST_UNIT)),
 //! so queries with different recurrences add up. A node here is one
 //! operator node of the candidate's physical plan DAG (`PhysicalASAPDAG`),
 //! not a machine. Each node's price for one
 //! computation is multiplied by how often it is computed per second
-//! ([`NodeCost::cost_per_second`]):
+//! ([`NodeCost::cost_per_second`](asap_cost::NodeCost::cost_per_second)):
 //!
 //! * A `NotMaterialized` node is recomputed for each consumer that reads it
 //!   and is not stored: it is charged once per consumer
-//!   ([`NodeCost::multiplier`]) at the sum of their rates. Its consumers are
+//!   ([`NodeCost::multiplier`](asap_cost::NodeCost::multiplier)) at the sum of their rates. Its consumers are
 //!   the queries whose sub-DAG reaches it and the materialized nodes above
 //!   it, counted without looking through a materialized node: a node below
 //!   one is computed when that node is. Stage 2 keeps a shared node one
@@ -64,7 +64,7 @@
 //!   (default 3600 s): `invocations / horizon` per second.
 //!
 //! Under cost model 1, memory is charged as bytes held per second
-//! ([`ResourceUsage::average_memory_bytes`]), at
+//! ([`ResourceUsage::average_memory_bytes`](asap_cost::ResourceUsage::average_memory_bytes)), at
 //! `cost_per_memory_byte_second` per byte per second. A `MatAtIngestion`
 //! node keeps its state every second: twice for a whole window (the window
 //! being built and the completed one queries read) and `N + 1` panes for a
@@ -85,7 +85,7 @@
 //! prices each and the cheaper wins.
 //!
 //! A query whose workload entry declares a range evaluation
-//! ([`RangeEvaluation`]: each request evaluates it at every `step_ms` over
+//! ([`RangeEvaluation`](asap_types::workload::RangeEvaluation): each request evaluates it at every `step_ms` over
 //! the last `span_ms`, as a dashboard's `query_range` does) is priced as
 //! `S = span_ms / step_ms + 1` evaluations per request (61 for a 1 h span
 //! at 1 min steps):
@@ -107,13 +107,13 @@
 //! Latency stays per evaluation (one step). Without a range evaluation
 //! `S = 1` and the retention is the window, so every price is as above.
 //! Memory a computation holds only while it runs counts in
-//! [`ResourceUsage::peak_memory_bytes`], which cost models 2 and 3 read, and
+//! [`ResourceUsage::peak_memory_bytes`](asap_cost::ResourceUsage::peak_memory_bytes), which cost models 2 and 3 read, and
 //! under cost model 1 for the time it is held, as above. (A `NotMaterialized`
 //! node computed at ingestion time is a streaming operator holding one row,
 //! and is not charged.)
 //!
 //! Prices come from [`asap_cost::analytical::estimate_operator`] over edge
-//! statistics derived from the [`DataWorkload`] and a fixed default group
+//! statistics derived from the [`DataWorkload`](asap_types::workload::DataWorkload) and a fixed default group
 //! count; summary build and estimation are priced as rows × sketch depth and
 //! groups × k. A query-time scan reads the longest window above it (a time
 //! shift moves a window without widening it); a time shift is free, and a
@@ -129,18 +129,18 @@
 //! illustrative, not calibrated: a binary, join or concat node is priced from
 //! its first input only (MVP; follow-up).
 //! A cost error on any candidate aborts selection; it is reachable only from
-//! bad declared rates or bad [`CostInputs`].
+//! bad declared rates or bad [`CostInputs`](asap_cost::CostInputs).
 //!
 //! ## Measured operation costs
 //!
 //! A deployment whose runtime measured its own costs gives them per
-//! operator ([`CostInputs::measured_operation_costs`],
+//! operator ([`CostInputs::measured_operation_costs`](asap_cost::CostInputs::measured_operation_costs),
 //! [`MeasuredOperationCosts`](asap_cost::MeasuredOperationCosts)): for an operator kind at ingestion or query
 //! time (and, for a summary operator, its sketch or exact accumulator; for
 //! an aggregate, each measure), CPU ns per unit and per computation. A node
 //! with an entry takes `units × ns_per_unit + ns_per_invocation` per
 //! computation, its scanning included; the units are what the operator
-//! processes ([`OperatorKind`]: samples a scan reads, rows a build inserts,
+//! processes ([`OperatorKind`](asap_cost::OperatorKind): samples a scan reads, rows a build inserts,
 //! states a merge reads, groups an estimate reads, ...). A query-time scan
 //! is the fetch and decode of raw data samples from the database holding them,
 //! so a plan that reads raw data pays for it. A sketch whose parameters
@@ -165,29 +165,29 @@
 //! slow sketch's ratio make the exact rebuild look costlier than it is).
 //! Only a table covering every operator kind the candidates use makes the
 //! choice the measured one. Each node reports how it was priced
-//! ([`NodePriceSource`]).
+//! ([`NodePriceSource`](asap_cost::NodePriceSource)).
 //! Measured times count as CPU operations of [`ResourceSpeed`](asap_cost::ResourceSpeed), so latency
 //! and all three cost models read them like any other operation.
 //!
 //! ## Cost models
 //!
-//! [`CostInputs::cost_model`] (in [`PlanningModels`]) chooses how
+//! [`CostInputs::cost_model`](asap_cost::CostInputs::cost_model) (in [`PlanningModels`]) chooses how
 //! usage becomes a choice; the default is cost model 1 with
 //! [`ResourceUnitCost::illustrative`](asap_cost::ResourceUnitCost::illustrative):
 //!
-//! * [`CostModel::UsageOverTime`] (cost model 1, pay-as-you-go): each
+//! * [`CostModel::UsageOverTime`](asap_cost::CostModel::UsageOverTime) (cost model 1, pay-as-you-go): each
 //!   node's CPU operations, scanned bytes and memory byte-seconds per second
 //!   (and disk bytes, unpriced by default) times their prices; the cheapest
 //!   candidate wins.
-//! * [`CostModel::ProvisionedCapacity`] (cost model 2): the candidate's peak
+//! * [`CostModel::ProvisionedCapacity`](asap_cost::CostModel::ProvisionedCapacity) (cost model 2): the candidate's peak
 //!   memory, peak CPU cores and disk times their prices per second; the
 //!   cheapest wins. Peak memory assumes every evaluation overlaps: kept
 //!   in-memory state plus each computation's working memory, once per
 //!   consumer that recomputes it. Peak cores are the ingestion work's cores
 //!   plus one per query evaluating at once.
-//! * [`CostModel::ClusterCapacity`] (cost model 3, own cluster): no prices.
+//! * [`CostModel::ClusterCapacity`](asap_cost::CostModel::ClusterCapacity) (cost model 3, own cluster): no prices.
 //!   A candidate over the cluster's memory, disk or cores is invalid, and
-//!   [`ClusterObjective`] chooses among the rest (lowest worst-query
+//!   [`ClusterObjective`](asap_cost::ClusterObjective) chooses among the rest (lowest worst-query
 //!   latency, least peak memory, or the Pareto front of the three in
 //!   [`Selection::front`]).
 //!
@@ -225,10 +225,10 @@
 //! model gives each step a full core, so a request's steps may run in
 //! parallel. Run one after another they take `S` times as long, which this
 //! check does not assume.
-//! [`ResourceUsage::latency_per_query`] reports every query's latency.
+//! [`ResourceUsage::latency_per_query`](asap_cost::ResourceUsage::latency_per_query) reports every query's latency.
 //!
 //! No memory limit applies outside cost model 3, where the cluster's memory
-//! is declared ([`ClusterLimits::memory_bytes`]); without one, a selected
+//! is declared ([`ClusterLimits::memory_bytes`](asap_cost::ClusterLimits::memory_bytes)); without one, a selected
 //! plan whose peak memory is over [`LARGE_PEAK_MEMORY_BYTES`] gets a
 //! warning, which `stage_pipeline` reports ([`large_peak_memory_warning`]).
 

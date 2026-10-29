@@ -147,7 +147,7 @@ pub struct AcceptedAccuracy {
     /// ([`RejectionCause::NoAccuracyGuarantee`] or
     /// [`RejectionCause::AccuracyTargetMissed`]): the output was accepted
     /// only because of the accuracy model (e.g.
-    /// [`CostInputs::ignore_accuracy_guarantees`]). `None` when
+    /// [`CostInputs::ignore_accuracy_guarantees`](asap_cost::CostInputs::ignore_accuracy_guarantees)). `None` when
     /// its guarantee meets the target.
     pub guarantee_check_rejection: Option<RejectionCause>,
     /// The sketch algorithms the query's output reads, in plan order
@@ -192,23 +192,23 @@ impl std::fmt::Display for AcceptedAccuracy {
 
 /// Stage 3's result: the selected candidate and the plan to run, with
 /// what Stage 3 kept of the other candidates. Keeping every candidate
-/// ([`PlanSelector::new`]'s `keep_every_candidate`, [`select_plan`]),
+/// ([`PlanSelector::new`](crate::PlanSelector::new)'s `keep_every_candidate`, [`select_plan`](crate::select_plan)),
 /// `costs` and `accepted` list every valid candidate and `rejected` every
 /// other one; otherwise only the selected candidate and, under
-/// [`ClusterObjective::ParetoFront`], the front are kept, and `rejected`
+/// [`ClusterObjective::ParetoFront`](asap_cost::ClusterObjective::ParetoFront), the front are kept, and `rejected`
 /// holds the first rejection of each cause.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Selection {
     pub selected: String,
     /// The selected candidate's query roots with every weight requirement
-    /// Stage 3 confirmed made a proof ([`with_confirmed_weights`]): the plan
+    /// Stage 3 confirmed made a proof ([`with_confirmed_weights`](crate::with_confirmed_weights)): the plan
     /// to run. The Stage 2 candidate keeps the open requirement.
     pub plan: Vec<QueryRoot>,
     pub costs: BTreeMap<String, CandidateCost>,
     /// For each valid candidate, per query, the accuracy Stage 3 accepted.
     pub accepted: BTreeMap<String, Vec<AcceptedAccuracy>>,
     pub rejected: Vec<Rejection>,
-    /// Under [`ClusterObjective::ParetoFront`], the valid candidates no
+    /// Under [`ClusterObjective::ParetoFront`](asap_cost::ClusterObjective::ParetoFront), the valid candidates no
     /// other beats on peak memory, disk and worst-query latency at once, in
     /// candidate order; empty under every other objective and cost model.
     pub front: Vec<String>,
@@ -364,7 +364,7 @@ pub enum SelectionError {
     #[error("candidate evaluation deadline exceeded")]
     EvaluationDeadlineExceeded,
     /// Bad input: the deployment's plan selection settings
-    /// ([`CostInputs::validate`]).
+    /// ([`CostInputs::validate`](asap_cost::CostInputs::validate)).
     #[error("plan selection settings: {0}")]
     InvalidSettings(AnalyticalCostError),
     /// Bad input: the caller gave a different number of workload entries
