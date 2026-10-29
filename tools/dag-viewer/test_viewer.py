@@ -757,7 +757,7 @@ class WorkloadSetTests(unittest.TestCase):
                 if "document" in entry:
                     self.assertTrue((HERE / entry["document"]).exists(), entry["document"])
         self.assertEqual(files, {path for path in WORKLOADS.glob("*/*.json") if path.name != server.TABLES_FILE})
-        self.assertEqual(len(files), 30)
+        self.assertEqual(len(files), 32)
 
 
 class PageTests(unittest.TestCase):
