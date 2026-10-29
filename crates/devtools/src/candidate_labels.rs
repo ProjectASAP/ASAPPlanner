@@ -1,7 +1,7 @@
 //! Display labels for the planning stages' candidates, for the
 //! `stage_pipeline` viewer document only. Planning never reads them: they
-//! are pure functions of the candidates' planning data (the Pass 1 choice,
-//! the Pass 2 rules applied and the materialization assignment).
+//! are pure functions of the candidates' planning data (the logical roots
+//! and the materialization assignment).
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -9,8 +9,6 @@ use std::rc::Rc;
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     HowToComputeAggregateMeasure, PerComputationCandidates,
 };
-use asap_logical_asap_optimization::pass2::asap_aware_cse::PaneCandidate;
-use asap_logical_asap_optimization::pass2::workload_candidates::Pass2Candidate;
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
@@ -26,25 +24,11 @@ pub fn candidate_labels(run: &PlanningStagesRun) -> BTreeMap<String, String> {
     let logical = &run.stage1_logical_asap_optimization;
     let mut labels = BTreeMap::new();
     for candidate in logical {
-        let mut label = if candidate.choice.is_empty() {
-            candidate
-                .roots
-                .as_deref()
-                .map(connected_candidate_label)
-                .unwrap_or_else(|_| "Unimplemented candidate".into())
-        } else {
-            choice_label(&run.stage1_pass1_per_computation, &candidate.choice)
-        };
-        if let Some(pass2) = &candidate.pass2 {
-            // The default search keeps only the selected candidate, so its
-            // Pass 1 candidate may not be in the run.
-            let pass1_roots = logical
-                .get(pass2.from_pass1_position)
-                .and_then(|c| c.roots.as_deref().ok())
-                .unwrap_or_default();
-            let candidate_roots = candidate.roots.as_deref().unwrap_or_default();
-            label += &pass2_label(pass2, pass1_roots, candidate_roots);
-        }
+        let label = candidate
+            .roots
+            .as_deref()
+            .map(connected_candidate_label)
+            .unwrap_or_else(|_| "Unimplemented candidate".into());
         labels.insert(candidate.id.clone(), label);
     }
     for candidate in &run.stage2_physical_asap_optimization {
@@ -147,249 +131,6 @@ pub fn computation_label(candidate: &HowToComputeAggregateMeasure) -> String {
     }
 }
 
-/// A Pass 1 choice, e.g. "Q1 exact · Q2 CMS+heap" (exact accumulators in
-/// parentheses), each target listed under the first query that reads it.
-pub fn choice_label<Id>(inventory: &PerComputationCandidates<Id>, choice: &[usize]) -> String {
-    let query_of_target = query_of_each_target(inventory);
-    // Each target's chosen candidate, with the targets it absorbs when the
-    // candidate is its fused computation's.
-    let chosen: Vec<_> = inventory
-        .targets
-        .iter()
-        .zip(choice)
-        .map(|(target, &index)| target.computation_for(index).expect("a listed candidate"))
-        .collect();
-    // Targets a chosen fused computation absorbs are not computed.
-    let absorbed: Vec<usize> = chosen
-        .iter()
-        .filter_map(|&(_, absorbs)| absorbs)
-        .flatten()
-        .copied()
-        .collect();
-    (0..inventory.roots.len())
-        .map(|query| {
-            let mut sketches = Vec::new();
-            let mut accumulators = Vec::new();
-            for (t, (&(candidate, absorbs), &target_query)) in
-                chosen.iter().zip(&query_of_target).enumerate()
-            {
-                if target_query != query || absorbed.contains(&t) {
-                    continue;
-                }
-                match candidate {
-                    HowToComputeAggregateMeasure::Exact => {}
-                    HowToComputeAggregateMeasure::ExactAccumulator(kinds) => {
-                        // e.g. "Sum acc", "Sum/Count acc" for an avg, or
-                        // "nested Sum acc" for a fused nested sum.
-                        let kinds: Vec<String> =
-                            kinds.iter().map(|kind| format!("{kind:?}")).collect();
-                        let nested = if absorbs.is_some() { "nested " } else { "" };
-                        accumulators.push(format!("{nested}{} acc", kinds.join("/")))
-                    }
-                    HowToComputeAggregateMeasure::Summary(algorithm) => {
-                        sketches.push(sketch_name(algorithm))
-                    }
-                }
-            }
-            let mut text = format!("Q{} ", query + 1);
-            text += &if sketches.is_empty() {
-                "exact".to_string()
-            } else {
-                sketches.join(" + ")
-            };
-            if !accumulators.is_empty() {
-                text += &format!(" ({})", accumulators.join(", "));
-            }
-            text
-        })
-        .collect::<Vec<_>>()
-        .join(" · ")
-}
-
-/// What a Pass 2 candidate adds to its Pass 1 candidate's label, e.g.
-/// " · one UnivMon for Q1, Q3 · Kll for Q1 in 5 × 1m panes · Sum acc for Q2
-/// rolled up from Q1 · shared Scan (Q1, Q2)". `pass1_roots` are the roots
-/// of the Pass 1 candidate it derives from, which hold the shared summary
-/// builds and the rolled-up builds; `candidate_roots` are its own, which hold its
-/// panes, rankings and shared nodes. Readers are found by structure, since
-/// later rules rebuild the nodes a rule saw.
-pub fn pass2_label(
-    pass2: &Pass2Candidate,
-    pass1_roots: &[QueryRoot],
-    candidate_roots: &[QueryRoot],
-) -> String {
-    let mut label = String::new();
-    // Summary-capability rule, e.g. "UnivMon for Q1, Q3".
-    let summaries: Vec<String> = pass2
-        .shared_builds
-        .iter()
-        .map(|builds| {
-            let shared = |node: &OperatorNode| builds.iter().any(|b| same_computation(node, b));
-            let queries = readers_in(&[pass1_roots, candidate_roots], shared);
-            let family = match builds[0].asap().and_then(ASAPOp::produced_state) {
-                Some(FieldDataType::Sketch(kind, _)) => format!("{:?}", kind.algorithm()),
-                _ => builds[0].operator.kind_name().to_string(),
-            };
-            for_queries(family, &queries)
-        })
-        .collect();
-    if !summaries.is_empty() {
-        label += &format!(" · one {}", summaries.join(", one "));
-    }
-    // Window-composition rule, e.g. "Kll for Q1 in 5 × 1m panes": the
-    // queries that read the pane chain the build became. Identical builds
-    // in different queries become one structurally identical chain, listed
-    // once with all its readers. A chain several builds share is listed
-    // once, with the queries that merge only its newest panes, e.g. "one
-    // Kll for Q1, Q2 in 30 × 10s panes (Q1 newest 6)".
-    let candidates = &pass2.pane_candidates;
-    let shared_member = |i: usize| {
-        pass2
-            .shared_pane_chains
-            .iter()
-            .any(|shared| shared.members.contains(&i))
-    };
-    let own: Vec<String> = candidates
-        .iter()
-        .enumerate()
-        .filter(|&(i, candidate)| {
-            !shared_member(i)
-                && !candidates[..i]
-                    .iter()
-                    .any(|earlier| same_pane_chain(earlier, candidate))
-        })
-        .map(|(_, candidate)| {
-            let chain = |node: &OperatorNode| {
-                is_pane_chain_of(
-                    node,
-                    &candidate.build,
-                    candidate.pane_width_ms,
-                    candidate.pane_count,
-                    false,
-                )
-            };
-            format!(
-                "{} in {} × {} panes",
-                for_queries(
-                    state_name(&candidate.build),
-                    &readers(candidate_roots, chain)
-                ),
-                candidate.pane_count,
-                duration_name(candidate.pane_width_ms)
-            )
-        })
-        .collect();
-    let shared = pass2.shared_pane_chains.iter().map(|shared| {
-        let build = &candidates[shared.members[0]].build;
-        // The chain is one member's build in panes (a coarser member reads
-        // it rolled up).
-        let chain = |node: &OperatorNode| {
-            shared.members.iter().any(|&m| {
-                is_pane_chain_of(
-                    node,
-                    &candidates[m].build,
-                    shared.pane_width_ms,
-                    shared.pane_count,
-                    true,
-                )
-            })
-        };
-        let mut text = format!(
-            "one {} in {} × {} panes",
-            for_queries(state_name(build), &readers(candidate_roots, chain)),
-            shared.pane_count,
-            duration_name(shared.pane_width_ms)
-        );
-        let mut counts: Vec<u32> = shared
-            .members
-            .iter()
-            .map(|&m| {
-                u32::try_from(candidates[m].window_ms() / shared.pane_width_ms).unwrap_or(u32::MAX)
-            })
-            .filter(|&n| n < shared.pane_count)
-            .collect();
-        counts.sort_unstable();
-        counts.dedup();
-        let newest: Vec<String> = counts
-            .into_iter()
-            .map(|n| {
-                let reads_newest = |node: &OperatorNode| match node.asap() {
-                    Some(ASAPOp::SummaryMerge {
-                        children,
-                        newest_panes,
-                        ..
-                    }) => *newest_panes == Some(n) && children.iter().any(|c| chain(c)),
-                    _ => false,
-                };
-                format!(
-                    "{} newest {n}",
-                    query_names(&readers(candidate_roots, reads_newest))
-                )
-            })
-            .collect();
-        if !newest.is_empty() {
-            text += &format!(" ({})", newest.join(", "));
-        }
-        text
-    });
-    let panes: Vec<String> = own.into_iter().chain(shared).collect();
-    if !panes.is_empty() {
-        label += &format!(" · {}", panes.join(", "));
-    }
-    // Rollup rule, e.g. "Sum acc for Q1 rolled up from Q2", then exact
-    // top-k reuse, e.g. "top-k for Q1, Q2 from one top-10": the queries
-    // that read the ranking.
-    let reused: Vec<String> = pass2
-        .rollup_candidates
-        .iter()
-        .map(|candidate| {
-            let roots = [pass1_roots, candidate_roots];
-            let finer = readers_in(&roots, |n| same_computation(n, &candidate.finer));
-            let coarse = readers_in(&roots, |n| same_computation(n, &candidate.coarse));
-            match finer.is_empty() {
-                true => format!(
-                    "{} rolled up",
-                    for_queries(state_name(&candidate.coarse), &coarse)
-                ),
-                false => format!(
-                    "{} rolled up from {}",
-                    for_queries(state_name(&candidate.coarse), &coarse),
-                    query_names(&finer)
-                ),
-            }
-        })
-        .chain(pass2.topk_reuse_candidates.iter().map(|candidate| {
-            let k = match candidate.ranking.non_asap() {
-                Some(NonASAPOp::Limit { n: Some(k), .. }) => *k,
-                _ => 0,
-            };
-            let queries = readers(candidate_roots, |n| same_computation(n, &candidate.ranking));
-            format!("{} from one top-{k}", for_queries("top-k".into(), &queries))
-        }))
-        .collect();
-    if !reused.is_empty() {
-        label += &format!(" · {}", reused.join(", "));
-    }
-    // Identical-expression rule, e.g. "Scan (Q1, Q2)": each shared node's
-    // operator kind and the queries that read it.
-    let shared: Vec<String> = pass2
-        .sharing_candidates
-        .iter()
-        .map(|candidate| {
-            let node = &candidate.nodes[0];
-            let queries = readers(candidate_roots, |n| same_computation(n, node));
-            match queries.is_empty() {
-                true => node.operator.kind_name().to_string(),
-                false => format!("{} ({})", node.operator.kind_name(), query_names(&queries)),
-            }
-        })
-        .collect();
-    if !shared.is_empty() {
-        label += &format!(" · shared {}", shared.join(", "));
-    }
-    label
-}
-
 /// `what` with the queries that read it, e.g. "Kll for Q1, Q3"; `what`
 /// alone when none is found (a node later rules rebuilt).
 fn for_queries(what: String, queries: &[usize]) -> String {
@@ -399,16 +140,6 @@ fn for_queries(what: String, queries: &[usize]) -> String {
     }
 }
 
-/// The readers of a node `matches` in the first of `roots` where any query
-/// reads one.
-fn readers_in(roots: &[&[QueryRoot]], matches: impl Fn(&OperatorNode) -> bool) -> Vec<usize> {
-    roots
-        .iter()
-        .map(|roots| readers(roots, &matches))
-        .find(|queries| !queries.is_empty())
-        .unwrap_or_default()
-}
-
 /// Query names for query indices, e.g. "Q1, Q3".
 fn query_names(queries: &[usize]) -> String {
     queries
@@ -416,106 +147,6 @@ fn query_names(queries: &[usize]) -> String {
         .map(|q| format!("Q{}", q + 1))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// The queries (indices into `roots`) from which a node `matches` is
-/// reachable.
-fn readers(roots: &[QueryRoot], matches: impl Fn(&OperatorNode) -> bool) -> Vec<usize> {
-    roots
-        .iter()
-        .enumerate()
-        .filter(|(_, root)| {
-            root_operators(root)
-                .into_iter()
-                .flat_map(OperatorNode::reachable)
-                .any(|n| matches(&n))
-        })
-        .map(|(q, _)| q)
-        .collect()
-}
-
-/// Whether `a` is `b` or computes the same thing: the same operators,
-/// schemas and children, whatever guarantees, timings and materializations
-/// later steps attached.
-fn same_computation(a: &OperatorNode, b: &OperatorNode) -> bool {
-    std::ptr::eq(a, b)
-        || (a.operator.map_children(|_| ()) == b.operator.map_children(|_| ())
-            && a.result_kind == b.result_kind
-            && a.schema == b.schema
-            && a.children().len() == b.children().len()
-            && a.children()
-                .iter()
-                .zip(b.children())
-                .all(|(x, y)| same_computation(x, y)))
-}
-
-/// Whether `node` is a pane chain `build` became: the same family, update,
-/// grouping and filter, over the build's window input, in `chain_pane_count`
-/// panes of `chain_pane_width_ms`. With `any_size`, the family at any size:
-/// a shared chain is sized for all its readers.
-fn is_pane_chain_of(
-    node: &OperatorNode,
-    build: &OperatorNode,
-    chain_pane_width_ms: u64,
-    chain_pane_count: u32,
-    any_size: bool,
-) -> bool {
-    let (
-        Some(ASAPOp::PaneChain {
-            child,
-            family,
-            input,
-            reduction,
-            grouping,
-            filter,
-            pane_width_ms,
-            pane_count,
-        }),
-        Some(ASAPOp::SummaryAgg {
-            child: range,
-            family: build_family,
-            input: build_input,
-            reduction: build_reduction,
-            grouping: build_grouping,
-            filter: build_filter,
-        }),
-    ) = (node.asap(), build.asap())
-    else {
-        return false;
-    };
-    (*pane_width_ms, *pane_count) == (chain_pane_width_ms, chain_pane_count)
-        && (family == build_family
-            || any_size
-                && match (family, build_family) {
-                    (FieldDataType::Sketch(a, g), FieldDataType::Sketch(b, h)) => {
-                        a.algorithm() == b.algorithm() && g == h
-                    }
-                    _ => false,
-                })
-        && input == build_input
-        && reduction == build_reduction
-        && grouping == build_grouping
-        && filter == build_filter
-        && range
-            .children()
-            .first()
-            .is_some_and(|window_input| same_computation(child, window_input))
-}
-
-/// Whether two pane candidates become the same pane chain: the same
-/// computation in the same panes.
-fn same_pane_chain(a: &PaneCandidate, b: &PaneCandidate) -> bool {
-    (a.pane_width_ms, a.pane_count) == (b.pane_width_ms, b.pane_count)
-        && same_computation(&a.build, &b.build)
-}
-
-/// The state a summary build keeps, e.g. "Kll" or "Rate acc".
-fn state_name(build: &OperatorNode) -> String {
-    match build.asap().and_then(ASAPOp::produced_state) {
-        Some(FieldDataType::Sketch(kind, _)) => sketch_name(kind.algorithm()),
-        Some(FieldDataType::ExactAggregate(kind, _)) => format!("{kind:?} acc"),
-        _ => build.operator.kind_name().to_string(),
-    }
 }
 
 /// `ms` in the largest whole unit: "1m", "10s", "250ms".

@@ -322,8 +322,8 @@ pub(crate) fn alone_violation<Id: Clone>(
     models: &PlanningModels<'_>,
 ) -> Option<(RejectionCause, String)> {
     let mut first = None;
-    for candidate in stage1_candidates_of_choice(alone, entries, choice, &|_| true) {
-        let roots = candidate.roots.ok()?;
+    for roots in stage1_candidates_of_choice(alone, entries, choice, &|_| true) {
+        let roots = roots.ok()?;
         let physical = optimize_physical_asap(
             "alone",
             &roots,

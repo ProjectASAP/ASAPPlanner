@@ -4,7 +4,6 @@
 
 use asap_frontend_sql::SqlCatalog;
 use asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidates;
-pub use asap_logical_asap_optimization::pass2::workload_candidates::Pass2Candidate;
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_plan_selection::pass::{run_stage1_to_stage3_with, Stage1ToStage3Search};
 pub use asap_plan_selection::pass::{LogicalCandidate, MemoSteps, PrunedCandidate};
@@ -21,8 +20,8 @@ use std::collections::HashSet;
 pub struct PlanningStagesRun {
     /// The query-language frontends' roots, one per workload entry.
     pub stage0_query_language_frontends: Vec<QueryRoot>,
-    /// Stage 1, Pass 1: the per-computation candidates the logical
-    /// candidates' `choice` indexes (query `i` has id `i`).
+    /// Stage 1, Pass 1: the per-computation candidates (query `i` has id
+    /// `i`).
     pub stage1_pass1_per_computation: PerComputationCandidates<usize>,
     pub stage1_logical_asap_optimization: Vec<LogicalCandidate>,
     /// Evaluated physical plans reference their archived logical source by ID.

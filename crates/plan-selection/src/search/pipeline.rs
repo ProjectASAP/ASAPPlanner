@@ -21,7 +21,6 @@ use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     generate_per_computation_candidates_with_memo, PerComputationCandidateError,
     PerComputationCandidates,
 };
-use asap_logical_asap_optimization::pass2::workload_candidates::Pass2Candidate;
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 
 /// A selected execution plan and the logical roots from which it was built.
@@ -34,10 +33,7 @@ pub(crate) type PlanSearchResult =
 pub struct LogicalCandidate {
     /// Stable identifier within the planning run.
     pub id: String,
-    pub choice: Vec<usize>,
     pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
-    /// For a Pass 2 candidate: what it changed of its Pass 1 candidate.
-    pub pass2: Option<Pass2Candidate>,
 }
 
 /// The memo after each step of the planning round whose plan was selected
@@ -300,9 +296,7 @@ fn memo_run<Id: Clone + std::fmt::Debug>(
             .zip(from_logical)
             .map(|(roots, id)| LogicalCandidate {
                 id,
-                choice: Vec::new(),
                 roots: Ok(roots),
-                pass2: None,
             }),
         memo_steps: None,
     }

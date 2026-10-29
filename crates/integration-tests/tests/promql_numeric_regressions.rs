@@ -339,9 +339,7 @@ fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
     asap_integration_tests::planning::require_composed_operator_candidates(vec![
         asap_plan_selection::search::LogicalCandidate {
             id: "invalid-composition".into(),
-            choice: Vec::new(),
             roots: Err(PerComputationCandidateError::InvalidChoice),
-            pass2: None,
         },
     ]);
 }
