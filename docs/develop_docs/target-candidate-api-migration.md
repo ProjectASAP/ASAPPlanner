@@ -49,7 +49,7 @@ or `Operator::ASAP(ASAPOp)`. Old public names are not kept as aliases.
 | `SummaryFamilyType` | `FieldDataType` (its non-`Plain` variants) |
 | Timing stored on post-ASAP nodes | `OperatorNode::timing`, `None` until `ir::timing::apply_materialization_timings` writes it from a `MaterializationAssignment` (default: all query time) |
 | `UnresolvedQueryExpr` + `asap_types::pre_asap::resolve_root` | `UnresolvedOp` / `UnresolvedScalar` + `asap_frontend_common::resolve_root` |
-| `pre_asap::canonicalize`, `pre_asap::cse::share_common_sub_dags` | `ir::canonicalize::canonicalize`, `ir::cse::share_common_sub_dags` |
+| `pre_asap::canonicalize`, `pre_asap::cse::share_common_sub_dags` | `asap_frontend_common` `canonicalize` (crate-private), `asap_logical_asap_optimization::pass2::cse::share_common_sub_dags` |
 | `asap_types::post_asap::compile_post_asap_dag` (wire version 5, `Fallback`/`Binary`/`Value` payloads) | `asap_types::ir::physical_export::compile_physical_asap_dag` (`PhysicalASAPDAG`, carried in the plan file versioned by `asap_planner::INSTALLABLE_PLAN_WIRE_VERSION`: one node per operator, `Operator<NodeId>` payloads, `ScalarRef` edges); input must be timed |
 | Exported schema JSON `columns` | `fields` |
 
