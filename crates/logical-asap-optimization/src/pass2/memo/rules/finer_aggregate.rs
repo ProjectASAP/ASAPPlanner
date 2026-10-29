@@ -70,7 +70,7 @@ fn value_rollup(measure: &AggIntent, col: usize, global: bool) -> Option<AggInte
     }
 }
 
-pub(in crate::pass2::memo) fn add_finer_aggregate_candidates(
+pub(crate) fn add_finer_aggregate_candidates(
     memo: &mut CandidateMemo,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {

@@ -206,9 +206,10 @@ mod tests {
     use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::state_groups::expand_concrete_summary_state_groups;
+    use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
     use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};
     use asap_logical_asap_optimization::test_support::lower_promql;
+    use asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::{ASAPOp, NonASAPOp};
@@ -243,10 +244,11 @@ mod tests {
             .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect::<Vec<_>>();
         let candidates = generate_per_computation_candidates(roots.clone()).unwrap();
-        let memo =
-            expand_concrete_summary_state_groups(try_populate_pass1(initial, &candidates).unwrap())
-                .unwrap()
-                .memo;
+        let memo = sharing_rules_and_shared_state_groups(
+            try_populate_pass1(initial, &candidates).unwrap(),
+            PaneWidthDomain::Complete,
+        )
+        .unwrap();
         let inventory = build_candidate_inventory(&memo, &output_groups, |node| {
             Ok(if is_kll(node) {
                 8.0

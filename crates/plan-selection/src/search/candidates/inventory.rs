@@ -364,9 +364,10 @@ mod tests {
     use crate::search::milp::model::select_candidates;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::state_groups::expand_concrete_summary_state_groups;
+    use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
     use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
     use asap_logical_asap_optimization::test_support::lower_promql;
+    use asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::{ASAPOp, NonASAPOp, QueryRoot};
@@ -392,7 +393,7 @@ mod tests {
         let candidates = generate_per_computation_candidates(roots).unwrap();
         let memo = try_populate_pass1(initial, &candidates).unwrap();
         (
-            expand_concrete_summary_state_groups(memo).unwrap().memo,
+            sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap(),
             output_groups,
         )
     }
@@ -635,7 +636,7 @@ mod tests {
         asap_logical_asap_optimization::pass2::memo::window_candidates::add_local_window_composition(
             &mut memo, &entries,
         );
-        let memo = expand_concrete_summary_state_groups(memo).unwrap().memo;
+        let memo = sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap();
         let source = build_candidate_inventory(&memo, &outputs, |_| Ok(0.0)).unwrap();
         let deployment = asap_logical_asap_optimization::DeploymentCapabilities {
             raw_data_retained: false,
@@ -817,11 +818,11 @@ mod tests {
                 .map(|query| *initial.query_roots[query].as_operator().unwrap())
                 .collect();
             let generated = generate_per_computation_candidates(roots.clone()).unwrap();
-            let memo = expand_concrete_summary_state_groups(
+            let memo = sharing_rules_and_shared_state_groups(
                 try_populate_pass1(initial, &generated).unwrap(),
+                PaneWidthDomain::Complete,
             )
-            .unwrap()
-            .memo;
+            .unwrap();
             let mut inventory = build_candidate_inventory(&memo, &outputs, |node| {
                 // Structural selection forces the reuse being tested. Actual
                 // prices are obtained only from PlanSelector below.
@@ -993,7 +994,8 @@ mod tests {
             fused.fused_groups.extend(original_inputs);
             fused.accuracy_budget_parts = 2;
             memo.candidates[owner].push(fused);
-            let memo = expand_concrete_summary_state_groups(memo).unwrap().memo;
+            let memo =
+                sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap();
             let mut inventory = build_candidate_inventory(&memo, &outputs, |node| {
                 Ok(if matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })) {
                     1000.0

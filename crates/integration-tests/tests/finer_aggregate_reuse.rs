@@ -10,7 +10,6 @@ use asap_logical_asap_optimization::{
             try_populate_pass1, CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup,
         },
         shared_configurations::PaneWidthDomain,
-        state_groups::expand_concrete_summary_state_groups_in_domain,
         DagOfLogicalMemoGroups,
     },
 };
@@ -58,9 +57,11 @@ fn expanded(queries: &[String]) -> CandidateMemo {
     let initial = DagOfLogicalMemoGroups::from_roots(&roots);
     let inventory = generate_per_computation_candidates(roots).unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
-    expand_concrete_summary_state_groups_in_domain(memo, PaneWidthDomain::SeedGrids)
-        .unwrap()
-        .memo
+    asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
+        memo,
+        PaneWidthDomain::SeedGrids,
+    )
+    .unwrap()
 }
 
 /// The aggregate group of query `query` alone and its rollup candidates.

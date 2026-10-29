@@ -9,7 +9,7 @@ pub mod candidates;
 /// The candidate DAGs a memo stands for: choices and their composition.
 pub mod enumeration;
 mod groups;
-mod rules;
+pub(crate) mod rules;
 /// Shared finite state configuration enumeration.
 pub mod shared_configurations;
 #[cfg(test)]

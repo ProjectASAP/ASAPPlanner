@@ -1217,8 +1217,9 @@ mod tests {
     use asap_logical_asap_optimization::pass2::memo::candidates::{
         try_populate_pass1, OriginOfCandidateForMemoGroup,
     };
-    use asap_logical_asap_optimization::pass2::memo::state_groups::expand_concrete_summary_state_groups;
+    use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
     use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
+    use asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
@@ -1255,10 +1256,11 @@ mod tests {
             .map(|q| *initial.query_roots[q].as_operator().unwrap())
             .collect();
         let generated = generate_per_computation_candidates(roots.clone()).unwrap();
-        let mut memo =
-            expand_concrete_summary_state_groups(try_populate_pass1(initial, &generated).unwrap())
-                .unwrap()
-                .memo;
+        let mut memo = sharing_rules_and_shared_state_groups(
+            try_populate_pass1(initial, &generated).unwrap(),
+            PaneWidthDomain::Complete,
+        )
+        .unwrap();
         // Keep the real generated shared KLL readers to bound this evaluator
         // integration test; materialization configurations still remain choices.
         for candidates in &mut memo.candidates {
@@ -1543,10 +1545,11 @@ mod tests {
         let initial = DagOfLogicalMemoGroups::from_roots(&identified);
         let output = *initial.query_roots[0].as_operator().unwrap();
         let generated = generate_per_computation_candidates(identified).unwrap();
-        let memo =
-            expand_concrete_summary_state_groups(try_populate_pass1(initial, &generated).unwrap())
-                .unwrap()
-                .memo;
+        let memo = sharing_rules_and_shared_state_groups(
+            try_populate_pass1(initial, &generated).unwrap(),
+            PaneWidthDomain::Complete,
+        )
+        .unwrap();
         let source = build_candidate_inventory(&memo, &[output], |_| Ok(0.0)).unwrap();
         let (_, _, _, mut data) = fixture();
         for facts in data.sources.values_mut() {
@@ -1652,7 +1655,7 @@ mod tests {
         asap_logical_asap_optimization::pass2::memo::window_candidates::add_local_window_composition(
             &mut memo, &entries,
         );
-        let memo = expand_concrete_summary_state_groups(memo).unwrap().memo;
+        let memo = sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap();
         let source = build_candidate_inventory(&memo, &outputs, |_| Ok(0.0)).unwrap();
         let deployment = asap_logical_asap_optimization::DeploymentCapabilities {
             raw_data_retained: false,

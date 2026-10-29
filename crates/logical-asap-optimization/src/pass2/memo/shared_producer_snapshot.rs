@@ -6,11 +6,10 @@
 //! reader.
 use super::candidates::{try_populate_pass1, CandidateMemo, OriginOfCandidateForMemoGroup};
 use super::shared_configurations::PaneWidthDomain;
-use super::state_groups::expand_concrete_summary_state_groups_in_domain;
 use super::window_candidates::add_local_window_composition;
 use super::DagOfLogicalMemoGroups;
 use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-use crate::test_support::{entry_with, lower_promql};
+use crate::test_support::{entry_with, lower_promql, sharing_rules_and_shared_state_groups};
 use asap_types::ir::flat::flatten;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::QueryRoot;
@@ -53,9 +52,7 @@ fn expanded(queries: &[(&str, f64)], step_ms: u32) -> CandidateMemo {
         })
         .collect();
     add_local_window_composition(&mut memo, &entries);
-    expand_concrete_summary_state_groups_in_domain(memo, PaneWidthDomain::SeedGrids)
-        .unwrap()
-        .memo
+    sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::SeedGrids).unwrap()
 }
 
 /// Whether one `sum_over_time` group (an aggregate directly over a window

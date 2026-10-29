@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
-pub(in crate::pass2::memo) fn add_rollup_candidates(
+pub(crate) fn add_rollup_candidates(
     memo: &mut CandidateMemo,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {
@@ -225,7 +225,7 @@ pub(in crate::pass2::memo) fn add_rollup_candidates(
 
 /// Existing pane rollup rules applied to producer pairs on already generated
 /// legal local grids. No whole-workload choice combinations are constructed.
-pub(in crate::pass2::memo) fn add_window_rollup_candidates(
+pub(crate) fn add_window_rollup_candidates(
     memo: &mut CandidateMemo,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {
@@ -328,9 +328,9 @@ pub(in crate::pass2::memo) fn add_window_rollup_candidates(
 mod tests {
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use crate::pass2::memo::candidates::{try_populate_pass1, OriginOfCandidateForMemoGroup};
-    use crate::pass2::memo::state_groups::expand_concrete_summary_state_groups;
+    use crate::pass2::memo::shared_configurations::PaneWidthDomain;
     use crate::pass2::memo::DagOfLogicalMemoGroups;
-    use crate::test_support::lower_promql;
+    use crate::test_support::{lower_promql, sharing_rules_and_shared_state_groups};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::QueryRoot;
 
@@ -352,10 +352,11 @@ mod tests {
             .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = generate_per_computation_candidates(roots).unwrap();
-        let memo =
-            expand_concrete_summary_state_groups(try_populate_pass1(initial, &inventory).unwrap())
-                .unwrap()
-                .memo;
+        let memo = sharing_rules_and_shared_state_groups(
+            try_populate_pass1(initial, &inventory).unwrap(),
+            PaneWidthDomain::Complete,
+        )
+        .unwrap();
         let root_of = |query: usize| memo.query_roots[query].as_operator().unwrap().0 as usize;
         let (coarse, fine) = (root_of(0), root_of(1));
         assert!(

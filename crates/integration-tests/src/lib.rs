@@ -311,16 +311,17 @@ pub mod planning {
         use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
         use asap_logical_asap_optimization::pass2::memo::{
             candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
-            state_groups::expand_concrete_summary_state_groups_in_domain,
             window_candidates::add_local_window_composition, DagOfLogicalMemoGroups,
         };
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = generate_per_computation_candidates(roots).unwrap();
         let mut memo = try_populate_pass1(initial, &inventory).unwrap();
         add_local_window_composition(&mut memo, entries);
-        expand_concrete_summary_state_groups_in_domain(memo, PaneWidthDomain::SeedGrids)
-            .unwrap()
-            .memo
+        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
+            memo,
+            PaneWidthDomain::SeedGrids,
+        )
+        .unwrap()
     }
 
     /// One plan of `memo`'s first `queries` queries (`memo::enumeration::build_logical_asap_dags_from_chosen_candidates`):
