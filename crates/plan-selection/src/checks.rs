@@ -16,10 +16,11 @@ use asap_types::ir::schema::{FieldDataType, GroupingStrategy, SketchAlgorithm, W
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
+use crate::accuracy_binding::{bound_root_guarantee, root_operators};
 use crate::report::{AcceptedAccuracy, RejectionCause};
 use crate::{
-    bound_root_guarantee, confirmed_weights, query_time_lookback_ms, root_operators, series_read,
-    source_name, values_per_result, PlanningModels,
+    confirmed_weights, query_time_lookback_ms, series_read, source_name, values_per_result,
+    PlanningModels,
 };
 
 /// The first query whose latency per evaluation is over its
