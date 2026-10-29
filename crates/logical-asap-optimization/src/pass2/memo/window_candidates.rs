@@ -437,11 +437,7 @@ mod tests {
             repeated(180_000),
             QueryRecurrence::Unknown,
         ]);
-        let group = memo
-            .groups
-            .iter()
-            .find(|group| group.roots_of.contains(&0))
-            .unwrap();
+        let group = &memo.groups[memo.query_roots[0].as_operator().unwrap().0 as usize];
         assert_eq!(
             compatible_reader_grids(group, &entries),
             pane_width_divisors(120_000)

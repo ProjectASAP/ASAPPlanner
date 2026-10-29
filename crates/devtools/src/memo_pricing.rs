@@ -178,8 +178,9 @@ fn price_choice(
 }
 
 /// For each query, the root group of each of its operator references, in
-/// `operator_refs` order: the one group whose `roots_of` names the query when
-/// its root is one operator, else the group whose node is the reference.
+/// `operator_refs` order: the one group the query's root (in the memo's
+/// `query_roots`) reads when its root is one operator, else the group
+/// whose node is the reference.
 fn root_groups_of_queries(
     memo: &CandidateMemo,
     stage0_roots: &[QueryRoot],
@@ -188,9 +189,17 @@ fn root_groups_of_queries(
         .iter()
         .enumerate()
         .map(|(query, root)| {
-            let groups: Vec<_> = (0..memo.groups.len())
-                .filter(|&g| memo.groups[g].roots_of.contains(&query))
-                .map(|g| MemoGroupId(g as u32))
+            let groups: Vec<_> = memo
+                .query_roots
+                .get(query)
+                .map(|root| {
+                    root.operator_refs()
+                        .into_iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>()
+                })
+                .unwrap_or_default()
+                .into_iter()
                 .collect();
             match root {
                 QueryRoot::Operator(_) if groups.len() == 1 => Ok(groups),

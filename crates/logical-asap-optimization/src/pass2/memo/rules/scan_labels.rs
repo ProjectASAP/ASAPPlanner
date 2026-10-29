@@ -223,7 +223,6 @@ fn intern_inputs(
                 child_groups: inputs.clone(),
                 parents: Vec::new(),
                 queries: queries.to_vec(),
-                roots_of: Vec::new(),
             });
             memo.candidates.push(vec![CandidateForMemoGroup {
                 implements: vec![group],

@@ -84,7 +84,7 @@ fn signature(node: &Rc<asap_types::ir::OperatorNode>) -> String {
 /// order: the search's tie-breaks depend on that order too.
 fn fingerprint(memo: &CandidateMemo) -> (usize, u64) {
     let mut entries: Vec<String> = Vec::new();
-    for (group, candidates) in memo.groups.iter().zip(&memo.candidates) {
+    for (index, (group, candidates)) in memo.groups.iter().zip(&memo.candidates).enumerate() {
         let own: Vec<String> = candidates
             .iter()
             .map(|candidate| {
@@ -104,7 +104,7 @@ fn fingerprint(memo: &CandidateMemo) -> (usize, u64) {
             group.child_groups,
             group.parents,
             group.queries,
-            group.roots_of,
+            super::queries_rooted_at(&memo.query_roots, super::MemoGroupId(index as u32)),
             own
         ));
     }

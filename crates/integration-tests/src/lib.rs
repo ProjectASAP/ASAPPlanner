@@ -344,7 +344,7 @@ pub mod planning {
             .map(|query| {
                 let (_, root) = roots
                     .iter()
-                    .find(|(group, _)| memo.groups[group.0 as usize].roots_of.contains(&query))
+                    .find(|(group, _)| memo.query_roots[query].operator_refs().contains(&group))
                     .expect("the query's root group");
                 Rc::clone(root)
             })
@@ -414,7 +414,7 @@ pub mod planning {
             .candidates
             .iter()
             .enumerate()
-            .filter(|(group, _)| memo.groups[*group].queries == [q])
+            .filter(|(group, _)| memo.groups[*group].reached_by_queries() == [q])
             .flat_map(|(group, candidates)| {
                 candidates
                     .iter()
@@ -431,7 +431,11 @@ pub mod planning {
             .groups
             .iter()
             .enumerate()
-            .filter(|(_, group)| group.roots_of.contains(&q))
+            .filter(|(group, _)| {
+                memo.query_roots[q].operator_refs().contains(
+                    &&asap_logical_asap_optimization::pass2::memo::MemoGroupId(*group as u32),
+                )
+            })
             .map(|(group, _)| (group, 0))
             .collect();
         while let Some((group, d)) = pending.pop_front() {
@@ -495,7 +499,7 @@ pub mod planning {
             })
             .collect();
         for (state, group) in memo.groups.iter().enumerate() {
-            if !is_build(&group.logical_node) || group.queries.len() < queries {
+            if !is_build(&group.logical_node) || group.reached_by_queries().len() < queries {
                 continue;
             }
             let reading: Option<std::collections::BTreeMap<usize, usize>> = (0..queries)

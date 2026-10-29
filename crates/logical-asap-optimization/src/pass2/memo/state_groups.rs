@@ -168,7 +168,6 @@ fn expand_with_state_index(
             child_groups: build.children.clone(),
             parents: Vec::new(),
             queries,
-            roots_of: Vec::new(),
         });
         memo.candidates.push(vec![CandidateForMemoGroup {
             implements: vec![state_group],
@@ -601,7 +600,7 @@ mod tests {
                 )));
             }
             assert_eq!(group.parents.len(), 2);
-            assert!(group.roots_of.is_empty());
+            assert!(!crate::pass2::memo::root_groups(&expanded.memo.query_roots).contains(state));
             for &parent in &group.parents {
                 assert!(
                     order.iter().position(|id| id == state).unwrap()
@@ -1006,11 +1005,7 @@ mod tests {
         ]);
         let expanded = expand_concrete_summary_state_groups(original).unwrap();
         let memo = &expanded.memo;
-        let fine = memo
-            .groups
-            .iter()
-            .position(|group| group.roots_of == [1])
-            .unwrap();
+        let fine = memo.query_roots[1].as_operator().unwrap().0 as usize;
         assert!(memo.candidates[fine].iter().all(|candidate| matches!(
             candidate.root_node.asap(),
             Some(ASAPOp::FinalizeExactAccumulator { .. })
@@ -1128,11 +1123,7 @@ mod tests {
     #[test]
     fn multiple_private_states_can_share_only_the_common_producer() {
         let mut original = workload(&[("avg(m)", 0.01), ("sum(m)", 0.01)]);
-        let average = original
-            .groups
-            .iter()
-            .position(|group| group.roots_of.contains(&0))
-            .unwrap();
+        let average = original.query_roots[0].as_operator().unwrap().0 as usize;
         assert!(original.candidates[average]
             .iter()
             .any(|candidate| direct_input_builds(&original, candidate).len() >= 2));

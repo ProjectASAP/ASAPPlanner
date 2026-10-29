@@ -1213,7 +1213,7 @@ mod tests {
         try_populate_pass1, OriginOfCandidateForMemoGroup,
     };
     use asap_logical_asap_optimization::pass2::memo::state_groups::expand_concrete_summary_state_groups;
-    use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};
+    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
@@ -1247,15 +1247,7 @@ mod tests {
             .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let outputs: Vec<_> = (0..2)
-            .map(|q| {
-                MemoGroupId(
-                    initial
-                        .groups
-                        .iter()
-                        .position(|g| g.roots_of.contains(&q))
-                        .unwrap() as u32,
-                )
-            })
+            .map(|q| *initial.query_roots[q].as_operator().unwrap())
             .collect();
         let generated = generate_per_computation_candidates(roots.clone()).unwrap();
         let mut memo =
@@ -1441,13 +1433,7 @@ mod tests {
         let roots = vec![original[0].clone(), original[0].clone()];
         let identified: Vec<_> = roots.iter().cloned().enumerate().collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&identified);
-        let output = MemoGroupId(
-            initial
-                .groups
-                .iter()
-                .position(|group| group.roots_of.contains(&0))
-                .unwrap() as u32,
-        );
+        let output = *initial.query_roots[0].as_operator().unwrap();
         let generated = generate_per_computation_candidates(identified).unwrap();
         let mut memo = try_populate_pass1(initial, &generated).unwrap();
         entries[0].recurrence =
@@ -1550,13 +1536,7 @@ mod tests {
         ));
         let identified = vec![(0, root.clone())];
         let initial = DagOfLogicalMemoGroups::from_roots(&identified);
-        let output = MemoGroupId(
-            initial
-                .groups
-                .iter()
-                .position(|g| g.roots_of.contains(&0))
-                .unwrap() as u32,
-        );
+        let output = *initial.query_roots[0].as_operator().unwrap();
         let generated = generate_per_computation_candidates(identified).unwrap();
         let memo =
             expand_concrete_summary_state_groups(try_populate_pass1(initial, &generated).unwrap())
@@ -1648,15 +1628,7 @@ mod tests {
         .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let outputs: Vec<_> = (0..roots.len())
-            .map(|query| {
-                MemoGroupId(
-                    initial
-                        .groups
-                        .iter()
-                        .position(|group| group.roots_of.contains(&query))
-                        .unwrap() as u32,
-                )
-            })
+            .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect();
         let generated = generate_per_computation_candidates(roots.clone()).unwrap();
         let mut memo = try_populate_pass1(initial, &generated).unwrap();

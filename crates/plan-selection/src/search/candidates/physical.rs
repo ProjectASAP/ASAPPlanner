@@ -240,15 +240,7 @@ mod tests {
             .collect::<Vec<_>>();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let output_groups = (0..2)
-            .map(|query| {
-                MemoGroupId(
-                    initial
-                        .groups
-                        .iter()
-                        .position(|group| group.roots_of.contains(&query))
-                        .unwrap() as u32,
-                )
-            })
+            .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect::<Vec<_>>();
         let candidates = generate_per_computation_candidates(roots.clone()).unwrap();
         let memo =

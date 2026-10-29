@@ -272,7 +272,7 @@ lists each stage's input and output types.
 
 | Component | Code | What it is |
 |---|---|---|
-| Memo group | `MemoGroup`, numbered by `MemoGroupId` | One distinct logical sub-expression: its logical node, its child groups, the groups that read it (`parents`), the queries that reach it (`queries`) and the queries whose root it is (`roots_of`). Groups are numbered children first. |
+| Memo group | `MemoGroup`, numbered by `MemoGroupId` | One distinct logical sub-expression: its logical node, its child groups, the groups that read it (`parent_groups()`) and the queries that reach it (`reached_by_queries()`). Groups are numbered children first; `DagOfLogicalMemoGroups::query_roots` holds each query's root over groups. |
 | DAG of logical memo groups | `DagOfLogicalMemoGroups` | Stage 0's groups, before any implementation choice: the workload's logical DAG hash-consed (below). |
 | Candidate memo | `CandidateMemo` | The groups, and the candidates for each memo group (`candidates[group]`). Pass 1 creates it from the DAG of logical memo groups; the Pass 2 rules add candidates and groups. |
 | Candidate for a memo group | `CandidateForMemoGroup` | One way to implement a group over child groups. `implements`: the group, or for a fused computation the group and the groups it absorbs (topmost first). `root_node`: its own nodes, down to the nodes of the groups it reads. `input_groups`: the groups it reads, whose implementations are chosen separately. `origin`: the rule that made it (`OriginOfCandidateForMemoGroup`, below). `accuracy_budget_parts`: the number of equal shares of the accuracy budget its summaries are sized for, 1 for the whole budget and `n` when it is one of `n` approximate inputs of a query. |

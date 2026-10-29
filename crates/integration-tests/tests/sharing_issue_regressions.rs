@@ -217,12 +217,7 @@ fn exact_rollup_catalog_crosses_identical_per_series_average() {
     let memo = try_populate_pass1(initial, &inventory).unwrap();
     let expanded =
         expand_concrete_summary_state_groups_in_domain(memo, PaneWidthDomain::SeedGrids).unwrap();
-    let owner = expanded
-        .memo
-        .groups
-        .iter()
-        .position(|g| g.roots_of.contains(&1))
-        .unwrap();
+    let owner = expanded.memo.query_roots[1].as_operator().unwrap().0 as usize;
     assert!(
         expanded.memo.candidates[owner]
             .iter()
@@ -552,12 +547,7 @@ fn sketch_rollup_crosses_inner_range_function() {
     let memo = try_populate_pass1(initial, &inventory).unwrap();
     let expanded =
         expand_concrete_summary_state_groups_in_domain(memo, PaneWidthDomain::SeedGrids).unwrap();
-    let owner = expanded
-        .memo
-        .groups
-        .iter()
-        .position(|g| g.roots_of.contains(&1))
-        .unwrap();
+    let owner = expanded.memo.query_roots[1].as_operator().unwrap().0 as usize;
     assert!(expanded.memo.candidates[owner]
         .iter()
         .any(|c| c.origin == OriginOfCandidateForMemoGroup::Rollup));

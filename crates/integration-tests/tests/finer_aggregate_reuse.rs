@@ -69,7 +69,7 @@ fn rollups(memo: &CandidateMemo, query: usize) -> (usize, Vec<&CandidateForMemoG
         .groups
         .iter()
         .position(|group| {
-            group.queries == [query]
+            group.reached_by_queries() == [query]
                 && matches!(
                     group.logical_node.non_asap(),
                     Some(NonASAPOp::Aggregate { .. })
