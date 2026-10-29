@@ -142,10 +142,11 @@
 // compose), `budget_share_1` (every chosen candidate sized for the whole
 // budget) and `selected` (it is `selected_choice`). With
 // `--price-enumerated <n>` (off by default), each of the first `n` listed
-// choices is also run through Stage 2 and Stage 3 as the selected plan is
-// (`memo_pricing::price_choices`, under the run's models): `valid`,
-// `rejection` (a Stage 3 rejection cause, or `compose_failed`,
-// `invalid_structure`, `stage2_failed`, `stage3_failed`, `rejected`) with
+// choices is also run through Stage 2 and Stage 3 as the selected plan is,
+// and its selected plan compiled (`memo_pricing::price_choices`, under the
+// run's models): `valid`, `rejection` (a Stage 3 rejection cause, or
+// `compose_failed`, `invalid_structure`, `stage2_failed`, `stage3_failed`,
+// `rejected`, `not_executable`) with
 // `rejection_reason`,
 // `cost_per_second` (its cheapest valid physical plan's) and
 // `cheaper_than_selected` (valid and cheaper than the selected plan); and

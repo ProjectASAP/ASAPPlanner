@@ -229,7 +229,7 @@ fn ratio_of_quantiles_no_listed_choice_is_cheaper_than_the_selected_plan() {
 /// key but return the same rows, so they are still one group: 5 × 5 = 25
 /// DAGs (two distinct approximate inputs), 9 of them sized for the whole
 /// budget. The executor compiles none of their per-series summaries without
-/// the series identity, so only the exact DAG is valid. Its price is not
+/// the series identity, so only the exact DAG compiles and is valid. Its price is not
 /// compared with the plan selected for the series-identity lowering: its
 /// rows carry no identity column, so it prices lower than the same exact
 /// DAG with the identity (#1035).
