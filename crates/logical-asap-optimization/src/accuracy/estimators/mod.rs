@@ -1,6 +1,7 @@
 //! Dispatch committed estimator parameters to their accuracy models.
 use super::*;
 use asap_types::ir::operator::AggIntent;
+use asap_types::ir::schema::FamilyCapability;
 
 pub mod cardinality;
 pub mod cms;
@@ -25,9 +26,7 @@ pub(super) fn sketch_guarantee(
         SketchParams::CountSketch { .. } | SketchParams::CountSketchWithHeap { .. } => {
             count_sketch::guarantee(algorithm, params, query)
         }
-        SketchParams::Kmv { .. } | SketchParams::Theta { .. } => {
-            cardinality::guarantee(algorithm, params, query)
-        }
+        SketchParams::Kmv { .. } => cardinality::guarantee(algorithm, params, query),
         SketchParams::UnivMon { .. } => univmon::guarantee(algorithm, params, query),
     }
 }
@@ -58,7 +57,8 @@ fn bounded_guarantee(
 /// `family` built over an **exact** input, derived from the family's
 /// committed parameters by inverting the same sizing formulas
 /// [`crate::realization::default_size_params`] uses. Exact for a plain value
-/// or an exact aggregate. `None` when the family has no error model
+/// or an exact aggregate. `None` when a sketch does not answer `query` (its
+/// family-capability table row), and when the family has no error model
 /// (`SummarySample`, `Wavelet`, `StatModel`, and sketch evaluations without a
 /// certified bound): Pass 1 then leaves the guarantee `None` and keeps the
 /// candidate for plan selection to decide.
@@ -71,7 +71,10 @@ pub fn local_guarantee(
         FieldDataType::ExactAggregate(kind, _) => Some(AccuracyGuarantee::exact(format!(
             "ExactAggregate({kind:?})"
         ))),
-        FieldDataType::Sketch(kind, _) => sketch_guarantee(kind.algorithm(), kind.params(), query),
+        FieldDataType::Sketch(kind, _) if FamilyCapability::of(family).answers(query) => {
+            sketch_guarantee(kind.algorithm(), kind.params(), query)
+        }
+        FieldDataType::Sketch(..) => None,
         // No error model is registered for these families.
         FieldDataType::SummarySample(..)
         | FieldDataType::Wavelet(..)
@@ -86,7 +89,7 @@ pub fn local_guarantee(
 /// UnivMon's heap, and KMV's `k` at the relative error it was sized for
 /// (#694). Other parameters are returned as they are: DDSketch never fails;
 /// classic HLL's failure probability comes from its source's distinct bound
-/// ([`hll::min_precision`]); Theta is calibrated at a fixed 99%; a KMV not
+/// ([`hll::min_precision`]); a KMV not
 /// sized for a relative error and an L2 or entropy UnivMon are not
 /// enlarged.
 pub fn with_failure_probability(params: &SketchParams, delta: f64) -> SketchParams {
@@ -161,13 +164,10 @@ pub(crate) fn size_params(
                 heap_size: topk_capacity(k, eps),
             }
         }
-        // Non-preferred candidates (DDSketch / Theta / Kmv / CountSketch /
+        // Non-preferred candidates (DDSketch / Kmv / CountSketch /
         // CountSketchWithHeap) are only reachable once a cost model picks
         // them; sized here so that wiring is local.
         SketchAlgorithm::DDSketch => ddsketch::size_params(eps),
-        SketchAlgorithm::Theta => SketchParams::Theta {
-            k: cardinality::theta_k_99(eps),
-        },
         SketchAlgorithm::Kmv => SketchParams::Kmv {
             k: cardinality::kmv_k(eps, delta),
             relative_error: Some(eps),
@@ -190,6 +190,29 @@ pub(crate) fn size_params(
                 depth: count_sketch::count_sketch_depth(width, delta),
                 heap_size: topk_capacity(k, eps),
             }
+        }
+        // Listed, not `_`: a family `asap_sketchlib` adds fails to compile
+        // here until the planner sizes it or lists it as not offered.
+        SketchAlgorithm::CountSketchWithL2Norm
+        | SketchAlgorithm::CmsWithSpaceSaving
+        | SketchAlgorithm::CountSketchWithSpaceSaving
+        | SketchAlgorithm::CmsFold
+        | SketchAlgorithm::CountSketchFold
+        | SketchAlgorithm::HllHip
+        | SketchAlgorithm::KllDynamic
+        | SketchAlgorithm::SpaceSaving
+        | SketchAlgorithm::Elastic
+        | SketchAlgorithm::Coco
+        | SketchAlgorithm::Bloom
+        | SketchAlgorithm::SetAggregator
+        | SketchAlgorithm::UnivMonTwoTier
+        | SketchAlgorithm::UnivMonQ
+        | SketchAlgorithm::HydraCms
+        | SketchAlgorithm::HydraCountSketch
+        | SketchAlgorithm::HydraKll
+        | SketchAlgorithm::HydraHll
+        | SketchAlgorithm::HydraUnivMon => {
+            unreachable!("Pass 1 offers only the families in FAMILY_PREFERENCE, not {kind:?}")
         }
     }
 }
@@ -348,7 +371,6 @@ pub fn size_for_all_readers(params: &[&SketchParams]) -> Option<SketchParams> {
                 k: k.max(*k2),
                 relative_error: min_recorded(relative_error, *e),
             },
-            (P::Theta { k }, P::Theta { k: k2 }) => P::Theta { k: k.max(*k2) },
             _ => return None,
         })
     })?;
@@ -671,5 +693,38 @@ mod tests {
         assert!(hll::classic_failure_probability(p, 0.05, 64) <= 0.01);
         assert!(hll::classic_failure_probability(p - 1, 0.05, 64) > 0.01);
         assert_eq!(hll::min_precision(0.05, 1e-30, 4096, 12), 12);
+    }
+
+    /// A sketch read for a statistic its table row does not answer (an HLL
+    /// for a total) has no guarantee; one it answers keeps its guarantee,
+    /// and a plain value or exact aggregate stays exact.
+    #[test]
+    fn local_guarantee_needs_a_statistic_the_family_answers() {
+        use asap_types::ir::scalar::expr_ir::ColumnRef;
+        use asap_types::ir::schema::{
+            DataType, ExactKind, ExactParams, GroupingStrategy, SketchKind,
+        };
+        let hll = FieldDataType::Sketch(
+            SketchKind::new(
+                SketchAlgorithm::Hll,
+                SketchParams::Hll {
+                    precision: 12,
+                    relative_error: None,
+                },
+            ),
+            GroupingStrategy::default(),
+        );
+        let total = SketchStatistic::PointCount {
+            key: ColumnRef::SampleValue,
+            value: None,
+        };
+        assert!(local_guarantee(&hll, &total).is_none());
+        assert!(local_guarantee(&hll, &SketchStatistic::Cardinality).is_some());
+        for exact in [
+            FieldDataType::Plain(DataType::Float64),
+            FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),
+        ] {
+            assert!(local_guarantee(&exact, &total).is_some(), "{exact:?}");
+        }
     }
 }

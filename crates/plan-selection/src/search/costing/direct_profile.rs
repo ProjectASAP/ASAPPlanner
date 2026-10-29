@@ -921,7 +921,6 @@ fn stable_size(node: &asap_types::ir::OperatorNode, delta: Option<f64>) -> bool 
             | SketchParams::DDSketch { .. }
             | SketchParams::Cms { .. }
             | SketchParams::CountSketch { .. }
-            | SketchParams::Theta { .. }
     ) {
         return false;
     }

@@ -3,24 +3,18 @@
 //! `DeploymentCapabilities::supported_summaries`, so the Planner offers no
 //! summary the executor would reject when it binds the plan.
 
-use crate::capability::{EVALUATED_FAMILIES, UNEVALUATED_READOUTS};
-use planner_types::ir::schema::{FamilyCapability, SupportedSummary};
+use crate::capability::EVALUATED_READOUTS;
+use planner_types::ir::schema::SupportedSummary;
 
 /// Every sketch family this executor builds from rows and the statistics it
-/// answers from one state of it: the family-capability table's row of each
-/// family it evaluates, less the readouts it does not evaluate yet. Exact
-/// accumulators are always supported and are not listed.
+/// answers from one state of it (`EVALUATED_READOUTS`). Exact accumulators
+/// are always supported and are not listed.
 pub fn supported_summary_families() -> Vec<SupportedSummary> {
-    EVALUATED_FAMILIES
-        .into_iter()
-        .map(|family| SupportedSummary {
-            readouts: FamilyCapability::of_per_instance_sketch(&family)
-                .readouts
-                .iter()
-                .map(|&(readout, _)| readout)
-                .filter(|readout| !UNEVALUATED_READOUTS.contains(&(family.clone(), *readout)))
-                .collect(),
+    EVALUATED_READOUTS
+        .iter()
+        .map(|&(family, readouts)| SupportedSummary {
             family,
+            readouts: readouts.to_vec(),
         })
         .collect()
 }
@@ -34,12 +28,13 @@ mod tests {
     use planner_types::ir::operator::operator_properties::{Reduction, Source};
     use planner_types::ir::scalar::ColumnRef;
     use planner_types::ir::schema::{
-        DataType, Field, FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchKind,
-        SketchParams, SketchStatistic, StatisticKind, SummaryInputExpr, SummaryUpdate,
+        DataType, FamilyCapability, Field, FieldDataType, GroupingStrategy, Schema,
+        SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, StatisticKind,
+        SummaryInputExpr, SummaryUpdate,
     };
     use planner_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 
-    const ALGORITHMS: [SketchAlgorithm; 10] = [
+    const ALGORITHMS: [SketchAlgorithm; 9] = [
         SketchAlgorithm::UnivMon,
         SketchAlgorithm::Kll,
         SketchAlgorithm::Cms,
@@ -47,7 +42,6 @@ mod tests {
         SketchAlgorithm::DDSketch,
         SketchAlgorithm::CmsWithHeap,
         SketchAlgorithm::Kmv,
-        SketchAlgorithm::Theta,
         SketchAlgorithm::CountSketch,
         SketchAlgorithm::CountSketchWithHeap,
     ];
@@ -95,7 +89,6 @@ mod tests {
                 k: 1024,
                 relative_error: None,
             },
-            A::Theta => SketchParams::Theta { k: 1024 },
             A::CountSketch => SketchParams::CountSketch {
                 width: 64,
                 depth: 3,
@@ -105,12 +98,13 @@ mod tests {
                 depth: 3,
                 heap_size: 10,
             },
+            other => unreachable!("{other:?} is not probed"),
         }
     }
 
     fn per_instance(algorithm: &SketchAlgorithm) -> FieldDataType {
         FieldDataType::Sketch(
-            SketchKind::new(algorithm.clone(), params(algorithm)),
+            SketchKind::new(*algorithm, params(algorithm)),
             GroupingStrategy::PerSubpopulationInstance,
         )
     }
@@ -133,6 +127,7 @@ mod tests {
             StatisticKind::FrequencyL2 => SketchStatistic::FrequencyL2,
             StatisticKind::FrequencyEntropy => SketchStatistic::FrequencyEntropy,
             StatisticKind::TopK => SketchStatistic::TopK { k: 5 },
+            other => unreachable!("{other:?} is not probed"),
         }
     }
 
@@ -230,9 +225,8 @@ mod tests {
     /// The list holds exactly the (family, readout) pairs the factory builds
     /// per instance and an evaluation answers from that state, and the
     /// IR's `SummaryEstimate` validation accepts exactly what the
-    /// family-capability table answers. A listed family's readouts are its
-    /// table row less the ones named not evaluated, each of which the table
-    /// answers and the executor does not.
+    /// family-capability table answers. Every declared readout is in the
+    /// family's table row.
     #[test]
     fn supported_summary_families_match_the_factory_and_evaluations() {
         let listed = supported_summary_families();
@@ -252,11 +246,10 @@ mod tests {
                     answered,
                     "IR: {algorithm:?} {readout:?}"
                 );
-                if UNEVALUATED_READOUTS.contains(&(algorithm.clone(), readout)) {
-                    assert!(answered && !executed, "{algorithm:?} {readout:?}");
-                } else if EVALUATED_FAMILIES.contains(algorithm) {
-                    assert_eq!(answered, executed, "table: {algorithm:?} {readout:?}");
-                }
+                assert!(
+                    !declared || answered,
+                    "declared but not in the table: {algorithm:?} {readout:?}"
+                );
             }
         }
         assert!(listed.iter().all(|s| !s.readouts.is_empty()));

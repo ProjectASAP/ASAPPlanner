@@ -10,26 +10,33 @@ owns the decision.
 
 A new sketch that Pass 1 can offer for an intent.
 
-1. **Type.** Add the variant to `SketchAlgorithm` and its parameters to
-   `SketchParams` (`crates/types/src/ir/schema/sketch.rs`).
-2. **Capability.** Add its row to `FamilyCapability::of`
-   (`crates/types/src/ir/schema/family_capability.rs`): which inputs it can
-   merge (`MergeInputRule`) and which statistics it answers (`StatisticKind`,
-   with the merged error). Pass 2's sharing, pane and rollup rules read only
-   this table.
-3. **Offer and size.** List it for its intents in
-   `realization::summary_candidates` (`crates/logical-asap-optimization`),
-   most preferred first, and size it in
-   `realization::default_size_params`.
+1. **Type.** `SketchAlgorithm` is `asap_sketchlib`'s family enum, so the
+   family must exist in the library first. Add its parameters to
+   `SketchParams` (`crates/types/src/ir/schema/sketch.rs`); a Hydra kind
+   maps to its library family in `FamilyCapability::of`.
+2. **Capability.** Its row, which inputs it can merge and which statistics
+   it answers with the merged error, is the library's family-capability
+   table (`SketchAlgorithm::capability`), read unchanged by
+   `FamilyCapability::of_per_instance_sketch`
+   (`crates/types/src/ir/schema/family_capability.rs`). Pass 2's sharing,
+   pane and rollup rules read only this table. Which readouts the executor
+   evaluates is its own declaration, `EVALUATED_READOUTS`
+   (`crates/executor/src/capability.rs`); add the family's readouts there
+   once the executor answers them.
+3. **Offer and size.** Place it in `realization::FAMILY_PREFERENCE`
+   (`crates/logical-asap-optimization`): `summary_candidates` offers it, in
+   that order, for every intent whose statistic its capability row answers.
+   Size it in `realization::default_size_params`.
 4. **Accuracy.** Add its error model under
    `crates/logical-asap-optimization/src/accuracy/estimators/` and return
    it from `DefaultAccuracyModel`'s `local_guarantee`, by inverting the same
    sizing formulas. Without a guarantee, every candidate that uses it is
    rejected.
-5. **Cost.** Give it a state size and per-operation CPU in
-   `crates/plan-selection/src/lib.rs` (and accept its parameters in
-   `crates/plan-selection/src/cost/measured.rs` if deployments
-   measure it).
+5. **Cost.** Give it a state size (the library's `estimated_memory_bytes`
+   for the type the executor builds; KLL keeps the planner's own formula)
+   and per-operation CPU in `sketch_shape`
+   (`crates/plan-selection/src/lib.rs`), and accept its parameters in
+   `crates/plan-selection/src/cost/measured.rs` if deployments measure it.
 6. **Executor.** Wrap the `asap_sketchlib` implementation in
    `crates/executor/src/summary_kernels/` and register it in
    `factory.rs` and `capability.rs`. Gaps in the library are fixed upstream,

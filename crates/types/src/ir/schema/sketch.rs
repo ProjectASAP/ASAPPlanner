@@ -50,34 +50,11 @@ pub enum ExactParams {
 // ── Approximate sketches ─────────────────────────────────────────────────────
 
 /// A specific sketch algorithm — bounded error, sized by its
-/// [`SketchParams`]. The statistics each answers are its row of the
-/// family-capability table ([`FamilyCapability`](crate::ir::schema::FamilyCapability)).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum SketchAlgorithm {
-    /// Universal frequency-vector summary with shared statistic evaluations.
-    UnivMon,
-    /// KLL quantile sketch (mergeable, ε-accurate rank queries).
-    Kll,
-    /// Count-Min Sketch (mergeable, (ε,δ)-accurate frequency queries).
-    Cms,
-    /// HyperLogLog (mergeable, (ε,δ)-accurate cardinality).
-    Hll,
-    /// DDSketch (mergeable, relative-error quantile queries).
-    DDSketch,
-    /// CMS augmented with a min-heap for top-k / heavy-hitter queries.
-    CmsWithHeap,
-    /// K-Minimum Values sketch (mergeable, join-cardinality estimation).
-    Kmv,
-    /// Theta sketch (mergeable, set operations + cardinality).
-    Theta,
-    /// Count-Sketch (mergeable, balanced/zero-mean-error frequency
-    /// queries — an alternative to CMS's one-sided bias).
-    CountSketch,
-    /// Count-Sketch augmented with a min-heap for top-k / heavy-hitter
-    /// queries — an alternative to `CmsWithHeap` on the Count-Sketch
-    /// substrate.
-    CountSketchWithHeap,
-}
+/// [`SketchParams`]. It is `asap_sketchlib`'s family enum; the statistics
+/// each answers are its row of the family-capability table
+/// ([`FamilyCapability`](crate::ir::schema::FamilyCapability)). The planner
+/// sizes and offers only the families [`SketchParams`] has a variant for.
+pub use asap_sketchlib::SketchAlgorithm;
 
 /// The largest KLL `k` `asap_sketchlib` builds: it silently caps a larger
 /// `k` at this (`MAX_CACHEABLE_K` in its `sketches::kll`).
@@ -146,9 +123,6 @@ pub enum SketchParams {
         /// standard error `1/√(k-2)`. Ignored by equality.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         relative_error: Option<f64>,
-    },
-    Theta {
-        k: u32,
     },
     CountSketch {
         width: u32,
@@ -228,9 +202,7 @@ impl PartialEq for SketchParams {
             ) => (a0, a1, a2) == (b0, b1, b2),
             (P::Hll { precision: a, .. }, P::Hll { precision: b, .. }) => a == b,
             (P::DDSketch { alpha: a }, P::DDSketch { alpha: b }) => a == b,
-            (P::Kmv { k: a, .. }, P::Kmv { k: b, .. }) | (P::Theta { k: a }, P::Theta { k: b }) => {
-                a == b
-            }
+            (P::Kmv { k: a, .. }, P::Kmv { k: b, .. }) => a == b,
             // Different variants. Listed by `self`'s variant, not `_`, so a
             // new variant fails to compile here until it is compared above.
             (P::UnivMon { .. }, _)
@@ -240,7 +212,6 @@ impl PartialEq for SketchParams {
             | (P::DDSketch { .. }, _)
             | (P::CmsWithHeap { .. }, _)
             | (P::Kmv { .. }, _)
-            | (P::Theta { .. }, _)
             | (P::CountSketch { .. }, _)
             | (P::CountSketchWithHeap { .. }, _) => false,
         }
@@ -275,7 +246,6 @@ impl SketchKind {
                 | (SketchAlgorithm::UnivMon, SketchParams::UnivMon { .. })
                 | (SketchAlgorithm::DDSketch, SketchParams::DDSketch { .. })
                 | (SketchAlgorithm::Hll, SketchParams::Hll { .. })
-                | (SketchAlgorithm::Theta, SketchParams::Theta { .. })
                 | (SketchAlgorithm::Kmv, SketchParams::Kmv { .. })
                 | (SketchAlgorithm::Cms, SketchParams::Cms { .. })
                 | (
@@ -911,7 +881,6 @@ mod tests {
             SketchAlgorithm::DDSketch,
             SketchAlgorithm::CmsWithHeap,
             SketchAlgorithm::Kmv,
-            SketchAlgorithm::Theta,
             SketchAlgorithm::CountSketchWithHeap,
         ] {
             assert_eq!(hydra_kind_for(&algorithm), None, "{algorithm:?}");

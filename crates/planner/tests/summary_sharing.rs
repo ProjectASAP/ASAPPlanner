@@ -118,9 +118,7 @@ fn composed_summary_candidates(
                     .choices
                     .candidates
                     .iter()
-                    .position(|candidate| {
-                        *candidate == ComputationCandidate::Summary(family.clone())
-                    })
+                    .position(|candidate| *candidate == ComputationCandidate::Summary(family))
                     .unwrap_or(0)
             })
             .collect();

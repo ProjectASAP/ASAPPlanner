@@ -21,7 +21,7 @@ fn supporting(supported: &[(SketchAlgorithm, &[StatisticKind])]) -> DeploymentCa
             supported
                 .iter()
                 .map(|(family, readouts)| SupportedSummary {
-                    family: family.clone(),
+                    family: *family,
                     readouts: readouts.to_vec(),
                 })
                 .collect(),
@@ -38,7 +38,7 @@ fn summaries_used(dag: &FlatDag) -> Vec<(SketchAlgorithm, StatisticKind)> {
         .flat_map(|(build, family, _)| {
             estimates_of(dag, build)
                 .into_iter()
-                .map(move |(_, statistic)| (family.clone(), statistic.kind()))
+                .map(move |(_, statistic)| (family, statistic.kind()))
         })
         .collect()
 }

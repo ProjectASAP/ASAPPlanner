@@ -176,7 +176,7 @@ The built-in models currently include:
 | Bounded Classic HLL | Source-conditioned relative-error/failure-probability bound and precision sizing for the linear-counting branch |
 | CMS | L1-normalized frequency bound from width and depth; does not by itself certify TopK membership |
 | CountSketch | L2-normalized frequency bound and median concentration bound, requiring valid odd depth |
-| KMV / Theta | Parameter-derived cardinality bounds using the registered variance/Chebyshev model at 99% confidence |
+| KMV | Provable distinct-count bound from the `k` smallest hashes |
 | UnivMon | Exact unit-update total for the supported evaluation; no universal guarantee for all its statistics |
 | Other families/evaluations | No default certificate where no accuracy model is registered |
 
@@ -385,7 +385,7 @@ accuracy/
     ├── hll.rs          # Generic HLL and bounded Classic HLL
     ├── cms.rs
     ├── count_sketch.rs
-    ├── cardinality.rs  # Shared KMV / Theta models
+    ├── cardinality.rs  # KMV model
     └── univmon.rs
 ```
 

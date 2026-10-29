@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn default_supports_everything_and_json_fills_the_rest() {
         let default = DeploymentCapabilities::default();
-        assert!(default.supports(&SketchAlgorithm::Theta, StatisticKind::TopK));
+        assert!(default.supports(&SketchAlgorithm::Bloom, StatisticKind::TopK));
         assert!(default.raw_data_retained && !default.query_time_results_retained);
         let parsed: DeploymentCapabilities = serde_json::from_str(
             r#"{"supported_summaries": [{"family": "Kll", "readouts": ["Quantile"]}]}"#,

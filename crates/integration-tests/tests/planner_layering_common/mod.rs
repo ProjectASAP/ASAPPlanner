@@ -562,7 +562,7 @@ pub fn sketch_builds(dag: &impl ExportedDag) -> Vec<(NodeId, SketchAlgorithm, Sk
                     family: FieldDataType::Sketch(kind, _),
                     ..
                 },
-            ) => Some((id, kind.algorithm().clone(), kind.params().clone())),
+            ) => Some((id, *kind.algorithm(), kind.params().clone())),
             _ => None,
         })
         .collect()

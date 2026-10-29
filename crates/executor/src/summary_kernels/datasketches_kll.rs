@@ -54,11 +54,13 @@ impl AggregateCore for DatasketchesKLLAccumulator {
             .as_any()
             .downcast_ref::<Self>()
             .ok_or("KLL merges only with KLL")?;
-        if self.inner.k() != other.inner.k() {
+        // sketchlib's merge panics on a different k or m.
+        let (k, m) = (self.inner.k(), self.inner.m());
+        if (k, m) != (other.inner.k(), other.inner.m()) {
             return Err(format!(
-                "KLL merges only with the same k ({} vs {})",
-                self.inner.k(),
-                other.inner.k()
+                "KLL merges only with the same k and m ({k}, {m} vs {}, {})",
+                other.inner.k(),
+                other.inner.m()
             )
             .into());
         }
@@ -136,12 +138,17 @@ mod tests {
         assert!(kll.approx_memory_bytes() > empty);
     }
 
-    // States of different k do not merge.
+    // States of different k or m do not merge: an error, not sketchlib's panic.
     #[test]
-    fn merge_rejects_a_different_k() {
+    fn merge_rejects_a_different_k_or_m() {
         let kll = DatasketchesKLLAccumulator::new(200);
         assert!(kll
             .merge_with(&DatasketchesKLLAccumulator::new(100))
+            .is_err());
+        assert!(kll
+            .merge_with(&DatasketchesKLLAccumulator {
+                inner: Kll::new(200, 4),
+            })
             .is_err());
         assert!(kll
             .merge_with(&DatasketchesKLLAccumulator::new(200))

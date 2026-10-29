@@ -11,9 +11,17 @@
 //! statistics ([`StatisticKind`]) one state answers, each with the error of
 //! that readout from a merged state ([`MergedError`]), so one state can
 //! serve every consumer whose statistic it answers.
+//!
+//! A sketch family's row is `asap_sketchlib`'s
+//! ([`SketchAlgorithm::capability`]), read unchanged: the family,
+//! statistic and merged-error vocabulary is the library's. The planner
+//! writes the rows of the exact accumulators, which the library does not
+//! have. Which readouts an executor evaluates is its own declaration
+//! (`DeploymentCapabilities::supported_summaries`), not this table's.
 
 use super::sketch::{ExactKind, GroupingStrategy, HydraKind, SketchAlgorithm, SketchStatistic};
 use crate::ir::schema::FieldDataType;
+pub use asap_sketchlib::{MergedError, StatisticKind};
 
 /// What one summary family can do: its row of the family-capability table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,27 +35,6 @@ pub struct FamilyCapability {
     /// finalized value (exact accumulators, whose merged state is exact) or
     /// one not listed.
     pub readouts: &'static [(StatisticKind, MergedError)],
-}
-
-/// The kind of a `SummaryEstimate` statistic, without its arguments: the
-/// readout vocabulary of this table and of a deployment's supported
-/// summaries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum StatisticKind {
-    /// The total of the updates: a bare `PointCount` (no item value).
-    Total,
-    /// One item's frequency: a `PointCount` with an item value.
-    ItemFrequency,
-    /// The value at any quantile rank.
-    Quantile,
-    /// The number of distinct items.
-    Distinct,
-    /// The L2 norm of the item frequencies.
-    FrequencyL2,
-    /// The entropy of the item frequencies.
-    FrequencyEntropy,
-    /// The heaviest items, any `k` up to the state's heap.
-    TopK,
 }
 
 /// One sketch family a deployment's executor can build, with the readouts
@@ -78,7 +65,8 @@ impl SketchStatistic {
 }
 
 /// How the inputs of a merge must relate for the result to keep the
-/// family's guarantee.
+/// family's guarantee: `asap_sketchlib`'s [`asap_sketchlib::MergeInputRule`]
+/// plus [`Self::DisjointInTime`] for the exact counter accumulators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeInputRule {
     /// No row in two inputs: the family counts a shared row twice.
@@ -91,19 +79,13 @@ pub enum MergeInputRule {
     MayOverlap,
 }
 
-/// How a merged state's error relates to its parts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MergedError {
-    /// The merged state is exact, as its parts are.
-    Exact,
-    /// Parts built with the same parameters merge into a state with the
-    /// guarantee of one build over the union of their rows: the error does
-    /// not grow with the number of parts, so a state sized for the whole
-    /// window may be built in parts.
-    AsIfBuiltOverUnion,
-    /// The merge is allowed, but the merged readout has no guarantee; it is
-    /// evidence only, for plan selection to judge.
-    Approximate,
+impl From<asap_sketchlib::MergeInputRule> for MergeInputRule {
+    fn from(rule: asap_sketchlib::MergeInputRule) -> Self {
+        match rule {
+            asap_sketchlib::MergeInputRule::Disjoint => Self::Disjoint,
+            asap_sketchlib::MergeInputRule::MayOverlap => Self::MayOverlap,
+        }
+    }
 }
 
 impl FamilyCapability {
@@ -145,59 +127,13 @@ impl FamilyCapability {
     }
 
     /// The capability of a per-subpopulation state of `algorithm`, whatever
-    /// its parameters: the table row the IR and a deployment's executor
-    /// read for that family.
+    /// its parameters: `asap_sketchlib`'s row of the family, which the IR and
+    /// a deployment's executor read.
     pub fn of_per_instance_sketch(algorithm: &SketchAlgorithm) -> Self {
-        use MergeInputRule::{Disjoint, MayOverlap};
-        use MergedError::{Approximate, AsIfBuiltOverUnion as Union};
-        use SketchAlgorithm as S;
-        use StatisticKind::*;
-        let (merge_inputs, readouts): (_, &'static [(StatisticKind, MergedError)]) = match algorithm
-        {
-            // A quantile sketch answers every rank.
-            S::Kll | S::DDSketch => (Some(Disjoint), &[(Quantile, Union)]),
-            // Linear sketches: counters add, so a merged state's
-            // point counts are the union's. Count-Min's unsigned counters
-            // also give its total; Count Sketch's signed counters do not.
-            S::Cms => (Some(Disjoint), &[(ItemFrequency, Union), (Total, Union)]),
-            S::CountSketch => (Some(Disjoint), &[(ItemFrequency, Union)]),
-            // Top-k reads the heap, which keeps only the heavy
-            // items of its own part: an item heavy over the window
-            // but in no single part is lost.
-            S::CmsWithHeap | S::CountSketchWithHeap => (Some(Disjoint), &[(TopK, Approximate)]),
-            // One frequency vector serves its total and every
-            // moment. L2 reads layer 0's Count Sketch, whose
-            // counters add. The distinct count's bound needs each
-            // layer's heap to keep `min(|S_j|, k)` of the layer's
-            // keys, chosen without reading the next layer's
-            // selection bit; `UnivMon::merge` re-ranks the union of
-            // the parts' heap keys by the merged sketch, which
-            // keeps both, and its top-layer completeness is the
-            // union's. Entropy reads heavy items a part may have
-            // dropped.
-            S::UnivMon => (
-                Some(Disjoint),
-                &[
-                    (Total, Union),
-                    (Distinct, Union),
-                    (FrequencyL2, Union),
-                    (FrequencyEntropy, Approximate),
-                ],
-            ),
-            // HLL's merge keeps each register's maximum, which is
-            // idempotent: an item both inputs saw counts once, so
-            // overlapping inputs merge to the state of their union.
-            // `asap_sketchlib`'s KMV hashes every item with one
-            // shared seed (`CANONICAL_HASH_SEED`), and `KMV::merge`
-            // keeps the k smallest distinct hashes: again the state
-            // of the union.
-            S::Hll | S::Kmv => (Some(MayOverlap), &[(Distinct, Union)]),
-            // Theta is not offered, and has no merge.
-            S::Theta => (None, &[(Distinct, Approximate)]),
-        };
+        let row = algorithm.capability();
         Self {
-            merge_inputs,
-            readouts,
+            merge_inputs: row.merge_inputs.map(MergeInputRule::from),
+            readouts: row.readouts,
         }
     }
 
@@ -206,8 +142,6 @@ impl FamilyCapability {
     pub fn of(family: &FieldDataType) -> Self {
         use ExactKind as E;
         use MergeInputRule::{Disjoint, DisjointInTime, MayOverlap};
-        use MergedError::{Approximate, AsIfBuiltOverUnion as Union};
-        use StatisticKind::*;
         let (merge_inputs, readouts): (_, &'static [(StatisticKind, MergedError)]) = match family {
             FieldDataType::ExactAggregate(kind, _) => match kind {
                 E::Sum | E::Count => (Some(Disjoint), &[]),
@@ -219,17 +153,18 @@ impl FamilyCapability {
                 // pane does not keep across its boundary.
                 E::IRate => (None, &[]),
             },
-            // Hydra answers per subpopulation, as the inner family does.
-            // Over a linear sketch it is a shared grid of linear sketches
-            // whose cells add; over KLL it has no accuracy model, so no
-            // merge.
+            // A Hydra answers per subpopulation from a shared grid of the
+            // inner family's cells. HydraKll merges as sketchlib's row says:
+            // `Hydra::merge` requires the same k and m and otherwise returns
+            // an error (asap_sketchlib #251). Nothing builds one yet: Pass 1
+            // offers no Hydra, and the executor builds only HydraCms
+            // (`create_hydra_cms`).
             FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
-                match kind {
-                    HydraKind::HydraCms | HydraKind::HydraCountSketch => {
-                        (Some(Disjoint), &[(ItemFrequency, Union)])
-                    }
-                    HydraKind::HydraKll => (None, &[(Quantile, Approximate)]),
-                }
+                return Self::of_per_instance_sketch(&match kind {
+                    HydraKind::HydraCms => SketchAlgorithm::HydraCms,
+                    HydraKind::HydraCountSketch => SketchAlgorithm::HydraCountSketch,
+                    HydraKind::HydraKll => SketchAlgorithm::HydraKll,
+                })
             }
             FieldDataType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance) => {
                 return Self::of_per_instance_sketch(kind.algorithm())
@@ -304,7 +239,7 @@ mod tests {
     }
 
     /// A quantile sketch answers every rank, not its total; heap sketches
-    /// answer top-k; Count Sketch answers item frequencies, not its total;
+    /// answer top-k and an item's frequency; Count Sketch answers item frequencies, not its total;
     /// HLL answers the distinct count, not its total.
     #[test]
     fn summary_capability_facts() {
@@ -367,8 +302,8 @@ mod tests {
             ),
             (
                 &cms_heap,
-                vec![SketchStatistic::TopK { k: 10 }],
-                vec![SketchStatistic::FrequencyL2, item()],
+                vec![SketchStatistic::TopK { k: 10 }, item()],
+                vec![SketchStatistic::FrequencyL2, total()],
             ),
             (
                 &hll,

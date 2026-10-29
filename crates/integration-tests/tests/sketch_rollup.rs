@@ -249,7 +249,7 @@ async fn direct_and_rolled_up(
         );
         let rolled = replace(&candidate, &build, &merge);
         rolled.validate_structure().unwrap();
-        out.push((kind.algorithm().clone(), candidate, rolled));
+        out.push((*kind.algorithm(), candidate, rolled));
     }
     out
 }
@@ -268,7 +268,7 @@ async fn distinct_counts_rolled_up_equal_the_direct_build() {
         accuracy,
     )
     .await;
-    let families: Vec<_> = pairs.iter().map(|(family, ..)| family.clone()).collect();
+    let families: Vec<_> = pairs.iter().map(|(family, ..)| *family).collect();
     assert!(families.contains(&SketchAlgorithm::Kmv), "{families:?}");
     for (family, direct, rolled) in pairs {
         let (direct, rolled) = (execute(&direct), execute(&rolled));

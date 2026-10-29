@@ -161,8 +161,6 @@ fn merge(children: Vec<Rc<OperatorNode>>) -> Result<Rc<OperatorNode>, String> {
 #[test]
 fn family_capability_table() {
     use MergeInputRule::{Disjoint, DisjointInTime, MayOverlap};
-    use MergedError::{Approximate, AsIfBuiltOverUnion as Union};
-    use StatisticKind::*;
     let (width, depth, heap_size) = (64, 4, 10);
     // (family, how its merge inputs must relate, its readouts).
     type Row = (
@@ -203,127 +201,6 @@ fn family_capability_table() {
             vec![],
         ),
         (exact(ExactKind::IRate, ExactParams::IRate), None, vec![]),
-        (kll(), Some(Disjoint), vec![(Quantile, Union)]),
-        (
-            sketch(
-                SketchAlgorithm::DDSketch,
-                SketchParams::DDSketch { alpha: 0.01 },
-            ),
-            Some(Disjoint),
-            vec![(Quantile, Union)],
-        ),
-        (hll(), Some(MayOverlap), vec![(Distinct, Union)]),
-        (
-            sketch(SketchAlgorithm::Cms, SketchParams::Cms { width, depth }),
-            Some(Disjoint),
-            vec![(ItemFrequency, Union), (Total, Union)],
-        ),
-        (
-            sketch(
-                SketchAlgorithm::CountSketch,
-                SketchParams::CountSketch { width, depth },
-            ),
-            Some(Disjoint),
-            vec![(ItemFrequency, Union)],
-        ),
-        (
-            sketch(
-                SketchAlgorithm::UnivMon,
-                SketchParams::UnivMon {
-                    heap_size,
-                    sketch_rows: depth,
-                    sketch_cols: width,
-                    layers: 8,
-                    distinct_failure_probability: None,
-                },
-            ),
-            Some(Disjoint),
-            vec![
-                (Total, Union),
-                (Distinct, Union),
-                (FrequencyL2, Union),
-                (FrequencyEntropy, Approximate),
-            ],
-        ),
-        // KMV keeps the k smallest hashes under one shared seed: the merge
-        // is the k smallest of the union and ignores repeated hashes.
-        (
-            sketch(
-                SketchAlgorithm::Kmv,
-                SketchParams::Kmv {
-                    k: 1024,
-                    relative_error: None,
-                },
-            ),
-            Some(MayOverlap),
-            vec![(Distinct, Union)],
-        ),
-        (
-            sketch(SketchAlgorithm::Theta, SketchParams::Theta { k: 1024 }),
-            None,
-            vec![(Distinct, Approximate)],
-        ),
-        (cms_with_heap(), Some(Disjoint), vec![(TopK, Approximate)]),
-        (
-            sketch(
-                SketchAlgorithm::CountSketchWithHeap,
-                SketchParams::CountSketchWithHeap {
-                    width,
-                    depth,
-                    heap_size,
-                },
-            ),
-            Some(Disjoint),
-            vec![(TopK, Approximate)],
-        ),
-        // Hydra over a linear sketch is a grid of linear sketches; Hydra
-        // over KLL has no accuracy model and fails closed.
-        (
-            hydra(
-                SketchAlgorithm::Cms,
-                SketchParams::Cms { width, depth },
-                HydraKind::HydraCms,
-                HydraParams::HydraCms {
-                    width,
-                    depth,
-                    shared_rows: depth,
-                    shared_columns: width,
-                },
-            ),
-            Some(Disjoint),
-            vec![(ItemFrequency, Union)],
-        ),
-        (
-            hydra(
-                SketchAlgorithm::CountSketch,
-                SketchParams::CountSketch { width, depth },
-                HydraKind::HydraCountSketch,
-                HydraParams::HydraCountSketch {
-                    width,
-                    depth,
-                    shared_rows: depth,
-                    shared_columns: width,
-                },
-            ),
-            Some(Disjoint),
-            vec![(ItemFrequency, Union)],
-        ),
-        (
-            hydra(
-                SketchAlgorithm::Kll,
-                SketchParams::Kll {
-                    k: 200,
-                    failure_probability: None,
-                },
-                HydraKind::HydraKll,
-                HydraParams::HydraKll {
-                    k: 200,
-                    shared_buckets: width,
-                },
-            ),
-            None,
-            vec![(Quantile, Approximate)],
-        ),
         (FieldDataType::Plain(DataType::Float64), None, vec![]),
         (
             FieldDataType::SummarySample(
@@ -349,6 +226,121 @@ fn family_capability_table() {
             vec![],
         ),
     ];
+    // A sketch family's row is asap_sketchlib's, unchanged; a Hydra reads
+    // the row of its Hydra family.
+    let lib = |algorithm: SketchAlgorithm| {
+        let row = algorithm.capability();
+        (
+            row.merge_inputs.map(MergeInputRule::from),
+            row.readouts.to_vec(),
+        )
+    };
+    let sketches = [
+        (kll(), SketchAlgorithm::Kll),
+        (
+            sketch(
+                SketchAlgorithm::DDSketch,
+                SketchParams::DDSketch { alpha: 0.01 },
+            ),
+            SketchAlgorithm::DDSketch,
+        ),
+        (hll(), SketchAlgorithm::Hll),
+        (
+            sketch(SketchAlgorithm::Cms, SketchParams::Cms { width, depth }),
+            SketchAlgorithm::Cms,
+        ),
+        (
+            sketch(
+                SketchAlgorithm::CountSketch,
+                SketchParams::CountSketch { width, depth },
+            ),
+            SketchAlgorithm::CountSketch,
+        ),
+        (
+            sketch(
+                SketchAlgorithm::UnivMon,
+                SketchParams::UnivMon {
+                    heap_size,
+                    sketch_rows: depth,
+                    sketch_cols: width,
+                    layers: 8,
+                    distinct_failure_probability: None,
+                },
+            ),
+            SketchAlgorithm::UnivMon,
+        ),
+        (
+            sketch(
+                SketchAlgorithm::Kmv,
+                SketchParams::Kmv {
+                    k: 1024,
+                    relative_error: None,
+                },
+            ),
+            SketchAlgorithm::Kmv,
+        ),
+        (cms_with_heap(), SketchAlgorithm::CmsWithHeap),
+        (
+            sketch(
+                SketchAlgorithm::CountSketchWithHeap,
+                SketchParams::CountSketchWithHeap {
+                    width,
+                    depth,
+                    heap_size,
+                },
+            ),
+            SketchAlgorithm::CountSketchWithHeap,
+        ),
+        (
+            hydra(
+                SketchAlgorithm::Cms,
+                SketchParams::Cms { width, depth },
+                HydraKind::HydraCms,
+                HydraParams::HydraCms {
+                    width,
+                    depth,
+                    shared_rows: depth,
+                    shared_columns: width,
+                },
+            ),
+            SketchAlgorithm::HydraCms,
+        ),
+        (
+            hydra(
+                SketchAlgorithm::CountSketch,
+                SketchParams::CountSketch { width, depth },
+                HydraKind::HydraCountSketch,
+                HydraParams::HydraCountSketch {
+                    width,
+                    depth,
+                    shared_rows: depth,
+                    shared_columns: width,
+                },
+            ),
+            SketchAlgorithm::HydraCountSketch,
+        ),
+        (
+            hydra(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll {
+                    k: 200,
+                    failure_probability: None,
+                },
+                HydraKind::HydraKll,
+                HydraParams::HydraKll {
+                    k: 200,
+                    shared_buckets: width,
+                },
+            ),
+            SketchAlgorithm::HydraKll,
+        ),
+    ];
+    let rows = rows
+        .into_iter()
+        .chain(sketches.into_iter().map(|(family, algorithm)| {
+            let (merge_inputs, readouts) = lib(algorithm);
+            (family, merge_inputs, readouts)
+        }));
     // One statistic of every kind.
     let statistics = [
         SketchStatistic::PointCount {
@@ -368,7 +360,7 @@ fn family_capability_table() {
     for (family, merge_inputs, readouts) in rows {
         let capability = FamilyCapability::of(&family);
         assert_eq!(capability.merge_inputs, merge_inputs, "{family:?}");
-        assert_eq!(capability.readouts, readouts.as_slice(), "{family:?}");
+        assert_eq!(capability.readouts.to_vec(), readouts, "{family:?}");
         for statistic in &statistics {
             let row = readouts
                 .iter()
@@ -391,11 +383,12 @@ fn family_capability_table() {
 }
 
 /// Heap readouts (entropy, top-k) of a merged state are approximate: each
-/// part's heaps keep only that part's heavy items. UnivMon's L2 reads layer
-/// 0's Count Sketch, which adds, and its distinct count's bound holds for
-/// any heap that keeps `min(|S_j|, k)` of a layer's keys, as the merge's
-/// does, so both keep the guarantee of one build over the union. A
-/// statistic the family does not answer has no merged error.
+/// part's heaps keep only that part's heavy items. UnivMon's total adds
+/// exactly. Its L2 reads layer 0's Count Sketch, which adds, and its
+/// distinct count's bound holds for any heap that keeps `min(|S_j|, k)` of
+/// a layer's keys, as the merge's does, so both keep the guarantee of one
+/// build over the union. A statistic the family does not answer has no
+/// merged error.
 #[test]
 fn merged_error_depends_on_the_readout() {
     use SketchStatistic::{Cardinality, FrequencyEntropy, FrequencyL2, TopK};
@@ -415,7 +408,7 @@ fn merged_error_depends_on_the_readout() {
     ));
     for (readout, error) in [
         (FrequencyL2, MergedError::AsIfBuiltOverUnion),
-        (point(), MergedError::AsIfBuiltOverUnion),
+        (point(), MergedError::Exact),
         (Cardinality, MergedError::AsIfBuiltOverUnion),
         (FrequencyEntropy, MergedError::Approximate),
     ] {
@@ -520,19 +513,20 @@ fn accepted_by_category(algorithm: &SketchAlgorithm, query: &SketchStatistic) ->
     use SketchStatistic as Q;
     match algorithm {
         A::Kll | A::DDSketch => matches!(query, Q::Quantile { .. }),
-        A::Hll | A::Theta | A::Kmv => matches!(query, Q::Cardinality),
+        A::Hll | A::Kmv => matches!(query, Q::Cardinality),
         A::Cms | A::CountSketch => matches!(query, Q::PointCount { .. }),
         A::CmsWithHeap | A::CountSketchWithHeap => matches!(query, Q::TopK { .. }),
         A::UnivMon => !matches!(query, Q::Quantile { .. }),
+        _ => unreachable!("{algorithm:?} is not probed"),
     }
 }
 
 /// Reading the family-capability table changes what the `SummaryEstimate`
 /// validation accepts only where the old category match was wrong: a
 /// UnivMon answers no item frequency or top-k, a Count Sketch's signed
-/// counters give no total, and a Hydra grid answers an item's frequency
-/// within a group, not the group's total. Every other (family, statistic)
-/// pair keeps its answer.
+/// counters give no total, and a heap family's counters answer an item's
+/// frequency. Every other (family, statistic) pair keeps its
+/// answer.
 #[test]
 fn estimate_validation_matches_the_category_match_except_the_fixed_rows() {
     let (width, depth) = (64, 4);
@@ -546,7 +540,6 @@ fn estimate_validation_matches_the_category_match_except_the_fixed_rows() {
             precision: 12,
             relative_error: None,
         },
-        SketchParams::Theta { k: 1024 },
         SketchParams::Kmv {
             k: 1024,
             relative_error: None,
@@ -578,7 +571,6 @@ fn estimate_validation_matches_the_category_match_except_the_fixed_rows() {
             SketchParams::Kll { .. } => A::Kll,
             SketchParams::DDSketch { .. } => A::DDSketch,
             SketchParams::Hll { .. } => A::Hll,
-            SketchParams::Theta { .. } => A::Theta,
             SketchParams::Kmv { .. } => A::Kmv,
             SketchParams::Cms { .. } => A::Cms,
             SketchParams::CountSketch { .. } => A::CountSketch,
@@ -641,19 +633,21 @@ fn estimate_validation_matches_the_category_match_except_the_fixed_rows() {
         SketchStatistic::TopK { k: 5 },
     ];
     for family in families {
-        let FieldDataType::Sketch(kind, grouping) = &family else {
+        let FieldDataType::Sketch(kind, _) = &family else {
             unreachable!()
         };
-        let hydra = *grouping != GroupingStrategy::PerSubpopulationInstance;
         for query in &statistics {
-            let fixed = match (kind.algorithm(), query.kind()) {
-                (SketchAlgorithm::UnivMon, StatisticKind::ItemFrequency | StatisticKind::TopK) => {
-                    true
-                }
-                (SketchAlgorithm::CountSketch, StatisticKind::Total) => true,
-                (SketchAlgorithm::Cms, StatisticKind::Total) => hydra,
-                _ => false,
-            };
+            let fixed = matches!(
+                (kind.algorithm(), query.kind()),
+                (
+                    SketchAlgorithm::UnivMon,
+                    StatisticKind::ItemFrequency | StatisticKind::TopK
+                ) | (SketchAlgorithm::CountSketch, StatisticKind::Total)
+                    | (
+                        SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap,
+                        StatisticKind::ItemFrequency,
+                    )
+            );
             let before = accepted_by_category(kind.algorithm(), query);
             let after = estimate(family.clone(), query.clone()).is_ok();
             assert_eq!(after, before != fixed, "{family:?} {query:?}");

@@ -1081,7 +1081,7 @@ fn sized_for_all(
     let operator = Operator::ASAP(ASAPOp::SummaryAgg {
         child: Rc::clone(child),
         family: FieldDataType::Sketch(
-            SketchKind::new(kind.algorithm().clone(), params),
+            SketchKind::new(*kind.algorithm(), params),
             grouping_strategy.clone(),
         ),
         input: input.clone(),
@@ -3296,9 +3296,7 @@ mod tests {
     /// in which every target chose `family`.
     fn chose(queries: &[(&str, f64)], family: SketchAlgorithm) -> Vec<QueryRoot> {
         use crate::per_computation_candidates::ComputationCandidate;
-        chose_where(queries, |c| {
-            *c == ComputationCandidate::Summary(family.clone())
-        })
+        chose_where(queries, |c| *c == ComputationCandidate::Summary(family))
     }
 
     /// The composed candidate of `queries` (each at its own ε, δ = 0.01)

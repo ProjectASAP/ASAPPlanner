@@ -11,8 +11,8 @@ use asap_types::ir::scalar::column_resolution::{resolve_column_ref, ResolveError
 use asap_types::ir::scalar::expr_ir::ColumnRef;
 use asap_types::ir::schema::ColumnId;
 use asap_types::ir::schema::{
-    EntityIdentity, Field, FieldDataType, NonNegativeWeightProof, Schema, SketchAlgorithm,
-    SketchParams, SummaryInputExpr, SummaryUpdate, WeightDomain,
+    EntityIdentity, FamilyCapability, Field, FieldDataType, NonNegativeWeightProof, Schema,
+    SketchAlgorithm, SketchParams, SketchStatistic, SummaryInputExpr, SummaryUpdate, WeightDomain,
 };
 use asap_types::ir::{NonASAPOp, OperatorNode};
 #[cfg(test)]
@@ -24,41 +24,67 @@ use std::rc::Rc;
 /// one. `ln(1/0.01) → depth 5`, matching the conventional CMS sizing.
 pub const DEFAULT_DELTA: f64 = 0.01;
 
-/// The sketch kinds that can serve an intent, most-preferred first.
-/// This is the `AggIntent → SketchAlgorithm` map of issue #98, read by
-/// Pass 1's summary choices. Listed here so the candidate set has one home.
-pub fn summary_candidates(intent: &AggIntent) -> &'static [SketchAlgorithm] {
-    match intent {
-        AggIntent::Quantile { .. } => &[SketchAlgorithm::Kll, SketchAlgorithm::DDSketch],
-        // A distinct-tuple count hashes the whole tuple as one item
-        // (`SummaryInputExpr::Tuple`), which the distinct-count sketches take
-        // unchanged. UnivMon is dropped there: it estimates frequency moments
-        // over a single value stream, and `realize_value_frequency_summary_input`
-        // would feed it one column of the tuple. Theta is not offered:
-        // `asap_sketchlib` has no Theta sketch to execute it; add it back
-        // once the library has one.
-        AggIntent::Cardinality { cols, .. } if cols.len() > 1 => {
-            &[SketchAlgorithm::Hll, SketchAlgorithm::Kmv]
-        }
-        AggIntent::Cardinality { .. } => &[
-            SketchAlgorithm::Hll,
-            SketchAlgorithm::Kmv,
-            SketchAlgorithm::UnivMon,
-        ],
-        AggIntent::FrequencyL2 { .. } | AggIntent::FrequencyEntropy { .. } => {
-            &[SketchAlgorithm::UnivMon]
-        }
-        // Count-Sketch-with-heap is CMS-with-heap's balanced/zero-mean-error
-        // alternative for the same heavy-hitter shape.
-        AggIntent::TopK { .. } => &[
-            SketchAlgorithm::CmsWithHeap,
-            SketchAlgorithm::CountSketchWithHeap,
-        ],
-        // Count Sketch's signed counters give no total, so it serves no
-        // count.
-        AggIntent::Count { .. } => &[SketchAlgorithm::Cms, SketchAlgorithm::UnivMon],
-        _ => &[],
-    }
+/// The sketch families the planner sizes and offers, in the order Pass 1
+/// offers those that answer an intent's statistic: the specialized families
+/// before the universal UnivMon.
+const FAMILY_PREFERENCE: &[SketchAlgorithm] = &[
+    SketchAlgorithm::Kll,
+    SketchAlgorithm::DDSketch,
+    SketchAlgorithm::Hll,
+    SketchAlgorithm::Kmv,
+    SketchAlgorithm::Cms,
+    SketchAlgorithm::CountSketch,
+    SketchAlgorithm::CmsWithHeap,
+    SketchAlgorithm::CountSketchWithHeap,
+    SketchAlgorithm::UnivMon,
+];
+
+/// The sketch kinds that can serve an intent, most-preferred first: the
+/// families whose family-capability table row answers the intent's
+/// statistic, in preference order, less UnivMon for a distinct-tuple
+/// count. Empty for an intent no sketch
+/// statistic serves.
+pub fn summary_candidates(intent: &AggIntent) -> Vec<SketchAlgorithm> {
+    candidates_by(intent, FamilyCapability::of_per_instance_sketch)
+}
+
+/// [`summary_candidates`] with each family's table row read from `capability`.
+fn candidates_by(
+    intent: &AggIntent,
+    capability: impl Fn(&SketchAlgorithm) -> FamilyCapability,
+) -> Vec<SketchAlgorithm> {
+    let Some(statistic) = sketch_statistic(intent) else {
+        return Vec::new();
+    };
+    // A distinct-tuple count hashes the whole tuple as one item
+    // (`SummaryInputExpr::Tuple`), which the distinct-count sketches take
+    // unchanged. UnivMon is dropped there: it estimates frequency moments
+    // over a single value stream, and `realize_value_frequency_summary_input`
+    // would feed it one column of the tuple.
+    let tuple = matches!(intent, AggIntent::Cardinality { cols, .. } if cols.len() > 1);
+    FAMILY_PREFERENCE
+        .iter()
+        .filter(|family| capability(family).answers(&statistic))
+        .filter(|family| !(tuple && **family == SketchAlgorithm::UnivMon))
+        .cloned()
+        .collect()
+}
+
+/// The statistic a summary is read for to answer `intent`, or `None` when
+/// no sketch statistic serves the intent.
+pub(crate) fn sketch_statistic(intent: &AggIntent) -> Option<SketchStatistic> {
+    Some(match intent {
+        AggIntent::Quantile { q, .. } => SketchStatistic::Quantile { q: *q },
+        AggIntent::Cardinality { .. } => SketchStatistic::Cardinality,
+        AggIntent::FrequencyL2 { .. } => SketchStatistic::FrequencyL2,
+        AggIntent::FrequencyEntropy { .. } => SketchStatistic::FrequencyEntropy,
+        AggIntent::TopK { k, .. } => SketchStatistic::TopK { k: *k },
+        AggIntent::Count { .. } => SketchStatistic::PointCount {
+            key: ColumnRef::SampleValue,
+            value: None,
+        },
+        _ => return None,
+    })
 }
 
 /// The [`AccuracyTarget`] an approximate-capable intent's summary is sized
@@ -520,6 +546,93 @@ mod tests {
                 Some(want),
                 "wrong summarised input for cols={cols:?}"
             );
+        }
+    }
+
+    /// Each approximable intent is offered the families it was offered when
+    /// the list was written by hand, in the same order; a non-sketch intent
+    /// is offered none.
+    #[test]
+    fn summary_candidates_keep_the_hand_written_lists() {
+        use SketchAlgorithm as S;
+        let accuracy = AccuracyTarget::max_error(0.01);
+        let cardinality = |cols: Vec<usize>| AggIntent::Cardinality {
+            cols,
+            accuracy: accuracy.clone(),
+        };
+        let cases = [
+            (
+                AggIntent::Quantile {
+                    col: None,
+                    q: 0.99,
+                    accuracy: accuracy.clone(),
+                },
+                vec![S::Kll, S::DDSketch],
+            ),
+            (cardinality(vec![]), vec![S::Hll, S::Kmv, S::UnivMon]),
+            (cardinality(vec![1]), vec![S::Hll, S::Kmv, S::UnivMon]),
+            (cardinality(vec![1, 2]), vec![S::Hll, S::Kmv]),
+            (
+                AggIntent::FrequencyL2 {
+                    col: None,
+                    accuracy: accuracy.clone(),
+                },
+                vec![S::UnivMon],
+            ),
+            (
+                AggIntent::FrequencyEntropy {
+                    col: None,
+                    accuracy: accuracy.clone(),
+                },
+                vec![S::UnivMon],
+            ),
+            (
+                AggIntent::TopK {
+                    k: 10,
+                    accuracy: accuracy.clone(),
+                },
+                vec![S::CmsWithHeap, S::CountSketchWithHeap],
+            ),
+            (
+                AggIntent::Count {
+                    accuracy: accuracy.clone(),
+                },
+                vec![S::Cms, S::UnivMon],
+            ),
+            (AggIntent::Sum { col: None }, vec![]),
+        ];
+        for (intent, want) in cases {
+            assert_eq!(summary_candidates(&intent), want, "{intent:?}");
+        }
+    }
+
+    /// Dropping a readout from a family's table row drops the family from
+    /// the candidates of the intents that read it, with no other edit.
+    #[test]
+    fn a_dropped_readout_drops_the_family() {
+        // Count-Min-with-heap answered from Count-Min's row: no top-k readout.
+        let heap_without_top_k = |family: &SketchAlgorithm| {
+            FamilyCapability::of_per_instance_sketch(match family {
+                SketchAlgorithm::CmsWithHeap => &SketchAlgorithm::Cms,
+                other => other,
+            })
+        };
+        let top_k = AggIntent::TopK {
+            k: 10,
+            accuracy: AccuracyTarget::max_error(0.01),
+        };
+        assert_eq!(
+            candidates_by(&top_k, heap_without_top_k),
+            vec![SketchAlgorithm::CountSketchWithHeap]
+        );
+    }
+
+    /// The preference order names each family it offers once.
+    #[test]
+    fn preference_order_names_each_family_once() {
+        let mut seen = std::collections::HashSet::new();
+        for family in FAMILY_PREFERENCE {
+            assert!(seen.insert(family), "{family:?} twice");
         }
     }
 }

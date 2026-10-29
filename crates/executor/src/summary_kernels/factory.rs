@@ -263,11 +263,7 @@ impl AccumulatorUpdater for DDSketchAccumulatorUpdater {
     }
 
     fn memory_usage_bytes(&self) -> usize {
-        // The struct and the 8-byte counts both bucket stores allocate,
-        // which grow with the values' range.
-        let sketch = &self.acc.inner;
-        let bins = sketch.positive_store_counts().len() + sketch.negative_store_counts().len();
-        std::mem::size_of::<DDSketchAccumulator>() + bins * std::mem::size_of::<u64>()
+        self.acc.approx_memory_bytes()
     }
 }
 
@@ -716,10 +712,8 @@ mod planner_parameter_regression {
                 },
             ),
         ] {
-            let family = SummaryFamilyType::Sketch(
-                SketchKind::new(algorithm.clone(), params),
-                Default::default(),
-            );
+            let family =
+                SummaryFamilyType::Sketch(SketchKind::new(algorithm, params), Default::default());
             let update = SummaryUpdate {
                 item: Some(SummaryInputExpr::Column(
                     planner_types::ir::scalar::ColumnRef::Named("host".into()),
@@ -872,9 +866,9 @@ mod ddsketch_domain {
 mod tests {
     use super::*;
 
-    /// A DDSketch updater reports the bins its stores allocate: none
-    /// before a sample, one 128-bin chunk of the positive store after a
-    /// few positive samples.
+    /// A DDSketch updater reports sketchlib's count of the bins its stores
+    /// allocate: none before a sample, one 128-bin chunk of the positive
+    /// store after a few positive samples.
     #[test]
     fn ddsketch_memory_is_its_allocated_bins() {
         let mut updater = DDSketchAccumulatorUpdater::new(0.05);
@@ -884,6 +878,10 @@ mod tests {
             updater.update_single(value, 0).unwrap();
         }
         assert_eq!(updater.memory_usage_bytes(), empty + 128 * 8);
+        assert_eq!(
+            updater.memory_usage_bytes(),
+            updater.acc.inner.memory_bytes()
+        );
     }
 
     /// A numeric sketch takes an Int64 as its exact Float64, and refuses

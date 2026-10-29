@@ -213,7 +213,7 @@ fn update_of(estimate: &OperatorNode) -> (SketchAlgorithm, SummaryUpdate) {
     else {
         panic!("sketch state expected")
     };
-    (kind.algorithm().clone(), input.clone())
+    (*kind.algorithm(), input.clone())
 }
 
 /// A heap sketch's bound is per item frequency, not Top-K membership, and

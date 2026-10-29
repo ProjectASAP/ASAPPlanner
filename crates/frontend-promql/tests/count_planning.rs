@@ -109,7 +109,7 @@ fn frequency_count_candidates_use_unit_weights() {
                 )),
                 "post-ASAP DAG must preserve the count update contract"
             );
-            algorithms.push(kind.algorithm().clone());
+            algorithms.push(*kind.algorithm());
             assert!(input.item.is_some(), "frequency keys must be explicit");
             assert_eq!(
                 input.weight,
