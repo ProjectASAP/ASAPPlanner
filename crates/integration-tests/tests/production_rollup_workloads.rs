@@ -257,8 +257,7 @@ fn independent_kll_cost(
         .iter()
         .map(|target| {
             target
-                .choices
-                .candidates
+                .ways_to_compute
                 .iter()
                 .position(|c| {
                     matches!(

@@ -164,7 +164,7 @@ async fn stage1_offers_exact_and_summary_l2_candidates() {
         .iter()
         .find(|t| has_l2(&t.aggregate))
         .expect("L2 target");
-    let candidates = &l2.choices.candidates;
+    let candidates = &l2.ways_to_compute;
     assert!(
         candidates.iter().any(|c| matches!(
             c,

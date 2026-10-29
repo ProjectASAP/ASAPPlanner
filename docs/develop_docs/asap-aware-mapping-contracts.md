@@ -35,17 +35,17 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 ## 2. Stage 1 candidates
 
 - **Targets.** `ComputationTarget` is one measure of one `Aggregate`. Its
-  `choices` list the exact option first (`ExactAccumulator` when the intent
+  `ways_to_compute` list the exact option first (`ExactAccumulator` when the intent
   has a mergeable exact state, else `Exact`), then each `Summary(family)` from
   `realization::summary_candidates`. Candidates are unranked: Pass 1 never
   compares cost.
 - **Pruning.** A candidate that cannot meet the target is moved to the
-  target's pruned list with a `PruneReason` (`RequiresExact`,
+  inventory's `pruned_ways_to_compute` (with its target) with a `PruneReason` (`RequiresExact`,
   `NullableAvgInput`, `UnsupportedByDeployment`,
   `QuantileOutsideUnitInterval`); it is never silently
   dropped. Pass 1 prunes only what it can prove; accuracy that depends on
   data facts is left to Stage 3.
-- **Fused computations.** `FusedComputation { absorbs, candidates, pruned }`
+- **Fused computations.** `FusedComputation { absorbed_targets, ways_to_compute }`
   replaces the targets beneath (the whole-expression top-k, the nested sum).
   It absorbs the target directly beneath and, for a heap over the raw data samples
   beneath a grouped sum of per-series sums or counts, the per-series target

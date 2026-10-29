@@ -129,7 +129,7 @@ fn sql_count_topk_has_a_fused_raw_row_heap() {
         .enumerate()
         .find(|(_, target)| target.fused_computation.is_some())
         .expect("SQL TopK must offer a fused raw-row heap");
-    for choice in target.choices.candidates.len()..target.choice_count() {
+    for choice in target.ways_to_compute.len()..target.choice_count() {
         let mut selected = vec![0; inventory.targets.len()];
         selected[index] = choice;
         let composed =
@@ -275,8 +275,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
         .iter()
         .map(|target| {
             target
-                .choices
-                .candidates
+                .ways_to_compute
                 .iter()
                 .position(|c| {
                     matches!(
@@ -565,16 +564,14 @@ fn sql_grouped_count_sketches_are_not_offered() {
     let roots = Planner::new(FuzzSettings::default()).lower(&w).unwrap();
     let inventory =
         generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
-    let target = inventory.targets.iter().find(|target| matches!(target.aggregate.non_asap(), Some(NonASAPOp::Aggregate { measures, .. }) if matches!(measures.as_slice(), [AggIntent::Count { .. }]))).unwrap();
+    let (index, target) = inventory.targets.iter().enumerate().find(|(_, target)| matches!(target.aggregate.non_asap(), Some(NonASAPOp::Aggregate { measures, .. }) if matches!(measures.as_slice(), [AggIntent::Count { .. }]))).unwrap();
     assert!(target
-        .choices
-        .candidates
+        .ways_to_compute
         .iter()
         .all(|candidate| !matches!(candidate, HowToComputeAggregateMeasure::Summary(_))));
     assert_eq!(
-        target
-            .choices
-            .pruned
+        inventory
+            .pruned_of_target(index, false)
             .iter()
             .filter(|(_, reason)| *reason == PruneReason::NoRelationalCountSketchRealization)
             .count(),

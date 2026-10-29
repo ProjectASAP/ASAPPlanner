@@ -79,8 +79,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             generate_per_computation_candidates(vec![(0, QueryRoot::Operator(original.clone()))])
                 .unwrap();
         let choice = generated.targets[0]
-            .choices
-            .candidates
+            .ways_to_compute
             .iter()
             .position(|candidate| {
                 matches!(

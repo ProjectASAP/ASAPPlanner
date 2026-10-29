@@ -259,7 +259,7 @@ pub mod planning {
         };
         let local =
             generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
-        let choices = local.targets.iter().map(|target| target.choices.candidates.iter()
+        let choices = local.targets.iter().map(|target| target.ways_to_compute.iter()
             .position(|candidate| matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == family)).unwrap_or(0)).collect::<Vec<_>>();
         match compose_logical_candidate(&local, &choices)
             .expect("explicit family choices compose")

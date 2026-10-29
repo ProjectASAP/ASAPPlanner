@@ -116,8 +116,7 @@ fn composed_summary_candidates(
             .iter()
             .map(|target| {
                 target
-                    .choices
-                    .candidates
+                    .ways_to_compute
                     .iter()
                     .position(|candidate| {
                         *candidate == HowToComputeAggregateMeasure::Summary(family)

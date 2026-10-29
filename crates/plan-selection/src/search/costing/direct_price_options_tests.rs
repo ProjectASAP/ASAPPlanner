@@ -459,8 +459,7 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         generate_per_computation_candidates(vec![(0, QueryRoot::Operator(original.clone()))])
             .unwrap();
     let choice = generated.targets[0]
-        .choices
-        .candidates
+        .ways_to_compute
         .iter()
         .position(|candidate| {
             matches!(

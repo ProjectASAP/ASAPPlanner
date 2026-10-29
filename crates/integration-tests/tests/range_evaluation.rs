@@ -51,8 +51,7 @@ fn run_explicit_for(workload: &PlanningWorkload, deployment: &DeploymentCapabili
     };
     let mut candidates = vec![compose(0)];
     if let Some(choice) = inventory.targets[0]
-        .choices
-        .candidates
+        .ways_to_compute
         .iter()
         .position(|candidate| {
             matches!(

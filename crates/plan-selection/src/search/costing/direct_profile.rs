@@ -1324,7 +1324,7 @@ mod tests {
                     QueryRoot::Operator(original.clone()),
                 )])
                 .unwrap();
-                let choice = generated.targets[0].choices.candidates.iter().position(|candidate|
+                let choice = generated.targets[0].ways_to_compute.iter().position(|candidate|
                     matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == algorithm)).unwrap();
                 let roots: Vec<_> = compose_logical_candidate(&generated, &[choice])
                     .unwrap()
@@ -1574,7 +1574,7 @@ mod tests {
                         QueryRoot::Operator(original.clone()),
                     )])
                     .unwrap();
-                    let choice = generated.targets[0].choices.candidates.iter().position(|candidate|
+                    let choice = generated.targets[0].ways_to_compute.iter().position(|candidate|
                     matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == algorithm)).unwrap();
                     let roots: Vec<_> = compose_logical_candidate(&generated, &[choice])
                         .unwrap()
@@ -2089,7 +2089,7 @@ mod tests {
                     originals.iter().cloned().enumerate().collect(),
                 )
                 .unwrap();
-                let choices: Vec<_> = generated.targets.iter().map(|target| target.choices.candidates.iter().position(|candidate|
+                let choices: Vec<_> = generated.targets.iter().map(|target| target.ways_to_compute.iter().position(|candidate|
                     matches!(candidate,HowToComputeAggregateMeasure::Summary(found) if *found==algorithm)).unwrap()).collect();
                 let roots: Vec<_> = compose_logical_candidate(&generated, &choices)
                     .unwrap()

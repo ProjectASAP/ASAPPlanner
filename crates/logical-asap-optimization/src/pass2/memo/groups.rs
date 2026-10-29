@@ -125,11 +125,11 @@ fn pass1_candidates<Id: Clone>(
         let summary = |c: &HowToComputeAggregateMeasure| {
             matches!(c, HowToComputeAggregateMeasure::Summary(_))
         };
-        target.choices.candidates.iter().any(summary)
+        target.ways_to_compute.iter().any(summary)
             || target
                 .fused_computation
                 .as_ref()
-                .is_some_and(|fused| fused.candidates.iter().any(summary))
+                .is_some_and(|fused| fused.ways_to_compute.iter().any(summary))
     };
     let mut most_approximate_inputs = vec![0usize; per_computation.roots.len()];
     for (g, targets) in &targets_of {
@@ -356,6 +356,7 @@ fn compose_alone<Id: Clone>(
                 target
             })
             .collect(),
+        pruned_ways_to_compute: Vec::new(),
     };
     let alone_choice: Vec<usize> = kept
         .iter()
@@ -627,8 +628,7 @@ mod tests {
         invalid_absorption.targets[0].fused_computation =
             Some(crate::pass1::per_computation_candidates::FusedComputation {
                 absorbed_targets: vec![missing],
-                candidates: Vec::new(),
-                pruned: Vec::new(),
+                ways_to_compute: Vec::new(),
             });
         assert!(matches!(try_populate_pass1(initial, &invalid_absorption),
             Err(CandidatePopulationError::InvalidAbsorption { target: 0, absorbed }) if absorbed == missing));
@@ -848,8 +848,7 @@ mod tests {
             .targets
             .iter()
             .map(|t| {
-                t.choices
-                    .candidates
+                t.ways_to_compute
                     .iter()
                     .position(|c| {
                         matches!(c, HowToComputeAggregateMeasure::Summary(a) if format!("{a:?}") == algorithm)
@@ -1179,8 +1178,8 @@ mod tests {
                     let fused = target
                         .fused_computation
                         .as_ref()
-                        .map_or(0, |f| f.candidates.len());
-                    if whole_budget(false) != target.choices.candidates.len()
+                        .map_or(0, |f| f.ways_to_compute.len());
+                    if whole_budget(false) != target.ways_to_compute.len()
                         || whole_budget(true) != fused
                     {
                         missing.push(format!("{gauges:?} seed {seed} target {t} candidates"));

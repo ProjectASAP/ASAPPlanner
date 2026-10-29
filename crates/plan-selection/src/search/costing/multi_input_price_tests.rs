@@ -193,8 +193,7 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
         .iter()
         .map(|target| {
             target
-                .choices
-                .candidates
+                .ways_to_compute
                 .iter()
                 .position(|choice| {
                     matches!(

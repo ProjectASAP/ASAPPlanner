@@ -743,8 +743,7 @@ mod tests {
             .iter()
             .map(|target| {
                 target
-                    .choices
-                    .candidates
+                    .ways_to_compute
                     .iter()
                     .position(|c| {
                         *c == HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch)

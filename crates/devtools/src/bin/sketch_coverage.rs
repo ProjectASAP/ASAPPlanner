@@ -148,7 +148,7 @@ fn analyze_corpus(
         let offered = inventory
             .targets
             .iter()
-            .flat_map(|target| &target.choices.candidates)
+            .flat_map(|target| &target.ways_to_compute)
             .filter_map(|candidate| match candidate {
                 HowToComputeAggregateMeasure::Summary(algorithm) => Some(format!("{algorithm:?}")),
                 _ => None,

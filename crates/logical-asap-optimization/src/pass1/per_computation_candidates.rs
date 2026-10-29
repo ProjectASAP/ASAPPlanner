@@ -216,23 +216,30 @@ impl ComputationChoices {
         reason: PruneReason,
         applies: impl Fn(&HowToComputeAggregateMeasure) -> bool,
     ) {
-        let (pruned, kept): (Vec<_>, _) = std::mem::take(&mut self.candidates)
-            .into_iter()
-            .partition(|choice| *choice != HowToComputeAggregateMeasure::Exact && applies(choice));
-        self.candidates = kept;
-        if pruned
-            .iter()
-            .any(|choice| matches!(choice, HowToComputeAggregateMeasure::ExactAccumulator(_)))
-        {
-            self.candidates
-                .insert(0, HowToComputeAggregateMeasure::Exact);
-        }
-        self.pruned.extend(
-            pruned
-                .into_iter()
-                .map(|choice: HowToComputeAggregateMeasure| (choice, reason)),
-        );
+        let pruned = prune_own(&mut self.candidates, applies);
+        self.pruned
+            .extend(pruned.into_iter().map(|choice| (choice, reason)));
     }
+}
+
+/// Removes from a measure's own `candidates` the ones `applies` matches
+/// (never `Exact`) and returns them; a pruned exact accumulator form is
+/// replaced by plain `Exact`, so the measure keeps one exact option.
+fn prune_own(
+    candidates: &mut Vec<HowToComputeAggregateMeasure>,
+    applies: impl Fn(&HowToComputeAggregateMeasure) -> bool,
+) -> Vec<HowToComputeAggregateMeasure> {
+    let (pruned, kept): (Vec<_>, _) = std::mem::take(candidates)
+        .into_iter()
+        .partition(|choice| *choice != HowToComputeAggregateMeasure::Exact && applies(choice));
+    *candidates = kept;
+    if pruned
+        .iter()
+        .any(|choice| matches!(choice, HowToComputeAggregateMeasure::ExactAccumulator(_)))
+    {
+        candidates.insert(0, HowToComputeAggregateMeasure::Exact);
+    }
+    pruned
 }
 
 /// Where a target's `HAVING` is applied. Composition (#575) applies it.
@@ -273,9 +280,10 @@ pub struct ComputationTarget {
     pub aggregate: Rc<OperatorNode>,
     /// Index into the aggregate's measures.
     pub measure_index: usize,
-    /// The measure's unranked candidates, the exact option first, and the
-    /// candidates Pass 1 pruned with their reasons.
-    pub choices: ComputationChoices,
+    /// The measure's unranked ways to compute it, the exact option first.
+    /// The ones Pass 1 pruned are in
+    /// [`PerComputationCandidates::pruned_ways_to_compute`].
+    pub ways_to_compute: Vec<HowToComputeAggregateMeasure>,
     /// The measure's own filter; only rows that pass it update the state
     /// (`SummaryAgg.filter`).
     pub measure_filter: Option<Predicate>,
@@ -308,24 +316,34 @@ pub struct FusedComputation {
     /// computations absorb. None of them is computed when this is picked.
     pub absorbed_targets: Vec<usize>,
     /// How the fused computation is computed: exact or a summary. Empty
-    /// when Pass 1 pruned every one ([`Self::pruned`]); the fusion is then
-    /// not offered.
-    pub candidates: Vec<HowToComputeAggregateMeasure>,
-    /// The candidates Pass 1 pruned from the fused computation, with their
-    /// reasons (today only [`PruneReason::UnsupportedByDeployment`]); empty
-    /// by default.
-    pub pruned: Vec<(HowToComputeAggregateMeasure, PruneReason)>,
+    /// when Pass 1 pruned every one (today only for
+    /// [`PruneReason::UnsupportedByDeployment`], recorded in
+    /// [`PerComputationCandidates::pruned_ways_to_compute`]); the fusion is
+    /// then not offered.
+    pub ways_to_compute: Vec<HowToComputeAggregateMeasure>,
+}
+
+/// A way to compute a target's measure that Pass 1 pruned, and why.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrunedWayToCompute {
+    /// The target, by index in [`PerComputationCandidates::targets`].
+    pub target: usize,
+    /// Whether it was a way of the target's fused computation
+    /// ([`ComputationTarget::fused_computation`]) rather than its own.
+    pub of_fused_computation: bool,
+    pub way_to_compute: HowToComputeAggregateMeasure,
+    pub reason: PruneReason,
 }
 
 impl ComputationTarget {
     /// How many values this target's digit of a whole-workload choice
     /// takes: its own candidates, then its fused computation's.
     pub fn choice_count(&self) -> usize {
-        self.choices.candidates.len()
+        self.ways_to_compute.len()
             + self
                 .fused_computation
                 .as_ref()
-                .map_or(0, |fused| fused.candidates.len())
+                .map_or(0, |fused| fused.ways_to_compute.len())
     }
 
     /// How the measure is computed when this target's digit of a
@@ -336,13 +354,13 @@ impl ComputationTarget {
         &self,
         index: usize,
     ) -> Option<(&HowToComputeAggregateMeasure, Option<&[usize]>)> {
-        let own = self.choices.candidates.len();
-        match self.choices.candidates.get(index) {
+        let own = self.ways_to_compute.len();
+        match self.ways_to_compute.get(index) {
             Some(candidate) => Some((candidate, None)),
             None => {
                 let fused = self.fused_computation.as_ref()?;
                 Some((
-                    fused.candidates.get(index - own)?,
+                    fused.ways_to_compute.get(index - own)?,
                     Some(fused.absorbed_targets.as_slice()),
                 ))
             }
@@ -359,6 +377,9 @@ pub struct PerComputationCandidates<Id> {
     /// The targets; a whole-workload choice has one digit per target,
     /// ranging over [`ComputationTarget::choice_count`].
     pub targets: Vec<ComputationTarget>,
+    /// The ways to compute the targets' measures that Pass 1 pruned, in the
+    /// order it pruned them.
+    pub pruned_ways_to_compute: Vec<PrunedWayToCompute>,
 }
 
 impl<Id> PerComputationCandidates<Id> {
@@ -382,7 +403,7 @@ impl<Id> PerComputationCandidates<Id> {
     /// [`Self::combinations`] of target `index` with the targets it absorbs.
     fn combinations_of(&self, index: usize) -> usize {
         let target = &self.targets[index];
-        let n = target.choices.candidates.len();
+        let n = target.ways_to_compute.len();
         let Some(fused) = &target.fused_computation else {
             return n;
         };
@@ -400,7 +421,7 @@ impl<Id> PerComputationCandidates<Id> {
             .filter(|&&a| !absorbed_by_another(a))
             .map(|&a| self.combinations_of(a))
             .fold(n, usize::saturating_mul)
-            .saturating_add(fused.candidates.len())
+            .saturating_add(fused.ways_to_compute.len())
     }
 
     /// Whether `choice` picks a fused computation and a candidate other
@@ -415,6 +436,23 @@ impl<Id> PerComputationCandidates<Id> {
         })
     }
 
+    /// The ways to compute target `target`'s measure that Pass 1 pruned,
+    /// with their reasons, in pruning order: its own, or its fused
+    /// computation's when `of_fused_computation`.
+    pub fn pruned_of_target(
+        &self,
+        target: usize,
+        of_fused_computation: bool,
+    ) -> Vec<(HowToComputeAggregateMeasure, PruneReason)> {
+        self.pruned_ways_to_compute
+            .iter()
+            .filter(|pruned| {
+                pruned.target == target && pruned.of_fused_computation == of_fused_computation
+            })
+            .map(|pruned| (pruned.way_to_compute.clone(), pruned.reason))
+            .collect()
+    }
+
     /// This inventory without the summary candidates the executor does not
     /// support (`supported_summaries`, the deployment's
     /// `DeploymentCapabilities::supported_summaries`; `None` supports
@@ -427,7 +465,7 @@ impl<Id> PerComputationCandidates<Id> {
         mut self,
         supported_summaries: Option<&[SupportedSummary]>,
     ) -> Self {
-        for target in &mut self.targets {
+        for (index, target) in self.targets.iter_mut().enumerate() {
             let Some(NonASAPOp::Aggregate { measures, .. }) = target.aggregate.non_asap() else {
                 continue;
             };
@@ -439,19 +477,24 @@ impl<Id> PerComputationCandidates<Id> {
                 matches!(candidate, HowToComputeAggregateMeasure::Summary(family)
                     if !summary_supported(supported_summaries, family, readout))
             };
-            target
-                .choices
-                .prune(PruneReason::UnsupportedByDeployment, unsupported);
+            let pruned = |of_fused_computation| {
+                move |way_to_compute| PrunedWayToCompute {
+                    target: index,
+                    of_fused_computation,
+                    way_to_compute,
+                    reason: PruneReason::UnsupportedByDeployment,
+                }
+            };
+            let own = prune_own(&mut target.ways_to_compute, unsupported);
+            self.pruned_ways_to_compute
+                .extend(own.into_iter().map(pruned(false)));
             if let Some(fused) = &mut target.fused_computation {
-                let (pruned, kept): (Vec<_>, _) = std::mem::take(&mut fused.candidates)
+                let (removed, kept): (Vec<_>, _) = std::mem::take(&mut fused.ways_to_compute)
                     .into_iter()
                     .partition(unsupported);
-                fused.candidates = kept;
-                fused.pruned.extend(
-                    pruned
-                        .into_iter()
-                        .map(|candidate| (candidate, PruneReason::UnsupportedByDeployment)),
-                );
+                fused.ways_to_compute = kept;
+                self.pruned_ways_to_compute
+                    .extend(removed.into_iter().map(pruned(true)));
             }
         }
         self
@@ -678,6 +721,7 @@ fn generate_with_computation_choices_cache<Id: std::fmt::Debug>(
         }
     }
     let mut targets = Vec::new();
+    let mut pruned_ways_to_compute = Vec::new();
     for (root, node) in aggregates {
         let Some(NonASAPOp::Aggregate {
             measures,
@@ -760,10 +804,18 @@ fn generate_with_computation_choices_cache<Id: std::fmt::Debug>(
                     matches!(choice, HowToComputeAggregateMeasure::Summary(_))
                 });
             }
+            pruned_ways_to_compute.extend(choices.pruned.into_iter().map(
+                |(way_to_compute, reason)| PrunedWayToCompute {
+                    target: targets.len(),
+                    of_fused_computation: false,
+                    way_to_compute,
+                    reason,
+                },
+            ));
             targets.push(ComputationTarget {
                 aggregate: node.clone(),
                 measure_index: measure,
-                choices,
+                ways_to_compute: choices.candidates,
                 measure_filter: filters.get(measure).cloned().flatten(),
                 having_filters: entries.clone(),
                 fused_computation: None,
@@ -775,10 +827,14 @@ fn generate_with_computation_choices_cache<Id: std::fmt::Debug>(
         }
     }
     add_whole_expression_targets(&mut targets, &consumers);
-    prune_topk_heaps_over_one_row_per_item(&mut targets);
+    prune_topk_heaps_over_one_row_per_item(&mut targets, &mut pruned_ways_to_compute);
     add_nested_sum_targets(&mut targets, &consumers);
     close_absorptions(&mut targets);
-    Ok(PerComputationCandidates { roots, targets })
+    Ok(PerComputationCandidates {
+        roots,
+        targets,
+        pruned_ways_to_compute,
+    })
 }
 
 /// Adds to each fused computation's `absorbed_targets` the targets its absorbed
@@ -867,8 +923,7 @@ fn add_nested_sum_targets(
         let merge = HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum]);
         targets[t].fused_computation = Some(FusedComputation {
             absorbed_targets: vec![inner],
-            candidates: vec![merge],
-            pruned: Vec::new(),
+            ways_to_compute: vec![merge],
         });
     }
 }
@@ -1002,24 +1057,23 @@ fn add_whole_expression_targets(
                 );
             }
         }
-        let (heaps, own): (Vec<_>, Vec<_>) = targets[t]
-            .choices
-            .candidates
-            .iter()
-            .cloned()
-            .partition(|candidate| {
-                matches!(candidate, HowToComputeAggregateMeasure::Summary(family)
+        let (heaps, own): (Vec<_>, Vec<_>) =
+            targets[t]
+                .ways_to_compute
+                .iter()
+                .cloned()
+                .partition(|candidate| {
+                    matches!(candidate, HowToComputeAggregateMeasure::Summary(family)
                     if family.capability().answers(StatisticKind::TopK))
-            });
+                });
         if heaps.is_empty() {
             continue;
         }
         let target = &mut targets[t];
-        target.choices.candidates = own;
+        target.ways_to_compute = own;
         target.fused_computation = Some(FusedComputation {
             absorbed_targets: absorbs,
-            candidates: heaps,
-            pruned: Vec::new(),
+            ways_to_compute: heaps,
         });
     }
 }
@@ -1027,8 +1081,11 @@ fn add_whole_expression_targets(
 /// Prunes the own heap candidates of each PromQL top-k
 /// ([`PruneReason::TopKHeapOverOneRowPerItem`]); a fused whole-expression
 /// heap ([`add_whole_expression_targets`]) has already moved out of them.
-fn prune_topk_heaps_over_one_row_per_item(targets: &mut [ComputationTarget]) {
-    for target in targets.iter_mut() {
+fn prune_topk_heaps_over_one_row_per_item(
+    targets: &mut [ComputationTarget],
+    pruned_ways_to_compute: &mut Vec<PrunedWayToCompute>,
+) {
+    for (index, target) in targets.iter_mut().enumerate() {
         let Some(NonASAPOp::Aggregate {
             measures, child, ..
         }) = target.aggregate.non_asap()
@@ -1046,12 +1103,18 @@ fn prune_topk_heaps_over_one_row_per_item(targets: &mut [ComputationTarget]) {
         if !reads_only_time_series(child) {
             continue;
         }
-        target
-            .choices
-            .prune(PruneReason::TopKHeapOverOneRowPerItem, |candidate| {
-                matches!(candidate, HowToComputeAggregateMeasure::Summary(family)
-                    if family.capability().answers(StatisticKind::TopK))
-            });
+        let pruned = prune_own(&mut target.ways_to_compute, |candidate| {
+            matches!(candidate, HowToComputeAggregateMeasure::Summary(family)
+                if family.capability().answers(StatisticKind::TopK))
+        });
+        pruned_ways_to_compute.extend(pruned.into_iter().map(|way_to_compute| {
+            PrunedWayToCompute {
+                target: index,
+                of_fused_computation: false,
+                way_to_compute,
+                reason: PruneReason::TopKHeapOverOneRowPerItem,
+            }
+        }));
     }
 }
 
@@ -4669,8 +4732,12 @@ mod tests {
             "repeated eligible groups reuse local rules"
         );
         assert_eq!(baseline.targets.len(), cached.targets.len());
+        assert_eq!(
+            baseline.pruned_ways_to_compute,
+            cached.pruned_ways_to_compute
+        );
         for (before, after) in baseline.targets.iter().zip(&cached.targets) {
-            assert_eq!(before.choices, after.choices);
+            assert_eq!(before.ways_to_compute, after.ways_to_compute);
             assert_eq!(before.having_filters, after.having_filters);
             assert_eq!(before.fused_computation, after.fused_computation);
         }
@@ -4755,7 +4822,7 @@ mod tests {
         let topk = topk_target(&inventory);
         let target = &inventory.targets[topk];
         assert_eq!(
-            target.choices.candidates,
+            target.ways_to_compute,
             [HowToComputeAggregateMeasure::Exact]
         );
         let fused = target
@@ -4763,14 +4830,14 @@ mod tests {
             .as_ref()
             .expect("a fused computation");
         assert_eq!(
-            fused.candidates,
+            fused.ways_to_compute,
             [
                 HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CmsWithHeap),
                 HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CountSketchWithHeap),
             ]
         );
         let inner = fused.absorbed_targets[0];
-        assert_eq!(inventory.targets[inner].choices.candidates.len(), 1);
+        assert_eq!(inventory.targets[inner].ways_to_compute.len(), 1);
         assert_eq!(inventory.combinations(), 3);
         for (candidate, root) in composed_with(&inventory, topk) {
             if candidate == HowToComputeAggregateMeasure::Exact {
@@ -4910,7 +4977,7 @@ mod tests {
             let topk = topk_target(&inventory);
             let target = &inventory.targets[topk];
             assert_eq!(
-                target.choices.candidates,
+                target.ways_to_compute,
                 [HowToComputeAggregateMeasure::Exact],
                 "{query}"
             );
@@ -4919,7 +4986,7 @@ mod tests {
                 .as_ref()
                 .expect("a fused computation");
             assert_eq!(
-                fused.candidates,
+                fused.ways_to_compute,
                 [
                     HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CmsWithHeap),
                     HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CountSketchWithHeap),
@@ -5056,14 +5123,14 @@ mod tests {
     fn avg_states_out_of_order_are_refused() {
         let mut inventory = inventory("avg by (job) (m)");
         assert_eq!(
-            inventory.targets[0].choices.candidates,
+            inventory.targets[0].ways_to_compute,
             [HowToComputeAggregateMeasure::ExactAccumulator(vec![
                 ExactKind::Sum,
                 ExactKind::Count
             ])]
         );
         assert!(compose_logical_candidate(&inventory, &[0]).is_ok());
-        inventory.targets[0].choices.candidates = vec![
+        inventory.targets[0].ways_to_compute = vec![
             HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Count, ExactKind::Sum]),
         ];
         assert!(matches!(
@@ -5078,7 +5145,7 @@ mod tests {
         inventory.targets.iter().position(|t| {
             t.fused_computation
                 .as_ref()
-                .is_some_and(|fused| fused.candidates == [merge.clone()])
+                .is_some_and(|fused| fused.ways_to_compute == [merge.clone()])
         })
     }
 
@@ -5093,14 +5160,14 @@ mod tests {
         let outer = nested_sum_target(&inventory).expect("a nested-sum merge");
         let target = &inventory.targets[outer];
         let sum = HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum]);
-        assert_eq!(target.choices.candidates, std::slice::from_ref(&sum));
+        assert_eq!(target.ways_to_compute, std::slice::from_ref(&sum));
         let fused = target
             .fused_computation
             .as_ref()
             .expect("a fused computation");
-        assert_eq!(fused.candidates, [sum]);
+        assert_eq!(fused.ways_to_compute, [sum]);
         let inner = fused.absorbed_targets[0];
-        assert_eq!(inventory.targets[inner].choices.candidates.len(), 1);
+        assert_eq!(inventory.targets[inner].ways_to_compute.len(), 1);
         assert_eq!(inventory.combinations(), 2);
         let composed = composed_with(&inventory, outer);
         let (_, separate) = &composed[0];
@@ -5274,12 +5341,12 @@ mod tests {
         let topk = topk_target(&inventory);
         let target = &inventory.targets[topk];
         let Some(fused) = &target.fused_computation else {
-            panic!("a fused computation: {:?}", target.choices.candidates)
+            panic!("a fused computation: {:?}", target.ways_to_compute)
         };
         let inner = fused.absorbed_targets[0];
-        let n = target.choices.candidates.len();
-        let whole = fused.candidates.len();
-        let m = inventory.targets[inner].choices.candidates.len();
+        let n = target.ways_to_compute.len();
+        let whole = fused.ways_to_compute.len();
+        let m = inventory.targets[inner].ways_to_compute.len();
         let enumerated = enumerated_choices(&inventory);
         assert!(whole > 0 && m > 1, "{n} {whole} {m}");
         assert_eq!(inventory.combinations(), n * m + whole);
@@ -5471,7 +5538,7 @@ mod tests {
             .targets
             .iter()
             .enumerate()
-            .map(|(t, target)| pick(t, &target.choices.candidates))
+            .map(|(t, target)| pick(t, &target.ways_to_compute))
             .collect();
         let composed = compose_logical_candidate(&inventory, &choice).unwrap();
         let QueryRoot::Operator(root) = &composed[0].1 else {
@@ -5692,21 +5759,24 @@ mod tests {
         )])));
         let target = &restricted.targets[0];
         assert_eq!(
-            target.choices.candidates,
+            target.ways_to_compute,
             [
                 HowToComputeAggregateMeasure::Exact,
                 HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)
             ]
         );
         assert_eq!(
-            target.choices.pruned,
+            restricted.pruned_of_target(0, false),
             [(
                 HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch),
                 PruneReason::UnsupportedByDeployment
             )]
         );
         let default = inventory(query).without_unsupported_summaries(None);
-        assert_eq!(default.targets[0].choices, unrestricted.targets[0].choices);
+        assert_eq!(
+            default.targets[0].ways_to_compute,
+            unrestricted.targets[0].ways_to_compute
+        );
     }
 
     /// A family the deployment builds but cannot answer the measure's
@@ -5726,14 +5796,14 @@ mod tests {
         ));
         let target = &restricted.targets[0];
         assert_eq!(
-            target.choices.candidates,
+            target.ways_to_compute,
             [
                 HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Count]),
                 HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Cms),
             ]
         );
         assert_eq!(
-            target.choices.pruned,
+            restricted.pruned_of_target(0, false),
             [(
                 HowToComputeAggregateMeasure::Summary(SketchAlgorithm::UnivMon),
                 PruneReason::UnsupportedByDeployment
@@ -5758,17 +5828,13 @@ mod tests {
                 .fused_computation
                 .as_ref()
                 .unwrap()
-                .candidates,
+                .ways_to_compute,
             [HowToComputeAggregateMeasure::Summary(
                 SketchAlgorithm::CountSketchWithHeap
             )]
         );
         assert_eq!(
-            one_heap.targets[topk]
-                .fused_computation
-                .as_ref()
-                .unwrap()
-                .pruned,
+            one_heap.pruned_of_target(topk, true),
             [(
                 HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CmsWithHeap),
                 PruneReason::UnsupportedByDeployment
@@ -5782,9 +5848,9 @@ mod tests {
         )])));
         let topk = topk_target(&none);
         let fused = none.targets[topk].fused_computation.as_ref().unwrap();
-        assert!(fused.candidates.is_empty());
+        assert!(fused.ways_to_compute.is_empty());
         assert_eq!(
-            fused.pruned,
+            none.pruned_of_target(topk, true),
             [
                 (
                     HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CmsWithHeap),
@@ -5797,7 +5863,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            none.targets[topk].choices.candidates,
+            none.targets[topk].ways_to_compute,
             [HowToComputeAggregateMeasure::Exact]
         );
         assert_eq!(none.combinations(), 1);
@@ -5959,7 +6025,7 @@ mod tests {
         algorithm: SketchAlgorithm,
     ) -> (SketchStatistic, Rc<OperatorNode>) {
         let topk = topk_target(inventory);
-        let own = inventory.targets[topk].choices.candidates.len();
+        let own = inventory.targets[topk].ways_to_compute.len();
         let (_, root) = composed_with(inventory, topk)
             .into_iter()
             .skip(own)
@@ -5998,7 +6064,7 @@ mod tests {
             .as_ref()
             .expect("a fused heap");
         assert!(fused
-            .candidates
+            .ways_to_compute
             .contains(&HowToComputeAggregateMeasure::Summary(
                 SketchAlgorithm::CmsWithHeap
             )));
@@ -6144,7 +6210,7 @@ mod tests {
             .targets
             .iter()
             .map(|target| {
-                let candidates = &target.choices.candidates;
+                let candidates = &target.ways_to_compute;
                 if candidates.contains(&kll) {
                     position_of(candidates, kll.clone())
                 } else {

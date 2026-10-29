@@ -68,8 +68,7 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
             .map(|target| match &algorithm {
                 None => 0,
                 Some(a) => target
-                    .choices
-                    .candidates
+                    .ways_to_compute
                     .iter()
                     .position(
                         |c| matches!(c,HowToComputeAggregateMeasure::Summary(found) if found==a),

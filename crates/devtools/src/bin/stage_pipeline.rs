@@ -1185,19 +1185,17 @@ fn pass1_pruned_json(inventory: &PerComputationCandidates<usize>) -> Vec<Value> 
         .targets
         .iter()
         .enumerate()
-        .filter_map(|(index, target)| {
-            let fused_pruned = target
-                .fused_computation
-                .as_ref()
-                .map_or(&[][..], |f| &f.pruned[..]);
-            if target.choices.pruned.is_empty() && fused_pruned.is_empty() {
+        .filter_map(|(index, _)| {
+            let pruned = inventory.pruned_of_target(index, false);
+            let fused_pruned = inventory.pruned_of_target(index, true);
+            if pruned.is_empty() && fused_pruned.is_empty() {
                 return None;
             }
             Some(json!({
                 "target": index,
                 "query": format!("Q{}", query_of_target[index] + 1),
-                "pruned": pruned_json(&target.choices.pruned),
-                "fused_pruned": pruned_json(fused_pruned),
+                "pruned": pruned_json(&pruned),
+                "fused_pruned": pruned_json(&fused_pruned),
             }))
         })
         .collect()

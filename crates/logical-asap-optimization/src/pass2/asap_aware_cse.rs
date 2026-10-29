@@ -3269,8 +3269,7 @@ mod tests {
             .targets
             .iter()
             .map(|t| {
-                t.choices
-                    .candidates
+                t.ways_to_compute
                     .iter()
                     .position(|c| *c == HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Cms))
                     .expect("Count-Min is offered for a count")
@@ -3334,8 +3333,7 @@ mod tests {
             .targets
             .iter()
             .map(|t| {
-                t.choices
-                    .candidates
+                t.ways_to_compute
                     .iter()
                     .position(&pick)
                     .expect("the family is a candidate")

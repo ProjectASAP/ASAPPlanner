@@ -73,7 +73,7 @@ fn run_group_choices(workload: &PlanningWorkload) -> Run {
     let local =
         generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
     assert_eq!(local.targets.len(), 1, "one grouped statistic per fixture");
-    let candidates = (0..local.targets[0].choices.candidates.len())
+    let candidates = (0..local.targets[0].ways_to_compute.len())
         .map(|choice| {
             compose_logical_candidate(&local, &[choice])
                 .unwrap()
