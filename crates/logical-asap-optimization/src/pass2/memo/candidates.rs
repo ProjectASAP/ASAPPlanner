@@ -26,7 +26,7 @@ pub struct CandidateForMemoGroup {
     /// (the topmost first).
     pub implements: Vec<MemoGroupId>,
     /// The implementation's own node(s): its root node, whose descendants
-    /// down to `children` are its private nodes.
+    /// down to [`Self::input_groups`] are its private nodes.
     pub root_node: Rc<OperatorNode>,
     /// The groups it reads, whose implementations are chosen separately.
     pub input_groups: Vec<MemoGroupId>,

@@ -1235,7 +1235,7 @@ pub fn compose_logical_candidate_with_budget_share<Id: Clone>(
     compose_with_budget_share(inventory, choice, Some(share))
 }
 
-/// [`compose_logical_candidate`], each summary sized for `accuracy_budget_parts`
+/// [`compose_logical_candidate`], each summary sized for `budget_share`
 /// shares of its budget, or as [`budget_shares`] splits it when `None`.
 fn compose_with_budget_share<Id: Clone>(
     inventory: &PerComputationCandidates<Id>,
