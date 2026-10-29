@@ -30,9 +30,3 @@ ahash = { version = "0.8", default-features = false, features = ["std", "runtime
 # capability table) and #254 (Planner names in that table). Moves to 0.4.1
 # once that is released.
 asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "21b63578c2e612e153f5aaa4d3848f1035a13c60" }
-
-# Tests spend most of their time in the solver (HiGHS), DataFusion and Arrow;
-# optimizing dependencies makes them several times faster for a slower cold
-# build, which CI's dependency cache absorbs.
-[profile.dev.package."*"]
-opt-level = 2
