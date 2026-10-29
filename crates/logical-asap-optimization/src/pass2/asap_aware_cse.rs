@@ -11,7 +11,7 @@
 //!
 //! A *sharing candidate* ([`SharingCandidate`]) of a whole-workload
 //! candidate is a set of two or more of its nodes with identical input and
-//! computation semantics that are legal to share: the `ir::cse` interning
+//! computation semantics that are legal to share: the `pass2::cse` interning
 //! merges ASAP nodes and non-ASAP nodes that return the same rows for the
 //! same input rows.
 //! [`identical_expression_pass2_candidates`] returns one Pass 2 candidate
@@ -153,7 +153,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use asap_types::ir::cse::share_common_sub_dags;
+use crate::pass2::cse::share_common_sub_dags;
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{

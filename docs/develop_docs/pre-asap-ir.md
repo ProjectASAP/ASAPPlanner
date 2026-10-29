@@ -142,7 +142,7 @@ yet — and calls `asap_frontend_common::resolve_root`, which does three things 
    enclosing scope references.
 2. **Schema derivation** — each `OperatorNode::new` derives the node's output schema and
    result kind from the operator and its children.
-3. **Canonicalization** — `asap_types::ir::canonicalize::canonicalize` erases structural
+3. **Canonicalization** — `asap_frontend_common::canonicalize::canonicalize` erases structural
    differences between semantically identical queries: it promotes an additive
    `Limit { Sort { Aggregate } }` ranking to the `AggIntent::TopK` heavy-hitter shape, and
    lowers `EXISTS` / `NOT EXISTS` / `IN (subquery)` predicates to `Join { Semi | Anti }` and a
@@ -152,7 +152,7 @@ yet — and calls `asap_frontend_common::resolve_root`, which does three things 
 The result is `Rc<OperatorNode>`. `lower_promql_workload`, `lower_sql` / `lower_sql_dialect` /
 `lower_sql_batch` and `lower_metricsql` all return it.
 
-Workload search then runs structural CSE (`asap_types::ir::cse::share_common_sub_dags`) once
+Workload search then runs structural CSE (`asap_logical_asap_optimization::pass2::cse::share_common_sub_dags`) once
 across every root: bottom-up hash-consing where the structural hash is only a filter and the
 typed `PartialEq` decides sharing, following scalar references like any other input, and
 gated by `NonASAPOp::is_shareable_when_equal` for non-ASAP producers.

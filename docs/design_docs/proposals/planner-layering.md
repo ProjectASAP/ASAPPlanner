@@ -283,7 +283,7 @@ one. It makes no implementation choice, so this section counts it as Stage 0
 (its output); the code runs it as Stage 1 starts, which is why
 [Stage inputs and outputs](#stage-inputs-and-outputs-whole-workload-candidates-and-memo)
 lists `DagOfLogicalMemoGroups::from_roots` with Pass 1. `DagOfLogicalMemoGroups::from_roots` runs
-`share_common_sub_dags` (`crates/types/src/ir/cse.rs`) over the frontends'
+`share_common_sub_dags` (`crates/logical-asap-optimization/src/pass2/cse.rs`) over the frontends'
 roots and numbers the shared nodes as groups. Two structurally equal nodes
 become one group only when sharing them is legal, that is, when every reader
 of the shared node reads the rows it would read alone. Equal nodes are
@@ -523,7 +523,7 @@ The memo types and rules are in `crates/logical-asap-optimization/src/`
 
 | Step | Entry point | Path |
 |---|---|---|
-| Stage 0 | `DagOfLogicalMemoGroups::from_roots`, `MemoGroup`, `MemoGroupId` | `pass2/memo.rs`; hash-consing is `share_common_sub_dags` in `crates/types/src/ir/cse.rs` |
+| Stage 0 | `DagOfLogicalMemoGroups::from_roots`, `MemoGroup`, `MemoGroupId` | `pass2/memo.rs`; hash-consing is `share_common_sub_dags` in `pass2/cse.rs` |
 | Pass 1 | `generate_per_computation_candidates_with_memo`; `try_populate_pass1` (exported from `pass2::memo::candidates`) | `pass1/per_computation_candidates.rs`; `pass2/memo/groups.rs` |
 | Memo types | `CandidateMemo`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup` | `pass2/memo/candidates.rs` |
 | Pass 2 window composition | `add_local_window_composition`, `extend_local_window_composition` | `pass2/memo/window_candidates.rs` |

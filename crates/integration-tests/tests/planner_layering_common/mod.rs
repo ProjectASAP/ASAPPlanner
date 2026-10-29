@@ -66,7 +66,7 @@ pub fn needs_merge(form: WindowForm, query_window_ms: u64) -> bool {
 /// expression rule, as the memo's group identity applies it).
 #[allow(dead_code)]
 pub fn share_identical(roots: &[QueryRoot]) -> Vec<QueryRoot> {
-    asap_types::ir::cse::share_common_sub_dags(
+    asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
         roots
             .iter()
             .enumerate()

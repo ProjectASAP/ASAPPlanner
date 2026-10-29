@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 
-use asap_types::ir::cse::share_common_sub_dags;
+use crate::pass2::cse::share_common_sub_dags;
 use asap_types::ir::{OperatorNode, QueryRoot};
 
 /// Candidate generation stopped before its finite catalog was complete.
