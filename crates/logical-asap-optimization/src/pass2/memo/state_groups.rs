@@ -70,7 +70,7 @@ pub(crate) fn check_unexpanded_memo(memo: &CandidateMemo) -> Result<(), StateGro
 /// (unsupported candidate shapes unchanged). Then rebuilds every group's
 /// parents and the queries it may serve. On error, discard `memo`: it may
 /// hold partial work.
-pub fn add_shared_summary_state_groups(
+pub(crate) fn add_shared_summary_state_groups(
     memo: &mut CandidateMemo,
     deadline: Option<Instant>,
 ) -> Result<(), StateGroupExpansionError> {
