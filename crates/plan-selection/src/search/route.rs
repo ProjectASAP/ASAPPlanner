@@ -1175,7 +1175,7 @@ fn search_domain<Id: Clone>(
         .map_err(|error| unsupported(&error))?;
     if let Some((plan, steps)) = &mut progress.memo_steps {
         *plan = Some(physical.id.clone());
-        steps.selected_choice = selected_memo_choice(
+        steps.selected_choice = selected_chosen_candidates(
             &steps.concrete_states,
             &source,
             &memo_candidate_roots,
@@ -1192,7 +1192,7 @@ fn search_domain<Id: Clone>(
 /// candidate whose root each selected candidate is. Factoring may give several
 /// memo candidates of a group one root (identical terminal readers of
 /// different inputs); the one reading the selected producers' groups is taken.
-fn selected_memo_choice(
+fn selected_chosen_candidates(
     memo: &CandidateMemo,
     source: &crate::search::candidates::inventory::CandidateInventory,
     memo_candidate_roots: &[Vec<crate::search::candidates::graph::PhysicalCandidateId>],

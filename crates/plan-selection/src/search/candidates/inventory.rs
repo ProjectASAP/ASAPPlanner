@@ -77,7 +77,7 @@ pub(in crate::search) fn build_candidate_inventory_before(
     node_local_cost: impl FnMut(&OperatorNode) -> Result<f64, String>,
     deadline: Option<std::time::Instant>,
 ) -> Result<(CandidateInventory, Vec<Vec<PhysicalCandidateId>>), CandidateInventoryError> {
-    let mut inventory = build_with_compatibility_memo(
+    let mut inventory = build_with_compatible_producers_cache(
         memo,
         output_groups,
         node_local_cost,
@@ -93,12 +93,12 @@ pub(in crate::search) fn build_candidate_inventory_before(
     Ok((inventory, memo_candidate_roots))
 }
 
-fn build_with_compatibility_memo(
+fn build_with_compatible_producers_cache(
     memo: &CandidateMemo,
     output_groups: &[MemoGroupId],
     mut node_local_cost: impl FnMut(&OperatorNode) -> Result<f64, String>,
     deadline: Option<std::time::Instant>,
-    compatibility: &mut MemoGroupOutputToCompatibleProducersCache,
+    compatible_producers_cache: &mut MemoGroupOutputToCompatibleProducersCache,
 ) -> Result<CandidateInventory, CandidateInventoryError> {
     super::check_deadline(deadline)?;
     let invalid = |message: &str| CandidateInventoryError::InvalidMemo(message.into());
@@ -209,7 +209,7 @@ fn build_with_compatibility_memo(
             }
             let mut builder = ImmediateCandidateBuilder {
                 inventory: &mut inventory,
-                compatibility: &mut *compatibility,
+                compatible_producers_cache: &mut *compatible_producers_cache,
                 boundaries,
                 private_nodes: HashMap::new(),
                 used_boundaries: HashSet::new(),
@@ -260,7 +260,7 @@ fn build_with_compatibility_memo(
 
 struct ImmediateCandidateBuilder<'a, F> {
     inventory: &'a mut CandidateInventory,
-    compatibility: &'a mut MemoGroupOutputToCompatibleProducersCache,
+    compatible_producers_cache: &'a mut MemoGroupOutputToCompatibleProducersCache,
     boundaries: HashMap<*const OperatorNode, MemoGroupId>,
     private_nodes: HashMap<*const OperatorNode, PhysicalCandidateId>,
     used_boundaries: HashSet<MemoGroupId>,
@@ -298,7 +298,7 @@ impl<F: FnMut(&OperatorNode) -> Result<f64, String>> ImmediateCandidateBuilder<'
                 self.used_boundaries.insert(group);
                 let key = MemoGroupOutputKey::new(group, &input)
                     .map_err(CandidateInventoryError::InvalidMemo)?;
-                if let Some(compatible) = self.compatibility.get(&key) {
+                if let Some(compatible) = self.compatible_producers_cache.get(&key) {
                     compatible
                 } else {
                     let mut compatible = Vec::new();
@@ -316,7 +316,7 @@ impl<F: FnMut(&OperatorNode) -> Result<f64, String>> ImmediateCandidateBuilder<'
                             compatible.push(candidate);
                         }
                     }
-                    self.compatibility.remember(key, compatible)
+                    self.compatible_producers_cache.remember(key, compatible)
                 }
             } else {
                 vec![self.add(&input, None)?].into()
@@ -412,14 +412,20 @@ mod tests {
     fn compatibility_memo_preserves_complete_candidate_graph_and_optimum() {
         let (memo, outputs) = quantile_memo();
         let cost = |node: &OperatorNode| Ok(if is_kll(node) { 8.0 } else { 1.0 });
-        let mut compatibility = MemoGroupOutputToCompatibleProducersCache::default();
-        let cached =
-            build_with_compatibility_memo(&memo, &outputs, cost, None, &mut compatibility).unwrap();
+        let mut compatible_producers_cache = MemoGroupOutputToCompatibleProducersCache::default();
+        let cached = build_with_compatible_producers_cache(
+            &memo,
+            &outputs,
+            cost,
+            None,
+            &mut compatible_producers_cache,
+        )
+        .unwrap();
         assert!(
-            compatibility.hits() > 0,
+            compatible_producers_cache.hits() > 0,
             "repeated typed supplier checks were actually reused"
         );
-        let uncached = build_with_compatibility_memo(
+        let uncached = build_with_compatible_producers_cache(
             &memo,
             &outputs,
             cost,
@@ -1236,7 +1242,7 @@ mod tests {
     #[test]
     fn terminal_reader_factoring_reconstructs_the_same_minimum_cost_computation() {
         let (memo, outputs) = nested_sum_memo(false);
-        let original = build_with_compatibility_memo(
+        let original = build_with_compatible_producers_cache(
             &memo,
             &outputs,
             |_| Ok(1.0),
@@ -1277,7 +1283,7 @@ mod tests {
             .position(|candidate| candidate.implements.len() > 1)
             .expect("nested sum has an absorbed computation");
         let absorbed = memo.candidates[owner][fused_index].implements[1];
-        let mut inventory = build_with_compatibility_memo(
+        let mut inventory = build_with_compatible_producers_cache(
             &memo,
             &outputs,
             |_| Ok(1.0),
@@ -1324,7 +1330,7 @@ mod tests {
                 candidate.node.contains_asap() && !candidate.children.contains(&inner)
             })
             .expect("fusion can privately recompute the shared inner work");
-        let mut inventory = build_with_compatibility_memo(
+        let mut inventory = build_with_compatible_producers_cache(
             &memo,
             &outputs,
             |_| Ok(1.0),

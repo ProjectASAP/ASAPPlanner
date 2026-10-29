@@ -18,7 +18,7 @@ const enumerationIsObject = (value) => !!value && typeof value === 'object' && !
 const enumerationIsCount = (value) => Number.isInteger(value) && value >= 0;
 
 // A `ChosenCandidatePerMemoGroup`: group id (a string of digits) → candidate index.
-function isMemoChoice(choice) {
+function isChosenCandidatePerMemoGroup(choice) {
   return enumerationIsObject(choice) && Object.entries(choice).every(([group, index]) => /^\d+$/.test(group) && enumerationIsCount(index));
 }
 
@@ -58,7 +58,7 @@ function validateMemoEnumeration(doc) {
   enumeration.choices.forEach((entry, index) => {
     if (!enumerationIsObject(entry)) return;
     const where = `${at}.choices[${index}]`;
-    if (!isMemoChoice(entry.choice)) errors.push(`${where}.choice must map group ids to candidate indices`);
+    if (!isChosenCandidatePerMemoGroup(entry.choice)) errors.push(`${where}.choice must map group ids to candidate indices`);
     // A choice that does not compose has no DAG but its error. Otherwise one
     // root per root group (which need not be one per query), each an index
     // into memo.nodes.

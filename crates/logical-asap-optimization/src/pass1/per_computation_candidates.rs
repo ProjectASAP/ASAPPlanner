@@ -607,7 +607,7 @@ fn placement(below: bool) -> HavingPlacement {
 pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
 ) -> Result<PerComputationCandidates<Id>, PerComputationCandidateError> {
-    generate_with_local_candidate_cache(roots, None, &mut HashMap::new())
+    generate_with_computation_choices_cache(roots, None, &mut HashMap::new())
 }
 
 /// Expand consumer-independent local rules once per logical group and measure.
@@ -620,16 +620,16 @@ pub fn generate_per_computation_candidates_with_memo<Id: std::fmt::Debug>(
     if !memo.matches_root_dependencies(&roots) {
         return Err(PerComputationCandidateError::MemoRootsChanged);
     }
-    generate_with_local_candidate_cache(roots, Some(memo), &mut HashMap::new())
+    generate_with_computation_choices_cache(roots, Some(memo), &mut HashMap::new())
 }
 
 type MemoGroupMeasureToComputationChoicesCache =
     HashMap<(crate::pass2::memo::MemoGroupId, usize), ComputationChoices>;
 
-fn generate_with_local_candidate_cache<Id: std::fmt::Debug>(
+fn generate_with_computation_choices_cache<Id: std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,
     memo: Option<&crate::pass2::memo::DagOfLogicalMemoGroups>,
-    local_candidates: &mut MemoGroupMeasureToComputationChoicesCache,
+    computation_choices_cache: &mut MemoGroupMeasureToComputationChoicesCache,
 ) -> Result<PerComputationCandidates<Id>, PerComputationCandidateError> {
     let mut seen = HashSet::new();
     // Each aggregate with the first root that reaches it.
@@ -716,7 +716,7 @@ fn generate_with_local_candidate_cache<Id: std::fmt::Debug>(
                 .and_then(|memo| memo.group_for_node(&node))
                 .map(|group| (group, measure));
             let cached = group_measure
-                .and_then(|key| local_candidates.get(&key))
+                .and_then(|key| computation_choices_cache.get(&key))
                 .cloned();
             let mut choices = cached
                 .map_or_else(|| computation_candidates_for_intent(intent), Ok)
@@ -730,7 +730,7 @@ fn generate_with_local_candidate_cache<Id: std::fmt::Debug>(
                     error => error,
                 })?;
             if let Some(key) = group_measure {
-                local_candidates
+                computation_choices_cache
                     .entry(key)
                     .or_insert_with(|| choices.clone());
             }
@@ -4645,7 +4645,8 @@ mod tests {
         let memo = crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots);
         let baseline = generate_per_computation_candidates(roots.clone()).unwrap();
         let mut cache = MemoGroupMeasureToComputationChoicesCache::new();
-        let cached = generate_with_local_candidate_cache(roots, Some(&memo), &mut cache).unwrap();
+        let cached =
+            generate_with_computation_choices_cache(roots, Some(&memo), &mut cache).unwrap();
         assert!(
             cache.len() < cached.targets.len(),
             "repeated eligible groups reuse local rules"
