@@ -185,6 +185,12 @@ workload manifests with ε = 1 − the accuracy SLA and δ = 0.3, and are
 planned as the MVP deployment: raw data not retained, Fargate prices,
 accuracy guarantees enforced.
 
+The two paper sets (paper-rangeheavy-first7, paper-rollupheavy-first7; one
+workload each) are the first seven queries of the paper's W-RangeHeavy
+(PromQL) and W-RollupHeavy (SQL, with its `tables.json`) workloads, with
+their data workloads unchanged. They are planned with raw data retained,
+since without it W-RangeHeavy's first seven queries have no feasible plan.
+
 ## Query editor
 
 With the local server running, **Query editor** plans SQL and PromQL

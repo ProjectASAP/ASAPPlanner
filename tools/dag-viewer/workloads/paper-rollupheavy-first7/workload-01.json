@@ -1,0 +1,164 @@
+{
+ "query_workload": {
+  "language": {
+   "sql": "datafusion_sql"
+  },
+  "query_batch": null,
+  "repeating_queries": [
+   {
+    "query": "SELECT dst_subnet, COUNT(DISTINCT src_addr) AS value FROM flows WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY dst_subnet",
+    "demand": {
+     "fixed_interval": 60000
+    },
+    "requirements": {
+     "accuracy": {
+      "accuracy_metric": "relative",
+      "max_error": 0.05,
+      "failure_probability": 0.05,
+      "accuracy_scope": "per_value"
+     }
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    }
+   },
+   {
+    "query": "SELECT dst_subnet, COUNT(DISTINCT src_addr) AS value FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY dst_subnet",
+    "demand": {
+     "fixed_interval": 60000
+    },
+    "requirements": {
+     "accuracy": {
+      "accuracy_metric": "relative",
+      "max_error": 0.05,
+      "failure_probability": 0.05,
+      "accuracy_scope": "per_value"
+     }
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    }
+   },
+   {
+    "query": "SELECT dst_port, COUNT(DISTINCT src_addr) AS value FROM flows WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY dst_port",
+    "demand": {
+     "fixed_interval": 60000
+    },
+    "requirements": {
+     "accuracy": {
+      "accuracy_metric": "relative",
+      "max_error": 0.05,
+      "failure_probability": 0.05,
+      "accuracy_scope": "per_value"
+     }
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    }
+   },
+   {
+    "query": "SELECT dst_port, COUNT(DISTINCT src_addr) AS value FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY dst_port",
+    "demand": {
+     "fixed_interval": 60000
+    },
+    "requirements": {
+     "accuracy": {
+      "accuracy_metric": "relative",
+      "max_error": 0.05,
+      "failure_probability": 0.05,
+      "accuracy_scope": "per_value"
+     }
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    }
+   },
+   {
+    "query": "SELECT dst_subnet, proto, COUNT(DISTINCT src_addr) AS value FROM flows WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY dst_subnet, proto",
+    "demand": {
+     "fixed_interval": 60000
+    },
+    "requirements": {
+     "accuracy": {
+      "accuracy_metric": "relative",
+      "max_error": 0.05,
+      "failure_probability": 0.05,
+      "accuracy_scope": "per_value"
+     }
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    }
+   },
+   {
+    "query": "SELECT dst_subnet, proto, COUNT(DISTINCT src_addr) AS value FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY dst_subnet, proto",
+    "demand": {
+     "fixed_interval": 60000
+    },
+    "requirements": {
+     "accuracy": {
+      "accuracy_metric": "relative",
+      "max_error": 0.05,
+      "failure_probability": 0.05,
+      "accuracy_scope": "per_value"
+     }
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    }
+   },
+   {
+    "query": "SELECT dst_port, proto, COUNT(DISTINCT src_addr) AS value FROM flows WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY dst_port, proto",
+    "demand": {
+     "fixed_interval": 60000
+    },
+    "requirements": {
+     "accuracy": {
+      "accuracy_metric": "relative",
+      "max_error": 0.05,
+      "failure_probability": 0.05,
+      "accuracy_scope": "per_value"
+     }
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    }
+   }
+  ]
+ },
+ "data_workload": {
+  "arrival": {
+   "ingesting": {
+    "rows_per_second": 6000000.0
+   }
+  },
+  "sources": {
+   "http": {
+    "series_count": 10000,
+    "sample_interval": 5,
+    "values_non_negative": true,
+    "max_distinct_per_evaluation": 1000000
+   },
+   "flows": {
+    "series_count": 3000000,
+    "sample_interval": 750,
+    "values_non_negative": true,
+    "max_distinct_per_evaluation": 1000000
+   }
+  }
+ }
+}
