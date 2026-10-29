@@ -441,7 +441,7 @@ pub mod planning {
             depth[group] = d;
             pending.extend(
                 memo.groups[group]
-                    .children
+                    .child_groups
                     .iter()
                     .map(|child| (child.0 as usize, d + 1)),
             );
@@ -469,7 +469,7 @@ pub mod planning {
                 let found = own_choices(memo, q, |c| {
                     c.origin
                         == asap_logical_asap_optimization::pass2::memo::candidates::OriginOfCandidateForMemoGroup::Pass1
-                        && builds(&c.node)
+                        && builds(&c.root_node)
                 });
                 let top = found
                     .first()
@@ -495,13 +495,13 @@ pub mod planning {
             })
             .collect();
         for (state, group) in memo.groups.iter().enumerate() {
-            if !is_build(&group.node) || group.queries.len() < queries {
+            if !is_build(&group.logical_node) || group.queries.len() < queries {
                 continue;
             }
             let reading: Option<std::collections::BTreeMap<usize, usize>> = (0..queries)
                 .map(|q| {
                     own_choices(memo, q, |c| {
-                        c.children.iter().any(|child| child.0 as usize == state)
+                        c.input_groups.iter().any(|child| child.0 as usize == state)
                     })
                     .into_iter()
                     .next()

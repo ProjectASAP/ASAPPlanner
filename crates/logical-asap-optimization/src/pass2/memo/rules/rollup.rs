@@ -46,13 +46,13 @@ pub(in crate::pass2::memo) fn add_rollup_candidates(
                 continue;
             }
             let roots = [
-                QueryRoot::Operator(Rc::clone(&coarse.node)),
-                QueryRoot::Operator(Rc::clone(&fine.node)),
+                QueryRoot::Operator(Rc::clone(&coarse.root_node)),
+                QueryRoot::Operator(Rc::clone(&fine.root_node)),
             ];
             let Some(rule) = rollup_candidate_for(&roots, Rc::as_ptr(coarse_build)) else {
                 continue;
             };
-            if !OperatorNode::reachable(&fine.node)
+            if !OperatorNode::reachable(&fine.root_node)
                 .iter()
                 .any(|node| Rc::ptr_eq(node, &rule.finer))
             {
@@ -136,16 +136,16 @@ pub(in crate::pass2::memo) fn add_rollup_candidates(
                 // implementation of the group is still checked by plan
                 // reconstruction (input contract) and Stage 3 (guarantee).
                 let fine_result_is_value = *fine_node == *value
-                    && memo.groups[*fine_group].node.schema == value.schema
+                    && memo.groups[*fine_group].logical_node.schema == value.schema
                     && memo.candidates[*fine_group].iter().all(|candidate| {
                         candidate
-                            .node
+                            .root_node
                             .guarantee
                             .as_ref()
                             .is_some_and(|guarantee| guarantee.is_exact())
                     });
                 if fine_result_is_value {
-                    let fine_result = Rc::clone(&memo.groups[*fine_group].node);
+                    let fine_result = Rc::clone(&memo.groups[*fine_group].logical_node);
                     let coarse_node = replace(
                         &coarse_node,
                         &HashMap::from([(Rc::as_ptr(&value), fine_result)]),
@@ -170,7 +170,7 @@ pub(in crate::pass2::memo) fn add_rollup_candidates(
                     OriginOfCandidateForMemoGroup::Rollup,
                     1,
                 )?;
-                let canonical = Rc::clone(&memo.groups[producer.0 as usize].node);
+                let canonical = Rc::clone(&memo.groups[producer.0 as usize].logical_node);
                 let coarse_node = replace(
                     &coarse_node,
                     &HashMap::from([(Rc::as_ptr(&value), Rc::clone(&canonical))]),
@@ -270,8 +270,8 @@ pub(in crate::pass2::memo) fn add_window_rollup_candidates(
             for grid in &grids[*coarse_group] {
                 check_generation_deadline(deadline)?;
                 let roots = [
-                    QueryRoot::Operator(Rc::clone(&coarse.node)),
-                    QueryRoot::Operator(Rc::clone(&fine.node)),
+                    QueryRoot::Operator(Rc::clone(&coarse.root_node)),
+                    QueryRoot::Operator(Rc::clone(&fine.root_node)),
                 ];
                 let panes = pane_candidates(&roots, &[Some(*grid), Some(*grid)]);
                 if panes.len() != 2 {
@@ -367,7 +367,7 @@ mod tests {
             memo.candidates[coarse].iter().any(|candidate| {
                 candidate.origin == OriginOfCandidateForMemoGroup::Rollup
                     && candidate
-                        .children
+                        .input_groups
                         .iter()
                         .any(|child| child.0 as usize == fine)
             }),

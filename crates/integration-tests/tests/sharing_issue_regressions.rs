@@ -126,7 +126,7 @@ fn sql_count_topk_has_a_fused_raw_row_heap() {
         .targets
         .iter()
         .enumerate()
-        .find(|(_, target)| target.fused.is_some())
+        .find(|(_, target)| target.fused_computation.is_some())
         .expect("SQL TopK must offer a fused raw-row heap");
     for choice in target.choices.candidates.len()..target.choice_count() {
         let mut selected = vec![0; inventory.targets.len()];
@@ -259,7 +259,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
     let expanded =
         expand_concrete_summary_state_groups_in_domain(memo, PaneWidthDomain::SeedGrids).unwrap();
     let (owner, candidate) = expanded.memo.candidates.iter().enumerate().flat_map(|(owner, candidates)| candidates.iter().map(move |c| (owner,c)))
-        .find(|(_, c)| c.origin == OriginOfCandidateForMemoGroup::Rollup && matches!(c.node.non_asap(), Some(NonASAPOp::Aggregate { measures, child, .. })
+        .find(|(_, c)| c.origin == OriginOfCandidateForMemoGroup::Rollup && matches!(c.root_node.non_asap(), Some(NonASAPOp::Aggregate { measures, child, .. })
             if matches!(measures.as_slice(), [AggIntent::Min { .. }]) && matches!(child.non_asap(), Some(NonASAPOp::Filter { .. }))))
         .expect("filtered group read candidate");
     // The same readout keeps a KLL's rank bound: it selects a whole group,
@@ -269,7 +269,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
     };
     use asap_types::ir::{schema::SketchAlgorithm, QueryRoot};
     use std::rc::Rc;
-    let filter = candidate.node.children()[0];
+    let filter = candidate.root_node.children()[0];
     let grouped = filter.children()[0];
     let inv =
         generate_per_computation_candidates(vec![(0, QueryRoot::Operator(Rc::clone(grouped)))])
@@ -303,7 +303,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
     );
     let readout = Rc::new(
         candidate
-            .node
+            .root_node
             .with_new_children(|_| Rc::clone(&filtered))
             .unwrap(),
     );
@@ -326,7 +326,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
     let many_groups = Rc::new(many_groups);
     let invalid = Rc::new(
         candidate
-            .node
+            .root_node
             .with_new_children(|_| Rc::clone(&many_groups))
             .unwrap(),
     );
@@ -351,7 +351,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
     let on_estimate = Rc::new(on_estimate);
     let invalid = Rc::new(
         candidate
-            .node
+            .root_node
             .with_new_children(|_| Rc::clone(&on_estimate))
             .unwrap(),
     );
@@ -381,11 +381,11 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
         ],
     ] {
         let before = physical_common::execute_raw_rows_at(
-            &expanded.memo.groups[owner].node,
+            &expanded.memo.groups[owner].logical_node,
             rows.clone(),
             1000,
         );
-        let after = physical_common::execute_raw_rows_at(&candidate.node, rows, 1000);
+        let after = physical_common::execute_raw_rows_at(&candidate.root_node, rows, 1000);
         assert_eq!(format!("{after:?}"), format!("{before:?}"));
         assert_eq!(after.len(), 1);
     }
@@ -434,7 +434,7 @@ fn sql_count_rollup_executes_with_integer_results() {
             .flat_map(|(owner, candidates)| candidates.iter().map(move |c| (owner, c)))
             .find(|(_, c)| {
                 c.origin == OriginOfCandidateForMemoGroup::Rollup
-                    && asap_types::ir::OperatorNode::reachable(&c.node)
+                    && asap_types::ir::OperatorNode::reachable(&c.root_node)
                         .iter()
                         .any(|node| {
                             matches!(node.asap(), Some(ASAPOp::FinalizeExactAccumulator { child })
@@ -462,9 +462,11 @@ fn sql_count_rollup_executes_with_integer_results() {
                 Value::Null,
             ],
         ];
-        let before =
-            physical_common::execute_raw_rows(&expanded.memo.groups[owner].node, rows.clone());
-        let after = physical_common::execute_raw_rows(&candidate.node, rows);
+        let before = physical_common::execute_raw_rows(
+            &expanded.memo.groups[owner].logical_node,
+            rows.clone(),
+        );
+        let after = physical_common::execute_raw_rows(&candidate.root_node, rows);
         let sorted = |rows: Vec<Vec<Value>>| {
             let mut rows: Vec<_> = rows.iter().map(|row| format!("{row:?}")).collect();
             rows.sort();
@@ -475,8 +477,8 @@ fn sql_count_rollup_executes_with_integer_results() {
             .all(|row| matches!(row.last(), Some(Value::Int64(_)))));
         assert_eq!(sorted(before), sorted(after));
         let before_empty =
-            physical_common::execute_raw_rows(&expanded.memo.groups[owner].node, vec![]);
-        let after_empty = physical_common::execute_raw_rows(&candidate.node, vec![]);
+            physical_common::execute_raw_rows(&expanded.memo.groups[owner].logical_node, vec![]);
+        let after_empty = physical_common::execute_raw_rows(&candidate.root_node, vec![]);
         assert_eq!(sorted(before_empty), sorted(after_empty));
     }
 }
@@ -590,5 +592,5 @@ fn sql_grouped_count_sketches_are_not_offered() {
     assert!(inventory
         .targets
         .iter()
-        .any(|target| target.fused.is_some()));
+        .any(|target| target.fused_computation.is_some()));
 }

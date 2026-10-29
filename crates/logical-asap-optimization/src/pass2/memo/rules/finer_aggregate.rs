@@ -78,7 +78,7 @@ pub(in crate::pass2::memo) fn add_finer_aggregate_candidates(
     // first levels of the paper's filter tree) instead of trying all pairs.
     let mut buckets: HashMap<String, Vec<usize>> = HashMap::new();
     for (group, entry) in memo.groups.iter().enumerate() {
-        if let Some(aggregate) = Aggregate::of(&entry.node) {
+        if let Some(aggregate) = Aggregate::of(&entry.logical_node) {
             buckets
                 .entry(format!("{:?}", aggregate.measures))
                 .or_default()
@@ -106,8 +106,8 @@ fn add_read(
     owner: usize,
     finer: usize,
 ) -> Result<usize, StateGroupExpansionError> {
-    let query_node = Rc::clone(&memo.groups[owner].node);
-    let finer_node = Rc::clone(&memo.groups[finer].node);
+    let query_node = Rc::clone(&memo.groups[owner].logical_node);
+    let finer_node = Rc::clone(&memo.groups[finer].logical_node);
     let (Some(query), Some(fine)) = (Aggregate::of(&query_node), Aggregate::of(&finer_node)) else {
         return Ok(0);
     };
@@ -167,10 +167,14 @@ fn add_read(
     // or nullability differs from the query's (a sum of counts) is not
     // offered.
     let mut schema = reader.schema.clone();
-    for (field, expected) in schema.fields.iter_mut().zip(&original.node.schema.fields) {
+    for (field, expected) in schema
+        .fields
+        .iter_mut()
+        .zip(&original.root_node.schema.fields)
+    {
         field.table = expected.table.clone();
     }
-    if schema != original.node.schema || reader.result_kind != original.node.result_kind {
+    if schema != original.root_node.schema || reader.result_kind != original.root_node.result_kind {
         return Ok(0);
     }
     let reader = Rc::new(OperatorNode::with_schema(reader.operator.clone(), schema));

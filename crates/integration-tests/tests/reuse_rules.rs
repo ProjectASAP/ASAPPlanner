@@ -173,13 +173,16 @@ fn candidates_of<'a>(
         .filter(|(group, _)| {
             let group = &memo.groups[*group];
             !group.roots_of.is_empty()
-                || matches!(group.node.non_asap(), Some(NonASAPOp::Aggregate { .. }))
+                || matches!(
+                    group.logical_node.non_asap(),
+                    Some(NonASAPOp::Aggregate { .. })
+                )
         })
         .flat_map(move |(group, candidates)| {
             candidates
                 .iter()
                 .filter(move |c| origins.contains(&c.origin))
-                .map(move |c| (group, &c.node))
+                .map(move |c| (group, &c.root_node))
         })
 }
 
@@ -244,7 +247,7 @@ fn choices(memo: &CandidateMemo, origins: &[OriginOfCandidateForMemoGroup]) -> V
         .map(|(group, node)| {
             let index = memo.candidates[group]
                 .iter()
-                .position(|c| Rc::ptr_eq(&c.node, node))
+                .position(|c| Rc::ptr_eq(&c.root_node, node))
                 .unwrap();
             (group, index)
         })
@@ -258,7 +261,7 @@ fn own_candidates<'a>(
     origins: &'a [OriginOfCandidateForMemoGroup],
 ) -> impl Iterator<Item = (usize, &'a Rc<OperatorNode>)> + 'a {
     candidates_of(memo, origins)
-        .filter(|(group, node)| !Rc::ptr_eq(node, &memo.groups[*group].node))
+        .filter(|(group, node)| !Rc::ptr_eq(node, &memo.groups[*group].logical_node))
 }
 
 /// `sum by (job) (sum_over_time(m[5m]))`: the nested sums and their merge
@@ -384,7 +387,7 @@ fn every_candidate_answers_alike(query: &str) {
     for (group, node) in own_candidates(&memo, &[OriginOfCandidateForMemoGroup::Pass1]) {
         assert_eq!(
             execute_implemented(node, &entry),
-            execute_implemented(&memo.groups[group].node, &entry),
+            execute_implemented(&memo.groups[group].logical_node, &entry),
             "{query}: a candidate of group {group} differs"
         );
         checked += 1;
@@ -431,7 +434,7 @@ fn reuse_answers_alike_in(
         }
         assert_eq!(
             execute_implemented(node, &entry),
-            execute_implemented(&memo.groups[group].node, &entry),
+            execute_implemented(&memo.groups[group].logical_node, &entry),
             "{queries:?}: a reuse candidate of group {group} differs"
         );
         checked += 1;
@@ -521,9 +524,9 @@ fn a_rollup_over_a_shared_summary_candidate_answers_as_without_it() {
         .find(|group| {
             group.queries.len() > 1
                 && group.queries.iter().all(|&q| q >= 2)
-                && matches!(group.node.asap(), Some(ASAPOp::SummaryAgg { .. }))
+                && matches!(group.logical_node.asap(), Some(ASAPOp::SummaryAgg { .. }))
         })
-        .map(|group| Rc::clone(&group.node))
+        .map(|group| Rc::clone(&group.logical_node))
         .expect("the quantiles share a summary build");
     // Each quantile's own candidate that reads the shared build.
     let mut sharing: BTreeMap<usize, usize> = [2, 3]
@@ -540,7 +543,7 @@ fn a_rollup_over_a_shared_summary_candidate_answers_as_without_it() {
                         .map(move |(i, c)| (group, i, c))
                 })
                 .find(|(_, _, c)| {
-                    OperatorNode::reachable(&c.node)
+                    OperatorNode::reachable(&c.root_node)
                         .iter()
                         .any(|node| Rc::ptr_eq(node, &shared))
                 })

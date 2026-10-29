@@ -21,7 +21,7 @@ pub mod window_candidates;
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use asap_types::ir::cse::share_common_sub_dags;
 use asap_types::ir::{OperatorNode, QueryRoot};
@@ -51,9 +51,9 @@ pub struct MemoGroupId(pub u32);
 pub struct MemoGroup {
     /// Its logical node as the frontends (and Pass 1 targets) see it; its
     /// children are other groups' nodes.
-    pub node: Rc<OperatorNode>,
+    pub logical_node: Rc<OperatorNode>,
     /// Its child groups, in the node's child order.
-    pub children: Vec<MemoGroupId>,
+    pub child_groups: Vec<MemoGroupId>,
     /// The groups that read it.
     pub parents: Vec<MemoGroupId>,
     /// The queries whose roots reach it, by index in the workload.
@@ -68,19 +68,15 @@ pub struct DagOfLogicalMemoGroups {
     pub groups: Vec<MemoGroup>,
     original_roots: Vec<QueryRoot>,
     group_of: GroupOf,
-    /// Time spent constructing logical identity, excluding later Pass 1 work.
-    pub build_duration: Duration,
 }
 
 impl DagOfLogicalMemoGroups {
     pub fn from_roots<Id>(roots: &[(Id, QueryRoot)]) -> Self {
-        let started = Instant::now();
         let (groups, group_of) = hash_consed(roots);
         Self {
             groups,
             original_roots: roots.iter().map(|(_, root)| root.clone()).collect(),
             group_of,
-            build_duration: started.elapsed(),
         }
     }
 
@@ -193,8 +189,8 @@ fn number(
         }
     }
     groups.push(MemoGroup {
-        node: Rc::clone(node),
-        children,
+        logical_node: Rc::clone(node),
+        child_groups: children,
         parents: Vec::new(),
         queries: Vec::new(),
         roots_of: Vec::new(),
@@ -206,7 +202,7 @@ fn number(
 /// `g` and every group below it.
 fn reach(groups: &[MemoGroup], g: MemoGroupId, reached: &mut HashSet<MemoGroupId>) {
     if reached.insert(g) {
-        for &child in &groups[g.0 as usize].children {
+        for &child in &groups[g.0 as usize].child_groups {
             reach(groups, child, reached);
         }
     }
@@ -264,10 +260,10 @@ mod tests {
         assert_ne!(root_group(2), root_group(3));
         for (index, group) in memo.groups.iter().enumerate() {
             assert!(group
-                .children
+                .child_groups
                 .iter()
                 .all(|child| (child.0 as usize) < index));
-            for child in &group.children {
+            for child in &group.child_groups {
                 assert!(memo.groups[child.0 as usize]
                     .parents
                     .contains(&MemoGroupId(index as u32)));
@@ -292,12 +288,12 @@ mod tests {
             .groups
             .iter()
             .find(|group| {
-                matches!(group.node.non_asap(), Some(NonASAPOp::BinaryOp { operator, .. })
+                matches!(group.logical_node.non_asap(), Some(NonASAPOp::BinaryOp { operator, .. })
                     if operator.kind == BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
             })
             .expect("a `G2 / G3` group");
         assert_eq!(
-            division.children[0], division.children[1],
+            division.child_groups[0], division.child_groups[1],
             "both operands of the division are one group"
         );
         assert_eq!(memo.groups.len(), 7);
@@ -368,7 +364,6 @@ mod tests {
             groups: Vec::new(),
             original_roots: roots.iter().map(|(_, r)| r.clone()).collect(),
             group_of: GroupOf::new(),
-            build_duration: Duration::ZERO,
         };
         assert!(memo.matches_root_dependencies(&roots));
     }

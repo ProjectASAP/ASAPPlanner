@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 pub(in crate::pass2::memo) fn eligible(candidate: &CandidateForMemoGroup) -> bool {
-    !candidate.implements.is_empty() && candidate.budget_share > 0
+    !candidate.implements.is_empty() && candidate.accuracy_budget_parts > 0
 }
 
 pub(in crate::pass2::memo) fn restore_inputs(
@@ -24,7 +24,7 @@ pub(in crate::pass2::memo) fn restore_inputs(
     // contract because the intermediate state's guarantee is part of its API.
     let canonical: Vec<_> = inputs
         .iter()
-        .flat_map(|id| OperatorNode::reachable(&memo.groups[id.0 as usize].node))
+        .flat_map(|id| OperatorNode::reachable(&memo.groups[id.0 as usize].logical_node))
         .collect();
     fn visit(
         node: &Rc<OperatorNode>,
@@ -106,8 +106,8 @@ pub(in crate::pass2::memo) fn append_producer(
         group.roots_of.is_empty()
             && memo.candidates[*index].len() == 1
             && memo.candidates[*index][0].origin == origin
-            && memo.candidates[*index][0].budget_share == budget_share
-            && same_node(&group.node, &node, true)
+            && memo.candidates[*index][0].accuracy_budget_parts == budget_share
+            && same_node(&group.logical_node, &node, true)
     }) {
         return Ok(MemoGroupId(index as u32));
     }
@@ -119,22 +119,22 @@ pub(in crate::pass2::memo) fn append_producer(
         .groups
         .iter()
         .enumerate()
-        .map(|(id, group)| (Rc::as_ptr(&group.node), MemoGroupId(id as u32)))
+        .map(|(id, group)| (Rc::as_ptr(&group.logical_node), MemoGroupId(id as u32)))
         .collect();
     let children = boundary_groups(&node, &boundaries);
     memo.groups.push(MemoGroup {
-        node: Rc::clone(&node),
-        children: children.clone(),
+        logical_node: Rc::clone(&node),
+        child_groups: children.clone(),
         parents: Vec::new(),
         queries: queries.to_vec(),
         roots_of: Vec::new(),
     });
     memo.candidates.push(vec![CandidateForMemoGroup {
         implements: vec![id],
-        node,
-        children,
+        root_node: node,
+        input_groups: children,
         origin,
-        budget_share,
+        accuracy_budget_parts: budget_share,
     }]);
     Ok(id)
 }
@@ -146,15 +146,15 @@ pub(in crate::pass2::memo) fn append_reader(
     node: Rc<OperatorNode>,
     origin: OriginOfCandidateForMemoGroup,
 ) -> Result<bool, StateGroupExpansionError> {
-    if original.node.schema.fields != node.schema.fields
-        || original.node.schema.time_index != node.schema.time_index
-        || original.node.schema.unique_keys != node.schema.unique_keys
-        || (original.node.schema.closed && !node.schema.closed)
-        || original.node.result_kind != node.result_kind
+    if original.root_node.schema.fields != node.schema.fields
+        || original.root_node.schema.time_index != node.schema.time_index
+        || original.root_node.schema.unique_keys != node.schema.unique_keys
+        || (original.root_node.schema.closed && !node.schema.closed)
+        || original.root_node.result_kind != node.result_kind
     {
         return Err(StateGroupExpansionError::ReuseRule(format!(
             "reuse changed the reader output contract ({origin:?}): expected {:?}, got {:?}",
-            original.node.schema, node.schema
+            original.root_node.schema, node.schema
         )));
     }
     let boundaries = memo
@@ -162,20 +162,20 @@ pub(in crate::pass2::memo) fn append_reader(
         .iter()
         .enumerate()
         .filter(|(id, _)| *id != owner)
-        .map(|(id, group)| (Rc::as_ptr(&group.node), MemoGroupId(id as u32)))
+        .map(|(id, group)| (Rc::as_ptr(&group.logical_node), MemoGroupId(id as u32)))
         .collect();
     let children = boundary_groups(&node, &boundaries);
     if memo.candidates[owner].iter().any(|known| {
-        known.children == children
-            && known.budget_share == original.budget_share
-            && *known.node == *node
-            && serde_json::to_string(&known.node).ok() == serde_json::to_string(&node).ok()
+        known.input_groups == children
+            && known.accuracy_budget_parts == original.accuracy_budget_parts
+            && *known.root_node == *node
+            && serde_json::to_string(&known.root_node).ok() == serde_json::to_string(&node).ok()
     }) {
         return Ok(false);
     }
     let mut candidate = original.clone();
-    candidate.node = node;
-    candidate.children = children;
+    candidate.root_node = node;
+    candidate.input_groups = children;
     candidate.origin = origin;
     memo.candidates[owner].push(candidate);
     Ok(true)
@@ -221,9 +221,9 @@ pub(in crate::pass2::memo) fn combined_inputs(
     right: &CandidateForMemoGroup,
 ) -> Vec<MemoGroupId> {
     let mut seen = HashSet::new();
-    left.children
+    left.input_groups
         .iter()
-        .chain(&right.children)
+        .chain(&right.input_groups)
         .copied()
         .filter(|id| seen.insert(*id))
         .collect()

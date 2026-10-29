@@ -1203,7 +1203,10 @@ fn pass1_pruned_json(inventory: &PerComputationCandidates<usize>) -> Vec<Value> 
         .iter()
         .enumerate()
         .filter_map(|(index, target)| {
-            let fused_pruned = target.fused.as_ref().map_or(&[][..], |f| &f.pruned[..]);
+            let fused_pruned = target
+                .fused_computation
+                .as_ref()
+                .map_or(&[][..], |f| &f.pruned[..]);
             if target.choices.pruned.is_empty() && fused_pruned.is_empty() {
                 return None;
             }
@@ -1593,7 +1596,7 @@ fn memo_json(steps: &MemoSteps, caps: &MemoCaps, pricing: &Pricing<'_>) -> Value
                 "id": format!("E{}", index + 1),
                 "choice": choice_json(choice),
                 "budget_share_1": choice.iter().all(|(group, &candidate)| {
-                    memo.candidates[group.0 as usize][candidate].budget_share == 1
+                    memo.candidates[group.0 as usize][candidate].accuracy_budget_parts == 1
                 }),
                 "selected": step == "concrete_states" && selected == Some(choice),
             });
@@ -1709,7 +1712,7 @@ fn memo_groups_json(
         .zip(&memo.candidates)
         .enumerate()
         .map(|(id, (group, candidates))| {
-            let node = table.add(std::slice::from_ref(&group.node)).0[0];
+            let node = table.add(std::slice::from_ref(&group.logical_node)).0[0];
             let mut by_origin = serde_json::Map::new();
             for candidate in candidates {
                 let count = by_origin
@@ -1725,15 +1728,18 @@ fn memo_groups_json(
                 .take(max_candidates)
                 .enumerate()
                 .map(|(index, candidate)| {
-                    let (roots, originals) = table.add(std::slice::from_ref(&candidate.node));
+                    let (roots, originals) = table.add(std::slice::from_ref(&candidate.root_node));
                     let group_of_node: serde_json::Map<_, _> = originals
                         .iter()
                         .filter_map(|(original, node)| {
                             candidate
-                                .children
+                                .input_groups
                                 .iter()
                                 .find(|child| {
-                                    Rc::ptr_eq(&memo.groups[child.0 as usize].node, original)
+                                    Rc::ptr_eq(
+                                        &memo.groups[child.0 as usize].logical_node,
+                                        original,
+                                    )
                                 })
                                 .map(|child| (node.to_string(), json!(child.0)))
                         })
@@ -1741,12 +1747,12 @@ fn memo_groups_json(
                     json!({
                         "index": index,
                         "implements": ids(&candidate.implements),
-                        "children": ids(&candidate.children),
+                        "children": ids(&candidate.input_groups),
                         "origin": origin_name(&candidate.origin),
-                        "budget_share": candidate.budget_share,
+                        "budget_share": candidate.accuracy_budget_parts,
                         "added": !earlier.iter().any(|before| {
-                            Rc::ptr_eq(&before.node, &candidate.node)
-                                && before.children == candidate.children
+                            Rc::ptr_eq(&before.root_node, &candidate.root_node)
+                                && before.input_groups == candidate.input_groups
                         }),
                         "label": candidate_node_label(&table.nodes, roots[0], &group_of_node),
                         "node": roots[0],
@@ -1757,7 +1763,7 @@ fn memo_groups_json(
             json!({
                 "id": id,
                 "label": node_label(&table.nodes[node]),
-                "children": ids(&group.children),
+                "children": ids(&group.child_groups),
                 "parents": ids(&group.parents),
                 "queries": group.queries,
                 "roots_of": group.roots_of,

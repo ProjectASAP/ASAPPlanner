@@ -26,10 +26,10 @@ pub struct CandidateForMemoGroup {
     /// (the topmost first).
     pub implements: Vec<MemoGroupId>,
     /// The implementation's own node(s): its root node, whose descendants
-    /// down to `children` are its private nodes.
-    pub node: Rc<OperatorNode>,
+    /// down to [`Self::input_groups`] are its private nodes.
+    pub root_node: Rc<OperatorNode>,
     /// The groups it reads, whose implementations are chosen separately.
-    pub children: Vec<MemoGroupId>,
+    pub input_groups: Vec<MemoGroupId>,
     /// How it was made: by Pass 1, or by which Pass 2 transformation.
     pub origin: OriginOfCandidateForMemoGroup,
     /// The number of equal shares of its measures' accuracy budget its
@@ -39,7 +39,7 @@ pub struct CandidateForMemoGroup {
     /// it is not an equality constraint on the selected number of readers or
     /// approximate inputs. Recompose and validate accuracy at query roots.
     /// Larger allocations may be valid but costlier than necessary.
-    pub budget_share: usize,
+    pub accuracy_budget_parts: usize,
 }
 
 /// Where an implementation candidate came from.

@@ -77,10 +77,10 @@ pub fn extend_local_window_composition(
         if !bucket.iter().any(|&index| {
             let previous = &memo.candidates[group][index];
             previous.origin == candidate.origin
-                && previous.children == candidate.children
+                && previous.input_groups == candidate.input_groups
                 && previous.implements == candidate.implements
-                && previous.budget_share == candidate.budget_share
-                && previous.node == candidate.node
+                && previous.accuracy_budget_parts == candidate.accuracy_budget_parts
+                && previous.root_node == candidate.root_node
         }) {
             bucket.push(memo.candidates[group].len());
             memo.candidates[group].push(candidate);
@@ -155,7 +155,7 @@ fn local_pane_candidates_delta(
                 ) {
                     continue;
                 }
-                let canonical_scans = OperatorNode::reachable(&candidate.node)
+                let canonical_scans = OperatorNode::reachable(&candidate.root_node)
                     .into_iter()
                     .filter(|node| {
                         matches!(
@@ -164,7 +164,7 @@ fn local_pane_candidates_delta(
                         ) && group_of.contains_key(&Rc::as_ptr(node))
                     })
                     .collect::<Vec<_>>();
-                let roots = [QueryRoot::Operator(Rc::clone(&candidate.node))];
+                let roots = [QueryRoot::Operator(Rc::clone(&candidate.root_node))];
                 let panes = pane_candidates(&roots, &[Some(grid)]);
                 if panes.is_empty() {
                     continue;
@@ -268,7 +268,7 @@ fn group_of_node(groups: &[MemoGroup]) -> HashMap<*const OperatorNode, usize> {
     groups
         .iter()
         .enumerate()
-        .map(|(g, group)| (Rc::as_ptr(&group.node), g))
+        .map(|(g, group)| (Rc::as_ptr(&group.logical_node), g))
         .collect()
 }
 
@@ -279,17 +279,17 @@ fn rewritten_candidate(
     origin: OriginOfCandidateForMemoGroup,
 ) -> CandidateForMemoGroup {
     let reached = |node: &Rc<OperatorNode>| child_groups(group_of, node, &from.implements);
-    let children = if reached(&from.node) == from.children {
+    let children = if reached(&from.root_node) == from.input_groups {
         reached(&node)
     } else {
-        from.children.clone()
+        from.input_groups.clone()
     };
     CandidateForMemoGroup {
         implements: from.implements.clone(),
-        node,
-        children,
+        root_node: node,
+        input_groups: children,
         origin,
-        budget_share: from.budget_share,
+        accuracy_budget_parts: from.accuracy_budget_parts,
     }
 }
 
@@ -325,7 +325,7 @@ fn child_groups(
 }
 
 fn candidate_signature(candidate: &CandidateForMemoGroup) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&flatten(&[QueryRoot::Operator(Rc::clone(&candidate.node))]).0)
+    serde_json::to_string(&flatten(&[QueryRoot::Operator(Rc::clone(&candidate.root_node))]).0)
 }
 
 #[cfg(test)]

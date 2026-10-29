@@ -90,7 +90,7 @@ fn expand_with_state_index(
     validate_references(&memo)?;
     if memo.groups.iter().any(|group| {
         matches!(
-            group.node.asap(),
+            group.logical_node.asap(),
             Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
         )
     }) {
@@ -164,18 +164,18 @@ fn expand_with_state_index(
         queries.sort_unstable();
         queries.dedup();
         memo.groups.push(MemoGroup {
-            node: Rc::clone(&build.build),
-            children: build.children.clone(),
+            logical_node: Rc::clone(&build.build),
+            child_groups: build.children.clone(),
             parents: Vec::new(),
             queries,
             roots_of: Vec::new(),
         });
         memo.candidates.push(vec![CandidateForMemoGroup {
             implements: vec![state_group],
-            node: Rc::clone(&build.build),
-            children: build.children,
+            root_node: Rc::clone(&build.build),
+            input_groups: build.children,
             origin: OriginOfCandidateForMemoGroup::SharedBuild,
-            budget_share: 1,
+            accuracy_budget_parts: 1,
         }]);
         for (group, index, own_build) in build.readers {
             check_generation_deadline(deadline)?;
@@ -197,13 +197,13 @@ fn expand_with_state_index(
         // factored result group's representative can equal its candidate root;
         // treating every memo node as an input would create a self-alias here.
         let boundaries = reader
-            .children
+            .input_groups
             .iter()
             .chain(&state_groups)
-            .map(|id| (Rc::as_ptr(&memo.groups[id.0 as usize].node), *id))
+            .map(|id| (Rc::as_ptr(&memo.groups[id.0 as usize].logical_node), *id))
             .collect();
-        reader.node = super::rules::reuse::replace(&reader.node, &replacements);
-        reader.children = boundary_groups(&reader.node, &boundaries);
+        reader.root_node = super::rules::reuse::replace(&reader.root_node, &replacements);
+        reader.input_groups = boundary_groups(&reader.root_node, &boundaries);
         reader.origin = OriginOfCandidateForMemoGroup::SharedBuild;
         memo.candidates[group].push(reader);
         added_reader_candidates += 1;
@@ -216,12 +216,12 @@ fn expand_with_state_index(
     for group in 0..memo.groups.len() {
         check_generation_deadline(deadline)?;
         let dependencies: HashSet<_> = memo.groups[group]
-            .children
+            .child_groups
             .iter()
             .chain(
                 memo.candidates[group]
                     .iter()
-                    .flat_map(|candidate| &candidate.children),
+                    .flat_map(|candidate| &candidate.input_groups),
             )
             .copied()
             .collect();
@@ -245,12 +245,12 @@ fn expand_with_state_index(
     {
         let queries = memo.groups[group.0 as usize].queries.clone();
         let children: HashSet<_> = memo.groups[group.0 as usize]
-            .children
+            .child_groups
             .iter()
             .chain(
                 memo.candidates[group.0 as usize]
                     .iter()
-                    .flat_map(|candidate| &candidate.children),
+                    .flat_map(|candidate| &candidate.input_groups),
             )
             .copied()
             .collect();
@@ -278,7 +278,7 @@ fn validate_references(memo: &CandidateMemo) -> Result<(), StateGroupExpansionEr
     }
     for group in &memo.groups {
         if group
-            .children
+            .child_groups
             .iter()
             .chain(&group.parents)
             .any(|id| id.0 as usize >= memo.groups.len())
@@ -288,7 +288,7 @@ fn validate_references(memo: &CandidateMemo) -> Result<(), StateGroupExpansionEr
     }
     for candidate in memo.candidates.iter().flatten() {
         if candidate
-            .children
+            .input_groups
             .iter()
             .chain(&candidate.implements)
             .any(|id| id.0 as usize >= memo.groups.len())
@@ -319,23 +319,28 @@ pub(super) fn direct_input_builds(
             | OriginOfCandidateForMemoGroup::Rollup
             | OriginOfCandidateForMemoGroup::SummaryResult
     ) || candidate.implements.is_empty()
-        || candidate.budget_share == 0
+        || candidate.accuracy_budget_parts == 0
     {
         return Vec::new();
     }
     let boundaries: HashMap<_, _> = candidate
-        .children
+        .input_groups
         .iter()
-        .map(|&group| (Rc::as_ptr(&memo.groups[group.0 as usize].node), group))
+        .map(|&group| {
+            (
+                Rc::as_ptr(&memo.groups[group.0 as usize].logical_node),
+                group,
+            )
+        })
         .collect();
-    let mut stack = vec![Rc::clone(&candidate.node)];
+    let mut stack = vec![Rc::clone(&candidate.root_node)];
     let mut seen = HashSet::new();
     let mut builds = Vec::new();
     while let Some(node) = stack.pop() {
         if boundaries.contains_key(&Rc::as_ptr(&node)) || !seen.insert(Rc::as_ptr(&node)) {
             continue;
         }
-        if !Rc::ptr_eq(&node, &candidate.node)
+        if !Rc::ptr_eq(&node, &candidate.root_node)
             && matches!(
                 node.asap(),
                 Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
@@ -509,11 +514,11 @@ mod tests {
                     .iter()
                     .map(|candidate| {
                         (
-                            candidate.children.clone(),
-                            candidate.budget_share,
+                            candidate.input_groups.clone(),
+                            candidate.accuracy_budget_parts,
                             serde_json::to_string(
                                 &asap_types::ir::flat::flatten(&[QueryRoot::Operator(Rc::clone(
-                                    &candidate.node,
+                                    &candidate.root_node,
                                 ))])
                                 .0,
                             )
@@ -525,7 +530,7 @@ mod tests {
             assert_eq!(signatures(left), signatures(right));
         }
         for (left, right) in indexed.memo.groups.iter().zip(&linear.memo.groups) {
-            assert_eq!(left.children, right.children);
+            assert_eq!(left.child_groups, right.child_groups);
             assert_eq!(left.parents, right.parents);
             assert_eq!(left.queries, right.queries);
         }
@@ -588,13 +593,12 @@ mod tests {
         for state in &expanded.state_groups {
             let group = &expanded.memo.groups[state.0 as usize];
             assert_eq!(group.queries, vec![0, 1]);
-            for input in &group.children {
+            for input in &group.child_groups {
                 assert_eq!(expanded.memo.groups[input.0 as usize].queries, vec![0, 1]);
-                assert!(group
-                    .node
-                    .children()
-                    .iter()
-                    .any(|node| Rc::ptr_eq(node, &expanded.memo.groups[input.0 as usize].node)));
+                assert!(group.logical_node.children().iter().any(|node| Rc::ptr_eq(
+                    node,
+                    &expanded.memo.groups[input.0 as usize].logical_node
+                )));
             }
             assert_eq!(group.parents.len(), 2);
             assert!(group.roots_of.is_empty());
@@ -605,12 +609,12 @@ mod tests {
                 );
                 let reader = expanded.memo.candidates[parent.0 as usize]
                     .iter()
-                    .find(|candidate| candidate.children.contains(state))
+                    .find(|candidate| candidate.input_groups.contains(state))
                     .unwrap();
-                assert!(OperatorNode::reachable(&reader.node)
+                assert!(OperatorNode::reachable(&reader.root_node)
                     .iter()
-                    .any(|node| Rc::ptr_eq(node, &group.node)));
-                assert_eq!(reader.children, vec![*state]);
+                    .any(|node| Rc::ptr_eq(node, &group.logical_node)));
+                assert_eq!(reader.input_groups, vec![*state]);
             }
         }
         for group in 0..original_count {
@@ -618,8 +622,8 @@ mod tests {
                 .iter()
                 .zip(&expanded.memo.candidates[group])
             {
-                assert!(Rc::ptr_eq(&before.node, &after.node));
-                assert_eq!(before.children, after.children);
+                assert!(Rc::ptr_eq(&before.root_node, &after.root_node));
+                assert_eq!(before.input_groups, after.input_groups);
             }
         }
         assert!(matches!(
@@ -641,7 +645,7 @@ mod tests {
             for candidate in candidates {
                 assert!(expanded.memo.candidates[group]
                     .iter()
-                    .any(|after| Rc::ptr_eq(&candidate.node, &after.node)));
+                    .any(|after| Rc::ptr_eq(&candidate.root_node, &after.root_node)));
             }
         }
         assert!(expanded
@@ -670,12 +674,12 @@ mod tests {
             .groups
             .iter()
             .enumerate()
-            .map(|(id, group)| (Rc::as_ptr(&group.node), MemoGroupId(id as u32)))
+            .map(|(id, group)| (Rc::as_ptr(&group.logical_node), MemoGroupId(id as u32)))
             .collect();
         for group in 0..memo.groups.len() {
             let grid = grids[memo.groups[group].queries[0]];
             for candidate in memo.candidates[group].clone() {
-                let roots = vec![QueryRoot::Operator(Rc::clone(&candidate.node))];
+                let roots = vec![QueryRoot::Operator(Rc::clone(&candidate.root_node))];
                 let panes = pane_candidates(&roots, &[Some(grid)]);
                 if panes.len() != 1 {
                     continue;
@@ -697,8 +701,8 @@ mod tests {
                     .unwrap();
                 let node = replace_node(node, chain.children()[0], &input);
                 let mut pane = candidate;
-                pane.node = Rc::clone(&node);
-                pane.children = boundary_groups(&node, &boundaries);
+                pane.root_node = Rc::clone(&node);
+                pane.input_groups = boundary_groups(&node, &boundaries);
                 pane.origin = OriginOfCandidateForMemoGroup::Panes;
                 memo.candidates[group].push(pane);
             }
@@ -721,16 +725,16 @@ mod tests {
             &[60_000, 60_000],
         );
         assert!(!original.groups.iter().any(|group| matches!(
-            group.node.non_asap(),
+            group.logical_node.non_asap(),
             Some(NonASAPOp::Scan { .. })
         ) && group
-            .node
+            .logical_node
             .schema
             .fields
             .iter()
             .any(|field| field.name == "job")
             && group
-                .node
+                .logical_node
                 .schema
                 .fields
                 .iter()
@@ -741,7 +745,7 @@ mod tests {
             .map(|candidates| {
                 candidates
                     .iter()
-                    .map(|candidate| Rc::clone(&candidate.node))
+                    .map(|candidate| Rc::clone(&candidate.root_node))
                     .collect::<Vec<_>>()
             })
             .collect();
@@ -751,11 +755,11 @@ mod tests {
             .iter()
             .find(|id| {
                 let group = &expanded.memo.groups[id.0 as usize];
-                matches!(group.node.asap(), Some(ASAPOp::PaneChain { .. }))
+                matches!(group.logical_node.asap(), Some(ASAPOp::PaneChain { .. }))
                     && group.queries == vec![0, 1]
                     && ["job", "region"].iter().all(|name| {
                         group
-                            .node
+                            .logical_node
                             .schema
                             .fields
                             .iter()
@@ -768,26 +772,29 @@ mod tests {
         for parent in &state.parents {
             let reader = expanded.memo.candidates[parent.0 as usize]
                 .iter()
-                .find(|candidate| candidate.children.contains(shared))
+                .find(|candidate| candidate.input_groups.contains(shared))
                 .unwrap();
             assert_eq!(
-                reader.node.schema.fields,
-                expanded.memo.groups[parent.0 as usize].node.schema.fields
+                reader.root_node.schema.fields,
+                expanded.memo.groups[parent.0 as usize]
+                    .logical_node
+                    .schema
+                    .fields
             );
-            assert!(OperatorNode::reachable(&reader.node)
+            assert!(OperatorNode::reachable(&reader.root_node)
                 .iter()
                 .any(|node| matches!(node.non_asap(), Some(NonASAPOp::Project { .. }))));
-            reader.node.validate_structure().unwrap();
+            reader.root_node.validate_structure().unwrap();
         }
         for (group, locals) in local_nodes.into_iter().enumerate() {
             assert!(locals
                 .iter()
                 .zip(&expanded.memo.candidates[group])
-                .all(|(before, after)| Rc::ptr_eq(before, &after.node)));
+                .all(|(before, after)| Rc::ptr_eq(before, &after.root_node)));
         }
         assert!(expanded.memo.topological_order().is_some());
         assert!(state
-            .children
+            .child_groups
             .iter()
             .all(|child| expanded.memo.groups[child.0 as usize].queries == vec![0, 1]));
     }
@@ -815,11 +822,11 @@ mod tests {
             .iter()
             .map(|id| &expanded.memo.groups[id.0 as usize])
             .find(|group| {
-                matches!(group.node.asap(), Some(ASAPOp::PaneChain { .. }))
+                matches!(group.logical_node.asap(), Some(ASAPOp::PaneChain { .. }))
                     && group.queries == vec![0, 1]
                     && ["job", "region"].iter().all(|name| {
                         group
-                            .node
+                            .logical_node
                             .schema
                             .fields
                             .iter()
@@ -827,7 +834,7 @@ mod tests {
                     })
             })
             .expect("identity-carrying union pane state");
-        let input = state.node.children()[0];
+        let input = state.logical_node.children()[0];
         assert!(input.schema.has_promql_series_identity());
         let identity = input
             .schema
@@ -843,19 +850,19 @@ mod tests {
             let reader = expanded.memo.candidates[parent.0 as usize]
                 .iter()
                 .find(|candidate| {
-                    candidate.children.contains(&MemoGroupId(
+                    candidate.input_groups.contains(&MemoGroupId(
                         expanded
                             .memo
                             .groups
                             .iter()
-                            .position(|group| Rc::ptr_eq(&group.node, &state.node))
+                            .position(|group| Rc::ptr_eq(&group.logical_node, &state.logical_node))
                             .unwrap() as u32,
                     ))
                 })
                 .unwrap();
             assert_eq!(
-                reader.node.schema,
-                expanded.memo.groups[parent.0 as usize].node.schema
+                reader.root_node.schema,
+                expanded.memo.groups[parent.0 as usize].logical_node.schema
             );
         }
     }
@@ -906,7 +913,7 @@ mod tests {
             .iter()
             .filter(|id| {
                 matches!(
-                    expanded.memo.groups[id.0 as usize].node.asap(),
+                    expanded.memo.groups[id.0 as usize].logical_node.asap(),
                     Some(ASAPOp::PaneChain { .. })
                 )
             })
@@ -916,17 +923,20 @@ mod tests {
             let group = &expanded.memo.groups[id.0 as usize];
             assert_eq!(group.queries, vec![0, 1]);
             assert_eq!(group.parents.len(), 2);
-            assert!(group.children.iter().all(|input| group
-                .node
+            assert!(group.child_groups.iter().all(|input| group
+                .logical_node
                 .children()
                 .iter()
-                .any(|node| Rc::ptr_eq(node, &expanded.memo.groups[input.0 as usize].node))));
+                .any(|node| Rc::ptr_eq(
+                    node,
+                    &expanded.memo.groups[input.0 as usize].logical_node
+                ))));
         }
         for (group, candidates) in original.candidates.iter().enumerate() {
             for original in candidates {
                 assert!(expanded.memo.candidates[group]
                     .iter()
-                    .any(|candidate| Rc::ptr_eq(&original.node, &candidate.node)));
+                    .any(|candidate| Rc::ptr_eq(&original.root_node, &candidate.root_node)));
             }
         }
         assert!(matches!(
@@ -951,7 +961,7 @@ mod tests {
             .iter()
             .find(|id| {
                 matches!(
-                    expanded.memo.groups[id.0 as usize].node.asap(),
+                    expanded.memo.groups[id.0 as usize].logical_node.asap(),
                     Some(ASAPOp::PaneChain {
                         pane_width_ms: 30_000,
                         pane_count: 30,
@@ -962,23 +972,25 @@ mod tests {
             .expect("shared fine grid covering fifteen minutes");
         assert_eq!(expanded.memo.groups[state.0 as usize].queries, vec![0, 1]);
         assert!(expanded.memo.candidates.iter().flatten().any(|reader| {
-            reader.children.contains(state)
-                && OperatorNode::reachable(&reader.node).iter().any(|node| {
-                    matches!(
-                        node.asap(),
-                        Some(ASAPOp::SummaryMerge {
-                            newest_panes: Some(10),
-                            ..
-                        })
-                    )
-                })
+            reader.input_groups.contains(state)
+                && OperatorNode::reachable(&reader.root_node)
+                    .iter()
+                    .any(|node| {
+                        matches!(
+                            node.asap(),
+                            Some(ASAPOp::SummaryMerge {
+                                newest_panes: Some(10),
+                                ..
+                            })
+                        )
+                    })
         }));
         for (group, candidates) in original.candidates.iter().enumerate() {
             assert!(candidates
                 .iter()
                 .all(|before| expanded.memo.candidates[group]
                     .iter()
-                    .any(|after| Rc::ptr_eq(&before.node, &after.node))));
+                    .any(|after| Rc::ptr_eq(&before.root_node, &after.root_node))));
         }
         assert!(expanded.memo.topological_order().is_some());
     }
@@ -1000,7 +1012,7 @@ mod tests {
             .position(|group| group.roots_of == [1])
             .unwrap();
         assert!(memo.candidates[fine].iter().all(|candidate| matches!(
-            candidate.node.asap(),
+            candidate.root_node.asap(),
             Some(ASAPOp::FinalizeExactAccumulator { .. })
         )));
         assert!(memo
@@ -1011,7 +1023,7 @@ mod tests {
             .flat_map(|(_, candidates)| candidates)
             .any(
                 |candidate| candidate.origin == OriginOfCandidateForMemoGroup::Rollup
-                    && candidate.children.contains(&MemoGroupId(fine as u32))
+                    && candidate.input_groups.contains(&MemoGroupId(fine as u32))
             ));
         assert!(memo.topological_order().is_some());
     }
@@ -1032,7 +1044,7 @@ mod tests {
             .flatten()
             .any(
                 |candidate| candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild
-                    && OperatorNode::reachable(&candidate.node)
+                    && OperatorNode::reachable(&candidate.root_node)
                         .iter()
                         .any(|node| matches!(
                             node.asap(),
@@ -1055,7 +1067,7 @@ mod tests {
         ]);
         let expanded = expand_concrete_summary_state_groups(original).unwrap();
         assert!(expanded.memo.groups.iter().any(|group| matches!(
-            group.node.non_asap(),
+            group.logical_node.non_asap(),
             Some(NonASAPOp::Limit { n: Some(5), .. })
         ) && group.parents.len() >= 2));
         assert!(expanded
@@ -1082,10 +1094,10 @@ mod tests {
             .iter()
             .enumerate()
             .find(|(_, group)| {
-                matches!(group.node.non_asap(), Some(NonASAPOp::Scan { .. }))
+                matches!(group.logical_node.non_asap(), Some(NonASAPOp::Scan { .. }))
                     && ["job", "region"].iter().all(|name| {
                         group
-                            .node
+                            .logical_node
                             .schema
                             .fields
                             .iter()
@@ -1098,11 +1110,13 @@ mod tests {
             .groups
             .iter()
             .enumerate()
-            .filter(|(_, group)| matches!(group.node.non_asap(), Some(NonASAPOp::Scan { .. })))
+            .filter(|(_, group)| {
+                matches!(group.logical_node.non_asap(), Some(NonASAPOp::Scan { .. }))
+            })
             .filter(|(group, _)| {
                 expanded.memo.candidates[*group].iter().any(|candidate| {
                     candidate.origin == OriginOfCandidateForMemoGroup::WidenedScans
-                        && candidate.children.contains(&union)
+                        && candidate.input_groups.contains(&union)
                 })
             })
             .count();
@@ -1124,7 +1138,7 @@ mod tests {
             .any(|candidate| direct_input_builds(&original, candidate).len() >= 2));
         for candidates in &mut original.candidates {
             for candidate in candidates {
-                candidate.budget_share = 2;
+                candidate.accuracy_budget_parts = 2;
             }
         }
         let expanded = expand_concrete_summary_state_groups(original.clone()).unwrap();
@@ -1134,15 +1148,15 @@ mod tests {
             .find(|candidate| {
                 candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild
                     && candidate
-                        .children
+                        .input_groups
                         .iter()
                         .any(|group| expanded.state_groups.contains(group))
             })
             .expect("average has shared state input");
-        assert_eq!(reader.budget_share, 2);
+        assert_eq!(reader.accuracy_budget_parts, 2);
         assert!(
             reader
-                .children
+                .input_groups
                 .iter()
                 .any(|id| expanded.state_groups.contains(id)
                     && expanded.memo.groups[id.0 as usize].queries == vec![0, 1]),
@@ -1150,7 +1164,7 @@ mod tests {
         );
         assert!(
             reader
-                .children
+                .input_groups
                 .iter()
                 .any(|id| expanded.state_groups.contains(id)
                     && expanded.memo.groups[id.0 as usize].queries == vec![0]),
@@ -1160,7 +1174,7 @@ mod tests {
             .iter()
             .all(|before| expanded.memo.candidates[average]
                 .iter()
-                .any(|after| Rc::ptr_eq(&before.node, &after.node))));
+                .any(|after| Rc::ptr_eq(&before.root_node, &after.root_node))));
     }
 
     // A global SQL-window quantile can consume newest panes of a longer,
@@ -1223,7 +1237,7 @@ mod tests {
             .flatten()
             .any(
                 |candidate| candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild
-                    && OperatorNode::reachable(&candidate.node)
+                    && OperatorNode::reachable(&candidate.root_node)
                         .iter()
                         .any(|node| matches!(
                             node.asap(),
@@ -1232,8 +1246,8 @@ mod tests {
                                 ..
                             })
                         ))
-                    && candidate.children.iter().any(|group| matches!(
-                        expanded.memo.groups[group.0 as usize].node.asap(),
+                    && candidate.input_groups.iter().any(|group| matches!(
+                        expanded.memo.groups[group.0 as usize].logical_node.asap(),
                         Some(ASAPOp::PaneChain {
                             pane_count: 120,
                             ..
@@ -1300,8 +1314,8 @@ mod tests {
                     };
                     replacements.insert(Rc::as_ptr(input), project);
                 }
-                candidate.node =
-                    crate::pass2::memo::rules::reuse::replace(&candidate.node, &replacements);
+                candidate.root_node =
+                    crate::pass2::memo::rules::reuse::replace(&candidate.root_node, &replacements);
                 assert!(direct_input_builds(&memo, &candidate).is_empty());
                 memo.candidates[owner].push(candidate);
                 injected += 1;
@@ -1312,7 +1326,7 @@ mod tests {
         assert!(expanded.state_groups.iter().any(|state| {
             let group = &expanded.memo.groups[state.0 as usize];
             group.queries == vec![0, 1]
-                && group.children.iter().any(|input| {
+                && group.child_groups.iter().any(|input| {
                     expanded.memo.candidates[input.0 as usize]
                         .iter()
                         .any(|candidate| {
@@ -1334,7 +1348,7 @@ mod tests {
             .candidates
             .iter()
             .flatten()
-            .flat_map(|candidate| OperatorNode::reachable(&candidate.node))
+            .flat_map(|candidate| OperatorNode::reachable(&candidate.root_node))
             .filter(|node| is_univmon(node))
             .collect();
         assert!(!before.is_empty(), "real generation must offer UnivMon");
@@ -1351,7 +1365,7 @@ mod tests {
                 memo.candidates
                     .iter()
                     .flatten()
-                    .flat_map(|candidate| OperatorNode::reachable(&candidate.node))
+                    .flat_map(|candidate| OperatorNode::reachable(&candidate.root_node))
                     .any(|node| Rc::ptr_eq(&original, &node)),
                 "local generated candidates remain intact"
             );
@@ -1382,9 +1396,9 @@ mod tests {
             unreachable!()
         };
         let boundaries: HashSet<_> = base
-            .children
+            .input_groups
             .iter()
-            .map(|id| Rc::as_ptr(&memo.groups[id.0 as usize].node))
+            .map(|id| Rc::as_ptr(&memo.groups[id.0 as usize].logical_node))
             .collect();
         fn without_private_guarantees(
             node: &Rc<OperatorNode>,
@@ -1413,7 +1427,7 @@ mod tests {
                 grouping.clone(),
             );
             let roots = crate::pass2::asap_aware_cse::with_resized_build(
-                &[QueryRoot::Operator(Rc::clone(&base.node))],
+                &[QueryRoot::Operator(Rc::clone(&base.root_node))],
                 &build,
                 family,
             )
@@ -1422,7 +1436,7 @@ mod tests {
                 unreachable!()
             };
             let root =
-                crate::pass2::memo::rules::reuse::restore_inputs(root, &memo, &base.children);
+                crate::pass2::memo::rules::reuse::restore_inputs(root, &memo, &base.input_groups);
             without_private_guarantees(&root, &boundaries)
         };
         let weak = rewritten(0.001);
@@ -1431,7 +1445,7 @@ mod tests {
             *weak, *strict,
             "ordinary equality omits the probability metadata"
         );
-        base.node = weak;
+        base.root_node = weak;
         memo.candidates[owner] = vec![base.clone()];
         assert!(crate::pass2::memo::rules::reuse::append_reader(
             &mut memo,
@@ -1461,9 +1475,9 @@ mod tests {
             })
             .unwrap();
         let boundaries: HashSet<_> = candidate
-            .children
+            .input_groups
             .iter()
-            .map(|id| Rc::as_ptr(&memo.groups[id.0 as usize].node))
+            .map(|id| Rc::as_ptr(&memo.groups[id.0 as usize].logical_node))
             .collect();
         fn duplicate(
             node: &Rc<OperatorNode>,
@@ -1479,15 +1493,15 @@ mod tests {
                 ..(**node).clone()
             })
         }
-        let second = duplicate(&candidate.node, &boundaries);
+        let second = duplicate(&candidate.root_node, &boundaries);
         let combined =
             OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Concat {
                 discriminator_unique_key: None,
-                children: vec![Rc::clone(&candidate.node), second],
+                children: vec![Rc::clone(&candidate.root_node), second],
             }))
             .unwrap();
-        candidate.node = Rc::clone(&combined);
-        memo.groups[owner].node = combined;
+        candidate.root_node = Rc::clone(&combined);
+        memo.groups[owner].logical_node = combined;
         memo.candidates[owner] = vec![candidate];
         let expanded = expand_concrete_summary_state_groups(memo).unwrap();
         assert_eq!(expanded.state_groups.len(), 1);
@@ -1499,7 +1513,7 @@ mod tests {
             .iter()
             .any(
                 |candidate| candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild
-                    && candidate.children.contains(&state)
+                    && candidate.input_groups.contains(&state)
             ));
     }
 
@@ -1507,7 +1521,7 @@ mod tests {
     #[test]
     fn malformed_references_fail_before_dependency_traversal() {
         let mut memo = workload(&[("quantile_over_time(0.95, latency[5m])", 0.01)]);
-        memo.groups[0].children.push(MemoGroupId(u32::MAX));
+        memo.groups[0].child_groups.push(MemoGroupId(u32::MAX));
         assert!(matches!(
             expand_concrete_summary_state_groups(memo),
             Err(StateGroupExpansionError::InvalidGroupReference)

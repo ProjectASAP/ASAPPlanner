@@ -19,7 +19,8 @@ pub(crate) fn add_scoped_candidates(
     }
     let mut sources = std::collections::HashSet::new();
     for group in &memo.groups {
-        if let Some(asap_types::ir::NonASAPOp::Scan { source, .. }) = group.node.non_asap() {
+        if let Some(asap_types::ir::NonASAPOp::Scan { source, .. }) = group.logical_node.non_asap()
+        {
             sources.insert(crate::source_name(source));
         }
     }
@@ -66,16 +67,16 @@ pub(crate) fn add_scoped_candidates(
         for candidate in candidates.iter() {
             super::check_deadline(deadline).map_err(|e| e.to_string())?;
             let roots = crate::with_resized_summaries(
-                &[QueryRoot::Operator(candidate.node.clone())],
+                &[QueryRoot::Operator(candidate.root_node.clone())],
                 &|_, params| Some(asap_logical_asap_optimization::accuracy::estimators::with_failure_probability(
-                    params, budget / candidate.budget_share.max(1) as f64)),
+                    params, budget / candidate.accuracy_budget_parts.max(1) as f64)),
             ).map_err(|e| e.to_string())?;
             let QueryRoot::Operator(node) = &roots[0] else {
                 unreachable!()
             };
-            if !Rc::ptr_eq(node, &candidate.node) {
+            if !Rc::ptr_eq(node, &candidate.root_node) {
                 let mut sized = candidate.clone();
-                sized.node = node.clone();
+                sized.root_node = node.clone();
                 additional.push(sized);
             }
         }

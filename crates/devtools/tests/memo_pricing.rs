@@ -242,7 +242,7 @@ fn ratio_of_quantiles_25_pass1_choices_without_identity_only_exact_is_valid() {
         .iter()
         .filter(|choice| {
             choice.iter().all(|(group, &index)| {
-                without_identity.memo.candidates[group.0 as usize][index].budget_share == 1
+                without_identity.memo.candidates[group.0 as usize][index].accuracy_budget_parts == 1
             })
         })
         .count();

@@ -314,13 +314,13 @@ fn memo_pipeline() -> Run {
     for q in 0..queries {
         if let Some(choice) = own(q, &|c| {
             c.origin == OriginOfCandidateForMemoGroup::Pass1
-                && OperatorNode::reachable(&c.node).iter().any(is_univmon)
+                && OperatorNode::reachable(&c.root_node).iter().any(is_univmon)
         }) {
             choices.push(BTreeMap::from([choice]));
         }
     }
     for (state, group) in memo.groups.iter().enumerate() {
-        if !is_univmon(&group.node) || group.queries.len() < 2 {
+        if !is_univmon(&group.logical_node) || group.queries.len() < 2 {
             continue;
         }
         let reading: Option<BTreeMap<_, _>> = group
@@ -328,7 +328,7 @@ fn memo_pipeline() -> Run {
             .iter()
             .map(|&q| {
                 own(q, &|c| {
-                    c.children.iter().any(|child| child.0 as usize == state)
+                    c.input_groups.iter().any(|child| child.0 as usize == state)
                 })
             })
             .collect();

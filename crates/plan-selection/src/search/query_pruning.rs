@@ -195,7 +195,7 @@ pub(crate) fn prune_query_candidates<Id: Clone>(
             .enumerate()
             .filter_map(|(choice, candidate)| retain[target][choice].then_some(candidate))
             .collect();
-        if let Some(fused) = &mut computation.fused {
+        if let Some(fused) = &mut computation.fused_computation {
             fused.candidates = std::mem::take(&mut fused.candidates)
                 .into_iter()
                 .enumerate()
@@ -281,9 +281,9 @@ pub(crate) fn query_digits<Id>(
         .filter(|&t| {
             read[t]
                 || per_computation.targets[t]
-                    .fused
+                    .fused_computation
                     .as_ref()
-                    .is_some_and(|fused| fused.absorbs.iter().any(|&a| read[a]))
+                    .is_some_and(|fused| fused.absorbed_targets.iter().any(|&a| read[a]))
         })
         .collect()
 }

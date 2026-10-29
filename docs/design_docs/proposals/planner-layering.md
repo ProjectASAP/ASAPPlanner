@@ -275,7 +275,7 @@ lists each stage's input and output types.
 | Memo group | `MemoGroup`, numbered by `MemoGroupId` | One distinct logical sub-expression: its logical node, its child groups, the groups that read it (`parents`), the queries that reach it (`queries`) and the queries whose root it is (`roots_of`). Groups are numbered children first. |
 | DAG of logical memo groups | `DagOfLogicalMemoGroups` | Stage 0's groups, before any implementation choice: the workload's logical DAG hash-consed (below). |
 | Candidate memo | `CandidateMemo` | The groups, and the candidates for each memo group (`candidates[group]`). Pass 1 creates it from the DAG of logical memo groups; the Pass 2 rules add candidates and groups. |
-| Candidate for a memo group | `CandidateForMemoGroup` | One way to implement a group over child groups. `implements`: the group, or for a fused computation the group and the groups it absorbs (topmost first). `node`: its own nodes, down to the nodes of the groups it reads. `children`: the groups it reads, whose implementations are chosen separately. `origin`: the rule that made it (`OriginOfCandidateForMemoGroup`, below). `budget_share`: the number of equal shares of the accuracy budget its summaries are sized for, 1 for the whole budget and `n` when it is one of `n` approximate inputs of a query. |
+| Candidate for a memo group | `CandidateForMemoGroup` | One way to implement a group over child groups. `implements`: the group, or for a fused computation the group and the groups it absorbs (topmost first). `root_node`: its own nodes, down to the nodes of the groups it reads. `input_groups`: the groups it reads, whose implementations are chosen separately. `origin`: the rule that made it (`OriginOfCandidateForMemoGroup`, below). `accuracy_budget_parts`: the number of equal shares of the accuracy budget its summaries are sized for, 1 for the whole budget and `n` when it is one of `n` approximate inputs of a query. |
 | Concrete summary-state group | a `MemoGroup` whose node is a `SummaryAgg` or a `PaneChain` | One summary state at one size, or one pane chain at one layout, that several readers may share. A choice several groups depend on, such as a shared size or a pane grid, is one concrete group per value, when two or more readers may read that value, and each of them gets a candidate reading that group: of two readers needing a KLL with `k ≥ 345` and `k ≥ 200`, both may read a group `KLL(345)`, and the second may also keep its own private `KLL(200)`. Choosing a value is choosing a group, so the memo has no separate type for such a choice. The other Pass 2 rules add groups too (below). |
 
 **Stage 0: hash-consing.** Hash-consing merges structurally equal nodes into
@@ -311,7 +311,7 @@ rule's origin, and gives each reader a candidate that reads that group.
 
 | `OriginOfCandidateForMemoGroup` | Added by | Candidates |
 |---|---|---|
-| `Pass1` | `try_populate_pass1` (`pass2/memo/groups.rs`) | Every Pass 1 choice of the group's measures: exact, exact accumulator, each summary family and size, and fused computations. Each summary choice comes at every `budget_share` from 1 to the most approximate inputs a query reaching the group has. A fused candidate implements the groups it absorbs only when no other reader needs them; otherwise they stay groups of their own. |
+| `Pass1` | `try_populate_pass1` (`pass2/memo/groups.rs`) | Every Pass 1 choice of the group's measures: exact, exact accumulator, each summary family and size, and fused computations. Each summary choice comes at every `accuracy_budget_parts` from 1 to the most approximate inputs a query reaching the group has. A fused candidate implements the groups it absorbs only when no other reader needs them; otherwise they stay groups of their own. |
 | `Panes` | Window composition: `add_local_window_composition` and `extend_local_window_composition` (`pass2/memo/window_candidates.rs`) | A window summary computed from tumbling panes, at each pane width the reader's evaluation grid allows. The pane chain stays private to the candidate. |
 | `WidenedScans` | Scan widening: `add_scan_label_candidates` (`pass2/memo/rules/scan_labels.rs`) | A reader of a metric's scans widened to a shared label set, read through a `Project`. |
 | `SummaryInput` | `factor_summary_inputs` (`pass2/memo/rules/summary_inputs.rs`) | Canonical value preprocessing feeding a summary build. |
@@ -370,7 +370,7 @@ candidates each. G0, G1, G3 and G5 get one each, their own node. G6 gets
 one: `avg` computed from exact sum and count accumulators. The memo now has
 19 candidates.
 
-| Candidate of G2 or G4 | `budget_share` |
+| Candidate of G2 or G4 | `accuracy_budget_parts` |
 |---|---|
 | Exact | 1 |
 | KLL, `k` 345 (`failure_probability` 0.001) | 1 |
@@ -385,7 +385,7 @@ sized for the whole accuracy budget and for a half of it. Pass 1 offers each
 KLL at two scopes: per value (the first two KLL candidates) and for the
 whole result (the last two), where the per-value `failure_probability` is the
 target's 0.001 divided over the source's 10,000 series. The memo stands for 7 × 7 = 49 candidate DAGs, all different:
-- 16 = 4 × 4 use only `budget_share` 1.
+- 16 = 4 × 4 use only `accuracy_budget_parts` 1.
 - 33 size at least one operand's summary for half of the budget.
 
 **Step 3, Stage 1 Pass 2: window composition.** The groups stay the same 7.
@@ -402,10 +402,10 @@ all; the memo has 259 candidates.
   accumulators; and 2 `FinalizeExactAccumulator` groups (G6's sum and count
   readouts).
 - 1738 candidates. G2 and G4 have 691 each: 10 `Pass1` (the 7 above and
-  3 copies of the `budget_share` 1 KLL `k` 567 that the state-configuration
+  3 copies of the `accuracy_budget_parts` 1 KLL `k` 567 that the state-configuration
   rule rewrote to the shared configurations with `k` 567, 1156 and 1184; each
-  keeps `budget_share` 1, and the `k` 1184 one composes the same DAG as the
-  `budget_share` 2 KLL),
+  keeps `accuracy_budget_parts` 1, and the `k` 1184 one composes the same DAG as the
+  `accuracy_budget_parts` 2 KLL),
   336 `Panes` and 345 `SharedBuild`. G6 has 3: `Pass1`, `SummaryResult` and
   `SharedBuild`.
 - Enumeration stops at `stage_pipeline`'s default limit of 1,000 candidate

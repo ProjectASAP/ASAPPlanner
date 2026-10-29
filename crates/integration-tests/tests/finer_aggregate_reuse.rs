@@ -70,7 +70,10 @@ fn rollups(memo: &CandidateMemo, query: usize) -> (usize, Vec<&CandidateForMemoG
         .iter()
         .position(|group| {
             group.queries == [query]
-                && matches!(group.node.non_asap(), Some(NonASAPOp::Aggregate { .. }))
+                && matches!(
+                    group.logical_node.non_asap(),
+                    Some(NonASAPOp::Aggregate { .. })
+                )
         })
         .expect("the query's own aggregate group");
     let candidates = memo.candidates[owner]
@@ -83,10 +86,10 @@ fn rollups(memo: &CandidateMemo, query: usize) -> (usize, Vec<&CandidateForMemoG
 /// Whether `candidate` reads another group's result through a `Filter`
 /// (the value path), rather than merging summary states.
 fn reads_finer_result(candidate: &CandidateForMemoGroup) -> bool {
-    !OperatorNode::reachable(&candidate.node)
+    !OperatorNode::reachable(&candidate.root_node)
         .iter()
         .any(|node| matches!(node.asap(), Some(ASAPOp::SummaryMerge { .. })))
-        && OperatorNode::reachable(&candidate.node)
+        && OperatorNode::reachable(&candidate.root_node)
             .iter()
             .any(|node| matches!(node.non_asap(), Some(NonASAPOp::Filter { .. })))
 }
@@ -126,9 +129,12 @@ fn assert_same_rows(memo: &CandidateMemo, owner: usize, candidate: &CandidateFor
         rows
     };
     for rows in row_sets() {
-        let before =
-            physical_common::execute_raw_rows_at(&memo.groups[owner].node, rows.clone(), 1000);
-        let after = physical_common::execute_raw_rows_at(&candidate.node, rows.clone(), 1000);
+        let before = physical_common::execute_raw_rows_at(
+            &memo.groups[owner].logical_node,
+            rows.clone(),
+            1000,
+        );
+        let after = physical_common::execute_raw_rows_at(&candidate.root_node, rows.clone(), 1000);
         assert_eq!(sorted(after), sorted(before), "rows {rows:?}");
     }
 }
@@ -200,7 +206,7 @@ fn filtered_kll_states_merge() {
     let merged = candidates
         .into_iter()
         .find(|candidate| {
-            OperatorNode::reachable(&candidate.node).iter().any(|node| {
+            OperatorNode::reachable(&candidate.root_node).iter().any(|node| {
                 matches!(node.asap(), Some(ASAPOp::SummaryMerge { children, group_by: Some(_), .. })
                     if matches!(children[0].non_asap(), Some(NonASAPOp::Filter { .. })))
             })
@@ -211,10 +217,12 @@ fn filtered_kll_states_merge() {
             .iter()
             .find(|candidate| {
                 candidate.origin == OriginOfCandidateForMemoGroup::Pass1
-                    && OperatorNode::reachable(&candidate.node).iter().any(|node| {
-                        matches!(node.asap(), Some(ASAPOp::SummaryAgg { family, .. })
+                    && OperatorNode::reachable(&candidate.root_node)
+                        .iter()
+                        .any(|node| {
+                            matches!(node.asap(), Some(ASAPOp::SummaryAgg { family, .. })
                             if format!("{family:?}").contains("Kll"))
-                    })
+                        })
             })
             .expect("the query's own KLL candidate")
             .clone()
@@ -225,14 +233,15 @@ fn filtered_kll_states_merge() {
     )]);
     let or_direct = own_kll(&or_memo, rollups(&or_memo, 0).0);
     for rows in row_sets() {
-        let before = physical_common::execute_raw_rows_at(&direct.node, rows.clone(), 1000);
-        let or_form = physical_common::execute_raw_rows_at(&or_direct.node, rows.clone(), 1000);
+        let before = physical_common::execute_raw_rows_at(&direct.root_node, rows.clone(), 1000);
+        let or_form =
+            physical_common::execute_raw_rows_at(&or_direct.root_node, rows.clone(), 1000);
         assert_eq!(
             format!("{before:?}"),
             format!("{or_form:?}"),
             "rows {rows:?}"
         );
-        let after = physical_common::execute_raw_rows_at(&merged.node, rows.clone(), 1000);
+        let after = physical_common::execute_raw_rows_at(&merged.root_node, rows.clone(), 1000);
         assert_eq!(format!("{after:?}"), format!("{before:?}"), "rows {rows:?}");
         assert_eq!(after.len(), 1);
     }
