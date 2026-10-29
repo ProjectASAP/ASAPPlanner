@@ -526,9 +526,12 @@ fn windows_ordered_apart(inputs: &[SummaryCoverage]) -> bool {
 /// The hash [`SummaryCoverage::definition_id`] reports: each node's
 /// operator without its children, output kind and schema (in their `Debug`
 /// form, which every IR type derives and which is fixed for a given IR),
-/// then its children's hashes in order. `memo` hashes a shared node once.
-fn definition_hash(node: &Rc<OperatorNode>, memo: &mut HashMap<*const OperatorNode, u128>) -> u128 {
-    if let Some(hash) = memo.get(&Rc::as_ptr(node)) {
+/// then its children's hashes in order. `cache` hashes a shared node once.
+fn definition_hash(
+    node: &Rc<OperatorNode>,
+    cache: &mut HashMap<*const OperatorNode, u128>,
+) -> u128 {
+    if let Some(hash) = cache.get(&Rc::as_ptr(node)) {
         return *hash;
     }
     const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -548,10 +551,10 @@ fn definition_hash(node: &Rc<OperatorNode>, memo: &mut HashMap<*const OperatorNo
     );
     write(own.as_bytes());
     for child in node.children() {
-        let child_hash = definition_hash(child, memo);
+        let child_hash = definition_hash(child, cache);
         write(&child_hash.to_le_bytes());
     }
-    memo.insert(Rc::as_ptr(node), hash);
+    cache.insert(Rc::as_ptr(node), hash);
     hash
 }
 

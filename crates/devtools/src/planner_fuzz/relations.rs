@@ -853,9 +853,9 @@ fn alternate_value(value: &str) -> String {
 pub fn rewrite(
     node: &Rc<OperatorNode>,
     replace: &mut dyn FnMut(&Rc<OperatorNode>) -> Option<Rc<OperatorNode>>,
-    memo: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    cache: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
 ) -> Result<Rc<OperatorNode>, String> {
-    if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+    if let Some(done) = cache.get(&Rc::as_ptr(node)) {
         return Ok(done.clone());
     }
     let rebuilt = match replace(node) {
@@ -863,12 +863,12 @@ pub fn rewrite(
         None => {
             let mut changed = false;
             for child in node.operator.children() {
-                let new = rewrite(child, replace, memo)?;
+                let new = rewrite(child, replace, cache)?;
                 changed |= !Rc::ptr_eq(&new, child);
             }
             if changed {
                 Rc::new(
-                    node.with_new_children(|child| memo[&Rc::as_ptr(child)].clone())
+                    node.with_new_children(|child| cache[&Rc::as_ptr(child)].clone())
                         .map_err(|e| format!("rebuilding {}: {e}", node.operator.kind_name()))?,
                 )
             } else {
@@ -876,7 +876,7 @@ pub fn rewrite(
             }
         }
     };
-    memo.insert(Rc::as_ptr(node), rebuilt.clone());
+    cache.insert(Rc::as_ptr(node), rebuilt.clone());
     Ok(rebuilt)
 }
 
@@ -1525,12 +1525,12 @@ fn longer_chain_roots(
             )
         })
     };
-    let mut memo = HashMap::new();
+    let mut cache = HashMap::new();
     let roots = base_roots
         .iter()
         .map(|root| match root.as_operator() {
             Some(node) => {
-                rewrite(node, &mut |n| reread(n, false), &mut memo).map(QueryRoot::Operator)
+                rewrite(node, &mut |n| reread(n, false), &mut cache).map(QueryRoot::Operator)
             }
             None => Ok(root.clone()),
         })
