@@ -14,7 +14,7 @@ use asap_types::ir::schema::SketchParams;
 use asap_types::ir::{OperatorNode, QueryRoot, SchemaDerivationError};
 use asap_types::workload::DataWorkload;
 
-use crate::{series_read, values_per_result};
+use crate::statistics::{series_read, values_per_result};
 
 /// `candidate` with each summary's per-value failure probability enlarged
 /// for its queries' targets (#669b), before pricing, so that cost reflects

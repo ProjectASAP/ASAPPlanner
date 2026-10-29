@@ -18,10 +18,8 @@ use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::accuracy_binding::{bound_root_guarantee, root_operators};
 use crate::report::{AcceptedAccuracy, RejectionCause};
-use crate::{
-    confirmed_weights, query_time_lookback_ms, series_read, source_name, values_per_result,
-    PlanningModels,
-};
+use crate::statistics::{confirmed_weights, series_read, source_name, values_per_result};
+use crate::{query_time_lookback_ms, PlanningModels};
 
 /// The first query whose latency per evaluation is over its
 /// `max_latency_ms` bound or, with no bound broken, over its repeat

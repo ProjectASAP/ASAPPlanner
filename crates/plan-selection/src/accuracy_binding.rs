@@ -20,7 +20,8 @@ use asap_types::ir::scalar::ScalarValue;
 use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode, QueryRoot, ScalarExpr};
 use asap_types::workload::DataWorkload;
 
-use crate::{declared_non_negative, PlanningModels};
+use crate::statistics::declared_non_negative;
+use crate::PlanningModels;
 
 /// The operator nodes a query root reads.
 pub(crate) fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
