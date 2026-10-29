@@ -37,7 +37,7 @@
 //! Structural equality is necessary but not sufficient. A non-ASAP node is
 //! only ever *returned* as a match for another when every execution over the
 //! same input rows returns the same output rows
-//! ([`NonASAPOp::returns_same_rows_for_same_input_rows`]). Equal nodes are
+//! ([`NonASAPOp::is_shareable_when_equal`]). Equal nodes are
 //! interned children first, so two equal nodes read one input, and one copy
 //! returns each reader the rows it would have computed alone. A unique key
 //! is not needed: equal per-series quantiles without a provable key are one
@@ -215,7 +215,7 @@ impl InternTable {
         let reusable = node.is_asap()
             || node
                 .non_asap()
-                .is_some_and(NonASAPOp::returns_same_rows_for_same_input_rows);
+                .is_some_and(NonASAPOp::is_shareable_when_equal);
         let bucket = self.buckets.entry(hash).or_default();
         if reusable {
             if let Some(existing) = bucket

@@ -88,7 +88,7 @@ typing error (`ScalarExpr::scalar_type`), because state must be read out before 
 it. Column references are positional `ColumnId`s (indexes into the input schema), never names.
 
 CSE shares a non-ASAP producer across consumers when every execution over the same input rows
-returns the same output rows (`NonASAPOp::returns_same_rows_for_same_input_rows`); a unique key
+returns the same output rows (`NonASAPOp::is_shareable_when_equal`); a unique key
 is not needed. An unordered `Limit`, a `Dedup` on some but not all columns and a window function
 that reads row positions without an `ORDER BY` are never shared.
 
@@ -155,7 +155,7 @@ The result is `Rc<OperatorNode>`. `lower_promql_workload`, `lower_sql` / `lower_
 Workload search then runs structural CSE (`asap_types::ir::cse::share_common_sub_dags`) once
 across every root: bottom-up hash-consing where the structural hash is only a filter and the
 typed `PartialEq` decides sharing, following scalar references like any other input, and
-gated by `NonASAPOp::returns_same_rows_for_same_input_rows` for non-ASAP producers.
+gated by `NonASAPOp::is_shareable_when_equal` for non-ASAP producers.
 
 ## Fields and column references
 

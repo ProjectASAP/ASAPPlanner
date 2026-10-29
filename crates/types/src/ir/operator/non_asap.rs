@@ -501,8 +501,9 @@ impl<C> NonASAPOp<C> {
 }
 
 impl NonASAPOp {
-    /// Whether every execution over the same input rows returns the same
-    /// output rows, so two equal nodes over one input can be computed (or
+    /// Whether two structurally equal copies of this node may be one shared
+    /// node: every execution over the same input rows returns the same
+    /// output rows, so one copy over their one input can be computed (or
     /// stored) once and read by both readers.
     ///
     /// Ties are the one place the input order decides: a `Sort` keeps tied
@@ -522,7 +523,7 @@ impl NonASAPOp {
     /// function the IR accepts is deterministic (no `random()`; unregistered
     /// SQL functions are rejected) and that a deployment's
     /// `AggIntent::Extension` returns the same rows for the same input.
-    pub fn returns_same_rows_for_same_input_rows(&self) -> bool {
+    pub fn is_shareable_when_equal(&self) -> bool {
         use NonASAPOp::*;
         match self {
             Limit {
@@ -535,9 +536,11 @@ impl NonASAPOp {
                     || matches!(child.non_asap(), Some(Sort { partition_by: sorted_by, .. })
                         if sorted_by == partition_by)
             }
+            // Empty `cols` means every column.
             Dedup { cols, child } => {
                 cols.is_empty()
-                    || (0..child.schema.fields.len()).all(|column| cols.contains(&column))
+                    || cols.iter().collect::<std::collections::BTreeSet<_>>().len()
+                        == child.schema.fields.len()
             }
             SQLWindowFunc {
                 func,
@@ -565,7 +568,23 @@ impl NonASAPOp {
                 };
                 !reads_row_positions || !order_by.is_empty()
             }
-            _ => true,
+            Scan { .. }
+            | Values { .. }
+            | Filter { .. }
+            | Project { .. }
+            | Aggregate { .. }
+            | Join { .. }
+            | SetOp { .. }
+            | Concat { .. }
+            | Sort { .. }
+            | BinaryOp { .. }
+            | TimeRange { .. }
+            | TimeShift { .. }
+            | PromqlVectorFromScalar(_)
+            | PromqlRelabel { .. }
+            | PromqlInfoEnrich { .. }
+            | PromqlSeriesSample { .. }
+            | PromqlSubquery { .. } => true,
         }
     }
 

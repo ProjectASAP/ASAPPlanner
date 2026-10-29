@@ -5,7 +5,7 @@
 //! [`asap_types::ir::cse::share_common_sub_dags`], the identical-expression rule's legality
 //! included: structurally equal nodes are one group when sharing them is
 //! legal: an ASAP node, or a non-ASAP node that returns the same rows for
-//! the same input rows (`NonASAPOp::returns_same_rows_for_same_input_rows`).
+//! the same input rows (`NonASAPOp::is_shareable_when_equal`).
 //! A unique key is not needed; an unordered `LIMIT` stays one group per
 //! reader.
 //!

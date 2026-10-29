@@ -289,7 +289,7 @@ become one group only when sharing them is legal, that is, when every reader
 of the shared node reads the rows it would read alone. Equal nodes are
 interned children first, so they always read one input, and a node is legal
 to share when every execution over the same input rows returns the same
-output rows (`NonASAPOp::returns_same_rows_for_same_input_rows`). A unique
+output rows (`NonASAPOp::is_shareable_when_equal`). A unique
 key is not needed.
 
 | Equal nodes | Share one group |
