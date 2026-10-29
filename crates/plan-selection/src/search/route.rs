@@ -865,8 +865,9 @@ fn search_domain<Id: Clone>(
                 groups: initial.groups.clone(),
                 query_roots: initial.query_roots.clone(),
             };
-            // The deadline is the same instant whenever it is taken:
-            // now plus the remaining budget.
+            // While budget remains, now plus the remaining budget is the same
+            // instant before or after population; once it is spent, either
+            // instant is already past and generation stops at its first check.
             let memo = generate_per_computation_logical_memo_candidates(
                 initial,
                 pruned.expect("first round pruned").inventory,
