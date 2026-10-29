@@ -3,10 +3,10 @@ use super::*;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::FamilyCapability;
 
-pub mod cardinality;
+pub(crate) mod cardinality;
 pub mod cms;
-pub mod count_sketch;
-pub mod ddsketch;
+pub(crate) mod count_sketch;
+pub(crate) mod ddsketch;
 pub mod hll;
 pub mod kll;
 pub mod univmon;
@@ -56,7 +56,7 @@ fn bounded_guarantee(
 /// The built-in guarantee of reading `query` out of a summary of family
 /// `family` built over an **exact** input, derived from the family's
 /// committed parameters by inverting the same sizing formulas
-/// [`crate::pass1::realization::default_size_params`] uses. Exact for a plain value
+/// [`size_params`] uses. Exact for a plain value
 /// or an exact aggregate. `None` when a sketch does not answer `query` (its
 /// family-capability table row), and when the family has no error model
 /// (`SummarySample`, `Wavelet`, `StatModel`, and sketch evaluations without a
@@ -136,7 +136,7 @@ pub fn with_failure_probability(params: &SketchParams, delta: f64) -> SketchPara
     }
 }
 
-pub(crate) fn size_params(
+pub fn size_params(
     kind: SketchAlgorithm,
     intent: &AggIntent,
     eps: f64,

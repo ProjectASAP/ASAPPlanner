@@ -1790,10 +1790,7 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
         .find(|node| node.id == root)
         .and_then(|node| node.guarantee.clone())
         .expect("the query's guarantee");
-    let sign =
-        asap_logical_asap_optimization::accuracy::composition::raw_data_samples_sign_statistic(
-            "data",
-        );
+    let sign = asap_accuracy::composition::raw_data_samples_sign_statistic("data");
     let bound = guarantee.bind(&|statistic| match statistic {
         "input_row_count" => Some(1_000.0),
         _ => (statistic == sign).then_some(1.0),
@@ -2666,7 +2663,7 @@ fn only_summary_family(family: SketchAlgorithm) -> Vec<asap_planner::SupportedSu
 /// the heap would.
 struct HeapPlansOnly(SketchAlgorithm);
 
-impl asap_plan_selection::AccuracyModel for HeapPlansOnly {
+impl asap_accuracy::AccuracyModel for HeapPlansOnly {
     fn satisfies(
         &self,
         _guarantee: &asap_types::ir::properties::AccuracyGuarantee,

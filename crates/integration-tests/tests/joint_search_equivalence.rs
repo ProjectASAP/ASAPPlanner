@@ -7,12 +7,12 @@
 
 use crate::planner_layering_common;
 
+use asap_accuracy::{AccuracyModel, BuiltinAccuracyModel};
 use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel, ResourceUnitCost};
 use asap_devtools::planning_stages::{lower_promql_roots, lower_sql_roots};
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
-    run_stage1_to_stage3_with, AccuracyModel, BuiltinAccuracyModel, PlanningModels,
-    Stage1ToStage3Run, Stage1ToStage3Search,
+    run_stage1_to_stage3_with, PlanningModels, Stage1ToStage3Run, Stage1ToStage3Search,
 };
 use asap_types::ir::properties::{AccuracyGuarantee, AccuracyTarget};
 use asap_types::ir::QueryRoot;

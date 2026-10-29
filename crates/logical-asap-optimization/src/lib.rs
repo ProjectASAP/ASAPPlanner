@@ -7,7 +7,8 @@
 //! invisible at the logical level ([`asap_aware_cse`](pass2::asap_aware_cse), Pass 2), e.g.
 //! `Quantile(x, 0.99)` and `Quantile(x, 0.95)` reading one built sketch.
 //!
-//! It depends only on `asap-types`, never on a later stage: Stage 2
+//! It depends only on `asap-types` and the shared accuracy model
+//! (`asap-accuracy`), never on a later stage: Stage 2
 //! (`asap-physical-asap-optimization`) and Stage 3 (`asap-plan-selection`)
 //! depend on it, and Cargo enforces that one-way flow. It depends on no
 //! query-language frontend either, except with the `test-support` feature,
@@ -30,20 +31,20 @@
 //! - [`realization`](pass1::realization) — the summary families that can serve an aggregate
 //!   intent, the intent's accuracy target and `(ε, δ)` budget, and default
 //!   sketch sizing, shared by Pass 1 and Pass 2.
-//! - [`accuracy`] — the built-in analytical accuracy rules: per-family
-//!   estimators, composition and budget allocation. They derive a
-//!   machine-readable
-//!   [`AccuracyGuarantee`](asap_types::ir::properties::AccuracyGuarantee)
-//!   for every finalized value and propagate it through
-//!   approximate-over-approximate compositions under conservative rules
-//!   (no independence assumptions, unknown statistics stay unknown). A
-//!   composition with no rule leaves the guarantee `None` and keeps the
-//!   candidate. Stage 1 has no pluggable accuracy model: plan selection
-//!   (Stage 3) checks each candidate's guarantee against its query's
-//!   `AccuracyTarget` with the deployment's `AccuracyModel` before pricing it.
 //! - [`deployment_capabilities`] — the deployment's supported summaries.
+//!
+//! Accuracy guarantees come from the built-in analytical accuracy rules in
+//! `asap-accuracy` (per-family estimators, composition and budget
+//! allocation). They derive a machine-readable
+//! [`AccuracyGuarantee`](asap_types::ir::properties::AccuracyGuarantee)
+//! for every finalized value and propagate it through
+//! approximate-over-approximate compositions under conservative rules (no
+//! independence assumptions, unknown statistics stay unknown). A
+//! composition with no rule leaves the guarantee `None` and keeps the
+//! candidate. Stage 1 has no pluggable accuracy model: plan selection
+//! (Stage 3) checks each candidate's guarantee against its query's
+//! `AccuracyTarget` with the deployment's `AccuracyModel` before pricing it.
 
-pub mod accuracy;
 /// The deployment's capabilities: supported summaries and what it retains.
 pub mod deployment_capabilities;
 /// Test helpers shared by the stage crates' tests (feature `test-support`).

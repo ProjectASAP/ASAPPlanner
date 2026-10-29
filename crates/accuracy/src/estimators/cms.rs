@@ -25,13 +25,13 @@ pub(super) fn guarantee(
 }
 
 /// CMS: over-count ≤ ε·N with width `w = ⌈e/ε⌉` columns.
-pub(crate) fn cms_width(eps: f64) -> u32 {
+pub fn cms_width(eps: f64) -> u32 {
     saturating_ceil(std::f64::consts::E / eps, 2, 1 << 26)
 }
 
 /// CMS: failure probability ≤ δ with depth `d = ⌈ln(1/δ)⌉` rows.
 /// δ = 0.01 → depth 5.
-pub(crate) fn cms_depth(delta: f64) -> u32 {
+pub fn cms_depth(delta: f64) -> u32 {
     saturating_ceil((1.0 / delta).ln(), 1, 32)
 }
 
@@ -41,10 +41,10 @@ mod tests {
 
     #[test]
     fn local_guarantee_inverts_frequency_sizing() {
-        use crate::pass1::realization::default_size_params;
+        use crate::estimators::size_params;
         use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let c = asap_types::ir::operator::agg_intent::default_cardinality();
-        let params = default_size_params(SketchAlgorithm::Cms, &c, 0.01, 0.001);
+        let params = size_params(SketchAlgorithm::Cms, &c, 0.01, 0.001);
         let g = local_guarantee(
             &FieldDataType::Sketch(
                 SketchKind::new(SketchAlgorithm::Cms, params),
@@ -88,51 +88,16 @@ mod tests {
         );
     }
 
-    /// CMS width is `⌈e/ε⌉` and depth `⌈ln(1/δ)⌉`, with an ε-only target
-    /// taking `DEFAULT_DELTA` (depth 5).
-    #[test]
-    fn epsilon_delta_sizes_cms_depth() {
-        use crate::pass1::realization::{accuracy_budget, default_size_params, DEFAULT_DELTA};
-        let intent = AggIntent::Count {
-            accuracy: AccuracyTarget::max_error(0.001).failure_probability(0.001),
-        };
-        assert_eq!(
-            default_size_params(SketchAlgorithm::Cms, &intent, 0.001, 0.001),
-            SketchParams::Cms {
-                width: 2719,
-                depth: 7
-            } // ⌈e/0.001⌉, ⌈ln 1000⌉
-        );
-        let target = AccuracyTarget::max_error(0.001);
-        let (eps, delta) = accuracy_budget(&target);
-        assert_eq!((eps, delta), (0.001, DEFAULT_DELTA));
-        let intent = AggIntent::Count { accuracy: target };
-        assert_eq!(
-            default_size_params(SketchAlgorithm::Cms, &intent, eps, delta),
-            SketchParams::Cms {
-                width: 2719,
-                depth: 5
-            }
-        );
-        assert_eq!(
-            default_size_params(SketchAlgorithm::Cms, &intent, 0.01, 0.01),
-            SketchParams::Cms {
-                width: 272,
-                depth: 5
-            }
-        );
-    }
-
     /// A top-k heap holds `max(k, ⌈1/ε⌉)` entries over a CMS sized as for counts.
     #[test]
     fn topk_heap_capacity_respects_accuracy_and_output_count() {
-        use crate::pass1::realization::default_size_params;
+        use crate::estimators::size_params;
         let intent = AggIntent::TopK {
             k: 25,
             accuracy: AccuracyTarget::max_error(0.01),
         };
         assert_eq!(
-            default_size_params(SketchAlgorithm::CmsWithHeap, &intent, 0.01, 0.01),
+            size_params(SketchAlgorithm::CmsWithHeap, &intent, 0.01, 0.01),
             SketchParams::CmsWithHeap {
                 width: 272, // ⌈e/0.01⌉
                 depth: 5,

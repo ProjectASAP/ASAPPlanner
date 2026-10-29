@@ -263,6 +263,13 @@ use asap_types::workload::{
 };
 use thiserror::Error;
 
+use asap_accuracy::composition::{
+    parse_raw_data_samples_sign_statistic, parse_source_norm_statistic, INPUT_ROW_COUNT,
+    PRODUCT_OPERAND_DOMAINS, STREAM_L1_NORM,
+};
+use asap_accuracy::estimators::with_failure_probability;
+use asap_accuracy::estimators::{hll, univmon};
+use asap_accuracy::OperandDomain;
 use asap_cost::analytical::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceEstimate,
 };
@@ -277,13 +284,6 @@ use asap_cost::{
     NodeCost, NodePriceSource, OperatorKind, QueryLatency, ResourceUsage, COST_SOURCE, COST_UNIT,
     MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
 };
-use asap_logical_asap_optimization::accuracy::composition::{
-    parse_raw_data_samples_sign_statistic, parse_source_norm_statistic, INPUT_ROW_COUNT,
-    PRODUCT_OPERAND_DOMAINS, STREAM_L1_NORM,
-};
-use asap_logical_asap_optimization::accuracy::estimators::with_failure_probability;
-use asap_logical_asap_optimization::accuracy::estimators::{hll, univmon};
-use asap_logical_asap_optimization::accuracy::OperandDomain;
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilitiesError;
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     approximate_inputs, distinct_bound_source, operand_domain_statistic, operand_guarantee,
@@ -291,10 +291,7 @@ use asap_logical_asap_optimization::pass1::per_computation_candidates::{
 };
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 
-pub mod accuracy;
-pub use accuracy::{
-    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, NoAccuracyEvidence,
-};
+mod accuracy;
 use asap_cost::execution_demand::{computations, evaluation_rate, query_starts};
 
 /// The Stage 1 to Stage 3 driver and the optimization-pass interface.
@@ -2279,7 +2276,7 @@ fn bound_root_guarantee(
 }
 
 /// `guarantee` with the statistics `value` supplies bound. A sign gate
-/// ([`raw_data_samples_sign_statistic`](asap_logical_asap_optimization::accuracy::composition::raw_data_samples_sign_statistic))
+/// ([`raw_data_samples_sign_statistic`](asap_accuracy::composition::raw_data_samples_sign_statistic))
 /// is an indicator that only 1 (proven) opens: any other value leaves it
 /// unbound, so it can never read as a perfect bound.
 fn bind_statistics(
@@ -4492,7 +4489,9 @@ mod tests {
             settings,
         )
     }
-    use crate::AccuracyEvidenceProvider;
+    use asap_accuracy::{
+        AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, NoAccuracyEvidence,
+    };
     use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
     use asap_logical_asap_optimization::test_support::{entry, entry_with, lower_promql};
     use asap_physical_asap_optimization::optimize_physical_asap;
@@ -4931,7 +4930,7 @@ mod tests {
     /// reading as a perfect bound. Other statistics pass through.
     #[test]
     fn the_sign_gate_opens_only_at_one() {
-        use asap_logical_asap_optimization::accuracy::composition::raw_data_samples_sign_statistic;
+        use asap_accuracy::composition::raw_data_samples_sign_statistic;
         let gated = AccuracyGuarantee::new(
             AccuracyMetric::Relative,
             BoundExpr::Product {
@@ -4978,7 +4977,7 @@ mod tests {
     /// name.
     #[test]
     fn sign_of_counter_raw_data_samples_is_bound_from_the_declared_type() {
-        use asap_logical_asap_optimization::accuracy::composition::raw_data_samples_sign_statistic;
+        use asap_accuracy::composition::raw_data_samples_sign_statistic;
         let gated = AccuracyGuarantee::new(
             AccuracyMetric::Relative,
             BoundExpr::Product {
@@ -7393,11 +7392,8 @@ mod tests {
     struct BoundedOperands;
 
     impl AccuracyEvidenceProvider for BoundedOperands {
-        fn operand_domain(
-            &self,
-            _operand: &OperatorNode,
-        ) -> Option<asap_logical_asap_optimization::accuracy::OperandDomain> {
-            Some(asap_logical_asap_optimization::accuracy::OperandDomain {
+        fn operand_domain(&self, _operand: &OperatorNode) -> Option<asap_accuracy::OperandDomain> {
+            Some(asap_accuracy::OperandDomain {
                 lower: 1.0,
                 upper: 1_000.0,
             })

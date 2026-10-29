@@ -155,11 +155,11 @@ mod tests {
 
     #[test]
     fn count_sketch_uses_an_l2_guarantee() {
-        use crate::pass1::realization::default_size_params;
+        use crate::estimators::size_params;
         use asap_types::ir::operator::agg_intent::default_cardinality;
         use asap_types::ir::schema::{GroupingStrategy, SketchKind};
         let intent = default_cardinality();
-        let count_sketch = default_size_params(SketchAlgorithm::CountSketch, &intent, 0.01, 0.01);
+        let count_sketch = size_params(SketchAlgorithm::CountSketch, &intent, 0.01, 0.01);
         let guarantee = local_guarantee(
             &FieldDataType::Sketch(
                 SketchKind::new(SketchAlgorithm::CountSketch, count_sketch),

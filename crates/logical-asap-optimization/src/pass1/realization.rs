@@ -151,7 +151,7 @@ pub fn default_size_params(
     eps: f64,
     delta: f64,
 ) -> SketchParams {
-    crate::accuracy::estimators::size_params(kind, intent, eps, delta)
+    asap_accuracy::estimators::size_params(kind, intent, eps, delta)
 }
 
 /// The column fed into a *single-column* summary: the intent's leading
@@ -634,5 +634,39 @@ mod tests {
         for family in FAMILY_PREFERENCE {
             assert!(seen.insert(family), "{family:?} twice");
         }
+    }
+
+    /// CMS width is `⌈e/ε⌉` and depth `⌈ln(1/δ)⌉`, with an ε-only target
+    /// taking `DEFAULT_DELTA` (depth 5).
+    #[test]
+    fn epsilon_delta_sizes_cms_depth() {
+        let intent = AggIntent::Count {
+            accuracy: AccuracyTarget::max_error(0.001).failure_probability(0.001),
+        };
+        assert_eq!(
+            default_size_params(SketchAlgorithm::Cms, &intent, 0.001, 0.001),
+            SketchParams::Cms {
+                width: 2719,
+                depth: 7
+            } // ⌈e/0.001⌉, ⌈ln 1000⌉
+        );
+        let target = AccuracyTarget::max_error(0.001);
+        let (eps, delta) = accuracy_budget(&target);
+        assert_eq!((eps, delta), (0.001, DEFAULT_DELTA));
+        let intent = AggIntent::Count { accuracy: target };
+        assert_eq!(
+            default_size_params(SketchAlgorithm::Cms, &intent, eps, delta),
+            SketchParams::Cms {
+                width: 2719,
+                depth: 5
+            }
+        );
+        assert_eq!(
+            default_size_params(SketchAlgorithm::Cms, &intent, 0.01, 0.01),
+            SketchParams::Cms {
+                width: 272,
+                depth: 5
+            }
+        );
     }
 }

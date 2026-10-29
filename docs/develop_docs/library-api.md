@@ -26,8 +26,9 @@ artifact, while preserving the checks required by its intended consumer.
 Inside this workspace, depend on the frontend you need, the stage crates
 (`asap-logical-asap-optimization` for Stage 1, `asap-physical-asap-optimization`
 for Stage 2, `asap-plan-selection` for Stage 3 and the Stage 1 to Stage 3
-driver), `asap-cost` for the cost model and its inputs (`CostInputs`), and
-`asap-types`, or on `asap-planner`, which wraps every frontend and
+driver), `asap-cost` for the cost model and its inputs (`CostInputs`),
+`asap-accuracy` for the accuracy model (`AccuracyModel`,
+`AccuracyEvidenceProvider`), and `asap-types`, or on `asap-planner`, which wraps every frontend and
 the planning stages. External users can use Git dependencies pinned to a
 compatible revision; use the same revision across these crates, and pick a
 revision at least as new as the APIs you call. Replace `REV` below with a
@@ -40,6 +41,7 @@ asap-planner = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV"
 asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
 asap-plan-selection = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
 asap-cost = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
+asap-accuracy = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
 asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "REV" }
 # For the async e2e_plan example:
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

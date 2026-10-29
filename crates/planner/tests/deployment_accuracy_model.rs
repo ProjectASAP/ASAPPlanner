@@ -6,10 +6,9 @@
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
+use asap_accuracy::{AccuracyModel, BuiltinAccuracyModel};
 use asap_frontend_promql::{lower_promql_query_workload, promql_metric_names};
-use asap_plan_selection::{
-    AccuracyModel, BuiltinAccuracyModel, PlanOutput, PlanningModels, RejectionCause,
-};
+use asap_plan_selection::{PlanOutput, PlanningModels, RejectionCause};
 use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};

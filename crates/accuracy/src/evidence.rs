@@ -26,7 +26,7 @@ pub struct PropagationStats {
     pub values_non_negative: Option<bool>,
     /// The statistic an unknown sign is named by when the folded values are
     /// one metric's raw data samples or plain sums of them
-    /// ([`raw_data_samples_sign_statistic`](crate::accuracy::composition::raw_data_samples_sign_statistic)):
+    /// ([`raw_data_samples_sign_statistic`](crate::composition::raw_data_samples_sign_statistic)):
     /// the relative bound is then gated on it, and plan selection binds it
     /// to 1 when the metric is declared a counter. `None`: the bare
     /// `values_non_negative`, which nothing binds.

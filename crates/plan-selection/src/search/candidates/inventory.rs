@@ -1373,8 +1373,8 @@ mod tests {
     #[test]
     fn ratio_accuracy_is_validated_after_selecting_concrete_budget_shares() {
         use crate::{PlanSelector, PlanningModels, SelectionError};
+        use asap_accuracy::satisfies;
         use asap_cost::CalibrationFit;
-        use asap_logical_asap_optimization::accuracy::satisfies;
         use asap_logical_asap_optimization::test_support::entry_with;
         use asap_physical_asap_optimization::optimize_physical_asap_chosen;
         use asap_types::ir::properties::AccuracyMetric;

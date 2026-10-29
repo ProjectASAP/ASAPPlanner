@@ -893,7 +893,7 @@ fn hll_size_certified(
     delta: f64,
     distinct: u64,
 ) -> bool {
-    use asap_logical_asap_optimization::accuracy::estimators::hll;
+    use asap_accuracy::estimators::hll;
     let error = hll::classic_relative_error(precision, relative_error);
     // Unsupported populations can make min_precision return its input unchanged.
     // The actual confidence certificate is essential, not merely size equality.
@@ -928,10 +928,7 @@ fn stable_size(node: &asap_types::ir::OperatorNode, delta: Option<f64>) -> bool 
         return false;
     }
     let Some(delta) = delta else { return false };
-    let sized = asap_logical_asap_optimization::accuracy::estimators::with_failure_probability(
-        kind.params(),
-        delta,
-    );
+    let sized = asap_accuracy::estimators::with_failure_probability(kind.params(), delta);
     match (rmp_serde::to_vec(kind.params()), rmp_serde::to_vec(&sized)) {
         (Ok(before), Ok(after)) => before == after,
         _ => false,
@@ -1095,9 +1092,7 @@ mod tests {
             k: 2,
             relative_error: Some(0.05),
         };
-        let sized = asap_logical_asap_optimization::accuracy::estimators::with_failure_probability(
-            &small, 0.05,
-        );
+        let sized = asap_accuracy::estimators::with_failure_probability(&small, 0.05);
         let set = |node: &mut OperatorNode, params| {
             let Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) = &mut node.operator else {
                 panic!("summary fixture")
@@ -1132,7 +1127,7 @@ mod tests {
             .find(|node| matches!(node.non_asap(), Some(NonASAPOp::Aggregate { .. })))
             .unwrap();
         let mut summary = asap_logical_asap_optimization::test_support::cms_summary("count(m)");
-        let params = asap_logical_asap_optimization::accuracy::estimators::with_failure_probability(
+        let params = asap_accuracy::estimators::with_failure_probability(
             &SketchParams::Kmv {
                 k: 2,
                 relative_error: Some(0.05),
