@@ -804,12 +804,23 @@ Output: Out — candidate replacement sub-DAGs for s
 17: return Out
 ```
 
-Summary nodes are created unsized. Algorithm 1 checks whether a family can
-meet `acc(s)` at all, and the summary is sized for the accuracy requirement
-later, since Pass 2 may tighten it to the strictest requirement among shared
-consumers. Pass 1 creates no merge nodes: each candidate summarizes exactly its
-own window, and merging across windows comes from the window-composition rule
-in Pass 2.
+Every size is decided in Stage 1; Stage 3 only checks the composed accuracy.
+Algorithm 1 checks whether a family can meet `acc(s)` at all and
+yields the family unsized (`HowToComputeAggregateMeasure::Summary`). When
+Pass 1 attaches the family to its memo group, it creates one sized candidate
+per split of the accuracy budget: `accuracy_budget_parts` from 1 to the most
+approximate inputs of a query reaching the group, each sized by the accuracy
+model for its share. Pass 2 never resizes a summary for its own readers: a
+pane chain inherits the size of the build it replaces (a merge of equal-size
+panes keeps the guarantee when the family's merged error is `Exact` or
+`AsIfBuiltOverUnion`), and a build shared by several readers takes the
+strictest reader's size, one state group per distinct size. Today two sizing
+steps still run outside Pass 1 and are to move into it: the whole-result
+failure-probability capacities (`add_scoped_candidates` in plan-selection) and
+Stage 3's failure-probability resizing (`resize_for_failure_probability`).
+Pass 1 creates no merge nodes: each candidate summarizes exactly its own
+window, and merging across windows comes from the window-composition rule in
+Pass 2.
 
 *Example for Algorithm 1.1* (Q2 of [Example 1](#example-1-aggregation-over-dimensions--the-candidate-set-through-every-stage)). MATCH binds the
 parameters of Q2. The TopK rule has two templates: one summary per group,
