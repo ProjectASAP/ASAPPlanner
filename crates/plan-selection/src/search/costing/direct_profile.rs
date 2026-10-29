@@ -633,7 +633,7 @@ fn price<'a>(
         }
         let raw_source = match &node.payload {
             asap_types::ir::Operator::NonASAP(NonASAPOp::Scan { source, .. }) => {
-                Some(crate::source_name(source).to_string())
+                Some(asap_types::workload::bounds::source_name(source).to_string())
             }
             asap_types::ir::Operator::NonASAP(
                 NonASAPOp::Filter { .. } | NonASAPOp::TimeRange { .. },
@@ -797,7 +797,8 @@ fn failure_budget(
                 };
                 for node in asap_types::ir::OperatorNode::reachable(root) {
                     if let Some(NonASAPOp::Scan { source, .. }) = node.non_asap() {
-                        sources.insert(crate::source_name(source).to_string());
+                        sources
+                            .insert(asap_types::workload::bounds::source_name(source).to_string());
                     }
                 }
             }

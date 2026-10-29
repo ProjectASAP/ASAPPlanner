@@ -20,8 +20,8 @@ use crate::report::{
     AcceptedAccuracy, Rejection, RejectionCause, SearchReport, Selection, SelectionError,
 };
 use crate::sizing::sized_for_failure_probability;
-use crate::statistics::with_confirmed_weights;
 use crate::PlanningModels;
+use asap_types::workload::bounds::with_confirmed_weights;
 
 /// A cost per second for a rejection reason: three decimals, or three
 /// significant digits in scientific notation when it is nonzero and below

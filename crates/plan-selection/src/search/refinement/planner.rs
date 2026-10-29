@@ -862,7 +862,7 @@ fn accuracy_baseline(
                         let root = QueryRoot::Operator(std::rc::Rc::clone(node));
                         crate::bound_root_guarantee(
                             &root,
-                            crate::series_read(&root, context.data),
+                            asap_types::workload::bounds::series_read(&root, context.data),
                             context.data,
                             &context.models,
                         ).is_none_or(|guarantee| {
@@ -974,7 +974,9 @@ fn retained_pane_priority_cost(
     let sources: std::collections::BTreeSet<_> = reachable
         .iter()
         .filter_map(|node| match node.non_asap() {
-            Some(NonASAPOp::Scan { source, .. }) => Some(crate::source_name(source)),
+            Some(NonASAPOp::Scan { source, .. }) => {
+                Some(asap_types::workload::bounds::source_name(source))
+            }
             _ => None,
         })
         .collect();
@@ -984,18 +986,18 @@ fn retained_pane_priority_cost(
         {
             1
         }
-        _ => crate::declared_series(&sources, context.data)
+        _ => asap_types::workload::bounds::declared_series(&sources, context.data)
             .unwrap_or(1)
             .max(1),
     };
-    let rows_per_state = crate::source_rows_per_ms(&sources, context.data)
+    let rows_per_state = asap_types::workload::bounds::source_rows_per_ms(&sources, context.data)
         .map(|rate| (rate * *pane_width_ms as f64 / groups as f64).ceil() as u64);
     let non_negative = matches!(
         child.non_asap(),
         Some(NonASAPOp::Scan { .. } | NonASAPOp::TimeRange { .. })
     ) && sources
         .iter()
-        .all(|source| crate::declared_non_negative(context.data, source));
+        .all(|source| asap_types::workload::bounds::declared_non_negative(context.data, source));
     let (_, bytes) = crate::summary_shape(
         family,
         crate::StateInputRows {

@@ -302,7 +302,9 @@ pub(crate) fn selected_logical(
 ) -> Option<Vec<QueryRoot>> {
     let targets = &crate::accuracy_targets(entries);
     let sized = crate::resize_for_failure_probability(roots, targets, data).ok()?;
-    Some(crate::with_confirmed_weights(&sized, data))
+    Some(asap_types::workload::bounds::with_confirmed_weights(
+        &sized, data,
+    ))
 }
 
 /// The planner pipeline behind the optimization-pass interface: the

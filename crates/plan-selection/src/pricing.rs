@@ -31,7 +31,7 @@ use asap_types::physical::{Materialization, Medium};
 use asap_types::workload::{DataWorkload, QueryRecurrence, RangeEvaluation};
 
 use crate::checks::family_name;
-use crate::statistics::{
+use asap_types::workload::bounds::{
     declared_non_negative, declared_series, group_count_bound, source_name, source_rows_per_ms,
     unchanged_source_columns,
 };

@@ -4,21 +4,19 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
-use asap_types::ir::operator::operator_properties::{
+use crate::ir::operator::operator_properties::{
     BinaryOpKind, PromQLVectorSetOpKind, RelationalSetOpKind,
 };
-use asap_types::ir::operator::{AggIntent, GroupKeys, Reduction, Source};
-use asap_types::ir::physical_export::PhysicalASAPOperatorPayload as Payload;
-use asap_types::ir::schema::{Schema, SketchStatistic, WeightDomain};
-use asap_types::ir::{
+use crate::ir::operator::{AggIntent, GroupKeys, Reduction, Source};
+use crate::ir::physical_export::PhysicalASAPOperatorPayload as Payload;
+use crate::ir::schema::{Schema, SketchStatistic, WeightDomain};
+use crate::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot, ScalarExpr,
 };
-use asap_types::workload::{DataWorkload, MetricType};
-
-use crate::accuracy_binding::root_operators;
+use crate::workload::{DataWorkload, MetricType};
 
 /// A scan source's name: its PromQL metric or SQL table.
-pub(crate) fn source_name(source: &Source) -> &str {
+pub fn source_name(source: &Source) -> &str {
     match source {
         Source::TimeSeries { metric } => metric,
         Source::Table { table_ref } => table_ref,
@@ -114,14 +112,15 @@ fn row_bound(
 }
 
 /// An upper bound on the rows any operator of `root` sees or returns in one
-/// evaluation ([`row_bound`]), from the series count each source it reads
+/// evaluation (`row_bound`), from the series count each source it reads
 /// declares: the input row count of its folds, and `G` for a PromQL
 /// instant vector ([`values_per_result`]). A join or fold of one source
 /// counts it once; an `or` counts each branch. `None` when `root` reads no
 /// source, or a source it reads declares no series count.
-pub(crate) fn series_read(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
+pub fn series_read(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
     let mut cache = HashMap::new();
-    let inputs: Vec<RowBound> = root_operators(root)
+    let inputs: Vec<RowBound> = root
+        .operator_refs()
         .into_iter()
         .map(|node| row_bound(node, &mut cache))
         .collect();
@@ -137,16 +136,16 @@ pub(crate) fn series_read(root: &QueryRoot, data: &DataWorkload) -> Option<u64> 
 }
 
 /// How many values one evaluation of `root` returns at most (`G`): one for
-/// a scalar root and for a root of at most one row ([`at_most_one_row`]),
+/// a scalar root and for a root of at most one row (`at_most_one_row`),
 /// provable from the query. Otherwise the smaller of two bounds, either
 /// alone when the other is unknown: `series_read` ([`series_read`]) for a
 /// PromQL instant vector, which bounds the values it can return (each
 /// branch of an `or` adds its own), and, for a grouped root of any
 /// language, the groups its keys' declared distinct values allow
-/// ([`declared_group_bound`]), at most `series_read`. `None` when neither
+/// (`declared_group_bound`), at most `series_read`. `None` when neither
 /// applies: an ungrouped SQL result, a grouping with an undeclared key, a
 /// range vector.
-pub(crate) fn values_per_result(
+pub fn values_per_result(
     root: &QueryRoot,
     series_read: Option<u64>,
     data: &DataWorkload,
@@ -250,7 +249,7 @@ fn declared_group_bound(node: &OperatorNode, data: &DataWorkload) -> Option<u64>
 /// or relabeled on the way (its values are no longer the source's), or a
 /// source's declared counts do not cover the columns.
 ///
-/// [`SourceFacts::declared_distinct_combinations`]: asap_types::workload::SourceFacts::declared_distinct_combinations
+/// [`SourceFacts::declared_distinct_combinations`]: super::SourceFacts::declared_distinct_combinations
 fn declared_distinct_combinations(
     node: &OperatorNode,
     columns: &[usize],
@@ -301,8 +300,8 @@ fn declared_distinct_combinations(
         } => {
             let reduced = match measures.first()?.input_cols().first() {
                 Some(&input) => input,
-                None => asap_types::ir::scalar::column_resolution::resolve_column_ref(
-                    &asap_types::ir::scalar::ColumnRef::SampleValue,
+                None => crate::ir::scalar::column_resolution::resolve_column_ref(
+                    &crate::ir::scalar::ColumnRef::SampleValue,
                     &child.schema,
                 )
                 .ok()?,
@@ -342,7 +341,7 @@ fn declared_distinct_combinations(
 /// above one only operators that keep or drop its rows, or join two such
 /// inputs without adding unmatched rows of both sides.
 fn at_most_one_row(node: &OperatorNode) -> bool {
-    let global = |reduction: &asap_types::ir::operator::Reduction| {
+    let global = |reduction: &crate::ir::operator::Reduction| {
         reduction
             .group_keys()
             .is_some_and(|by| !by.is_without() && by.keys().is_empty())
@@ -389,7 +388,7 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
         Operator::NonASAP(NonASAPOp::Join {
             kind, left, right, ..
         }) => {
-            use asap_types::ir::operator::operator_properties::JoinKind;
+            use crate::ir::operator::operator_properties::JoinKind;
             match kind {
                 JoinKind::Semi | JoinKind::Anti => at_most_one_row(left),
                 JoinKind::Full => false,
@@ -416,8 +415,8 @@ pub fn confirmed_weights(domain: &WeightDomain, data: &DataWorkload) -> WeightDo
 
 /// Whether `data` declares every sample of `metric` non-negative: the
 /// metric is declared a counter, or a metric (a gauge, say) with
-/// [`SourceFacts::values_non_negative`](asap_types::workload::SourceFacts::values_non_negative).
-pub(crate) fn declared_non_negative(data: &DataWorkload, metric: &str) -> bool {
+/// [`SourceFacts::values_non_negative`](crate::workload::SourceFacts::values_non_negative).
+pub fn declared_non_negative(data: &DataWorkload, metric: &str) -> bool {
     declared_counter(data, metric)
         || data
             .sources
@@ -493,7 +492,7 @@ pub fn with_confirmed_weights(roots: &[QueryRoot], data: &DataWorkload) -> Vec<Q
 /// source declares one, else all of it (no source receives more). A node
 /// reading no source sees the whole `rows_per_second`. `None` when a
 /// source's rate has neither (the arrival declares no rate).
-pub(crate) fn source_rows_per_ms(sources: &BTreeSet<&str>, data: &DataWorkload) -> Option<f64> {
+pub fn source_rows_per_ms(sources: &BTreeSet<&str>, data: &DataWorkload) -> Option<f64> {
     let workload_rows_per_ms = data.arrival.rows_per_second().map(|rows| rows / 1_000.0);
     if sources.is_empty() {
         return workload_rows_per_ms;
@@ -535,8 +534,8 @@ pub(crate) fn source_rows_per_ms(sources: &BTreeSet<&str>, data: &DataWorkload) 
 /// operator pairing rows, a relabeling, a computed column) gives none, so a
 /// declared label set never bounds values it does not describe.
 /// `producers` are each producer's output schema and unchanged columns.
-pub(crate) fn unchanged_source_columns<'a>(
-    node: &'a asap_types::ir::physical_export::PhysicalASAPDAGNode,
+pub fn unchanged_source_columns<'a>(
+    node: &'a crate::ir::physical_export::PhysicalASAPDAGNode,
     producers: &[(&'a Schema, &BTreeSet<&'a str>)],
 ) -> BTreeSet<&'a str> {
     let output_names = || node.output_schema.fields.iter().map(|f| f.name.as_str());
@@ -650,7 +649,7 @@ pub(crate) fn unchanged_source_columns<'a>(
 ///   smallest product of the counts it declares in
 ///   `distinct_values_per_label` and `distinct_values_per_label_set` that
 ///   covers the keys
-///   ([`SourceFacts::declared_distinct_combinations`](asap_types::workload::SourceFacts::declared_distinct_combinations));
+///   ([`SourceFacts::declared_distinct_combinations`](crate::workload::SourceFacts::declared_distinct_combinations));
 ///   otherwise (several sources, a join pairing labels of different rows,
 ///   or a relabeled key) the product of each key's
 ///   `distinct_values_per_label` count summed over the sources (a union
@@ -661,7 +660,7 @@ pub(crate) fn unchanged_source_columns<'a>(
 ///   sources): each is in one group;
 /// - `rows_read`, the rows the grouping reads per evaluation: each row is
 ///   in at most one group.
-pub(crate) fn group_count_bound(
+pub fn group_count_bound(
     keys: &GroupKeys,
     input: Option<&Schema>,
     sources: &BTreeSet<&str>,
@@ -727,11 +726,49 @@ pub(crate) fn group_count_bound(
 /// The series (or groups of rows) the sources in `sources` declare
 /// together, when every one declares `series_count`; `None` otherwise and
 /// for a node that reads no source.
-pub(crate) fn declared_series(sources: &BTreeSet<&str>, data: &DataWorkload) -> Option<u64> {
+pub fn declared_series(sources: &BTreeSet<&str>, data: &DataWorkload) -> Option<u64> {
     if sources.is_empty() {
         return None;
     }
     sources.iter().try_fold(0u64, |total, source| {
         Some(total.saturating_add(data.sources.get(*source)?.series_count?))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workload::{DataArrival, DurationMs, SourceFacts};
+
+    /// A source's rows per ms: its series over its sample interval when it
+    /// declares both, else its series share of the workload's rate.
+    #[test]
+    fn each_source_arrives_at_its_own_rate() {
+        let data = DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 4_000.0,
+            },
+            sources: [("a", Some(100)), ("b", Some(300)), ("c", None)]
+                .into_iter()
+                .map(|(metric, interval)| {
+                    let facts = SourceFacts {
+                        series_count: Some(if metric == "a" { 1_000 } else { 3_000 }),
+                        sample_interval: interval.map(DurationMs),
+                        ..SourceFacts::default()
+                    };
+                    (metric.to_string(), facts)
+                })
+                .collect(),
+        };
+        // 1 000 series every 100 ms; 3 000 series every 300 ms.
+        assert_eq!(source_rows_per_ms(&["a"].into(), &data), Some(10.0));
+        assert_eq!(source_rows_per_ms(&["a", "b"].into(), &data), Some(20.0));
+        // No interval: 3 000 of the 7 000 declared series, of 4 rows per ms.
+        assert_eq!(
+            source_rows_per_ms(&["c"].into(), &data),
+            Some(4.0 * 3_000.0 / 7_000.0)
+        );
+        // A node reading no source sees the whole rate.
+        assert_eq!(source_rows_per_ms(&BTreeSet::new(), &data), Some(4.0));
+    }
 }
