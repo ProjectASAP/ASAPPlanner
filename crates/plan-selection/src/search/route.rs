@@ -56,16 +56,17 @@ struct DomainProgress {
     catalog_completed: bool,
     refinements: usize,
     report: Option<crate::CandidateConnectionReport>,
-    local_memo: Option<asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo>,
-    /// The memo after Stage 0 and after Pass 1, kept with `local_memo`.
+    /// Pass 2's state between pane-width rounds; `None` before the first
+    /// round and after a round whose local window composition timed out.
+    pass2_round:
+        Option<asap_logical_asap_optimization::pass2::logical_memo_candidates::Pass2RoundState>,
+    /// The memo after Stage 0 and after Pass 1, kept with `pass2_round`.
     pass1_steps: Option<(
         asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo,
         asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo,
     )>,
     /// This round's memo steps, with its selected plan's ID when it has one.
     memo_steps: Option<(Option<String>, crate::search::pipeline::MemoSteps)>,
-    previous_domain:
-        Option<asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain>,
 }
 
 /// Obtain an incumbent on seed grids, then progressively expose finer widths.
@@ -162,9 +163,8 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
     let seed_report = seed_progress.report.clone();
     let full_started = Instant::now();
     let mut full_progress = DomainProgress {
-        local_memo: seed_progress.local_memo.take(),
+        pass2_round: seed_progress.pass2_round.take(),
         pass1_steps: seed_progress.pass1_steps.take(),
-        previous_domain: seed_progress.previous_domain,
         ..Default::default()
     };
     let global_deadline = started.checked_add(
@@ -225,9 +225,8 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         rounds.push(format!("{domain:?}"));
         let complete = domain == PaneWidthDomain::Complete;
         let mut round_progress = DomainProgress {
-            local_memo: full_progress.local_memo.take(),
+            pass2_round: full_progress.pass2_round.take(),
             pass1_steps: full_progress.pass1_steps.take(),
-            previous_domain: full_progress.previous_domain,
             ..Default::default()
         };
         let round = search_domain(
@@ -257,9 +256,8 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
             &mut round_progress,
             &format!("pane-round-{}-", rounds.len() - 1),
         );
-        full_progress.local_memo = round_progress.local_memo.take();
+        full_progress.pass2_round = round_progress.pass2_round.take();
         full_progress.pass1_steps = round_progress.pass1_steps.take();
-        full_progress.previous_domain = round_progress.previous_domain;
         full_progress.refinements += round_progress.refinements;
         completed_full_domain = complete && round_progress.catalog_completed;
         full_progress.catalog_completed = completed_full_domain;
@@ -296,7 +294,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         }
         // A timed-out rule pass leaves no reusable partial memo; stop rather
         // than repeating all generation and pretending the domain expanded.
-        if full_progress.local_memo.is_none() {
+        if full_progress.pass2_round.is_none() {
             break;
         }
     }
@@ -721,9 +719,10 @@ fn search_domain<Id: Clone>(
     use crate::search::refinement::planner::CandidatePlanningContext;
     use crate::search::refinement::search::{CandidateSearchLimits, CandidateSearchStatus};
     use asap_logical_asap_optimization::pass1::logical_memo_candidates::generate_per_computation_logical_memo_candidates;
-    use asap_logical_asap_optimization::pass2::memo::state_groups::{
-        expand_concrete_summary_state_groups_before, StateGroupExpansionError,
+    use asap_logical_asap_optimization::pass2::logical_memo_candidates::{
+        generate_logical_asap_memo_candidates, LogicalASAPMemoCandidatesError, Pass2RoundState,
     };
+    use asap_logical_asap_optimization::pass2::memo::state_groups::StateGroupExpansionError;
     use std::time::{Duration, Instant};
     let unsupported = |reason: &str| {
         SelectionError::Solver(format!(
@@ -804,7 +803,7 @@ fn search_domain<Id: Clone>(
         }
     }
     let started = Instant::now();
-    let pruned = if progress.local_memo.is_none() {
+    let pruned = if progress.pass2_round.is_none() {
         Some(
             crate::search::query_pruning::prune_query_candidates(
                 inventory,
@@ -857,8 +856,8 @@ fn search_domain<Id: Clone>(
         })
         .collect();
     let started = Instant::now();
-    let mut memo = match progress.local_memo.take() {
-        Some(memo) => memo,
+    let mut pass2_round = match progress.pass2_round.take() {
+        Some(pass2_round) => pass2_round,
         None => {
             let stage0 = CandidateMemo {
                 candidates: vec![Vec::new(); initial.groups.len()],
@@ -868,51 +867,49 @@ fn search_domain<Id: Clone>(
             // While budget remains, now plus the remaining budget is the same
             // instant before or after population; once it is spent, either
             // instant is already past and generation stops at its first check.
-            let memo = generate_per_computation_logical_memo_candidates(
+            let pass1 = generate_per_computation_logical_memo_candidates(
                 initial,
                 pruned.expect("first round pruned").inventory,
                 entries,
                 data,
                 Instant::now().checked_add(remaining()),
             )
-            .map_err(|error| unsupported(&error.to_string()))?
-            .memo;
-            progress.pass1_steps = Some((stage0, memo.clone()));
-            memo
+            .map_err(|error| unsupported(&error.to_string()))?;
+            progress.pass1_steps = Some((stage0, pass1.memo.clone()));
+            Pass2RoundState::new(pass1)
         }
     };
     let deadline = Instant::now().checked_add(remaining());
-    asap_logical_asap_optimization::pass2::memo::window_candidates::extend_local_window_composition(
-        &mut memo,
-        entries,
-        progress.previous_domain,
-        domain,
-        deadline,
-    )
-    .map_err(|error| {
-        progress.budget_stopped = true;
-        unsupported(&error.to_string())
-    })?;
-    // State-group splitting is currently one-shot. Keep the unexpanded memo;
-    // later rounds append local widths, then rebuild the state/physical catalog.
-    progress.local_memo = Some(memo.clone());
     // The seed-grid round, or the one complete round when there is none.
-    let first_round = progress.previous_domain.is_none();
-    progress.previous_domain = Some(domain);
-    let memo = expand_concrete_summary_state_groups_before(memo, domain, deadline)
-        .map_err(|error| {
-            progress.budget_stopped =
-                matches!(error, StateGroupExpansionError::DeadlineExceeded(_));
-            unsupported(&error.to_string())
-        })?
-        .memo;
+    let first_round = pass2_round.previous_domain().is_none();
+    // Pass 2 keeps its memo before state-group splitting across rounds: later
+    // rounds append local widths, then rebuild the state/physical catalog.
+    let memo =
+        match generate_logical_asap_memo_candidates(&mut pass2_round, entries, domain, deadline) {
+            Ok(candidates) => candidates.memo,
+            Err(error) => {
+                match &error {
+                    // A timed-out window composition leaves partial work: drop it.
+                    LogicalASAPMemoCandidatesError::LocalWindowComposition(_) => {
+                        progress.budget_stopped = true;
+                    }
+                    LogicalASAPMemoCandidatesError::Expansion(expansion) => {
+                        progress.budget_stopped =
+                            matches!(expansion, StateGroupExpansionError::DeadlineExceeded(_));
+                        progress.pass2_round = Some(pass2_round);
+                    }
+                }
+                return Err(unsupported(&error.to_string()));
+            }
+        };
+    let pass2_round = progress.pass2_round.insert(pass2_round);
     progress.memo_steps = progress.pass1_steps.as_ref().map(|(stage0, pass1)| {
         (
             None,
             crate::search::pipeline::MemoSteps {
                 stage0: stage0.clone(),
                 pass1: pass1.clone(),
-                pass2: progress.local_memo.clone().expect("kept above"),
+                pass2: pass2_round.unexpanded_memo().clone(),
                 concrete_states: memo.clone(),
                 selected_chosen_candidates: Err("no plan was selected".into()),
             },
@@ -1945,7 +1942,10 @@ mod tests {
     fn local_pane_rules_expose_identical_chains_to_state_groups() {
         use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
         use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-        use asap_logical_asap_optimization::pass2::memo::state_groups::expand_concrete_summary_state_groups;
+        use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
+        use asap_logical_asap_optimization::test_support::{
+            shared_summary_state_groups, sharing_rules_and_shared_state_groups,
+        };
         let (roots, mut entries, _) = workload();
         for entry in &mut entries {
             entry.recurrence =
@@ -1957,10 +1957,11 @@ mod tests {
         asap_logical_asap_optimization::pass2::memo::window_candidates::add_local_window_composition(
             &mut memo, &entries,
         );
-        let expanded = expand_concrete_summary_state_groups(memo).unwrap();
+        let expanded =
+            sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap();
         assert!(
-            expanded.state_groups.iter().any(|group| {
-                let state = &expanded.memo.groups[group.0 as usize];
+            shared_summary_state_groups(&expanded).iter().any(|group| {
+                let state = &expanded.groups[group.0 as usize];
                 matches!(
                     state.logical_node.asap(),
                     Some(asap_types::ir::ASAPOp::PaneChain { .. })

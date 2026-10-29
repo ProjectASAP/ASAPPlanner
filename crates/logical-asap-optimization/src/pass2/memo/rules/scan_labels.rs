@@ -16,7 +16,7 @@ use crate::pass2::memo::{MemoGroup, MemoGroupId};
 
 /// Preserve local implementations and append readers over union-label inputs.
 /// Parent/query reachability is rebuilt by the enclosing state-group expansion.
-pub(in crate::pass2::memo) fn add_scan_label_candidates(
+pub(crate) fn add_scan_label_candidates(
     memo: &mut CandidateMemo,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {

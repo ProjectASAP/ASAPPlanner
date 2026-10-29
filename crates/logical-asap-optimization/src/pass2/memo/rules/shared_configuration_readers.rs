@@ -95,7 +95,7 @@ struct SummaryStates {
     requests: HashSet<(usize, usize)>,
 }
 
-pub(in crate::pass2::memo) fn add_state_configuration_candidates_in_domain(
+pub(crate) fn add_state_configuration_candidates_in_domain(
     memo: &mut CandidateMemo,
     domain: PaneWidthDomain,
     deadline: Option<Instant>,

@@ -11,6 +11,44 @@ use asap_types::workload::{
     QueryRequirements, QueryWorkload,
 };
 
+/// Pass 2 after local window composition, on a memo the test composed
+/// itself (or not at all): rules 2–9 for `domain`, then
+/// [`add_shared_summary_state_groups`](crate::pass2::memo::state_groups::add_shared_summary_state_groups).
+/// Production runs these through
+/// [`generate_logical_asap_memo_candidates`](crate::pass2::logical_memo_candidates::generate_logical_asap_memo_candidates).
+pub fn sharing_rules_and_shared_state_groups(
+    mut memo: crate::pass2::memo::candidates::CandidateMemo,
+    domain: crate::pass2::memo::shared_configurations::PaneWidthDomain,
+) -> Result<
+    crate::pass2::memo::candidates::CandidateMemo,
+    crate::pass2::memo::state_groups::StateGroupExpansionError,
+> {
+    crate::pass2::logical_memo_candidates::apply_sharing_rules(&mut memo, domain, None)?;
+    crate::pass2::memo::state_groups::add_shared_summary_state_groups(&mut memo, None)?;
+    Ok(memo)
+}
+
+/// The groups [`add_shared_summary_state_groups`](crate::pass2::memo::state_groups::add_shared_summary_state_groups)
+/// added to an expanded memo, in order: each has one candidate, the
+/// shared build (origin `SharedBuild`); no other group's candidates are
+/// only that.
+pub fn shared_summary_state_groups(
+    memo: &crate::pass2::memo::candidates::CandidateMemo,
+) -> Vec<crate::pass2::memo::MemoGroupId> {
+    memo.candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidates)| {
+            matches!(
+                candidates.as_slice(),
+                [only] if only.origin
+                    == crate::pass2::memo::candidates::OriginOfCandidateForMemoGroup::SharedBuild
+            )
+        })
+        .map(|(group, _)| crate::pass2::memo::MemoGroupId(group as u32))
+        .collect()
+}
+
 /// The statistic classic HLL's failure probability at `precision` and
 /// `relative_error` over `source` is left as, for Stage 3 tests that bind
 /// it. The estimator keeps the format crate-private.
