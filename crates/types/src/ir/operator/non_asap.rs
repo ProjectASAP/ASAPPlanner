@@ -509,8 +509,8 @@ impl NonASAPOp {
     /// rows in input order (a stable sort), and an exact top-k ranks with that
     /// sort. That tie order counts as fixed. An operator that picks rows by
     /// input order alone does not return the same rows:
-    /// - a `Limit` or `OFFSET` whose child is not a `Sort` (`LIMIT 10` may
-    ///   return any 10 rows);
+    /// - a `Limit` or `OFFSET` whose child is not a `Sort` with the same
+    ///   partitions (`LIMIT 10` may return any 10 rows);
     /// - a `Dedup` on some but not all columns (which row of each key
     ///   survives is unspecified);
     /// - a window function that reads row positions (`ROW_NUMBER`, `LAG`,
@@ -518,13 +518,23 @@ impl NonASAPOp {
     ///
     /// Every other operator computes its output from the input rows' values
     /// only. `limitk` and `limit_ratio` pick the same series on every
-    /// evaluation by definition ([`SampleKind`]).
+    /// evaluation by definition ([`SampleKind`]). This assumes every scalar
+    /// function the IR accepts is deterministic (no `random()`; unregistered
+    /// SQL functions are rejected) and that a deployment's
+    /// `AggIntent::Extension` returns the same rows for the same input.
     pub fn returns_same_rows_for_same_input_rows(&self) -> bool {
         use NonASAPOp::*;
         match self {
             Limit {
-                n, offset, child, ..
-            } => (n.is_none() && *offset == 0) || matches!(child.non_asap(), Some(Sort { .. })),
+                n,
+                offset,
+                partition_by,
+                child,
+            } => {
+                (n.is_none() && *offset == 0)
+                    || matches!(child.non_asap(), Some(Sort { partition_by: sorted_by, .. })
+                        if sorted_by == partition_by)
+            }
             Dedup { cols, child } => {
                 cols.is_empty()
                     || (0..child.schema.fields.len()).all(|column| cols.contains(&column))

@@ -276,7 +276,7 @@ mod tests {
     }
 
     /// A per-series quantile has no provable unique key, but it is
-    /// deterministic: both readers of `G2 / G3` read the same rows, so the
+    /// deterministic: both operands of `G2 / G2` read the same rows, so the
     /// two equal sub-expressions are one group read twice.
     #[test]
     fn equal_keyless_deterministic_results_share_one_group() {

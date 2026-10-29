@@ -497,8 +497,8 @@ async fn cross_series_p50_and_p99_share_one_producer() {
     assert_eq!(unique_deployments(&output), 1);
 }
 
-/// An ungrouped aggregate has no unique key, so pre-ASAP CSE keeps the two
-/// copies apart; their identical producers (rate, then sum) are shared here.
+/// Two identical ungrouped queries: their identical producers (rate, then
+/// sum) are shared.
 #[tokio::test]
 async fn identical_ungrouped_queries_share_their_producers() {
     let query = ("sum(rate(x[5m]))", 0.01);

@@ -737,10 +737,12 @@ mod tests {
         assert!(!Rc::ptr_eq(&ra, &rb));
     }
 
-    /// A `LIMIT` over a `Sort` keeps the first rows of a fixed order.
+    /// A `LIMIT` over a `Sort` with the same partitions keeps the first rows
+    /// of a fixed order; over a `Sort` partitioned differently, which rows
+    /// come first still depends on input order.
     #[test]
-    fn ordered_limits_are_shared() {
-        let limit = || {
+    fn limits_over_a_sort_with_their_partitions_are_shared() {
+        let limit = |sort_partitions: GroupKeys| {
             node(NonASAPOp::Limit {
                 n: Some(10),
                 offset: 0,
@@ -751,13 +753,15 @@ mod tests {
                         ascending: false,
                         nulls_first: false,
                     }],
-                    partition_by: GroupKeys::default(),
+                    partition_by: sort_partitions,
                     child: scan(),
                 }),
             })
         };
-        let (ra, rb) = two_roots(limit(), limit());
+        let (ra, rb) = two_roots(limit(GroupKeys::default()), limit(GroupKeys::default()));
         assert!(Rc::ptr_eq(&ra, &rb));
+        let (ra, rb) = two_roots(limit(GroupKeys::by(vec![1])), limit(GroupKeys::by(vec![1])));
+        assert!(!Rc::ptr_eq(&ra, &rb));
     }
 
     /// `count without (service)` has no provable unique key, but it computes

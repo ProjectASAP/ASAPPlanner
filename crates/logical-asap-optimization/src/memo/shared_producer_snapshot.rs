@@ -58,6 +58,23 @@ fn expanded(queries: &[(&str, f64)], step_ms: u32) -> CandidateMemo {
         .memo
 }
 
+/// Whether one `sum_over_time` group (an aggregate directly over a window
+/// of `metric`) is reached by every query in `queries`.
+fn one_sum_over_time_group_for(memo: &CandidateMemo, metric: &str, queries: &[usize]) -> bool {
+    use asap_types::ir::operator::Source;
+    use asap_types::ir::NonASAPOp;
+    memo.groups.iter().any(|group| {
+        let Some(NonASAPOp::Aggregate { child, .. }) = group.node.non_asap() else {
+            return false;
+        };
+        let Some(NonASAPOp::TimeRange { child: scan, .. }) = child.non_asap() else {
+            return false;
+        };
+        matches!(scan.non_asap(), Some(NonASAPOp::Scan { source: Source::TimeSeries { metric: m }, .. }) if m == metric)
+            && queries.iter().all(|query| group.queries.contains(query))
+    })
+}
+
 fn signature(node: &Rc<asap_types::ir::OperatorNode>) -> String {
     serde_json::to_string(&flatten(&[QueryRoot::Operator(Rc::clone(node))]).0).unwrap()
 }
@@ -115,6 +132,7 @@ fn top_k_reuse_candidates_are_unchanged() {
         .iter()
         .flatten()
         .any(|candidate| candidate.origin == CandidateOrigin::TopKReuse));
+    assert!(one_sum_over_time_group_for(&memo, "m_gauge", &[0, 1]));
     assert_eq!(fingerprint(&memo), (69, 14825718632741491576));
 }
 
@@ -164,5 +182,7 @@ fn several_top_k_sets_are_unchanged() {
         ],
         60_000,
     );
+    assert!(one_sum_over_time_group_for(&memo, "m_gauge", &[0, 1, 2]));
+    assert!(one_sum_over_time_group_for(&memo, "other", &[3, 4]));
     assert_eq!(fingerprint(&memo), (504, 3265274154981812875));
 }
