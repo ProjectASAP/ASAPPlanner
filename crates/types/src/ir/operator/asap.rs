@@ -256,16 +256,6 @@ impl<C> ASAPOp<C> {
 }
 
 impl ASAPOp {
-    /// Reserved variants that are migrated but not implemented.
-    #[allow(dead_code)]
-    pub(crate) fn is_unimplemented(&self) -> bool {
-        use ASAPOp::*;
-        matches!(
-            self,
-            SummarySubtract { .. } | SummaryDelete { .. } | SummaryJoin { .. } | Extension { .. }
-        )
-    }
-
     fn unimplemented() -> SchemaDerivationError {
         SchemaDerivationError::InvalidScalarSignature(UNIMPLEMENTED_ASAP_OP.into())
     }
