@@ -238,10 +238,14 @@ impl ScanWindow {
     }
 }
 
-/// The window of the `TimeRange` `time_range`
-/// ([`PhysicalASAPDAG::time_range_window`]), with `payload` giving each
-/// node's operator.
-fn time_range_window_of<'a>(
+/// The rows the `TimeRange` `time_range` keeps, back from the evaluation
+/// time `T`: `(T - s - w, T - s]` for a `TimeRange(w)` over `TimeShift`s
+/// whose offsets sum to `s`, the window [`PhysicalASAPDAG::scan_window`]
+/// counts for it. `Unbounded` when one of those shifts has an `@` anchor,
+/// or `time_range` is not a `TimeRange`. `payload` gives each node's
+/// operator by id; an indexed lookup keeps this O(shifts), so a caller
+/// asking for every `TimeRange` of a pane-expanded DAG stays linear.
+pub fn time_range_window<'a>(
     time_range: PhysicalASAPNodeId,
     payload: impl Fn(PhysicalASAPNodeId) -> Option<&'a PhysicalASAPOperatorPayload>,
 ) -> ScanWindow {
@@ -360,11 +364,12 @@ impl PhysicalASAPDAG {
                 .or_default()
                 .push(edge.consumer);
         }
+        let roots: HashSet<PhysicalASAPNodeId> = self.roots.iter().copied().collect();
         let payload = |id: PhysicalASAPNodeId| payloads.get(&id).copied();
         let mut window: Option<ScanWindow> = None;
         let mut pending = vec![(scan, 0i64)];
         while let Some((id, end_offset_ms)) = pending.pop() {
-            if self.roots.contains(&id) {
+            if roots.contains(&id) {
                 return ScanWindow::Unbounded;
             }
             for &consumer in consumers.get(&id).into_iter().flatten() {
@@ -400,23 +405,9 @@ impl PhysicalASAPDAG {
         window.unwrap_or(ScanWindow::Unbounded)
     }
 
-    /// The rows the `TimeRange` `time_range` keeps, back from the
-    /// evaluation time `T`: `(T - s - w, T - s]` for a `TimeRange(w)` over
-    /// `TimeShift`s whose offsets sum to `s`, the window
-    /// [`Self::scan_window`] counts for it. `Unbounded` when one of those
-    /// shifts has an `@` anchor, or `time_range` is not a `TimeRange`.
-    pub fn time_range_window(&self, time_range: PhysicalASAPNodeId) -> ScanWindow {
-        time_range_window_of(time_range, |id| {
-            self.nodes
-                .iter()
-                .find(|node| node.id == id)
-                .map(|node| &node.payload)
-        })
-    }
-
     /// The interval of data the output of `node` summarizes, back from the
     /// evaluation time `T`: the union of the windows
-    /// ([`Self::time_range_window`]) of every `TimeRange` below it. For an
+    /// ([`time_range_window`]) of every `TimeRange` below it. For an
     /// expanded pane, its pane; for a view built from panes, all of them.
     /// `Unbounded` when no `TimeRange` is below it or one of them is
     /// unbounded (a whole SQL table, an `@` anchor). O(nodes + edges).
@@ -438,7 +429,7 @@ impl PhysicalASAPDAG {
                 continue;
             }
             if let Some(Operator::NonASAP(NonASAPOp::TimeRange { .. })) = payloads.get(&id) {
-                let read = time_range_window_of(id, |id| payloads.get(&id).copied());
+                let read = time_range_window(id, |id| payloads.get(&id).copied());
                 window = Some(window.map_or(read, |window| window.union(read)));
                 continue;
             }
