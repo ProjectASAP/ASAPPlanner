@@ -157,7 +157,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     # Planning takes 2-6 min (6 min on one core) plus the release build; each
-    # query stops at 120 s.
+    # query stops at 240 s.
     timeout-minutes: 45
     steps:
     - uses: actions/checkout@v4

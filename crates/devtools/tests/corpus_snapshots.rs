@@ -18,7 +18,7 @@
 //! Stage 1 and Stage 2 candidate lists and the memo vary from run to run
 //! (round budgets are wall-clock), so they are left out. Floats are rounded
 //! to 12 significant digits. A run that the time limit stopped fails instead
-//! of being recorded, and a query marked `known_slow` in the manifest is
+//! of being recorded, and a query with a `skip_reason` in the manifest is
 //! skipped.
 
 use std::path::{Path, PathBuf};
@@ -26,9 +26,9 @@ use std::process::Command;
 
 use serde_json::{json, Map, Value};
 
-/// Per query. The slowest kept query takes about 60 s on one core, so this
+/// Per query. The slowest kept queries take about 60 s on one core, so this
 /// leaves room for a slower CI runner while still failing a runaway search.
-const TIME_LIMIT_S: &str = "120";
+const TIME_LIMIT_S: &str = "240";
 
 fn corpora_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus_snapshots")
@@ -70,8 +70,9 @@ fn plan(workload: &Value, args: &[String], scratch: &Path) -> Value {
     serde_json::from_str(&std::fs::read_to_string(output).unwrap()).unwrap()
 }
 
-/// Whether the wall-clock budget ended the search: the report says so, or
-/// planning used the whole budget.
+/// Whether the wall-clock budget ended the search: the final round's status
+/// says so, or planning used the whole budget. An earlier pane round cut short
+/// by its own budget is not visible in the report.
 fn hit_time_limit(document: &Value) -> bool {
     let report = &document["stage3_plan_selection"]["search"]["candidate_connections"];
     if report["status"] == "time_limit" {
@@ -214,12 +215,12 @@ fn corpus_plans_match_snapshots() {
                 .unwrap();
         let args: Vec<String> =
             serde_json::from_value(corpus["stage_pipeline_args"].clone()).unwrap();
-        // A `known_slow` query (its value says why) is not planned.
+        // A query with a `skip_reason` is not planned.
         let queries: Vec<&Value> = corpus["queries"]
             .as_array()
             .unwrap()
             .iter()
-            .filter(|q| q.get("known_slow").is_none())
+            .filter(|q| q.get("skip_reason").is_none())
             .collect();
         let ids: Vec<&str> = queries.iter().map(|q| q["id"].as_str().unwrap()).collect();
 

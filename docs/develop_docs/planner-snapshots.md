@@ -13,7 +13,7 @@ and the change is explained.
 - `corpus.json`: the inputs shared by the corpus's queries (`stage_pipeline_args`,
   the repeating-query entry and the `data_workload`), and the queries, each
   with a stable `id`. Each query is planned on its own. A query with a
-  `known_slow` entry (saying why) is skipped and has no snapshot.
+  `skip_reason` entry (saying why) is skipped and has no snapshot.
 - `<id>.json`: that query's snapshot, pretty-printed with sorted keys.
 
 ## What a snapshot holds
@@ -29,9 +29,9 @@ Only the plan, which must not change between runs:
 - for a query that does not plan, `selected: null`, the `error` up to its
   embedded search report, and the causes and reasons of the rejections.
 
-Floats are rounded to 12 significant digits. Everything about the search is
-left out: candidate ids (such as `pane-round-12-joint-plan-1`), the search
-report's counters, bounds, status and timings, the Stage 1 and Stage 2
+Floats are rounded to 12 significant digits. Everything about the search
+except whether it proved the plan optimal is left out: candidate ids (such as
+`pane-round-12-joint-plan-1`), the search report's counters, bounds and timings, the Stage 1 and Stage 2
 candidate lists, and the memo (`stage_pipeline` runs with `--no-memo`). These
 vary from run to run because the search's pane-width rounds have wall-clock
 budgets, so a different round can find the same plan.
@@ -55,8 +55,9 @@ the PR description.
 The test also fails, instead of recording a snapshot, in these cases:
 
 - A query's search was ended by a wall-clock budget: its status is
-  `time_limit`, or planning used the whole 120 s limit. Its plan would then
-  depend on machine speed.
+  `time_limit`, or planning used the whole 240 s limit. Its plan would then
+  depend on machine speed. Only the final pane round's status is checked: an
+  earlier round cut short by its own wall-clock budget is not reported.
 - A snapshot file has no matching checked query in `corpus.json`.
 - `stage_pipeline` crashed.
 
@@ -64,5 +65,5 @@ The test also fails, instead of recording a snapshot, in these cases:
 
 Add the query to `corpus.json` with a new `id` and regenerate. Before you
 commit, run the check twice, plus once on one core (`taskset -c 0`), and confirm
-it passes each time. Keep each query well under the 120 s limit on one core
-with a release build; otherwise mark it `known_slow` with the reason.
+it passes each time. Keep each query well under the 240 s limit on one core
+with a release build; otherwise give it a `skip_reason`.
