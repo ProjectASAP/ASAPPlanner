@@ -1,5 +1,6 @@
 [package]
 name = "asap-frontend-sql"
+autotests = false
 version = "0.1.0"
 edition = "2021"
 
@@ -46,3 +47,7 @@ path = "tests/bgp_analytics/bgp_analytics.rs"
 [[test]]
 name = "bgp_jan2024_workload"
 path = "tests/bgp_jan2024_workload/bgp_jan2024_workload.rs"
+
+[[test]]
+name = "sql"
+path = "tests/main.rs"

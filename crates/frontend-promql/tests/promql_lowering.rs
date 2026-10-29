@@ -14,8 +14,8 @@ use asap_types::workload::{
     QueryWorkload,
 };
 
+use crate::support;
 use asap_frontend_promql::{lower_promql_workload, PromqlError as LoweringError};
-mod support;
 use support::lower_promql;
 
 fn lower(q: &str) -> Rc<OperatorNode> {

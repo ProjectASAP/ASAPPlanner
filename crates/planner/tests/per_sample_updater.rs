@@ -17,7 +17,7 @@ use asap_planner::{
 };
 use futures::StreamExt;
 
-mod time_series;
+use crate::time_series;
 use time_series::{series_identity, series_labels, time_series_tables, RawDataSample};
 
 /// The evaluation time: the end of an hour.

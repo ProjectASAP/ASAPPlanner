@@ -5,8 +5,8 @@
 //! heuristic's false-positive and false-negative cases. Undeclared metrics still
 //! fall back to the heuristic.
 
+use crate::support;
 use asap_frontend_promql::{HistogramCatalog, HistogramKind};
-mod support;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{NonASAPOp, OperatorNode};

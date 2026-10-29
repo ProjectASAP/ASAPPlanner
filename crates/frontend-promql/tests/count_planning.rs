@@ -1,5 +1,5 @@
 //! Query text through summary selection: counts use observations, never value weights.
-mod support;
+use crate::support;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{

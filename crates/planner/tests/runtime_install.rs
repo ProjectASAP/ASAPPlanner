@@ -7,10 +7,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use crate::time_series;
 use asap_executor::physical_planner::compile;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, Value};
-mod time_series;
 use asap_planner::{
     plan_installable, DeploymentCapabilities, FrontendInput, InstallablePlan, InstallablePlanError,
     MaterializedView, MaterializedViewRefresh, OperatorKind, OptimizationInput, OptimizationPass,

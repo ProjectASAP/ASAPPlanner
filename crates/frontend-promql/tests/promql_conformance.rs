@@ -35,8 +35,8 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::support;
 use asap_frontend_promql::PromqlError as LoweringError;
-mod support;
 use asap_types::ir::operator::{
     AggIntent, AtModifier, BinaryOpKind, PromQLVectorSetOpKind, Reduction, SampleKind, Source,
     TimeFunc,

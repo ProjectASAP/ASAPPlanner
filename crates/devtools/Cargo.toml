@@ -1,5 +1,6 @@
 [package]
 name = "asap-devtools"
+autotests = false
 version = "0.1.0"
 edition = "2021"
 
@@ -29,3 +30,12 @@ serde_json = "1"
 serde_yaml = "0.9"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 
+
+[[test]]
+name = "devtools"
+path = "tests/main.rs"
+
+# The nightly corpus-snapshots workflow runs this binary by name.
+[[test]]
+name = "corpus_snapshots"
+path = "tests/corpus_snapshots.rs"
