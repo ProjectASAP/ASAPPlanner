@@ -273,16 +273,16 @@ lists each stage's input and output types.
 | Component | Code | What it is |
 |---|---|---|
 | Memo group | `MemoGroup`, numbered by `MemoGroupId` | One distinct logical sub-expression: its logical node, its child groups, the groups that read it (`parents`), the queries that reach it (`queries`) and the queries whose root it is (`roots_of`). Groups are numbered children first. |
-| Logical memo | `LogicalMemo` | Stage 0's groups, before any implementation choice: the workload's logical DAG hash-consed (below). |
-| Candidate memo | `CandidateMemo` | The groups, and each group's implementation candidates (`candidates[group]`). Pass 1 creates it from the logical memo; the Pass 2 rules add candidates and groups. |
-| Implementation candidate | `ImplementationCandidate` | One way to implement a group over child groups. `implements`: the group, or for a fused computation the group and the groups it absorbs (topmost first). `node`: its own nodes, down to the nodes of the groups it reads. `children`: the groups it reads, whose implementations are chosen separately. `origin`: the rule that made it (`CandidateOrigin`, below). `budget_share`: the number of equal shares of the accuracy budget its summaries are sized for, 1 for the whole budget and `n` when it is one of `n` approximate inputs of a query. |
+| DAG of logical memo groups | `DagOfLogicalMemoGroups` | Stage 0's groups, before any implementation choice: the workload's logical DAG hash-consed (below). |
+| Candidate memo | `CandidateMemo` | The groups, and the candidates for each memo group (`candidates[group]`). Pass 1 creates it from the DAG of logical memo groups; the Pass 2 rules add candidates and groups. |
+| Candidate for a memo group | `CandidateForMemoGroup` | One way to implement a group over child groups. `implements`: the group, or for a fused computation the group and the groups it absorbs (topmost first). `node`: its own nodes, down to the nodes of the groups it reads. `children`: the groups it reads, whose implementations are chosen separately. `origin`: the rule that made it (`OriginOfCandidateForMemoGroup`, below). `budget_share`: the number of equal shares of the accuracy budget its summaries are sized for, 1 for the whole budget and `n` when it is one of `n` approximate inputs of a query. |
 | Concrete summary-state group | a `MemoGroup` whose node is a `SummaryAgg` or a `PaneChain` | One summary state at one size, or one pane chain at one layout, that several readers may share. A choice several groups depend on, such as a shared size or a pane grid, is one concrete group per value, when two or more readers may read that value, and each of them gets a candidate reading that group: of two readers needing a KLL with `k ≥ 345` and `k ≥ 200`, both may read a group `KLL(345)`, and the second may also keep its own private `KLL(200)`. Choosing a value is choosing a group, so the memo has no separate type for such a choice. The other Pass 2 rules add groups too (below). |
 
 **Stage 0: hash-consing.** Hash-consing merges structurally equal nodes into
 one. It makes no implementation choice, so this section counts it as Stage 0
 (its output); the code runs it as Stage 1 starts, which is why
 [Stage inputs and outputs](#stage-inputs-and-outputs-whole-workload-candidates-and-memo)
-lists `LogicalMemo::from_roots` with Pass 1. `LogicalMemo::from_roots` runs
+lists `DagOfLogicalMemoGroups::from_roots` with Pass 1. `DagOfLogicalMemoGroups::from_roots` runs
 `share_common_sub_dags` (`crates/types/src/ir/cse.rs`) over the frontends'
 roots and numbers the shared nodes as groups. Two structurally equal nodes
 become one group only when sharing them is legal, that is, when every reader
@@ -303,13 +303,13 @@ Equal nodes that may not share stay separate groups, also within one query.
 They may still read one shared child group.
 
 **Which rule adds which candidates.** Each candidate records the rule that
-made it in `CandidateOrigin`. Rules add candidates and keep the existing
+made it in `OriginOfCandidateForMemoGroup`. Rules add candidates and keep the existing
 ones. A rule that shares a producer (a widened scan, a canonical
 preprocessing, a ranking, a finer aggregate, a summary readout, a summary
 state or pane chain) also adds one group for it, with one candidate of the
 rule's origin, and gives each reader a candidate that reads that group.
 
-| `CandidateOrigin` | Added by | Candidates |
+| `OriginOfCandidateForMemoGroup` | Added by | Candidates |
 |---|---|---|
 | `Pass1` | `try_populate_pass1` (`pass2/memo/groups.rs`) | Every Pass 1 choice of the group's measures: exact, exact accumulator, each summary family and size, and fused computations. Each summary choice comes at every `budget_share` from 1 to the most approximate inputs a query reaching the group has. A fused candidate implements the groups it absorbs only when no other reader needs them; otherwise they stay groups of their own. |
 | `Panes` | Window composition: `add_local_window_composition` and `extend_local_window_composition` (`pass2/memo/window_candidates.rs`) | A window summary computed from tumbling panes, at each pane width the reader's evaluation grid allows. The pane chain stays private to the candidate. |
@@ -331,8 +331,8 @@ instead of whole candidates:
 
 | Stage | Over the memo |
 |---|---|
-| 0 | Hash-conses the frontends' roots into groups (`LogicalMemo`). |
-| 1, Pass 1 | Emits each group's implementation candidates: exact, exact accumulator, each summary family and size, fused computations. |
+| 0 | Hash-conses the frontends' roots into groups (`DagOfLogicalMemoGroups`). |
+| 1, Pass 1 | Emits the candidates for each memo group: exact, exact accumulator, each summary family and size, fused computations. |
 | 1, Pass 2 | Each rule adds candidates to groups. Identical expression is group identity (nothing to add). Summary capability: a reader reading a concrete summary-state group shared with other groups, one group per shared size. Window composition: tumbling panes, and the newest panes of a shared chain, one concrete group per chain layout (grid, longest window, size). Rollup and exact top-k reuse: a candidate that reads another group (a finer grouping, a ranking). Scan widening: a reader of a metric's scans widened to a shared label set. |
 | 2 | Chooses each candidate's materialization, once for a group however many parents read it. A scan read through one window is built once; one read through different windows may also be read per reader. |
 | 3 | Chooses one candidate per needed group, and costs each candidate's own nodes, per node, given its readers; plan-level charges are added once per plan. A source's retained raw data is a concrete group `raw window(S, H)`, one per distinct lookback `H` of the source's query-time readers (a window plus any offset); its storage of `H` of raw data is charged once when it is chosen (planned). |
@@ -346,7 +346,7 @@ One query, evaluated every minute, with `max_error 0.01` and
 avg by (job) (quantile_over_time(0.5, data[5m]) / quantile_over_time(0.5, data[5m]) + quantile_over_time(0.9, data[5m]))
 ```
 
-**Step 1, Stage 0.** `LogicalMemo::from_roots` makes 7 groups:
+**Step 1, Stage 0.** `DagOfLogicalMemoGroups::from_roots` makes 7 groups:
 
 | Group | Logical sub-expression | Reads |
 |---|---|---|
@@ -411,7 +411,7 @@ all; the memo has 259 candidates.
 - Enumeration stops at `stage_pipeline`'s default limit of 1,000 candidate
   DAGs (`--memo-enumeration-limit`), as it does after step 3.
 
-| After | Groups | Implementation candidates | Candidate DAGs |
+| After | Groups | Candidates for memo groups | Candidate DAGs |
 |---|---|---|---|
 | Stage 0 | 7 | – (each group is its own node) | 1 |
 | Stage 1, Pass 1 | 7 | 19 | 49 = 16 whole-budget + 33 budget-share variants |
@@ -438,10 +438,10 @@ the same candidate DAGs as the vector of whole-workload candidates the stage
 table describes. `pass2::memo::enumeration` converts a memo after any step into
 that vector.
 
-- **`MemoChoice`** maps each needed group to one candidate index in
+- **`ChosenCandidatePerMemoGroup`** maps each needed group to one candidate index in
   `CandidateMemo::candidates[group]`. A group is *needed* when a query's
   root is in it or a chosen candidate reads it.
-- **`enumerate(memo, limit) -> MemoEnumeration { choices, complete }`** lists
+- **`enumerate(memo, limit) -> AllChosenCandidatesPerMemoGroup { all_chosen_candidates, complete }`** lists
   every choice, depth first:
   1. Pending: the root groups (the groups with a query's root).
   2. Take a pending group. If the choice already names it, skip it: a group
@@ -451,7 +451,7 @@ that vector.
   4. When nothing is pending, the choice is complete: record it. If a
      further choice is found after `limit` are recorded, stop with
      `complete: false`.
-- **`compose(memo, choice)`** builds one choice's complete DAG for each root
+- **`build_logical_asap_dags_from_chosen_candidates(memo, chosen_candidates)`** builds one choice's complete DAG for each root
   group, as `(MemoGroupId, Rc<OperatorNode>)` pairs:
   1. A group's DAG is its chosen candidate's `node`, with each child group's
      node in it replaced by that child's DAG. A group the choice does not
@@ -461,7 +461,7 @@ that vector.
   3. `recompose_guarantees` then runs over the roots, as plan reconstruction
      does: every node is rebuilt with the schema and guarantee derived from
      the children chosen, not the ones its candidate had alone.
-  4. `ComposeError` reports a candidate index the group does not have
+  4. `ErrorBuildingLogicalAsapDagsFromChosenCandidates` reports a candidate index the group does not have
      (`NoSuchCandidate`, bad input), a child group whose node is not in the
      candidate (`ChildNotInCandidate`, a memo construction bug), or a
      DAG whose schemas or guarantees cannot be re-derived (`Recompose`).
@@ -523,13 +523,13 @@ The memo types and rules are in `crates/logical-asap-optimization/src/`
 
 | Step | Entry point | Path |
 |---|---|---|
-| Stage 0 | `LogicalMemo::from_roots`, `MemoGroup`, `MemoGroupId` | `pass2/memo.rs`; hash-consing is `share_common_sub_dags` in `crates/types/src/ir/cse.rs` |
+| Stage 0 | `DagOfLogicalMemoGroups::from_roots`, `MemoGroup`, `MemoGroupId` | `pass2/memo.rs`; hash-consing is `share_common_sub_dags` in `crates/types/src/ir/cse.rs` |
 | Pass 1 | `generate_per_computation_candidates_with_memo`; `try_populate_pass1` (exported from `pass2::memo::candidates`) | `pass1/per_computation_candidates.rs`; `pass2/memo/groups.rs` |
-| Memo types | `CandidateMemo`, `ImplementationCandidate`, `CandidateOrigin` | `pass2/memo/candidates.rs` |
+| Memo types | `CandidateMemo`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup` | `pass2/memo/candidates.rs` |
 | Pass 2 window composition | `add_local_window_composition`, `extend_local_window_composition` | `pass2/memo/window_candidates.rs` |
 | Pass 2 rules and concrete summary-state groups | `expand_concrete_summary_state_groups_before`, which runs the rules in `pass2/memo/rules/` in this order: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; then the shared builds | `pass2/memo/state_groups.rs`, `pass2/memo/rules/`, `pass2/memo/shared_configurations.rs` |
-| Memo to candidate DAGs | `enumerate`, `compose`, `MemoChoice`, `MemoEnumeration`, `ComposeError` | `pass2/memo/enumeration.rs` (module `pass2::memo::enumeration`) |
-| Production memo build and search | `run_stage1_to_stage3_with` and `run_stage1_to_stage3_from_pass1` build the logical memo (`pipeline.rs`); `candidate_connection_search` (`route.rs`) builds the candidate memo for each pane-width round: query pruning (first round), `try_populate_pass1`, the accuracy-scoped candidates, `extend_local_window_composition`, `expand_concrete_summary_state_groups_before`; then `candidates/`, `milp/` and `refinement/` | `crates/plan-selection/src/search/` |
+| Memo to candidate DAGs | `enumerate`, `build_logical_asap_dags_from_chosen_candidates`, `ChosenCandidatePerMemoGroup`, `AllChosenCandidatesPerMemoGroup`, `ErrorBuildingLogicalAsapDagsFromChosenCandidates` | `pass2/memo/enumeration.rs` (module `pass2::memo::enumeration`) |
+| Production memo build and search | `run_stage1_to_stage3_with` and `run_stage1_to_stage3_from_pass1` build the DAG of logical memo groups (`pipeline.rs`); `candidate_connection_search` (`route.rs`) builds the candidate memo for each pane-width round: query pruning (first round), `try_populate_pass1`, the accuracy-scoped candidates, `extend_local_window_composition`, `expand_concrete_summary_state_groups_before`; then `candidates/`, `milp/` and `refinement/` | `crates/plan-selection/src/search/` |
 
 ## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies
 
@@ -570,10 +570,10 @@ the memo path's entry points.
 | Stage | Whole-workload candidates: input → output | Memo: input → output | Entry point (memo path) |
 |---|---|---|---|
 | 0. Frontends | Query text, language → one logical root per query, carrying its accuracy target | Same: a `QueryRoot` per query | `lower_promql_workload`, `lower_sql_dialect` (`asap-frontend-*`); `plan_installable` (`asap_planner`) runs the frontends and Stages 1–3 on the user input |
-| 1, Pass 1 | Logical roots; the deployment's supported summaries → the Pass 1 inventory, every computation's candidates (`PerComputationCandidates`) | Logical roots → `LogicalMemo` (hash-consed `MemoGroup`s); with the Pass 1 inventory, less the summaries the deployment does not support → `CandidateMemo`: each group's `ImplementationCandidate`s | `LogicalMemo::from_roots`, `generate_per_computation_candidates_with_memo`, `try_populate_pass1` |
+| 1, Pass 1 | Logical roots; the deployment's supported summaries → the Pass 1 inventory, every computation's candidates (`PerComputationCandidates`) | Logical roots → `DagOfLogicalMemoGroups` (hash-consed `MemoGroup`s); with the Pass 1 inventory, less the summaries the deployment does not support → `CandidateMemo`: each group's `CandidateForMemoGroup`s | `DagOfLogicalMemoGroups::from_roots`, `generate_per_computation_candidates_with_memo`, `try_populate_pass1` |
 | 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (`Pass2Candidate`, `stage1_candidates_of_choice`) | `CandidateMemo`; the entries' recurrence and range steps → the same memo with each rule's candidates added to the groups they implement | the memo rules (`pass2/memo/rules/`), `pass2::memo::window_candidates` |
 | 1, concrete summary-state groups | (part of Pass 2) | `CandidateMemo` → the memo with concrete summary-state groups: one group per shared size or pane layout that readers can read | `expand_concrete_summary_state_groups_before` |
-| 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per materialization assignment | Each implementation candidate, on demand → its physical operators and its allowed materializations | `implement_candidate_operators`, `summary_materialization_eligibility` (called from Stage 3) |
+| 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per materialization assignment | Each candidate for a memo group, on demand → its physical operators and its allowed materializations | `implement_candidate_operators`, `summary_materialization_eligibility` (called from Stage 3) |
 | 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model, raw-data retention → one plan | The expanded memo's candidates and their configurations; the same inputs → one candidate per needed group, connected into one plan | `run_stage1_to_stage3_with`, `candidate_connection_search`; output `Stage1ToStage3Run`, which holds the selected `PhysicalWorkloadPlan` and the selection |
 | 4. Execution | The selected `PhysicalASAPDAG` → query results | Same: an `InstallablePlan` (`{dag, query_texts}`) → query results | The deployment runtime installs the `InstallablePlan` |
 
@@ -583,7 +583,7 @@ What changed with the memo:
   choices several groups depend on, such as a shared state's size, are made
   jointly.
 - Stage 2 is no longer a pass over whole candidate DAGs. Stage 3 calls it per
-  implementation candidate while it builds the candidate graph, so
+  candidate for a memo group while it builds the candidate graph, so
   physical optimization runs lazily, per candidate.
 - The concrete summary-state groups are expanded by Stage 3's search today,
   through the Stage 1 functions above. A planned change moves this expansion
