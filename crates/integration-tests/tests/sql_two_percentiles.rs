@@ -331,7 +331,7 @@ async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
         }
     }
     for algorithm in [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch] {
-        let together: Option<Vec<_>> = local.targets.iter().map(|target| target.choices.candidates.iter()
+        let together: Option<Vec<_>> = local.targets.iter().map(|target| target.ways_to_compute.iter()
             .position(|candidate| matches!(candidate, HowToComputeAggregateMeasure::Summary(family) if *family == algorithm))).collect();
         if let Some(choice) = together {
             choices.insert(choice);

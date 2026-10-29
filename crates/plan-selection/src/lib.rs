@@ -7323,8 +7323,7 @@ mod tests {
             .iter()
             .map(|target| {
                 target
-                    .choices
-                    .candidates
+                    .ways_to_compute
                     .iter()
                     .position(|candidate| {
                         *candidate
@@ -7337,7 +7336,7 @@ mod tests {
             .targets
             .iter()
             .zip(&choices)
-            .any(|(target, &choice)| target.choices.candidates[choice]
+            .any(|(target, &choice)| target.ways_to_compute[choice]
                 == pcc::HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch)));
         let outputs = pcc::compose_logical_candidate(&inventory, &choices).unwrap();
         let output = &outputs[0].1;
@@ -7662,8 +7661,7 @@ mod tests {
             .targets
             .iter()
             .map(|t| {
-                t.choices
-                    .candidates
+                t.ways_to_compute
                     .iter()
                     .position(|c| {
                         *c == asap_logical_asap_optimization::pass1::per_computation_candidates::HowToComputeAggregateMeasure::Summary(
@@ -8192,8 +8190,7 @@ mod tests {
         )
         .unwrap();
         let kll = inventory.targets[0]
-            .choices
-            .candidates
+            .ways_to_compute
             .iter()
             .position(|c| {
                 matches!(
@@ -9175,8 +9172,7 @@ mod tests {
             .iter()
             .map(|target| {
                 target
-                    .choices
-                    .candidates
+                    .ways_to_compute
                     .iter()
                     .position(|c| {
                         matches!(

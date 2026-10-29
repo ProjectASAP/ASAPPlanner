@@ -199,10 +199,9 @@ fn intern_inputs(
         {
             Rc::clone(&existing.logical_node)
         } else {
-            let group = MemoGroupId(
-                u32::try_from(memo.groups.len())
-                    .map_err(|_| StateGroupExpansionError::TooManyGroups)?,
-            );
+            // The new group's id must fit a `MemoGroupId`.
+            u32::try_from(memo.groups.len())
+                .map_err(|_| StateGroupExpansionError::TooManyGroups)?;
             let mut seen = HashSet::new();
             let inputs: Vec<_> = rewritten
                 .children()
@@ -225,7 +224,7 @@ fn intern_inputs(
                 queries: queries.to_vec(),
             });
             memo.candidates.push(vec![CandidateForMemoGroup {
-                implements: vec![group],
+                fused_groups: Vec::new(),
                 root_node: Rc::clone(&rewritten),
                 input_groups: inputs,
                 origin: OriginOfCandidateForMemoGroup::WidenedScans,

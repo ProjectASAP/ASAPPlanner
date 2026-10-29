@@ -170,7 +170,7 @@ fn expand_with_state_index(
             queries,
         });
         memo.candidates.push(vec![CandidateForMemoGroup {
-            implements: vec![state_group],
+            fused_groups: Vec::new(),
             root_node: Rc::clone(&build.build),
             input_groups: build.children,
             origin: OriginOfCandidateForMemoGroup::SharedBuild,
@@ -289,7 +289,7 @@ fn validate_references(memo: &CandidateMemo) -> Result<(), StateGroupExpansionEr
         if candidate
             .input_groups
             .iter()
-            .chain(&candidate.implements)
+            .chain(&candidate.fused_groups)
             .any(|id| id.0 as usize >= memo.groups.len())
         {
             return Err(StateGroupExpansionError::InvalidGroupReference);
@@ -317,8 +317,7 @@ pub(super) fn direct_input_builds(
             | OriginOfCandidateForMemoGroup::WidenedScans
             | OriginOfCandidateForMemoGroup::Rollup
             | OriginOfCandidateForMemoGroup::SummaryResult
-    ) || candidate.implements.is_empty()
-        || candidate.accuracy_budget_parts == 0
+    ) || candidate.accuracy_budget_parts == 0
     {
         return Vec::new();
     }

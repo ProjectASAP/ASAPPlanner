@@ -385,8 +385,7 @@ pub fn pattern_b_computations(workload: &PlanningWorkload) -> Vec<Vec<QueryRoot>
         "Pattern B has one quantile computation"
     );
     let kll = local.targets[0]
-        .choices
-        .candidates
+        .ways_to_compute
         .iter()
         .position(|candidate| {
             matches!(

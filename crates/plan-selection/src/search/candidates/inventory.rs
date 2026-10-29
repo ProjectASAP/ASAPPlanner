@@ -125,11 +125,10 @@ fn build_with_compatible_producers_cache(
                 candidate: index,
                 reason,
             };
-            if candidate.implements.first() != Some(&MemoGroupId(group as u32)) {
-                return Err(unsupported("candidate output belongs to a different group"));
-            }
-            let implemented: HashSet<_> = candidate.implements.iter().copied().collect();
-            if implemented.len() != candidate.implements.len()
+            let implemented: HashSet<_> = std::iter::once(MemoGroupId(group as u32))
+                .chain(candidate.fused_groups.iter().copied())
+                .collect();
+            if implemented.len() != 1 + candidate.fused_groups.len()
                 || implemented
                     .iter()
                     .any(|id| id.0 as usize >= memo.groups.len())
@@ -138,7 +137,7 @@ fn build_with_compatible_producers_cache(
                     "candidate names duplicate or missing absorbed groups",
                 ));
             }
-            // Only the first group is this candidate's output contract. Further
+            // Only the owner group is this candidate's output contract. Its fused
             // groups describe absorbed computations inside its private subtree,
             // not additional results it can supply. Private-node decomposition
             // charges that work; independent consumers of an absorbed group
@@ -991,7 +990,7 @@ mod tests {
                     .unwrap(),
             );
             fused.input_groups = raw_inputs;
-            fused.implements.extend(original_inputs);
+            fused.fused_groups.extend(original_inputs);
             fused.accuracy_budget_parts = 2;
             memo.candidates[owner].push(fused);
             let memo = expand_concrete_summary_state_groups(memo).unwrap().memo;
@@ -1229,9 +1228,9 @@ mod tests {
         let owner = outputs[0].0 as usize;
         let fused_index = memo.candidates[owner]
             .iter()
-            .position(|candidate| candidate.implements.len() > 1)
+            .position(|candidate| !candidate.fused_groups.is_empty())
             .expect("nested sum has an absorbed computation");
-        let absorbed = memo.candidates[owner][fused_index].implements[1];
+        let absorbed = memo.candidates[owner][fused_index].fused_groups[0];
         let mut inventory = build_with_compatible_producers_cache(
             &memo,
             &outputs,

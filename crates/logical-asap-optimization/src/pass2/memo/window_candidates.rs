@@ -78,7 +78,7 @@ pub fn extend_local_window_composition(
             let previous = &memo.candidates[group][index];
             previous.origin == candidate.origin
                 && previous.input_groups == candidate.input_groups
-                && previous.implements == candidate.implements
+                && previous.fused_groups == candidate.fused_groups
                 && previous.accuracy_budget_parts == candidate.accuracy_budget_parts
                 && previous.root_node == candidate.root_node
         }) {
@@ -206,6 +206,7 @@ fn local_pane_candidates_delta(
                         g,
                         rewritten_candidate(
                             &group_of,
+                            GroupId(g as u32),
                             candidate,
                             node,
                             OriginOfCandidateForMemoGroup::Panes,
@@ -272,20 +273,25 @@ fn group_of_node(groups: &[MemoGroup]) -> HashMap<*const OperatorNode, usize> {
         .collect()
 }
 
+/// `from`, a candidate of group `owner`, with root `node` and `origin`.
 fn rewritten_candidate(
     group_of: &HashMap<*const OperatorNode, usize>,
+    owner: GroupId,
     from: &CandidateForMemoGroup,
     node: Rc<OperatorNode>,
     origin: OriginOfCandidateForMemoGroup,
 ) -> CandidateForMemoGroup {
-    let reached = |node: &Rc<OperatorNode>| child_groups(group_of, node, &from.implements);
+    let implements: Vec<GroupId> = std::iter::once(owner)
+        .chain(from.fused_groups.iter().copied())
+        .collect();
+    let reached = |node: &Rc<OperatorNode>| child_groups(group_of, node, &implements);
     let children = if reached(&from.root_node) == from.input_groups {
         reached(&node)
     } else {
         from.input_groups.clone()
     };
     CandidateForMemoGroup {
-        implements: from.implements.clone(),
+        fused_groups: from.fused_groups.clone(),
         root_node: node,
         input_groups: children,
         origin,

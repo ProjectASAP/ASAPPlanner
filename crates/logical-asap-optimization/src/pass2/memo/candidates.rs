@@ -26,9 +26,10 @@ pub struct CandidateMemo {
 /// child groups.
 #[derive(Debug, Clone)]
 pub struct CandidateForMemoGroup {
-    /// The groups it implements: one, or several for a fused computation
-    /// (the topmost first).
-    pub implements: Vec<MemoGroupId>,
+    /// The groups a fused computation also implements, beyond the group
+    /// whose candidate it is (its owner, implicit from its position in
+    /// [`CandidateMemo::candidates`]); empty otherwise.
+    pub fused_groups: Vec<MemoGroupId>,
     /// The implementation's own node(s): its root node, whose descendants
     /// down to [`Self::input_groups`] are its private nodes.
     pub root_node: Rc<OperatorNode>,

@@ -112,7 +112,7 @@ fn pass1_candidates<Id: Clone>(
         }
     }
     let own = |g: usize| CandidateForMemoGroup {
-        implements: vec![MemoGroupId(g as u32)],
+        fused_groups: Vec::new(),
         root_node: Rc::clone(&groups[g].logical_node),
         input_groups: groups[g].child_groups.clone(),
         origin: OriginOfCandidateForMemoGroup::Pass1,
@@ -125,11 +125,11 @@ fn pass1_candidates<Id: Clone>(
         let summary = |c: &HowToComputeAggregateMeasure| {
             matches!(c, HowToComputeAggregateMeasure::Summary(_))
         };
-        target.choices.candidates.iter().any(summary)
+        target.ways_to_compute.iter().any(summary)
             || target
                 .fused_computation
                 .as_ref()
-                .is_some_and(|fused| fused.candidates.iter().any(summary))
+                .is_some_and(|fused| fused.ways_to_compute.iter().any(summary))
     };
     let mut most_approximate_inputs = vec![0usize; per_computation.roots.len()];
     for (g, targets) in &targets_of {
@@ -254,7 +254,7 @@ fn target_candidates<Id: Clone>(
                 (node, children)
             };
             candidates.push(CandidateForMemoGroup {
-                implements: implements.clone(),
+                fused_groups: implements[1..].to_vec(),
                 root_node: node,
                 input_groups: children,
                 origin: OriginOfCandidateForMemoGroup::Pass1,
@@ -356,6 +356,7 @@ fn compose_alone<Id: Clone>(
                 target
             })
             .collect(),
+        pruned_ways_to_compute: Vec::new(),
     };
     let alone_choice: Vec<usize> = kept
         .iter()
@@ -627,8 +628,7 @@ mod tests {
         invalid_absorption.targets[0].fused_computation =
             Some(crate::pass1::per_computation_candidates::FusedComputation {
                 absorbed_targets: vec![missing],
-                candidates: Vec::new(),
-                pruned: Vec::new(),
+                ways_to_compute: Vec::new(),
             });
         assert!(matches!(try_populate_pass1(initial, &invalid_absorption),
             Err(CandidatePopulationError::InvalidAbsorption { target: 0, absorbed }) if absorbed == missing));
@@ -761,7 +761,7 @@ mod tests {
         assert!(algorithms(&candidates[1])[0].contains("Kll"));
         assert!(algorithms(&candidates[2])[0].contains("DDSketch"));
         for candidate in candidates {
-            assert_eq!(candidate.implements, vec![MemoGroupId(quantile as u32)]);
+            assert!(candidate.fused_groups.is_empty());
             assert_eq!(candidate.input_groups, input);
             assert_eq!(candidate.origin, OriginOfCandidateForMemoGroup::Pass1);
         }
@@ -783,11 +783,11 @@ mod tests {
         assert_eq!(candidates[0].input_groups, vec![sums]);
         let fused: Vec<_> = candidates
             .iter()
-            .filter(|c| c.implements.len() > 1)
+            .filter(|c| !c.fused_groups.is_empty())
             .collect();
         assert!(!fused.is_empty());
         for candidate in fused {
-            assert_eq!(candidate.implements, vec![MemoGroupId(topk as u32), sums]);
+            assert_eq!(candidate.fused_groups, vec![sums]);
             assert_eq!(candidate.input_groups, sums_input);
             assert!(algorithms(candidate)[0].contains("Heap"));
         }
@@ -848,8 +848,7 @@ mod tests {
             .targets
             .iter()
             .map(|t| {
-                t.choices
-                    .candidates
+                t.ways_to_compute
                     .iter()
                     .position(|c| {
                         matches!(c, HowToComputeAggregateMeasure::Summary(a) if format!("{a:?}") == algorithm)
@@ -1172,15 +1171,15 @@ mod tests {
                         memo.candidates[g]
                             .iter()
                             .filter(|c| {
-                                c.accuracy_budget_parts == 1 && (c.implements.len() > 1) == fused
+                                c.accuracy_budget_parts == 1 && !c.fused_groups.is_empty() == fused
                             })
                             .count()
                     };
                     let fused = target
                         .fused_computation
                         .as_ref()
-                        .map_or(0, |f| f.candidates.len());
-                    if whole_budget(false) != target.choices.candidates.len()
+                        .map_or(0, |f| f.ways_to_compute.len());
+                    if whole_budget(false) != target.ways_to_compute.len()
                         || whole_budget(true) != fused
                     {
                         missing.push(format!("{gauges:?} seed {seed} target {t} candidates"));

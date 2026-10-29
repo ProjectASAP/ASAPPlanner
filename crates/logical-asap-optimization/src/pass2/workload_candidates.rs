@@ -486,7 +486,7 @@ mod tests {
             .iter()
             .map(|target| {
                 if target.fused_computation.is_some() {
-                    target.choices.candidates.len()
+                    target.ways_to_compute.len()
                 } else {
                     0
                 }

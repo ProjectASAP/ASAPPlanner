@@ -123,8 +123,7 @@ async fn run(deployment: &DeploymentCapabilities) -> Run {
         .iter()
         .map(|target| {
             target
-                .choices
-                .candidates
+                .ways_to_compute
                 .iter()
                 .position(|choice| {
                     matches!(

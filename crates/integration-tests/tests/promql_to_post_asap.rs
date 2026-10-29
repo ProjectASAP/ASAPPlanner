@@ -712,8 +712,7 @@ fn ddsketch_ratio_selection(
         .iter()
         .map(|target| {
             target
-                .choices
-                .candidates
+                .ways_to_compute
                 .iter()
                 .position(|candidate| {
                     *candidate == HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch)

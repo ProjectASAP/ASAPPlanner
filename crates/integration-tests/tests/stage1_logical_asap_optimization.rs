@@ -277,7 +277,7 @@ async fn subquery_in_a_measure_filter_is_substituted() {
                 .is_some_and(|by| by.keys().is_empty())
         })
         .expect("inner quantile");
-    let candidates = &inventory.targets[inner].choices.candidates;
+    let candidates = &inventory.targets[inner].ways_to_compute;
     assert!(candidates.len() > 1);
     let (mut seen, mut approximate_inner) = (Vec::new(), false);
     for (index, candidate) in candidates.iter().enumerate() {
@@ -399,8 +399,7 @@ async fn avg_as_sum_and_count(
         .iter()
         .map(|target| {
             target
-                .choices
-                .candidates
+                .ways_to_compute
                 .iter()
                 .position(|c| {
                     *c == HowToComputeAggregateMeasure::ExactAccumulator(vec![
@@ -528,7 +527,7 @@ fn promql_avg_divides_sum_and_count_vectors() {
     let inventory =
         generate_per_computation_candidates(vec![(0, promql("avg by (job) (m)"))]).unwrap();
     assert_eq!(
-        inventory.targets[0].choices.candidates[0],
+        inventory.targets[0].ways_to_compute[0],
         HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum, ExactKind::Count])
     );
     let composed = compose_logical_candidate(&inventory, &[0]).unwrap();
@@ -572,8 +571,7 @@ async fn every_candidate(
         generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
     assert_eq!(inventory.targets.len(), 1, "{query}");
     inventory.targets[0]
-        .choices
-        .candidates
+        .ways_to_compute
         .iter()
         .enumerate()
         .map(|(index, candidate)| {

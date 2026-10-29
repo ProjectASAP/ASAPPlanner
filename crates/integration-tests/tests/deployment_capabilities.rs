@@ -145,8 +145,7 @@ fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
         .iter()
         .map(|target| {
             target
-                .choices
-                .candidates
+                .ways_to_compute
                 .iter()
                 .position(|candidate| {
                     matches!(

@@ -54,7 +54,7 @@ pub(crate) fn prune_query_candidates<Id: Clone>(
     if inventory
         .targets
         .iter()
-        .any(|target| target.choices.candidates.is_empty())
+        .any(|target| target.ways_to_compute.is_empty())
     {
         return Err("query pruning requires an own candidate for every target".into());
     }
@@ -117,6 +117,7 @@ pub(crate) fn prune_query_candidates<Id: Clone>(
         let alone = PerComputationCandidates {
             roots: vec![root.clone()],
             targets: inventory.targets.clone(),
+            pruned_ways_to_compute: Vec::new(),
         };
         let mut choice = vec![0; inventory.targets.len()];
         loop {
@@ -172,7 +173,7 @@ pub(crate) fn prune_query_candidates<Id: Clone>(
                 report.shared_producer_choices_retained += 1;
             }
         }
-        let own = computation.choices.candidates.len();
+        let own = computation.ways_to_compute.len();
         if !retain[target][..own].iter().any(|keep| *keep) {
             retain[target][0] = true;
             report.final_choices_retained += 1;
@@ -190,13 +191,13 @@ pub(crate) fn prune_query_candidates<Id: Clone>(
                 });
             }
         }
-        computation.choices.candidates = std::mem::take(&mut computation.choices.candidates)
+        computation.ways_to_compute = std::mem::take(&mut computation.ways_to_compute)
             .into_iter()
             .enumerate()
             .filter_map(|(choice, candidate)| retain[target][choice].then_some(candidate))
             .collect();
         if let Some(fused) = &mut computation.fused_computation {
-            fused.candidates = std::mem::take(&mut fused.candidates)
+            fused.ways_to_compute = std::mem::take(&mut fused.ways_to_compute)
                 .into_iter()
                 .enumerate()
                 .filter_map(|(choice, candidate)| retain[target][own + choice].then_some(candidate))
@@ -392,8 +393,7 @@ mod tests {
             .iter()
             .position(|target| {
                 target
-                    .choices
-                    .candidates
+                    .ways_to_compute
                     .contains(&HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll))
             })
             .unwrap()
@@ -408,8 +408,7 @@ mod tests {
             prune_query_candidates(&inventory, &entries, &data, PlanningModels::builtin(), 128)
                 .unwrap();
         assert!(!result.inventory.targets[target]
-            .choices
-            .candidates
+            .ways_to_compute
             .contains(&HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)));
         assert!(!result.report.removed.is_empty());
     }
@@ -428,8 +427,7 @@ mod tests {
             prune_query_candidates(&inventory, &entries, &data, PlanningModels::builtin(), 128)
                 .unwrap();
         assert!(result.inventory.targets[target]
-            .choices
-            .candidates
+            .ways_to_compute
             .contains(&HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)));
     }
 
@@ -452,8 +450,7 @@ mod tests {
             prune_query_candidates(&inventory, &entries, &data, PlanningModels::builtin(), 128)
                 .unwrap();
         assert!(result.inventory.targets[target]
-            .choices
-            .candidates
+            .ways_to_compute
             .contains(&HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)));
     }
 
@@ -537,8 +534,7 @@ mod tests {
             prune_query_candidates(&inventory, &entries, &data, PlanningModels::builtin(), 128)
                 .unwrap();
         assert!(result.inventory.targets[target]
-            .choices
-            .candidates
+            .ways_to_compute
             .contains(&HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)));
     }
 
