@@ -369,7 +369,7 @@ pub enum StatModelParams {
 // per-subpopulation vs. shared-multi-subpopulation variant, so it is a
 // second, independent axis, not a member of any one family's own kind
 // vocabulary. It is legal only for a grouped aggregate (a non-empty `by`)
-// whose family has a Hydra variant ([`hydra_kind_for`]); the planner does
+// whose family has a Hydra variant (CMS or Count-Sketch); the planner does
 // not offer it as a candidate yet (#703).
 
 /// A shared-multi-subpopulation summary family — one physical structure
@@ -400,8 +400,8 @@ pub enum StatModelParams {
 /// noise" algebra. The paper is explicit that its own construction cannot
 /// serve quantiles at all (§4.3: "A statistic that cannot directly be
 /// estimated by Hydra-sketch is quantiles."). `HydraKll` remains available
-/// as an explicit experimental IR value, but [`hydra_kind_for`] does not
-/// expose it to semantics-preserving replacement search: no error bound is
+/// as an explicit experimental IR value, but must not be exposed to
+/// semantics-preserving replacement search: no error bound is
 /// modeled for it (see [`HydraParams::HydraKll`]'s own doc). Enable automatic
 /// selection only alongside an actual proof and error model.
 ///
@@ -488,69 +488,6 @@ pub enum HydraParams {
         shared_rows: u32,
         shared_columns: u32,
     },
-}
-
-/// Which [`HydraKind`] (if any) provides a shared-multi-subpopulation
-/// variant of a plain per-subpopulation [`SketchAlgorithm`]. `None` means
-/// this axis's scope stops at legality: not every `SketchAlgorithm` has a
-/// Hydra wrapper modeled yet — extend alongside `HydraKind` as more are
-/// added. See [`HydraKind`]'s own doc for which of the mapped kinds are the
-/// paper's own proven construction. Unproven extensions such as `HydraKll`
-/// deliberately return `None`: replacement search may only expose variants
-/// with a modeled error guarantee.
-pub fn hydra_kind_for(algorithm: &SketchAlgorithm) -> Option<HydraKind> {
-    match algorithm {
-        SketchAlgorithm::Cms => Some(HydraKind::HydraCms),
-        SketchAlgorithm::CountSketch => Some(HydraKind::HydraCountSketch),
-        _ => None,
-    }
-}
-
-/// Default [`HydraParams`] for `kind`, carrying over `per_subpopulation_params`
-/// — the [`SketchParams`] a plain, independent-per-subpopulation instance of
-/// the same algorithm would have used — unchanged into the corresponding
-/// `HydraParams` fields. `None` when `per_subpopulation_params` doesn't
-/// belong to the [`SketchAlgorithm`] `kind` wraps: a caller bug, since
-/// [`hydra_kind_for`] and the algorithm a `SketchParams` came from must
-/// agree.
-///
-/// This function is generic over which inner sketch type `kind` wraps
-/// precisely because [`SketchParams`] already is: it destructures whichever
-/// variant matches `kind` rather than assuming a single scalar knob (e.g. a
-/// bare `k: u32`) that only KLL happens to have — a Hydra "sketch of
-/// sketches" is a framework over *any* mergeable inner sketch, and `HydraCms`/
-/// `HydraCountSketch`'s (`width`, `depth`) pairs are just as much a
-/// per-subpopulation accuracy knob as `HydraKll`'s `k`.
-///
-/// `shared_buckets`/`shared_rows`/`shared_columns` are all sized to the same
-/// per-subpopulation value as a placeholder pending real cost-model-driven
-/// sizing (the paper's own `r`/`w`, §4.6) — see each field's own doc for why
-/// that's deliberately out of scope here.
-pub fn default_hydra_params(
-    kind: HydraKind,
-    per_subpopulation_params: &SketchParams,
-) -> Option<HydraParams> {
-    match (kind, per_subpopulation_params) {
-        (HydraKind::HydraKll, SketchParams::Kll { k, .. }) => Some(HydraParams::HydraKll {
-            k: *k,
-            shared_buckets: *k,
-        }),
-        (HydraKind::HydraCms, SketchParams::Cms { width, depth }) => Some(HydraParams::HydraCms {
-            width: *width,
-            depth: *depth,
-            shared_rows: *depth,
-            shared_columns: *width,
-        }),
-        (HydraKind::HydraCountSketch, SketchParams::CountSketch { width, depth }) => {
-            Some(HydraParams::HydraCountSketch {
-                width: *width,
-                depth: *depth,
-                shared_rows: *depth,
-                shared_columns: *width,
-            })
-        }
-        _ => None,
-    }
 }
 
 /// How a grouped aggregate's summary state is physically instantiated
@@ -860,95 +797,6 @@ mod tests {
         assert_eq!(
             GroupingStrategy::default(),
             GroupingStrategy::PerSubpopulationInstance
-        );
-    }
-
-    #[test]
-    fn hydra_kind_for_only_maps_algorithms_with_modeled_error_bounds() {
-        assert_eq!(hydra_kind_for(&SketchAlgorithm::Kll), None);
-        assert_eq!(
-            hydra_kind_for(&SketchAlgorithm::Cms),
-            Some(HydraKind::HydraCms)
-        );
-        assert_eq!(
-            hydra_kind_for(&SketchAlgorithm::CountSketch),
-            Some(HydraKind::HydraCountSketch)
-        );
-        // Every other `SketchAlgorithm` has no Hydra variant modeled yet —
-        // a deliberate, documented scope limit, not an oversight.
-        for algorithm in [
-            SketchAlgorithm::Hll,
-            SketchAlgorithm::DDSketch,
-            SketchAlgorithm::CmsWithHeap,
-            SketchAlgorithm::Kmv,
-            SketchAlgorithm::CountSketchWithHeap,
-        ] {
-            assert_eq!(hydra_kind_for(&algorithm), None, "{algorithm:?}");
-        }
-    }
-
-    #[test]
-    fn default_hydra_params_carries_over_per_subpopulation_params_by_kind() {
-        assert_eq!(
-            default_hydra_params(
-                HydraKind::HydraKll,
-                &SketchParams::Kll {
-                    k: 200,
-                    failure_probability: None
-                }
-            ),
-            Some(HydraParams::HydraKll {
-                k: 200,
-                shared_buckets: 200,
-            })
-        );
-        assert_eq!(
-            default_hydra_params(
-                HydraKind::HydraCms,
-                &SketchParams::Cms {
-                    width: 2048,
-                    depth: 4,
-                }
-            ),
-            Some(HydraParams::HydraCms {
-                width: 2048,
-                depth: 4,
-                shared_rows: 4,
-                shared_columns: 2048,
-            })
-        );
-        assert_eq!(
-            default_hydra_params(
-                HydraKind::HydraCountSketch,
-                &SketchParams::CountSketch {
-                    width: 2048,
-                    depth: 4,
-                }
-            ),
-            Some(HydraParams::HydraCountSketch {
-                width: 2048,
-                depth: 4,
-                shared_rows: 4,
-                shared_columns: 2048,
-            })
-        );
-    }
-
-    #[test]
-    fn default_hydra_params_rejects_a_mismatched_kind_and_params_pair() {
-        // A `HydraCms` kind paired with KLL params (or vice versa) is a
-        // caller bug — `hydra_kind_for` and the algorithm a `SketchParams`
-        // came from must agree. Degrades to `None` rather than panicking,
-        // matching this module's conservative stance elsewhere.
-        assert_eq!(
-            default_hydra_params(
-                HydraKind::HydraCms,
-                &SketchParams::Kll {
-                    k: 200,
-                    failure_probability: None
-                }
-            ),
-            None
         );
     }
 

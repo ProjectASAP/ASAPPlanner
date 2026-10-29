@@ -42,9 +42,8 @@ use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilit
 use asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidateError;
 
 pub use pipeline::{
-    run_stage1_to_stage3, run_stage1_to_stage3_from_pass1, run_stage1_to_stage3_with,
-    LogicalCandidate, MemoSteps, PrunedCandidate, Stage1ToStage3Pass, Stage1ToStage3Run,
-    Stage1ToStage3Search,
+    run_stage1_to_stage3, run_stage1_to_stage3_with, LogicalCandidate, MemoSteps, PrunedCandidate,
+    Stage1ToStage3Pass, Stage1ToStage3Run, Stage1ToStage3Search,
 };
 
 static BUILTIN_ACCURACY_MODEL: BuiltinAccuracyModel = BuiltinAccuracyModel;

@@ -402,9 +402,11 @@ mod tests {
     use super::*;
     use crate::{
         operators::Operator,
-        runtime::{batch_execution::evaluate_batch, Limits, RunContext, Scope},
+        plan::PhysicalDAG,
+        runtime::{Limits, RunContext, Scope},
         values::Batch,
     };
+    use futures::StreamExt;
     use planner_types::ir::properties::AccuracyTarget;
     use planner_types::ir::schema::{
         DataType, Field as SummaryField, FieldDataType as SummaryFamilyType, Schema,
@@ -464,14 +466,19 @@ mod tests {
                 let operator =
                     Operator::window(schema.clone(), intent, 0, 1, vec![], Some((0, 2000)))
                         .unwrap();
-                let result = evaluate_batch(
-                    batch,
-                    vec![operator],
-                    RunContext::new(scope.clone(), Limits::default()).unwrap(),
+                let mut dag = PhysicalDAG::default();
+                dag.add(
+                    0,
+                    vec![],
+                    Operator::source(schema.clone(), vec![batch]).unwrap(),
                 )
                 .unwrap();
+                dag.add(1, vec![0], operator).unwrap();
+                let context = RunContext::new(scope.clone(), Limits::default()).unwrap();
+                let mut output = dag.execute(&[1], context).unwrap().remove(0);
+                let result = futures::executor::block_on(output.next()).unwrap().unwrap();
                 assert_eq!(
-                    format!("{:?}", result[0].to_rows()[0][0]),
+                    format!("{:?}", result.to_rows()[0][0]),
                     format!("{expected:?}")
                 );
             }

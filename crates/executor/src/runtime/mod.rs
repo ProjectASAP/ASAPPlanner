@@ -264,7 +264,6 @@ impl<V> Stream for Input<'_, V> {
     }
 }
 
-pub mod batch_execution;
 #[cfg(test)]
 mod tests;
 

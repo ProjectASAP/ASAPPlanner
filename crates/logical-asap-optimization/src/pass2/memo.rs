@@ -12,8 +12,6 @@ mod groups;
 pub(crate) mod rules;
 /// Shared finite state configuration enumeration.
 pub mod shared_configurations;
-#[cfg(test)]
-mod shared_producer_snapshot;
 /// Concrete summary-state groups exposed by sharing rules.
 pub mod state_groups;
 /// Local pane candidates with selected-reader grid configurations.
