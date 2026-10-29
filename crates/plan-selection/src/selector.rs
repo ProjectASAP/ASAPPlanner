@@ -15,14 +15,13 @@ use crate::checks::{
     accuracy_check, accuracy_targets, latency_violation, per_entity_aggregate_violation,
     raw_data_violation, CheckFailure,
 };
+use crate::pricing::{kept_pane_chains, node_map, pane_retention_ms, price_at_scale, query_reach};
 use crate::report::{
     AcceptedAccuracy, Rejection, RejectionCause, SearchReport, Selection, SelectionError,
 };
 use crate::sizing::sized_for_failure_probability;
 use crate::statistics::with_confirmed_weights;
-use crate::{
-    kept_pane_chains, node_map, pane_retention_ms, price_at_scale, query_reach, PlanningModels,
-};
+use crate::PlanningModels;
 
 /// A cost per second for a rejection reason: three decimals, or three
 /// significant digits in scientific notation when it is nonzero and below
