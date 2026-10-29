@@ -245,8 +245,8 @@ mod pricing;
 mod report;
 mod selector;
 mod sizing;
-mod statistics;
 pub(crate) use accuracy_binding::bound_root_guarantee;
+pub use asap_types::workload::bounds::with_confirmed_weights;
 pub(crate) use checks::{accuracy_targets, guarantee_check};
 pub(crate) use pricing::{panes_of, price_node, trailing_window, PricedNode, ProducerOutput};
 pub use report::{
@@ -257,10 +257,6 @@ pub(crate) use selector::{cheaper, checked_candidate, choose, Ranking};
 pub use selector::{select_plan, PlanSelector};
 pub use sizing::resize_for_failure_probability;
 pub(crate) use sizing::sized_for_failure_probability;
-pub use statistics::{confirmed_weights, with_confirmed_weights};
-pub(crate) use statistics::{
-    declared_non_negative, declared_series, series_read, source_name, source_rows_per_ms,
-};
 
 /// The Stage 1 to Stage 3 driver and the optimization-pass interface.
 pub mod search;
@@ -280,7 +276,6 @@ mod tests {
     use crate::accuracy_binding::{bind_statistics, root_operators, workload_statistic};
     use crate::checks::{accuracy_check, CheckFailure};
     use crate::pricing::{kept_pane_chains, node_map, price_at_scale};
-    use crate::statistics::values_per_result;
     use asap_accuracy::composition::INPUT_ROW_COUNT;
     use asap_accuracy::estimators::hll;
     use asap_cost::execution_demand::evaluation_rate;
@@ -304,6 +299,7 @@ mod tests {
     };
     use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
     use asap_types::physical::{Materialization, Medium};
+    use asap_types::workload::bounds::{declared_series, series_read, values_per_result};
     use asap_types::workload::{
         DataWorkload, QueryRecurrence, QueryWorkloadEntry, RangeEvaluation,
     };
@@ -1578,38 +1574,6 @@ mod tests {
         assert_eq!(declared_series(&["x", "m"].into(), &declared), Some(30));
         assert_eq!(declared_series(&["x", "y"].into(), &declared), None);
         assert_eq!(declared_series(&BTreeSet::new(), &declared), None);
-    }
-
-    /// A source's rows per ms: its series over its sample interval when it
-    /// declares both, else its series share of the workload's rate.
-    #[test]
-    fn each_source_arrives_at_its_own_rate() {
-        let data = DataWorkload {
-            arrival: DataArrival::Ingesting {
-                rows_per_second: 4_000.0,
-            },
-            sources: [("a", Some(100)), ("b", Some(300)), ("c", None)]
-                .into_iter()
-                .map(|(metric, interval)| {
-                    let facts = SourceFacts {
-                        series_count: Some(if metric == "a" { 1_000 } else { 3_000 }),
-                        sample_interval: interval.map(asap_types::workload::DurationMs),
-                        ..SourceFacts::default()
-                    };
-                    (metric.to_string(), facts)
-                })
-                .collect(),
-        };
-        // 1 000 series every 100 ms; 3 000 series every 300 ms.
-        assert_eq!(source_rows_per_ms(&["a"].into(), &data), Some(10.0));
-        assert_eq!(source_rows_per_ms(&["a", "b"].into(), &data), Some(20.0));
-        // No interval: 3 000 of the 7 000 declared series, of 4 rows per ms.
-        assert_eq!(
-            source_rows_per_ms(&["c"].into(), &data),
-            Some(4.0 * 3_000.0 / 7_000.0)
-        );
-        // A node reading no source sees the whole rate.
-        assert_eq!(source_rows_per_ms(&BTreeSet::new(), &data), Some(4.0));
     }
 
     /// The exact physical DAG of `queries` planned together, over `data`.

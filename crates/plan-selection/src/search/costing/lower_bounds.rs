@@ -624,10 +624,9 @@ fn certified_price<'a>(
                         asap_types::ir::Operator::NonASAP(
                             NonASAPOp::Scan { .. } | NonASAPOp::TimeRange { .. }
                         )
-                    ) && priced
-                        .sources
-                        .iter()
-                        .all(|source| crate::declared_non_negative(context.data, source))
+                    ) && priced.sources.iter().all(|source| {
+                        asap_types::workload::bounds::declared_non_negative(context.data, source)
+                    })
                 });
                 // Producer pane counts, family, schema fields, statistics and
                 // provenance must agree; upstream work is charged separately.

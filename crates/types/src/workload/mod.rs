@@ -1,3 +1,4 @@
+pub mod bounds;
 pub mod parsed_workload;
 
 use std::collections::BTreeMap;
