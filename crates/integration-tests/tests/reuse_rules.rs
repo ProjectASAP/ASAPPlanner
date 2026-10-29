@@ -4,7 +4,7 @@
 //! computation they read is materialized for all its readers, and answer as
 //! the computation they replace. Selection prices fixed plans made of the
 //! memo's candidates, so no assertion depends on a timed search.
-mod physical_common;
+use crate::physical_common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;

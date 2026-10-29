@@ -3,7 +3,7 @@
 //! over the workload of #840: two per-series quantiles and two grouped
 //! quantiles of one gauge with 10,000 series.
 
-mod planner_layering_common;
+use crate::planner_layering_common;
 
 use std::collections::BTreeSet;
 

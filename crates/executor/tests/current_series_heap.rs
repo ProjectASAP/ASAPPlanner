@@ -1,6 +1,6 @@
 //! Spatial heap weights come from a fresh instant vector, never sample history.
+use crate::common;
 use asap_executor::sources::InMemoryDataStore;
-mod common;
 use asap_executor::{
     operators::Operator,
     physical_planner::{

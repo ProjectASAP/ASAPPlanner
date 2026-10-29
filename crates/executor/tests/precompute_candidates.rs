@@ -1,7 +1,7 @@
 //! A grouped Rate→Sum answers the same whether the deployment stores the
 //! Rate state or the grouped Sum state.
+use crate::common;
 use asap_executor::sources::InMemoryDataStore;
-mod common;
 use asap_executor::{
     factory::create_planner_accumulator,
     physical_planner::{compile, test_support::views_at, CompiledPhysicalDAG},

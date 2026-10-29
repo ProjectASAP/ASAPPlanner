@@ -5,7 +5,7 @@
 //! the panes kept across steps and requests, and retains kept panes for
 //! the span plus the window.
 
-mod planner_layering_common;
+use crate::planner_layering_common;
 
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::RejectionCause;

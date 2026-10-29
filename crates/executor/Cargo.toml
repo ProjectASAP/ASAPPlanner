@@ -2,6 +2,7 @@
 name = "asap-executor"
 version = "0.1.0"
 edition = "2021"
+autotests = false
 
 [dependencies]
 arrow.workspace = true
@@ -27,3 +28,29 @@ rmp-serde = "1"
 asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
 asap-plan-selection = { path = "../plan-selection" }
 asap-frontend-promql = { path = "../frontend-promql" }
+
+[[test]]
+name = "executor"
+path = "tests/main.rs"
+
+# Each installs a counting #[global_allocator] and asserts peak memory, so it
+# needs a process of its own.
+[[test]]
+name = "aggregate_memory_limit"
+path = "tests/aggregate_memory_limit.rs"
+
+[[test]]
+name = "cheap_measures_memory_limit"
+path = "tests/cheap_measures_memory_limit.rs"
+
+[[test]]
+name = "grouped_limit_memory_limit"
+path = "tests/grouped_limit_memory_limit.rs"
+
+[[test]]
+name = "series_window_memory_limit"
+path = "tests/series_window_memory_limit.rs"
+
+[[test]]
+name = "summary_build_memory_limit"
+path = "tests/summary_build_memory_limit.rs"

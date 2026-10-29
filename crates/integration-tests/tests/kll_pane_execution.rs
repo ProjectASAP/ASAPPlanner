@@ -1,5 +1,5 @@
 //! Maintenance -> stored pane state -> independently bound query execution.
-mod physical_common;
+use crate::physical_common;
 use asap_executor::sources::InMemoryDataStore;
 use asap_executor::{
     operators::{Operator, SummaryEvaluation},

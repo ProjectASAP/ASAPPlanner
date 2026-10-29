@@ -1,5 +1,5 @@
 //! The design's SQL distinct query executes natively and exactly.
-mod physical_common;
+use crate::physical_common;
 use asap_executor::values::Value;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::properties::AccuracyTarget;

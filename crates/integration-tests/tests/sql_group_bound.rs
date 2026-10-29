@@ -5,7 +5,7 @@
 //! over all of them. Without declarations the groups stay unbound and only
 //! the exact plan meets it.
 
-mod planner_layering_common;
+use crate::planner_layering_common;
 
 use asap_devtools::planning_stages::lower_sql_roots;
 use asap_devtools::SqlCatalog;

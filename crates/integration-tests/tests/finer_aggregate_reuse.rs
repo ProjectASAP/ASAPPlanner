@@ -16,7 +16,7 @@ use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 use serde_json::json;
 use std::path::Path;
 
-mod physical_common;
+use crate::physical_common;
 
 const P90: &str = "percentile_cont(0.9) WITHIN GROUP (ORDER BY value)";
 const WINDOW: &str = "ts > now() - INTERVAL '5' MINUTE";

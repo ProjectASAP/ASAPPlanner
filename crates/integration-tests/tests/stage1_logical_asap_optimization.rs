@@ -29,7 +29,7 @@ use asap_types::workload::{
 };
 use futures::StreamExt;
 
-mod physical_common;
+use crate::physical_common;
 
 fn accuracy() -> AccuracyTarget {
     AccuracyTarget::max_error(0.01).failure_probability(0.01)

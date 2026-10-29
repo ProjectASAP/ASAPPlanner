@@ -5,7 +5,7 @@
 //! assignment correctness is tested separately against the MILP model oracle.
 //! Larger fixtures check validated behavior without asserting global optimality.
 
-mod planner_layering_common;
+use crate::planner_layering_common;
 
 use asap_devtools::planning_stages::{lower_promql_roots, lower_sql_roots};
 use asap_logical_asap_optimization::DeploymentCapabilities;

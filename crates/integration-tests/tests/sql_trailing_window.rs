@@ -4,7 +4,7 @@
 //! a deployment that keeps no raw data still gets a plan, and Stage 3 prices
 //! each scan by its window.
 
-mod planner_layering_common;
+use crate::planner_layering_common;
 
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_logical_asap_optimization::DeploymentCapabilities;

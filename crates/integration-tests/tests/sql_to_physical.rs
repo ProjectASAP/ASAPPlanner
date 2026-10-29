@@ -1,6 +1,6 @@
 //! SQL frontend, the planner pipeline's selection, physical compilation and
 //! fresh-run execution.
-mod physical_common;
+use crate::physical_common;
 use asap_executor::{
     physical_planner::compile,
     runtime::{Limits, RunContext, Scope},

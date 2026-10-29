@@ -18,7 +18,7 @@ use asap_types::ir::{
     TimingMemo,
 };
 
-mod physical_common;
+use crate::physical_common;
 
 const EVALUATION_MS: i64 = 300_000;
 /// `flows_src_ip` samples: source 1 twice, 2 three times, 3 once.

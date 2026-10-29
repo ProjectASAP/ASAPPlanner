@@ -1,7 +1,7 @@
 //! Planner-selected summaries over raw data samples compile, bound to raw data
 //! at their `Scan`, and produce the same estimates as feeding their kernel
 //! sample by sample.
-mod physical_common;
+use crate::physical_common;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use asap_types::ir::ASAPOp;
 use asap_types::ir::OperatorNode;

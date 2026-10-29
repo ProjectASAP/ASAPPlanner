@@ -25,7 +25,7 @@ use asap_types::ir::{
 };
 use asap_types::physical::{Materialization, Medium};
 
-mod physical_common;
+use crate::physical_common;
 
 const AT_INGESTION: Materialization = Materialization::MatAtIngestion(Medium::Memory);
 
