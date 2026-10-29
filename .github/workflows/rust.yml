@@ -73,11 +73,6 @@ jobs:
   test:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    env:
-      # Debug info is most of target/; with it the workspace test build
-      # outgrows the runner's free disk (~107 GB after "Free disk space").
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
     - uses: actions/checkout@v4
 

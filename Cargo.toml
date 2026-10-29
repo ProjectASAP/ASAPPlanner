@@ -31,3 +31,8 @@ ahash = { version = "0.8", default-features = false, features = ["std", "runtime
 # capability table) and #254 (Planner names in that table). Moves to 0.4.1
 # once that is released.
 asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "21b63578c2e612e153f5aaa4d3848f1035a13c60" }
+
+[profile.dev]
+# Backtraces and profilers keep file:line; full variable info is opt-in via
+# CARGO_PROFILE_DEV_DEBUG=2. `profile.test` inherits this.
+debug = "line-tables-only"
