@@ -1736,46 +1736,56 @@ fn scans_projecting_different_labels_are_shared() {
     let data = workload.data_workload.as_ref().unwrap();
     let roots = lower_promql_roots(&workload).unwrap();
     use asap_logical_asap_optimization::pass2::asap_aware_cse::with_union_scan_labels;
-    let widened = with_union_scan_labels(&roots).unwrap().unwrap();
-    // Identical sub-DAGs made one node, as the memo's groups are: the
-    // widened scan, and the two instant selectors' identical range.
-    let shared: Vec<_> = asap_types::ir::cse::share_common_sub_dags(
-        widened
-            .iter()
-            .enumerate()
-            .map(|(id, root)| match root {
-                asap_types::ir::QueryRoot::Operator(node) => (id, std::rc::Rc::clone(node)),
-                asap_types::ir::QueryRoot::Scalar(_) => panic!("operator root"),
-            })
-            .collect(),
-    )
-    .into_iter()
-    .map(|(_, node)| asap_types::ir::QueryRoot::Operator(node))
-    .collect();
     use asap_types::physical::{Materialization, Medium};
-    let physical = asap_physical_asap_optimization::optimize_physical_asap_assigned(
-        "widened-scan-rule",
-        &shared,
-        &entries,
-        data,
-        &asap_planner::DeploymentCapabilities::default(),
-        &mut |readers| {
-            Some(if readers.len() > 1 {
-                Materialization::MatAtQuery(Medium::Memory)
-            } else {
-                Materialization::NotMaterialized
-            })
-        },
-    )
-    .unwrap()
-    .expect("the widened scan can be materialized once per evaluation");
-    let offered = asap_plan_selection::select_plan(
-        std::slice::from_ref(&physical),
-        &entries,
-        data,
-        asap_plan_selection::PlanningModels::builtin(),
-    )
-    .unwrap();
+    // Plans `roots` with identical sub-DAGs made one node, as the memo's
+    // groups are, and a node read by several roots kept for the evaluation.
+    let plan = |name: &str, roots: &[asap_types::ir::QueryRoot]| {
+        let shared: Vec<_> = asap_types::ir::cse::share_common_sub_dags(
+            roots
+                .iter()
+                .enumerate()
+                .map(|(id, root)| match root {
+                    asap_types::ir::QueryRoot::Operator(node) => (id, std::rc::Rc::clone(node)),
+                    asap_types::ir::QueryRoot::Scalar(_) => panic!("operator root"),
+                })
+                .collect(),
+        )
+        .into_iter()
+        .map(|(_, node)| asap_types::ir::QueryRoot::Operator(node))
+        .collect();
+        let physical = asap_physical_asap_optimization::optimize_physical_asap_assigned(
+            name,
+            &shared,
+            &entries,
+            data,
+            &asap_planner::DeploymentCapabilities::default(),
+            &mut |readers| {
+                Some(if readers.len() > 1 {
+                    Materialization::MatAtQuery(Medium::Memory)
+                } else {
+                    Materialization::NotMaterialized
+                })
+            },
+        )
+        .unwrap()
+        .expect("a node read by several roots can be kept for the evaluation");
+        let offered = asap_plan_selection::select_plan(
+            std::slice::from_ref(&physical),
+            &entries,
+            data,
+            asap_plan_selection::PlanningModels::builtin(),
+        )
+        .unwrap();
+        (physical, offered)
+    };
+    // The widened scan: one scan with every label, shared by all four.
+    let widened = with_union_scan_labels(&roots).unwrap().unwrap();
+    let (physical, offered) = plan("widened-scan-rule", &widened);
+    // The partial-sharing reference: the two windows share a narrow scan, and
+    // the two instant selectors a scan widened to their labels.
+    let mut partial = roots[..2].to_vec();
+    partial.extend(with_union_scan_labels(&roots[2..]).unwrap().unwrap());
+    let (_, reference) = plan("partial-sharing", &partial);
     let (installed, _) =
         asap_planner::installable_plan_of(&physical.roots, Some(&offered), &entries).unwrap();
     installed.validate().unwrap();
@@ -1815,13 +1825,19 @@ fn scans_projecting_different_labels_are_shared() {
     let selected_cost = selection["costs"][selected]["cost_per_second"]
         .as_f64()
         .unwrap();
-    // Offering maximal sharing must not force a costlier plan. The historical
-    // partial-sharing/rollup plan remains the production quality upper bound.
+    // Offering maximal sharing must not force a costlier plan, and the
+    // search must find a plan no dearer than the partial-sharing one (#994).
+    let reference_cost = reference.costs[&reference.selected]
+        .cost_per_second
+        .unwrap();
     assert!(
         selected_cost <= shared_cost,
         "{selected_cost} > {shared_cost}"
     );
-    assert!(selected_cost <= 0.1518, "{selected_cost}");
+    assert!(
+        selected_cost <= reference_cost * (1.0 + 1e-9),
+        "{selected_cost} > partial sharing {reference_cost}"
+    );
 }
 
 /// The public engine is candidate-connections; retired selectors are rejected.

@@ -93,7 +93,7 @@ pub(in crate::search) fn apply(
                     .flat_map(|input| input.compatible_producers.iter().map(|producer| producer.0)),
             );
         }
-        let shortest_reader_window_ms = shortest_reader_windows(configured);
+        let common_reader_window_ms = common_reader_windows(configured);
         let nodes: Vec<_> = (0..count)
             .map(|id| {
                 let configuration = configured.configurations[id];
@@ -109,12 +109,12 @@ pub(in crate::search) fn apply(
                         return None;
                     }
                     match (template.non_asap(), template.asap()) {
-                        // A query-time scan reads at least its shortest
-                        // reader window ([`shortest_reader_windows`]); the
+                        // A query-time scan reads at least its common
+                        // reader window ([`common_reader_windows`]); the
                         // row operators and builds above it read at least
                         // the rows that bound certifies.
                         (Some(NonASAPOp::Scan { .. }), _)
-                            if shortest_reader_window_ms[id].is_none() =>
+                            if common_reader_window_ms[id].is_none() =>
                         {
                             return None
                         }
@@ -229,7 +229,7 @@ pub(in crate::search) fn apply(
                 id,
                 configured,
                 &nodes,
-                &shortest_reader_window_ms,
+                &common_reader_window_ms,
                 context,
                 query_rate_floor,
                 &mut cache,
@@ -274,13 +274,18 @@ pub(in crate::search) fn apply(
     Ok(metrics)
 }
 
-/// Each candidate's shortest reader window: the least window any candidate
-/// that may read it (through time shifts) reads, as the evaluator's
+/// Each candidate's common reader window: the window every candidate that
+/// may read it (through time shifts) reads, as the evaluator's
 /// `windows_read` counts windows (a time range's range, a pane chain's
 /// panes). A query-time scan reads its readers' longest window, or every
 /// row held when no reader has one; both are at least the rows of this
-/// window capped by the rows held. `None` when no reader has a window.
-fn shortest_reader_windows(configured: &CandidateConfigurationInventory) -> Vec<Option<u64>> {
+/// window capped by the rows held. `None` when no reader has a window, or
+/// when readers' windows differ: which window the scan reads then depends on
+/// the readers selected, so the scan is left uncertified like any other node
+/// without a sound fixed bound. (A bound at the shortest window was sound but
+/// priced a scan a short and a long window may share far below a scan for the
+/// long window alone, so the search proposed the shared scan first, #994.)
+fn common_reader_windows(configured: &CandidateConfigurationInventory) -> Vec<Option<u64>> {
     let graph = &configured.inventory.graph;
     let mut readers = vec![Vec::new(); graph.candidates.len()];
     for (reader, candidate) in graph.candidates.iter().enumerate() {
@@ -292,7 +297,7 @@ fn shortest_reader_windows(configured: &CandidateConfigurationInventory) -> Vec<
     }
     (0..graph.candidates.len())
         .map(|id| {
-            let mut shortest: Option<u64> = None;
+            let mut windows_ms = std::collections::BTreeSet::new();
             let mut pending = vec![id];
             let mut seen = std::collections::HashSet::new();
             while let Some(producer) = pending.pop() {
@@ -323,12 +328,13 @@ fn shortest_reader_windows(configured: &CandidateConfigurationInventory) -> Vec<
                         })) => Some(pane_width_ms.saturating_mul(u64::from(*pane_count))),
                         _ => None,
                     };
-                    if let Some(window) = window {
-                        shortest = Some(shortest.map_or(window, |least| least.min(window)));
-                    }
+                    windows_ms.extend(window);
                 }
             }
-            shortest
+            match windows_ms.len() {
+                1 => windows_ms.pop_first(),
+                _ => None,
+            }
         })
         .collect()
 }
@@ -561,7 +567,7 @@ fn certified_price<'a>(
     id: usize,
     configured: &CandidateConfigurationInventory,
     nodes: &'a [Option<PhysicalASAPDAGNode>],
-    shortest_reader_window_ms: &[Option<u64>],
+    common_reader_window_ms: &[Option<u64>],
     context: &'a CandidatePlanningContext<'a>,
     query_rate_floor: f64,
     cache: &mut [Option<PricedNode<'a>>],
@@ -589,7 +595,7 @@ fn certified_price<'a>(
                     supplier.0,
                     configured,
                     nodes,
-                    shortest_reader_window_ms,
+                    common_reader_window_ms,
                     context,
                     query_rate_floor,
                     cache,
@@ -699,8 +705,8 @@ fn certified_price<'a>(
                 },
             ),
             // Stage 3 scans the width of the union of the readers' windows,
-            // at least the shortest one, whatever their offsets.
-            crate::trailing_window(shortest_reader_window_ms[id]),
+            // at least their common width, whatever their offsets.
+            crate::trailing_window(common_reader_window_ms[id]),
             retained,
             maintained_window,
             context.data,
@@ -1439,36 +1445,50 @@ mod tests {
         assert_eq!(metrics.ingestion_scans, 2);
     }
 
-    /// `query`'s Pass 1 candidate that `pick` selects, built for `built_for`,
-    /// every node at query time: its configured inventory after [`apply`],
-    /// the bound of its selected plan, and that plan's evaluated cost for
-    /// queries with target `evaluated_for` (Stage 3 resizes sketches to it).
+    /// Each of `queries`' Pass 1 candidates that `pick` selects, built for
+    /// `built_for`, every node at query time and equal nodes shared: their
+    /// configured inventory after [`apply`], the bound of the selected plan,
+    /// and that plan's evaluated cost for queries with target
+    /// `evaluated_for` (Stage 3 resizes sketches to it).
     fn query_time_bound_and_cost(
-        query: &str,
+        queries: &[&str],
         built_for: AccuracyTarget,
         evaluated_for: AccuracyTarget,
         settings: &crate::PlanSelectionSettings,
         pick: fn(&OperatorNode) -> bool,
     ) -> (CandidateConfigurationInventory, f64, f64) {
-        let roots_with_ids = vec![(0usize, QueryRoot::Operator(lower_promql(query, built_for)))];
+        let roots_with_ids: Vec<_> = queries
+            .iter()
+            .enumerate()
+            .map(|(id, query)| {
+                (
+                    id,
+                    QueryRoot::Operator(lower_promql(query, built_for.clone())),
+                )
+            })
+            .collect();
         let memo = try_populate_pass1(
             LogicalMemo::from_roots(&roots_with_ids),
             &generate_per_computation_candidates(roots_with_ids).unwrap(),
         )
         .unwrap();
-        let root_group = memo
-            .groups
-            .iter()
-            .position(|group| group.roots_of.contains(&0))
-            .unwrap();
-        let candidate = memo.candidates[root_group]
-            .iter()
-            .find(|candidate| {
-                OperatorNode::reachable(&candidate.node)
+        let picked: Vec<_> = (0..queries.len())
+            .map(|query| {
+                let root_group = memo
+                    .groups
                     .iter()
-                    .any(|node| pick(node))
+                    .position(|group| group.roots_of.contains(&query))
+                    .unwrap();
+                memo.candidates[root_group]
+                    .iter()
+                    .find(|candidate| {
+                        OperatorNode::reachable(&candidate.node)
+                            .iter()
+                            .any(|node| pick(node))
+                    })
+                    .unwrap()
             })
-            .unwrap();
+            .collect();
         let mut configured = CandidateConfigurationInventory {
             inventory: CandidateInventory {
                 graph: CandidateDependencyGraph::default(),
@@ -1481,6 +1501,14 @@ mod tests {
             node: &Rc<OperatorNode>,
             configured: &mut CandidateConfigurationInventory,
         ) -> usize {
+            if let Some(id) = configured
+                .inventory
+                .templates
+                .iter()
+                .position(|template| template.as_deref() == Some(&**node))
+            {
+                return id;
+            }
             let mut inputs = Vec::new();
             node.operator.map_children(|child| {
                 inputs.push(intern(child, configured));
@@ -1509,19 +1537,31 @@ mod tests {
                 });
             id
         }
-        let root = intern(&candidate.node, &mut configured);
-        configured
-            .inventory
-            .graph
-            .query_roots
-            .push(QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(root)],
-            });
-        let roots = vec![QueryRoot::Operator(Rc::clone(&candidate.node))];
-        let entries = vec![entry_with(
-            evaluated_for,
-            QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(10_000))),
-        )];
+        for candidate in &picked {
+            let root = intern(&candidate.node, &mut configured);
+            configured
+                .inventory
+                .graph
+                .query_roots
+                .push(QueryRootCandidates {
+                    compatible_candidates: vec![PhysicalCandidateId(root)],
+                });
+        }
+        let roots: Vec<_> = picked
+            .iter()
+            .map(|candidate| QueryRoot::Operator(Rc::clone(&candidate.node)))
+            .collect();
+        let entries: Vec<_> = queries
+            .iter()
+            .map(|_| {
+                entry_with(
+                    evaluated_for.clone(),
+                    QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(
+                        10_000,
+                    ))),
+                )
+            })
+            .collect();
         let data = DataWorkload {
             arrival: DataArrival::Ingesting {
                 rows_per_second: 1000.0,
@@ -1601,7 +1641,7 @@ mod tests {
             "sum_over_time(latency[5m] offset 1m)",
         ] {
             let (configured, bound, cost) = query_time_bound_and_cost(
-                query,
+                &[query],
                 AccuracyTarget::exact(),
                 AccuracyTarget::exact(),
                 &crate::PlanSelectionSettings::default(),
@@ -1631,6 +1671,53 @@ mod tests {
         }
     }
 
+    // A scan a 15 s and a 5 m window may share reads 5 minutes when the 5 m
+    // window reads it. A bound at the 15 s window would price it far below a
+    // scan for the 5 m window alone, so it gets no bound (nor do the nodes
+    // over it); a scan for one window keeps its bound. Both plans' bounds
+    // stay at or below their costs.
+    #[test]
+    fn a_scan_read_through_different_windows_has_no_bound() {
+        let pick: fn(&OperatorNode) -> bool = |node| {
+            matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(..), child, .. })
+                if matches!(child.non_asap(), Some(NonASAPOp::TimeRange { .. })))
+        };
+        let is_scan = |node: &OperatorNode| matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }));
+        for (queries, scan_bounded) in [
+            (&["sum_over_time(latency[5m])"][..], true),
+            (
+                &["sum_over_time(latency[15s])", "sum_over_time(latency[5m])"][..],
+                false,
+            ),
+        ] {
+            let (configured, bound, cost) = query_time_bound_and_cost(
+                queries,
+                AccuracyTarget::exact(),
+                AccuracyTarget::exact(),
+                &crate::PlanSelectionSettings::default(),
+                pick,
+            );
+            let scans = configured
+                .inventory
+                .templates
+                .iter()
+                .filter(|template| is_scan(template.as_ref().unwrap()))
+                .count();
+            assert_eq!(scans, 1, "{queries:?} share one scan");
+            let scan = bound_of(&configured, is_scan);
+            assert_eq!(scan > 0.0, scan_bounded, "{queries:?}: scan bound {scan}");
+            assert_eq!(
+                bound > 0.0,
+                scan_bounded,
+                "{queries:?}: build bound {bound}"
+            );
+            assert!(
+                bound <= cost * (1.0 + 1e-9),
+                "{queries:?}: bound {bound} against cost {cost}"
+            );
+        }
+    }
+
     fn is_kll_build(node: &OperatorNode) -> bool {
         matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
             if matches!(kind.params(), SketchParams::Kll { .. }))
@@ -1645,7 +1732,7 @@ mod tests {
         let mut costs = Vec::new();
         for failure_probability in [0.01, 0.001, 0.0001] {
             let (configured, bound, cost) = query_time_bound_and_cost(
-                "quantile_over_time(0.9, latency[5m])",
+                &["quantile_over_time(0.9, latency[5m])"],
                 built_for.clone(),
                 AccuracyTarget::max_error(0.01).failure_probability(failure_probability),
                 &crate::PlanSelectionSettings::default(),
@@ -1676,7 +1763,7 @@ mod tests {
             ..Default::default()
         };
         let (configured, _, _) = query_time_bound_and_cost(
-            "quantile_over_time(0.9, latency[5m])",
+            &["quantile_over_time(0.9, latency[5m])"],
             AccuracyTarget::max_error(0.01).failure_probability(0.01),
             AccuracyTarget::max_error(0.01).failure_probability(0.01),
             &settings,
@@ -1702,7 +1789,7 @@ mod tests {
         let built_for = AccuracyTarget::max_error(0.01).failure_probability(0.01);
         for failure_probability in [0.01, 0.0001] {
             let (configured, bound, cost) = query_time_bound_and_cost(
-                "quantile_over_time(0.9, latency[5m])",
+                &["quantile_over_time(0.9, latency[5m])"],
                 built_for.clone(),
                 AccuracyTarget::max_error(0.01).failure_probability(failure_probability),
                 &settings,
