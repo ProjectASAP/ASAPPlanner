@@ -233,10 +233,6 @@ fn reaches(
     false
 }
 
-fn root_groups(memo: &CandidateMemo) -> impl DoubleEndedIterator<Item = MemoGroupId> + '_ {
-    memo.groups
-        .iter()
-        .enumerate()
-        .filter(|(_, group)| !group.roots_of.is_empty())
-        .map(|(index, _)| MemoGroupId(index as u32))
+fn root_groups(memo: &CandidateMemo) -> impl DoubleEndedIterator<Item = MemoGroupId> {
+    super::root_groups(&memo.query_roots).into_iter()
 }

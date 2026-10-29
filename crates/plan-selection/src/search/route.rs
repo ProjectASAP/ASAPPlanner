@@ -5,7 +5,7 @@ use asap_logical_asap_optimization::pass1::per_computation_candidates::PerComput
 use asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo;
 use asap_logical_asap_optimization::pass2::memo::enumeration::ChosenCandidatePerMemoGroup;
 use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};
-use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::ir::QueryRoot;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 use std::rc::Rc;
 
@@ -777,6 +777,13 @@ fn search_domain<Id: Clone>(
     crate::PlanSelector::new(entries, data, models, false)?;
     let calibration_policy =
         CandidateCalibration::for_models(models).map_err(|error| unsupported(&error))?;
+    // The output references are the initial memo's query roots, which
+    // stand for the inventory's roots only when the memo was built from them.
+    if !initial.matches_root_dependencies(&inventory.roots) {
+        return Err(unsupported(
+            "the workload's query roots are not the initial memo's",
+        ));
+    }
     let roots = inventory
         .roots
         .iter()
@@ -784,30 +791,17 @@ fn search_domain<Id: Clone>(
         .collect::<Vec<_>>();
     let mut output_groups = Vec::new();
     let mut output_queries = Vec::new();
-    let mut missing_group = false;
-    for (query, root) in roots.iter().enumerate() {
-        let mut reference = |node: &Rc<OperatorNode>| {
-            if let Some(group) = initial.group_for_node(node) {
-                output_groups.push(group);
-                output_queries.push(query);
-            } else {
-                missing_group = true;
-            }
-            Rc::clone(node)
+    for (query, root) in initial.query_roots.iter().enumerate() {
+        let mut reference = |&group: &MemoGroupId| {
+            output_groups.push(group);
+            output_queries.push(query);
         };
         match root {
-            QueryRoot::Operator(node) => {
-                reference(node);
-            }
+            QueryRoot::Operator(group) => reference(group),
             QueryRoot::Scalar(expression) => {
                 expression.map_operator_refs(&mut reference);
             }
         }
-    }
-    if missing_group {
-        return Err(unsupported(
-            "an output reference is absent from the initial memo",
-        ));
     }
     let started = Instant::now();
     let pruned = if progress.local_memo.is_none() {
@@ -869,6 +863,7 @@ fn search_domain<Id: Clone>(
             let stage0 = CandidateMemo {
                 candidates: vec![Vec::new(); initial.groups.len()],
                 groups: initial.groups.clone(),
+                query_roots: initial.query_roots.clone(),
             };
             let mut memo = try_populate_pass1(
                 initial,
@@ -1251,10 +1246,10 @@ fn selected_chosen_candidates(
         }
     }
     // Every group the chosen candidates need, from the query roots, is chosen.
-    let mut pending: Vec<_> = (0..memo.groups.len())
-        .filter(|&group| !memo.groups[group].roots_of.is_empty())
-        .map(|group| MemoGroupId(group as u32))
-        .collect();
+    let mut pending: Vec<_> =
+        asap_logical_asap_optimization::pass2::memo::root_groups(&memo.query_roots)
+            .into_iter()
+            .collect();
     let mut seen = std::collections::HashSet::new();
     while let Some(group) = pending.pop() {
         if !seen.insert(group) {
@@ -1969,7 +1964,7 @@ mod tests {
                 matches!(
                     state.logical_node.asap(),
                     Some(asap_types::ir::ASAPOp::PaneChain { .. })
-                ) && state.queries == vec![0, 1]
+                ) && state.reached_by_queries() == [0, 1]
             }),
             "identical panes must expose a common state producer"
         );
@@ -2016,7 +2011,7 @@ mod tests {
             .roots
             .iter()
             .flat_map(|root| match root {
-                QueryRoot::Operator(node) => OperatorNode::reachable(node),
+                QueryRoot::Operator(node) => asap_types::ir::OperatorNode::reachable(node),
                 QueryRoot::Scalar(_) => Vec::new(),
             })
             .any(|node| matches!(node.asap(), Some(asap_types::ir::ASAPOp::PaneChain { .. }))));

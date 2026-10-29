@@ -2430,7 +2430,7 @@ fn composed_selected_choice_is_the_selected_stage1_dag() {
             .map(|query| {
                 let (_, node) = composed
                     .iter()
-                    .find(|(group, _)| memo.groups[group.0 as usize].roots_of.contains(&query))
+                    .find(|(group, _)| memo.query_roots[query].operator_refs().contains(&group))
                     .unwrap();
                 QueryRoot::Operator(
                     asap_physical_asap_optimization::implement_candidate_operators(node, &[])

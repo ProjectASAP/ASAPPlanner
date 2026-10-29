@@ -5,7 +5,7 @@
 
 use std::rc::Rc;
 
-use asap_types::ir::OperatorNode;
+use asap_types::ir::{OperatorNode, QueryRoot};
 
 pub use super::groups::try_populate_pass1;
 use super::{MemoGroup, MemoGroupId};
@@ -14,6 +14,10 @@ use super::{MemoGroup, MemoGroupId};
 #[derive(Debug, Clone, Default)]
 pub struct CandidateMemo {
     pub groups: Vec<MemoGroup>,
+    /// Each query's root over groups, by index in the workload
+    /// ([`super::DagOfLogicalMemoGroups::query_roots`]); groups added later
+    /// are never a query's root.
+    pub query_roots: Vec<QueryRoot<MemoGroupId>>,
     /// Each group's implementation candidates, by group index.
     pub candidates: Vec<Vec<CandidateForMemoGroup>>,
 }

@@ -186,7 +186,7 @@ mod tests {
     use asap_cost::CalibrationFit;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};
+    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
@@ -204,13 +204,7 @@ mod tests {
         ))];
         let identified = roots.iter().cloned().enumerate().collect::<Vec<_>>();
         let initial = DagOfLogicalMemoGroups::from_roots(&identified);
-        let output = MemoGroupId(
-            initial
-                .groups
-                .iter()
-                .position(|group| group.roots_of.contains(&0))
-                .unwrap() as u32,
-        );
+        let output = *initial.query_roots[0].as_operator().unwrap();
         let memo = try_populate_pass1(
             initial,
             &generate_per_computation_candidates(identified).unwrap(),

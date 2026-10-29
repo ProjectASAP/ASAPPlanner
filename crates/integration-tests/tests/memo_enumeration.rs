@@ -46,7 +46,7 @@ use asap_logical_asap_optimization::pass2::memo::candidates::{
 use asap_logical_asap_optimization::pass2::memo::enumeration::{
     build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
 };
-use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
+use asap_logical_asap_optimization::pass2::memo::{queries_rooted_at, MemoGroupId};
 use asap_plan_selection::{
     run_stage1_to_stage3_with, MemoSteps, PlanningModels, Stage1ToStage3Run, Stage1ToStage3Search,
 };
@@ -163,7 +163,11 @@ fn whole_workload_plans(inventory: &PerComputationCandidates<usize>) -> Vec<(Vec
 fn composed(memo: &CandidateMemo, choice: &ChosenCandidatePerMemoGroup) -> Plan {
     let mut roots = build_logical_asap_dags_from_chosen_candidates(memo, choice)
         .expect("an enumerated choice composes");
-    roots.sort_by_key(|(group, _)| memo.groups[group.0 as usize].roots_of.iter().min().copied());
+    roots.sort_by_key(|(group, _)| {
+        queries_rooted_at(&memo.query_roots, *group)
+            .first()
+            .copied()
+    });
     roots.into_iter().map(|(_, root)| root).collect()
 }
 

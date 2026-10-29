@@ -284,7 +284,7 @@ use asap_logical_asap_optimization::pass2::memo::candidates::{
 use asap_logical_asap_optimization::pass2::memo::enumeration::{
     build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
 };
-use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
+use asap_logical_asap_optimization::pass2::memo::{queries_rooted_at, MemoGroupId};
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
     large_peak_memory_warning, PlanningModels, Rejection, Selection, SelectionError,
@@ -1747,9 +1747,9 @@ fn memo_groups_json(
                 "id": id,
                 "label": node_label(&table.nodes[node]),
                 "children": ids(&group.child_groups),
-                "parents": ids(&group.parents),
-                "queries": group.queries,
-                "roots_of": group.roots_of,
+                "parents": ids(group.parent_groups()),
+                "queries": group.reached_by_queries(),
+                "roots_of": queries_rooted_at(&memo.query_roots, MemoGroupId(id as u32)),
                 "node": node,
                 "candidate_count": candidates.len(),
                 "candidate_count_by_origin": by_origin,

@@ -356,12 +356,7 @@ mod tests {
             expand_concrete_summary_state_groups(try_populate_pass1(initial, &inventory).unwrap())
                 .unwrap()
                 .memo;
-        let root_of = |query| {
-            memo.groups
-                .iter()
-                .position(|group| group.roots_of == [query])
-                .unwrap()
-        };
+        let root_of = |query: usize| memo.query_roots[query].as_operator().unwrap().0 as usize;
         let (coarse, fine) = (root_of(0), root_of(1));
         assert!(
             memo.candidates[coarse].iter().any(|candidate| {

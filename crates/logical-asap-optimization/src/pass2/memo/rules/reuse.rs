@@ -102,8 +102,9 @@ pub(in crate::pass2::memo) fn append_producer(
 ) -> Result<MemoGroupId, StateGroupExpansionError> {
     // Reuse only dedicated producer groups. A logical result group can contain
     // other implementations and cannot enforce this producer's exact contract.
+    let root_groups = crate::pass2::memo::root_groups(&memo.query_roots);
     if let Some((index, _)) = memo.groups.iter().enumerate().find(|(index, group)| {
-        group.roots_of.is_empty()
+        !root_groups.contains(&MemoGroupId(*index as u32))
             && memo.candidates[*index].len() == 1
             && memo.candidates[*index][0].origin == origin
             && memo.candidates[*index][0].accuracy_budget_parts == budget_share
@@ -127,7 +128,6 @@ pub(in crate::pass2::memo) fn append_producer(
         child_groups: children.clone(),
         parents: Vec::new(),
         queries: queries.to_vec(),
-        roots_of: Vec::new(),
     });
     memo.candidates.push(vec![CandidateForMemoGroup {
         implements: vec![id],

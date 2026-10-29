@@ -813,11 +813,7 @@ mod tests {
                 &generate_per_computation_candidates(roots_with_ids).unwrap(),
             )
             .unwrap();
-            let root_group = memo
-                .groups
-                .iter()
-                .position(|group| group.roots_of.contains(&0))
-                .unwrap();
+            let root_group = memo.query_roots[0].as_operator().unwrap().0 as usize;
             let candidate = memo.candidates[root_group].iter().find(|candidate|
                 OperatorNode::reachable(&candidate.root_node).iter().any(|node| if exact {
                     matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(..), child, .. }) if !grouped || matches!(child.non_asap(), Some(NonASAPOp::TimeRange { .. })))
@@ -1473,11 +1469,7 @@ mod tests {
         .unwrap();
         let picked: Vec<_> = (0..queries.len())
             .map(|query| {
-                let root_group = memo
-                    .groups
-                    .iter()
-                    .position(|group| group.roots_of.contains(&query))
-                    .unwrap();
+                let root_group = memo.query_roots[query].as_operator().unwrap().0 as usize;
                 memo.candidates[root_group]
                     .iter()
                     .find(|candidate| {

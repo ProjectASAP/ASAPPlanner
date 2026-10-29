@@ -388,15 +388,7 @@ mod tests {
             .collect::<Vec<_>>();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let output_groups = (0..2)
-            .map(|query| {
-                MemoGroupId(
-                    initial
-                        .groups
-                        .iter()
-                        .position(|group| group.roots_of.contains(&query))
-                        .unwrap() as u32,
-                )
-            })
+            .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect();
         let candidates = generate_per_computation_candidates(roots).unwrap();
         let memo = try_populate_pass1(initial, &candidates).unwrap();
@@ -625,15 +617,7 @@ mod tests {
             .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let outputs: Vec<_> = (0..roots.len())
-            .map(|query| {
-                MemoGroupId(
-                    initial
-                        .groups
-                        .iter()
-                        .position(|group| group.roots_of.contains(&query))
-                        .unwrap() as u32,
-                )
-            })
+            .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect();
         let generated = generate_per_computation_candidates(roots.clone()).unwrap();
         let mut memo = try_populate_pass1(initial, &generated).unwrap();
@@ -831,15 +815,7 @@ mod tests {
                 .collect();
             let initial = DagOfLogicalMemoGroups::from_roots(&roots);
             let outputs: Vec<_> = (0..2)
-                .map(|query| {
-                    MemoGroupId(
-                        initial
-                            .groups
-                            .iter()
-                            .position(|group| group.roots_of.contains(&query))
-                            .unwrap() as u32,
-                    )
-                })
+                .map(|query| *initial.query_roots[query].as_operator().unwrap())
                 .collect();
             let generated = generate_per_computation_candidates(roots.clone()).unwrap();
             let memo = expand_concrete_summary_state_groups(
@@ -987,15 +963,7 @@ mod tests {
                 .collect();
             let initial = DagOfLogicalMemoGroups::from_roots(&roots);
             let outputs: Vec<_> = (0..roots.len())
-                .map(|query| {
-                    MemoGroupId(
-                        initial
-                            .groups
-                            .iter()
-                            .position(|group| group.roots_of.contains(&query))
-                            .unwrap() as u32,
-                    )
-                })
+                .map(|query| *initial.query_roots[query].as_operator().unwrap())
                 .collect();
             let generated = generate_per_computation_candidates(roots.clone()).unwrap();
             let mut memo = try_populate_pass1(initial, &generated).unwrap();
@@ -1226,15 +1194,7 @@ mod tests {
             .collect::<Vec<_>>();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let outputs = (0..queries.len())
-            .map(|query| {
-                MemoGroupId(
-                    initial
-                        .groups
-                        .iter()
-                        .position(|group| group.roots_of.contains(&query))
-                        .unwrap() as u32,
-                )
-            })
+            .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect();
         let generated = generate_per_computation_candidates(roots).unwrap();
         (try_populate_pass1(initial, &generated).unwrap(), outputs)
@@ -1439,13 +1399,7 @@ mod tests {
         let query = "quantile_over_time(0.99, m[1m]) / quantile_over_time(0.5, m[1m])";
         let roots = vec![(0, QueryRoot::Operator(lower_promql(query, target.clone())))];
         let logical = DagOfLogicalMemoGroups::from_roots(&roots);
-        let output = MemoGroupId(
-            logical
-                .groups
-                .iter()
-                .position(|group| group.roots_of.contains(&0))
-                .unwrap() as u32,
-        );
+        let output = *logical.query_roots[0].as_operator().unwrap();
         let generated = generate_per_computation_candidates(roots).unwrap();
         let original = try_populate_pass1(logical, &generated).unwrap();
         assert!(original
