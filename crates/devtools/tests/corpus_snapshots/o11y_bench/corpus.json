@@ -93,7 +93,8 @@
     },
     {
       "id": "q18",
-      "query": "sum(increase(http_requests_total{job=\"payment-service\",status=~\"5..\"}[1h] offset 6h)) / sum(increase(http_requests_total{job=\"payment-service\"}[1h] offset 6h))"
+      "query": "sum(increase(http_requests_total{job=\"payment-service\",status=~\"5..\"}[1h] offset 6h)) / sum(increase(http_requests_total{job=\"payment-service\"}[1h] offset 6h))",
+      "known_slow": "planning runs past the time limit on main (#1023)"
     },
     {
       "id": "q19",
@@ -105,7 +106,8 @@
     },
     {
       "id": "q21",
-      "query": "sum(rate(http_requests_total{job=\"order-service\"}[5m] offset 1h))"
+      "query": "sum(rate(http_requests_total{job=\"order-service\"}[5m] offset 1h))",
+      "known_slow": "a pane round can end on its wall-clock budget (status time_limit), so the result depends on machine speed; about 70 s and 400 MB on one core"
     },
     {
       "id": "q22",

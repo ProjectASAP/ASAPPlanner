@@ -156,6 +156,9 @@ jobs:
   corpus-snapshots:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    # Planning takes 2-6 min (6 min on one core) plus the release build; each
+    # query stops at 120 s.
+    timeout-minutes: 45
     steps:
     - uses: actions/checkout@v4
 
@@ -164,17 +167,17 @@ jobs:
       with:
         toolchain: stable
 
+    # sccache alone: caching the release target as well would duplicate it.
     - name: Run sccache-cache
       uses: mozilla-actions/sccache-action@v0.0.4
 
-    - name: Cache cargo
+    - name: Cache cargo registry
       uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Check planner snapshots
       run: cargo test --release --locked -p asap-devtools --test corpus_snapshots -- --include-ignored

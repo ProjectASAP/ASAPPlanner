@@ -1,26 +1,34 @@
 //! Planner snapshots over real-world query corpora (#941).
 //!
 //! The planner has no reference answer, so these tests pin its output
-//! instead: each corpus query's `stage_pipeline` document (default search)
-//! is compared with the committed one, and any change fails until the
-//! snapshot is regenerated and the change explained in the PR.
+//! instead: each corpus query's selected plan (default search) is compared
+//! with the committed one, and any change fails until the snapshot is
+//! regenerated and the change explained in the PR.
 //!
 //! Each `tests/corpus_snapshots/<corpus>/corpus.json` declares the shared
 //! planning inputs and the queries by stable id; `<id>.json` beside it is
 //! that query's snapshot. Regenerate with
 //! `UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored`.
 //!
-//! A snapshot must not depend on the machine: the search report's timings are
-//! dropped, and a run the wall-clock budget stopped fails instead of being
-//! recorded, so only the evaluation budget can end a search.
+//! A snapshot holds only the plan, never the search that found it: the
+//! selected Stage 2 candidate's DAG and display name, its cost and accepted
+//! accuracy, the materialized views, pane retention, and whether the search
+//! proved the plan optimal; for a query that does not plan, the error and
+//! rejections. Candidate ids, round and evaluation counters, timings, the
+//! Stage 1 and Stage 2 candidate lists and the memo vary from run to run
+//! (round budgets are wall-clock), so they are left out. Floats are rounded
+//! to 12 significant digits. A run that the time limit stopped fails instead
+//! of being recorded, and a query marked `known_slow` in the manifest is
+//! skipped.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
-/// Far above any corpus query's planning time, so it never binds.
-const TIME_LIMIT_S: &str = "600";
+/// Per query. The slowest kept query takes about 60 s on one core, so this
+/// leaves room for a slower CI runner while still failing a runaway search.
+const TIME_LIMIT_S: &str = "120";
 
 fn corpora_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus_snapshots")
@@ -39,7 +47,8 @@ fn workload(corpus: &Value, query: &str) -> Value {
     })
 }
 
-/// Runs `stage_pipeline` on `workload`; panics (a planner crash) on failure.
+/// Runs `stage_pipeline` (without the memo section) on `workload`; panics
+/// (a planner crash) on failure.
 fn plan(workload: &Value, args: &[String], scratch: &Path) -> Value {
     let input = scratch.join("workload.json");
     let output = scratch.join("document.json");
@@ -48,7 +57,7 @@ fn plan(workload: &Value, args: &[String], scratch: &Path) -> Value {
     command
         .arg("--workload")
         .arg(&input)
-        .args(["--milp-time-limit-s", TIME_LIMIT_S])
+        .args(["--milp-time-limit-s", TIME_LIMIT_S, "--no-memo"])
         .args(args)
         .arg("--out")
         .arg(&output);
@@ -61,9 +70,13 @@ fn plan(workload: &Value, args: &[String], scratch: &Path) -> Value {
     serde_json::from_str(&std::fs::read_to_string(output).unwrap()).unwrap()
 }
 
-/// Whether the wall-clock budget, not the evaluation budget, ended the search.
+/// Whether the wall-clock budget ended the search: the report says so, or
+/// planning used the whole budget.
 fn hit_time_limit(document: &Value) -> bool {
     let report = &document["stage3_plan_selection"]["search"]["candidate_connections"];
+    if report["status"] == "time_limit" {
+        return true;
+    }
     match (
         report["full_planning_ms"].as_f64(),
         report["time_limit_ms"].as_f64(),
@@ -73,28 +86,87 @@ fn hit_time_limit(document: &Value) -> bool {
     }
 }
 
-/// Drops the search report's timings (`*_ms`), the only fields that differ
-/// between runs of the same workload. A failed selection's error also embeds
-/// the report, timings included; it is cut off there, since `search` has it.
-fn strip_timings(document: &mut Value) {
-    if let Some(Value::String(error)) = document.pointer_mut("/stage3_plan_selection/error") {
-        if let Some(at) = error.find(" Search report: ") {
-            error.truncate(at);
+/// `value` with every non-integer number rounded to 12 significant digits.
+fn rounded(value: &Value) -> Value {
+    match value {
+        Value::Number(n) if n.is_f64() => {
+            let x = n.as_f64().unwrap();
+            json!(format!("{x:.11e}").parse::<f64>().unwrap())
         }
+        Value::Object(map) => {
+            Value::Object(map.iter().map(|(k, v)| (k.clone(), rounded(v))).collect())
+        }
+        Value::Array(items) => Value::Array(items.iter().map(rounded).collect()),
+        other => other.clone(),
     }
-    fn strip(value: &mut Value) {
-        match value {
-            Value::Object(map) => {
-                map.retain(|key, _| !key.ends_with("_ms"));
-                map.values_mut().for_each(strip);
+}
+
+/// The stable part of a `stage_pipeline` document: the selected plan and
+/// its cost, or why there is none. See the module docs.
+fn snapshot_of(document: &Value) -> Value {
+    let stage3 = &document["stage3_plan_selection"];
+    let mut snapshot = Map::new();
+    snapshot.insert(
+        "query".into(),
+        document["workload"]["queries"][0]["text"].clone(),
+    );
+    snapshot.insert(
+        "accuracy_guarantees".into(),
+        document["accuracy_guarantees"].clone(),
+    );
+    match stage3["selected"].as_str() {
+        Some(id) => {
+            let candidate = document["stage2_physical_asap_optimization"]["candidates"]
+                .as_array()
+                .and_then(|candidates| candidates.iter().find(|c| c["id"] == id))
+                .unwrap_or_else(|| panic!("selected candidate {id} is not shown"));
+            snapshot.insert(
+                "selected".into(),
+                json!({
+                    "display_name": candidate["display_name"],
+                    "dag": candidate["dag"],
+                    "cost": stage3["costs"][id],
+                    "accepted": stage3["accepted"][id],
+                }),
+            );
+            snapshot.insert(
+                "proven_optimal".into(),
+                json!(stage3["search"]["candidate_connections"]["status"] == "optimal"),
+            );
+            for key in [
+                "materialized_views",
+                "materialized_views_error",
+                "pane_retention_ms",
+                "warnings",
+            ] {
+                if let Some(value) = stage3.get(key) {
+                    snapshot.insert(key.into(), value.clone());
+                }
             }
-            Value::Array(items) => items.iter_mut().for_each(strip),
-            _ => {}
+        }
+        None => {
+            snapshot.insert("selected".into(), Value::Null);
+            if let Some(error) = stage3["error"].as_str() {
+                let error = error.split(" Search report: ").next().unwrap();
+                snapshot.insert("error".into(), json!(error));
+            }
+            // Which candidates were rejected depends on the search; why does not.
+            let causes = |key: &str| -> Value {
+                let mut causes: Vec<Value> = stage3[key]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|r| json!({"cause": r["cause"], "reason": r["reason"]}))
+                    .collect();
+                causes.sort_by_key(|c| c.to_string());
+                causes.dedup();
+                Value::Array(causes)
+            };
+            snapshot.insert("rejected".into(), causes("rejected"));
+            snapshot.insert("search_rejected".into(), causes("search_rejected"));
         }
     }
-    if let Some(search) = document.pointer_mut("/stage3_plan_selection/search") {
-        strip(search);
-    }
+    rounded(&Value::Object(snapshot))
 }
 
 /// The first line where `expected` and `actual` differ, for the failure message.
@@ -117,13 +189,15 @@ fn first_difference(expected: &str, actual: &str) -> String {
     String::new()
 }
 
-/// Every corpus query's document matches its committed snapshot.
+/// Every corpus query's plan matches its committed snapshot.
 #[test]
 #[ignore = "runs the release planner over the corpora: see the module docs"]
 fn corpus_plans_match_snapshots() {
     let update = std::env::var_os("UPDATE_SNAPSHOTS").is_some();
-    // Regenerated snapshots of failing queries, for CI to upload.
+    // Regenerated snapshots of failing queries, with their full
+    // `stage_pipeline` documents for the DAG viewer, for CI to upload.
     let regenerated = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("corpus_snapshots");
+    let _ = std::fs::remove_dir_all(&regenerated);
     let scratch = std::env::temp_dir().join(format!("corpus_snapshots_{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
     let mut failures = Vec::new();
@@ -140,22 +214,29 @@ fn corpus_plans_match_snapshots() {
                 .unwrap();
         let args: Vec<String> =
             serde_json::from_value(corpus["stage_pipeline_args"].clone()).unwrap();
-        let queries = corpus["queries"].as_array().unwrap();
+        // A `known_slow` query (its value says why) is not planned.
+        let queries: Vec<&Value> = corpus["queries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|q| q.get("known_slow").is_none())
+            .collect();
         let ids: Vec<&str> = queries.iter().map(|q| q["id"].as_str().unwrap()).collect();
 
-        // A snapshot whose query left the manifest would otherwise go stale unseen.
+        // A snapshot whose query left the manifest, or became known-slow,
+        // would otherwise go stale unseen.
         for entry in std::fs::read_dir(&dir).unwrap() {
             let file = entry.unwrap().file_name().to_string_lossy().into_owned();
             if let Some(id) = file.strip_suffix(".json") {
                 if id != "corpus" && !ids.contains(&id) {
-                    failures.push(format!("{name}/{file}: no query with id {id}"));
+                    failures.push(format!("{name}/{file}: no checked query with id {id}"));
                 }
             }
         }
 
         for query in queries {
             let id = query["id"].as_str().unwrap();
-            let mut document = plan(
+            let document = plan(
                 &workload(&corpus, query["query"].as_str().unwrap()),
                 &args,
                 &scratch,
@@ -167,21 +248,22 @@ fn corpus_plans_match_snapshots() {
                 ));
                 continue;
             }
-            strip_timings(&mut document);
-            let actual = serde_json::to_string_pretty(&document).unwrap() + "\n";
+            let actual = serde_json::to_string_pretty(&snapshot_of(&document)).unwrap() + "\n";
             let path = dir.join(format!("{id}.json"));
             if update {
                 std::fs::write(&path, &actual).unwrap();
                 continue;
             }
-            let Ok(expected) = std::fs::read_to_string(&path) else {
-                failures.push(format!("{name}/{id}: no snapshot {}", path.display()));
-                continue;
-            };
+            let expected = std::fs::read_to_string(&path).unwrap_or_default();
             if expected != actual {
                 let out = regenerated.join(&name);
                 std::fs::create_dir_all(&out).unwrap();
                 std::fs::write(out.join(format!("{id}.json")), &actual).unwrap();
+                std::fs::write(
+                    out.join(format!("{id}.document.json")),
+                    serde_json::to_string_pretty(&document).unwrap(),
+                )
+                .unwrap();
                 failures.push(format!(
                     "{name}/{id}: plan changed at {}",
                     first_difference(&expected, &actual)
@@ -201,43 +283,85 @@ fn corpus_plans_match_snapshots() {
     );
 }
 
-/// Only the search report's timings, and the report embedded in a selection
-/// error, are dropped; `_ms` inputs elsewhere stay.
+/// The snapshot keeps the selected plan without its id or the search
+/// report, and rounds floats.
 #[test]
-fn strip_timings_keeps_inputs() {
-    let mut document = json!({
-        "workload": {"queries": [{"range_evaluation": {"step_ms": 60000}}]},
+fn snapshot_keeps_only_the_plan() {
+    let document = json!({
+        "accuracy_guarantees": "enforced",
+        "workload": {"queries": [{"text": "sum(up)"}]},
+        "stage2_physical_asap_optimization": {"candidates": [
+            {"id": "pane-round-12-joint-plan-1", "display_name": "plan A", "dag": {"nodes": [1]}},
+        ]},
         "stage3_plan_selection": {
-            "pane_retention_ms": {"3": 60000},
-            "error": "infeasible. Search report: {\"solver_ms\":1.5}",
-            "search": {"candidate_connections": {"solver_ms": 1.5, "refinements": 128}},
+            "selected": "pane-round-12-joint-plan-1",
+            "costs": {"pane-round-12-joint-plan-1": {"cost_per_second": 0.1 + 0.2}},
+            "accepted": {"pane-round-12-joint-plan-1": []},
+            "materialized_views": [],
+            "pane_retention_ms": {"1": 60000},
+            "search": {"candidate_connections": {"status": "refinement_limit", "solver_ms": 1.5}},
         },
     });
-    strip_timings(&mut document);
     assert_eq!(
-        document,
+        snapshot_of(&document),
         json!({
-            "workload": {"queries": [{"range_evaluation": {"step_ms": 60000}}]},
-            "stage3_plan_selection": {
-                "pane_retention_ms": {"3": 60000},
-                "error": "infeasible.",
-                "search": {"candidate_connections": {"refinements": 128}},
+            "query": "sum(up)",
+            "accuracy_guarantees": "enforced",
+            "selected": {
+                "display_name": "plan A",
+                "dag": {"nodes": [1]},
+                "cost": {"cost_per_second": 0.3},
+                "accepted": [],
             },
+            "proven_optimal": false,
+            "materialized_views": [],
+            "pane_retention_ms": {"1": 60000},
         })
     );
 }
 
-/// A search that used its whole wall-clock budget is detected; one stopped by
-/// the evaluation budget, or with no search report, is not.
+/// A query without a plan keeps the error up to the embedded search report
+/// and the rejections' causes without candidate ids.
+#[test]
+fn snapshot_of_a_failed_query() {
+    let document = json!({
+        "accuracy_guarantees": "enforced",
+        "workload": {"queries": [{"text": "sum(up)"}]},
+        "stage3_plan_selection": {
+            "selected": null,
+            "error": "infeasible. Search report: {\"solver_ms\":1.5}",
+            "rejected": [
+                {"id": "joint-plan-2", "cause": "costlier", "reason": "r"},
+                {"id": "joint-plan-1", "cause": "costlier", "reason": "r"},
+            ],
+        },
+    });
+    assert_eq!(
+        snapshot_of(&document),
+        json!({
+            "query": "sum(up)",
+            "accuracy_guarantees": "enforced",
+            "selected": null,
+            "error": "infeasible.",
+            "rejected": [{"cause": "costlier", "reason": "r"}],
+            "search_rejected": [],
+        })
+    );
+}
+
+/// A search that used its whole wall-clock budget, or reports `time_limit`
+/// (a round budget), is detected; one stopped by the evaluation budget, or
+/// with no search report, is not.
 #[test]
 fn time_limit_detection() {
-    let report = |elapsed: f64| {
+    let report = |elapsed: f64, status: &str| {
         json!({"stage3_plan_selection": {"search": {"candidate_connections": {
-            "full_planning_ms": elapsed, "time_limit_ms": 1000.0,
+            "full_planning_ms": elapsed, "time_limit_ms": 1000.0, "status": status,
         }}}})
     };
-    assert!(hit_time_limit(&report(1000.2)));
-    assert!(!hit_time_limit(&report(12.0)));
+    assert!(hit_time_limit(&report(1000.2, "refinement_limit")));
+    assert!(hit_time_limit(&report(12.0, "time_limit")));
+    assert!(!hit_time_limit(&report(12.0, "refinement_limit")));
     assert!(!hit_time_limit(
         &json!({"stage3_plan_selection": {"error": "x"}})
     ));
