@@ -156,7 +156,7 @@ fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
         })
         .collect::<Vec<_>>();
     let composed = compose_logical_candidate(&local, &choices).unwrap();
-    let shared = asap_types::ir::cse::share_common_sub_dags(
+    let shared = asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
         composed
             .into_iter()
             .map(|(id, root)| match root {

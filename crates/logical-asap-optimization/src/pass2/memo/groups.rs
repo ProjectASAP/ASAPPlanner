@@ -2,7 +2,7 @@
 //! group (design steps 1 and 2, Pass 1 part).
 //!
 //! Groups are the workload's logical DAG interned by
-//! [`asap_types::ir::cse::share_common_sub_dags`], the identical-expression rule's legality
+//! [`crate::pass2::cse::share_common_sub_dags`], the identical-expression rule's legality
 //! included: structurally equal nodes are one group when sharing them is
 //! legal: an ASAP node, or a non-ASAP node that returns the same rows for
 //! the same input rows (`NonASAPOp::is_shareable_when_equal`).

@@ -1795,7 +1795,7 @@ fn scans_projecting_different_labels_are_shared() {
     // Plans `roots` with identical sub-DAGs made one node, as the memo's
     // groups are, and a node read by several roots kept for the evaluation.
     let plan = |name: &str, roots: &[asap_types::ir::QueryRoot]| {
-        let shared: Vec<_> = asap_types::ir::cse::share_common_sub_dags(
+        let shared: Vec<_> = asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
             roots
                 .iter()
                 .enumerate()

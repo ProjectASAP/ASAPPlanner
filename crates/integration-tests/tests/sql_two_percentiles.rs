@@ -338,7 +338,7 @@ async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
         }
     }
     let share = |roots: Vec<QueryRoot>| {
-        asap_types::ir::cse::share_common_sub_dags(
+        asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
             roots
                 .into_iter()
                 .enumerate()

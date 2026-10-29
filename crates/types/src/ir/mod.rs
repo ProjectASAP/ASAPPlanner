@@ -11,8 +11,6 @@ pub use operator::query::QueryRoot;
 pub use scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
 pub use schema::error::SchemaDerivationError;
 
-pub mod canonicalize;
-pub mod cse;
 pub mod flat;
 /// What a runtime keeps for a physical ASAP DAG: its materialized views and
 /// raw-data retention, derived from the DAG.

@@ -82,7 +82,7 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
             .map(|(_, r)| r)
             .collect();
         // Identical sub-DAGs made one node, as the memo's groups are.
-        let roots: Vec<_> = asap_types::ir::cse::share_common_sub_dags(
+        let roots: Vec<_> = asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
             roots
                 .iter()
                 .enumerate()

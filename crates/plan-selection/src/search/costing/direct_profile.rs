@@ -2081,19 +2081,20 @@ mod tests {
                     .map(|(_, root)| root)
                     .collect();
                 // Identical sub-DAGs made one node, as the memo's groups are.
-                let shared: Vec<_> = asap_types::ir::cse::share_common_sub_dags(
-                    roots
-                        .iter()
-                        .enumerate()
-                        .map(|(id, root)| match root {
-                            QueryRoot::Operator(node) => (id, Rc::clone(node)),
-                            QueryRoot::Scalar(_) => panic!("operator root"),
-                        })
-                        .collect(),
-                )
-                .into_iter()
-                .map(|(_, node)| QueryRoot::Operator(node))
-                .collect();
+                let shared: Vec<_> =
+                    asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
+                        roots
+                            .iter()
+                            .enumerate()
+                            .map(|(id, root)| match root {
+                                QueryRoot::Operator(node) => (id, Rc::clone(node)),
+                                QueryRoot::Scalar(_) => panic!("operator root"),
+                            })
+                            .collect(),
+                    )
+                    .into_iter()
+                    .map(|(_, node)| QueryRoot::Operator(node))
+                    .collect();
                 let mut configured = CandidateConfigurationInventory {
                     inventory: CandidateInventory {
                         graph: CandidateDependencyGraph::default(),

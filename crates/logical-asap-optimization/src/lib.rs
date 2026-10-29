@@ -2,7 +2,7 @@
 //! optimization: from the query-language frontends' logical DAGs to the
 //! CandidateLogicalASAPDAGs.
 //!
-//! Identical-sub-DAG sharing over the logical DAG (`asap_types::ir::cse`)
+//! Identical-sub-DAG sharing over the logical DAG ([`pass2::cse`])
 //! runs before the stages; Stage 1 adds the ASAP-aware sharing that is
 //! invisible at the logical level ([`asap_aware_cse`](pass2::asap_aware_cse), Pass 2), e.g.
 //! `Quantile(x, 0.99)` and `Quantile(x, 0.95)` reading one built sketch.
@@ -16,7 +16,7 @@
 //! their tests.
 //!
 //! Post-lowering **canonicalization** is *not* here: it lives in
-//! `asap_types::ir::canonicalize`, run inside `asap_frontend_common`'s shared
+//! `asap_frontend_common::canonicalize`, run inside that crate's shared
 //! `resolve_root` so every front end normalizes before the IR leaves resolution
 //! (issue #34, closed).
 //!

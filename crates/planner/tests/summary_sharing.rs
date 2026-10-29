@@ -194,7 +194,7 @@ fn shared_kll_candidate(
         .map(|(_, root)| root)
         .collect();
     // Every identical sub-DAG of the two queries made one node.
-    let roots: Vec<_> = asap_types::ir::cse::share_common_sub_dags(
+    let roots: Vec<_> = asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
         roots
             .into_iter()
             .enumerate()

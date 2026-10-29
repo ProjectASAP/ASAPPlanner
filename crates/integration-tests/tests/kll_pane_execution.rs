@@ -307,15 +307,15 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
         &[fixture.merge, fixture.p50, fixture.p99],
     )
     .unwrap();
-    let layout = asap_types::physical::PaneLayout {
+    let layout = asap_physical_asap_optimization::summary_window::PaneLayout {
         pane_width_ms: 60_000,
         pane_origin_ms: Some(0),
     };
     assert!(
-        asap_types::physical::validate_pane_coverage(
+        asap_physical_asap_optimization::summary_window::validate_pane_coverage(
             &layout,
             Some(330_000),
-            &asap_types::physical::WindowEdgeCoverage::PaneAligned
+            &asap_physical_asap_optimization::summary_window::WindowEdgeCoverage::PaneAligned
         )
         .is_err(),
         "moving window edges require residual computation"
@@ -329,10 +329,10 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
                 .collect::<Vec<_>>(),
         );
         let evaluation_time_ms = (5 + offset as i64) * 60_000;
-        asap_types::physical::validate_pane_coverage(
+        asap_physical_asap_optimization::summary_window::validate_pane_coverage(
             &layout,
             Some(evaluation_time_ms),
-            &asap_types::physical::WindowEdgeCoverage::PaneAligned,
+            &asap_physical_asap_optimization::summary_window::WindowEdgeCoverage::PaneAligned,
         )
         .unwrap();
         // View `i` holds the pane ending `i` minutes before the evaluation time.
