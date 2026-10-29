@@ -68,8 +68,8 @@ same pipeline behind the `OptimizationPass` trait that `asap-planner` calls.
 | Stage 3: accuracy check, latency check, deployment-capability checks, resource usage (`ResourceUsage`), cost models 1–3 (`CostModel`), measured operation costs | `asap-plan-selection`, `lib.rs`; `asap-cost`, `lib.rs` and `measured.rs` |
 | The analytical per-operator resource model Stage 3 measures with | `asap-cost`, `analytical.rs` and `operator_statistics.rs` |
 | The accuracy algebra: per-family guarantees, composition, budget split | `asap-logical-asap-optimization`, `accuracy/` (`AccuracyModel`, `DefaultAccuracyModel`, `estimators/`, `composition.rs`, `budget.rs`) |
-| What the executor supports (`DeploymentCapabilities`) | `asap-logical-asap-optimization`, `deployment_capabilities.rs`; each stage receives only the field it reads: Pass 1 `supported_summaries`, Stage 2 `query_time_results_retained` (a `bool` argument, so Stage 2 does not depend on the Stage 1 crate), Stage 3 `raw_data_retained` |
-| The inputs every stage reads (`PlanningModels`: accuracy model, evidence, plan selection settings, deployment capabilities) and the `OptimizationPass` trait | `asap-plan-selection`, `pass/mod.rs` |
+| What the executor supports (`DeploymentCapabilities`) | `asap-logical-asap-optimization`, `deployment_capabilities.rs`; Pass 1 receives only `supported_summaries` and Stage 2 only `query_time_results_retained` (a `bool` argument, so Stage 2 does not depend on the Stage 1 crate); Stage 3 still receives the whole struct through `PlanningModels` and reads only `raw_data_retained` |
+| The inputs every stage reads (`PlanningModels`: accuracy model, evidence, plan selection settings, deployment capabilities) and the `OptimizationPass` trait | `asap-plan-selection`, `search/mod.rs` (public path `asap_plan_selection::pass`) |
 
 The current production search organizes these computations in memo result/state
 groups and jointly selects physical candidates and connections; it does not
