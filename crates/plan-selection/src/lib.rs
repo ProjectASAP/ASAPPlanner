@@ -238,11 +238,9 @@ use asap_types::ir::operator::operator_properties::{
     BinaryOpKind, PromQLVectorSetOpKind, RelationalSetOpKind,
 };
 use asap_types::ir::operator::{AggIntent, GroupKeys, Reduction, Source};
-use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
 use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload, ScanWindow,
 };
-use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric, ExecutionTiming};
 use asap_types::ir::scalar::ScalarValue;
 use asap_types::ir::schema::Schema;
@@ -251,7 +249,7 @@ use asap_types::ir::schema::{
 };
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot,
-    ScalarExpr, SchemaDerivationError, TimeRangeKind,
+    ScalarExpr, TimeRangeKind,
 };
 use asap_types::physical::{Materialization, Medium};
 #[cfg(test)]
@@ -262,7 +260,6 @@ use asap_accuracy::composition::{
     parse_raw_data_samples_sign_statistic, parse_source_norm_statistic, INPUT_ROW_COUNT,
     PRODUCT_OPERAND_DOMAINS, STREAM_L1_NORM,
 };
-use asap_accuracy::estimators::with_failure_probability;
 use asap_accuracy::estimators::{hll, univmon};
 use asap_accuracy::OperandDomain;
 use asap_cost::analytical::{
@@ -279,15 +276,15 @@ use asap_cost::{
     QueryLatency, ResourceUsage, COST_SOURCE, COST_UNIT, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
 };
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    approximate_inputs, distinct_bound_source, operand_domain_statistic, operand_guarantee,
-    operand_of, project_column_guarantee, root_guarantee, with_resized_summaries,
+    operand_domain_statistic, operand_guarantee, operand_of, project_column_guarantee,
+    root_guarantee, with_resized_summaries,
 };
-use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 
 mod accuracy;
 mod checks;
 mod report;
 mod selector;
+mod sizing;
 use asap_cost::execution_demand::{computations, evaluation_rate, query_starts};
 use checks::family_name;
 pub(crate) use checks::{accuracy_targets, guarantee_check};
@@ -297,6 +294,8 @@ pub use report::{
 };
 pub(crate) use selector::{cheaper, checked_candidate, choose, Ranking};
 pub use selector::{select_plan, PlanSelector};
+pub use sizing::resize_for_failure_probability;
+pub(crate) use sizing::sized_for_failure_probability;
 
 /// The Stage 1 to Stage 3 driver and the optimization-pass interface.
 pub mod search;
@@ -694,116 +693,6 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
         }
         _ => false,
     }
-}
-
-/// `candidate` with each summary's per-value failure probability enlarged
-/// for its queries' targets (#669b), before pricing, so that cost reflects
-/// the deeper sketch. A query with a target with failure probability `δ`,
-/// over `n` approximate inputs ([`approximate_inputs`]) and covering `V`
-/// values per evaluation ([`AccuracyScope::max_values_covered`]: 1 for a
-/// per-value target, at most `⌊1 / share⌋` for one over the groups holding
-/// a record share, `G` ([`values_per_result`]) for the whole result), needs
-/// each input to fail with probability at most `δ / (n · V)`: `n · V` such
-/// failures union-bound to `δ` over the values the target covers. A summary
-/// several queries read takes the smallest `δ / (n · V)` among them. The
-/// parameters that depend on it are enlarged ([`with_failure_probability`];
-/// classic HLL's precision from its source's distinct bound), and the
-/// guarantees above are composed again. A query whose `V` is unbound (a
-/// whole-result target of an unbound `G`) enlarges nothing: its target
-/// stays unmet. Stage 1 sizes for ε and reads no data workload; only this
-/// stage binds `G`. `Err` is the reason the candidate is rejected when its
-/// resized summaries do not rebuild into a plan.
-pub(crate) fn sized_for_failure_probability(
-    candidate: &PhysicalWorkloadPlan,
-    targets: &[AccuracyTarget],
-    data: &DataWorkload,
-) -> Result<PhysicalWorkloadPlan, String> {
-    let resize_failed = |error: &dyn std::fmt::Display| {
-        format!("resizing for the failure probability failed: {error}")
-    };
-    let roots = resize_for_failure_probability(&candidate.roots, targets, data)
-        .map_err(|error| resize_failed(&error))?;
-    if roots
-        .iter()
-        .zip(&candidate.roots)
-        .all(|(sized, root)| sized == root)
-    {
-        return Ok(candidate.clone());
-    }
-    let mut dag = compile_physical_asap_workload_with_node_ids(&roots)
-        .map_err(|error| resize_failed(&error))?
-        .dag;
-    // The DAG has the same nodes, so each keeps the placement Stage 2 gave it.
-    if dag.nodes.len() == candidate.dag.nodes.len() {
-        for (node, placed) in dag.nodes.iter_mut().zip(&candidate.dag.nodes) {
-            if node.id == placed.id {
-                node.output_state = placed.output_state;
-                node.materialization = placed.materialization;
-            }
-        }
-    }
-    Ok(PhysicalWorkloadPlan {
-        roots,
-        dag,
-        ..candidate.clone()
-    })
-}
-
-/// `roots` with their summaries enlarged as [`sized_for_failure_probability`]
-/// says: the plan plan selection prices and runs, for the logical roots of
-/// the selected candidate too.
-pub fn resize_for_failure_probability(
-    roots: &[QueryRoot],
-    targets: &[AccuracyTarget],
-    data: &DataWorkload,
-) -> Result<Vec<QueryRoot>, SchemaDerivationError> {
-    let mut required: HashMap<*const OperatorNode, f64> = HashMap::new();
-    for (root, target) in roots.iter().zip(targets) {
-        let Some((target, delta)) = target
-            .failure_probability
-            .map(|delta| (target, delta))
-            .filter(|(t, delta)| !t.is_exact() && *delta > 0.0)
-        else {
-            continue;
-        };
-        let values = target.accuracy_scope.max_values_covered(values_per_result(
-            root,
-            series_read(root, data),
-            data,
-        ));
-        let Some(values) = values else { continue };
-        let inputs = approximate_inputs(root);
-        let per_input_failure_probability = delta / (inputs.len() as f64 * values as f64);
-        for state in &inputs {
-            let entry = required
-                .entry(Rc::as_ptr(state))
-                .or_insert(per_input_failure_probability);
-            *entry = entry.min(per_input_failure_probability);
-        }
-    }
-    if required.is_empty() {
-        return Ok(roots.to_vec());
-    }
-    let resize = |state: &OperatorNode, params: &SketchParams| {
-        let delta = *required.get(&std::ptr::from_ref(state))?;
-        Some(match params {
-            SketchParams::Hll {
-                precision,
-                relative_error,
-            } => {
-                let source = distinct_bound_source(state)?;
-                let bound = data.sources.get(&source)?.max_distinct_per_evaluation?;
-                // The guarantee keeps the relative error Pass 1 sized for.
-                let relative_error = hll::classic_relative_error(*precision, *relative_error);
-                SketchParams::Hll {
-                    precision: hll::min_precision(relative_error, delta, bound, *precision),
-                    relative_error: Some(relative_error),
-                }
-            }
-            params => with_failure_probability(params, delta),
-        })
-    };
-    with_resized_summaries(roots, &resize)
 }
 
 /// `domain` with an open requirement answered from `data`'s declared source
@@ -3054,6 +2943,7 @@ mod tests {
     use crate::selector::dominates;
     use asap_cost::{ClusterLimits, ClusterObjective};
     use asap_cost::{MeasuredOperationCosts, OperatorCost, ResourceUnitCost};
+    use asap_physical_asap_optimization::PhysicalWorkloadPlan;
     use asap_types::ir::properties::AccuracyScope;
     use asap_types::ir::schema::DataType;
     use asap_types::ir::schema::SketchAlgorithm;

@@ -18,9 +18,10 @@ use crate::checks::{
 use crate::report::{
     AcceptedAccuracy, Rejection, RejectionCause, SearchReport, Selection, SelectionError,
 };
+use crate::sizing::sized_for_failure_probability;
 use crate::{
     kept_pane_chains, node_map, pane_retention_ms, price_at_scale, query_reach,
-    sized_for_failure_probability, with_confirmed_weights, PlanningModels,
+    with_confirmed_weights, PlanningModels,
 };
 
 /// A cost per second for a rejection reason: three decimals, or three
