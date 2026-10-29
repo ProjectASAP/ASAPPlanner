@@ -1572,7 +1572,7 @@ fn memo_json(steps: &MemoSteps, caps: &MemoCaps, pricing: &Pricing<'_>) -> Value
     }
     let last = &steps.concrete_states;
     let (step, memo) = listed.unwrap_or(("concrete_states", last));
-    let selected = steps.selected_choice.as_ref().ok();
+    let selected = steps.selected_chosen_candidates.as_ref().ok();
     let enumerated = enumerate(memo, caps.enumerated).all_chosen_candidates;
     let priced = (caps.choices_to_price > 0).then(|| {
         price_choices(
@@ -1636,7 +1636,7 @@ fn memo_json(steps: &MemoSteps, caps: &MemoCaps, pricing: &Pricing<'_>) -> Value
             "priced": priced,
         },
     });
-    if let Err(reason) = &steps.selected_choice {
+    if let Err(reason) = &steps.selected_chosen_candidates {
         memo["selected_choice_unavailable"] = json!(reason);
     }
     memo

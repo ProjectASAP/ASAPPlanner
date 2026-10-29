@@ -74,15 +74,15 @@ pub fn enumerate(memo: &CandidateMemo, limit: usize) -> AllChosenCandidatesPerMe
         mut pending: Vec<MemoGroupId>,
         chosen_candidates: &mut ChosenCandidatePerMemoGroup,
         limit: usize,
-        choices: &mut Vec<ChosenCandidatePerMemoGroup>,
+        all_chosen_candidates: &mut Vec<ChosenCandidatePerMemoGroup>,
     ) -> bool {
         let group = loop {
             match pending.pop() {
                 None => {
-                    if choices.len() == limit {
+                    if all_chosen_candidates.len() == limit {
                         return false;
                     }
-                    choices.push(chosen_candidates.clone());
+                    all_chosen_candidates.push(chosen_candidates.clone());
                     return true;
                 }
                 Some(group) if !chosen_candidates.contains_key(&group) => break group,
@@ -102,7 +102,7 @@ pub fn enumerate(memo: &CandidateMemo, limit: usize) -> AllChosenCandidatesPerMe
             chosen_candidates.insert(group, index);
             let mut next = pending.clone();
             next.extend(candidate.children.iter().rev());
-            let finished = walk(memo, next, chosen_candidates, limit, choices);
+            let finished = walk(memo, next, chosen_candidates, limit, all_chosen_candidates);
             chosen_candidates.remove(&group);
             if !finished {
                 return false;
@@ -111,16 +111,16 @@ pub fn enumerate(memo: &CandidateMemo, limit: usize) -> AllChosenCandidatesPerMe
         true
     }
     let roots = root_groups(memo).rev().collect();
-    let mut choices = Vec::new();
+    let mut all_chosen_candidates = Vec::new();
     let complete = walk(
         memo,
         roots,
         &mut ChosenCandidatePerMemoGroup::new(),
         limit,
-        &mut choices,
+        &mut all_chosen_candidates,
     );
     AllChosenCandidatesPerMemoGroup {
-        all_chosen_candidates: choices,
+        all_chosen_candidates,
         complete,
     }
 }

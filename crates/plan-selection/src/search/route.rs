@@ -454,7 +454,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         Some((_, steps)) => archive.memo_steps = Some(steps),
         None => {
             if let Some(steps) = &mut archive.memo_steps {
-                steps.selected_choice =
+                steps.selected_chosen_candidates =
                     Err("the selected plan's planning round is not recorded".into());
             }
         }
@@ -918,7 +918,7 @@ fn search_domain<Id: Clone>(
                 pass1: pass1.clone(),
                 pass2: progress.local_memo.clone().expect("kept above"),
                 concrete_states: memo.clone(),
-                selected_choice: Err("no plan was selected".into()),
+                selected_chosen_candidates: Err("no plan was selected".into()),
             },
         )
     });
@@ -1175,7 +1175,7 @@ fn search_domain<Id: Clone>(
         .map_err(|error| unsupported(&error))?;
     if let Some((plan, steps)) = &mut progress.memo_steps {
         *plan = Some(physical.id.clone());
-        steps.selected_choice = selected_chosen_candidates(
+        steps.selected_chosen_candidates = selected_chosen_candidates(
             &steps.concrete_states,
             &source,
             &memo_candidate_roots,
@@ -1219,7 +1219,7 @@ fn selected_chosen_candidates(
             .or_default()
             .push(source.graph.candidates[source_of(connection.producer).0].group);
     }
-    let mut choice = ChosenCandidatePerMemoGroup::new();
+    let mut chosen_candidates = ChosenCandidatePerMemoGroup::new();
     for &id in &selected.selected_candidates {
         let Some(options) = memo_candidates_of.get(&source_of(id)) else {
             continue; // a candidate's private node
@@ -1240,7 +1240,7 @@ fn selected_chosen_candidates(
                 id.0
             )
         })?;
-        if let Some(previous) = choice.insert(group, index) {
+        if let Some(previous) = chosen_candidates.insert(group, index) {
             if previous != index {
                 return Err(format!(
                     "the selected plan implements group {} with two candidates, {previous} and {index}",
@@ -1259,7 +1259,7 @@ fn selected_chosen_candidates(
         if !seen.insert(group) {
             continue;
         }
-        let index = choice.get(&group).ok_or_else(|| {
+        let index = chosen_candidates.get(&group).ok_or_else(|| {
             format!(
                 "the selected plan uses group {} but no candidate of it is selected",
                 group.0
@@ -1267,7 +1267,7 @@ fn selected_chosen_candidates(
         })?;
         pending.extend(&memo.candidates[group.0 as usize][*index].children);
     }
-    Ok(choice)
+    Ok(chosen_candidates)
 }
 
 fn selected_logical_roots(

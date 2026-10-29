@@ -55,7 +55,7 @@ pub struct MemoSteps {
     pub concrete_states: CandidateMemo,
     /// The selected plan's candidate for each group of `concrete_states` it
     /// uses, or why there is none.
-    pub selected_choice: Result<ChosenCandidatePerMemoGroup, String>,
+    pub selected_chosen_candidates: Result<ChosenCandidatePerMemoGroup, String>,
 }
 
 /// A composed logical candidate that physical ASAP-aware optimization could

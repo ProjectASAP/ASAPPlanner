@@ -2365,7 +2365,7 @@ fn composed_selected_choice_is_the_selected_stage1_dag() {
         )
         .unwrap();
         let steps = run.memo_steps.as_ref().unwrap();
-        let choice = steps.selected_choice.as_ref().unwrap();
+        let choice = steps.selected_chosen_candidates.as_ref().unwrap();
         let memo = &steps.concrete_states;
         let composed = build_logical_asap_dags_from_chosen_candidates(memo, choice).unwrap();
         let composed: Vec<_> = (0..entries.len())
