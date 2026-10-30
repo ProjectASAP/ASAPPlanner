@@ -141,8 +141,8 @@ fn id(candidate: usize) -> PhysicalCandidateId {
 // Dominance
 // ---------------------------------------------------------------------------
 
-fn usage() -> ClassUsage {
-    ClassUsage {
+fn usage() -> CandidateUsage {
+    CandidateUsage {
         cpu_ops_per_execution: 10.0,
         scanned_bytes_per_execution: 10.0,
         work_ms_per_execution: 10.0,
@@ -160,12 +160,12 @@ fn usage() -> ClassUsage {
     }
 }
 
-fn data_with(usage: ClassUsage) -> ClassData {
-    ClassData {
+fn data_with(usage: CandidateUsage) -> CandidateData {
+    CandidateData {
         approximate: true,
         accuracy_budget_parts: 1,
         usage: Ok(usage),
-        usage_depends_on: Vec::new(),
+        ..CandidateData::default()
     }
 }
 
@@ -199,7 +199,7 @@ fn dominance_needs_every_condition() {
         timing: ExecutionTiming::QueryTime,
         materialization: Materialization::NotMaterialized,
         shareable: false,
-        producer_classes_per_input: &producers,
+        producer_candidates_per_input: &producers,
         readers: vec![(PhysicalCandidateId(9), 0)],
         output_references: vec![0],
         reader_constraint_ids: vec![1],
@@ -252,7 +252,7 @@ fn dominance_needs_every_condition() {
         (
             "producers",
             DominanceKey {
-                producer_classes_per_input: &other_producers,
+                producer_candidates_per_input: &other_producers,
                 ..key.clone()
             },
         ),
@@ -396,7 +396,7 @@ fn pruning_keeps_the_smallest_equal_class_and_incomparable_ones() {
         timing: ExecutionTiming::QueryTime,
         materialization: Materialization::NotMaterialized,
         shareable: false,
-        producer_classes_per_input: &producers,
+        producer_candidates_per_input: &producers,
         readers: Vec::new(),
         output_references: vec![0],
         reader_constraint_ids: Vec::new(),
@@ -425,7 +425,7 @@ fn pruning_keeps_the_smallest_equal_class_and_incomparable_ones() {
         data_with(worse),
         data_with(incomparable),
     ];
-    let pruned = prune_dominated_classes(&profiles, &data);
+    let pruned = prune_dominated_candidates(&profiles, &data);
     let summary: Vec<_> = pruned
         .iter()
         .map(|pruned| (pruned.class.0, pruned.dominated_by.0))
@@ -473,19 +473,22 @@ fn a_dominated_class_is_deleted_with_its_links() {
     let inputs = prepared(&physical);
     let (leaf, kept, deleted, top) = (id(0), id(1), id(2), id(3));
     assert_eq!(
-        inputs.class_data[kept.0].usage,
-        inputs.class_data[deleted.0].usage
+        inputs.candidate_data[kept.0].usage,
+        inputs.candidate_data[deleted.0].usage
     );
     assert_eq!(
         inputs
-            .pruned_classes
+            .pruned_candidates
             .iter()
             .map(|pruned| (pruned.class, pruned.dominated_by))
             .collect::<Vec<_>>(),
         vec![(deleted, kept)]
     );
-    assert_eq!(inputs.producer_classes_per_input[top.0], vec![vec![kept]]);
-    assert!(inputs.producer_classes_per_input[deleted.0].is_empty());
+    assert_eq!(
+        inputs.producer_candidates_per_input[top.0],
+        vec![vec![kept]]
+    );
+    assert!(inputs.producer_candidates_per_input[deleted.0].is_empty());
     assert_eq!(inputs.query_owners[0].classes, vec![leaf, kept, top]);
 }
 
@@ -529,7 +532,7 @@ fn owners_and_regions_on_a_hand_built_catalog() {
     let inputs = prepared(&physical);
     let (leaf, middle, top_0, top_1, lone) = (id(0), id(1), id(2), id(3), id(4));
     assert!(CandidateLinks::new(&physical).is_shareable(middle));
-    assert!(inputs.pruned_classes.is_empty());
+    assert!(inputs.pruned_candidates.is_empty());
     assert_eq!(
         inputs.query_owners,
         vec![
@@ -566,7 +569,7 @@ fn owners_and_regions_on_a_hand_built_catalog() {
     assert_eq!(inputs.queries_reaching[middle.0], vec![0, 1]);
     assert_eq!(inputs.queries_reaching[leaf.0], vec![0, 1]);
     assert_eq!(
-        inputs.output_classes,
+        inputs.output_candidates,
         vec![vec![top_0], vec![top_1], vec![lone]]
     );
 }
@@ -738,18 +741,17 @@ fn weights_of(
     physical: &PhysicalASAPMemoCandidates,
     approximate_candidates: &[usize],
 ) -> BTreeMap<usize, AccuracyWeight> {
-    let class_data: Vec<ClassData> = (0..physical.candidates.len())
-        .map(|candidate| ClassData {
+    let candidate_data: Vec<CandidateData> = (0..physical.candidates.len())
+        .map(|candidate| CandidateData {
             approximate: approximate_candidates.contains(&candidate),
             accuracy_budget_parts: 1,
-            usage: Err("not costed".into()),
-            usage_depends_on: Vec::new(),
+            ..CandidateData::default()
         })
         .collect();
     let alive = vec![true; physical.candidates.len()];
-    let links = producer_classes_left(&CandidateLinks::new(physical), &alive);
-    let outputs = output_classes(physical, &alive);
-    let weights = accuracy_weights(physical, &class_data, &links, &outputs);
+    let links = producer_candidates_left(&CandidateLinks::new(physical), &alive);
+    let outputs = output_candidates(physical, &alive);
+    let weights = accuracy_weights(physical, &candidate_data, &links, &outputs);
     weights[0]
         .iter()
         .map(|(candidate, weight)| (candidate.0, *weight))

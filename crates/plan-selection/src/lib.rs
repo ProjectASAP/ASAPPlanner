@@ -242,6 +242,10 @@ mod models;
 // #1095 C3: the MILP's inputs; the candidate MILP (C4) reads them.
 #[cfg_attr(not(test), allow(dead_code))]
 mod owners;
+// #1095 C4: the selection MILP; C5 decodes its solution and wires it into
+// `select_plan`.
+#[cfg_attr(not(test), allow(dead_code))]
+mod milp;
 mod report;
 mod search;
 mod selector;
