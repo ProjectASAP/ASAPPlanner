@@ -532,10 +532,12 @@ mod tests {
             )),
         )];
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+        // An inventory is tied to its roots by structure: the same query
+        // text lowered again is the same DAG, so the other roots must differ.
         let other_roots = vec![(
             0,
             QueryRoot::Operator(lower_promql(
-                "quantile_over_time(0.95, m[5m])",
+                "quantile_over_time(0.5, n[1m])",
                 AccuracyTarget::max_error(0.01),
             )),
         )];

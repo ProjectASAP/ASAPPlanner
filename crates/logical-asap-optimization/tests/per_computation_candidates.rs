@@ -353,7 +353,7 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
     );
     let error = generate_per_computation_candidates(
         &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            "q",
+            0,
             QueryRoot::Operator(invalid),
         )]),
     )
@@ -364,14 +364,11 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
             PerComputationCandidateError::InvalidAccuracy {
                 root: Some(root),
                 measure: Some(1)
-            } if root == "\"q\""
+            } if root == "0"
         ),
         "{error:?}"
     );
-    assert!(
-        error.to_string().contains("root \"q\", measure 1 "),
-        "{error}"
-    );
+    assert!(error.to_string().contains("root 0, measure 1 "), "{error}");
 }
 
 /// TopK keeps both declared heap substrates without choosing an implementation.
@@ -704,7 +701,8 @@ fn having_on_one_consumer_of_a_shared_aggregate_stays_above() {
         .having_filters
         .iter()
         .all(|entry| entry.placement == HavingPlacement::BelowAggregate));
-    assert_eq!(targets[0].having_filters.len(), 2);
+    // The two equal `Filter`s are one memo group, so one HAVING entry.
+    assert_eq!(targets[0].having_filters.len(), 1);
 }
 
 /// A scalar reference to a grouped aggregate (`Filter(scan, EXISTS G)` as a
@@ -1461,7 +1459,9 @@ fn grouped_avg_composition_preserves_the_whole_schema() {
     assert_eq!(out.schema, root.schema);
 }
 
-// Filtered and unfiltered consumers of a shared group keep their own HAVING placement.
+// Structurally equal aggregates are one memo group with one target, and its
+// HAVING placement is decided over every consumer of the group: an unfiltered
+// consumer keeps the key-only HAVING above the output for the filtered ones.
 #[test]
 fn memo_cached_rules_preserve_occurrence_specific_having() {
     use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
@@ -1478,9 +1478,10 @@ fn memo_cached_rules_preserve_occurrence_specific_having() {
     ];
     let memo = DagOfLogicalMemoGroups::from_roots(&roots);
     let cached = generate_per_computation_candidates(&memo).unwrap();
-    assert_eq!(cached.targets.len(), 2);
-    assert_ne!(
-        cached.targets[0].having_filters[0].placement,
-        cached.targets[1].having_filters[0].placement
-    );
+    assert_eq!(cached.targets.len(), 1);
+    // Roots 0 and 2 apply the same `Filter`, one memo group: one entry.
+    let [entry] = &cached.targets[0].having_filters[..] else {
+        panic!("one HAVING entry: {:?}", cached.targets[0].having_filters);
+    };
+    assert_eq!(entry.placement, HavingPlacement::AboveOutput);
 }
