@@ -180,32 +180,15 @@ pub(crate) fn counter_function_metrics(
     query: &str,
 ) -> Result<std::collections::BTreeSet<(&'static str, String)>> {
     fn collect(expr: &Expr, out: &mut std::collections::BTreeSet<(&'static str, String)>) {
-        match expr {
-            Expr::Paren(p) => collect(&p.expr, out),
-            Expr::Unary(u) => collect(&u.expr, out),
-            Expr::Subquery(s) => collect(&s.expr, out),
-            Expr::Aggregate(a) => collect(&a.expr, out),
-            Expr::Binary(b) => {
-                collect(&b.lhs, out);
-                collect(&b.rhs, out);
+        if let Expr::Call(c) = expr {
+            if let function @ ("rate" | "increase" | "irate") = c.func.name {
+                let mut metrics = Vec::new();
+                collect_metric_names(expr, &mut metrics);
+                out.extend(metrics.into_iter().map(|m| (function, m)));
             }
-            Expr::Call(c) => {
-                let function = match c.func.name {
-                    "rate" => Some("rate"),
-                    "increase" => Some("increase"),
-                    "irate" => Some("irate"),
-                    _ => None,
-                };
-                for arg in &c.args.args {
-                    if let Some(function) = function {
-                        let mut metrics = Vec::new();
-                        collect_metric_names(arg, &mut metrics);
-                        out.extend(metrics.into_iter().map(|m| (function, m)));
-                    }
-                    collect(arg, out);
-                }
-            }
-            _ => {}
+        }
+        for child in children(expr) {
+            collect(child, out);
         }
     }
     let ast = parser::parse(query).map_err(LoweringError::Parse)?;
@@ -280,32 +263,33 @@ fn check_depth(expr: &Expr, budget: usize) -> Result<()> {
             "query nesting exceeds the {MAX_DEPTH}-level limit"
         )));
     };
+    for child in children(expr) {
+        check_depth(child, budget)?;
+    }
+    if let Expr::Aggregate(a) = expr {
+        if let Some(p) = &a.param {
+            check_depth(p, budget)?;
+        }
+    }
+    Ok(())
+}
+
+/// The sub-expressions of `expr`, in source order. An aggregate's parameter
+/// (`k`, `φ`, a label) is not included: callers that need it read it directly.
+fn children(expr: &Expr) -> Vec<&Expr> {
     match expr {
-        Expr::Aggregate(a) => {
-            check_depth(&a.expr, budget)?;
-            if let Some(p) = &a.param {
-                check_depth(p, budget)?;
-            }
-        }
-        Expr::Unary(u) => check_depth(&u.expr, budget)?,
-        Expr::Binary(b) => {
-            check_depth(&b.lhs, budget)?;
-            check_depth(&b.rhs, budget)?;
-        }
-        Expr::Paren(p) => check_depth(&p.expr, budget)?,
-        Expr::Subquery(s) => check_depth(&s.expr, budget)?,
-        Expr::Call(c) => {
-            for arg in &c.args.args {
-                check_depth(arg, budget)?;
-            }
-        }
+        Expr::Aggregate(a) => vec![&a.expr],
+        Expr::Unary(u) => vec![&u.expr],
+        Expr::Paren(p) => vec![&p.expr],
+        Expr::Subquery(s) => vec![&s.expr],
+        Expr::Binary(b) => vec![&b.lhs, &b.rhs],
+        Expr::Call(c) => c.args.args.iter().map(|a| a.as_ref()).collect(),
         Expr::MatrixSelector(_)
         | Expr::VectorSelector(_)
         | Expr::NumberLiteral(_)
         | Expr::StringLiteral(_)
-        | Expr::Extension(_) => {}
+        | Expr::Extension(_) => vec![],
     }
-    Ok(())
 }
 
 fn walk(expr: &Expr) -> Result<Unresolved> {
@@ -1384,39 +1368,25 @@ fn collect_metric_names(expr: &Expr, out: &mut Vec<String>) {
                 out.push(metric);
             }
         }
-        Expr::Paren(p) => collect_metric_names(&p.expr, out),
-        Expr::Unary(u) => collect_metric_names(&u.expr, out),
-        Expr::Subquery(s) => collect_metric_names(&s.expr, out),
-        Expr::Aggregate(a) => collect_metric_names(&a.expr, out),
-        Expr::Binary(b) => {
-            collect_metric_names(&b.lhs, out);
-            collect_metric_names(&b.rhs, out);
-        }
-        Expr::Call(c) => c
-            .args
-            .args
-            .iter()
-            .for_each(|a| collect_metric_names(a, out)),
-        _ => {}
+        _ => children(expr)
+            .into_iter()
+            .for_each(|child| collect_metric_names(child, out)),
     }
 }
 
 fn is_classic_bucket_arg(expr: &Expr) -> bool {
     match expr {
-        Expr::Paren(p) => is_classic_bucket_arg(&p.expr),
-        Expr::Unary(u) => is_classic_bucket_arg(&u.expr),
-        Expr::Subquery(s) => is_classic_bucket_arg(&s.expr),
-        Expr::Aggregate(agg) => {
-            matches!(
+        Expr::Aggregate(agg)
+            if matches!(
                 &agg.modifier,
                 Some(LabelModifier::Include(ls)) if ls.labels.iter().any(|l| l == "le")
-            ) || is_classic_bucket_arg(&agg.expr)
+            ) =>
+        {
+            true
         }
-        Expr::Binary(b) => is_classic_bucket_arg(&b.lhs) || is_classic_bucket_arg(&b.rhs),
-        Expr::Call(c) => c.args.args.iter().any(|a| is_classic_bucket_arg(a)),
         Expr::VectorSelector(vs) => selector_is_bucket(vs),
         Expr::MatrixSelector(ms) => selector_is_bucket(&ms.vs),
-        _ => false,
+        _ => children(expr).into_iter().any(is_classic_bucket_arg),
     }
 }
 
