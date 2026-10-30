@@ -449,3 +449,30 @@ fn require_arity(name: &str, actual: usize, expected: usize) -> Result<(), Metri
 fn unsupported(message: impl Into<String>) -> MetricsqlError {
     MetricsqlError::UnsupportedFeature(message.into())
 }
+
+/// Lower one MetricsQL query whose metrics are all sampled every
+/// `sample_interval`, to an operator root; a scalar query is an error (use
+/// [`lower_metricsql_query`]).
+pub fn lower_metricsql(
+    query: &str,
+    accuracy: AccuracyTarget,
+    sample_interval: Duration,
+) -> Result<Rc<asap_types::ir::OperatorNode>, MetricsqlError> {
+    match lower_metricsql_query(query, accuracy, sample_interval)? {
+        asap_types::ir::QueryRoot::Operator(node) => Ok(node),
+        _ => Err(MetricsqlError::UnsupportedFeature(
+            "scalar root: use lower_metricsql_query".into(),
+        )),
+    }
+}
+
+/// Lower scalar constants without fabricating a relational operator. Every
+/// metric is sampled every `sample_interval`: a bare instant selector looks
+/// back that long for its latest sample.
+pub fn lower_metricsql_query(
+    query: &str,
+    accuracy: AccuracyTarget,
+    sample_interval: Duration,
+) -> Result<asap_types::ir::QueryRoot, MetricsqlError> {
+    lower_with_sample_intervals(query, accuracy, &|_| Some(sample_interval))
+}
