@@ -15,7 +15,9 @@ use asap_types::workload::{
 };
 
 use crate::support;
-use asap_frontend_promql::{lower_promql_workload, PromqlError as LoweringError};
+use asap_frontend_promql::{
+    lower_promql_query_workload, HistogramCatalog, PromqlError as LoweringError,
+};
 use support::lower_promql;
 
 fn lower(q: &str) -> Rc<OperatorNode> {
@@ -894,7 +896,7 @@ fn scan_columns(e: &OperatorNode) -> Vec<String> {
 fn without_grouping_lowers_to_the_exclusion_form() {
     // `sum without (instance) (rate(m[5m]))` — a cross-series reduction over the
     // per-series rate, grouped by every label except `instance`. The excluded
-    // label is stored positionally (the SchemaResolver seeds it), the grouping is the
+    // label is stored positionally (the schema resolver seeds it), the grouping is the
     // `without` form, and the output schema stays open.
     let qe = lower("sum without (instance) (rate(m[5m]))");
     let NonASAPOp::Aggregate {
@@ -1062,7 +1064,7 @@ fn accuracy_target_flows_into_quantile_intent() {
 fn aggregate_output_schema_preserves_time_axis_and_labels() {
     let qe = lower(r#"quantile_over_time(0.99, http_request_duration{env="prod"}[5m])"#);
     // Per-series reduction: the root is Aggregate { TimeRange { Scan } }.
-    // The SchemaResolver adds all referenced label names (group keys AND filter
+    // The schema resolver adds all referenced label names (group keys AND filter
     // predicate columns) to the scan schema, so `env` appears as a column
     // even though it is only used as a filter.
     // per_series_reduction_schema preserves the time axis and all label columns.
@@ -1081,7 +1083,7 @@ fn aggregate_output_schema_preserves_time_axis_and_labels() {
 
 #[test]
 fn scan_schema_carries_ts_value_and_group_keys() {
-    // `service` is a group key → the SchemaResolver lands it in the self-contained
+    // `service` is a group key → the schema resolver lands it in the self-contained
     // Scan schema (positional). `env` is only a filter, so it is not a column.
     let qe = lower("count by (service) (count_over_time(requests[1m]))");
     fn find_scan(n: &OperatorNode) -> &OperatorNode {
@@ -1135,7 +1137,8 @@ fn batch_lowers_each_entry_and_reads_per_query_accuracy() {
         // Range selectors only: no sample interval is needed.
         data_workload: None,
     };
-    let results = lower_promql_workload(&workload).expect("valid workload");
+    let results = lower_promql_query_workload(&workload, &HistogramCatalog::default())
+        .expect("valid workload");
     assert_eq!(results.len(), 2);
 }
 
@@ -1158,7 +1161,7 @@ fn batch_rejects_non_promql_language() {
         data_workload: None,
     };
     assert!(matches!(
-        lower_promql_workload(&workload),
+        lower_promql_query_workload(&workload, &HistogramCatalog::default()),
         Err(LoweringError::WrongLanguage(_))
     ));
 }

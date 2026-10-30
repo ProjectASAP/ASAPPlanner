@@ -22,7 +22,7 @@
 //! |---|---|
 //! | `quantile_over_time(φ, m{f}[w])` | `Aggregate{[Quantile(φ)], TimeRange{w, Scan{predicates}}}` |
 //! | `histogram_quantile(φ, <classic buckets>)` | `Aggregate{without(le), [HistogramQuantile(φ, le)]}` — cumulative-bucket interpolation (classic form recognised by `by (le)` / a `_bucket` metric / an `le` matcher) |
-//! | `histogram_quantile(φ, <native hist / raw>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered arg (generic, sketch-able with an accuracy target) |
+//! | `histogram_quantile(φ, <declared RawDataSamples>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered arg (generic, sketch-able with an accuracy target); a declared native histogram, or an undeclared non-bucket argument, is rejected |
 //! | `histogram_quantiles(v, "l", φ…)` | `Concat{PromqlRelabel{l=φᵢ, <the histogram_quantile(φᵢ, v) branch>}…}` — one branch per φ (issue #109) |
 //! | `histogram_count/sum/avg/stddev/stdvar(v)`, `histogram_fraction(l,u,v)` | **rejected** — native histogram samples have no IR representation, and `histogram_fraction` over classic `_bucket` series is not lowered (issue #43) |
 //! | `OUTER_op(inner_func(m[w]))` (e.g. `sum(rate(m[w]))`) | `Aggregate{[OUTER_op]}` over `Aggregate{[inner_func]}` — two levels |
@@ -300,7 +300,8 @@ impl Drop for AccuracyGuard {
     }
 }
 
-/// The ambient accuracy target installed by the current [`PromqlLowerer::lower`] call.
+/// The ambient accuracy target installed by the current
+/// [`PromqlLowerer::lower_query_with_sample_intervals`] call.
 fn current_accuracy() -> AccuracyTarget {
     ACCURACY.with(|a| a.borrow().clone())
 }
@@ -596,7 +597,7 @@ fn range_fn_over_subquery(call: &Call) -> Result<Option<Unresolved>> {
         "distinct_over_time" => (InnerFunc::Cardinality, 0),
         "entropy_over_time" => (InnerFunc::FrequencyEntropy, 0),
         "l2_over_time" => (InnerFunc::FrequencyL2, 0),
-        "quantile_over_time" => (InnerFunc::Quantile(quantile_param(num_arg(call, 0)?)?), 1),
+        "quantile_over_time" => (InnerFunc::Quantile(num_arg(call, 0)?), 1),
         "changes" => (InnerFunc::Changes, 0),
         "delta" => (InnerFunc::Delta, 0),
         "idelta" => (InnerFunc::IDelta, 0),
@@ -751,7 +752,7 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
     } else if op == token::T_STDVAR {
         Outer::Plain(OuterIntent::Variance)
     } else if op == token::T_QUANTILE {
-        Outer::Plain(OuterIntent::Quantile(quantile_param(num_param(agg)?)?))
+        Outer::Plain(OuterIntent::Quantile(num_param(agg)?))
     } else {
         return Err(LoweringError::UnsupportedAggregateOp(format!(
             "aggregate token {op}"
@@ -759,30 +760,16 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
     })
 }
 
-/// Wrap an already-lowered Unresolved sub-DAG in the outer aggregation. This is the
-/// general-nesting counterpart to [`build`]: where `build` assembles the
-/// two-level shape from a flat [`Inner`], this composes the outer operator over
-/// an arbitrary child (`max(sum by (job) (…))`, `sum(a + b)`, …).
-///
-/// A heavy-hitter `TopK` is only recognised on the flat `count_over_time` shape
-/// (handled in `build`); over a general sub-DAG, `topk`/`bottomk` is a generic
-/// order-by-value + limit — the same `Sort{partition_by} → Limit` pair `build`
-/// emits for any non-heavy-hitter ranking.
 /// Flip the outer `Aggregate` produced for a `without(...)` grouping into the
 /// exclusion form. The reducing-aggregation `build` paths place that aggregate
 /// at the root; `walk_aggregate` has already rejected the non-aggregate outers
-/// (topk/limitk), so a `without` grouping always has an `Aggregate` here (issue
-/// #39). A no-op when the modifier was `by`.
-/// Flip the outer `Aggregate` produced for a `without(...)` grouping into the
-/// exclusion form. A no-op when the modifier was `by`.
+/// (topk/bottomk/limitk/limit_ratio), so a `without` grouping always has an
+/// `Aggregate` here (issue #39). A no-op when the modifier was `by`.
 ///
 /// `reduction_for` (used by [`windowed_aggregate`]/[`outer_aggregate`] to
 /// build this node) decides `PerEntity` vs `Reduce(by)` *without* knowing
 /// about `without` yet — it only ever sees `by`-mode keys, since `without`'s
-/// excluded-labels list is applied here, after the fact, exactly like the
-/// pre-#179 legacy relational tree's own `mark_without` did (its
-/// converter read `without` only after this front-end step had already set
-/// it). Whether
+/// excluded-labels list is applied here, after the fact. Whether
 /// `reduction_for` picked `PerEntity` (only possible when `keys` was empty)
 /// or `Reduce(by)`, the correct answer under `without(...)` is always
 /// `Reduce(without(keys))`: a `without` grouping is never label-preserving —
@@ -818,6 +805,15 @@ fn mark_without(dag: Unresolved, without: bool) -> Unresolved {
     }
 }
 
+/// Wrap an already-lowered Unresolved sub-DAG in the outer aggregation. This is the
+/// general-nesting counterpart to [`build`]: where `build` assembles the
+/// two-level shape from a flat [`Inner`], this composes the outer operator over
+/// an arbitrary child (`max(sum by (job) (…))`, `sum(a + b)`, …).
+///
+/// A heavy-hitter `TopK` is only recognised on the flat `count_over_time` shape
+/// (handled in `build`); over a general sub-DAG, `topk`/`bottomk` is a generic
+/// order-by-value + limit — the same `Sort{partition_by} → Limit` pair `build`
+/// emits for any non-heavy-hitter ranking.
 fn build_over_sub_dag(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> Result<Unresolved> {
     Ok(match outer {
         // `walk_aggregate` always passes a real aggregator; `None` can't occur.
@@ -915,7 +911,7 @@ fn walk_histogram(call: &Call) -> Result<Unresolved> {
         return walk_histogram_quantiles(call);
     }
     if call.func.name == "histogram_quantile" {
-        let phi = quantile_param(num_arg(call, 0)?)?;
+        let phi = num_arg(call, 0)?;
         let arg_expr = arg(call, 1)?;
         // Two lowerings of `histogram_quantile(φ, …)`:
         //  - classic `le`-bucket form → `HistogramQuantile`, exact interpolation
@@ -993,7 +989,7 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
     let sketchable = histogram_arg_is_sketchable(vec_expr)?;
     let branches = (2..call.args.args.len())
         .map(|i| {
-            let phi = quantile_param(num_arg(call, i)?)?;
+            let phi = num_arg(call, i)?;
             let child = walk(vec_expr)?;
             // Each branch aliases its value column to "value" (not the
             // intent-keyed default) so `Concat` — which derives its schema
@@ -1418,17 +1414,6 @@ fn clamp_bounds_filter(min: &Scalar, max: &Scalar, child: Unresolved) -> Unresol
     }
 }
 
-/// Whether `expr` is a **classic cumulative-bucket** `histogram_quantile`
-/// argument — as opposed to a native histogram or raw data samples. Recognised
-/// structurally, by any of:
-///  - a `by (le)` grouping (`sum by (le) (…)`),
-///  - a selector on a classic `_bucket` metric (`http_request_…_bucket`),
-///  - a selector with an `le` label matcher (`{le="…"}`).
-///
-/// The bucket form must be *interpolated* (`HistogramQuantile`); everything
-/// else is a sketch-able generic `Quantile`. This is a heuristic proxy for the
-/// real signal — the argument's sample type — which isn't visible at lowering;
-/// see the follow-up issue on the discrimination criteria (issue #43).
 /// Whether `histogram_quantile(φ, arg)` lowers to the sketch-able generic
 /// `Quantile` (`true`) or exact classic-bucket interpolation (`false`).
 ///
@@ -1436,8 +1421,10 @@ fn clamp_bounds_filter(min: &Scalar, max: &Scalar, child: Unresolved) -> Unresol
 /// [`HistogramKind`](crate::histogram::HistogramKind), that decides it (issue
 /// #79) — this fixes both the false-positive (a `…_bucket`-named non-histogram
 /// declared `RawDataSamples`) and the false-negative (a suffix-less classic
-/// histogram declared `ClassicBucket`) of the structural heuristic. With no
-/// declaration, fall back to the structural `by (le)`/`_bucket` heuristic.
+/// histogram declared `ClassicBucket`) of the structural heuristic. A declared
+/// `Native` kind, or declared kinds that disagree, is rejected. With no
+/// declaration, an argument [`is_classic_bucket_arg`] recognises is exact
+/// interpolation; any other argument is rejected.
 fn histogram_arg_is_sketchable(arg: &Expr) -> Result<bool> {
     let mut metrics = Vec::new();
     collect_metric_names(arg, &mut metrics);
@@ -1499,6 +1486,16 @@ fn collect_metric_names(expr: &Expr, out: &mut Vec<String>) {
     }
 }
 
+/// Whether `expr` is a **classic cumulative-bucket** `histogram_quantile`
+/// argument, recognised structurally by any of:
+///  - a `by (le)` grouping (`sum by (le) (…)`),
+///  - a selector on a classic `_bucket` metric (`http_request_…_bucket`),
+///  - a selector with an `le` label matcher (`{le="…"}`).
+///
+/// This is a heuristic proxy for the real signal — the argument's sample
+/// type — which [`histogram_arg_is_sketchable`] consults first when a
+/// [`HistogramCatalog`](crate::histogram::HistogramCatalog) declares it
+/// (issues #43, #79).
 fn is_classic_bucket_arg(expr: &Expr) -> bool {
     match expr {
         Expr::Paren(p) => is_classic_bucket_arg(&p.expr),
@@ -1665,7 +1662,7 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
             })
         }
         "quantile_over_time" => {
-            let phi = quantile_param(num_arg(call, 0)?)?;
+            let phi = num_arg(call, 0)?;
             let (metric, matchers, window, shift) = extract_matrix(arg(call, 1)?)?;
             Ok(Inner {
                 metric,
@@ -1963,7 +1960,7 @@ fn filtered_source(metric: String, matchers: Vec<Scalar>, shift: TimeShift) -> U
     let scan = Unresolved::Scan {
         source: Source::TimeSeries { metric },
         predicates: matchers.into_iter().map(UnresolvedPredicate).collect(),
-        // Usage-derived (PromQL is schemaless) — the SchemaResolver fills this in.
+        // Usage-derived (PromQL is schemaless) — the schema resolver fills this in.
         schema: None,
     };
     if shift.is_identity() {
@@ -2369,11 +2366,6 @@ fn ratio_param(agg: &AggregateExpr) -> Result<f64> {
 }
 
 /// Preserve the full Prometheus quantile parameter domain, including special values.
-fn quantile_param(q: f64) -> Result<f64> {
-    // Prometheus returns NaN/-Inf/+Inf for these parameters at execution time.
-    Ok(q)
-}
-
 fn binop(id: token::TokenId) -> Result<BinaryOpKind> {
     Ok(if id == token::T_ADD {
         BinaryOpKind::Arithmetic(ArithmeticOpKind::Add)

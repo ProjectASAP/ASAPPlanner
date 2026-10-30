@@ -234,14 +234,14 @@ accuracy issue. All three are fixed on the same PR:
 
 1. **`schema_resolver.rs`'s `collect_referenced_columns` didn't walk
    `discriminator_unique_key`'s `ColumnRef`s.** This function seeds every
-   name a query references into the SchemaResolver's usage-derived fallback schema,
+   name a query references into the schema resolver's usage-derived fallback schema,
    which a schema-less `Scan` leaf (PromQL) falls back to. The `Concat` arm
    was updated with `, ..` only, unlike the analogous `Dedup.cols` case
    (which *is* walked, `push_ref_name`-style). Concretely: a future
    `concat_with_discriminator(branches, discriminator_col, inner_key)` call
    over an open query, where the discriminator column isn't otherwise
    referenced anywhere else in the DAG, with a schema-less leaf `Scan` in
-   the first branch — the SchemaResolver's fallback schema wouldn't contain the
+   the first branch — the schema resolver's fallback schema wouldn't contain the
    discriminator name, and `resolve.rs`'s later `resolve_column_ref` call
    would fail `NotFound` for a column the caller correctly named. Fixed:
    the `Concat` arm now pushes `key.discriminator()` and every

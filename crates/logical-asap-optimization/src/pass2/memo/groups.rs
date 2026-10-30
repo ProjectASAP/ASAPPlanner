@@ -1014,17 +1014,19 @@ mod tests {
                     .collect(),
             }),
         };
-        asap_frontend_promql::lower_promql_query_workload(&workload)
-            .unwrap()
-            .into_iter()
-            .map(|root| match root {
-                QueryRoot::Operator(node) => QueryRoot::Operator(
-                    asap_types::ir::schema::schema_support::with_promql_series_identity(&node)
-                        .unwrap(),
-                ),
-                scalar => scalar,
-            })
-            .collect()
+        asap_frontend_promql::lower_promql_query_workload(
+            &workload,
+            &asap_frontend_promql::HistogramCatalog::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|root| match root {
+            QueryRoot::Operator(node) => QueryRoot::Operator(
+                asap_types::ir::schema::schema_support::with_promql_series_identity(&node).unwrap(),
+            ),
+            scalar => scalar,
+        })
+        .collect()
     }
 
     /// Whether a composed sub-DAG is some combination of the memo's

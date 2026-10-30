@@ -73,10 +73,13 @@ fn planned(workload: &PlanningWorkload, series_identity: bool) -> Planned {
     let roots = if series_identity {
         lower_promql_roots(workload).unwrap()
     } else {
-        asap_frontend_promql::lower_promql_query_workload(workload)
-            .unwrap()
-            .into_iter()
-            .collect()
+        asap_frontend_promql::lower_promql_query_workload(
+            workload,
+            &asap_frontend_promql::HistogramCatalog::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .collect()
     };
     let indexed: Vec<_> = roots.iter().cloned().enumerate().collect();
     let initial = DagOfLogicalMemoGroups::from_roots(&indexed);

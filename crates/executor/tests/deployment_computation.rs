@@ -44,9 +44,15 @@ fn lower_with(query: &str, accuracy: AccuracyTarget) -> Rc<planner_types::ir::Op
             DurationMs(60_000),
         )),
     };
-    asap_frontend_promql::lower_promql_workload(&workload)
-        .unwrap()
-        .remove(0)
+    asap_frontend_promql::lower_promql_query_workload(
+        &workload,
+        &asap_frontend_promql::HistogramCatalog::default(),
+    )
+    .unwrap()
+    .remove(0)
+    .as_operator()
+    .cloned()
+    .expect("operator root")
 }
 
 /// The exact plan the planner pipeline selects.

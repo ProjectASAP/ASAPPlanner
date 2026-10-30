@@ -61,7 +61,10 @@ pub mod fixtures {
                 DurationMs(1_000),
             )),
         };
-        let mut lowered = asap_frontend_promql::lower_promql_query_workload(&workload)?;
+        let mut lowered = asap_frontend_promql::lower_promql_query_workload(
+            &workload,
+            &asap_frontend_promql::HistogramCatalog::default(),
+        )?;
         Ok(lowered.remove(0))
     }
 
@@ -78,7 +81,7 @@ pub mod fixtures {
     }
 
     /// Canonical PromQL leaf schema: `(ts: Timestamp, value: Float64)` plus
-    /// any label columns referenced in the query, in the order the SchemaResolver
+    /// any label columns referenced in the query, in the order the schema resolver
     /// appends them (alphabetical after dedup).
     pub fn metric_schema(labels: &[&str]) -> Schema {
         let mut cols = vec![ts_col(), value_col()];

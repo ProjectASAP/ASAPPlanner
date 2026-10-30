@@ -51,7 +51,7 @@ tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 
 | Public function | Required input | Output |
 | --- | --- | --- |
-| `asap_frontend_promql::lower_promql_workload` | PromQL `PlanningWorkload`; a bare instant selector needs its metric's nonzero `sample_interval` in `DataWorkload.sources` | All-or-nothing `Result<Vec<Rc<OperatorNode>>, PromqlError>` for normalized batch and repeating entries |
+| `asap_frontend_promql::lower_promql_query_workload` | PromQL `PlanningWorkload` and a `HistogramCatalog`; a bare instant selector needs its metric's nonzero `sample_interval` in `DataWorkload.sources` | All-or-nothing `Result<Vec<QueryRoot>, PromqlError>` for normalized batch and repeating entries |
 | `asap_frontend_metricsql::lower_metricsql` | Query string, `AccuracyTarget` | `Result<Rc<OperatorNode>, MetricsqlError>` |
 | `asap_frontend_sql::lower_sql` | Query string, `SqlCatalog`, accuracy | Async `Result<Rc<OperatorNode>, SqlError>`; default SQL dialect is DataFusionSQL |
 | `asap_frontend_sql::lower_sql_dialect` | Same inputs plus `SqlDialect` | Async resolved Pre-ASAP query or error |
@@ -72,8 +72,8 @@ those entries with the single-query frontend.
 PromQL's public signature (types are imported from their respective crates):
 
 ```text
-lower_promql_workload(workload: &PlanningWorkload)
-    -> Result<Vec<Rc<OperatorNode>>, PromqlError>
+lower_promql_query_workload(workload: &PlanningWorkload, histograms: &HistogramCatalog)
+    -> Result<Vec<QueryRoot>, PromqlError>
 ```
 
 A bare instant selector reads the latest sample within the sample interval
@@ -81,8 +81,8 @@ its metric declares (`DataWorkload.sources[metric].sample_interval`,
 nonzero), whatever the arrival. A query with one fails with
 `WorkloadError::MissingSampleInterval` when that metric declares no
 interval. Explicit range selectors retain their query-specified range and
-need no interval. Use `lower_promql_workload_with_histograms`
-to supply a histogram catalog for the whole workload. Each entry carries its
+need no interval. `histograms` declares each histogram metric's sample type
+for the whole workload; pass `HistogramCatalog::default()` when there is none. Each entry carries its
 own accuracy requirement, an `AccuracyTarget` with the fields `error` (ε),
 `failure_probability` (δ, optional), `accuracy_metric` (optional) and
 `accuracy_scope` (default the whole result). Build it with:
@@ -104,7 +104,7 @@ candidate's guarantee and its error metric; a target is a requirement, not proof
 that a supported candidate exists.
 
 ```rust
-use asap_frontend_promql::lower_promql_workload;
+use asap_frontend_promql::{lower_promql_query_workload, HistogramCatalog};
 use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
@@ -133,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             DurationMs(1_000),
         )),
     };
-    let pre_asap = lower_promql_workload(&workload)?;
+    let pre_asap = lower_promql_query_workload(&workload, &HistogramCatalog::default())?;
     println!("{pre_asap:#?}");
     Ok(())
 }

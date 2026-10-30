@@ -92,7 +92,9 @@ fn physical_candidates(
     use asap_physical_asap_optimization::test_support::optimize_physical_asap_chosen;
     use asap_types::physical::Materialization;
 
-    let roots = lower_promql_query_workload(workload).expect("lowers");
+    let roots =
+        lower_promql_query_workload(workload, &asap_frontend_promql::HistogramCatalog::default())
+            .expect("lowers");
     let inventory = generate_per_computation_candidates(
         &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
             &roots.into_iter().enumerate().collect::<Vec<_>>(),

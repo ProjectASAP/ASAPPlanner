@@ -5,8 +5,8 @@
 //! Differences from the resolved IR, and nothing else:
 //! - every `ColumnId` is a name-based [`ColumnRef`];
 //! - `Scan.schema` is `Option<Schema>` — a front end knows the schema only for
-//!   a catalog-backed SQL leaf; `None` (PromQL) defers to the
-//!   [`SchemaResolver`](crate::schema_resolver::SchemaResolver);
+//!   a catalog-backed SQL leaf; `None` (PromQL) defers to the usage-derived
+//!   [`resolve_schema_with_inherited`](crate::schema_resolver::resolve_schema_with_inherited);
 //! - children are `Rc<UnresolvedOp>` rather than `Rc<OperatorNode>` — no
 //!   derived schema exists yet.
 
