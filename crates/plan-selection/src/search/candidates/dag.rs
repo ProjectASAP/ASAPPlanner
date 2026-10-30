@@ -237,6 +237,21 @@ pub(crate) fn validate_selected_graph(
         .iter()
         .map(|root| root.candidates.as_slice())
         .collect();
+    // `to_selected_candidates` orders the roots by output index, so each
+    // output must be assigned exactly once before that order means anything.
+    let mut assigned_outputs: Vec<usize> = selected
+        .query_roots
+        .iter()
+        .map(|root| root.query_root)
+        .collect();
+    assigned_outputs.sort_unstable();
+    if !assigned_outputs
+        .iter()
+        .copied()
+        .eq(0..graph.query_roots.len())
+    {
+        return Err("decoded candidate selection violates dependency or root constraints".into());
+    }
     validate_selected_connections(
         graph.candidates.len(),
         |candidate| {

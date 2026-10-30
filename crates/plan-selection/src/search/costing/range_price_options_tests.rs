@@ -155,7 +155,10 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             deadline: None,
             refine_materialization: false,
             query_roots: &originals,
-            realizer: &crate::search::test_realizer(&originals, &entries, &data),
+            realizer: &asap_physical_asap_optimization::catalog::Stage2AssignmentRealizer {
+                query_time_results_retained: deployment.query_time_results_retained,
+                ..crate::search::test_realizer(&originals, &entries, &data)
+            },
             entries: &entries,
             data: &data,
             models: crate::SelectionModels {
