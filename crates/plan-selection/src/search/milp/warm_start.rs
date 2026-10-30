@@ -1,6 +1,7 @@
 //! Complete feasible starts from already validated candidate assignments.
 use super::{
-    CandidateDependencyGraph, ObservedAssignment, PhysicalCandidateId, SelectedCandidateGraph,
+    DagOfPhysicalCandidatesWithCosts, ObservedAssignment, PhysicalCandidateId,
+    SelectedCandidateGraph,
 };
 use std::collections::HashSet;
 
@@ -47,7 +48,7 @@ impl AssignmentKey {
 /// exclude a formerly feasible observation; never submit that assignment as a
 /// start. Cost refinements of the same assignment all apply simultaneously.
 pub(in crate::search) fn cheapest_start<'a>(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     observations: &'a [ObservedAssignment],
 ) -> Option<WarmStart<'a>> {
     // Canonical decision keys avoid repeated quadratic edge-set comparisons

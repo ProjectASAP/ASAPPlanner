@@ -85,19 +85,19 @@ pub struct SupplierStorageMetrics {
 }
 
 pub fn supplier_storage_metrics(
-    graph: &super::graph::CandidateDependencyGraph,
+    physical: &super::PhysicalASAPMemoCandidates,
 ) -> SupplierStorageMetrics {
     let mut allocations = HashSet::new();
     let mut metrics = SupplierStorageMetrics::default();
-    for input in graph
+    for suppliers in physical
         .candidates
         .iter()
-        .flat_map(|candidate| &candidate.producer_requirements)
+        .flat_map(|candidate| &candidate.supplier_candidates_per_input)
     {
-        metrics.logical_connections += input.compatible_producers.len();
-        if allocations.insert(Rc::as_ptr(&input.compatible_producers.0)) {
+        metrics.logical_connections += suppliers.len();
+        if allocations.insert(Rc::as_ptr(&suppliers.0)) {
             metrics.unique_supplier_sets += 1;
-            metrics.stored_supplier_ids += input.compatible_producers.len();
+            metrics.stored_supplier_ids += suppliers.len();
         }
     }
     metrics
@@ -112,37 +112,55 @@ mod tests {
     #[test]
     fn shared_supplier_storage_keeps_input_choices_independent() {
         use super::super::graph::{
-            validate_selected_graph, CandidateDependencyGraph, PhysicalCandidate,
-            ProducerConsumerConnection, ProducerRequirement, QueryRootAssignment,
-            QueryRootCandidates, SelectedCandidateGraph,
+            validate_selected_connections, ProducerConsumerConnection, QueryRootAssignment,
+            SelectedCandidateGraph,
         };
+        use super::super::memo_candidates::{
+            CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
+            OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate,
+        };
+        use crate::ir::properties::ExecutionTiming;
+        use crate::ir::QueryRoot;
+        use crate::physical::Materialization;
         use crate::stages::MemoGroupId;
         let mut interner = SupplierSetInterner::default();
         let choices = interner.intern(vec![PhysicalCandidateId(0), PhysicalCandidateId(1)]);
-        let graph = CandidateDependencyGraph {
-            candidates: (0..3)
+        use crate::ir::scalar::expr_ir::ScalarValue;
+        use crate::ir::schema::{DataType, Field, Schema};
+        use crate::ir::{NonASAPOp, Operator, OperatorNode, ScalarExpr};
+        let node = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Values {
+            rows: vec![vec![ScalarExpr::Literal(ScalarValue::Float64(1.0))]],
+            schema: Schema::lifted(vec![Field::plain("value", DataType::Float64, false)], None),
+        }))
+        .unwrap();
+        let physical = PhysicalASAPMemoCandidates::new(
+            (0..3)
+                .map(|group| OperatorNodeOfCandidateForMemoGroup {
+                    candidates_for_memo_group: vec![CandidateForMemoGroupId {
+                        group: MemoGroupId(group),
+                        index: 0,
+                    }],
+                    is_implementation_root: true,
+                    physical_node: Rc::clone(&node),
+                })
+                .collect(),
+            (0..3)
                 .map(|id| PhysicalCandidate {
-                    group: MemoGroupId(id),
-                    local_cost: 0.0,
-                    producer_requirements: if id == 2 {
-                        vec![
-                            ProducerRequirement {
-                                compatible_producers: choices.clone(),
-                            },
-                            ProducerRequirement {
-                                compatible_producers: choices.clone(),
-                            },
-                        ]
+                    operator_node: OperatorNodeOfCandidateForMemoGroupId(id),
+                    timing: ExecutionTiming::QueryTime,
+                    materialization: Materialization::NotMaterialized,
+                    supplier_candidates_per_input: if id == 2 {
+                        vec![choices.clone(), choices.clone()]
                     } else {
                         vec![]
                     },
+                    may_produce_query_output: id == 2,
+                    may_keep_across_evaluations_per_sole_reader_query: Vec::new(),
                 })
                 .collect(),
-            query_roots: vec![QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(2)],
-            }],
-            ..Default::default()
-        };
+            vec![QueryRoot::Operator(MemoGroupId(2))],
+            Vec::new(),
+        );
         let selected = SelectedCandidateGraph {
             selected_candidates: vec![
                 PhysicalCandidateId(0),
@@ -162,10 +180,21 @@ mod tests {
             }],
             modeled_cost: 0.0,
         };
-        graph.validate().unwrap();
-        validate_selected_graph(&graph, &selected).unwrap();
+        validate_selected_connections(
+            3,
+            |c| physical.candidates[c.0].supplier_candidates_per_input.len(),
+            |c, input| {
+                physical.candidates[c.0]
+                    .supplier_candidates_per_input
+                    .get(input)
+            },
+            &[&physical.query_output_candidates(0).collect::<Vec<_>>()],
+            &physical.reader_constraints,
+            &selected,
+        )
+        .unwrap();
         assert_eq!(
-            supplier_storage_metrics(&graph),
+            supplier_storage_metrics(&physical),
             SupplierStorageMetrics {
                 logical_connections: 4,
                 unique_supplier_sets: 1,

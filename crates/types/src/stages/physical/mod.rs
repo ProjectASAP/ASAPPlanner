@@ -1,19 +1,19 @@
-//! The Stage 2 → Stage 3 boundary: the physical candidate catalog Stage 2
-//! builds from the memo and Stage 3 searches (#1047, #1054).
+//! The Stage 2 → Stage 3 boundary: the physical candidates Stage 2 builds
+//! from the memo and Stage 3 selects from (#1047, #1054).
 
-mod configurations;
 mod graph;
-mod inventory;
+mod memo_candidates;
 mod suppliers;
 
-pub use configurations::{CandidateConfiguration, CandidateConfigurationInventory};
 pub use graph::{
-    validate_selected_graph, CandidateDependencyGraph, CandidateSelectionError, PhysicalCandidate,
-    PhysicalCandidateId, ProducerConsumerConnection, ProducerRequirement, QueryRootAssignment,
-    QueryRootCandidates, ReaderConstraint, ResourceBudget, SelectedCandidateGraph,
-    MINIMUM_RELATIVE_COEFFICIENT,
+    validate_selected_connections, PhysicalCandidateId, ProducerConsumerConnection,
+    QueryRootAssignment, ReaderConstraint, SelectedCandidateGraph,
 };
-pub use inventory::{CandidateInventory, CandidateOperatorTemplates};
+pub use memo_candidates::{
+    output_references, CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
+    OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate,
+    PruningMetrics,
+};
 pub use suppliers::{
     supplier_storage_metrics, SupplierCandidates, SupplierSetInterner, SupplierStorageMetrics,
 };

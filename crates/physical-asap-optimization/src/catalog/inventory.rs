@@ -1,10 +1,10 @@
-//! Lower the logical candidate memo into typed immediate candidate connections.
+//! Lower the logical candidate memo into typed immediate operator nodes and
+//! the nodes that may supply each of their inputs.
 //!
-//! The callback supplies node-local costs for a fixed accounting context.
 //! Consumer-dependent demand, composed accuracy, and physical materialization
 //! are handled by later configuration and evaluation stages. Private exact
-//! operators are lowered before decomposition; the resulting graph still needs
-//! Stage 2 validation before execution.
+//! operators are lowered before decomposition; the resulting nodes still need
+//! Stage 2 validation before execution. Nothing is priced.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -16,9 +16,53 @@ use asap_types::stages::MemoGroupId;
 
 use super::factoring::{MemoGroupOutputKey, MemoGroupOutputToCompatibleProducersCache};
 use asap_types::stages::{
-    CandidateDependencyGraph, CandidateInventory, PhysicalCandidate, PhysicalCandidateId,
-    ProducerRequirement, QueryRootCandidates,
+    CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup, PhysicalCandidateId,
+    SupplierCandidates,
 };
+
+/// The memo's implementation candidates lowered to operator nodes, before
+/// timing and materialization. Node IDs index
+/// `operator_nodes_of_candidates_for_memo_groups`; they become
+/// [`asap_types::stages::OperatorNodeOfCandidateForMemoGroupId`]s of the
+/// configured candidates.
+#[derive(Debug)]
+pub struct CandidateInventory {
+    /// One per operator node: each implementation root, then the private
+    /// nodes below it.
+    pub operator_nodes_of_candidates_for_memo_groups: Vec<OperatorNodeOfCandidateForMemoGroup>,
+    /// Per node, per input (in `map_children` order): the nodes that may
+    /// supply it (a private child, or the input group's compatible roots).
+    pub supplier_nodes_per_input: Vec<Vec<SupplierCandidates>>,
+    /// Per output reference: the roots of its group whose output matches the
+    /// group's logical node.
+    pub query_output_nodes: Vec<Vec<PhysicalCandidateId>>,
+    /// Per group: its implementation roots, excluding each implementation's
+    /// private nodes.
+    pub implementation_roots_of_group: Vec<Vec<PhysicalCandidateId>>,
+}
+
+impl CandidateInventory {
+    /// Every supplier and query output names an existing node, once per list.
+    pub fn validate(&self) -> Result<(), String> {
+        let count = self.operator_nodes_of_candidates_for_memo_groups.len();
+        if self.supplier_nodes_per_input.len() != count {
+            return Err("supplier lists are not indexed by node".into());
+        }
+        for (node, inputs) in self.supplier_nodes_per_input.iter().enumerate() {
+            for (input, suppliers) in inputs.iter().enumerate() {
+                super::validate_ids(
+                    suppliers,
+                    count,
+                    &format!("candidate {node}, requirement {input}"),
+                )?;
+            }
+        }
+        for (output, nodes) in self.query_output_nodes.iter().enumerate() {
+            super::validate_ids(nodes, count, &format!("query root {output}"))?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum CandidateInventoryError {
@@ -40,34 +84,28 @@ pub enum CandidateInventoryError {
         candidate: usize,
         reason: String,
     },
-    #[error("node-local fixed-context cost: {0}")]
-    Cost(String),
 }
 
-/// The inventory, and the root ID of each memo candidate, indexed like
-/// `CandidateMemo::candidates` (factoring may give several the same ID).
+/// The inventory with identical terminal readers factored into one node
+/// (whose `candidates_for_memo_group` lists every candidate it can implement).
 pub fn build_candidate_inventory_before(
     memo: &CandidateMemo,
     output_groups: &[MemoGroupId],
-    node_local_cost: impl FnMut(&OperatorNode) -> Result<f64, String>,
     deadline: Option<std::time::Instant>,
-) -> Result<(CandidateInventory, Vec<Vec<PhysicalCandidateId>>), CandidateInventoryError> {
+) -> Result<CandidateInventory, CandidateInventoryError> {
     let mut inventory = build_with_compatible_producers_cache(
         memo,
         output_groups,
-        node_local_cost,
         deadline,
         &mut MemoGroupOutputToCompatibleProducersCache::default(),
     )?;
-    let mut memo_candidate_roots = inventory.group_candidates.clone();
-    super::factoring::factor_terminal_readers(&mut inventory, &mut memo_candidate_roots, deadline)?;
-    Ok((inventory, memo_candidate_roots))
+    super::factoring::factor_terminal_readers(&mut inventory, deadline)?;
+    Ok(inventory)
 }
 
 pub fn build_with_compatible_producers_cache(
     memo: &CandidateMemo,
     output_groups: &[MemoGroupId],
-    mut node_local_cost: impl FnMut(&OperatorNode) -> Result<f64, String>,
     deadline: Option<std::time::Instant>,
     compatible_producers_cache: &mut MemoGroupOutputToCompatibleProducersCache,
 ) -> Result<CandidateInventory, CandidateInventoryError> {
@@ -83,9 +121,10 @@ pub fn build_with_compatible_producers_cache(
         return Err(invalid("query output references missing group"));
     }
     let mut inventory = CandidateInventory {
-        graph: CandidateDependencyGraph::default(),
-        templates: Vec::new(),
-        group_candidates: vec![Vec::new(); memo.groups.len()],
+        operator_nodes_of_candidates_for_memo_groups: Vec::new(),
+        supplier_nodes_per_input: Vec::new(),
+        query_output_nodes: Vec::new(),
+        implementation_roots_of_group: vec![Vec::new(); memo.groups.len()],
     };
     for (group, candidates) in memo.candidates.iter().enumerate() {
         super::check_deadline(deadline)?;
@@ -143,14 +182,20 @@ pub fn build_with_compatible_producers_cache(
                 candidate: index,
                 reason: error.to_string(),
             })?;
-            let id = PhysicalCandidateId(inventory.graph.candidates.len());
-            inventory.group_candidates[group].push(id);
-            inventory.templates.push(Some(implemented));
-            inventory.graph.candidates.push(PhysicalCandidate {
-                group: MemoGroupId(group as u32),
-                local_cost: 0.0,
-                producer_requirements: Vec::new(),
-            });
+            let id =
+                PhysicalCandidateId(inventory.operator_nodes_of_candidates_for_memo_groups.len());
+            inventory.implementation_roots_of_group[group].push(id);
+            inventory.operator_nodes_of_candidates_for_memo_groups.push(
+                OperatorNodeOfCandidateForMemoGroup {
+                    candidates_for_memo_group: vec![CandidateForMemoGroupId {
+                        group: MemoGroupId(group as u32),
+                        index,
+                    }],
+                    is_implementation_root: true,
+                    physical_node: implemented,
+                },
+            );
+            inventory.supplier_nodes_per_input.push(Vec::new());
         }
     }
     for (group, candidates) in memo.candidates.iter().enumerate() {
@@ -180,16 +225,19 @@ pub fn build_with_compatible_producers_cache(
                 boundaries,
                 private_nodes: HashMap::new(),
                 used_boundaries: HashSet::new(),
-                owner: MemoGroupId(group as u32),
-                candidate_index: index,
-                node_local_cost: &mut node_local_cost,
+                owner: CandidateForMemoGroupId {
+                    group: MemoGroupId(group as u32),
+                    index,
+                },
                 deadline,
             };
-            let root_id = builder.inventory.group_candidates[group][index];
-            let implemented = builder.inventory.templates[root_id.0]
-                .as_ref()
-                .cloned()
-                .ok_or_else(|| invalid("missing implemented root template"))?;
+            let root_id = builder.inventory.implementation_roots_of_group[group][index];
+            let implemented = Rc::clone(
+                &builder
+                    .inventory
+                    .operator_nodes_of_candidates_for_memo_groups[root_id.0]
+                    .physical_node,
+            );
             builder.add(&implemented, Some(root_id))?;
             if candidate
                 .input_groups
@@ -205,39 +253,32 @@ pub fn build_with_compatible_producers_cache(
     for group in output_groups {
         let expected = &memo.groups[group.0 as usize].logical_node;
         let mut compatible_candidates = Vec::new();
-        for &id in &inventory.group_candidates[group.0 as usize] {
-            let template = inventory.templates[id.0]
-                .as_ref()
-                .ok_or_else(|| invalid("missing root template"))?;
+        for &id in &inventory.implementation_roots_of_group[group.0 as usize] {
+            let template =
+                &inventory.operator_nodes_of_candidates_for_memo_groups[id.0].physical_node;
             if compatible_output(expected, template)? {
                 compatible_candidates.push(id);
             }
         }
-        inventory.graph.query_roots.push(QueryRootCandidates {
-            compatible_candidates,
-        });
+        inventory.query_output_nodes.push(compatible_candidates);
     }
-    inventory
-        .graph
-        .validate()
-        .map_err(|error| invalid(&error.to_string()))?;
+    inventory.validate().map_err(|error| invalid(&error))?;
     super::check_deadline(deadline)?;
     Ok(inventory)
 }
 
-struct ImmediateCandidateBuilder<'a, F> {
+struct ImmediateCandidateBuilder<'a> {
     inventory: &'a mut CandidateInventory,
     compatible_producers_cache: &'a mut MemoGroupOutputToCompatibleProducersCache,
     boundaries: HashMap<*const OperatorNode, MemoGroupId>,
     private_nodes: HashMap<*const OperatorNode, PhysicalCandidateId>,
     used_boundaries: HashSet<MemoGroupId>,
-    owner: MemoGroupId,
-    candidate_index: usize,
-    node_local_cost: &'a mut F,
+    /// The memo candidate being lowered; owner of every node it adds.
+    owner: CandidateForMemoGroupId,
     deadline: Option<std::time::Instant>,
 }
 
-impl<F: FnMut(&OperatorNode) -> Result<f64, String>> ImmediateCandidateBuilder<'_, F> {
+impl ImmediateCandidateBuilder<'_> {
     fn add(
         &mut self,
         node: &Rc<OperatorNode>,
@@ -249,8 +290,8 @@ impl<F: FnMut(&OperatorNode) -> Result<f64, String>> ImmediateCandidateBuilder<'
         }
         if node.timing.is_some() || node.materialization != Materialization::NotMaterialized {
             return Err(CandidateInventoryError::Unsupported {
-                group: self.owner.0 as usize,
-                candidate: self.candidate_index,
+                group: self.owner.group.0 as usize,
+                candidate: self.owner.index,
                 reason: "assigned execution timing or materialization",
             });
         }
@@ -269,16 +310,13 @@ impl<F: FnMut(&OperatorNode) -> Result<f64, String>> ImmediateCandidateBuilder<'
                     compatible
                 } else {
                     let mut compatible = Vec::new();
-                    for &candidate in &self.inventory.group_candidates[group.0 as usize] {
+                    for &candidate in
+                        &self.inventory.implementation_roots_of_group[group.0 as usize]
+                    {
                         super::check_deadline(self.deadline)?;
-                        let template =
-                            self.inventory.templates[candidate.0]
-                                .as_ref()
-                                .ok_or_else(|| {
-                                    CandidateInventoryError::InvalidMemo(
-                                        "missing root template".into(),
-                                    )
-                                })?;
+                        let template = &self.inventory.operator_nodes_of_candidates_for_memo_groups
+                            [candidate.0]
+                            .physical_node;
                         if compatible_output(&input, template)? {
                             compatible.push(candidate);
                         }
@@ -288,28 +326,25 @@ impl<F: FnMut(&OperatorNode) -> Result<f64, String>> ImmediateCandidateBuilder<'
             } else {
                 vec![self.add(&input, None)?].into()
             };
-            requirements.push(ProducerRequirement {
-                compatible_producers: producers,
-            });
+            requirements.push(producers);
         }
-        let cost = (self.node_local_cost)(node).map_err(CandidateInventoryError::Cost)?;
-        if !cost.is_finite() || cost < 0.0 {
-            return Err(CandidateInventoryError::Cost(
-                "cost must be finite and nonnegative".into(),
-            ));
-        }
-        let candidate = PhysicalCandidate {
-            group: self.owner,
-            local_cost: cost,
-            producer_requirements: requirements,
-        };
         let id = if let Some(id) = reserved {
-            self.inventory.graph.candidates[id.0] = candidate;
+            self.inventory.supplier_nodes_per_input[id.0] = requirements;
             id
         } else {
-            let id = PhysicalCandidateId(self.inventory.graph.candidates.len());
-            self.inventory.graph.candidates.push(candidate);
-            self.inventory.templates.push(Some(Rc::clone(node)));
+            let id = PhysicalCandidateId(
+                self.inventory
+                    .operator_nodes_of_candidates_for_memo_groups
+                    .len(),
+            );
+            self.inventory.supplier_nodes_per_input.push(requirements);
+            self.inventory
+                .operator_nodes_of_candidates_for_memo_groups
+                .push(OperatorNodeOfCandidateForMemoGroup {
+                    candidates_for_memo_group: vec![self.owner],
+                    is_implementation_root: false,
+                    physical_node: Rc::clone(node),
+                });
             id
         };
         self.private_nodes.insert(Rc::as_ptr(node), id);

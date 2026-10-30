@@ -11,7 +11,7 @@ use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::physical::Materialization;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
-use asap_types::stages::{CandidateInventory, SelectedCandidateGraph};
+use asap_types::stages::{PhysicalASAPMemoCandidates, SelectedCandidateGraph};
 
 use super::reconstruction::{
     output_contract_satisfied, paired_node_identities, reconstruct_selected_candidates,
@@ -47,7 +47,7 @@ pub struct SelectedPhysicalCandidate {
 /// roots in workload order (one reference for an operator root). Repeated scalar
 /// references remain separate positions; literal-only scalar roots use none.
 pub fn materialize_selected_candidates(
-    inventory: &CandidateInventory,
+    physical_candidates: &PhysicalASAPMemoCandidates,
     selected: &SelectedCandidateGraph,
     materializations: &[Option<Materialization>],
     original_roots: &[QueryRoot],
@@ -58,8 +58,7 @@ pub fn materialize_selected_candidates(
     if entries.len() != original_roots.len() {
         return Err("workload entries and query roots differ in length".into());
     }
-    let rebuilt =
-        reconstruct_selected_candidates(&inventory.graph, selected, &inventory.templates)?;
+    let rebuilt = reconstruct_selected_candidates(physical_candidates, selected)?;
     if materializations.len() != rebuilt.nodes_by_candidate.len() {
         return Err("materialization vector must be indexed by candidate ID".into());
     }

@@ -10,13 +10,13 @@ use asap_physical_asap_optimization::catalog::{
 };
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::physical::Materialization;
-use asap_types::stages::CandidateInventory;
+
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::candidates::inventory::build_candidate_inventory;
+    use crate::search::candidates::inventory::{build_candidate_inventory, InventoryForTests};
     use crate::search::milp::model::select_candidates;
     use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
@@ -29,7 +29,7 @@ mod tests {
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::{ASAPOp, NonASAPOp};
     use asap_types::physical::Medium;
-    use asap_types::stages::MemoGroupId;
+
     use asap_types::workload::{
         DataArrival, Predictability, Query, QueryRecurrence, QueryRequirements, RepeatedDemand,
         RepetitionInterval,
@@ -40,7 +40,7 @@ mod tests {
     }
 
     fn fixture() -> (
-        CandidateInventory,
+        InventoryForTests,
         Vec<QueryRoot>,
         Vec<QueryWorkloadEntry>,
         DataWorkload,
@@ -109,22 +109,14 @@ mod tests {
 
     fn shared_non_summary_fixture(
         with_shared_parent: bool,
-    ) -> (CandidateInventory, Vec<QueryRoot>, Vec<QueryWorkloadEntry>) {
-        use asap_types::stages::{
-            CandidateDependencyGraph, PhysicalCandidate, PhysicalCandidateId, ProducerRequirement,
-            QueryRootCandidates,
-        };
+    ) -> (InventoryForTests, Vec<QueryRoot>, Vec<QueryWorkloadEntry>) {
+        use asap_types::stages::PhysicalCandidateId;
         let logical = lower_promql("latency", AccuracyTarget::exact());
         let scan = OperatorNode::reachable(&logical)
             .into_iter()
             .find(|node| matches!(node.non_asap(), Some(NonASAPOp::Scan { .. })))
             .unwrap();
-        let mut templates = vec![Some(Rc::clone(&scan))];
-        let mut candidates = vec![PhysicalCandidate {
-            group: MemoGroupId(0),
-            local_cost: 0.0,
-            producer_requirements: Vec::new(),
-        }];
+        let mut nodes = vec![(Rc::clone(&scan), Vec::new())];
         if with_shared_parent {
             let range =
                 OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeRange {
@@ -133,31 +125,17 @@ mod tests {
                     child: scan,
                 }))
                 .unwrap();
-            templates.push(Some(range));
-            candidates.push(PhysicalCandidate {
-                group: MemoGroupId(1),
-                local_cost: 0.0,
-                producer_requirements: vec![ProducerRequirement {
-                    compatible_producers: vec![PhysicalCandidateId(0)].into(),
-                }],
-            });
+            nodes.push((range, vec![vec![PhysicalCandidateId(0)]]));
         }
-        let root_id = templates.len() - 1;
-        let roots = vec![QueryRoot::Operator(Rc::clone(templates[root_id].as_ref().unwrap())); 2];
-        let inventory = CandidateInventory {
-            graph: CandidateDependencyGraph {
-                candidates,
-                query_roots: vec![
-                    QueryRootCandidates {
-                        compatible_candidates: vec![PhysicalCandidateId(root_id)]
-                    };
-                    2
-                ],
-                ..Default::default()
-            },
-            templates,
-            group_candidates: Vec::new(),
-        };
+        let root_id = nodes.len() - 1;
+        let roots = vec![QueryRoot::Operator(Rc::clone(&nodes[root_id].0)); 2];
+        let inventory = InventoryForTests::new(
+            crate::search::candidates::configurations::inventory_for_tests(
+                nodes,
+                vec![vec![PhysicalCandidateId(root_id)]; 2],
+            ),
+            |_| Ok(0.0),
+        );
         let entries = (0..2)
             .map(|_| QueryWorkloadEntry {
                 query: Query("latency".into()),
@@ -185,15 +163,15 @@ mod tests {
                 .unwrap();
         let mode = Materialization::MatAtQuery(Medium::Memory);
         assert!(configured
-            .configurations
+            .physical
+            .candidates
             .iter()
             .any(|configuration| configuration.materialization == mode));
         for (candidate, configuration) in configured
-            .inventory
-            .graph
+            .dag
             .candidates
             .iter_mut()
-            .zip(&configured.configurations)
+            .zip(&configured.physical.candidates)
         {
             candidate.local_cost = if configuration.materialization == mode {
                 0.0
@@ -201,15 +179,13 @@ mod tests {
                 1.0
             };
         }
-        let selected = select_candidates(&configured.inventory.graph)
-            .unwrap()
-            .unwrap();
-        let mut assignments = vec![None; configured.configurations.len()];
+        let selected = select_candidates(&configured.dag).unwrap().unwrap();
+        let mut assignments = vec![None; configured.physical.candidates.len()];
         for id in &selected.selected_candidates {
-            assignments[id.0] = Some(configured.configurations[id.0].materialization);
+            assignments[id.0] = Some(configured.physical.candidates[id.0].materialization);
         }
         let physical = materialize_selected_candidates(
-            &configured.inventory,
+            &configured.physical,
             &selected,
             &assignments,
             &roots,
@@ -224,7 +200,8 @@ mod tests {
             enumerate_candidate_configurations(&source, &[0, 0], &entries[..1], &data, &deployment)
                 .unwrap();
         assert!(!same_query
-            .configurations
+            .physical
+            .candidates
             .iter()
             .any(|configuration| configuration.materialization == mode));
     }
@@ -241,7 +218,7 @@ mod tests {
         ];
         assert!(matches!(
             materialize_selected_candidates(
-                &inventory,
+                &inventory.configured_for_tests().physical,
                 &selected,
                 &modes,
                 &roots,
@@ -261,7 +238,7 @@ mod tests {
         let build = selected
             .selected_candidates
             .iter()
-            .find(|id| is_kll(inventory.templates[id.0].as_ref().unwrap()))
+            .find(|id| is_kll(&inventory.templates[id.0]))
             .unwrap()
             .0;
         for mode in [
@@ -274,7 +251,13 @@ mod tests {
             }
             modes[build] = Some(mode);
             let result = materialize_selected_candidates(
-                &inventory, &selected, &modes, &roots, &entries, &data, false,
+                &inventory.configured_for_tests().physical,
+                &selected,
+                &modes,
+                &roots,
+                &entries,
+                &data,
+                false,
             )
             .unwrap();
             assert_eq!(
@@ -310,14 +293,20 @@ mod tests {
         let selected = select_candidates(&inventory.graph).unwrap().unwrap();
         let mut modes = vec![None; inventory.graph.candidates.len()];
         for id in &selected.selected_candidates {
-            modes[id.0] = Some(if is_kll(inventory.templates[id.0].as_ref().unwrap()) {
+            modes[id.0] = Some(if is_kll(&inventory.templates[id.0]) {
                 Materialization::MatAtIngestion(Medium::Memory)
             } else {
                 Materialization::NotMaterialized
             });
         }
         let result = materialize_selected_candidates(
-            &inventory, &selected, &modes, &roots, &entries, &data, false,
+            &inventory.configured_for_tests().physical,
+            &selected,
+            &modes,
+            &roots,
+            &entries,
+            &data,
+            false,
         );
         assert!(
             matches!(result, Err(PhysicalCandidateError::RejectedAssignment(error)) if error.contains("not offered"))

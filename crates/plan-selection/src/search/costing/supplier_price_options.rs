@@ -84,7 +84,7 @@ impl Iterator for InputTuples {
 }
 
 pub(in crate::search) fn extract_price_options(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
 ) -> Result<Option<JointPriceProfile>, DirectProfileError> {
     let Some(prepared) = prepare_profile(configured, context, false)? else {
@@ -106,10 +106,10 @@ pub(in crate::search) fn extract_price_options(
         if node.is_none() {
             continue;
         }
-        for supplier in configured.inventory.graph.candidates[id]
-            .producer_requirements
+        for supplier in configured.dag.candidates[id]
+            .supplier_candidates_per_input
             .iter()
-            .flat_map(|input| input.compatible_producers.iter())
+            .flat_map(|input| input.candidates.iter())
         {
             if supplier.0 != id && nodes[supplier.0].is_some() {
                 pending[id] += 1;
@@ -164,9 +164,9 @@ pub(in crate::search) fn extract_price_options(
                 continue;
             }
             let mut inputs = Vec::new();
-            for input in &configured.inventory.graph.candidates[id].producer_requirements {
+            for input in &configured.dag.candidates[id].supplier_candidates_per_input {
                 let mut choices = Vec::new();
-                for producer in &input.compatible_producers {
+                for producer in &input.candidates {
                     check_deadline(context.deadline)?;
                     if producer.0 == id {
                         continue;
@@ -262,8 +262,7 @@ pub(in crate::search) fn extract_price_options(
                             let Some(delta) = delta else { continue };
                             let divided = delta / sketch_ids.len() as f64;
                             if !sketch_ids.iter().all(|sketch| {
-                                let template =
-                                    configured.inventory.templates[*sketch].as_ref().unwrap();
+                                let template = configured.node(*sketch);
                                 if requires_source_sizing(template) {
                                     let Some(source) =
                                         sketch_sources.get(sketch).and_then(|s| s.as_ref())

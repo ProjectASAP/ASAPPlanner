@@ -1,6 +1,5 @@
 use super::*;
 use crate::search::milp::model::{solve_direct_cost_proposal_with_metrics, CandidateSolveMetrics};
-use asap_types::stages::MemoGroupId;
 use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
 
 fn union(queries: &[QueryRecurrence], mask: usize) -> f64 {
@@ -43,21 +42,20 @@ pub(super) fn rate_schedule(rates: &[f64]) -> QueryScheduleRates {
             .collect::<Vec<_>>(),
     )
 }
-fn node(input: Option<usize>) -> PhysicalCandidate {
-    PhysicalCandidate {
-        group: MemoGroupId(0),
+fn node(input: Option<usize>) -> PhysicalCandidateWithCost {
+    PhysicalCandidateWithCost {
         local_cost: 0.0,
-        producer_requirements: input
+        supplier_candidates_per_input: input
             .into_iter()
-            .map(|id| ProducerRequirement {
-                compatible_producers: vec![PhysicalCandidateId(id)].into(),
+            .map(|id| InputSupplierCandidates {
+                candidates: vec![PhysicalCandidateId(id)].into(),
             })
             .collect(),
     }
 }
-fn root(id: usize) -> QueryRootCandidates {
-    QueryRootCandidates {
-        compatible_candidates: vec![PhysicalCandidateId(id)],
+fn root(id: usize) -> QueryOutputCandidates {
+    QueryOutputCandidates {
+        candidates: vec![PhysicalCandidateId(id)],
     }
 }
 
@@ -67,7 +65,7 @@ fn root(id: usize) -> QueryRootCandidates {
 fn heterogeneous_intervals_price_boundary_rates_and_weighted_lifetimes() {
     let queries = [500, 1000]
         .map(|ms| QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(ms))));
-    let graph = CandidateDependencyGraph {
+    let graph = DagOfPhysicalCandidatesWithCosts {
         candidates: vec![node(None), node(Some(0)), node(Some(1)), node(Some(1))],
         query_roots: vec![root(2), root(3)],
         ..Default::default()
@@ -140,7 +138,7 @@ fn heterogeneous_intervals_price_boundary_rates_and_weighted_lifetimes() {
 #[test]
 fn aligned_and_offset_phases_use_evaluator_union_policy() {
     use asap_types::workload::TimestampMs;
-    let graph = CandidateDependencyGraph {
+    let graph = DagOfPhysicalCandidatesWithCosts {
         candidates: vec![node(None)],
         query_roots: vec![root(0), root(0)],
         ..Default::default()
@@ -196,13 +194,13 @@ fn heterogeneous_selection_matches_exhaustive_reader_assignments() {
     let queries = [500, 1000]
         .map(|ms| QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(ms))));
     let schedule = schedules(&queries);
-    let mut graph = CandidateDependencyGraph {
+    let mut graph = DagOfPhysicalCandidatesWithCosts {
         candidates: vec![node(None), node(None), node(Some(0)), node(Some(0))],
         query_roots: vec![root(2), root(3)],
         ..Default::default()
     };
     for id in [2, 3] {
-        graph.candidates[id].producer_requirements[0].compatible_producers =
+        graph.candidates[id].supplier_candidates_per_input[0].candidates =
             vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
     }
     let profile = DirectCostProfile {
@@ -302,7 +300,7 @@ fn heterogeneous_selection_matches_exhaustive_reader_assignments() {
 fn extreme_reader_rates_are_explicitly_unsupported() {
     let queries = [1, u32::MAX]
         .map(|ms| QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(ms))));
-    let graph = CandidateDependencyGraph {
+    let graph = DagOfPhysicalCandidatesWithCosts {
         candidates: vec![node(None), node(None), node(Some(0)), node(Some(0))],
         query_roots: vec![root(2), root(3)],
         ..Default::default()

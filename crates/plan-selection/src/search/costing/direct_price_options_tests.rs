@@ -4,11 +4,10 @@ use super::*;
 use asap_logical_asap_optimization::test_support::lower_promql;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{Operator, OperatorNode, ProjectItem, ScalarExpr};
-use asap_types::stages::CandidateConfiguration;
-use asap_types::stages::CandidateInventory;
-use asap_types::stages::MemoGroupId;
-use asap_types::stages::{
-    CandidateDependencyGraph, PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
+
+use crate::search::candidates::dag::{
+    DagOfPhysicalCandidatesWithCosts, InputSupplierCandidates, PhysicalCandidateWithCost,
+    QueryOutputCandidates,
 };
 use asap_types::workload::{
     DataWorkload, Predictability, Query, QueryRequirements, QueryWorkloadEntry, RepetitionInterval,
@@ -39,43 +38,30 @@ fn differing_supplier_statistics_keep_both_price_interfaces() {
         child: m.clone(),
     }))
     .unwrap();
-    let mut configured = CandidateConfigurationInventory {
-        inventory: CandidateInventory {
-            graph: CandidateDependencyGraph {
-                candidates: (0..3)
-                    .map(|id| PhysicalCandidate {
-                        group: MemoGroupId(id as u32),
-                        local_cost: 0.0,
-                        producer_requirements: if id == 2 {
-                            vec![ProducerRequirement {
-                                compatible_producers: vec![
-                                    PhysicalCandidateId(0),
-                                    PhysicalCandidateId(1),
-                                ]
-                                .into(),
-                            }]
-                        } else {
-                            vec![]
-                        },
-                    })
-                    .collect(),
-                query_roots: vec![QueryRootCandidates {
-                    compatible_candidates: vec![PhysicalCandidateId(2)],
-                }],
-                ..Default::default()
-            },
-            templates: vec![Some(m), Some(n), Some(project.clone())],
-            group_candidates: vec![],
+    let mut configured = PhysicalCandidatesWithCosts::from_dag_for_tests(
+        DagOfPhysicalCandidatesWithCosts {
+            candidates: (0..3)
+                .map(|id| PhysicalCandidateWithCost {
+                    local_cost: 0.0,
+                    supplier_candidates_per_input: if id == 2 {
+                        vec![InputSupplierCandidates {
+                            candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
+                        }]
+                    } else {
+                        vec![]
+                    },
+                })
+                .collect(),
+            query_roots: vec![QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(2)],
+            }],
+            ..Default::default()
         },
-        configurations: (0..3)
-            .map(|id| CandidateConfiguration {
-                may_keep_with_sole_reader: Vec::new(),
-                source_candidate: PhysicalCandidateId(id),
-                materialization: Materialization::NotMaterialized,
-                timing: ExecutionTiming::QueryTime,
-            })
+        vec![m, n, project.clone()]
+            .into_iter()
+            .zip((0..3).map(|_| (ExecutionTiming::QueryTime, Materialization::NotMaterialized)))
             .collect(),
-    };
+    );
     let roots = vec![QueryRoot::Operator(project)];
     let entries = [QueryWorkloadEntry {
         query: Query("m".into()),
@@ -142,22 +128,23 @@ fn differing_supplier_statistics_keep_both_price_interfaces() {
         "projection work must follow selected input rows, not template rows"
     );
     assert_eq!(
-        configured.inventory.graph.candidates[2].producer_requirements[0]
-            .compatible_producers
+        configured.dag.candidates[2].supplier_candidates_per_input[0]
+            .candidates
             .len(),
         2
     );
     // Force each structurally legal supplier in turn. The model must price
     // the selected binding rather than only returning the cheapest interface.
     for producer in [PhysicalCandidateId(0), PhysicalCandidateId(1)] {
-        configured.inventory.graph.reader_constraints =
+        configured.dag.reader_constraints =
             vec![asap_types::stages::ReaderConstraint::ActivationRequires {
                 candidate: PhysicalCandidateId(2),
                 required_candidate: producer,
             }];
+        configured.sync_physical_for_tests();
         let proposal =
             crate::search::milp::direct_price_options::solve_joint_price_proposal_with_metrics(
-                &configured.inventory.graph,
+                &configured.dag,
                 &[],
                 None,
                 &mut Default::default(),
@@ -228,43 +215,30 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
         child: m.clone(),
     }))
     .unwrap();
-    let mut configured = CandidateConfigurationInventory {
-        inventory: CandidateInventory {
-            graph: CandidateDependencyGraph {
-                candidates: (0..3)
-                    .map(|id| PhysicalCandidate {
-                        group: MemoGroupId(id as u32),
-                        local_cost: 0.0,
-                        producer_requirements: if id == 2 {
-                            vec![ProducerRequirement {
-                                compatible_producers: vec![
-                                    PhysicalCandidateId(0),
-                                    PhysicalCandidateId(1),
-                                ]
-                                .into(),
-                            }]
-                        } else {
-                            vec![]
-                        },
-                    })
-                    .collect(),
-                query_roots: vec![QueryRootCandidates {
-                    compatible_candidates: vec![PhysicalCandidateId(2)],
-                }],
-                ..Default::default()
-            },
-            templates: vec![Some(m), Some(n), Some(project.clone())],
-            group_candidates: vec![],
+    let mut configured = PhysicalCandidatesWithCosts::from_dag_for_tests(
+        DagOfPhysicalCandidatesWithCosts {
+            candidates: (0..3)
+                .map(|id| PhysicalCandidateWithCost {
+                    local_cost: 0.0,
+                    supplier_candidates_per_input: if id == 2 {
+                        vec![InputSupplierCandidates {
+                            candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
+                        }]
+                    } else {
+                        vec![]
+                    },
+                })
+                .collect(),
+            query_roots: vec![QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(2)],
+            }],
+            ..Default::default()
         },
-        configurations: (0..3)
-            .map(|id| CandidateConfiguration {
-                may_keep_with_sole_reader: Vec::new(),
-                source_candidate: PhysicalCandidateId(id),
-                materialization: Materialization::NotMaterialized,
-                timing: ExecutionTiming::QueryTime,
-            })
+        vec![m, n, project.clone()]
+            .into_iter()
+            .zip((0..3).map(|_| (ExecutionTiming::QueryTime, Materialization::NotMaterialized)))
             .collect(),
-    };
+    );
     let downstream = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
         cols: project
             .schema
@@ -280,28 +254,17 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
         child: project,
     }))
     .unwrap();
-    configured
-        .inventory
-        .graph
-        .candidates
-        .push(PhysicalCandidate {
-            group: MemoGroupId(3),
-            local_cost: 0.0,
-            producer_requirements: vec![ProducerRequirement {
-                compatible_producers: vec![PhysicalCandidateId(2)].into(),
-            }],
-        });
-    configured
-        .inventory
-        .templates
-        .push(Some(downstream.clone()));
-    configured.configurations.push(CandidateConfiguration {
-        may_keep_with_sole_reader: Vec::new(),
-        source_candidate: PhysicalCandidateId(3),
-        materialization: Materialization::NotMaterialized,
-        timing: ExecutionTiming::QueryTime,
-    });
-    configured.inventory.graph.query_roots[0].compatible_candidates = vec![PhysicalCandidateId(3)];
+    configured.push_for_tests(
+        downstream.clone(),
+        ExecutionTiming::QueryTime,
+        Materialization::NotMaterialized,
+        0.0,
+        vec![InputSupplierCandidates {
+            candidates: vec![PhysicalCandidateId(2)].into(),
+        }],
+    );
+    configured.dag.query_roots[0].candidates = vec![PhysicalCandidateId(3)];
+    configured.sync_physical_for_tests();
     let roots = vec![QueryRoot::Operator(downstream)];
     let entries = [QueryWorkloadEntry {
         query: Query("m".into()),
@@ -356,10 +319,10 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
     // Optional identity cycles must not disable otherwise legal pricing paths
     // or create a zero-input phantom plan. All selected DAGs still need a scan.
     let solve =
-        |configured: &CandidateConfigurationInventory,
+        |configured: &PhysicalCandidatesWithCosts,
          profile: &crate::search::milp::direct_price_options::JointPriceProfile| {
             crate::search::milp::direct_price_options::solve_joint_price_proposal_with_metrics(
-                &configured.inventory.graph,
+                &configured.dag,
                 &[],
                 None,
                 &mut Default::default(),
@@ -369,13 +332,14 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
             .unwrap()
         };
     let baseline = solve(&configured, &extracted);
-    configured.inventory.graph.candidates[2].producer_requirements[0].compatible_producers = vec![
+    configured.dag.candidates[2].supplier_candidates_per_input[0].candidates = vec![
         PhysicalCandidateId(0),
         PhysicalCandidateId(1),
         PhysicalCandidateId(2),
         PhysicalCandidateId(3),
     ]
     .into();
+    configured.sync_physical_for_tests();
     let cyclic = extract_price_options(&configured, &context)
         .unwrap()
         .unwrap();
@@ -406,7 +370,7 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
     use std::rc::Rc;
     fn append(
         node: Rc<OperatorNode>,
-        configured: &mut CandidateConfigurationInventory,
+        configured: &mut PhysicalCandidatesWithCosts,
         ingestion: bool,
         mode: Materialization,
     ) -> PhysicalCandidateId {
@@ -417,36 +381,27 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         let mut inputs = Vec::new();
         node.operator
             .map_children(|child| inputs.push(append(child.clone(), configured, ingestion, mode)));
-        let id = PhysicalCandidateId(configured.configurations.len());
-        configured.configurations.push(CandidateConfiguration {
-            may_keep_with_sole_reader: Vec::new(),
-            source_candidate: id,
-            materialization: if pane {
-                mode
-            } else {
-                Materialization::NotMaterialized
-            },
-            timing: if ingestion {
+        let id = PhysicalCandidateId(configured.physical.candidates.len());
+        configured.push_for_tests(
+            node,
+            if ingestion {
                 ExecutionTiming::IngestionTime
             } else {
                 ExecutionTiming::QueryTime
             },
-        });
-        configured.inventory.templates.push(Some(node));
-        configured
-            .inventory
-            .graph
-            .candidates
-            .push(PhysicalCandidate {
-                group: MemoGroupId(id.0 as u32),
-                local_cost: 0.0,
-                producer_requirements: inputs
-                    .into_iter()
-                    .map(|supplier| ProducerRequirement {
-                        compatible_producers: vec![supplier].into(),
-                    })
-                    .collect(),
-            });
+            if pane {
+                mode
+            } else {
+                Materialization::NotMaterialized
+            },
+            0.0,
+            inputs
+                .into_iter()
+                .map(|supplier| InputSupplierCandidates {
+                    candidates: vec![supplier].into(),
+                })
+                .collect(),
+        );
         id
     }
 
@@ -494,14 +449,7 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
     })).unwrap();
     let sized = crate::resize_for_failure_probability(&roots, std::slice::from_ref(&target), &data)
         .unwrap();
-    let mut configured = CandidateConfigurationInventory {
-        inventory: CandidateInventory {
-            graph: CandidateDependencyGraph::default(),
-            templates: vec![],
-            group_candidates: vec![],
-        },
-        configurations: vec![],
-    };
+    let mut configured = PhysicalCandidatesWithCosts::empty_for_tests();
     let QueryRoot::Operator(root) = &sized[0] else {
         panic!("operator")
     };
@@ -511,38 +459,26 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         false,
         Materialization::MatAtIngestion(Medium::Memory),
     );
-    configured
-        .inventory
-        .graph
-        .query_roots
-        .push(QueryRootCandidates {
-            compatible_candidates: vec![root_id],
-        });
+    configured.dag.query_roots.push(QueryOutputCandidates {
+        candidates: vec![root_id],
+    });
+    configured.sync_physical_for_tests();
     let chain = configured
-        .inventory
-        .templates
+        .nodes_for_tests()
         .iter()
-        .position(|node| {
-            node.as_ref()
-                .is_some_and(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
-        })
+        .position(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
         .unwrap();
-    let raw_supplier = configured.inventory.graph.candidates[chain].producer_requirements[0]
-        .compatible_producers[0];
+    let raw_supplier =
+        configured.dag.candidates[chain].supplier_candidates_per_input[0].candidates[0];
+    configured.sync_physical_for_tests();
     assert!(matches!(
-        configured.inventory.templates[raw_supplier.0]
-            .as_ref()
-            .unwrap()
-            .non_asap(),
+        configured.node(raw_supplier.0).non_asap(),
         Some(NonASAPOp::Scan { .. })
     ));
     // This tests the pricing kernel, not executor installation of a projection
     // below a pane. Both suppliers return exactly the same stream. The identity projection
     // adds ingestion CPU without changing rows, values, or source identity.
-    let source = configured.inventory.templates[raw_supplier.0]
-        .as_ref()
-        .unwrap()
-        .clone();
+    let source = configured.node(raw_supplier.0).clone();
     let projected = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
         cols: source
             .schema
@@ -558,25 +494,15 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         child: source,
     }))
     .unwrap();
-    let projected_supplier = PhysicalCandidateId(configured.configurations.len());
-    configured.inventory.templates.push(Some(projected));
-    configured.configurations.push(CandidateConfiguration {
-        may_keep_with_sole_reader: Vec::new(),
-        source_candidate: projected_supplier,
-        materialization: Materialization::NotMaterialized,
-        timing: ExecutionTiming::IngestionTime,
-    });
-    configured
-        .inventory
-        .graph
-        .candidates
-        .push(PhysicalCandidate {
-            group: configured.inventory.graph.candidates[raw_supplier.0].group,
-            local_cost: 0.0,
-            producer_requirements: vec![ProducerRequirement {
-                compatible_producers: vec![raw_supplier].into(),
-            }],
-        });
+    let projected_supplier = configured.push_for_tests(
+        projected,
+        ExecutionTiming::IngestionTime,
+        Materialization::NotMaterialized,
+        0.0,
+        vec![InputSupplierCandidates {
+            candidates: vec![raw_supplier].into(),
+        }],
+    );
     let originals = vec![QueryRoot::Operator(original)];
     let entries = vec![QueryWorkloadEntry {
         query: Query("quantile_over_time(0.95, latency[5m])".into()),
@@ -629,8 +555,9 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         },
         ..context
     };
-    configured.inventory.graph.candidates[chain].producer_requirements[0].compatible_producers =
+    configured.dag.candidates[chain].supplier_candidates_per_input[0].candidates =
         vec![raw_supplier, projected_supplier].into();
+    configured.sync_physical_for_tests();
     let old = extract(&configured, &context).unwrap().unwrap();
     assert_eq!(
         old.suppliers[chain],
@@ -664,22 +591,24 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
     assert_eq!(raw_option.profile.compaction_seconds, 0.0);
     assert!(projected_option.profile.compaction_seconds > 0.0);
     for supplier in [raw_supplier, projected_supplier] {
-        configured.inventory.graph.reader_constraints =
+        configured.dag.reader_constraints =
             vec![asap_types::stages::ReaderConstraint::ActivationRequires {
                 candidate: root_id,
                 required_candidate: supplier,
             }];
+        configured.sync_physical_for_tests();
         if supplier == raw_supplier {
-            configured.inventory.graph.reader_constraints.push(
+            configured.dag.reader_constraints.push(
                 asap_types::stages::ReaderConstraint::AllowedOutputs {
                     candidate: projected_supplier,
                     outputs: vec![],
                 },
             );
+            configured.sync_physical_for_tests();
         }
         let proposal =
             crate::search::milp::direct_price_options::solve_joint_price_proposal_with_metrics(
-                &configured.inventory.graph,
+                &configured.dag,
                 &[],
                 None,
                 &mut Default::default(),
@@ -735,43 +664,30 @@ fn mixed_schedule_joint_prices_match_the_real_evaluator() {
         child: m.clone(),
     }))
     .unwrap();
-    let mut configured = CandidateConfigurationInventory {
-        inventory: CandidateInventory {
-            graph: CandidateDependencyGraph {
-                candidates: (0..3)
-                    .map(|id| PhysicalCandidate {
-                        group: MemoGroupId(id as u32),
-                        local_cost: 0.0,
-                        producer_requirements: if id == 2 {
-                            vec![ProducerRequirement {
-                                compatible_producers: vec![
-                                    PhysicalCandidateId(0),
-                                    PhysicalCandidateId(1),
-                                ]
-                                .into(),
-                            }]
-                        } else {
-                            vec![]
-                        },
-                    })
-                    .collect(),
-                query_roots: vec![QueryRootCandidates {
-                    compatible_candidates: vec![PhysicalCandidateId(2)],
-                }],
-                ..Default::default()
-            },
-            templates: vec![Some(m), Some(n), Some(project.clone())],
-            group_candidates: vec![],
+    let mut configured = PhysicalCandidatesWithCosts::from_dag_for_tests(
+        DagOfPhysicalCandidatesWithCosts {
+            candidates: (0..3)
+                .map(|id| PhysicalCandidateWithCost {
+                    local_cost: 0.0,
+                    supplier_candidates_per_input: if id == 2 {
+                        vec![InputSupplierCandidates {
+                            candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
+                        }]
+                    } else {
+                        vec![]
+                    },
+                })
+                .collect(),
+            query_roots: vec![QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(2)],
+            }],
+            ..Default::default()
         },
-        configurations: (0..3)
-            .map(|id| CandidateConfiguration {
-                may_keep_with_sole_reader: Vec::new(),
-                source_candidate: PhysicalCandidateId(id),
-                materialization: Materialization::NotMaterialized,
-                timing: ExecutionTiming::QueryTime,
-            })
+        vec![m, n, project.clone()]
+            .into_iter()
+            .zip((0..3).map(|_| (ExecutionTiming::QueryTime, Materialization::NotMaterialized)))
             .collect(),
-    };
+    );
     let roots = vec![QueryRoot::Operator(project); 5];
     let entries = [QueryWorkloadEntry {
         query: Query("m".into()),
@@ -810,12 +726,13 @@ fn mixed_schedule_joint_prices_match_the_real_evaluator() {
         invocations: 3,
         execute_at: None,
     };
-    configured.inventory.graph.query_roots =
-        vec![configured.inventory.graph.query_roots[0].clone(); 5];
+    configured.dag.query_roots = vec![configured.dag.query_roots[0].clone(); 5];
+    configured.sync_physical_for_tests();
     // All roots use the original source; this parity check has no synthetic
     // equivalence between different source names.
-    configured.inventory.graph.candidates[2].producer_requirements[0].compatible_producers =
+    configured.dag.candidates[2].supplier_candidates_per_input[0].candidates =
         vec![PhysicalCandidateId(0)].into();
+    configured.sync_physical_for_tests();
     let context = CandidatePlanningContext {
         deadline: None,
         refine_materialization: false,
@@ -832,7 +749,7 @@ fn mixed_schedule_joint_prices_match_the_real_evaluator() {
     assert!(profile.schedules.is_some());
     let proposal =
         crate::search::milp::direct_price_options::solve_joint_price_proposal_with_metrics(
-            &configured.inventory.graph,
+            &configured.dag,
             &[],
             None,
             &mut Default::default(),

@@ -1,7 +1,8 @@
 //! Unit tests of Stage 2's terminal-reader factoring
 //! (`asap_physical_asap_optimization::catalog`) that select with the solver.
 use asap_physical_asap_optimization::catalog::test_support::{
-    factor_terminal_readers, MemoGroupOutputKey, MemoGroupOutputToCompatibleProducersCache,
+    factor_terminal_readers, CandidateInventory, MemoGroupOutputKey,
+    MemoGroupOutputToCompatibleProducersCache,
 };
 use asap_types::stages::MemoGroupId;
 use asap_types::stages::PhysicalCandidateId;
@@ -12,79 +13,80 @@ mod tests {
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_types::ir::properties::AccuracyTarget;
 
-    fn terminal_fixture() -> asap_types::stages::CandidateInventory {
+    /// Node costs: states 0 and 1 cost 8 and 12, their readers 1 each (the
+    /// factored reader keeps index 2).
+    const NODE_COSTS: [f64; 4] = [8.0, 12.0, 1.0, 1.0];
+
+    fn terminal_fixture() -> CandidateInventory {
         use asap_logical_asap_optimization::test_support::{cms_summary, estimate_over};
         use asap_types::ir::properties::AccuracyGuarantee;
-        use asap_types::stages::{
-            CandidateDependencyGraph, PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
-        };
         use std::rc::Rc;
         let state = Rc::new(cms_summary("count(m)"));
         let reader = estimate_over(state.clone(), AccuracyGuarantee::exact("fixture"));
-        asap_types::stages::CandidateInventory {
-            graph: CandidateDependencyGraph {
-                candidates: (0..4)
-                    .map(|id| PhysicalCandidate {
-                        group: MemoGroupId(if id < 2 { 0 } else { 1 }),
-                        local_cost: [8.0, 12.0, 1.0, 1.0][id],
-                        producer_requirements: if id < 2 {
-                            vec![]
-                        } else {
-                            vec![ProducerRequirement {
-                                compatible_producers: vec![PhysicalCandidateId(id - 2)].into(),
-                            }]
-                        },
-                    })
-                    .collect(),
-                query_roots: vec![
-                    QueryRootCandidates {
-                        compatible_candidates: vec![PhysicalCandidateId(2), PhysicalCandidateId(3)]
-                    };
-                    2
-                ],
-                ..Default::default()
-            },
-            templates: vec![
-                Some(state.clone()),
-                Some(state),
-                Some(reader.clone()),
-                Some(reader),
+        crate::search::candidates::configurations::inventory_for_tests(
+            vec![
+                (state.clone(), vec![]),
+                (state, vec![]),
+                (reader.clone(), vec![vec![PhysicalCandidateId(0)]]),
+                (reader, vec![vec![PhysicalCandidateId(1)]]),
             ],
-            group_candidates: vec![
-                vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
-                vec![PhysicalCandidateId(2), PhysicalCandidateId(3)],
-            ],
-        }
+            vec![vec![PhysicalCandidateId(2), PhysicalCandidateId(3)]; 2],
+        )
     }
 
+    /// `inventory`'s nodes as candidates (states materialized at ingestion,
+    /// readers at query time) at [`NODE_COSTS`], with execution scopes for
+    /// two output references of one query.
     fn with_scopes(
-        inventory: asap_types::stages::CandidateInventory,
-    ) -> asap_types::stages::CandidateConfigurationInventory {
+        inventory: CandidateInventory,
+    ) -> crate::search::candidates::dag::PhysicalCandidatesWithCosts {
+        use crate::search::candidates::dag::{
+            DagOfPhysicalCandidatesWithCosts, InputSupplierCandidates, PhysicalCandidateWithCost,
+            PhysicalCandidatesWithCosts, QueryOutputCandidates,
+        };
         use asap_types::ir::properties::ExecutionTiming;
         use asap_types::physical::{Materialization, Medium};
-        use asap_types::stages::{CandidateConfiguration, CandidateConfigurationInventory};
-        let count = inventory.graph.candidates.len();
-        let configurations = (0..count)
-            .map(|id| CandidateConfiguration {
-                may_keep_with_sole_reader: Vec::new(),
-                source_candidate: PhysicalCandidateId(id),
-                timing: if id < 2 {
-                    ExecutionTiming::IngestionTime
-                } else {
-                    ExecutionTiming::QueryTime
-                },
-                materialization: if id < 2 {
-                    Materialization::MatAtIngestion(Medium::Memory)
-                } else {
-                    Materialization::NotMaterialized
-                },
+        let count = inventory.operator_nodes_of_candidates_for_memo_groups.len();
+        let dag = DagOfPhysicalCandidatesWithCosts {
+            candidates: (0..count)
+                .map(|id| PhysicalCandidateWithCost {
+                    local_cost: NODE_COSTS[id],
+                    supplier_candidates_per_input: inventory.supplier_nodes_per_input[id]
+                        .iter()
+                        .map(|suppliers| InputSupplierCandidates {
+                            candidates: suppliers.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            query_roots: inventory
+                .query_output_nodes
+                .iter()
+                .map(|nodes| QueryOutputCandidates {
+                    candidates: nodes.clone(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let nodes = (0..count)
+            .map(|id| {
+                (
+                    inventory.operator_nodes_of_candidates_for_memo_groups[id]
+                        .physical_node
+                        .clone(),
+                    if id < 2 {
+                        (
+                            ExecutionTiming::IngestionTime,
+                            Materialization::MatAtIngestion(Medium::Memory),
+                        )
+                    } else {
+                        (ExecutionTiming::QueryTime, Materialization::NotMaterialized)
+                    },
+                )
             })
             .collect();
         crate::search::candidates::scopes::expand_execution_scopes(
-            CandidateConfigurationInventory {
-                inventory,
-                configurations,
-            },
+            PhysicalCandidatesWithCosts::from_dag_for_tests(dag, nodes),
             &vec![1; count],
             &[0, 0],
         )
@@ -101,20 +103,19 @@ mod tests {
         for assignment in [[0, 0], [0, 1], [1, 0], [1, 1]] {
             let original = with_scopes(terminal_fixture());
             let mut factored = terminal_fixture();
+            assert_eq!(factor_terminal_readers(&mut factored, None).unwrap(), 1);
             assert_eq!(
-                factor_terminal_readers(&mut factored, &mut [], None).unwrap(),
-                1
+                factored.operator_nodes_of_candidates_for_memo_groups.len(),
+                3
             );
-            assert_eq!(factored.graph.candidates.len(), 3);
             let compressed = with_scopes(factored);
-            assert!(
-                compressed.inventory.graph.candidates.len()
-                    < original.inventory.graph.candidates.len()
-            );
+            assert!(compressed.dag.candidates.len() < original.dag.candidates.len());
             for mut configured in [original, compressed] {
                 for state in 0..2 {
-                    configured.inventory.graph.reader_constraints.push(
-                        ReaderConstraint::AllowedOutputs {
+                    configured
+                        .dag
+                        .reader_constraints
+                        .push(ReaderConstraint::AllowedOutputs {
                             candidate: PhysicalCandidateId(state),
                             outputs: assignment
                                 .iter()
@@ -123,10 +124,9 @@ mod tests {
                                     (producer == state).then_some(output)
                                 })
                                 .collect(),
-                        },
-                    );
+                        });
                 }
-                let selected = select_candidates(&configured.inventory.graph)
+                let selected = select_candidates(&configured.dag)
                     .unwrap()
                     .expect("every original assignment remains feasible");
                 let expected = if assignment[0] == assignment[1] {
@@ -143,63 +143,46 @@ mod tests {
     fn duplicate_terminal_interfaces_reduce_scoped_candidates_and_connections() {
         let build = || {
             let mut inventory = terminal_fixture();
-            for reader in &mut inventory.graph.candidates[2..] {
-                reader.producer_requirements[0].compatible_producers =
-                    vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
+            for reader in &mut inventory.supplier_nodes_per_input[2..] {
+                reader[0] = vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
             }
             inventory
         };
         let original = with_scopes(build());
         let mut compact = build();
-        assert_eq!(
-            factor_terminal_readers(&mut compact, &mut [], None).unwrap(),
-            1
-        );
+        assert_eq!(factor_terminal_readers(&mut compact, None).unwrap(), 1);
         let compact = with_scopes(compact);
-        let counts = |graph: &asap_types::stages::CandidateDependencyGraph| {
+        let counts = |graph: &crate::search::candidates::dag::DagOfPhysicalCandidatesWithCosts| {
             (
                 graph.candidates.len(),
                 graph
                     .candidates
                     .iter()
-                    .flat_map(|candidate| &candidate.producer_requirements)
-                    .map(|input| input.compatible_producers.len())
+                    .flat_map(|candidate| &candidate.supplier_candidates_per_input)
+                    .map(|input| input.candidates.len())
                     .sum::<usize>(),
             )
         };
-        assert_eq!(counts(&original.inventory.graph), (6, 8));
-        assert_eq!(counts(&compact.inventory.graph), (4, 4));
+        assert_eq!(counts(&original.dag), (6, 8));
+        assert_eq!(counts(&compact.dag), (4, 4));
     }
 
     #[test]
     fn terminal_quotient_preserves_interfaces_and_internal_consumers() {
         use asap_types::ir::properties::AccuracyGuarantee;
-        use asap_types::stages::ProducerRequirement;
         use std::rc::Rc;
         let mut accuracy = terminal_fixture();
-        let mut other = (**accuracy.templates[3].as_ref().unwrap()).clone();
+        let reader = &mut accuracy.operator_nodes_of_candidates_for_memo_groups[3].physical_node;
+        let mut other = (**reader).clone();
         other.guarantee = Some(AccuracyGuarantee::exact("different proof contract"));
-        accuracy.templates[3] = Some(Rc::new(other));
-        assert_eq!(
-            factor_terminal_readers(&mut accuracy, &mut [], None).unwrap(),
-            0
-        );
+        *reader = Rc::new(other);
+        assert_eq!(factor_terminal_readers(&mut accuracy, None).unwrap(), 0);
         let mut eligibility = terminal_fixture();
-        eligibility.graph.query_roots[1].compatible_candidates = vec![PhysicalCandidateId(3)];
-        assert_eq!(
-            factor_terminal_readers(&mut eligibility, &mut [], None).unwrap(),
-            0
-        );
+        eligibility.query_output_nodes[1] = vec![PhysicalCandidateId(3)];
+        assert_eq!(factor_terminal_readers(&mut eligibility, None).unwrap(), 0);
         let mut internal = terminal_fixture();
-        internal.graph.candidates[0]
-            .producer_requirements
-            .push(ProducerRequirement {
-                compatible_producers: vec![PhysicalCandidateId(2)].into(),
-            });
-        assert_eq!(
-            factor_terminal_readers(&mut internal, &mut [], None).unwrap(),
-            0
-        );
+        internal.supplier_nodes_per_input[0].push(vec![PhysicalCandidateId(2)].into());
+        assert_eq!(factor_terminal_readers(&mut internal, None).unwrap(), 0);
     }
 
     // Logical ownership (including window semantics), closedness and required

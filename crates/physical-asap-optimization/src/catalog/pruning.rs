@@ -1,25 +1,19 @@
 //! Remove provably unusable configurations before constructing solver variables.
 //! No costs or dominance assumptions are involved: finite input realizability,
 //! potential output reach and necessary reader counts are sufficient proofs.
-use asap_types::stages::CandidateConfigurationInventory;
-use asap_types::stages::{CandidateDependencyGraph, PhysicalCandidateId, ReaderConstraint};
+use asap_types::stages::{
+    PhysicalASAPMemoCandidates, PhysicalCandidateId, PruningMetrics, ReaderConstraint,
+};
 use asap_types::stages::{SupplierCandidates, SupplierSetInterner};
 use std::collections::HashMap;
 
-#[derive(Debug, Default)]
-pub struct PruningMetrics {
-    pub removed_candidates: usize,
-    pub removed_connections: usize,
-}
-
-pub fn prune(configured: &mut CandidateConfigurationInventory) -> Result<PruningMetrics, String> {
-    let graph = &configured.inventory.graph;
-    graph.validate().map_err(|error| error.to_string())?;
-    let count = graph.candidates.len();
-    if configured.configurations.len() != count || configured.inventory.templates.len() != count {
-        return Err("candidate pruning requires aligned configurations and templates".into());
-    }
-    let keep = usable_candidates(graph);
+/// `configured` without the candidates [`usable_candidates`] rules out, its
+/// IDs renumbered densely in their order; the counts removed are recorded in
+/// its `pruning_metrics`.
+pub fn prune(configured: PhysicalASAPMemoCandidates) -> Result<PhysicalASAPMemoCandidates, String> {
+    super::validate_candidates(&configured)?;
+    let count = configured.candidates.len();
+    let keep = usable_candidates(&configured);
     let mut mapping = vec![None; count];
     let mut next = 0;
     for (id, retained) in keep.iter().enumerate() {
@@ -28,29 +22,31 @@ pub fn prune(configured: &mut CandidateConfigurationInventory) -> Result<Pruning
             next += 1;
         }
     }
-    let connections_before: usize = graph
-        .candidates
-        .iter()
-        .flat_map(|c| &c.producer_requirements)
-        .map(|input| input.compatible_producers.len())
-        .sum();
-    let graph = &mut configured.inventory.graph;
+    let connections = |physical: &PhysicalASAPMemoCandidates| -> usize {
+        physical
+            .candidates
+            .iter()
+            .flat_map(|c| &c.supplier_candidates_per_input)
+            .map(|input| input.len())
+            .sum()
+    };
+    let connections_before = connections(&configured);
     let mut supplier_sets = SupplierSetInterner::default();
     let mut remapped: HashMap<SupplierCandidates, SupplierCandidates> = HashMap::new();
-    graph.candidates = std::mem::take(&mut graph.candidates)
+    let candidates = configured
+        .candidates
         .into_iter()
         .enumerate()
         .filter_map(|(id, mut candidate)| {
             if !keep[id] {
                 return None;
             }
-            for input in &mut candidate.producer_requirements {
-                input.compatible_producers = remapped
-                    .entry(input.compatible_producers.clone())
+            for input in &mut candidate.supplier_candidates_per_input {
+                *input = remapped
+                    .entry(input.clone())
                     .or_insert_with(|| {
                         supplier_sets.intern(
                             input
-                                .compatible_producers
                                 .iter()
                                 .filter_map(|id| mapping[id.0])
                                 .collect::<Vec<_>>(),
@@ -61,21 +57,8 @@ pub fn prune(configured: &mut CandidateConfigurationInventory) -> Result<Pruning
             Some(candidate)
         })
         .collect();
-    for root in &mut graph.query_roots {
-        root.compatible_candidates = root
-            .compatible_candidates
-            .iter()
-            .filter_map(|id| mapping[id.0])
-            .collect();
-    }
-    for budget in &mut graph.resource_budgets {
-        budget.candidate_usage = std::mem::take(&mut budget.candidate_usage)
-            .into_iter()
-            .enumerate()
-            .filter_map(|(id, usage)| keep[id].then_some(usage))
-            .collect();
-    }
-    graph.reader_constraints = std::mem::take(&mut graph.reader_constraints)
+    let reader_constraints = configured
+        .reader_constraints
         .into_iter()
         .filter_map(|mut constraint| {
             let id = match &mut constraint {
@@ -95,35 +78,24 @@ pub fn prune(configured: &mut CandidateConfigurationInventory) -> Result<Pruning
             Some(constraint)
         })
         .collect();
-    for group in &mut configured.inventory.group_candidates {
-        *group = group.iter().filter_map(|id| mapping[id.0]).collect();
-    }
-    configured.inventory.templates = std::mem::take(&mut configured.inventory.templates)
-        .into_iter()
-        .enumerate()
-        .filter_map(|(id, template)| keep[id].then_some(template))
-        .collect();
-    // source_candidate refers to the pre-configuration inventory, not this map.
-    configured.configurations = std::mem::take(&mut configured.configurations)
-        .into_iter()
-        .enumerate()
-        .filter_map(|(id, configuration)| keep[id].then_some(configuration))
-        .collect();
-    graph.validate().map_err(|error| error.to_string())?;
-    let connections_after: usize = graph
-        .candidates
-        .iter()
-        .flat_map(|c| &c.producer_requirements)
-        .map(|input| input.compatible_producers.len())
-        .sum();
-    Ok(PruningMetrics {
+    // Operator nodes are kept whole: `operator_node` indexes them unchanged.
+    let mut pruned = PhysicalASAPMemoCandidates::new(
+        configured.operator_nodes_of_candidates_for_memo_groups,
+        candidates,
+        configured.query_roots,
+        reader_constraints,
+    );
+    super::validate_candidates(&pruned)?;
+    pruned.pruning_metrics = PruningMetrics {
         removed_candidates: count - next,
-        removed_connections: connections_before - connections_after,
-    })
+        removed_connections: connections_before - connections(&pruned),
+    };
+    Ok(pruned)
 }
 
-pub fn usable_candidates(graph: &CandidateDependencyGraph) -> Vec<bool> {
-    let count = graph.candidates.len();
+pub fn usable_candidates(physical: &PhysicalASAPMemoCandidates) -> Vec<bool> {
+    let count = physical.candidates.len();
+    let query_output_candidates = super::query_output_candidates(physical);
     let mut enabled = vec![true; count];
     loop {
         // Least fixed point: a cycle without a finite implementation is not a
@@ -131,13 +103,13 @@ pub fn usable_candidates(graph: &CandidateDependencyGraph) -> Vec<bool> {
         let mut realizable = vec![false; count];
         loop {
             let mut changed = false;
-            for (id, candidate) in graph.candidates.iter().enumerate() {
+            for (id, candidate) in physical.candidates.iter().enumerate() {
                 if enabled[id]
                     && !realizable[id]
                     && candidate
-                        .producer_requirements
+                        .supplier_candidates_per_input
                         .iter()
-                        .all(|input| input.compatible_producers.iter().any(|id| realizable[id.0]))
+                        .all(|input| input.iter().any(|id| realizable[id.0]))
                 {
                     realizable[id] = true;
                     changed = true;
@@ -147,24 +119,24 @@ pub fn usable_candidates(graph: &CandidateDependencyGraph) -> Vec<bool> {
                 break;
             }
         }
-        let mut reached = vec![vec![false; graph.query_roots.len()]; count];
-        for (output, root) in graph.query_roots.iter().enumerate() {
-            let mut pending = root.compatible_candidates.clone();
+        let mut reached = vec![vec![false; query_output_candidates.len()]; count];
+        for (output, root) in query_output_candidates.iter().enumerate() {
+            let mut pending = root.clone();
             while let Some(id) = pending.pop() {
                 if realizable[id.0] && !reached[id.0][output] {
                     reached[id.0][output] = true;
                     pending.extend(
-                        graph.candidates[id.0]
-                            .producer_requirements
+                        physical.candidates[id.0]
+                            .supplier_candidates_per_input
                             .iter()
-                            .flat_map(|input| input.compatible_producers.iter().copied()),
+                            .flat_map(|input| input.iter().copied()),
                     );
                 }
             }
         }
         // Intersect all allowed-reader restrictions before counting potential
         // distinct queries. Potential reach is an upper bound, never a demand.
-        for constraint in &graph.reader_constraints {
+        for constraint in &physical.reader_constraints {
             if let ReaderConstraint::AllowedOutputs { candidate, outputs } = constraint {
                 for (output, value) in reached[candidate.0].iter_mut().enumerate() {
                     *value &= outputs.contains(&output);
@@ -176,7 +148,7 @@ pub fn usable_candidates(graph: &CandidateDependencyGraph) -> Vec<bool> {
             .zip(&reached)
             .map(|(realizable, outputs)| *realizable && outputs.iter().any(|value| *value))
             .collect();
-        for constraint in &graph.reader_constraints {
+        for constraint in &physical.reader_constraints {
             if let ReaderConstraint::ActivationRequires {
                 candidate,
                 required_candidate,

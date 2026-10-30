@@ -15,6 +15,7 @@ mod general_schedule_rates;
 mod schedule_selection_tests;
 pub(crate) use general_schedule_rates::QueryScheduleRates;
 
+use crate::search::candidates::dag::*;
 use asap_types::stages::*;
 
 /// Smallest/largest monetary coefficient ratio after lifetime normalization.
@@ -66,7 +67,7 @@ pub(crate) struct DirectCostProfile {
 impl DirectCostProfile {
     pub(crate) fn validate(
         &self,
-        graph: &CandidateDependencyGraph,
+        graph: &DagOfPhysicalCandidatesWithCosts,
     ) -> Result<(), CandidateSelectionError> {
         let valid = |v: f64| v.is_finite() && v >= 0.0;
         if self.nodes.len() != graph.candidates.len()
@@ -94,9 +95,9 @@ impl DirectCostProfile {
         }
         for (consumer, candidate) in graph.candidates.iter().enumerate() {
             for producer in candidate
-                .producer_requirements
+                .supplier_candidates_per_input
                 .iter()
-                .flat_map(|input| input.compatible_producers.iter())
+                .flat_map(|input| input.candidates.iter())
             {
                 let source = &self.nodes[producer.0];
                 // Query latency stops at the first maintained ingestion state.
@@ -114,7 +115,7 @@ impl DirectCostProfile {
         if graph
             .query_roots
             .iter()
-            .flat_map(|root| &root.compatible_candidates)
+            .flat_map(|root| &root.candidates)
             .any(|id| self.nodes[id.0].ingestion && !self.nodes[id.0].materialized)
         {
             return Err(CandidateSelectionError::InvalidGraph(
@@ -196,7 +197,7 @@ impl DirectCostProfile {
     /// A time-limited incumbent may leave nonminimal epigraph variables.
     pub(crate) fn selected_cost(
         &self,
-        graph: &CandidateDependencyGraph,
+        graph: &DagOfPhysicalCandidatesWithCosts,
         selected: &SelectedCandidateGraph,
     ) -> f64 {
         let mut inputs = vec![Vec::new(); self.nodes.len()];
@@ -313,7 +314,7 @@ impl DirectCostProfile {
     /// for each role. This bounds every selected DAG (shared work may be counted
     /// twice) without summing mutually exclusive catalog choices. Potential
     /// cycles conservatively use the old all-node sum, never a cyclic DP value.
-    fn maximum_latency(&self, graph: &CandidateDependencyGraph) -> f64 {
+    fn maximum_latency(&self, graph: &DagOfPhysicalCandidatesWithCosts) -> f64 {
         let count = self.nodes.len();
         let mut pending = vec![0usize; count];
         let mut parents = vec![Vec::new(); count];
@@ -322,9 +323,9 @@ impl DirectCostProfile {
                 continue;
             }
             for supplier in candidate
-                .producer_requirements
+                .supplier_candidates_per_input
                 .iter()
-                .flat_map(|input| input.compatible_producers.iter())
+                .flat_map(|input| input.candidates.iter())
             {
                 pending[id] += 1;
                 parents[supplier.0].push(id);
@@ -338,11 +339,11 @@ impl DirectCostProfile {
             if !self.nodes[id].ingestion {
                 bounds[id] = self.nodes[id].query_work_seconds()
                     + graph.candidates[id]
-                        .producer_requirements
+                        .supplier_candidates_per_input
                         .iter()
                         .map(|input| {
                             input
-                                .compatible_producers
+                                .candidates
                                 .iter()
                                 .map(|supplier| bounds[supplier.0])
                                 .fold(0.0, f64::max)
@@ -360,7 +361,7 @@ impl DirectCostProfile {
             graph
                 .query_roots
                 .iter()
-                .flat_map(|root| &root.compatible_candidates)
+                .flat_map(|root| &root.candidates)
                 .map(|id| bounds[id.0])
                 .fold(0.0, f64::max)
         } else {
@@ -380,7 +381,7 @@ impl DirectCostProfile {
 
     pub(crate) fn coefficients<'a>(
         &'a self,
-        graph: &CandidateDependencyGraph,
+        graph: &DagOfPhysicalCandidatesWithCosts,
     ) -> impl Iterator<Item = f64> + 'a {
         // Constant request fees cannot influence selection and need not limit
         // the coefficient range. Lifetimes use a dimensionless [0,1] scale.
@@ -430,7 +431,7 @@ struct BoundaryReach {
 
 #[allow(clippy::too_many_arguments)]
 fn boundary_flows(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     profile: &DirectCostProfile,
     variables: &mut ProblemVariables,
     constraints: &mut Vec<Constraint>,
@@ -451,12 +452,12 @@ fn boundary_flows(
         }
         let mut possible = vec![false; count];
         let mut pending = if boundary < queries {
-            graph.query_roots[boundary].compatible_candidates.clone()
+            graph.query_roots[boundary].candidates.clone()
         } else {
             graph.candidates[boundary - queries]
-                .producer_requirements
+                .supplier_candidates_per_input
                 .iter()
-                .flat_map(|input| input.compatible_producers.iter().copied())
+                .flat_map(|input| input.candidates.iter().copied())
                 .collect()
         };
         while let Some(id) = pending.pop() {
@@ -466,9 +467,9 @@ fn boundary_flows(
             }
             pending.extend(
                 graph.candidates[id.0]
-                    .producer_requirements
+                    .supplier_candidates_per_input
                     .iter()
-                    .flat_map(|input| input.compatible_producers.iter().copied()),
+                    .flat_map(|input| input.candidates.iter().copied()),
             );
         }
         let used: Vec<_> = possible
@@ -519,7 +520,7 @@ fn boundary_flows(
 /// Descending threshold ORs are implied integral by binary query reach. Their
 /// telescoping weighted sum equals the largest reached delay, with O(N) rows.
 fn query_latency_expressions(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     profile: &DirectCostProfile,
     variables: &mut ProblemVariables,
     constraints: &mut Vec<Constraint>,
@@ -573,7 +574,7 @@ fn query_latency_expressions(
 /// implied integral by the selected acyclic graph, as in the main model.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     profile: &DirectCostProfile,
     variables: &mut ProblemVariables,
     constraints: &mut Vec<Constraint>,
@@ -752,26 +753,24 @@ mod tests {
     use crate::search::milp::model::{
         solve_direct_cost_proposal_with_metrics, CandidateSolveMetrics,
     };
-    use asap_types::stages::MemoGroupId;
 
-    fn node(input: Option<usize>) -> PhysicalCandidate {
-        PhysicalCandidate {
-            group: MemoGroupId(0),
+    fn node(input: Option<usize>) -> PhysicalCandidateWithCost {
+        PhysicalCandidateWithCost {
             local_cost: 0.0,
-            producer_requirements: input
+            supplier_candidates_per_input: input
                 .into_iter()
-                .map(|id| ProducerRequirement {
-                    compatible_producers: vec![PhysicalCandidateId(id)].into(),
+                .map(|id| InputSupplierCandidates {
+                    candidates: vec![PhysicalCandidateId(id)].into(),
                 })
                 .collect(),
         }
     }
-    fn root(id: usize) -> QueryRootCandidates {
-        QueryRootCandidates {
-            compatible_candidates: vec![PhysicalCandidateId(id)],
+    fn root(id: usize) -> QueryOutputCandidates {
+        QueryOutputCandidates {
+            candidates: vec![PhysicalCandidateId(id)],
         }
     }
-    fn solve(graph: &CandidateDependencyGraph, profile: &DirectCostProfile) -> f64 {
+    fn solve(graph: &DagOfPhysicalCandidatesWithCosts, profile: &DirectCostProfile) -> f64 {
         solve_direct_cost_proposal_with_metrics(
             graph,
             &[],
@@ -789,7 +788,7 @@ mod tests {
     // retained once at the maximum horizon, while fees remain per workload.
     #[test]
     fn complete_cost_counts_shared_demand_held_memory_retention_and_fees() {
-        let graph = CandidateDependencyGraph {
+        let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![node(None), node(Some(0)), node(Some(0))],
             query_roots: vec![root(1), root(2)],
             ..Default::default()
@@ -840,7 +839,7 @@ mod tests {
     // its unmaterialized input. Charging it once per query would double memory.
     #[test]
     fn upstream_lifetime_uses_boundary_count_divided_by_query_count() {
-        let graph = CandidateDependencyGraph {
+        let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![node(None), node(Some(0)), node(Some(1)), node(Some(1))],
             query_roots: vec![root(2), root(3)],
             ..Default::default()
@@ -893,13 +892,13 @@ mod tests {
     // counts and held lifetime; the least-node graph alone cannot price these.
     #[test]
     fn direct_selection_matches_four_assignment_cost_oracle() {
-        let mut graph = CandidateDependencyGraph {
+        let mut graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![node(None), node(None), node(Some(0)), node(Some(0))],
             query_roots: vec![root(2), root(3)],
             ..Default::default()
         };
         for reader in [2, 3] {
-            graph.candidates[reader].producer_requirements[0].compatible_producers =
+            graph.candidates[reader].supplier_candidates_per_input[0].candidates =
                 vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
         }
         for materialized_build_cost in [1.0, 10.0, 100.0] {
@@ -980,10 +979,10 @@ mod tests {
     // possible raw-buffer cost; currency normalization must not drop the fee.
     #[test]
     fn direct_currency_range_preserves_tiny_meaningful_costs() {
-        let graph = CandidateDependencyGraph {
+        let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![node(None), node(None)],
-            query_roots: vec![QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
+            query_roots: vec![QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
             }],
             ..Default::default()
         };
@@ -1027,7 +1026,7 @@ mod tests {
     fn ingestion_profile(
         two_states: bool,
         query_rate: f64,
-    ) -> (CandidateDependencyGraph, DirectCostProfile) {
+    ) -> (DagOfPhysicalCandidatesWithCosts, DirectCostProfile) {
         let mut candidates = vec![node(None), node(Some(0))];
         let mut nodes = vec![
             NodeCostProfile {
@@ -1061,7 +1060,7 @@ mod tests {
             ..Default::default()
         }));
         (
-            CandidateDependencyGraph {
+            DagOfPhysicalCandidatesWithCosts {
                 candidates,
                 query_roots: vec![root(first_reader), root(first_reader + 1)],
                 ..Default::default()
@@ -1121,26 +1120,22 @@ mod tests {
     // producer twice; standing memory can change which choice wins.
     #[test]
     fn ingestion_selection_matches_shared_state_cost_oracle() {
-        let graph = CandidateDependencyGraph {
+        let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![
                 node(None),
                 node(Some(0)),
                 node(Some(0)),
                 node(Some(0)),
-                PhysicalCandidate {
-                    group: MemoGroupId(1),
+                PhysicalCandidateWithCost {
                     local_cost: 0.0,
-                    producer_requirements: vec![ProducerRequirement {
-                        compatible_producers: vec![PhysicalCandidateId(1), PhysicalCandidateId(2)]
-                            .into(),
+                    supplier_candidates_per_input: vec![InputSupplierCandidates {
+                        candidates: vec![PhysicalCandidateId(1), PhysicalCandidateId(2)].into(),
                     }],
                 },
-                PhysicalCandidate {
-                    group: MemoGroupId(1),
+                PhysicalCandidateWithCost {
                     local_cost: 0.0,
-                    producer_requirements: vec![ProducerRequirement {
-                        compatible_producers: vec![PhysicalCandidateId(1), PhysicalCandidateId(3)]
-                            .into(),
+                    supplier_candidates_per_input: vec![InputSupplierCandidates {
+                        candidates: vec![PhysicalCandidateId(1), PhysicalCandidateId(3)].into(),
                     }],
                 },
             ],
@@ -1218,7 +1213,7 @@ mod tests {
     // reader lifetime. This differs from charging the kept state per reader.
     #[test]
     fn retained_query_state_prices_residency_refresh_and_input_lifetime() {
-        let graph = CandidateDependencyGraph {
+        let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![node(None), node(Some(0)), node(Some(1)), node(Some(1))],
             query_roots: vec![root(2), root(3)],
             ..Default::default()
@@ -1290,7 +1285,7 @@ mod tests {
     // maximizing the latency expression gives the same value for every mask.
     #[test]
     fn compaction_max_is_exact_without_a_held_memory_objective() {
-        let graph = CandidateDependencyGraph {
+        let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![node(None); 3],
             query_roots: vec![root(0), root(1), root(2)],
             ..Default::default()
@@ -1358,12 +1353,12 @@ mod tests {
     #[test]
     fn compaction_selection_matches_exhaustive_reader_bindings() {
         let mut reader = node(Some(0));
-        reader.producer_requirements[0].compatible_producers =
+        reader.supplier_candidates_per_input[0].candidates =
             vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
         reader
-            .producer_requirements
-            .push(node(Some(2)).producer_requirements.remove(0));
-        let graph = CandidateDependencyGraph {
+            .supplier_candidates_per_input
+            .push(node(Some(2)).supplier_candidates_per_input.remove(0));
+        let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![node(None), node(None), node(None), reader.clone(), reader],
             query_roots: vec![root(3), root(4)],
             ..Default::default()
@@ -1425,7 +1420,7 @@ mod tests {
     // reject that unsupported profile instead of charging all ancestor maxima.
     #[test]
     fn nested_maintained_ingestion_states_are_not_admitted() {
-        let graph = CandidateDependencyGraph {
+        let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![node(None), node(Some(0))],
             query_roots: vec![root(1)],
             ..Default::default()
@@ -1453,12 +1448,12 @@ mod tests {
     // its held-memory charge remains significant in actual currency units.
     #[test]
     fn extreme_unselected_latency_does_not_erase_selected_memory_cost() {
-        let mut graph = CandidateDependencyGraph {
+        let mut graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![node(None), node(None), node(Some(0))],
             query_roots: vec![root(2)],
             ..Default::default()
         };
-        graph.candidates[2].producer_requirements[0].compatible_producers =
+        graph.candidates[2].supplier_candidates_per_input[0].candidates =
             vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
         for tiny_compaction in [false, true] {
             let profile = DirectCostProfile {
@@ -1517,12 +1512,12 @@ mod tests {
     // cycles conservatively fall back instead of inventing a smaller bound.
     #[test]
     fn latency_bound_respects_choices_required_inputs_and_potential_cycles() {
-        let mut graph = CandidateDependencyGraph {
+        let mut graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![node(None), node(None), node(Some(0))],
             query_roots: vec![root(2)],
             ..Default::default()
         };
-        graph.candidates[2].producer_requirements[0].compatible_producers =
+        graph.candidates[2].supplier_candidates_per_input[0].candidates =
             vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
         let profile = DirectCostProfile {
             nodes: [1.0, 3.0, 2.0]
@@ -1539,10 +1534,11 @@ mod tests {
         };
         assert_eq!(profile.maximum_latency(&graph), 5.0);
         graph.candidates[2]
-            .producer_requirements
-            .push(node(Some(0)).producer_requirements.remove(0));
+            .supplier_candidates_per_input
+            .push(node(Some(0)).supplier_candidates_per_input.remove(0));
         assert_eq!(profile.maximum_latency(&graph), 6.0);
-        graph.candidates[0].producer_requirements = node(Some(2)).producer_requirements;
+        graph.candidates[0].supplier_candidates_per_input =
+            node(Some(2)).supplier_candidates_per_input;
         assert_eq!(profile.maximum_latency(&graph), 6.0);
     }
 }

@@ -16,7 +16,7 @@ fn both(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     profile: &DirectCostProfile,
     schedule: &QueryScheduleRates,
     variables: &mut ProblemVariables,

@@ -4,16 +4,104 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use asap_physical_asap_optimization::catalog::test_support::{
-    build_with_compatible_producers_cache, MemoGroupOutputToCompatibleProducersCache,
+    build_candidate_inventory_before, build_with_compatible_producers_cache, CandidateInventory,
+    MemoGroupOutputToCompatibleProducersCache,
 };
-use asap_physical_asap_optimization::catalog::{
-    build_candidate_inventory_before, CandidateInventoryError,
-};
+use asap_physical_asap_optimization::catalog::CandidateInventoryError;
 use asap_types::ir::OperatorNode;
 use asap_types::physical::Materialization;
-use asap_types::stages::CandidateInventory;
-use asap_types::stages::CandidateMemo;
-use asap_types::stages::MemoGroupId;
+use asap_types::stages::{CandidateMemo, MemoGroupId, PhysicalCandidateId};
+
+use crate::search::candidates::dag::{
+    DagOfPhysicalCandidatesWithCosts, InputSupplierCandidates, PhysicalCandidateWithCost,
+    QueryOutputCandidates,
+};
+
+/// A Stage 2 inventory, and its operator nodes as a DAG with test-chosen
+/// costs, for tests that solve the inventory before configuration.
+#[cfg(test)]
+pub(in crate::search) struct InventoryForTests {
+    pub inventory: CandidateInventory,
+    /// Node `i` as candidate `i`, priced by the test's node cost, reading the
+    /// inventory's suppliers; query roots are its output references.
+    pub graph: DagOfPhysicalCandidatesWithCosts,
+    /// Node `i`'s operator node.
+    pub templates: Vec<Rc<OperatorNode>>,
+    /// The inventory's implementation roots per group.
+    pub group_candidates: Vec<Vec<PhysicalCandidateId>>,
+}
+
+#[cfg(test)]
+impl InventoryForTests {
+    pub(in crate::search) fn new(
+        inventory: CandidateInventory,
+        mut node_local_cost: impl FnMut(&OperatorNode) -> Result<f64, String>,
+    ) -> Self {
+        let templates: Vec<_> = inventory
+            .operator_nodes_of_candidates_for_memo_groups
+            .iter()
+            .map(|node| Rc::clone(&node.physical_node))
+            .collect();
+        let graph = DagOfPhysicalCandidatesWithCosts {
+            candidates: templates
+                .iter()
+                .zip(&inventory.supplier_nodes_per_input)
+                .map(|(node, inputs)| PhysicalCandidateWithCost {
+                    local_cost: node_local_cost(node).unwrap(),
+                    supplier_candidates_per_input: inputs
+                        .iter()
+                        .map(|suppliers| InputSupplierCandidates {
+                            candidates: suppliers.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            query_roots: inventory
+                .query_output_nodes
+                .iter()
+                .map(|nodes| QueryOutputCandidates {
+                    candidates: nodes.clone(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let group_candidates = inventory.implementation_roots_of_group.clone();
+        Self {
+            inventory,
+            graph,
+            templates,
+            group_candidates,
+        }
+    }
+
+    /// Each node as one query-time, unmaterialized candidate with the DAG's
+    /// costs.
+    pub(in crate::search) fn configured_for_tests(
+        &self,
+    ) -> crate::search::candidates::dag::PhysicalCandidatesWithCosts {
+        use asap_types::ir::properties::ExecutionTiming;
+        crate::search::candidates::dag::PhysicalCandidatesWithCosts::from_dag_for_tests(
+            self.graph.clone(),
+            self.templates
+                .iter()
+                .map(|node| {
+                    (
+                        Rc::clone(node),
+                        (ExecutionTiming::QueryTime, Materialization::NotMaterialized),
+                    )
+                })
+                .collect(),
+        )
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for InventoryForTests {
+    type Target = CandidateInventory;
+    fn deref(&self) -> &CandidateInventory {
+        &self.inventory
+    }
+}
 
 /// Each output reference is an operator group, not necessarily an entire query.
 /// Scalar query assembly and Stage 2/accuracy validation remain with the caller.
@@ -22,9 +110,9 @@ pub(in crate::search) fn build_candidate_inventory(
     memo: &CandidateMemo,
     output_groups: &[MemoGroupId],
     node_local_cost: impl FnMut(&OperatorNode) -> Result<f64, String>,
-) -> Result<CandidateInventory, CandidateInventoryError> {
-    build_candidate_inventory_before(memo, output_groups, node_local_cost, None)
-        .map(|(inventory, _)| inventory)
+) -> Result<InventoryForTests, CandidateInventoryError> {
+    build_candidate_inventory_before(memo, output_groups, None)
+        .map(|inventory| InventoryForTests::new(inventory, node_local_cost))
 }
 
 #[cfg(test)]
@@ -75,26 +163,30 @@ mod tests {
         let (memo, outputs) = quantile_memo();
         let cost = |node: &OperatorNode| Ok(if is_kll(node) { 8.0 } else { 1.0 });
         let mut compatible_producers_cache = MemoGroupOutputToCompatibleProducersCache::default();
-        let cached = build_with_compatible_producers_cache(
-            &memo,
-            &outputs,
+        let cached = InventoryForTests::new(
+            build_with_compatible_producers_cache(
+                &memo,
+                &outputs,
+                None,
+                &mut compatible_producers_cache,
+            )
+            .unwrap(),
             cost,
-            None,
-            &mut compatible_producers_cache,
-        )
-        .unwrap();
+        );
         assert!(
             compatible_producers_cache.hits() > 0,
             "repeated typed supplier checks were actually reused"
         );
-        let uncached = build_with_compatible_producers_cache(
-            &memo,
-            &outputs,
+        let uncached = InventoryForTests::new(
+            build_with_compatible_producers_cache(
+                &memo,
+                &outputs,
+                None,
+                &mut MemoGroupOutputToCompatibleProducersCache::disabled(),
+            )
+            .unwrap(),
             cost,
-            None,
-            &mut MemoGroupOutputToCompatibleProducersCache::disabled(),
-        )
-        .unwrap();
+        );
         assert_eq!(
             format!("{:?}", cached.graph),
             format!("{:?}", uncached.graph)
@@ -102,10 +194,7 @@ mod tests {
         assert_eq!(cached.group_candidates, uncached.group_candidates);
         assert_eq!(cached.templates.len(), uncached.templates.len());
         for (cached, uncached) in cached.templates.iter().zip(&uncached.templates) {
-            assert!(
-                Rc::ptr_eq(cached.as_ref().unwrap(), uncached.as_ref().unwrap())
-                    || cached.as_ref().unwrap() == uncached.as_ref().unwrap()
-            );
+            assert!(Rc::ptr_eq(cached, uncached) || cached == uncached);
         }
         let cached_plan = select_candidates(&cached.graph).unwrap().unwrap();
         let uncached_plan = select_candidates(&uncached.graph).unwrap().unwrap();
@@ -159,7 +248,7 @@ mod tests {
             selected
                 .selected_candidates
                 .iter()
-                .filter(|id| is_kll(inventory.templates[id.0].as_ref().unwrap()))
+                .filter(|id| is_kll(&inventory.templates[id.0]))
                 .count(),
             1
         );
@@ -331,60 +420,45 @@ mod tests {
             enumerate_candidate_configurations(&source, &[0, 1], &entries, &data, &deployment)
                 .unwrap();
         // Synthetic activation objective exposes reuse; it is not runtime pricing.
-        for (id, candidate) in configured.inventory.graph.candidates.iter_mut().enumerate() {
-            let node = configured.inventory.templates[id].as_ref().unwrap();
+        let nodes = configured.nodes_for_tests();
+        for (id, candidate) in configured.dag.candidates.iter_mut().enumerate() {
+            let node = &nodes[id];
             candidate.local_cost = if node.guarantee.as_ref().is_some_and(|guarantee| {
                 !guarantee.is_exact()
                     && guarantee.spec.accuracy_metric
                         == asap_types::ir::properties::AccuracyMetric::Rank
             }) {
                 100_000.0
-            } else if matches!(
-                configured.inventory.templates[id].as_ref().unwrap().asap(),
-                Some(ASAPOp::PaneChain { .. })
-            ) {
+            } else if matches!(node.asap(), Some(ASAPOp::PaneChain { .. })) {
                 1000.0
             } else {
                 1.0
             };
         }
-        let selected = crate::search::milp::model::solve_candidate_proposal(
-            &configured.inventory.graph,
-            &[],
-            None,
-        )
-        .unwrap()
-        .unwrap()
-        .selected;
+        let selected =
+            crate::search::milp::model::solve_candidate_proposal(&configured.dag, &[], None)
+                .unwrap()
+                .unwrap()
+                .selected;
         let chains: Vec<_> = selected
             .selected_candidates
             .iter()
-            .filter(|id| {
-                matches!(
-                    configured.inventory.templates[id.0]
-                        .as_ref()
-                        .unwrap()
-                        .asap(),
-                    Some(ASAPOp::PaneChain { .. })
-                )
-            })
+            .filter(|id| matches!(configured.node(id.0).asap(), Some(ASAPOp::PaneChain { .. })))
             .collect();
         assert_eq!(chains.len(), 1);
-        let chain = configured.inventory.templates[chains[0].0]
-            .as_ref()
-            .unwrap();
+        let chain = configured.node(chains[0].0);
         assert!(labels.iter().all(|name| chain
             .schema
             .fields
             .iter()
             .any(|field| field.name == *name)));
-        let mut modes = vec![None; configured.configurations.len()];
+        let mut modes = vec![None; configured.physical.candidates.len()];
         for id in &selected.selected_candidates {
-            modes[id.0] = Some(configured.configurations[id.0].materialization);
+            modes[id.0] = Some(configured.physical.candidates[id.0].materialization);
         }
         let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
         let mut physical = materialize_selected_candidates(
-            &configured.inventory,
+            &configured.physical,
             &selected,
             &modes,
             &roots,
@@ -516,18 +590,15 @@ mod tests {
             .unwrap();
             if matches!(kind, "ranking" | "sketch") {
                 for (output, group) in inventory.graph.query_roots.iter_mut().zip(&outputs) {
-                    output.compatible_candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| memo.candidates[group.0 as usize][index].origin == if kind == "ranking" { asap_types::stages::OriginOfCandidateForMemoGroup::TopKReuse } else { asap_types::stages::OriginOfCandidateForMemoGroup::SharedBuild }));
-                    assert!(
-                        !output.compatible_candidates.is_empty(),
-                        "{kind} reader generated"
-                    );
+                    output.candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| memo.candidates[group.0 as usize][index].origin == if kind == "ranking" { asap_types::stages::OriginOfCandidateForMemoGroup::TopKReuse } else { asap_types::stages::OriginOfCandidateForMemoGroup::SharedBuild }));
+                    assert!(!output.candidates.is_empty(), "{kind} reader generated");
                 }
             }
             let selected = select_candidates(&inventory.graph).unwrap().expect(kind);
             let chosen: Vec<_> = selected
                 .selected_candidates
                 .iter()
-                .map(|id| inventory.templates[id.0].as_ref().unwrap())
+                .map(|id| &inventory.templates[id.0])
                 .collect();
             if kind == "ranking" {
                 assert_eq!(
@@ -571,7 +642,13 @@ mod tests {
                 .or_default()
                 .values_non_negative = true;
             let mut realized = materialize_selected_candidates(
-                &inventory, &selected, &modes, &roots, &entries, &data, false,
+                &inventory.configured_for_tests().physical,
+                &selected,
+                &modes,
+                &roots,
+                &entries,
+                &data,
+                false,
             )
             .unwrap();
             realized.physical.id = format!("shared-{kind}");
@@ -681,14 +758,14 @@ mod tests {
                 .zip(&outputs)
                 .enumerate()
             {
-                output.compatible_candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| {
+                output.candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| {
                     let candidate = &memo.candidates[group.0 as usize][index];
                     if query == 0 { candidate.origin == OriginOfCandidateForMemoGroup::SummaryResult } else {
                         candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild && OperatorNode::reachable(&candidate.root_node).iter().any(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg {family: FieldDataType::Sketch(kind, _), ..}) if kind.algorithm() == &SketchAlgorithm::DDSketch))
                     }
                 }));
                 assert!(
-                    !output.compatible_candidates.is_empty(),
+                    !output.candidates.is_empty(),
                     "factored/shared output {query}"
                 );
             }
@@ -696,18 +773,16 @@ mod tests {
             let alphas: Vec<_> = selected
                 .selected_candidates
                 .iter()
-                .filter_map(
-                    |id| match inventory.templates[id.0].as_ref().unwrap().asap() {
-                        Some(ASAPOp::SummaryAgg {
-                            family: FieldDataType::Sketch(kind, _),
-                            ..
-                        }) => match kind.params() {
-                            SketchParams::DDSketch { alpha } => Some(*alpha),
-                            _ => None,
-                        },
+                .filter_map(|id| match &inventory.templates[id.0].asap() {
+                    Some(ASAPOp::SummaryAgg {
+                        family: FieldDataType::Sketch(kind, _),
+                        ..
+                    }) => match kind.params() {
+                        SketchParams::DDSketch { alpha } => Some(*alpha),
                         _ => None,
                     },
-                )
+                    _ => None,
+                })
                 .collect();
             assert_eq!(
                 alphas.len(),
@@ -744,7 +819,13 @@ mod tests {
             }
             let mut realized =
                 asap_physical_asap_optimization::catalog::materialize_selected_candidates(
-                    &inventory, &selected, &modes, &roots, &entries, &data, false,
+                    &inventory.configured_for_tests().physical,
+                    &selected,
+                    &modes,
+                    &roots,
+                    &entries,
+                    &data,
+                    false,
                 )
                 .unwrap();
             realized.physical.id = format!("independent-capacities-{share_both}");
@@ -798,14 +879,14 @@ mod tests {
         assert!(priced_operators.contains(&"Sort"));
         assert!(priced_operators.contains(&"Limit"));
         let exact_root = inventory.group_candidates[output.0 as usize][0];
-        let root_template = inventory.templates[exact_root.0].as_ref().unwrap();
+        let root_template = &inventory.templates[exact_root.0];
         assert!(
             OperatorNode::reachable(root_template)
                 .iter()
                 .any(|node| Rc::ptr_eq(node, &original_input)),
             "lowering preserves canonical input boundary"
         );
-        assert!(inventory.templates.iter().flatten().all(|node| !matches!(node.non_asap(), Some(NonASAPOp::Aggregate { measures, .. }) if measures.iter().any(|measure| matches!(measure, AggIntent::TopK { .. })))));
+        assert!(inventory.templates.iter().all(|node| !matches!(node.non_asap(), Some(NonASAPOp::Aggregate { measures, .. }) if measures.iter().any(|measure| matches!(measure, AggIntent::TopK { .. })))));
         let selected = select_candidates(&inventory.graph).unwrap().unwrap();
         let mut modes = vec![None; inventory.graph.candidates.len()];
         for id in &selected.selected_candidates {
@@ -816,7 +897,7 @@ mod tests {
             QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(60_000))),
         )];
         let physical = materialize_selected_candidates(
-            &inventory,
+            &inventory.configured_for_tests().physical,
             &selected,
             &modes,
             &roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>(),
@@ -862,14 +943,16 @@ mod tests {
     #[test]
     fn terminal_reader_factoring_reconstructs_the_same_minimum_cost_computation() {
         let (memo, outputs) = nested_sum_memo(false);
-        let original = build_with_compatible_producers_cache(
-            &memo,
-            &outputs,
+        let original = InventoryForTests::new(
+            build_with_compatible_producers_cache(
+                &memo,
+                &outputs,
+                None,
+                &mut MemoGroupOutputToCompatibleProducersCache::default(),
+            )
+            .unwrap(),
             |_| Ok(1.0),
-            None,
-            &mut MemoGroupOutputToCompatibleProducersCache::default(),
-        )
-        .unwrap();
+        );
         let compact = build_candidate_inventory(&memo, &outputs, |_| Ok(1.0)).unwrap();
         assert!(compact.graph.candidates.len() < original.graph.candidates.len());
         let before = select_candidates(&original.graph).unwrap().unwrap();
@@ -903,23 +986,23 @@ mod tests {
             .position(|candidate| !candidate.fused_groups.is_empty())
             .expect("nested sum has an absorbed computation");
         let absorbed = memo.candidates[owner][fused_index].fused_groups[0];
-        let mut inventory = build_with_compatible_producers_cache(
-            &memo,
-            &outputs,
+        let mut inventory = InventoryForTests::new(
+            build_with_compatible_producers_cache(
+                &memo,
+                &outputs,
+                None,
+                &mut MemoGroupOutputToCompatibleProducersCache::default(),
+            )
+            .unwrap(),
             |_| Ok(1.0),
-            None,
-            &mut MemoGroupOutputToCompatibleProducersCache::default(),
-        )
-        .unwrap();
+        );
         let fused = inventory.group_candidates[owner][fused_index];
         assert!(!inventory.group_candidates[absorbed.0 as usize].contains(&fused));
         assert!(
-            inventory.graph.query_roots[0]
-                .compatible_candidates
-                .contains(&fused),
+            inventory.graph.query_roots[0].candidates.contains(&fused),
             "fused output satisfies its owning group's contract"
         );
-        inventory.graph.query_roots[0].compatible_candidates = vec![fused];
+        inventory.graph.query_roots[0].candidates = vec![fused];
         let selected = select_candidates(&inventory.graph).unwrap().unwrap();
         assert!(inventory.group_candidates[absorbed.0 as usize]
             .iter()
@@ -950,19 +1033,19 @@ mod tests {
                 candidate.root_node.contains_asap() && !candidate.input_groups.contains(&inner)
             })
             .expect("fusion can privately recompute the shared inner work");
-        let mut inventory = build_with_compatible_producers_cache(
-            &memo,
-            &outputs,
+        let mut inventory = InventoryForTests::new(
+            build_with_compatible_producers_cache(
+                &memo,
+                &outputs,
+                None,
+                &mut MemoGroupOutputToCompatibleProducersCache::default(),
+            )
+            .unwrap(),
             |_| Ok(1.0),
-            None,
-            &mut MemoGroupOutputToCompatibleProducersCache::default(),
-        )
-        .unwrap();
+        );
         let fused = inventory.group_candidates[owner][fused_index];
-        inventory.graph.query_roots[0].compatible_candidates = vec![fused];
-        assert!(!inventory.graph.query_roots[1]
-            .compatible_candidates
-            .contains(&fused));
+        inventory.graph.query_roots[0].candidates = vec![fused];
+        assert!(!inventory.graph.query_roots[1].candidates.contains(&fused));
         let selected = select_candidates(&inventory.graph).unwrap().unwrap();
         assert!(inventory.group_candidates[inner.0 as usize]
             .iter()
@@ -1011,19 +1094,14 @@ mod tests {
     fn inventory_deadline_returns_typed_timeout() {
         let (memo, outputs) = quantile_memo();
         assert!(matches!(
-            build_candidate_inventory_before(
-                &memo,
-                &outputs,
-                |_| Ok(0.0),
-                Some(std::time::Instant::now())
-            ),
+            build_candidate_inventory_before(&memo, &outputs, Some(std::time::Instant::now())),
             Err(CandidateInventoryError::DeadlineExceeded(_))
         ));
     }
 
     // Unsupported decisions must fail adaptation, rather than disappear.
     #[test]
-    fn rejects_zero_accuracy_share_and_invalid_costs() {
+    fn rejects_zero_accuracy_share() {
         let (mut memo, outputs) = quantile_memo();
         memo.candidates[0][0].accuracy_budget_parts = 0;
         assert!(matches!(
@@ -1032,11 +1110,6 @@ mod tests {
                 reason: "zero accuracy budget share",
                 ..
             })
-        ));
-        memo.candidates[0][0].accuracy_budget_parts = 1;
-        assert!(matches!(
-            build_candidate_inventory(&memo, &outputs, |_| Ok(f64::NAN)),
-            Err(CandidateInventoryError::Cost(_))
         ));
     }
     // Budget shares are concrete sizes: composed root accuracy, not the share

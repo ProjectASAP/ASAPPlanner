@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use asap_types::ir::{NonASAPOp, QueryRoot};
 
+use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
 use crate::search::milp::model::CandidateSolveMetrics;
 #[cfg(test)]
 use crate::search::refinement::planner::evaluate_configured_candidate;
@@ -17,11 +18,11 @@ use crate::search::refinement::search::{
 };
 use crate::PlanSelector;
 use asap_cost::CostModel;
-use asap_types::stages::CandidateConfigurationInventory;
-use asap_types::stages::CandidateInventory;
+
+use crate::search::candidates::dag::{validate_selected_graph, DagOfPhysicalCandidatesWithCosts};
 use asap_types::stages::{
-    validate_selected_graph, CandidateDependencyGraph, PhysicalCandidateId,
-    ProducerConsumerConnection, QueryRootAssignment, ReaderConstraint, SelectedCandidateGraph,
+    PhysicalASAPMemoCandidates, PhysicalCandidateId, ProducerConsumerConnection,
+    QueryRootAssignment, ReaderConstraint, SelectedCandidateGraph,
 };
 use asap_types::stages::{SupplierCandidates, SupplierSetInterner};
 
@@ -32,30 +33,22 @@ struct Component {
     outputs: Vec<usize>,
 }
 
+/// The query of each output reference of `roots`
+/// ([`asap_types::stages::output_references`]).
 fn output_queries(roots: &[QueryRoot]) -> Vec<usize> {
-    let mut outputs = Vec::new();
-    for (query, root) in roots.iter().enumerate() {
-        match root {
-            QueryRoot::Operator(_) => outputs.push(query),
-            QueryRoot::Scalar(expression) => {
-                expression.map_operator_refs(&mut |node| {
-                    outputs.push(query);
-                    node.clone()
-                });
-            }
-        }
-    }
-    outputs
+    asap_types::stages::output_references(roots)
+        .into_iter()
+        .map(|(query, _)| query)
+        .collect()
 }
 
 fn components(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
 ) -> Result<Vec<Component>, String> {
-    let graph = &configured.inventory.graph;
+    let graph = &configured.dag;
     graph.validate().map_err(|e| e.to_string())?;
-    if configured.inventory.templates.len() != graph.candidates.len()
-        || configured.configurations.len() != graph.candidates.len()
+    if configured.physical.candidates.len() != graph.candidates.len()
         || context.original_roots.len() != context.entries.len()
     {
         return Err("component inputs have inconsistent candidate/query indexing".into());
@@ -102,7 +95,7 @@ fn components(
     let raw_retention_priced = context.models.deployment_capabilities.raw_data_retained
         && prices.cost_per_disk_byte_second > 0.0;
     for (output, &query) in outputs.iter().enumerate() {
-        let mut pending = graph.query_roots[output].compatible_candidates.clone();
+        let mut pending = graph.query_roots[output].candidates.clone();
         while let Some(id) = pending.pop() {
             if !reach[query].insert(id.0) {
                 continue;
@@ -113,9 +106,7 @@ fn components(
                 first_reader[id.0] = Some(query);
             }
             if raw_retention_priced {
-                let node = configured.inventory.templates[id.0]
-                    .as_ref()
-                    .ok_or("component candidate has no template")?;
+                let node = configured.node(id.0);
                 if let Some(NonASAPOp::Scan { source, .. }) = node.non_asap() {
                     let signature = serde_json::to_string(source).map_err(|e| e.to_string())?;
                     if let Some(&other) = first_source.get(&signature) {
@@ -127,9 +118,9 @@ fn components(
             }
             pending.extend(
                 graph.candidates[id.0]
-                    .producer_requirements
+                    .supplier_candidates_per_input
                     .iter()
-                    .flat_map(|input| input.compatible_producers.iter().copied()),
+                    .flat_map(|input| input.candidates.iter().copied()),
             );
         }
     }
@@ -183,17 +174,17 @@ fn components(
 
 /// Whether `component` holds every producer, root candidate and required copy
 /// its candidates and outputs refer to, so `project` drops nothing.
-fn closed(graph: &CandidateDependencyGraph, component: &Component) -> bool {
+fn closed(graph: &DagOfPhysicalCandidatesWithCosts, component: &Component) -> bool {
     let inside: HashSet<_> = component.candidates.iter().copied().collect();
     component.candidates.iter().all(|&id| {
         graph.candidates[id]
-            .producer_requirements
+            .supplier_candidates_per_input
             .iter()
-            .flat_map(|input| input.compatible_producers.iter())
+            .flat_map(|input| input.candidates.iter())
             .all(|producer| inside.contains(&producer.0))
     }) && component.outputs.iter().all(|&output| {
         graph.query_roots[output]
-            .compatible_candidates
+            .candidates
             .iter()
             .all(|id| inside.contains(&id.0))
     }) && graph
@@ -209,9 +200,9 @@ fn closed(graph: &CandidateDependencyGraph, component: &Component) -> bool {
 }
 
 fn project(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     component: &Component,
-) -> CandidateConfigurationInventory {
+) -> PhysicalCandidatesWithCosts {
     let candidates: HashMap<_, _> = component
         .candidates
         .iter()
@@ -224,22 +215,22 @@ fn project(
         .enumerate()
         .map(|(local, &global)| (global, local))
         .collect();
-    let graph = &configured.inventory.graph;
+    let graph = &configured.dag;
     let mut supplier_sets = SupplierSetInterner::default();
     let mut remapped: HashMap<SupplierCandidates, SupplierCandidates> = HashMap::new();
-    let mut projected = CandidateDependencyGraph {
+    let mut projected = DagOfPhysicalCandidatesWithCosts {
         candidates: component
             .candidates
             .iter()
             .map(|&id| {
                 let mut candidate = graph.candidates[id].clone();
-                for input in &mut candidate.producer_requirements {
-                    input.compatible_producers = remapped
-                        .entry(input.compatible_producers.clone())
+                for input in &mut candidate.supplier_candidates_per_input {
+                    input.candidates = remapped
+                        .entry(input.candidates.clone())
                         .or_insert_with(|| {
                             supplier_sets.intern(
                                 input
-                                    .compatible_producers
+                                    .candidates
                                     .iter()
                                     .filter_map(|id| candidates.get(&id.0))
                                     .map(|&local| PhysicalCandidateId(local))
@@ -256,8 +247,8 @@ fn project(
             .iter()
             .map(|&id| {
                 let mut root = graph.query_roots[id].clone();
-                root.compatible_candidates = root
-                    .compatible_candidates
+                root.candidates = root
+                    .candidates
                     .iter()
                     .filter_map(|id| candidates.get(&id.0))
                     .map(|&local| PhysicalCandidateId(local))
@@ -346,49 +337,66 @@ fn project(
         };
         projected.reader_constraints.push(mapped);
     }
-    CandidateConfigurationInventory {
-        inventory: CandidateInventory {
-            graph: projected,
-            templates: component
-                .candidates
+    // The component keeps only the operator nodes its candidates run,
+    // renumbered in first-use order.
+    let mut operator_nodes = Vec::new();
+    let mut operator_node_of = HashMap::new();
+    // The component is planned over its own queries only, so per-query
+    // facts are re-indexed to `component.queries`.
+    let physical_candidates = component
+        .candidates
+        .iter()
+        .zip(&projected.candidates)
+        .map(|(&id, projected)| {
+            let mut candidate = configured.physical.candidates[id].clone();
+            candidate.operator_node = *operator_node_of
+                .entry(candidate.operator_node)
+                .or_insert_with(|| {
+                    operator_nodes.push(
+                        configured
+                            .physical
+                            .operator_nodes_of_candidates_for_memo_groups
+                            [candidate.operator_node.0]
+                            .clone(),
+                    );
+                    asap_types::stages::OperatorNodeOfCandidateForMemoGroupId(
+                        operator_nodes.len() - 1,
+                    )
+                });
+            candidate.supplier_candidates_per_input = projected
+                .supplier_candidates_per_input
                 .iter()
-                .map(|&id| configured.inventory.templates[id].clone())
-                .collect(),
-            group_candidates: configured
-                .inventory
-                .group_candidates
-                .iter()
-                .map(|group| {
-                    group
-                        .iter()
-                        .filter_map(|id| {
-                            candidates
-                                .get(&id.0)
-                                .map(|&local| PhysicalCandidateId(local))
-                        })
-                        .collect()
-                })
-                .collect(),
-        },
-        // The component is planned over its own queries only, so per-query
-        // facts are re-indexed to `component.queries`.
-        configurations: component
-            .candidates
+                .map(|input| input.candidates.clone())
+                .collect();
+            if !candidate
+                .may_keep_across_evaluations_per_sole_reader_query
+                .is_empty()
+            {
+                candidate.may_keep_across_evaluations_per_sole_reader_query = component
+                    .queries
+                    .iter()
+                    .map(|&query| {
+                        configured.physical.candidates[id]
+                            .may_keep_across_evaluations_per_sole_reader_query[query]
+                    })
+                    .collect();
+            }
+            candidate
+        })
+        .collect();
+    let physical = PhysicalASAPMemoCandidates::new(
+        operator_nodes,
+        physical_candidates,
+        component
+            .queries
             .iter()
-            .map(|&id| {
-                let mut configuration = configured.configurations[id].clone();
-                if !configuration.may_keep_with_sole_reader.is_empty() {
-                    configuration.may_keep_with_sole_reader = component
-                        .queries
-                        .iter()
-                        .map(|&query| {
-                            configured.configurations[id].may_keep_with_sole_reader[query]
-                        })
-                        .collect();
-                }
-                configuration
-            })
+            .map(|&query| configured.physical.query_roots[query].clone())
             .collect(),
+        projected.reader_constraints.clone(),
+    );
+    PhysicalCandidatesWithCosts {
+        physical,
+        dag: projected,
     }
 }
 
@@ -434,11 +442,11 @@ const MAX_SHARED_SEARCH_CANDIDATES: usize = 128;
 /// combination is not a valid selection. It is not yet evaluated for the
 /// whole workload.
 pub(in crate::search) fn separate_plans_combined(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
     limits: CandidateSearchLimits,
 ) -> Option<(SelectedCandidateGraph, f64)> {
-    let graph = &configured.inventory.graph;
+    let graph = &configured.dag;
     let outputs = output_queries(context.original_roots);
     if outputs.len() != graph.query_roots.len() {
         return None;
@@ -454,14 +462,14 @@ pub(in crate::search) fn separate_plans_combined(
     };
     let mut reach = vec![HashSet::new(); count];
     for (output, &query) in outputs.iter().enumerate() {
-        let mut pending = graph.query_roots[output].compatible_candidates.clone();
+        let mut pending = graph.query_roots[output].candidates.clone();
         while let Some(id) = pending.pop() {
             if reach[query].insert(id.0) {
                 pending.extend(
                     graph.candidates[id.0]
-                        .producer_requirements
+                        .supplier_candidates_per_input
                         .iter()
-                        .flat_map(|input| input.compatible_producers.iter().copied()),
+                        .flat_map(|input| input.candidates.iter().copied()),
                 );
             }
         }
@@ -556,7 +564,7 @@ pub(in crate::search) fn separate_plans_combined(
 /// and covered values, then takes the minimum for shared state. Such state joins
 /// components above; there is no workload-global failure-budget allocation.
 pub(in crate::search) fn optimize_independent_components(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
     limits: CandidateSearchLimits,
 ) -> Result<CandidatePlanningResult, String> {
@@ -575,9 +583,7 @@ pub(in crate::search) fn optimize_independent_components(
         return optimize_configured_candidates(configured, context, limits);
     }
     // `project` drops what lies outside a component; components are closed.
-    debug_assert!(parts
-        .iter()
-        .all(|part| closed(&configured.inventory.graph, part)));
+    debug_assert!(parts.iter().all(|part| closed(&configured.dag, part)));
     let mut combined = SelectedCandidateGraph {
         selected_candidates: Vec::new(),
         connections: Vec::new(),
@@ -692,7 +698,7 @@ pub(in crate::search) fn optimize_independent_components(
     }
     combined.selected_candidates.sort_unstable();
     combined.query_roots.sort_by_key(|root| root.query_root);
-    validate_selected_graph(&configured.inventory.graph, &combined)?;
+    validate_selected_graph(&configured.dag, &combined)?;
     let validation_started = Instant::now();
     let mut rejected_queries = Vec::new();
     let evaluated = evaluate_configured_candidate_before(
@@ -785,6 +791,7 @@ mod tests {
         assert_eq!(wall_time - (first + second), wall_time / 8);
     }
     use crate::search::candidates::configurations::enumerate_candidate_configurations;
+    use crate::search::candidates::dag::ResourceBudget;
     use crate::search::milp::model::{solve_candidate_proposal, ObservedAssignment};
     use crate::PlanningModels;
     use asap_cost::{CalibrationFit, CostInputs, ResourceUnitCost};
@@ -792,8 +799,7 @@ mod tests {
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::scalar::{ScalarExpr, ScalarValue};
     use asap_types::ir::{Operator, OperatorNode};
-    use asap_types::stages::MemoGroupId;
-    use asap_types::stages::{PhysicalCandidate, QueryRootCandidates, ResourceBudget};
+
     use asap_types::workload::*;
     use std::rc::Rc;
     use std::time::Duration;
@@ -801,7 +807,7 @@ mod tests {
     fn fixture(
         literal: bool,
     ) -> (
-        CandidateConfigurationInventory,
+        PhysicalCandidatesWithCosts,
         Vec<QueryRoot>,
         Vec<QueryWorkloadEntry>,
         DataWorkload,
@@ -815,26 +821,16 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let source = CandidateInventory {
-            graph: CandidateDependencyGraph {
-                candidates: (0..2)
-                    .map(|id| PhysicalCandidate {
-                        group: MemoGroupId(id),
-                        local_cost: 0.0,
-                        producer_requirements: Vec::new(),
-                    })
-                    .collect(),
-                query_roots: [0, 0, 1, 1]
-                    .into_iter()
-                    .map(|id| QueryRootCandidates {
-                        compatible_candidates: vec![PhysicalCandidateId(id)],
-                    })
-                    .collect(),
-                ..Default::default()
-            },
-            templates: scans.iter().map(|node| Some(Rc::clone(node))).collect(),
-            group_candidates: Vec::new(),
-        };
+        let source = crate::search::candidates::configurations::inventory_for_tests(
+            scans
+                .iter()
+                .map(|node| (Rc::clone(node), Vec::new()))
+                .collect(),
+            [0, 0, 1, 1]
+                .into_iter()
+                .map(|id| vec![PhysicalCandidateId(id)])
+                .collect(),
+        );
         let mut roots: Vec<_> = [0, 0, 1, 1]
             .into_iter()
             .map(|id| QueryRoot::Operator(Rc::clone(&scans[id])))
@@ -910,7 +906,7 @@ mod tests {
         let mut observed = Vec::new();
         let mut optimum = f64::INFINITY;
         while let Some(proposal) =
-            solve_candidate_proposal(&configured.inventory.graph, &observed, None).unwrap()
+            solve_candidate_proposal(&configured.dag, &observed, None).unwrap()
         {
             let result = evaluate_configured_candidate(
                 &configured,
@@ -943,7 +939,7 @@ mod tests {
         .unwrap();
         let incumbent = split.search.incumbent.unwrap();
         assert!((incumbent.actual_cost - optimum).abs() <= 1e-9 * optimum);
-        validate_selected_graph(&configured.inventory.graph, &incumbent.selected).unwrap();
+        validate_selected_graph(&configured.dag, &incumbent.selected).unwrap();
         let (selection, physical) = split.best.unwrap();
         assert_eq!(physical.roots.len(), 5);
         assert_eq!(selection.accepted[&selection.selected].len(), 5);
@@ -971,21 +967,17 @@ mod tests {
             calibration: CalibrationFit::default(),
         };
         assert_eq!(components(&configured, &context).unwrap().len(), 2);
-        let first = configured.inventory.graph.query_roots[0].compatible_candidates[0];
-        configured.inventory.graph.query_roots[2]
-            .compatible_candidates
-            .push(first);
+        let first = configured.dag.query_roots[0].candidates[0];
+        configured.dag.query_roots[2].candidates.push(first);
         assert_eq!(components(&configured, &context).unwrap().len(), 1);
-        configured.inventory.graph.query_roots[2]
-            .compatible_candidates
-            .pop();
-        for node in configured.inventory.templates.iter_mut().flatten() {
-            let mut changed = (**node).clone();
+        configured.dag.query_roots[2].candidates.pop();
+        for (id, node) in configured.nodes_for_tests().into_iter().enumerate() {
+            let mut changed = (*node).clone();
             let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = &mut changed.operator else {
                 unreachable!()
             };
             *source = asap_types::ir::operator::Source::TimeSeries { metric: "a".into() };
-            *node = Rc::new(changed);
+            configured.set_node_for_tests(id, Rc::new(changed));
         }
         assert_eq!(components(&configured, &context).unwrap().len(), 1);
         let mut free_disk = CostInputs::default();
@@ -999,17 +991,13 @@ mod tests {
             ..context
         };
         assert_eq!(components(&configured, &independent).unwrap().len(), 2);
-        configured
-            .inventory
-            .graph
-            .resource_budgets
-            .push(ResourceBudget {
-                name: "global memory".into(),
-                capacity: 100.0,
-                candidate_usage: vec![1.0; configured.configurations.len()],
-            });
+        configured.dag.resource_budgets.push(ResourceBudget {
+            name: "global memory".into(),
+            capacity: 100.0,
+            candidate_usage: vec![1.0; configured.physical.candidates.len()],
+        });
         assert_eq!(components(&configured, &independent).unwrap().len(), 1);
-        configured.inventory.graph.resource_budgets.clear();
+        configured.dag.resource_budgets.clear();
         let provisioned = CostInputs {
             cost_model: CostModel::ProvisionedCapacity(ResourceUnitCost::illustrative()),
             ..Default::default()

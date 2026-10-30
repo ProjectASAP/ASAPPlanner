@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use asap_types::ir::OperatorNode;
 use asap_types::stages::MemoGroupId;
 
-use asap_types::stages::PhysicalCandidateId;
+use asap_types::stages::{CandidateForMemoGroupId, PhysicalCandidateId};
 use asap_types::stages::{SupplierCandidates, SupplierSetInterner};
 
 #[derive(Hash, PartialEq, Eq)]
@@ -74,41 +74,35 @@ impl MemoGroupOutputToCompatibleProducersCache {
 /// operators retain their original identities. Scope expansion must retain one
 /// independently bound reader copy per possible output reference; then every
 /// old selection maps to these copies, and each new binding expands to an old
-/// reader with the same complete interface and fixed local cost.
+/// reader with the same complete interface.
 ///
 /// These operators bypass ConcreteRows' witness-based row certification.
 /// certified_price checks every supplied producer; template-based proposal
 /// prices remain advisory. Execution and accuracy are recomputed from selected
 /// suppliers, never from the representative template's child witness.
 ///
-/// `memo_candidate_roots` (root IDs, by memo group and candidate) is mapped
-/// to the new IDs without removing duplicates.
+/// A kept node's `candidates_for_memo_group` becomes the union, ascending,
+/// of the candidates of the nodes factored into it.
 pub fn factor_terminal_readers(
-    inventory: &mut asap_types::stages::CandidateInventory,
-    memo_candidate_roots: &mut [Vec<PhysicalCandidateId>],
+    inventory: &mut super::inventory::CandidateInventory,
     deadline: Option<std::time::Instant>,
 ) -> Result<usize, super::inventory::CandidateInventoryError> {
     use super::inventory::CandidateInventoryError;
     use asap_types::ir::ASAPOp;
     let invalid = |error: String| CandidateInventoryError::InvalidMemo(error);
-    if !inventory.graph.reader_constraints.is_empty()
-        || !inventory.graph.resource_budgets.is_empty()
-    {
-        return Ok(0);
-    }
-    let count = inventory.graph.candidates.len();
+    let count = inventory.operator_nodes_of_candidates_for_memo_groups.len();
     let mut internal = vec![false; count];
-    for candidate in &inventory.graph.candidates {
+    for inputs in &inventory.supplier_nodes_per_input {
         super::check_deadline(deadline)?;
-        for input in &candidate.producer_requirements {
-            for producer in &input.compatible_producers {
+        for input in inputs {
+            for producer in input {
                 internal[producer.0] = true;
             }
         }
     }
     let mut outputs = vec![Vec::new(); count];
-    for (output, root) in inventory.graph.query_roots.iter().enumerate() {
-        for id in &root.compatible_candidates {
+    for (output, root) in inventory.query_output_nodes.iter().enumerate() {
+        for id in root {
             outputs[id.0].push(output);
         }
     }
@@ -117,13 +111,14 @@ pub fn factor_terminal_readers(
     let mut eligible = vec![false; count];
     for id in 0..count {
         super::check_deadline(deadline)?;
-        let candidate = &inventory.graph.candidates[id];
-        if internal[id] || outputs[id].is_empty() || candidate.producer_requirements.len() != 1 {
+        let node = &inventory.operator_nodes_of_candidates_for_memo_groups[id];
+        if internal[id]
+            || outputs[id].is_empty()
+            || inventory.supplier_nodes_per_input[id].len() != 1
+        {
             continue;
         }
-        let Some(template) = &inventory.templates[id] else {
-            continue;
-        };
+        let template = &node.physical_node;
         if !matches!(
             template.asap(),
             Some(ASAPOp::SummaryEstimate { .. } | ASAPOp::FinalizeExactAccumulator { .. })
@@ -140,8 +135,7 @@ pub fn factor_terminal_readers(
         };
         eligible[id] = true;
         let key = rmp_serde::to_vec(&(
-            candidate.group.0,
-            candidate.local_cost.to_bits(),
+            node.group().0,
             &outputs[id],
             operator,
             &template.schema,
@@ -172,18 +166,23 @@ pub fn factor_terminal_readers(
     }
     let mut unions = HashMap::<usize, Vec<PhysicalCandidateId>>::new();
     let mut known = HashMap::<usize, std::collections::HashSet<PhysicalCandidateId>>::new();
+    let mut candidates_for_memo_group = HashMap::<usize, Vec<CandidateForMemoGroupId>>::new();
     for (id, &rep) in representative.iter().enumerate() {
         super::check_deadline(deadline)?;
         if eligible[id] {
             let suppliers = unions.entry(rep).or_default();
             let known = known.entry(rep).or_default();
-            for &supplier in
-                &inventory.graph.candidates[id].producer_requirements[0].compatible_producers
-            {
+            for &supplier in &inventory.supplier_nodes_per_input[id][0] {
                 if known.insert(supplier) {
                     suppliers.push(supplier);
                 }
             }
+        }
+        if id != rep {
+            candidates_for_memo_group.entry(rep).or_default().extend(
+                &inventory.operator_nodes_of_candidates_for_memo_groups[id]
+                    .candidates_for_memo_group,
+            );
         }
     }
     let mut new_ids = vec![PhysicalCandidateId(0); count];
@@ -198,28 +197,32 @@ pub fn factor_terminal_readers(
         new_ids[id] = new_ids[rep];
     }
     let mut lists = SupplierSetInterner::default();
-    let mut candidates = Vec::with_capacity(next);
-    let mut templates = Vec::with_capacity(next);
-    for (id, candidate) in inventory.graph.candidates.iter().enumerate() {
+    let mut nodes = Vec::with_capacity(next);
+    let mut supplier_nodes_per_input = Vec::with_capacity(next);
+    for (id, node) in inventory
+        .operator_nodes_of_candidates_for_memo_groups
+        .iter()
+        .enumerate()
+    {
         super::check_deadline(deadline)?;
         if representative[id] != id {
             continue;
         }
-        let mut candidate = candidate.clone();
+        let mut node = node.clone();
+        if let Some(factored) = candidates_for_memo_group.remove(&id) {
+            node.candidates_for_memo_group.extend(factored);
+            node.candidates_for_memo_group.sort_unstable();
+            node.candidates_for_memo_group.dedup();
+        }
+        let mut inputs = inventory.supplier_nodes_per_input[id].clone();
         if let Some(suppliers) = unions.remove(&id) {
-            candidate.producer_requirements[0].compatible_producers = suppliers.into();
+            inputs[0] = suppliers.into();
         }
-        for input in &mut candidate.producer_requirements {
-            input.compatible_producers = lists.intern(
-                input
-                    .compatible_producers
-                    .iter()
-                    .map(|id| new_ids[id.0])
-                    .collect::<Vec<_>>(),
-            );
+        for input in &mut inputs {
+            *input = lists.intern(input.iter().map(|id| new_ids[id.0]).collect::<Vec<_>>());
         }
-        candidates.push(candidate);
-        templates.push(inventory.templates[id].clone());
+        nodes.push(node);
+        supplier_nodes_per_input.push(inputs);
     }
     let remap = |ids: &mut Vec<PhysicalCandidateId>| {
         let mut seen = std::collections::HashSet::new();
@@ -229,20 +232,14 @@ pub fn factor_terminal_readers(
             .filter(|id| seen.insert(*id))
             .collect();
     };
-    for root in &mut inventory.graph.query_roots {
-        remap(&mut root.compatible_candidates);
+    for root in &mut inventory.query_output_nodes {
+        remap(root);
     }
-    for group in &mut inventory.group_candidates {
+    for group in &mut inventory.implementation_roots_of_group {
         remap(group);
     }
-    for id in memo_candidate_roots.iter_mut().flatten() {
-        *id = new_ids[id.0];
-    }
-    inventory.graph.candidates = candidates;
-    inventory.templates = templates;
-    inventory
-        .graph
-        .validate()
-        .map_err(|error| invalid(error.to_string()))?;
+    inventory.operator_nodes_of_candidates_for_memo_groups = nodes;
+    inventory.supplier_nodes_per_input = supplier_nodes_per_input;
+    inventory.validate().map_err(invalid)?;
     Ok(removed)
 }

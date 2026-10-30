@@ -4,24 +4,25 @@ use std::rc::Rc;
 
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
 use asap_physical_asap_optimization::catalog::test_support::{
-    compatible_timing, may_keep_with_sole_reader,
+    compatible_timing, enumerate_candidate_configurations_before,
+    may_keep_across_evaluations_per_sole_reader_query, CandidateInventory,
 };
-use asap_physical_asap_optimization::catalog::{
-    enumerate_candidate_configurations_before, ConfigurationError,
-};
+use asap_physical_asap_optimization::catalog::ConfigurationError;
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::{ASAPOp, OperatorNode};
+use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot, ScalarExpr};
 use asap_types::physical::{Materialization, Medium};
+use asap_types::stages::{
+    CandidateForMemoGroupId, MemoGroupId, OperatorNodeOfCandidateForMemoGroup, PhysicalCandidateId,
+};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
-use asap_types::stages::{
-    CandidateConfigurationInventory, CandidateDependencyGraph, CandidateInventory,
-    PhysicalCandidate, PhysicalCandidateId, ProducerRequirement, QueryRootCandidates,
-};
+use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
 
-/// `output_queries[reference]` identifies the owning workload query. Multiple
-/// references of one scalar query count once for shared-query materialization.
-/// Existing costs are intentionally not copied: timing changes their demand.
+/// [`enumerate_candidate_configurations_before`] with no deadline, its
+/// output references those of `source`, owned by the queries
+/// `output_queries[reference]` ([`query_roots_for_tests`]), and an unpriced
+/// DAG. Multiple references of one scalar query count once for shared-query
+/// materialization.
 #[cfg(test)]
 pub(in crate::search) fn enumerate_candidate_configurations(
     source: &CandidateInventory,
@@ -29,49 +30,138 @@ pub(in crate::search) fn enumerate_candidate_configurations(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     deployment: &DeploymentCapabilities,
-) -> Result<CandidateConfigurationInventory, ConfigurationError> {
+) -> Result<PhysicalCandidatesWithCosts, ConfigurationError> {
     enumerate_candidate_configurations_before(
         source,
-        output_queries,
+        &query_roots_for_tests(source, output_queries, entries.len()),
         entries,
         data,
         deployment.query_time_results_retained,
         deployment.raw_data_retained,
         None,
     )
+    .map(PhysicalCandidatesWithCosts::new)
 }
 
-/// Test fixtures build configurations by hand; this fills each one's
-/// [`CandidateConfiguration::may_keep_with_sole_reader`] from its template as
-/// [`enumerate_candidate_configurations_before`] does.
+/// A hand-built inventory: node `i` runs `nodes[i].0` and reads, per input,
+/// the nodes `nodes[i].1`; output reference `r` may be produced by the nodes
+/// `query_output_nodes[r]`. The nodes each distinct output list names are the
+/// implementation roots of one group (1, 2, … in order of first appearance);
+/// every other node is a root of group 0.
 #[cfg(test)]
-pub(in crate::search) fn fill_may_keep_with_sole_reader(
-    configured: &mut CandidateConfigurationInventory,
+pub(in crate::search) fn inventory_for_tests(
+    nodes: Vec<(std::rc::Rc<OperatorNode>, Vec<Vec<PhysicalCandidateId>>)>,
+    query_output_nodes: Vec<Vec<PhysicalCandidateId>>,
+) -> CandidateInventory {
+    let mut lists: Vec<Vec<PhysicalCandidateId>> = Vec::new();
+    let mut group_of = vec![0; nodes.len()];
+    for list in &query_output_nodes {
+        let mut sorted = list.clone();
+        sorted.sort();
+        if !lists.contains(&sorted) {
+            lists.push(sorted.clone());
+        }
+        let group = lists.iter().position(|known| *known == sorted).unwrap() + 1;
+        for id in list {
+            assert!(
+                group_of[id.0] == 0 || group_of[id.0] == group,
+                "test inventory gives node {} two different output lists",
+                id.0
+            );
+            group_of[id.0] = group;
+        }
+    }
+    let mut implementation_roots_of_group = vec![Vec::new(); lists.len() + 1];
+    for (id, &group) in group_of.iter().enumerate() {
+        implementation_roots_of_group[group].push(PhysicalCandidateId(id));
+    }
+    let (operator_nodes, suppliers): (Vec<_>, Vec<_>) = nodes
+        .into_iter()
+        .enumerate()
+        .map(|(id, (node, inputs))| {
+            (
+                OperatorNodeOfCandidateForMemoGroup {
+                    candidates_for_memo_group: vec![CandidateForMemoGroupId {
+                        group: MemoGroupId(group_of[id] as u32),
+                        index: id,
+                    }],
+                    is_implementation_root: true,
+                    physical_node: node,
+                },
+                inputs.into_iter().map(Into::into).collect(),
+            )
+        })
+        .unzip();
+    CandidateInventory {
+        operator_nodes_of_candidates_for_memo_groups: operator_nodes,
+        supplier_nodes_per_input: suppliers,
+        query_output_nodes,
+        implementation_roots_of_group,
+    }
+}
+
+/// The roots of `query_count` queries over `source`'s groups: query `q`
+/// reads, in order, the group of each output reference `r` with
+/// `output_queries[r] == q` (a scalar root unless it reads exactly one); an
+/// output no node may produce reads a group with no implementation roots.
+#[cfg(test)]
+pub(in crate::search) fn query_roots_for_tests(
+    source: &CandidateInventory,
+    output_queries: &[usize],
+    query_count: usize,
+) -> Vec<QueryRoot<MemoGroupId>> {
+    let mut groups = vec![Vec::new(); query_count];
+    for (output, &query) in output_queries.iter().enumerate() {
+        groups[query].push(
+            source.query_output_nodes[output]
+                .first()
+                .map_or(MemoGroupId(u32::MAX), |node| {
+                    source.operator_nodes_of_candidates_for_memo_groups[node.0].group()
+                }),
+        );
+    }
+    groups
+        .into_iter()
+        .map(|groups| match groups.as_slice() {
+            [group] => QueryRoot::Operator(*group),
+            _ => QueryRoot::Scalar(ScalarExpr::FunctionCall {
+                name: "refs".into(),
+                args: groups
+                    .into_iter()
+                    .map(ScalarExpr::PromqlScalarFromVector)
+                    .collect(),
+            }),
+        })
+        .collect()
+}
+
+/// Test fixtures build candidates by hand; this fills each one's
+/// `may_keep_across_evaluations_per_sole_reader_query` from its operator
+/// node as [`enumerate_candidate_configurations_before`] does.
+#[cfg(test)]
+pub(in crate::search) fn fill_may_keep_across_evaluations_per_sole_reader_query(
+    configured: &mut PhysicalCandidatesWithCosts,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     query_time_results_retained: bool,
 ) {
-    for (configuration, template) in configured
-        .configurations
-        .iter_mut()
-        .zip(&configured.inventory.templates)
-    {
-        configuration.may_keep_with_sole_reader = template.as_ref().map_or_else(Vec::new, |node| {
-            may_keep_with_sole_reader(
+    let nodes = configured.nodes_for_tests();
+    for (candidate, node) in configured.physical.candidates.iter_mut().zip(&nodes) {
+        candidate.may_keep_across_evaluations_per_sole_reader_query =
+            may_keep_across_evaluations_per_sole_reader_query(
                 node,
-                configuration.materialization,
+                candidate.materialization,
                 entries,
                 data,
                 query_time_results_retained,
-            )
-        });
+            );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::candidates::inventory::build_candidate_inventory;
+    use crate::search::candidates::inventory::{build_candidate_inventory, InventoryForTests};
     use crate::search::milp::model::select_candidates;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
@@ -82,7 +172,7 @@ mod tests {
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::QueryRoot;
-    use asap_types::stages::MemoGroupId;
+
     use asap_types::workload::{
         DataArrival, Predictability, Query, QueryRecurrence, QueryRequirements, RepeatedDemand,
         RepetitionInterval,
@@ -95,7 +185,7 @@ mod tests {
         assert!(matches!(
             enumerate_candidate_configurations_before(
                 &source,
-                &[0, 1],
+                &query_roots_for_tests(&source, &[0, 1], entries.len()),
                 &entries,
                 &data,
                 DeploymentCapabilities::default().query_time_results_retained,
@@ -106,7 +196,7 @@ mod tests {
         ));
     }
 
-    fn fixture() -> (CandidateInventory, Vec<QueryWorkloadEntry>, DataWorkload) {
+    fn fixture() -> (InventoryForTests, Vec<QueryWorkloadEntry>, DataWorkload) {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let queries = [
             "quantile_over_time(0.95, latency[5m])",
@@ -172,25 +262,25 @@ mod tests {
             &DeploymentCapabilities::default(),
         )
         .unwrap();
-        for (consumer, configuration) in expanded.configurations.iter().enumerate() {
-            let original = &source.graph.candidates[configuration.source_candidate.0];
-            let generated = &expanded.inventory.graph.candidates[consumer];
+        for (consumer, configuration) in expanded.physical.candidates.iter().enumerate() {
+            let original = &source.graph.candidates[configuration.operator_node.0];
+            let generated = &expanded.dag.candidates[consumer];
             assert_eq!(
-                generated.producer_requirements.len(),
-                original.producer_requirements.len()
+                generated.supplier_candidates_per_input.len(),
+                original.supplier_candidates_per_input.len()
             );
             for (original, generated) in original
-                .producer_requirements
+                .supplier_candidates_per_input
                 .iter()
-                .zip(&generated.producer_requirements)
+                .zip(&generated.supplier_candidates_per_input)
             {
                 let expected: Vec<_> = original
-                    .compatible_producers
+                    .candidates
                     .iter()
                     .flat_map(|source| {
-                        expanded.configurations.iter().enumerate().filter_map(
+                        expanded.physical.candidates.iter().enumerate().filter_map(
                             move |(id, producer)| {
-                                (producer.source_candidate == *source
+                                (producer.operator_node.0 == source.0
                                     && (configuration.timing == producer.timing
                                         || (configuration.timing == ExecutionTiming::QueryTime
                                             && matches!(
@@ -202,19 +292,15 @@ mod tests {
                         )
                     })
                     .collect();
-                assert_eq!(
-                    generated.compatible_producers.as_slice(),
-                    expected.as_slice()
-                );
+                assert_eq!(generated.candidates.as_slice(), expected.as_slice());
             }
         }
-        let metrics = asap_types::stages::supplier_storage_metrics(&expanded.inventory.graph);
+        let metrics = asap_types::stages::supplier_storage_metrics(&expanded.physical);
         let requirements = expanded
-            .inventory
-            .graph
+            .dag
             .candidates
             .iter()
-            .map(|candidate| candidate.producer_requirements.len())
+            .map(|candidate| candidate.supplier_candidates_per_input.len())
             .sum::<usize>();
         assert!(metrics.unique_supplier_sets < requirements, "{metrics:?}");
         assert!(
@@ -240,15 +326,14 @@ mod tests {
                 .graph
                 .candidates
                 .iter()
-                .map(|candidate| candidate.producer_requirements.len())
+                .map(|candidate| candidate.supplier_candidates_per_input.len())
                 .sum::<usize>();
         assert!(
-            expanded.configurations.len()
+            expanded.physical.candidates.len()
                 <= 4 * source.graph.candidates.len() * original_positions.max(1)
         );
         assert!(expanded
-            .inventory
-            .graph
+            .dag
             .candidates
             .iter()
             .all(|candidate| candidate.local_cost == 0.0));
@@ -256,7 +341,7 @@ mod tests {
             .templates
             .iter()
             .enumerate()
-            .filter_map(|(id, template)| kll(template.as_ref().unwrap()).then_some(id))
+            .filter_map(|(id, template)| kll(template).then_some(id))
             .collect::<Vec<_>>();
         assert!(
             builds.len() >= 3,
@@ -264,40 +349,41 @@ mod tests {
         );
         for source in builds {
             let modes = expanded
-                .configurations
+                .physical
+                .candidates
                 .iter()
-                .filter(|configuration| configuration.source_candidate.0 == source)
+                .filter(|configuration| configuration.operator_node.0 == source)
                 .map(|configuration| configuration.materialization)
                 .collect::<Vec<_>>();
             assert!(modes.contains(&Materialization::NotMaterialized));
             assert!(modes.contains(&Materialization::MatAtQuery(Medium::Memory)));
             assert!(modes.contains(&Materialization::MatAtIngestion(Medium::Memory)));
             assert!(!expanded
-                .configurations
+                .physical
+                .candidates
                 .iter()
-                .any(|configuration| configuration.source_candidate.0 == source
+                .any(|configuration| configuration.operator_node.0 == source
                     && configuration.materialization == Materialization::NotMaterialized
                     && configuration.timing == ExecutionTiming::IngestionTime));
         }
-        for (consumer, candidate) in expanded.inventory.graph.candidates.iter().enumerate() {
+        for (consumer, candidate) in expanded.dag.candidates.iter().enumerate() {
             for producer in candidate
-                .producer_requirements
+                .supplier_candidates_per_input
                 .iter()
-                .flat_map(|input| &input.compatible_producers)
+                .flat_map(|input| &input.candidates)
             {
                 assert!(compatible_timing(
-                    expanded.configurations[consumer].timing,
-                    &expanded.configurations[producer.0]
+                    expanded.physical.candidates[consumer].timing,
+                    &expanded.physical.candidates[producer.0]
                 ));
             }
         }
         assert!(expanded
-            .inventory
-            .graph
+            .dag
             .query_roots
             .iter()
-            .flat_map(|root| &root.compatible_candidates)
-            .all(|id| expanded.configurations[id.0].timing == ExecutionTiming::QueryTime));
+            .flat_map(|root| &root.candidates)
+            .all(|id| expanded.physical.candidates[id.0].timing == ExecutionTiming::QueryTime));
     }
 
     // Identical logical readers need separate bindings when their whole-window
@@ -306,42 +392,27 @@ mod tests {
     fn identical_quantiles_with_distinct_phases_have_separate_execution_scopes() {
         let (catalog, mut entries, data) = fixture();
         let root = catalog.graph.query_roots[0]
-            .compatible_candidates
+            .candidates
             .iter()
-            .filter_map(|id| catalog.templates[id.0].as_ref())
+            .map(|id| &catalog.templates[id.0])
             .find(|node| OperatorNode::reachable(node).iter().any(|child| kll(child)))
             .unwrap()
             .clone();
-        let mut source = CandidateInventory {
-            graph: CandidateDependencyGraph::default(),
-            templates: Vec::new(),
-            group_candidates: Vec::new(),
-        };
-        fn append(node: &Rc<OperatorNode>, source: &mut CandidateInventory) -> PhysicalCandidateId {
-            let mut requirements = Vec::new();
+        fn append(
+            node: &Rc<OperatorNode>,
+            nodes: &mut Vec<(Rc<OperatorNode>, Vec<Vec<PhysicalCandidateId>>)>,
+        ) -> PhysicalCandidateId {
+            let mut inputs = Vec::new();
             node.operator.map_children(|child| {
-                requirements.push(ProducerRequirement {
-                    compatible_producers: vec![append(child, source)].into(),
-                });
+                inputs.push(vec![append(child, nodes)]);
                 child.clone()
             });
-            let id = PhysicalCandidateId(source.templates.len());
-            source.templates.push(Some(node.clone()));
-            source.graph.candidates.push(PhysicalCandidate {
-                group: MemoGroupId(id.0 as u32),
-                local_cost: 0.0,
-                producer_requirements: requirements,
-            });
-            source.group_candidates.push(vec![id]);
-            id
+            nodes.push((node.clone(), inputs));
+            PhysicalCandidateId(nodes.len() - 1)
         }
-        let output = append(&root, &mut source);
-        source.graph.query_roots = vec![
-            QueryRootCandidates {
-                compatible_candidates: vec![output]
-            };
-            2
-        ];
+        let mut nodes = Vec::new();
+        let output = append(&root, &mut nodes);
+        let source = inventory_for_tests(nodes, vec![vec![output]; 2]);
         for (index, entry) in entries.iter_mut().enumerate() {
             entry.recurrence = QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
                 interval: RepetitionInterval(600_000),
@@ -355,26 +426,26 @@ mod tests {
         let expanded =
             enumerate_candidate_configurations(&source, &[0, 1], &entries, &data, &deployment)
                 .unwrap();
-        let selected = select_candidates(&expanded.inventory.graph)
+        let selected = select_candidates(&expanded.dag)
             .unwrap()
             .expect("both incompatible phases must be covered");
         let builds: Vec<_> = selected
             .selected_candidates
             .iter()
-            .filter(|id| kll(expanded.inventory.templates[id.0].as_ref().unwrap()))
+            .filter(|id| kll(expanded.node(id.0)))
             .collect();
         assert_eq!(builds.len(), 2);
         assert!(builds
             .iter()
-            .all(|id| expanded.configurations[id.0].materialization
+            .all(|id| expanded.physical.candidates[id.0].materialization
                 == Materialization::MatAtIngestion(Medium::Memory)));
-        let mut modes = vec![None; expanded.configurations.len()];
+        let mut modes = vec![None; expanded.physical.candidates.len()];
         for id in &selected.selected_candidates {
-            modes[id.0] = Some(expanded.configurations[id.0].materialization);
+            modes[id.0] = Some(expanded.physical.candidates[id.0].materialization);
         }
         let original_roots = vec![QueryRoot::Operator(root); 2];
         let physical = asap_physical_asap_optimization::catalog::materialize_selected_candidates(
-            &expanded.inventory,
+            &expanded.physical,
             &selected,
             &modes,
             &original_roots,
@@ -392,10 +463,10 @@ mod tests {
     #[test]
     fn repeated_identical_queries_keep_scope_and_connection_counts_constant() {
         let (mut source, entries, data) = fixture();
-        let root = source.graph.query_roots[0].clone();
+        let root = source.inventory.query_output_nodes[0].clone();
         let mut counts = Vec::new();
         for count in [2, 32] {
-            source.graph.query_roots = vec![root.clone(); count];
+            source.inventory.query_output_nodes = vec![root.clone(); count];
             let entries = vec![entries[0].clone(); count];
             let outputs: Vec<_> = (0..count).collect();
             let expanded = enumerate_candidate_configurations(
@@ -407,14 +478,13 @@ mod tests {
             )
             .unwrap();
             let edges: usize = expanded
-                .inventory
-                .graph
+                .dag
                 .candidates
                 .iter()
-                .flat_map(|candidate| &candidate.producer_requirements)
-                .map(|input| input.compatible_producers.len())
+                .flat_map(|candidate| &candidate.supplier_candidates_per_input)
+                .map(|input| input.candidates.len())
                 .sum();
-            counts.push((expanded.configurations.len(), edges));
+            counts.push((expanded.physical.candidates.len(), edges));
         }
         assert_eq!(counts[0], counts[1]);
     }
@@ -436,12 +506,13 @@ mod tests {
         )
         .unwrap();
         let scans = expanded
-            .configurations
+            .physical
+            .candidates
             .iter()
             .enumerate()
             .filter(|(id, _)| {
                 matches!(
-                    expanded.inventory.templates[*id].as_ref().unwrap().operator,
+                    expanded.node(*id).operator,
                     asap_types::ir::Operator::NonASAP(asap_types::ir::NonASAPOp::Scan { .. })
                 )
             })
@@ -450,9 +521,7 @@ mod tests {
         assert!(scans
             .iter()
             .all(|(_, config)| config.timing == ExecutionTiming::IngestionTime));
-        assert!(select_candidates(&expanded.inventory.graph)
-            .unwrap()
-            .is_some());
+        assert!(select_candidates(&expanded.dag).unwrap().is_some());
     }
 
     // Two references belonging to one scalar query cannot justify shared-query materialization.
@@ -467,13 +536,11 @@ mod tests {
             &DeploymentCapabilities::default(),
         )
         .unwrap();
-        let selected = select_candidates(&expanded.inventory.graph)
-            .unwrap()
-            .unwrap();
+        let selected = select_candidates(&expanded.dag).unwrap().unwrap();
         assert!(selected
             .selected_candidates
             .iter()
-            .all(|id| expanded.configurations[id.0].materialization
+            .all(|id| expanded.physical.candidates[id.0].materialization
                 != Materialization::MatAtQuery(Medium::Memory)));
     }
 
@@ -495,13 +562,14 @@ mod tests {
             .group_candidates
             .iter()
             .flatten()
-            .find(|id| kll(source.templates[id.0].as_ref().unwrap()))
+            .find(|id| kll(&source.templates[id.0]))
             .unwrap();
         let ingestion = expanded
-            .configurations
+            .physical
+            .candidates
             .iter()
             .position(|configuration| {
-                configuration.source_candidate == *shared_build
+                configuration.operator_node.0 == shared_build.0
                     && configuration.materialization
                         == Materialization::MatAtIngestion(Medium::Memory)
             })
@@ -515,29 +583,31 @@ mod tests {
             .enumerate()
             .filter(|(_, candidate)| {
                 candidate
-                    .producer_requirements
+                    .supplier_candidates_per_input
                     .iter()
-                    .any(|input| input.compatible_producers.contains(shared_build))
+                    .any(|input| input.candidates.contains(shared_build))
             })
             .map(|(id, _)| id)
             .collect::<Vec<_>>();
         assert!(reader_sources.len() >= 2);
-        for (id, configuration) in expanded.configurations.iter().enumerate() {
-            if reader_sources.contains(&configuration.source_candidate.0)
+        for (id, configuration) in expanded.physical.candidates.iter().enumerate() {
+            if reader_sources.contains(&configuration.operator_node.0)
                 && configuration.timing == ExecutionTiming::QueryTime
             {
-                for input in &mut expanded.inventory.graph.candidates[id].producer_requirements {
-                    if input.compatible_producers.iter().any(|producer| {
-                        expanded.configurations[producer.0].source_candidate == *shared_build
+                for input in &mut expanded.dag.candidates[id].supplier_candidates_per_input {
+                    if input.candidates.iter().any(|producer| {
+                        expanded.physical.candidates[producer.0].operator_node.0 == shared_build.0
                     }) {
                         // Query-specific readers have their original logical owner.
-                        let source_group =
-                            source.graph.candidates[configuration.source_candidate.0].group;
+                        let group = |node: usize| {
+                            source.operator_nodes_of_candidates_for_memo_groups[node].group()
+                        };
+                        let source_group = group(configuration.operator_node.0);
                         let is_first = source.graph.query_roots[0]
-                            .compatible_candidates
+                            .candidates
                             .iter()
-                            .any(|root| source.graph.candidates[root.0].group == source_group);
-                        input.compatible_producers.retain(|producer| {
+                            .any(|root| group(root.0) == source_group);
+                        input.candidates.retain(|producer| {
                             if is_first {
                                 producer.0 == ingestion
                             } else {
@@ -550,17 +620,17 @@ mod tests {
         }
         // Make complete exact/local choices expensive, so the exercised solution
         // uses the shared-state reader path. These are test-only coefficients.
-        for (id, candidate) in expanded.inventory.graph.candidates.iter_mut().enumerate() {
-            let source_id = expanded.configurations[id].source_candidate;
-            candidate.local_cost = if source_id == *shared_build {
+        for (id, candidate) in expanded.dag.candidates.iter_mut().enumerate() {
+            let source_id = expanded.physical.candidates[id].operator_node;
+            candidate.local_cost = if source_id.0 == shared_build.0 {
                 1.0
-            } else if kll(source.templates[source_id.0].as_ref().unwrap()) {
+            } else if kll(&source.templates[source_id.0]) {
                 50.0
             } else if matches!(
-                source.templates[source_id.0].as_ref().unwrap().asap(),
+                &source.templates[source_id.0].asap(),
                 Some(ASAPOp::SummaryAgg { .. })
             ) || matches!(
-                source.templates[source_id.0].as_ref().unwrap().non_asap(),
+                &source.templates[source_id.0].non_asap(),
                 Some(asap_types::ir::NonASAPOp::Aggregate { .. })
             ) {
                 100.0
@@ -568,9 +638,7 @@ mod tests {
                 0.0
             };
         }
-        let selected = select_candidates(&expanded.inventory.graph)
-            .unwrap()
-            .unwrap();
+        let selected = select_candidates(&expanded.dag).unwrap().unwrap();
         assert!(selected
             .selected_candidates
             .contains(&PhysicalCandidateId(ingestion)));
@@ -578,8 +646,8 @@ mod tests {
             .selected_candidates
             .iter()
             .any(
-                |id| expanded.configurations[id.0].source_candidate == *shared_build
-                    && expanded.configurations[id.0].timing == ExecutionTiming::QueryTime
+                |id| expanded.physical.candidates[id.0].operator_node.0 == shared_build.0
+                    && expanded.physical.candidates[id.0].timing == ExecutionTiming::QueryTime
             ));
     }
 }

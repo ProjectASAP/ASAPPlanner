@@ -7,6 +7,7 @@ use asap_types::ir::QueryRoot;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 use std::collections::BTreeMap;
 
+use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
 use crate::search::candidates::graph::RejectedQuerySubgraph;
 use crate::search::refinement::search::{
     search_candidates_with_direct_feedback, CandidateEvaluation, CandidateSearchLimits,
@@ -17,7 +18,6 @@ use asap_cost::{CalibrationFit, CostModel};
 use asap_physical_asap_optimization::catalog::{
     materialize_selected_candidates, PhysicalCandidateError,
 };
-use asap_types::stages::CandidateConfigurationInventory;
 use asap_types::stages::SelectedCandidateGraph;
 
 /// The share of a search's time a search spends before a final validation
@@ -86,7 +86,7 @@ pub(in crate::search) struct CandidatePlanningResult {
 /// Cluster objectives use candidate_objectives and the original selector
 /// archive; their Pareto/lexicographic policy is not a scalar price.
 pub(in crate::search) fn optimize_configured_candidates(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
     limits: CandidateSearchLimits,
 ) -> Result<CandidatePlanningResult, String> {
@@ -96,7 +96,7 @@ pub(in crate::search) fn optimize_configured_candidates(
     ) {
         return Err("candidate price search does not support ClusterCapacity objectives".into());
     }
-    if configured.configurations.len() != configured.inventory.graph.candidates.len() {
+    if configured.physical.candidates.len() != configured.dag.candidates.len() {
         return Err("physical configurations must be indexed by candidate ID".into());
     }
     if context.original_roots.len() != context.entries.len() {
@@ -175,11 +175,11 @@ pub(in crate::search) fn optimize_configured_candidates(
         .as_ref()
         .map(|profile| {
             use asap_types::stages::{PhysicalCandidateId, ReaderConstraint};
-            let mut graph = configured.inventory.graph.clone();
+            let mut graph = configured.dag.clone();
             for (id, candidate) in graph.candidates.iter_mut().enumerate() {
                 candidate.local_cost = weights[id];
                 if profile.candidates[id].is_empty() {
-                    candidate.producer_requirements.clear();
+                    candidate.supplier_candidates_per_input.clear();
                     graph
                         .reader_constraints
                         .push(ReaderConstraint::AllowedOutputs {
@@ -187,15 +187,15 @@ pub(in crate::search) fn optimize_configured_candidates(
                             outputs: Vec::new(),
                         });
                 } else {
-                    for input in &mut candidate.producer_requirements {
+                    for input in &mut candidate.supplier_candidates_per_input {
                         input
-                            .compatible_producers
+                            .candidates
                             .retain(|producer| !profile.candidates[producer.0].is_empty());
                     }
                 }
             }
             for root in &mut graph.query_roots {
-                root.compatible_candidates
+                root.candidates
                     .retain(|id| !profile.candidates[id.0].is_empty());
             }
             graph
@@ -204,7 +204,7 @@ pub(in crate::search) fn optimize_configured_candidates(
             graph
                 .query_roots
                 .iter()
-                .all(|root| !root.compatible_candidates.is_empty())
+                .all(|root| !root.candidates.is_empty())
         });
     let mut direct_refs: Vec<_> = direct
         .iter()
@@ -289,7 +289,7 @@ pub(in crate::search) fn optimize_configured_candidates(
         Ok(Some(cost).into())
     };
     let mut search = search_candidates_with_direct_feedback(
-        &configured.inventory.graph,
+        &configured.dag,
         CandidateSearchLimits {
             wall_time: limits
                 .wall_time
@@ -359,7 +359,7 @@ pub(in crate::search) fn optimize_configured_candidates(
 /// spanning a much smaller scale than ingestion costs. Prune unsupported price
 /// tuples to a fixed point before compacting option indices.
 fn maintained_state_profile(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     profile: &crate::search::milp::direct_price_options::JointPriceProfile,
     deadline: Option<std::time::Instant>,
 ) -> Option<crate::search::milp::direct_price_options::JointPriceProfile> {
@@ -368,14 +368,10 @@ fn maintained_state_profile(
         .iter()
         .enumerate()
         .map(|(id, options)| {
-            let scan = configured.inventory.templates[id]
-                .as_ref()
-                .is_some_and(|node| {
-                    matches!(
-                        node.non_asap(),
-                        Some(asap_types::ir::NonASAPOp::Scan { .. })
-                    )
-                });
+            let scan = matches!(
+                configured.node(id).non_asap(),
+                Some(asap_types::ir::NonASAPOp::Scan { .. })
+            );
             options
                 .iter()
                 .map(|option| {
@@ -452,13 +448,13 @@ fn maintained_state_profile(
 }
 
 fn joint_cost_seed(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
     exclusions: &[asap_types::stages::PhysicalCandidateId],
     fallback_reasons: &mut Vec<String>,
 ) -> Result<
     Option<(
-        asap_types::stages::CandidateDependencyGraph,
+        crate::search::candidates::dag::DagOfPhysicalCandidatesWithCosts,
         crate::search::milp::direct_price_options::JointPriceProfile,
     )>,
     String,
@@ -481,7 +477,7 @@ fn joint_cost_seed(
     // As with the fixed-price seed, avoid permutations of interchangeable
     // execution copies in this bounded proposal. Every supplier price option
     // remains available on the first copy; the full search retains all copies.
-    for constraint in &configured.inventory.graph.reader_constraints {
+    for constraint in &configured.dag.reader_constraints {
         if let asap_types::stages::ReaderConstraint::ActivationRequires { candidate, .. } =
             constraint
         {
@@ -502,19 +498,19 @@ fn joint_cost_seed(
             });
         }
     }
-    Ok(Some((configured.inventory.graph.clone(), profile)))
+    Ok(Some((configured.dag.clone(), profile)))
 }
 
 /// Restrict only the direct-price proposal. Unsupported configurations and
 /// supplier interfaces remain available in the full evaluator-refined search.
 fn direct_cost_seed(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
     seed_exclusions: &[asap_types::stages::PhysicalCandidateId],
     latest_panes: bool,
 ) -> Result<
     Option<(
-        asap_types::stages::CandidateDependencyGraph,
+        crate::search::candidates::dag::DagOfPhysicalCandidatesWithCosts,
         crate::search::milp::direct_cost::DirectCostProfile,
     )>,
     String,
@@ -541,7 +537,7 @@ fn direct_cost_seed(
     {
         return Ok(None);
     }
-    let mut graph = configured.inventory.graph.clone();
+    let mut graph = configured.dag.clone();
     let mut supported = extracted.supported;
     // One interchangeable execution-scope copy is sufficient for this seed.
     // Keep all copies in the full graph, where independent input bindings may
@@ -564,7 +560,7 @@ fn direct_cost_seed(
         if !supported[id] {
             extracted.profile.nodes[id] = Default::default();
             candidate.local_cost = 0.0;
-            candidate.producer_requirements.clear();
+            candidate.supplier_candidates_per_input.clear();
             graph
                 .reader_constraints
                 .push(ReaderConstraint::AllowedOutputs {
@@ -572,17 +568,16 @@ fn direct_cost_seed(
                     outputs: Vec::new(),
                 });
         } else {
-            for input in &mut candidate.producer_requirements {
-                input.compatible_producers.retain(|supplier| {
+            for input in &mut candidate.supplier_candidates_per_input {
+                input.candidates.retain(|supplier| {
                     supported[supplier.0] && extracted.suppliers[id].contains(supplier)
                 });
             }
         }
     }
     for root in &mut graph.query_roots {
-        root.compatible_candidates
-            .retain(|candidate| supported[candidate.0]);
-        if root.compatible_candidates.is_empty() {
+        root.candidates.retain(|candidate| supported[candidate.0]);
+        if root.candidates.is_empty() {
             return Ok(None);
         }
     }
@@ -592,7 +587,7 @@ fn direct_cost_seed(
 /// Price work and state for proposal ordering without an exactness surcharge.
 /// Recomposition and validation still decide the selected graph's accuracy.
 pub(in crate::search) fn accuracy_baseline_weights(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
 ) -> Result<Vec<f64>, String> {
     accuracy_baseline(configured, context).map(|(weights, _)| weights)
@@ -604,7 +599,7 @@ pub(in crate::search) fn accuracy_baseline_weights(
 /// not a proof of query accuracy; the complete catalog and final validator keep
 /// mixed exact/approximate plans and all otherwise legal capacities.
 fn seed_dds_budgets(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
     output_queries: &[usize],
 ) -> Vec<f64> {
@@ -612,7 +607,7 @@ fn seed_dds_budgets(
     use asap_types::ir::{
         operator::AggIntent, properties::AccuracyMetric, NonASAPOp, OperatorNode,
     };
-    let graph = &configured.inventory.graph;
+    let graph = &configured.dag;
     let mut budgets = vec![f64::INFINITY; graph.candidates.len()];
     if context.models.plan_selection.ignore_accuracy_guarantees {
         return budgets;
@@ -654,12 +649,7 @@ fn seed_dds_budgets(
     let mut pending = Vec::new();
     for (root, &query) in graph.query_roots.iter().zip(output_queries) {
         if let Some(budget) = query_budgets[query] {
-            pending.extend(
-                root.compatible_candidates
-                    .iter()
-                    .copied()
-                    .map(|id| (id, budget)),
-            );
+            pending.extend(root.candidates.iter().copied().map(|id| (id, budget)));
         }
     }
     while let Some((id, budget)) = pending.pop() {
@@ -673,9 +663,9 @@ fn seed_dds_budgets(
             budgets[id.0] = budget;
             pending.extend(
                 graph.candidates[id.0]
-                    .producer_requirements
+                    .supplier_candidates_per_input
                     .iter()
-                    .flat_map(|input| input.compatible_producers.iter().copied())
+                    .flat_map(|input| input.candidates.iter().copied())
                     .map(|producer| (producer, budget)),
             );
         }
@@ -684,15 +674,15 @@ fn seed_dds_budgets(
 }
 
 fn accuracy_baseline(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
 ) -> Result<(Vec<f64>, Vec<asap_types::stages::PhysicalCandidateId>), String> {
     use asap_types::ir::properties::AccuracyMetric;
     use asap_types::ir::schema::FieldDataType;
     use asap_types::ir::ASAPOp;
-    let graph = &configured.inventory.graph;
+    let graph = &configured.dag;
     graph.validate().map_err(|error| error.to_string())?;
-    if configured.inventory.templates.len() != graph.candidates.len() {
+    if configured.physical.candidates.len() != graph.candidates.len() {
         return Err("baseline templates must be indexed by candidate ID".into());
     }
     let mut output_queries = Vec::new();
@@ -727,16 +717,16 @@ fn accuracy_baseline(
                 .accuracy_metric
                 == Some(AccuracyMetric::Rank)
         })
-        .flat_map(|(root, _)| root.compatible_candidates.iter().copied())
+        .flat_map(|(root, _)| root.candidates.iter().copied())
         .collect();
     while let Some(candidate) = pending.pop() {
         if !rank_requested[candidate.0] {
             rank_requested[candidate.0] = true;
             pending.extend(
                 graph.candidates[candidate.0]
-                    .producer_requirements
+                    .supplier_candidates_per_input
                     .iter()
-                    .flat_map(|input| input.compatible_producers.iter().copied()),
+                    .flat_map(|input| input.candidates.iter().copied()),
             );
         }
     }
@@ -744,21 +734,17 @@ fn accuracy_baseline(
     // appear below the executor's raw TimeRange boundary. Keep original raw
     // source bindings for the feasibility seed; the full graph still contains
     // the useful projected candidates for other consumers.
-    let raw_source_groups: std::collections::HashSet<_> = configured
-        .inventory
-        .group_candidates
-        .iter()
-        .enumerate()
-        .filter_map(|(group, candidates)| {
-            candidates
-                .iter()
-                .any(|id| {
-                    configured.inventory.templates[id.0]
-                        .as_ref()
-                        .is_some_and(|node| raw_scan_with_shifts(node))
-                })
-                .then_some(asap_types::stages::MemoGroupId(group as u32))
+    let raw_source_groups: std::collections::HashSet<_> = (0..configured.physical.candidates.len())
+        .map(asap_types::stages::PhysicalCandidateId)
+        .filter(|&id| {
+            configured
+                .physical
+                .operator_nodes_of_candidates_for_memo_groups
+                [configured.physical.candidates[id.0].operator_node.0]
+                .is_implementation_root
+                && raw_scan_with_shifts(configured.physical.physical_node(id))
         })
+        .map(|id| configured.physical.memo_group_of(id))
         .collect();
     // Bound the numerical range; these tiers are intentionally heuristic.
     let preference = (graph.candidates.len() as f64 + 1.0).min(1000.0);
@@ -771,18 +757,14 @@ fn accuracy_baseline(
         .iter()
         .enumerate()
         .map(|(id, candidate)| {
-            configured.inventory.templates[id]
-                .as_ref()
-                .map_or(candidate.local_cost, |node| {
-                    candidate
-                        .local_cost
-                        .max(estimated_costs[id])
-                        .max(retained_pane_priority_cost(
-                            node,
-                            &configured.configurations[id],
-                            context,
-                        ))
-                })
+            candidate
+                .local_cost
+                .max(estimated_costs[id])
+                .max(retained_pane_priority_cost(
+                    configured.node(id),
+                    &configured.physical.candidates[id],
+                    context,
+                ))
         })
         .collect();
     // Feasibility seeds compare retained states; cost-only seeds compare query
@@ -794,15 +776,10 @@ fn accuracy_baseline(
         .filter_map(|(id, &cost)| {
             (cost > 0.0
                 && if context.models.plan_selection.ignore_accuracy_guarantees {
-                    configured.configurations[id].timing
+                    configured.physical.candidates[id].timing
                         == asap_types::ir::properties::ExecutionTiming::QueryTime
                 } else {
-                    matches!(
-                        configured.inventory.templates[id]
-                            .as_ref()
-                            .and_then(|node| node.asap()),
-                        Some(ASAPOp::PaneChain { .. })
-                    )
+                    matches!(configured.node(id).asap(), Some(ASAPOp::PaneChain { .. }))
                 })
             .then_some(cost)
         })
@@ -815,15 +792,9 @@ fn accuracy_baseline(
         .get(positive_costs.len().saturating_sub(1) / 2)
         .copied()
         .unwrap_or(0.0);
-    let priorities = configured
-        .inventory
-        .templates
-        .iter()
-        .enumerate()
-        .map(|(id, template)| {
-            let node = template
-                .as_ref()
-                .ok_or("baseline candidate has no operator template")?;
+    let priorities = (0..configured.physical.candidates.len())
+        .map(|id| {
+            let node = configured.node(id);
             // Accuracy determines admissibility through composition and validation.
             // It must not add a price surcharge to an approximate implementation.
             let cost_priority = if reference_cost > 0.0 {
@@ -875,13 +846,14 @@ fn accuracy_baseline(
             // non-summary materializations remain in the complete search.
             let contextual_materialization =
                 !context.models.plan_selection.ignore_accuracy_guarantees
-                    && configured.configurations[id].materialization
+                    && configured.physical.candidates[id].materialization
                         != asap_types::physical::Materialization::NotMaterialized
                     && !matches!(
                         node.asap(),
                         Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
                     );
-            let projected_raw_source = raw_source_groups.contains(&graph.candidates[id].group)
+            let projected_raw_source = raw_source_groups
+                .contains(&configured.physical.memo_group_of(asap_types::stages::PhysicalCandidateId(id)))
                 && matches!(
                     node.non_asap(),
                     Some(asap_types::ir::NonASAPOp::Project { .. })
@@ -890,7 +862,7 @@ fn accuracy_baseline(
             // local query work can be priced for the initial proposal; the
             // complete search retains every legal pane and its certified bound.
             let unknown_work_priority = if context.models.plan_selection.ignore_accuracy_guarantees
-                && configured.configurations[id].timing
+                && configured.physical.candidates[id].timing
                     == asap_types::ir::properties::ExecutionTiming::QueryTime
                 && matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
                 && proposal_costs[id] == 0.0
@@ -937,7 +909,7 @@ fn raw_scan_with_shifts(node: &asap_types::ir::OperatorNode) -> bool {
 // Group/cardinality and supplier choices remain authoritative after selection.
 fn retained_pane_priority_cost(
     node: &std::rc::Rc<asap_types::ir::OperatorNode>,
-    configuration: &asap_types::stages::CandidateConfiguration,
+    configuration: &asap_types::stages::PhysicalCandidate,
     context: &CandidatePlanningContext<'_>,
 ) -> f64 {
     use asap_types::ir::{ASAPOp, NonASAPOp};
@@ -1010,7 +982,7 @@ pub(in crate::search) enum MaterializationOutcome {
 }
 
 pub(in crate::search) fn materialize_configured_candidate(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
     selected: &SelectedCandidateGraph,
     evaluation_number: usize,
@@ -1029,20 +1001,23 @@ pub(in crate::search) fn materialize_configured_candidate(
 }
 
 pub(in crate::search) fn materialize_configured_candidate_with_diagnostics(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
     selected: &SelectedCandidateGraph,
     evaluation_number: usize,
     rejections: &mut CandidateRejectionSummary,
 ) -> Result<MaterializationOutcome, String> {
-    let mut modes = vec![None; configured.configurations.len()];
+    let mut modes = vec![None; configured.physical.candidates.len()];
     for id in &selected.selected_candidates {
-        modes[id.0] = Some(configured.configurations[id.0].materialization);
+        modes[id.0] = Some(configured.physical.candidates[id.0].materialization);
     }
     // Only a typed infeasible assignment justifies a no-good cut. Missing
     // identity, incompatible contracts and unsupported rewrites stop search.
+    configured
+        .validate_selected(selected)
+        .map_err(|error| PhysicalCandidateError::InvalidOrUnsupported(error).to_string())?;
     let mut realized = match materialize_selected_candidates(
-        &configured.inventory,
+        &configured.physical,
         selected,
         &modes,
         context.original_roots,
@@ -1064,10 +1039,10 @@ pub(in crate::search) fn materialize_configured_candidate_with_diagnostics(
         let node = realized.nodes_by_candidate[id.0]
             .as_ref()
             .ok_or_else(|| format!("candidate {} has no physical node", id.0))?;
-        if node.timing != Some(configured.configurations[id.0].timing) {
+        if node.timing != Some(configured.physical.candidates[id.0].timing) {
             return Err(format!(
                 "candidate {} requested timing {:?}, Stage 2 produced {:?}",
-                id.0, configured.configurations[id.0].timing, node.timing
+                id.0, configured.physical.candidates[id.0].timing, node.timing
             ));
         }
     }
@@ -1079,7 +1054,7 @@ pub(in crate::search) fn materialize_configured_candidate_with_diagnostics(
 }
 
 pub(in crate::search) fn reconstruct_configured_candidate(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
     selected: &SelectedCandidateGraph,
     evaluation_number: usize,
@@ -1141,7 +1116,7 @@ pub(in crate::search) fn reconstruct_configured_candidate(
 
 #[cfg(test)]
 pub(in crate::search) fn evaluate_configured_candidate(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
     selected: &SelectedCandidateGraph,
     evaluation_number: usize,
@@ -1160,7 +1135,7 @@ pub(in crate::search) fn evaluate_configured_candidate(
 }
 
 pub(in crate::search) fn evaluate_configured_candidate_before(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
     selected: &SelectedCandidateGraph,
     evaluation_number: usize,
@@ -1222,7 +1197,7 @@ mod tests {
     use std::time::Duration;
 
     fn fixture() -> (
-        CandidateConfigurationInventory,
+        PhysicalCandidatesWithCosts,
         Vec<QueryRoot>,
         Vec<QueryWorkloadEntry>,
         DataWorkload,
@@ -1298,15 +1273,15 @@ mod tests {
         .unwrap();
         // Keep this refinement fixture's finite search space focused on summary
         // modes. Non-summary shared materialization has separate physical tests.
-        for (id, configuration) in configured.configurations.iter().enumerate() {
+        for (id, configuration) in configured.physical.candidates.iter().enumerate() {
             if matches!(
                 configuration.materialization,
                 Materialization::MatAtQuery(_)
             ) && !matches!(
-                configured.inventory.templates[id].as_ref().unwrap().asap(),
+                configured.node(id).asap(),
                 Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
             ) {
-                configured.inventory.graph.reader_constraints.push(
+                configured.dag.reader_constraints.push(
                     asap_types::stages::ReaderConstraint::AllowedOutputs {
                         candidate: asap_types::stages::PhysicalCandidateId(id),
                         outputs: Vec::new(),
@@ -1349,14 +1324,10 @@ mod tests {
             .any(|options| !options.is_empty()));
         assert!(restricted.candidates.iter().map(Vec::len).sum::<usize>() < original_count);
         for (id, options) in restricted.candidates.iter().enumerate() {
-            let scan = configured.inventory.templates[id]
-                .as_ref()
-                .is_some_and(|node| {
-                    matches!(
-                        node.non_asap(),
-                        Some(asap_types::ir::NonASAPOp::Scan { .. })
-                    )
-                });
+            let scan = matches!(
+                configured.node(id).non_asap(),
+                Some(asap_types::ir::NonASAPOp::Scan { .. })
+            );
             for option in options {
                 assert!(!scan || option.profile.ingestion);
                 assert!(option.profile.ingestion || !option.profile.materialized);
@@ -1454,42 +1425,36 @@ mod tests {
         )
         .unwrap();
         let has_panes: Vec<_> = configured
-            .inventory
-            .templates
+            .nodes_for_tests()
             .iter()
             .map(|node| {
-                OperatorNode::reachable(node.as_ref().unwrap())
+                OperatorNode::reachable(node)
                     .iter()
                     .any(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
             })
             .collect();
-        configured.inventory.graph.query_roots[0]
-            .compatible_candidates
+        configured.dag.query_roots[0]
+            .candidates
             .retain(|id| has_panes[id.0]);
-        configured.inventory.graph.query_roots[1]
-            .compatible_candidates
+        configured.dag.query_roots[1]
+            .candidates
             .retain(|id| !has_panes[id.0]);
-        assert!(!configured.inventory.graph.query_roots[0]
-            .compatible_candidates
-            .is_empty());
+        assert!(!configured.dag.query_roots[0].candidates.is_empty());
         let allowed: Vec<_> = configured
-            .inventory
-            .templates
+            .nodes_for_tests()
             .iter()
             .enumerate()
             .map(|(id, node)| {
-                !matches!(
-                    node.as_ref().unwrap().asap(),
-                    Some(ASAPOp::PaneChain { .. })
-                ) || configured.configurations[id].timing == ExecutionTiming::IngestionTime
+                !matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+                    || configured.physical.candidates[id].timing == ExecutionTiming::IngestionTime
             })
             .collect();
-        for candidate in &mut configured.inventory.graph.candidates {
-            for input in &mut candidate.producer_requirements {
-                input.compatible_producers.retain(|id| allowed[id.0]);
+        for candidate in &mut configured.dag.candidates {
+            for input in &mut candidate.supplier_candidates_per_input {
+                input.candidates.retain(|id| allowed[id.0]);
             }
         }
-        let selected = select_candidates(&configured.inventory.graph)
+        let selected = select_candidates(&configured.dag)
             .unwrap()
             .expect("repeated reader still has an ingestion pane plan");
         let context = CandidatePlanningContext {
@@ -1512,14 +1477,9 @@ mod tests {
         )
         .unwrap();
         assert!(evaluated.is_some());
-        configured.inventory.graph.query_roots[1].compatible_candidates =
-            configured.inventory.graph.query_roots[0]
-                .compatible_candidates
-                .clone();
+        configured.dag.query_roots[1].candidates = configured.dag.query_roots[0].candidates.clone();
         assert!(
-            select_candidates(&configured.inventory.graph)
-                .unwrap()
-                .is_none(),
+            select_candidates(&configured.dag).unwrap().is_none(),
             "unpredictable reader cannot bind to ingestion-only panes"
         );
     }
@@ -1566,16 +1526,12 @@ mod tests {
             models,
             calibration: CalibrationFit::default(),
         };
-        let original_count = configured.inventory.graph.candidates.len();
+        let original_count = configured.dag.candidates.len();
         let (_, excluded) = accuracy_baseline(&configured, &context).unwrap();
         let mut coarse = 0;
         let mut composed = 0;
-        for (id, node) in configured.inventory.templates.iter().enumerate() {
-            let Some(FieldDataType::Sketch(kind, _)) = node
-                .as_ref()
-                .unwrap()
-                .asap()
-                .and_then(ASAPOp::produced_state)
+        for (id, node) in configured.nodes_for_tests().iter().enumerate() {
+            let Some(FieldDataType::Sketch(kind, _)) = node.asap().and_then(ASAPOp::produced_state)
             else {
                 continue;
             };
@@ -1593,7 +1549,7 @@ mod tests {
             coarse > 0 && composed > 0,
             "both whole and composed capacities remain in the catalog"
         );
-        assert_eq!(configured.inventory.graph.candidates.len(), original_count);
+        assert_eq!(configured.dag.candidates.len(), original_count);
         let settings = asap_cost::CostInputs {
             ignore_accuracy_guarantees: true,
             ..Default::default()
@@ -1692,7 +1648,7 @@ mod tests {
         let mut rejected_queries = Vec::new();
         let mut bad_assignment = None;
         let plain = crate::search::refinement::search::search_candidates_with_baseline(
-            &configured.inventory.graph,
+            &configured.dag,
             limits,
             |selected| {
                 bad_assignment = Some(selected.clone());
@@ -1764,19 +1720,23 @@ mod tests {
     // installation. Projection above a range remains a legal seed candidate.
     #[test]
     fn feasibility_seed_distinguishes_raw_source_and_range_projections() {
+        use crate::search::candidates::dag::InputSupplierCandidates;
         use asap_types::ir::{NonASAPOp, Operator, ProjectItem, ScalarExpr};
-        use asap_types::stages::{PhysicalCandidateId, ProducerRequirement};
+        use asap_types::stages::PhysicalCandidateId;
         let (mut configured, roots, entries, data) = fixture();
         let find = |is_range: bool| {
-            configured
-                .inventory
-                .group_candidates
-                .iter()
-                .flatten()
-                .copied()
+            (0..configured.physical.candidates.len())
+                .map(PhysicalCandidateId)
+                .filter(|&id| {
+                    configured
+                        .physical
+                        .operator_nodes_of_candidates_for_memo_groups
+                        [configured.physical.candidates[id.0].operator_node.0]
+                        .is_implementation_root
+                })
                 .find(|id| {
-                    let node = configured.inventory.templates[id.0].as_ref().unwrap();
-                    configured.configurations[id.0].materialization
+                    let node = configured.node(id.0);
+                    configured.physical.candidates[id.0].materialization
                         == Materialization::NotMaterialized
                         && matches!(
                             (is_range, node.non_asap()),
@@ -1790,10 +1750,7 @@ mod tests {
         let range = find(true);
         let mut projected = Vec::new();
         for supplier in [source, range] {
-            let child = configured.inventory.templates[supplier.0]
-                .as_ref()
-                .unwrap()
-                .clone();
+            let child = configured.node(supplier.0).clone();
             let template = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
                 cols: child
                     .schema
@@ -1809,17 +1766,13 @@ mod tests {
                 child,
             }))
             .unwrap();
-            let id = PhysicalCandidateId(configured.configurations.len());
-            let mut candidate = configured.inventory.graph.candidates[supplier.0].clone();
-            candidate.producer_requirements = vec![ProducerRequirement {
-                compatible_producers: vec![supplier].into(),
-            }];
-            configured.inventory.group_candidates[candidate.group.0 as usize].push(id);
-            configured.inventory.graph.candidates.push(candidate);
-            configured.inventory.templates.push(Some(template));
-            configured
-                .configurations
-                .push(configured.configurations[supplier.0].clone());
+            let id = configured.push_root_like_for_tests(
+                template,
+                supplier,
+                vec![InputSupplierCandidates {
+                    candidates: vec![supplier].into(),
+                }],
+            );
             projected.push(id);
         }
         let context = CandidatePlanningContext {
@@ -1853,8 +1806,9 @@ mod tests {
         assert!(!ignored_excluded.contains(&projected[1]));
         assert!(!ignored_excluded.contains(&source));
         assert_eq!(
-            configured.inventory.group_candidates
-                [configured.inventory.graph.candidates[source.0].group.0 as usize]
+            configured
+                .physical
+                .implementation_roots(configured.physical.memo_group_of(source))
                 .last(),
             Some(&projected[0]),
             "seed policy does not remove the projected candidate from the inventory"
@@ -1881,12 +1835,11 @@ mod tests {
             calibration: CalibrationFit::default(),
         };
         let id = configured
-            .inventory
-            .templates
+            .nodes_for_tests()
             .iter()
             .position(|node| {
                 matches!(
-                    node.as_ref().and_then(|node| node.asap()),
+                    node.asap(),
                     Some(ASAPOp::SummaryAgg {
                         family: FieldDataType::Sketch(..),
                         ..
@@ -1929,11 +1882,11 @@ mod tests {
             calibration: CalibrationFit::default(),
         };
         let original = accuracy_baseline_weights(&configured, &context).unwrap();
-        configured.inventory.graph.candidates[0].local_cost = 100.0;
+        configured.dag.candidates[0].local_cost = 100.0;
         let priced = accuracy_baseline_weights(&configured, &context).unwrap();
         assert!(priced[0] > original[0] + 2.0);
         assert_eq!(priced[1..], original[1..]);
-        assert_eq!(configured.inventory.graph.candidates[0].local_cost, 100.0);
+        assert_eq!(configured.dag.candidates[0].local_cost, 100.0);
     }
 
     // An irrelevant extremely fine pane must not erase the cost distinction
@@ -1952,13 +1905,7 @@ mod tests {
             calibration: CalibrationFit::default(),
         };
         let original = accuracy_baseline_weights(&configured, &context).unwrap();
-        for (candidate, cost) in configured
-            .inventory
-            .graph
-            .candidates
-            .iter_mut()
-            .zip([100.0, 1.0, 1e8])
-        {
+        for (candidate, cost) in configured.dag.candidates.iter_mut().zip([100.0, 1.0, 1e8]) {
             candidate.local_cost = cost;
         }
         let weighted = accuracy_baseline_weights(&configured, &context).unwrap();
@@ -2018,7 +1965,8 @@ mod tests {
             .into_iter()
             .enumerate()
         {
-            configured.inventory.templates[id] = Some(
+            configured.set_node_for_tests(
+                id,
                 OperatorNode::new_shared(Operator::ASAP(ASAPOp::PaneChain {
                     child: child.clone(),
                     family: family.clone(),
@@ -2031,9 +1979,9 @@ mod tests {
                 }))
                 .unwrap(),
             );
-            configured.configurations[id].materialization =
+            configured.physical.candidates[id].materialization =
                 Materialization::MatAtIngestion(Medium::Memory);
-            configured.configurations[id].timing =
+            configured.physical.candidates[id].timing =
                 asap_types::ir::properties::ExecutionTiming::IngestionTime;
         }
         let context = CandidatePlanningContext {
@@ -2049,8 +1997,7 @@ mod tests {
         let weights = accuracy_baseline_weights(&configured, &context).unwrap();
         assert!(weights[0] > weights[1] + weights[2]);
         assert!(configured
-            .inventory
-            .graph
+            .dag
             .candidates
             .iter()
             .all(|candidate| candidate.local_cost == 0.0));
@@ -2084,20 +2031,19 @@ mod tests {
         }
         let (rank_weights, rank_exclusions) = weights(&entries);
         let rank_nodes: Vec<_> = configured
-            .inventory
-            .templates
+            .nodes_for_tests()
             .iter()
             .enumerate()
             .filter(|(id, _)| {
-                configured.inventory.graph.query_roots.iter().any(|root| {
-                    root.compatible_candidates
-                        .iter()
-                        .any(|candidate| candidate.0 == *id)
-                })
+                configured
+                    .dag
+                    .query_roots
+                    .iter()
+                    .any(|root| root.candidates.iter().any(|candidate| candidate.0 == *id))
             })
             .filter_map(|(id, node)| {
-                node.as_ref()
-                    .and_then(|node| node.guarantee.as_ref())
+                node.guarantee
+                    .as_ref()
                     .filter(|guarantee| {
                         !guarantee.is_exact()
                             && guarantee.spec.accuracy_metric == AccuracyMetric::Rank
@@ -2117,8 +2063,7 @@ mod tests {
             .iter()
             .all(|&id| rank_weights[id] == value_weights[id]));
         assert!(configured
-            .inventory
-            .graph
+            .dag
             .candidates
             .iter()
             .all(|candidate| candidate.local_cost == 0.0));
@@ -2239,10 +2184,10 @@ mod tests {
         // Select an ingestion-only summary assignment explicitly. Solver
         // traversal order can change with warm starts and must not determine
         // whether this test exercises authoritative eligibility rejection.
-        let mut ingestion_graph = configured.inventory.graph.clone();
-        for (id, configuration) in configured.configurations.iter().enumerate() {
+        let mut ingestion_graph = configured.dag.clone();
+        for (id, configuration) in configured.physical.candidates.iter().enumerate() {
             if matches!(
-                configured.inventory.templates[id].as_ref().unwrap().asap(),
+                configured.node(id).asap(),
                 Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
             ) && !matches!(
                 configuration.materialization,

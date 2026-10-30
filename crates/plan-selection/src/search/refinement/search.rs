@@ -16,14 +16,13 @@ pub(in crate::search) enum DirectPriceModel<'a> {
 }
 use std::time::{Duration, Instant};
 
+use crate::search::candidates::dag::{CandidateSelectionError, DagOfPhysicalCandidatesWithCosts};
 use crate::search::candidates::graph::RejectedQuerySubgraph;
 use crate::search::milp::model::{
     solve_candidate_proposal_with_metrics, solve_direct_cost_proposal_with_metrics,
     CandidateProposal, CandidateSolveMetrics, ObservedAssignment,
 };
-use asap_types::stages::{
-    CandidateDependencyGraph, CandidateSelectionError, PhysicalCandidateId, SelectedCandidateGraph,
-};
+use asap_types::stages::{PhysicalCandidateId, SelectedCandidateGraph};
 
 #[derive(Debug, Default)]
 pub(in crate::search) struct CandidateEvaluation {
@@ -91,7 +90,7 @@ pub(in crate::search) struct CandidateSearchResult {
 struct SeedRestrictions<'a> {
     excluded: &'a [PhysicalCandidateId],
     materialization_changes: &'a [(PhysicalCandidateId, PhysicalCandidateId)],
-    direct: &'a [(&'a CandidateDependencyGraph, DirectPriceModel<'a>)],
+    direct: &'a [(&'a DagOfPhysicalCandidatesWithCosts, DirectPriceModel<'a>)],
 }
 
 /// The callback returns an actual total cost for a validated feasible plan, or
@@ -103,7 +102,7 @@ struct SeedRestrictions<'a> {
 /// Time bounds are cooperative: a blocking evaluator cannot be preempted here.
 #[cfg(test)]
 pub(in crate::search) fn search_candidates(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     limits: CandidateSearchLimits,
     mut evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<Option<f64>, String>,
 ) -> Result<CandidateSearchResult, String> {
@@ -122,7 +121,7 @@ pub(in crate::search) fn search_candidates(
 /// or lower bound. Its proposals undergo the same evaluator and exact cuts.
 #[cfg(test)]
 pub(in crate::search) fn search_candidates_with_baseline(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     limits: CandidateSearchLimits,
     evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<Option<f64>, String>,
 ) -> Result<CandidateSearchResult, String> {
@@ -132,7 +131,7 @@ pub(in crate::search) fn search_candidates_with_baseline(
 /// Optional weights order baseline proposals only; they never modify cost bounds.
 #[cfg(test)]
 pub(in crate::search) fn search_candidates_with_weighted_baseline(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     limits: CandidateSearchLimits,
     weights: Option<&[f64]>,
     evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<Option<f64>, String>,
@@ -145,7 +144,7 @@ pub(in crate::search) fn search_candidates_with_weighted_baseline(
 
 #[cfg(test)]
 pub(in crate::search) fn search_candidates_with_feedback(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     limits: CandidateSearchLimits,
     weights: Option<&[f64]>,
     evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
@@ -162,7 +161,7 @@ pub(in crate::search) fn search_candidates_with_feedback(
 
 #[cfg(test)]
 pub(in crate::search) fn search_candidates_with_restricted_feedback(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     limits: CandidateSearchLimits,
     weights: &[f64],
     excluded_from_seed: &[PhysicalCandidateId],
@@ -181,12 +180,12 @@ pub(in crate::search) fn search_candidates_with_restricted_feedback(
 }
 
 pub(in crate::search) fn search_candidates_with_direct_feedback(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     limits: CandidateSearchLimits,
     weights: &[f64],
     excluded_from_seed: &[PhysicalCandidateId],
     materialization_changes: &[(PhysicalCandidateId, PhysicalCandidateId)],
-    direct: &[(&CandidateDependencyGraph, DirectPriceModel<'_>)],
+    direct: &[(&DagOfPhysicalCandidatesWithCosts, DirectPriceModel<'_>)],
     evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
 ) -> Result<CandidateSearchResult, String> {
     search_with_structural_baseline(
@@ -204,7 +203,7 @@ pub(in crate::search) fn search_candidates_with_direct_feedback(
 }
 
 fn search_with_structural_baseline(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     limits: CandidateSearchLimits,
     structural_baseline: bool,
     baseline_weights: Option<&[f64]>,
@@ -223,14 +222,14 @@ fn search_with_structural_baseline(
 }
 
 fn search_with_solver(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     limits: CandidateSearchLimits,
     structural_baseline: bool,
     baseline_weights: Option<&[f64]>,
     restrictions: SeedRestrictions<'_>,
     mut evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
     mut propose: impl FnMut(
-        &CandidateDependencyGraph,
+        &DagOfPhysicalCandidatesWithCosts,
         &[ObservedAssignment],
         Option<f64>,
         &mut CandidateSolveMetrics,
@@ -286,18 +285,15 @@ fn search_with_solver(
             }
             for (id, candidate) in heuristic.candidates.iter_mut().enumerate() {
                 if disabled[id] {
-                    candidate.producer_requirements.clear();
+                    candidate.supplier_candidates_per_input.clear();
                 } else {
-                    for input in &mut candidate.producer_requirements {
-                        input
-                            .compatible_producers
-                            .retain(|producer| !disabled[producer.0]);
+                    for input in &mut candidate.supplier_candidates_per_input {
+                        input.candidates.retain(|producer| !disabled[producer.0]);
                     }
                 }
             }
             for root in &mut heuristic.query_roots {
-                root.compatible_candidates
-                    .retain(|candidate| !disabled[candidate.0]);
+                root.candidates.retain(|candidate| !disabled[candidate.0]);
             }
             heuristic
                 .reader_constraints
@@ -407,8 +403,11 @@ fn search_with_solver(
             let admitted = observations
                 .iter()
                 .filter(|observation: &&ObservedAssignment| {
-                    asap_types::stages::validate_selected_graph(restricted, &observation.selected)
-                        .is_ok()
+                    crate::search::candidates::dag::validate_selected_graph(
+                        restricted,
+                        &observation.selected,
+                    )
+                    .is_ok()
                 })
                 .cloned()
                 .map(|mut observation| {
@@ -753,24 +752,23 @@ fn same_assignment(left: &SelectedCandidateGraph, right: &SelectedCandidateGraph
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::stages::MemoGroupId;
-    use asap_types::stages::{
-        PhysicalCandidate, PhysicalCandidateId, ProducerRequirement, QueryRootCandidates,
+    use crate::search::candidates::dag::{
+        InputSupplierCandidates, PhysicalCandidateWithCost, QueryOutputCandidates,
     };
 
-    fn choices(costs: &[f64]) -> CandidateDependencyGraph {
-        CandidateDependencyGraph {
+    use asap_types::stages::PhysicalCandidateId;
+
+    fn choices(costs: &[f64]) -> DagOfPhysicalCandidatesWithCosts {
+        DagOfPhysicalCandidatesWithCosts {
             candidates: costs
                 .iter()
-                .enumerate()
-                .map(|(id, &local_cost)| PhysicalCandidate {
-                    group: MemoGroupId(id as u32),
+                .map(|&local_cost| PhysicalCandidateWithCost {
                     local_cost,
-                    producer_requirements: vec![],
+                    supplier_candidates_per_input: vec![],
                 })
                 .collect(),
-            query_roots: vec![QueryRootCandidates {
-                compatible_candidates: (0..costs.len()).map(PhysicalCandidateId).collect(),
+            query_roots: vec![QueryOutputCandidates {
+                candidates: (0..costs.len()).map(PhysicalCandidateId).collect(),
             }],
             ..Default::default()
         }
@@ -829,7 +827,7 @@ mod tests {
         use crate::search::milp::direct_cost::NodeCostProfile;
         let graph = choices(&[0.0, 0.0]);
         let mut restricted = graph.clone();
-        restricted.query_roots[0].compatible_candidates = vec![PhysicalCandidateId(1)];
+        restricted.query_roots[0].candidates = vec![PhysicalCandidateId(1)];
         let profile = DirectCostProfile {
             schedules: None,
             nodes: vec![
@@ -872,7 +870,7 @@ mod tests {
     fn structural_restricted_seed_uses_only_evaluated_prices() {
         let graph = choices(&[0.0, 0.0]);
         let mut restricted = graph.clone();
-        restricted.query_roots[0].compatible_candidates = vec![PhysicalCandidateId(1)];
+        restricted.query_roots[0].candidates = vec![PhysicalCandidateId(1)];
         restricted.candidates[1].local_cost = 100.0;
         let result = search_candidates_with_direct_feedback(
             &graph,
@@ -896,9 +894,9 @@ mod tests {
         use crate::search::milp::direct_cost::NodeCostProfile;
         let graph = choices(&[0.0, 0.0]);
         let mut first = graph.clone();
-        first.query_roots[0].compatible_candidates = vec![PhysicalCandidateId(0)];
+        first.query_roots[0].candidates = vec![PhysicalCandidateId(0)];
         let mut second = graph.clone();
-        second.query_roots[0].compatible_candidates = vec![PhysicalCandidateId(1)];
+        second.query_roots[0].candidates = vec![PhysicalCandidateId(1)];
         let profile = DirectCostProfile {
             schedules: None,
             nodes: vec![
@@ -938,7 +936,8 @@ mod tests {
     // the earlier certified bound or falsely closing the optimality gap.
     #[test]
     fn nonoptimal_proposal_preserves_bound_and_improves_incumbent() {
-        use asap_types::stages::{validate_selected_graph, QueryRootAssignment};
+        use crate::search::candidates::dag::validate_selected_graph;
+        use asap_types::stages::QueryRootAssignment;
         let graph = choices(&[2.0, 3.0]);
         let mut round = 0;
         let result = search_with_solver(
@@ -988,11 +987,11 @@ mod tests {
     fn certified_feedback_survives_heuristic_phase_without_changing_cost_bounds() {
         let mut graph = choices(&[0.0, 0.0, 0.0, 0.0]);
         graph.query_roots = vec![
-            QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
+            QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
             },
-            QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(2), PhysicalCandidateId(3)],
+            QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(2), PhysicalCandidateId(3)],
             },
         ];
         let mut bad_evaluations = 0;
@@ -1033,11 +1032,11 @@ mod tests {
     fn structural_seed_uses_original_bound_and_favors_shared_nodes() {
         let mut graph = choices(&[0.25, 0.25, 0.25]);
         graph.query_roots = vec![
-            QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(2)],
+            QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(2)],
             },
-            QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(1), PhysicalCandidateId(2)],
+            QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(1), PhysicalCandidateId(2)],
             },
         ];
         let result = search_candidates_with_baseline(&graph, limits(1), |selected| {
@@ -1274,9 +1273,9 @@ mod tests {
     fn observed_cost_cut_includes_absent_candidate_decisions() {
         let mut graph = choices(&[1.0, 1.0]);
         graph.candidates[1]
-            .producer_requirements
-            .push(ProducerRequirement {
-                compatible_producers: vec![PhysicalCandidateId(0)].into(),
+            .supplier_candidates_per_input
+            .push(InputSupplierCandidates {
+                candidates: vec![PhysicalCandidateId(0)].into(),
             });
         let result = search_candidates(&graph, limits(10), |selected| {
             Ok(Some(if selected.selected_candidates.len() == 1 {
@@ -1332,17 +1331,17 @@ mod tests {
     fn observed_context_distinguishes_connections_and_output_assignments() {
         let mut graph = choices(&[0.0; 3]);
         graph.candidates[2]
-            .producer_requirements
-            .push(ProducerRequirement {
-                compatible_producers: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
+            .supplier_candidates_per_input
+            .push(InputSupplierCandidates {
+                candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
             });
         graph.query_roots = (0..3)
-            .map(|id| QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(id)],
+            .map(|id| QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(id)],
             })
             .collect();
-        graph.query_roots.push(QueryRootCandidates {
-            compatible_candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
+        graph.query_roots.push(QueryOutputCandidates {
+            candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
         });
         let mut seen = Vec::new();
         let result = search_candidates(&graph, limits(10), |selected| {

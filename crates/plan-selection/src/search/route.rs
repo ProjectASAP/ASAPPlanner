@@ -718,12 +718,7 @@ fn search_domain<Id: Clone>(
         generate_logical_asap_memo_candidates, LogicalASAPMemoCandidatesError, Pass2RoundState,
     };
     use asap_logical_asap_optimization::pass2::memo::state_groups::StateGroupExpansionError;
-    use asap_physical_asap_optimization::catalog::{
-        build_candidate_inventory_before, CandidateInventoryError,
-    };
-    use asap_physical_asap_optimization::catalog::{
-        enumerate_candidate_configurations_before, ConfigurationError,
-    };
+    use asap_physical_asap_optimization::catalog::generate_physical_asap_memo_candidates;
     use std::time::{Duration, Instant};
     let unsupported = |reason: &str| {
         SelectionError::Solver(format!(
@@ -789,20 +784,7 @@ fn search_domain<Id: Clone>(
         .iter()
         .map(|(_, root)| root.clone())
         .collect::<Vec<_>>();
-    let mut output_groups = Vec::new();
-    let mut output_queries = Vec::new();
-    for (query, root) in initial.query_roots.iter().enumerate() {
-        let mut reference = |&group: &MemoGroupId| {
-            output_groups.push(group);
-            output_queries.push(query);
-        };
-        match root {
-            QueryRoot::Operator(group) => reference(group),
-            QueryRoot::Scalar(expression) => {
-                expression.map_operator_refs(&mut reference);
-            }
-        }
-    }
+    let output_references = asap_types::stages::output_references(&initial.query_roots).len();
     let started = Instant::now();
     let pruned = if progress.pass2_round.is_none() {
         Some(
@@ -885,9 +867,9 @@ fn search_domain<Id: Clone>(
     let first_round = pass2_round.previous_domain().is_none();
     // Pass 2 keeps its memo before state-group splitting across rounds: later
     // rounds append local widths, then rebuild the state/physical catalog.
-    let memo =
+    let logical_asap_candidates =
         match generate_logical_asap_memo_candidates(&mut pass2_round, entries, domain, deadline) {
-            Ok(candidates) => candidates.memo,
+            Ok(candidates) => candidates,
             Err(error) => {
                 match &error {
                     // A timed-out window composition leaves partial work: drop it.
@@ -903,6 +885,7 @@ fn search_domain<Id: Clone>(
                 return Err(unsupported(&error.to_string()));
             }
         };
+    let memo = &logical_asap_candidates.memo;
     let pass2_round = progress.pass2_round.insert(pass2_round);
     progress.memo_steps = progress.pass1_steps.as_ref().map(|(stage0, pass1)| {
         (
@@ -921,19 +904,8 @@ fn search_domain<Id: Clone>(
     let groups = memo.groups.len();
     let logical_candidates = memo.candidates.iter().map(Vec::len).sum();
     let started = Instant::now();
-    let (source, memo_candidate_roots) =
-        build_candidate_inventory_before(&memo, &output_groups, |_| Ok(0.0), deadline).map_err(
-            |error| {
-                progress.budget_stopped =
-                    matches!(error, CandidateInventoryError::DeadlineExceeded(_));
-                unsupported(&error.to_string())
-            },
-        )?;
-    let immediate_candidates = source.graph.candidates.len();
-
-    let mut configured = enumerate_candidate_configurations_before(
-        &source,
-        &output_queries,
+    let physical = generate_physical_asap_memo_candidates(
+        &logical_asap_candidates,
         entries,
         data,
         models.deployment_capabilities.query_time_results_retained,
@@ -941,11 +913,12 @@ fn search_domain<Id: Clone>(
         deadline,
     )
     .map_err(|error| {
-        progress.budget_stopped = matches!(error, ConfigurationError::DeadlineExceeded(_));
+        progress.budget_stopped = error.is_deadline_exceeded();
         unsupported(&error.to_string())
     })?;
-    let structural_pruning = asap_physical_asap_optimization::catalog::prune(&mut configured)
-        .map_err(|error| unsupported(&error))?;
+    let immediate_candidates = physical.operator_nodes_of_candidates_for_memo_groups.len();
+    let structural_pruning = physical.pruning_metrics;
+    let mut configured = crate::search::candidates::dag::PhysicalCandidatesWithCosts::new(physical);
     check_budget("physical candidate generation", progress)?;
     let context = CandidatePlanningContext {
         deadline,
@@ -1095,8 +1068,7 @@ fn search_domain<Id: Clone>(
         result.status,
         CandidateSearchStatus::TimeLimit | CandidateSearchStatus::RefinementLimit
     );
-    let supplier_storage =
-        asap_types::stages::supplier_storage_metrics(&configured.inventory.graph);
+    let supplier_storage = asap_types::stages::supplier_storage_metrics(&configured.physical);
     let report = crate::CandidateConnectionReport {
         inventory_pane_width_domain: Some(format!("{domain:?}")),
         supplier_sets: supplier_storage.unique_supplier_sets,
@@ -1114,9 +1086,9 @@ fn search_domain<Id: Clone>(
         evaluation_complete: result.evaluation_complete,
         catalog_scope: "Pass 1, local panes, shared summary/pane states, exact and sketch rollups, compatible TopK ranking reuse, and scan widening; finite capacity, pane-width, horizon, materialization and execution-scope configurations".into(),
         status, groups, logical_candidates, immediate_candidates,
-        physical_configurations: configured.configurations.len(),
-        compatible_connections: configured.inventory.graph.candidates.iter().flat_map(|candidate| &candidate.producer_requirements).map(|input| input.compatible_producers.len()).sum(),
-        output_references: output_groups.len(), refinements: result.refinements,
+        physical_configurations: configured.physical.candidates.len(),
+        compatible_connections: configured.dag.candidates.iter().flat_map(|candidate| &candidate.supplier_candidates_per_input).map(|input| input.candidates.len()).sum(),
+        output_references, refinements: result.refinements,
         max_refinements: search.max_evaluations.unwrap_or(128), time_limit_ms: search.milp_time_limit_ms.unwrap_or(30_000),
         lower_bound: result.lower_bound, relative_gap: result.relative_gap,
         objective: match &models.plan_selection.cost_model {
@@ -1166,13 +1138,8 @@ fn search_domain<Id: Clone>(
         .map_err(|error| unsupported(&error))?;
     if let Some((plan, steps)) = &mut progress.memo_steps {
         *plan = Some(physical.id.clone());
-        steps.selected_chosen_candidates = selected_chosen_candidates(
-            &steps.concrete_states,
-            &source,
-            &memo_candidate_roots,
-            &configured,
-            selected,
-        );
+        steps.selected_chosen_candidates =
+            selected_chosen_candidates(&steps.concrete_states, &configured.physical, selected);
     }
     selection.search.candidates_checked = result.refinements as u64;
     selection.search.candidate_connections = Some(report);
@@ -1185,37 +1152,26 @@ fn search_domain<Id: Clone>(
 /// different inputs); the one reading the selected producers' groups is taken.
 fn selected_chosen_candidates(
     memo: &CandidateMemo,
-    source: &asap_types::stages::CandidateInventory,
-    memo_candidate_roots: &[Vec<asap_types::stages::PhysicalCandidateId>],
-    configured: &asap_types::stages::CandidateConfigurationInventory,
+    physical: &asap_types::stages::PhysicalASAPMemoCandidates,
     selected: &asap_types::stages::SelectedCandidateGraph,
 ) -> Result<ChosenCandidatePerMemoGroup, String> {
     use std::collections::HashMap;
-    let mut memo_candidates_of = HashMap::<_, Vec<(MemoGroupId, usize)>>::new();
-    for (group, roots) in memo_candidate_roots.iter().enumerate() {
-        for (index, &root) in roots.iter().enumerate() {
-            memo_candidates_of
-                .entry(root)
-                .or_default()
-                .push((MemoGroupId(group as u32), index));
-        }
-    }
-    let source_of = |id: asap_types::stages::PhysicalCandidateId| {
-        configured.configurations[id.0].source_candidate
-    };
     let mut producer_groups = HashMap::<_, Vec<MemoGroupId>>::new();
     for connection in &selected.connections {
         producer_groups
             .entry(connection.consumer)
             .or_default()
-            .push(source.graph.candidates[source_of(connection.producer).0].group);
+            .push(physical.memo_group_of(connection.producer));
     }
     let mut chosen_candidates = ChosenCandidatePerMemoGroup::new();
     for &id in &selected.selected_candidates {
-        let Some(options) = memo_candidates_of.get(&source_of(id)) else {
+        let node = &physical.operator_nodes_of_candidates_for_memo_groups
+            [physical.candidates[id.0].operator_node.0];
+        if !node.is_implementation_root {
             continue; // a candidate's private node
-        };
-        let reads = |&&(group, index): &&(MemoGroupId, usize)| {
+        }
+        let options = &node.candidates_for_memo_group;
+        let reads = |&&asap_types::stages::CandidateForMemoGroupId { group, index }: &&asap_types::stages::CandidateForMemoGroupId| {
             producer_groups.get(&id).is_none_or(|read| {
                 read.iter().all(|&child| {
                     child == group
@@ -1225,12 +1181,13 @@ fn selected_chosen_candidates(
                 })
             })
         };
-        let &(group, index) = options.iter().find(reads).ok_or_else(|| {
-            format!(
-                "selected candidate {} reads groups none of its memo candidates read",
-                id.0
-            )
-        })?;
+        let &asap_types::stages::CandidateForMemoGroupId { group, index } =
+            options.iter().find(reads).ok_or_else(|| {
+                format!(
+                    "selected candidate {} reads groups none of its memo candidates read",
+                    id.0
+                )
+            })?;
         if let Some(previous) = chosen_candidates.insert(group, index) {
             if previous != index {
                 return Err(format!(
@@ -1261,14 +1218,14 @@ fn selected_chosen_candidates(
 }
 
 fn selected_logical_roots(
-    configured: &asap_types::stages::CandidateConfigurationInventory,
+    configured: &crate::search::candidates::dag::PhysicalCandidatesWithCosts,
     selected: &asap_types::stages::SelectedCandidateGraph,
     roots: &[QueryRoot],
 ) -> Result<Vec<QueryRoot>, String> {
+    configured.validate_selected(selected)?;
     let outputs = asap_physical_asap_optimization::catalog::reconstruct_selected_candidates(
-        &configured.inventory.graph,
+        &configured.physical,
         selected,
-        &configured.inventory.templates,
     )?
     .outputs;
     let mut next = outputs.iter();

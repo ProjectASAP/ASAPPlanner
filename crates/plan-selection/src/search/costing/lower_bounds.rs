@@ -8,10 +8,10 @@ use asap_types::ir::schema::{FieldDataType, SketchParams};
 use asap_types::ir::{ASAPOp, NonASAPOp};
 use asap_types::physical::Materialization;
 
+use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
 use crate::search::refinement::planner::CandidatePlanningContext;
 use crate::{price_node, PricedNode, ProducerOutput, StateFamily};
 use asap_cost::CostModel;
-use asap_types::stages::CandidateConfigurationInventory;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(in crate::search) struct LowerBoundMetrics {
@@ -26,16 +26,12 @@ pub(in crate::search) struct LowerBoundMetrics {
 /// Replace placeholder costs in the actual inventory used by selection and
 /// reconstruction. This is a lower bound, never a substitute for plan evaluation.
 pub(in crate::search) fn apply(
-    configured: &mut CandidateConfigurationInventory,
+    configured: &mut PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
 ) -> Result<LowerBoundMetrics, String> {
-    configured
-        .inventory
-        .graph
-        .validate()
-        .map_err(|e| e.to_string())?;
-    let count = configured.inventory.graph.candidates.len();
-    if configured.configurations.len() != count || configured.inventory.templates.len() != count {
+    configured.dag.validate().map_err(|e| e.to_string())?;
+    let count = configured.dag.candidates.len();
+    if configured.physical.candidates.len() != count {
         return Err("lower-bound inputs must be indexed by candidate ID".into());
     }
     let mut metrics = LowerBoundMetrics::default();
@@ -72,7 +68,8 @@ pub(in crate::search) fn apply(
         // consumer, even when the current policy would permit this floor.
         let mut retained_ancestor = vec![false; count];
         let mut pending: Vec<_> = configured
-            .configurations
+            .physical
+            .candidates
             .iter()
             .enumerate()
             .filter_map(|(id, config)| {
@@ -88,17 +85,17 @@ pub(in crate::search) fn apply(
                 continue;
             }
             pending.extend(
-                configured.inventory.graph.candidates[id]
-                    .producer_requirements
+                configured.dag.candidates[id]
+                    .supplier_candidates_per_input
                     .iter()
-                    .flat_map(|input| input.compatible_producers.iter().map(|producer| producer.0)),
+                    .flat_map(|input| input.candidates.iter().map(|producer| producer.0)),
             );
         }
         let common_reader_window_ms = common_reader_windows(configured);
         let nodes: Vec<_> = (0..count)
             .map(|id| {
-                let configuration = &configured.configurations[id];
-                let template = configured.inventory.templates[id].as_ref()?;
+                let configuration = &configured.physical.candidates[id];
+                let template = configured.node(id);
                 let state = if configuration.timing == ExecutionTiming::QueryTime {
                     if retained_ancestor[id] {
                         return None;
@@ -194,8 +191,8 @@ pub(in crate::search) fn apply(
                     id
                 });
                 if position
-                    != configured.inventory.graph.candidates[id]
-                        .producer_requirements
+                    != configured.dag.candidates[id]
+                        .supplier_candidates_per_input
                         .len()
                 {
                     return None;
@@ -264,14 +261,10 @@ pub(in crate::search) fn apply(
     // the evaluator continues to charge their complete actual cost.
     metrics.rounded_down_candidates = round_down_small_bounds(&mut costs);
     metrics.priced_candidates -= metrics.rounded_down_candidates;
-    for (candidate, cost) in configured.inventory.graph.candidates.iter_mut().zip(costs) {
+    for (candidate, cost) in configured.dag.candidates.iter_mut().zip(costs) {
         candidate.local_cost = cost;
     }
-    configured
-        .inventory
-        .graph
-        .validate()
-        .map_err(|e| e.to_string())?;
+    configured.dag.validate().map_err(|e| e.to_string())?;
     Ok(metrics)
 }
 
@@ -286,12 +279,12 @@ pub(in crate::search) fn apply(
 /// without a sound fixed bound. (A bound at the shortest window was sound but
 /// priced a scan a short and a long window may share far below a scan for the
 /// long window alone, so the search proposed the shared scan first, #994.)
-fn common_reader_windows(configured: &CandidateConfigurationInventory) -> Vec<Option<u64>> {
-    let graph = &configured.inventory.graph;
+fn common_reader_windows(configured: &PhysicalCandidatesWithCosts) -> Vec<Option<u64>> {
+    let graph = &configured.dag;
     let mut readers = vec![Vec::new(); graph.candidates.len()];
     for (reader, candidate) in graph.candidates.iter().enumerate() {
-        for requirement in &candidate.producer_requirements {
-            for producer in requirement.compatible_producers.iter() {
+        for requirement in &candidate.supplier_candidates_per_input {
+            for producer in requirement.candidates.iter() {
                 readers[producer.0].push(reader);
             }
         }
@@ -306,27 +299,21 @@ fn common_reader_windows(configured: &CandidateConfigurationInventory) -> Vec<Op
                     continue;
                 }
                 for &reader in &readers[producer] {
-                    let window = match configured.inventory.templates[reader]
-                        .as_ref()
-                        .map(|template| &template.operator)
-                    {
-                        Some(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeRange {
-                            range,
-                            ..
-                        })) => Some(range.as_millis() as u64),
-                        Some(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeShift {
-                            ..
-                        })) => {
+                    let window = match &configured.node(reader).operator {
+                        asap_types::ir::Operator::NonASAP(NonASAPOp::TimeRange {
+                            range, ..
+                        }) => Some(range.as_millis() as u64),
+                        asap_types::ir::Operator::NonASAP(NonASAPOp::TimeShift { .. }) => {
                             pending.push(reader);
                             None
                         }
                         // A chain kept across evaluations reads one pane;
                         // its scans are never certified (retained ancestors).
-                        Some(asap_types::ir::Operator::ASAP(ASAPOp::PaneChain {
+                        asap_types::ir::Operator::ASAP(ASAPOp::PaneChain {
                             pane_width_ms,
                             pane_count,
                             ..
-                        })) => Some(pane_width_ms.saturating_mul(u64::from(*pane_count))),
+                        }) => Some(pane_width_ms.saturating_mul(u64::from(*pane_count))),
                         _ => None,
                     };
                     windows_ms.extend(window);
@@ -383,7 +370,9 @@ fn round_down_small_bounds(costs: &mut [f64]) -> usize {
     let largest = costs.iter().copied().fold(0.0_f64, f64::max);
     let mut removed = 0;
     for cost in costs {
-        if *cost > 0.0 && *cost / largest < asap_types::stages::MINIMUM_RELATIVE_COEFFICIENT {
+        if *cost > 0.0
+            && *cost / largest < crate::search::candidates::dag::MINIMUM_RELATIVE_COEFFICIENT
+        {
             *cost = 0.0;
             removed += 1;
         }
@@ -401,7 +390,7 @@ struct ConcreteRows {
 }
 
 impl ConcreteRows {
-    fn of(configured: &CandidateConfigurationInventory) -> Self {
+    fn of(configured: &PhysicalCandidatesWithCosts) -> Self {
         let mut result = Self {
             nodes: Vec::new(),
             children: Vec::new(),
@@ -444,13 +433,11 @@ impl ConcreteRows {
             result.children.push(children);
             Some(id)
         }
-        for (id, config) in configured.configurations.iter().enumerate() {
+        for (id, config) in configured.physical.candidates.iter().enumerate() {
             let root = if config.timing == ExecutionTiming::IngestionTime
                 && config.materialization == Materialization::NotMaterialized
             {
-                configured.inventory.templates[id]
-                    .as_ref()
-                    .and_then(|node| append(node, &mut result))
+                append(configured.node(id), &mut result)
             } else {
                 None
             };
@@ -499,7 +486,7 @@ impl ConcreteRows {
 
     fn certify(
         &self,
-        configured: &CandidateConfigurationInventory,
+        configured: &PhysicalCandidatesWithCosts,
         prices: &[Option<PricedNode<'_>>],
     ) -> Result<Vec<bool>, String> {
         let interfaces: Vec<_> = self
@@ -536,14 +523,14 @@ impl ConcreteRows {
                     continue;
                 }
                 let root = self.roots[id].unwrap();
-                let inputs = &configured.inventory.graph.candidates[id].producer_requirements;
+                let inputs = &configured.dag.candidates[id].supplier_candidates_per_input;
                 let agrees = inputs.len() == self.children[root].len()
                     && inputs
                         .iter()
                         .zip(&self.children[root])
                         .all(|(input, &child)| {
-                            !input.compatible_producers.is_empty()
-                                && input.compatible_producers.iter().all(|supplier| {
+                            !input.candidates.is_empty()
+                                && input.candidates.iter().all(|supplier| {
                                     valid[supplier.0]
                                         && interfaces[self.roots[supplier.0].unwrap()]
                                             == interfaces[child]
@@ -564,7 +551,7 @@ impl ConcreteRows {
 #[allow(clippy::too_many_arguments)]
 fn certified_price<'a>(
     id: usize,
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     nodes: &'a [Option<PhysicalASAPDAGNode>],
     common_reader_window_ms: &[Option<u64>],
     context: &'a CandidatePlanningContext<'a>,
@@ -586,10 +573,10 @@ fn certified_price<'a>(
     visiting[id] = true;
     let result: Result<Option<PricedNode<'a>>, String> = (|| {
         let mut views = Vec::new();
-        for requirement in &configured.inventory.graph.candidates[id].producer_requirements {
+        for requirement in &configured.dag.candidates[id].supplier_candidates_per_input {
             let mut representative = None;
             let mut signature = None;
-            for supplier in &requirement.compatible_producers {
+            for supplier in &requirement.candidates {
                 let Some(priced) = certified_price(
                     supplier.0,
                     configured,
@@ -751,18 +738,15 @@ mod tests {
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::{OperatorNode, QueryRoot};
     use asap_types::physical::Medium;
-    use asap_types::stages::CandidateConfiguration;
-    use asap_types::stages::CandidateInventory;
-    use asap_types::stages::MemoGroupId;
-    use asap_types::stages::{
-        CandidateDependencyGraph, PhysicalCandidate, PhysicalCandidateId, ProducerRequirement,
-        QueryRootCandidates,
-    };
+
+    use crate::search::candidates::dag::{InputSupplierCandidates, QueryOutputCandidates};
+
+    use asap_types::stages::PhysicalCandidateId;
     use asap_types::workload::*;
     use std::{collections::HashMap, rc::Rc};
 
     fn fixture() -> (
-        CandidateConfigurationInventory,
+        PhysicalCandidatesWithCosts,
         Vec<QueryRoot>,
         Vec<QueryWorkloadEntry>,
         DataWorkload,
@@ -773,7 +757,7 @@ mod tests {
     fn fixture_for(
         exact: bool,
     ) -> (
-        CandidateConfigurationInventory,
+        PhysicalCandidatesWithCosts,
         Vec<QueryRoot>,
         Vec<QueryWorkloadEntry>,
         DataWorkload,
@@ -785,7 +769,7 @@ mod tests {
         exact: bool,
         grouped: bool,
     ) -> (
-        CandidateConfigurationInventory,
+        PhysicalCandidatesWithCosts,
         Vec<QueryRoot>,
         Vec<QueryWorkloadEntry>,
         DataWorkload,
@@ -828,17 +812,10 @@ mod tests {
                     .remove(0),
             );
         }
-        let mut configured = CandidateConfigurationInventory {
-            inventory: CandidateInventory {
-                graph: CandidateDependencyGraph::default(),
-                templates: Vec::new(),
-                group_candidates: Vec::new(),
-            },
-            configurations: Vec::new(),
-        };
+        let mut configured = PhysicalCandidatesWithCosts::empty_for_tests();
         fn intern(
             node: &Rc<OperatorNode>,
-            configured: &mut CandidateConfigurationInventory,
+            configured: &mut PhysicalCandidatesWithCosts,
             ids: &mut HashMap<*const OperatorNode, usize>,
         ) -> usize {
             if let Some(&id) = ids.get(&Rc::as_ptr(node)) {
@@ -849,39 +826,30 @@ mod tests {
                 inputs.push(intern(child, configured, ids));
                 Rc::clone(child)
             });
-            let id = configured.inventory.templates.len();
+            let id = configured.nodes_for_tests().len();
             ids.insert(Rc::as_ptr(node), id);
             let pane = matches!(node.asap(), Some(ASAPOp::PaneChain { .. }));
             let scan = matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }));
-            configured.configurations.push(CandidateConfiguration {
-                may_keep_with_sole_reader: Vec::new(),
-                source_candidate: PhysicalCandidateId(id),
-                timing: if pane || scan {
+            configured.push_for_tests(
+                Rc::clone(node),
+                if pane || scan {
                     ExecutionTiming::IngestionTime
                 } else {
                     ExecutionTiming::QueryTime
                 },
-                materialization: if pane {
+                if pane {
                     Materialization::MatAtIngestion(Medium::Memory)
                 } else {
                     Materialization::NotMaterialized
                 },
-            });
-            configured.inventory.templates.push(Some(Rc::clone(node)));
-            configured
-                .inventory
-                .graph
-                .candidates
-                .push(PhysicalCandidate {
-                    group: MemoGroupId(id as u32),
-                    local_cost: 0.0,
-                    producer_requirements: inputs
-                        .into_iter()
-                        .map(|input| ProducerRequirement {
-                            compatible_producers: vec![PhysicalCandidateId(input)].into(),
-                        })
-                        .collect(),
-                });
+                0.0,
+                inputs
+                    .into_iter()
+                    .map(|input| InputSupplierCandidates {
+                        candidates: vec![PhysicalCandidateId(input)].into(),
+                    })
+                    .collect(),
+            );
             id
         }
         let mut ids = HashMap::new();
@@ -890,34 +858,28 @@ mod tests {
                 unreachable!()
             };
             let id = intern(node, &mut configured, &mut ids);
-            configured
-                .inventory
-                .graph
-                .query_roots
-                .push(QueryRootCandidates {
-                    compatible_candidates: vec![PhysicalCandidateId(id)],
-                });
+            configured.dag.query_roots.push(QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(id)],
+            });
+            configured.sync_physical_for_tests();
         }
         let chains: Vec<_> = configured
-            .inventory
-            .templates
+            .nodes_for_tests()
             .iter()
             .enumerate()
             .filter_map(|(id, node)| {
-                matches!(
-                    node.as_ref().unwrap().asap(),
-                    Some(ASAPOp::PaneChain { .. })
-                )
-                .then_some(PhysicalCandidateId(id))
+                matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+                    .then_some(PhysicalCandidateId(id))
             })
             .collect();
-        for candidate in &mut configured.inventory.graph.candidates {
-            for input in &mut candidate.producer_requirements {
-                if chains.contains(&input.compatible_producers[0]) {
-                    input.compatible_producers = chains.clone().into();
+        for candidate in &mut configured.dag.candidates {
+            for input in &mut candidate.supplier_candidates_per_input {
+                if chains.contains(&input.candidates[0]) {
+                    input.candidates = chains.clone().into();
                 }
             }
         }
+        configured.sync_physical_for_tests();
         let entries = (0..2)
             .map(|_| {
                 let mut entry = entry_with(
@@ -948,30 +910,23 @@ mod tests {
         (configured, roots, entries, data)
     }
 
-    fn add_ingestion_transforms(configured: &mut CandidateConfigurationInventory) {
+    fn add_ingestion_transforms(configured: &mut PhysicalCandidatesWithCosts) {
         use asap_types::ir::scalar::{ProjectItem, ScalarExpr};
         use asap_types::ir::TimeRangeKind;
         let chains: Vec<_> = configured
-            .inventory
-            .templates
+            .nodes_for_tests()
             .iter()
             .enumerate()
             .filter_map(|(id, node)| {
-                matches!(
-                    node.as_ref().unwrap().asap(),
-                    Some(ASAPOp::PaneChain { .. })
-                )
-                .then_some(id)
+                matches!(node.asap(), Some(ASAPOp::PaneChain { .. })).then_some(id)
             })
             .collect();
         let mut projects = Vec::new();
         for (index, &chain) in chains.iter().enumerate() {
-            let scan = configured.inventory.graph.candidates[chain].producer_requirements[0]
-                .compatible_producers[0];
-            let input = configured.inventory.templates[scan.0]
-                .as_ref()
-                .unwrap()
-                .clone();
+            let scan =
+                configured.dag.candidates[chain].supplier_candidates_per_input[0].candidates[0];
+            configured.sync_physical_for_tests();
+            let input = configured.node(scan.0).clone();
             let range =
                 OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::TimeRange {
                     range: std::time::Duration::from_secs(300 + index as u64 * 300),
@@ -997,40 +952,30 @@ mod tests {
                 .unwrap();
             let mut producer = scan;
             for node in [range, project] {
-                let id = PhysicalCandidateId(configured.configurations.len());
-                configured.configurations.push(CandidateConfiguration {
-                    may_keep_with_sole_reader: Vec::new(),
-                    source_candidate: id,
-                    materialization: Materialization::NotMaterialized,
-                    timing: ExecutionTiming::IngestionTime,
-                });
-                configured.inventory.templates.push(Some(node));
-                configured
-                    .inventory
-                    .graph
-                    .candidates
-                    .push(PhysicalCandidate {
-                        group: MemoGroupId(id.0 as u32),
-                        local_cost: 0.0,
-                        producer_requirements: vec![ProducerRequirement {
-                            compatible_producers: vec![producer].into(),
-                        }],
-                    });
+                let id = PhysicalCandidateId(configured.physical.candidates.len());
+                configured.push_for_tests(
+                    node,
+                    ExecutionTiming::IngestionTime,
+                    Materialization::NotMaterialized,
+                    0.0,
+                    vec![InputSupplierCandidates {
+                        candidates: vec![producer].into(),
+                    }],
+                );
                 producer = id;
             }
             projects.push(producer);
         }
         for chain in chains {
-            configured.inventory.graph.candidates[chain].producer_requirements[0]
-                .compatible_producers = projects.clone().into();
-            let child = configured.inventory.templates[projects[0].0]
-                .as_ref()
-                .unwrap()
-                .clone();
-            let template = configured.inventory.templates[chain].as_ref().unwrap();
-            configured.inventory.templates[chain] = Some(Rc::new(
-                template.with_new_children(|_| child.clone()).unwrap(),
-            ));
+            configured.dag.candidates[chain].supplier_candidates_per_input[0].candidates =
+                projects.clone().into();
+            configured.sync_physical_for_tests();
+            let child = configured.nodes_for_tests()[projects[0].0].clone();
+            let template = configured.node(chain);
+            configured.set_node_for_tests(
+                chain,
+                Rc::new(template.with_new_children(|_| child.clone()).unwrap()),
+            );
         }
     }
 
@@ -1041,24 +986,17 @@ mod tests {
         let (mut configured, roots, entries, mut data) = fixture();
         data.sources.get_mut("latency").unwrap().values_non_negative = true;
         let scans: Vec<_> = configured
-            .inventory
-            .templates
+            .nodes_for_tests()
             .iter()
             .enumerate()
             .filter_map(|(id, node)| {
-                matches!(
-                    node.as_ref().unwrap().non_asap(),
-                    Some(NonASAPOp::Scan { .. })
-                )
-                .then_some(PhysicalCandidateId(id))
+                matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }))
+                    .then_some(PhysicalCandidateId(id))
             })
             .collect();
         let mut projects = Vec::new();
         for scan in &scans {
-            let input = configured.inventory.templates[scan.0]
-                .as_ref()
-                .unwrap()
-                .clone();
+            let input = configured.node(scan.0).clone();
             let project =
                 OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Project {
                     cols: input
@@ -1075,40 +1013,29 @@ mod tests {
                     child: input,
                 }))
                 .unwrap();
-            let id = PhysicalCandidateId(configured.configurations.len());
-            configured.configurations.push(CandidateConfiguration {
-                may_keep_with_sole_reader: Vec::new(),
-                source_candidate: id,
-                materialization: Materialization::NotMaterialized,
-                timing: ExecutionTiming::IngestionTime,
-            });
-            configured.inventory.templates.push(Some(project));
-            configured
-                .inventory
-                .graph
-                .candidates
-                .push(PhysicalCandidate {
-                    group: MemoGroupId(id.0 as u32),
-                    local_cost: 0.0,
-                    producer_requirements: vec![ProducerRequirement {
-                        compatible_producers: vec![*scan].into(),
-                    }],
-                });
+            let id = PhysicalCandidateId(configured.physical.candidates.len());
+            configured.push_for_tests(
+                project,
+                ExecutionTiming::IngestionTime,
+                Materialization::NotMaterialized,
+                0.0,
+                vec![InputSupplierCandidates {
+                    candidates: vec![*scan].into(),
+                }],
+            );
             projects.push(id);
         }
-        for (id, template) in configured.inventory.templates.iter().enumerate() {
-            if matches!(
-                template.as_ref().unwrap().asap(),
-                Some(ASAPOp::PaneChain { .. })
-            ) {
-                let input = &mut configured.inventory.graph.candidates[id].producer_requirements[0];
+        for (id, template) in configured.nodes_for_tests().iter().enumerate() {
+            if matches!(template.asap(), Some(ASAPOp::PaneChain { .. })) {
+                let input = &mut configured.dag.candidates[id].supplier_candidates_per_input[0];
                 // Put larger signed-domain Project pricing last to expose the
                 // former arbitrary representative selection.
                 let mut suppliers = scans.clone();
                 suppliers.extend(projects.iter().copied());
-                input.compatible_producers = suppliers.into();
+                input.candidates = suppliers.into();
             }
         }
+        configured.sync_physical_for_tests();
         let models = PlanningModels::builtin();
         let calibration = CalibrationFit::default();
         let context = CandidatePlanningContext {
@@ -1126,15 +1053,15 @@ mod tests {
         let mut observations = Vec::new();
         let mut valid = 0;
         while let Some(proposal) =
-            solve_candidate_proposal(&configured.inventory.graph, &observations, None).unwrap()
+            solve_candidate_proposal(&configured.dag, &observations, None).unwrap()
         {
             let selected = proposal.selected;
-            let mut modes = vec![None; configured.configurations.len()];
+            let mut modes = vec![None; configured.physical.candidates.len()];
             for id in &selected.selected_candidates {
-                modes[id.0] = Some(configured.configurations[id.0].materialization);
+                modes[id.0] = Some(configured.physical.candidates[id.0].materialization);
             }
             let physical = materialize_selected_candidates(
-                &configured.inventory,
+                &configured.physical,
                 &selected,
                 &modes,
                 &roots,
@@ -1214,23 +1141,21 @@ mod tests {
                 add_ingestion_transforms(&mut configured);
                 if cyclic {
                     let projects: Vec<_> = configured
-                        .inventory
-                        .templates
+                        .nodes_for_tests()
                         .iter()
                         .enumerate()
                         .filter_map(|(id, node)| {
-                            (configured.configurations[id].timing == ExecutionTiming::IngestionTime
-                                && matches!(
-                                    node.as_ref().unwrap().non_asap(),
-                                    Some(NonASAPOp::Project { .. })
-                                ))
+                            (configured.physical.candidates[id].timing
+                                == ExecutionTiming::IngestionTime
+                                && matches!(node.non_asap(), Some(NonASAPOp::Project { .. })))
                             .then_some(PhysicalCandidateId(id))
                         })
                         .collect();
                     for project in &projects {
-                        configured.inventory.graph.candidates[project.0].producer_requirements[0]
-                            .compatible_producers
+                        configured.dag.candidates[project.0].supplier_candidates_per_input[0]
+                            .candidates
                             .extend(projects.iter().copied());
+                        configured.sync_physical_for_tests();
                     }
                 }
             }
@@ -1276,13 +1201,12 @@ mod tests {
             assert!(metrics.query_readers > 0);
             if exact {
                 let finalizers: Vec<_> = configured
-                    .inventory
-                    .templates
+                    .nodes_for_tests()
                     .iter()
                     .enumerate()
                     .filter_map(|(id, template)| {
                         matches!(
-                            template.as_ref().unwrap().asap(),
+                            template.asap(),
                             Some(ASAPOp::FinalizeExactAccumulator { .. })
                         )
                         .then_some(id)
@@ -1291,7 +1215,7 @@ mod tests {
                 assert!(!finalizers.is_empty());
                 assert!(finalizers
                     .iter()
-                    .all(|&id| configured.inventory.graph.candidates[id].local_cost > 0.0));
+                    .all(|&id| configured.dag.candidates[id].local_cost > 0.0));
             }
             if transformed {
                 assert_eq!(metrics.ingestion_transforms, 4);
@@ -1299,15 +1223,15 @@ mod tests {
             let mut observations = Vec::new();
             let mut valid = 0;
             while let Some(proposal) =
-                solve_candidate_proposal(&configured.inventory.graph, &observations, None).unwrap()
+                solve_candidate_proposal(&configured.dag, &observations, None).unwrap()
             {
                 let selected = proposal.selected;
-                let mut modes = vec![None; configured.configurations.len()];
+                let mut modes = vec![None; configured.physical.candidates.len()];
                 for id in &selected.selected_candidates {
-                    modes[id.0] = Some(configured.configurations[id.0].materialization);
+                    modes[id.0] = Some(configured.physical.candidates[id.0].materialization);
                 }
                 let physical = materialize_selected_candidates(
-                    &configured.inventory,
+                    &configured.physical,
                     &selected,
                     &modes,
                     &roots,
@@ -1350,9 +1274,9 @@ mod tests {
     #[test]
     fn retained_consumer_context_keeps_query_work_unpriced() {
         let (mut configured, roots, entries, data) = fixture();
-        for root in &configured.inventory.graph.query_roots {
-            for candidate in &root.compatible_candidates {
-                configured.configurations[candidate.0].materialization =
+        for root in &configured.dag.query_roots {
+            for candidate in &root.candidates {
+                configured.physical.candidates[candidate.0].materialization =
                     Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory);
             }
         }
@@ -1370,11 +1294,10 @@ mod tests {
         assert_eq!(metrics.query_readers, 0);
         assert!(metrics.ingestion_pane_chains > 0);
         for (candidate, config) in configured
-            .inventory
-            .graph
+            .dag
             .candidates
             .iter()
-            .zip(&configured.configurations)
+            .zip(&configured.physical.candidates)
         {
             if config.timing == ExecutionTiming::QueryTime {
                 assert_eq!(candidate.local_cost, 0.0);
@@ -1386,21 +1309,17 @@ mod tests {
     fn differing_supplier_metadata_leaves_pane_bounds_zero() {
         let (mut configured, roots, entries, mut data) = fixture();
         let scans: Vec<_> = configured
-            .inventory
-            .templates
+            .nodes_for_tests()
             .iter()
             .enumerate()
             .filter_map(|(id, node)| {
-                matches!(
-                    node.as_ref().unwrap().non_asap(),
-                    Some(NonASAPOp::Scan { .. })
-                )
-                .then_some(PhysicalCandidateId(id))
+                matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }))
+                    .then_some(PhysicalCandidateId(id))
             })
             .collect();
         assert_eq!(scans.len(), 2);
-        let original = configured.inventory.templates[scans[1].0].as_ref().unwrap();
-        let mut different = (**original).clone();
+        let original = configured.node(scans[1].0).clone();
+        let mut different = (*original).clone();
         let asap_types::ir::Operator::NonASAP(NonASAPOp::Scan { source, .. }) =
             &mut different.operator
         else {
@@ -1409,23 +1328,16 @@ mod tests {
         *source = asap_types::ir::operator::Source::TimeSeries {
             metric: "other".into(),
         };
-        configured.inventory.templates[scans[1].0] = Some(Rc::new(different));
+        configured.set_node_for_tests(scans[1].0, Rc::new(different));
         data.sources
             .insert("other".into(), data.sources["latency"].clone());
-        for (candidate, node) in configured
-            .inventory
-            .graph
-            .candidates
-            .iter_mut()
-            .zip(&configured.inventory.templates)
-        {
-            if matches!(
-                node.as_ref().unwrap().asap(),
-                Some(ASAPOp::PaneChain { .. })
-            ) {
-                candidate.producer_requirements[0].compatible_producers = scans.clone().into();
+        let nodes = configured.nodes_for_tests();
+        for (candidate, node) in configured.dag.candidates.iter_mut().zip(&nodes) {
+            if matches!(node.asap(), Some(ASAPOp::PaneChain { .. })) {
+                candidate.supplier_candidates_per_input[0].candidates = scans.clone().into();
             }
         }
+        configured.sync_physical_for_tests();
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
@@ -1452,7 +1364,7 @@ mod tests {
         evaluated_for: AccuracyTarget,
         settings: &asap_cost::CostInputs,
         pick: fn(&OperatorNode) -> bool,
-    ) -> (CandidateConfigurationInventory, f64, f64) {
+    ) -> (PhysicalCandidatesWithCosts, f64, f64) {
         let roots_with_ids: Vec<_> = queries
             .iter()
             .enumerate()
@@ -1481,23 +1393,12 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let mut configured = CandidateConfigurationInventory {
-            inventory: CandidateInventory {
-                graph: CandidateDependencyGraph::default(),
-                templates: Vec::new(),
-                group_candidates: Vec::new(),
-            },
-            configurations: Vec::new(),
-        };
-        fn intern(
-            node: &Rc<OperatorNode>,
-            configured: &mut CandidateConfigurationInventory,
-        ) -> usize {
+        let mut configured = PhysicalCandidatesWithCosts::empty_for_tests();
+        fn intern(node: &Rc<OperatorNode>, configured: &mut PhysicalCandidatesWithCosts) -> usize {
             if let Some(id) = configured
-                .inventory
-                .templates
+                .nodes_for_tests()
                 .iter()
-                .position(|template| template.as_deref() == Some(&**node))
+                .position(|template| **template == **node)
             {
                 return id;
             }
@@ -1506,39 +1407,27 @@ mod tests {
                 inputs.push(intern(child, configured));
                 Rc::clone(child)
             });
-            let id = configured.inventory.templates.len();
-            configured.configurations.push(CandidateConfiguration {
-                may_keep_with_sole_reader: Vec::new(),
-                source_candidate: PhysicalCandidateId(id),
-                timing: ExecutionTiming::QueryTime,
-                materialization: Materialization::NotMaterialized,
-            });
-            configured.inventory.templates.push(Some(Rc::clone(node)));
-            configured
-                .inventory
-                .graph
-                .candidates
-                .push(PhysicalCandidate {
-                    group: MemoGroupId(id as u32),
-                    local_cost: 0.0,
-                    producer_requirements: inputs
-                        .into_iter()
-                        .map(|input| ProducerRequirement {
-                            compatible_producers: vec![PhysicalCandidateId(input)].into(),
-                        })
-                        .collect(),
-                });
+            let id = configured.nodes_for_tests().len();
+            configured.push_for_tests(
+                Rc::clone(node),
+                ExecutionTiming::QueryTime,
+                Materialization::NotMaterialized,
+                0.0,
+                inputs
+                    .into_iter()
+                    .map(|input| InputSupplierCandidates {
+                        candidates: vec![PhysicalCandidateId(input)].into(),
+                    })
+                    .collect(),
+            );
             id
         }
         for candidate in &picked {
             let root = intern(&candidate.root_node, &mut configured);
-            configured
-                .inventory
-                .graph
-                .query_roots
-                .push(QueryRootCandidates {
-                    compatible_candidates: vec![PhysicalCandidateId(root)],
-                });
+            configured.dag.query_roots.push(QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(root)],
+            });
+            configured.sync_physical_for_tests();
         }
         let roots: Vec<_> = picked
             .iter()
@@ -1581,17 +1470,18 @@ mod tests {
             seed_separate_plans: false,
         };
         apply(&mut configured, &context).unwrap();
-        let selected = solve_candidate_proposal(&configured.inventory.graph, &[], None)
+        let selected = solve_candidate_proposal(&configured.dag, &[], None)
             .unwrap()
             .unwrap()
             .selected;
         let modes: Vec<_> = configured
-            .configurations
+            .physical
+            .candidates
             .iter()
             .map(|config| Some(config.materialization))
             .collect();
         let physical = materialize_selected_candidates(
-            &configured.inventory,
+            &configured.physical,
             &selected,
             &modes,
             &roots,
@@ -1608,15 +1498,14 @@ mod tests {
     }
 
     fn bound_of(
-        configured: &CandidateConfigurationInventory,
+        configured: &PhysicalCandidatesWithCosts,
         matches: impl Fn(&OperatorNode) -> bool,
     ) -> f64 {
         configured
-            .inventory
-            .templates
+            .nodes_for_tests()
             .iter()
-            .zip(&configured.inventory.graph.candidates)
-            .find(|(template, _)| matches(template.as_ref().unwrap()))
+            .zip(&configured.dag.candidates)
+            .find(|(template, _)| matches(template))
             .unwrap()
             .1
             .local_cost
@@ -1691,10 +1580,9 @@ mod tests {
                 pick,
             );
             let scans = configured
-                .inventory
-                .templates
+                .nodes_for_tests()
                 .iter()
-                .filter(|template| is_scan(template.as_ref().unwrap()))
+                .filter(|template| is_scan(template))
                 .count();
             assert_eq!(scans, 1, "{queries:?} share one scan");
             let scan = bound_of(&configured, is_scan);
