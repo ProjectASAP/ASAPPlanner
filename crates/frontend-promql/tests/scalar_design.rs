@@ -5,10 +5,10 @@ use asap_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::ir::{NonASAPOp, QueryRoot, ScalarExpr};
 
 fn root(query: &str) -> QueryRoot {
-    asap_frontend_promql::lower_promql_query_workload(&support::workload(
-        query,
-        AccuracyTarget::exact(),
-    ))
+    asap_frontend_promql::lower_promql_query_workload(
+        &support::workload(query, AccuracyTarget::exact()),
+        &asap_frontend_promql::HistogramCatalog::default(),
+    )
     .unwrap()
     .remove(0)
 }

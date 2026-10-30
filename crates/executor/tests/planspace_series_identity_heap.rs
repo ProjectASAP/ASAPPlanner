@@ -35,9 +35,15 @@ fn lower(query: &str, accuracy: &AccuracyTarget) -> Rc<OperatorNode> {
             DurationMs(1_000),
         )),
     };
-    asap_frontend_promql::lower_promql_workload(&workload)
-        .unwrap()
-        .remove(0)
+    asap_frontend_promql::lower_promql_query_workload(
+        &workload,
+        &asap_frontend_promql::HistogramCatalog::default(),
+    )
+    .unwrap()
+    .remove(0)
+    .as_operator()
+    .cloned()
+    .expect("operator root")
 }
 
 fn carries_identity(root: &Rc<OperatorNode>) -> bool {

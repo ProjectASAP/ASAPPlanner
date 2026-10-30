@@ -54,10 +54,10 @@ impl Tally {
 fn tally(corpus: &str) -> Tally {
     let mut t = Tally::default();
     for q in queries(corpus) {
-        match asap_frontend_promql::lower_promql_query_workload(&support::workload(
-            q,
-            AccuracyTarget::exact(),
-        )) {
+        match asap_frontend_promql::lower_promql_query_workload(
+            &support::workload(q, AccuracyTarget::exact()),
+            &asap_frontend_promql::HistogramCatalog::default(),
+        ) {
             Ok(_) => t.lowered += 1,
             Err(LoweringError::Parse(_)) => t.unparseable += 1,
             Err(e) if e.to_string().contains(NO_METRIC_NAME) => t.no_metric_name += 1,

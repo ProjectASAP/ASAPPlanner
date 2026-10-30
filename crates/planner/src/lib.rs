@@ -22,9 +22,7 @@ use asap_types::workload::SqlDialect;
 use asap_types::workload::{QueryLanguage, WorkloadError};
 
 use asap_frontend_metricsql::{lower_metricsql_query_workload, MetricsqlError};
-use asap_frontend_promql::{
-    lower_promql_query_workload, lower_promql_query_workload_with_histograms, PromqlError,
-};
+use asap_frontend_promql::{lower_promql_query_workload, PromqlError};
 use asap_frontend_sql::{lower_sql_dialect, SqlError};
 
 mod pass;
@@ -275,16 +273,15 @@ async fn lower(input: &UserInput<'_>) -> Result<Vec<asap_types::ir::QueryRoot>, 
             Ok(lowered)
         }
         FrontendInput::Promql { histograms, .. } => {
-            let lowered = match histograms {
-                Some(histograms) => {
-                    lower_promql_query_workload_with_histograms(input.workload, histograms.clone())
-                }
-                None => lower_promql_query_workload(input.workload),
-            }
-            .map_err(|source| PlanError::Lowering {
-                entry_index: None,
-                source: LoweringError::Promql(source),
-            })?;
+            let no_histograms = HistogramCatalog::default();
+            let histograms = histograms.as_ref().unwrap_or(&no_histograms);
+            let lowered =
+                lower_promql_query_workload(input.workload, histograms).map_err(|source| {
+                    PlanError::Lowering {
+                        entry_index: None,
+                        source: LoweringError::Promql(source),
+                    }
+                })?;
             Ok(lowered)
         }
         FrontendInput::Metricsql => {

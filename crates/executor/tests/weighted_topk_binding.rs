@@ -199,7 +199,7 @@ fn assert_weighted_binding(algorithm: SketchAlgorithm) {
     }
 }
 
-use asap_frontend_promql::lower_promql_workload;
+use asap_frontend_promql::{lower_promql_query_workload, HistogramCatalog};
 use planner_types::workload::{
     BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
     QueryRequirements, QueryWorkload,
@@ -229,8 +229,13 @@ pub fn lower_promql(
             DurationMs(1_000),
         )),
     };
-    let mut lowered = lower_promql_workload(&workload)?;
-    Ok(lowered.remove(0))
+    Ok(
+        lower_promql_query_workload(&workload, &HistogramCatalog::default())?
+            .remove(0)
+            .as_operator()
+            .cloned()
+            .expect("operator root"),
+    )
 }
 
 // The old untyped heap updater must not silently round a Planner rate update.
