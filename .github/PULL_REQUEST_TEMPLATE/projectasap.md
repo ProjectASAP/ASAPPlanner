@@ -59,8 +59,9 @@ Give each new test a one- or two-line behavioral purpose.
 
 ## Snapshot changes
 
-For each changed file under `crates/devtools/tests/corpus_snapshots/`: the
-query and why its plan changed. Write "None" if no snapshot changed. See
+For each changed file under `crates/devtools/tests/corpus_snapshots/` or
+`crates/devtools/tests/sketch_plan_snapshots/`: the query or workload and why
+its plan changed. Write "None" if no snapshot changed. See
 [planner snapshots](../../docs/develop_docs/planner-snapshots.md).
 
 ## Architectural decisions

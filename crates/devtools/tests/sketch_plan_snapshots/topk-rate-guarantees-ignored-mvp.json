@@ -1,0 +1,2101 @@
+{
+  "accuracy_guarantees": "ignored",
+  "materialized_views": [
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -10000
+              },
+              {
+                "included": 0
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 0,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 0,
+      "node_id": 2,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -20000
+              },
+              {
+                "included": -10000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 10000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 1,
+      "node_id": 5,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -30000
+              },
+              {
+                "included": -20000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 20000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 2,
+      "node_id": 8,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -40000
+              },
+              {
+                "included": -30000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 30000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 3,
+      "node_id": 11,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -50000
+              },
+              {
+                "included": -40000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 40000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 4,
+      "node_id": 14,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -60000
+              },
+              {
+                "included": -50000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 50000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 5,
+      "node_id": 17,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -70000
+              },
+              {
+                "included": -60000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 60000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 6,
+      "node_id": 20,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -80000
+              },
+              {
+                "included": -70000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 70000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 7,
+      "node_id": 23,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -90000
+              },
+              {
+                "included": -80000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 80000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 8,
+      "node_id": 26,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -100000
+              },
+              {
+                "included": -90000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 90000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 9,
+      "node_id": 29,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -110000
+              },
+              {
+                "included": -100000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 100000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 10,
+      "node_id": 32,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -120000
+              },
+              {
+                "included": -110000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 110000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 11,
+      "node_id": 35,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -130000
+              },
+              {
+                "included": -120000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 120000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 12,
+      "node_id": 38,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -140000
+              },
+              {
+                "included": -130000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 130000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 13,
+      "node_id": 41,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -150000
+              },
+              {
+                "included": -140000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 140000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 14,
+      "node_id": 44,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -160000
+              },
+              {
+                "included": -150000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 150000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 15,
+      "node_id": 47,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -170000
+              },
+              {
+                "included": -160000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 160000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 16,
+      "node_id": 50,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -180000
+              },
+              {
+                "included": -170000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 170000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 17,
+      "node_id": 53,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -190000
+              },
+              {
+                "included": -180000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 180000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 18,
+      "node_id": 56,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -200000
+              },
+              {
+                "included": -190000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 190000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 19,
+      "node_id": 59,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -210000
+              },
+              {
+                "included": -200000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 200000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 20,
+      "node_id": 62,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -220000
+              },
+              {
+                "included": -210000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 210000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 21,
+      "node_id": 65,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -230000
+              },
+              {
+                "included": -220000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 220000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 22,
+      "node_id": 68,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -240000
+              },
+              {
+                "included": -230000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 230000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 23,
+      "node_id": 71,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -250000
+              },
+              {
+                "included": -240000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 240000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 24,
+      "node_id": 74,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -260000
+              },
+              {
+                "included": -250000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 250000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 25,
+      "node_id": 77,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -270000
+              },
+              {
+                "included": -260000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 260000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 26,
+      "node_id": 80,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -280000
+              },
+              {
+                "included": -270000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 270000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 27,
+      "node_id": 83,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -290000
+              },
+              {
+                "included": -280000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 280000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 28,
+      "node_id": 86,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "9dfffca4bd58dda229c67ca3b6042d4f",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -300000
+              },
+              {
+                "included": -290000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 290000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data_total"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 29,
+      "node_id": 89,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    }
+  ],
+  "pane_retention_ms": {
+    "1": 300000
+  },
+  "proven_optimal": true,
+  "queries": [
+    "topk(5, sum by (job) (rate(data_total[5m])))"
+  ],
+  "search_status": "optimal",
+  "selected": {
+    "accepted": [
+      {
+        "accepted_metric": null,
+        "accepted_regardless_of_guarantee": true,
+        "guarantee_check_rejection": "no_accuracy_guarantee",
+        "sketches": [
+          "CmsWithHeap"
+        ],
+        "summary": "metric not set; accepted by the deployment's accuracy model regardless of guarantee, ignoring a failed guarantee check (NoAccuracyGuarantee) (CmsWithHeap)",
+        "target_metric": null
+      }
+    ],
+    "cost": {
+      "cost_per_second": 2.91198328572e-8,
+      "cost_unit": "cost_per_second",
+      "cpu_core_seconds_per_second": 0.000814001,
+      "per_node": {
+        "0": {
+          "cost_per_second": 6.52152e-9,
+          "cpu_core_seconds_per_second": 0.00058,
+          "detail": "scan 100000 samples; x 1.0000/s",
+          "multiplier": 1,
+          "operator": "Scan",
+          "price_source": "analytical",
+          "timing": "ingestion_time"
+        },
+        "1": {
+          "cost_per_second": 2.22159834707e-8,
+          "cpu_core_seconds_per_second": 0.0002,
+          "detail": "build exact Rate accumulator in 30 panes of 10000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 17360000 bytes",
+          "multiplier": 1,
+          "operator": "PaneChain",
+          "price_source": "analytical",
+          "timing": "ingestion_time"
+        },
+        "2": {
+          "cost_per_second": 3.37341900136e-10,
+          "cpu_core_seconds_per_second": 0.00003,
+          "detail": "merge 300000 states into 10000; x 0.1000/s; holds 560000 bytes for 0.3 ms",
+          "multiplier": 1,
+          "operator": "SummaryMerge",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "3": {
+          "cost_per_second": 1.1244e-11,
+          "cpu_core_seconds_per_second": 1e-6,
+          "detail": "finalize 10000 accumulators; x 0.1000/s",
+          "multiplier": 1,
+          "operator": "FinalizeExactAccumulator",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "4": {
+          "cost_per_second": 3.37322413708e-11,
+          "cpu_core_seconds_per_second": 3e-6,
+          "detail": "build CmsWithHeap into 1 states: 10000 rows x depth 3; x 0.1000/s; holds 6172 bytes for 0.3 ms",
+          "multiplier": 1,
+          "operator": "SummaryAgg",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "5": {
+          "cost_per_second": 5.622e-15,
+          "cpu_core_seconds_per_second": 5e-10,
+          "detail": "estimate 1 groups x 5; x 0.1000/s",
+          "multiplier": 1,
+          "operator": "SummaryEstimate",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "6": {
+          "cost_per_second": 5.62293857724e-15,
+          "cpu_core_seconds_per_second": 5e-10,
+          "detail": "operator: pass 5 rows; x 0.1000/s; holds 24 bytes for 0.3 ms",
+          "multiplier": 1,
+          "operator": "Project",
+          "price_source": "analytical",
+          "timing": "query_time"
+        }
+      },
+      "source": "analytical-cost-v2 (illustrative statistics)",
+      "usage": {
+        "average_memory_bytes": 17360019.2512,
+        "cpu_ops_per_second": 334001.0,
+        "disk_bytes": 0,
+        "latency_per_query": [
+          {
+            "compaction_ms": 0.0,
+            "query_ms": 0.34001
+          }
+        ],
+        "peak_cpu_cores": 2,
+        "peak_memory_bytes": 17926244,
+        "scanned_bytes_per_second": 4800000.0
+      }
+    },
+    "dag": {
+      "edges": [
+        {
+          "consumer": 1,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "ingestion_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 0,
+          "role": "Input",
+          "window": "RequiresAlignedPanePhaseOrExactBoundaryResidual"
+        },
+        {
+          "consumer": 2,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "ingestion_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "ExactAggregate": [
+                    "Rate",
+                    "Rate"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 1,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 3,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "ExactAggregate": [
+                    "Rate",
+                    "Rate"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 2,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 4,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 3,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 5,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "CmsWithHeap",
+                      "params": {
+                        "CmsWithHeap": {
+                          "depth": 2,
+                          "heap_size": 20,
+                          "width": 55
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": []
+          },
+          "producer": 4,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 6,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "topk",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 5,
+          "role": "Input",
+          "window": "NotApplicable"
+        }
+      ],
+      "nodes": [
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 0,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "ingestion_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": true,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "job",
+                      "nullable": true,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "$promql_series_identity",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": [
+                    [
+                      3,
+                      0
+                    ]
+                  ]
+                },
+                "source": {
+                  "TimeSeries": {
+                    "metric": "data_total"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 1,
+          "materialization": {
+            "MatAtIngestion": "Memory"
+          },
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "ExactAggregate": [
+                    "Rate",
+                    "Rate"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "ingestion_time"
+          },
+          "payload": {
+            "ASAP": {
+              "PaneChain": {
+                "child": 0,
+                "family": {
+                  "ExactAggregate": [
+                    "Rate",
+                    "Rate"
+                  ]
+                },
+                "filter": null,
+                "grouping": "PerSubpopulationInstance",
+                "input": {
+                  "item": null,
+                  "weight": {
+                    "Column": "SampleValue"
+                  },
+                  "weight_domain": {
+                    "kind": "unknown_or_signed"
+                  }
+                },
+                "pane_count": 30,
+                "pane_width_ms": 10000,
+                "reduction": "PerEntity"
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 2,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "ExactAggregate": [
+                    "Rate",
+                    "Rate"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryMerge": {
+                "children": [
+                  1
+                ]
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact accumulator over exact input"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 3,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "FinalizeExactAccumulator": {
+                "child": 2
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 4,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "CmsWithHeap",
+                      "params": {
+                        "CmsWithHeap": {
+                          "depth": 2,
+                          "heap_size": 20,
+                          "width": 55
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": []
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryAgg": {
+                "child": 3,
+                "family": {
+                  "Sketch": [
+                    {
+                      "algorithm": "CmsWithHeap",
+                      "params": {
+                        "CmsWithHeap": {
+                          "depth": 2,
+                          "heap_size": 20,
+                          "width": 55
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "filter": null,
+                "grouping": "PerSubpopulationInstance",
+                "input": {
+                  "item": {
+                    "Column": {
+                      "Named": "job"
+                    }
+                  },
+                  "weight": {
+                    "Column": "SampleValue"
+                  },
+                  "weight_domain": {
+                    "kind": "counter_derivative_of_metric",
+                    "metric": "data_total"
+                  }
+                },
+                "reduction": {
+                  "Reduce": []
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 5,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "topk",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryEstimate": {
+                "query": {
+                  "TopK": {
+                    "k": 5
+                  }
+                },
+                "summary_input": 4
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 6,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "topk_5",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                1
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Project": {
+                "child": 5,
+                "cols": [
+                  {
+                    "alias": "topk_5",
+                    "expr": {
+                      "Column": 1
+                    }
+                  },
+                  {
+                    "alias": "job",
+                    "expr": {
+                      "Column": 0
+                    }
+                  }
+                ],
+                "qualifier": null
+              }
+            }
+          }
+        }
+      ],
+      "roots": [
+        6
+      ],
+      "scalar_roots": []
+    },
+    "display_name": "Q1 CMS+heap + Rate acc ×30 panes · ingestion time: Rate acc for Q1, 30 × 10s panes"
+  }
+}

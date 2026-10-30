@@ -1,0 +1,3161 @@
+{
+  "accuracy_guarantees": "enforced",
+  "materialized_views": [
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -10000
+              },
+              {
+                "included": 0
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 0,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 0,
+      "node_id": 2,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -20000
+              },
+              {
+                "included": -10000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 10000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 1,
+      "node_id": 5,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -30000
+              },
+              {
+                "included": -20000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 20000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 2,
+      "node_id": 8,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -40000
+              },
+              {
+                "included": -30000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 30000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 3,
+      "node_id": 11,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -50000
+              },
+              {
+                "included": -40000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 40000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 4,
+      "node_id": 14,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -60000
+              },
+              {
+                "included": -50000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 50000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 5,
+      "node_id": 17,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -70000
+              },
+              {
+                "included": -60000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 60000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 6,
+      "node_id": 20,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -80000
+              },
+              {
+                "included": -70000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 70000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 7,
+      "node_id": 23,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -90000
+              },
+              {
+                "included": -80000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 80000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 8,
+      "node_id": 26,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -100000
+              },
+              {
+                "included": -90000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 90000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 9,
+      "node_id": 29,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -110000
+              },
+              {
+                "included": -100000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 100000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 10,
+      "node_id": 32,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -120000
+              },
+              {
+                "included": -110000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 110000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 11,
+      "node_id": 35,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -130000
+              },
+              {
+                "included": -120000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 120000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 12,
+      "node_id": 38,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -140000
+              },
+              {
+                "included": -130000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 130000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 13,
+      "node_id": 41,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -150000
+              },
+              {
+                "included": -140000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 140000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 14,
+      "node_id": 44,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -160000
+              },
+              {
+                "included": -150000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 150000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 15,
+      "node_id": 47,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -170000
+              },
+              {
+                "included": -160000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 160000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 16,
+      "node_id": 50,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -180000
+              },
+              {
+                "included": -170000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 170000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 17,
+      "node_id": 53,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -190000
+              },
+              {
+                "included": -180000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 180000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 18,
+      "node_id": 56,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -200000
+              },
+              {
+                "included": -190000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 190000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 19,
+      "node_id": 59,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -210000
+              },
+              {
+                "included": -200000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 200000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 20,
+      "node_id": 62,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -220000
+              },
+              {
+                "included": -210000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 210000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 21,
+      "node_id": 65,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -230000
+              },
+              {
+                "included": -220000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 220000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 22,
+      "node_id": 68,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -240000
+              },
+              {
+                "included": -230000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 230000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 23,
+      "node_id": 71,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -250000
+              },
+              {
+                "included": -240000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 240000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 24,
+      "node_id": 74,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -260000
+              },
+              {
+                "included": -250000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 250000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 25,
+      "node_id": 77,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -270000
+              },
+              {
+                "included": -260000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 260000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 26,
+      "node_id": 80,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -280000
+              },
+              {
+                "included": -270000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 270000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 27,
+      "node_id": 83,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -290000
+              },
+              {
+                "included": -280000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 280000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 28,
+      "node_id": 86,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "ef56d9daf3c36b6588ca5f3bbb46d4a6",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -300000
+              },
+              {
+                "included": -290000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 290000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 29,
+      "node_id": 89,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    }
+  ],
+  "pane_retention_ms": {
+    "1": 300000
+  },
+  "proven_optimal": true,
+  "queries": [
+    "avg by (region) (quantile_over_time(0.9, data[5m]))"
+  ],
+  "search_status": "optimal",
+  "selected": {
+    "accepted": [
+      {
+        "accepted_metric": "relative",
+        "accepted_regardless_of_guarantee": false,
+        "guarantee_check_rejection": null,
+        "sketches": [
+          "DDSketch"
+        ],
+        "summary": "metric not set; accepted relative (DDSketch)",
+        "target_metric": null
+      }
+    ],
+    "cost": {
+      "cost_per_second": 1.96599532814e-6,
+      "cost_unit": "cost_per_second",
+      "cpu_core_seconds_per_second": 0.000819,
+      "per_node": {
+        "0": {
+          "cost_per_second": 6.52152e-9,
+          "cpu_core_seconds_per_second": 0.00058,
+          "detail": "scan 100000 samples; x 1.0000/s",
+          "multiplier": 1,
+          "operator": "Scan",
+          "price_source": "analytical",
+          "timing": "ingestion_time"
+        },
+        "1": {
+          "cost_per_second": 1.95903278013e-6,
+          "cpu_core_seconds_per_second": 0.0002,
+          "detail": "build DDSketch in 30 panes of 10000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 1701280000 bytes",
+          "multiplier": 1,
+          "operator": "PaneChain",
+          "price_source": "analytical",
+          "timing": "ingestion_time"
+        },
+        "10": {
+          "cost_per_second": 1.12440010766e-11,
+          "cpu_core_seconds_per_second": 1e-6,
+          "detail": "operator: pass 10000 rows; x 0.1000/s; holds 24 bytes for 0.4 ms",
+          "multiplier": 1,
+          "operator": "BinaryOp",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "11": {
+          "cost_per_second": 1.12440010766e-11,
+          "cpu_core_seconds_per_second": 1e-6,
+          "detail": "operator: pass 10000 rows; x 0.1000/s; holds 24 bytes for 0.4 ms",
+          "multiplier": 1,
+          "operator": "Project",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "2": {
+          "cost_per_second": 3.39781760491e-10,
+          "cpu_core_seconds_per_second": 0.00003,
+          "detail": "merge 300000 states into 10000; x 0.1000/s; holds 54880000 bytes for 0.4 ms",
+          "multiplier": 1,
+          "operator": "SummaryMerge",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "3": {
+          "cost_per_second": 1.1244e-11,
+          "cpu_core_seconds_per_second": 1e-6,
+          "detail": "estimate 10000 groups x 1; x 0.1000/s",
+          "multiplier": 1,
+          "operator": "SummaryEstimate",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "4": {
+          "cost_per_second": 1.12440021531e-11,
+          "cpu_core_seconds_per_second": 1e-6,
+          "detail": "operator: pass 10000 rows; x 0.1000/s; holds 48 bytes for 0.4 ms",
+          "multiplier": 1,
+          "operator": "Project",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "5": {
+          "cost_per_second": 1.1269120005e-11,
+          "cpu_core_seconds_per_second": 1e-6,
+          "detail": "build exact Sum accumulator into 10000 states: 10000 rows x depth 1; x 0.1000/s; holds 560000 bytes for 0.4 ms",
+          "multiplier": 1,
+          "operator": "SummaryAgg",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "6": {
+          "cost_per_second": 1.1244e-11,
+          "cpu_core_seconds_per_second": 1e-6,
+          "detail": "finalize 10000 accumulators; x 0.1000/s",
+          "multiplier": 1,
+          "operator": "FinalizeExactAccumulator",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "7": {
+          "cost_per_second": 1.1269120005e-11,
+          "cpu_core_seconds_per_second": 1e-6,
+          "detail": "build exact Count accumulator into 10000 states: 10000 rows x depth 1; x 0.1000/s; holds 560000 bytes for 0.4 ms",
+          "multiplier": 1,
+          "operator": "SummaryAgg",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "8": {
+          "cost_per_second": 1.1244e-11,
+          "cpu_core_seconds_per_second": 1e-6,
+          "detail": "finalize 10000 accumulators; x 0.1000/s",
+          "multiplier": 1,
+          "operator": "FinalizeExactAccumulator",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "9": {
+          "cost_per_second": 1.12440010766e-11,
+          "cpu_core_seconds_per_second": 1e-6,
+          "detail": "operator: pass 10000 rows; x 0.1000/s; holds 24 bytes for 0.4 ms",
+          "multiplier": 1,
+          "operator": "Project",
+          "price_source": "analytical",
+          "timing": "query_time"
+        }
+      },
+      "source": "analytical-cost-v2 (illustrative statistics)",
+      "usage": {
+        "average_memory_bytes": 1701282184.0,
+        "cpu_ops_per_second": 339000.0,
+        "disk_bytes": 0,
+        "latency_per_query": [
+          {
+            "compaction_ms": 0.0,
+            "query_ms": 0.39
+          }
+        ],
+        "peak_cpu_cores": 2,
+        "peak_memory_bytes": 1757280168,
+        "scanned_bytes_per_second": 4800000.0
+      }
+    },
+    "dag": {
+      "edges": [
+        {
+          "consumer": 1,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "ingestion_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 0,
+          "role": "Input",
+          "window": "RequiresAlignedPanePhaseOrExactBoundaryResidual"
+        },
+        {
+          "consumer": 2,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "ingestion_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "DDSketch",
+                      "params": {
+                        "DDSketch": {
+                          "alpha": 0.05
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 1,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 3,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "DDSketch",
+                      "params": {
+                        "DDSketch": {
+                          "alpha": 0.05
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 2,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 4,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "quantile",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 3,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 5,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 4,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 6,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "ExactAggregate": [
+                    "Sum",
+                    "Sum"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 5,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 7,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 4,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 8,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "ExactAggregate": [
+                    "Count",
+                    "Count"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 7,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 9,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "count",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 8,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 10,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "sum",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 6,
+          "role": "Left",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 10,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "col_1",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 9,
+          "role": "Right",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 11,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "sum",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 10,
+          "role": "Input",
+          "window": "NotApplicable"
+        }
+      ],
+      "nodes": [
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 0,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "ingestion_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": true,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "region",
+                      "nullable": true,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "$promql_series_identity",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": [
+                    [
+                      3,
+                      0
+                    ]
+                  ]
+                },
+                "source": {
+                  "TimeSeries": {
+                    "metric": "data"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 1,
+          "materialization": {
+            "MatAtIngestion": "Memory"
+          },
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "DDSketch",
+                      "params": {
+                        "DDSketch": {
+                          "alpha": 0.05
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "ingestion_time"
+          },
+          "payload": {
+            "ASAP": {
+              "PaneChain": {
+                "child": 0,
+                "family": {
+                  "Sketch": [
+                    {
+                      "algorithm": "DDSketch",
+                      "params": {
+                        "DDSketch": {
+                          "alpha": 0.05
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "filter": null,
+                "grouping": "PerSubpopulationInstance",
+                "input": {
+                  "item": null,
+                  "weight": {
+                    "Column": "SampleValue"
+                  },
+                  "weight_domain": {
+                    "kind": "unknown_or_signed"
+                  }
+                },
+                "pane_count": 30,
+                "pane_width_ms": 10000,
+                "reduction": "PerEntity"
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 2,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "DDSketch",
+                      "params": {
+                        "DDSketch": {
+                          "alpha": 0.05
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryMerge": {
+                "children": [
+                  1
+                ]
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "algorithm": "DDSketch",
+                "contract": "ddsketch_relative_error_alpha_v1",
+                "kind": "sketch_evaluation",
+                "params": {
+                  "DDSketch": {
+                    "alpha": 0.05
+                  }
+                },
+                "query": "Quantile { q: 0.9 }"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "relative",
+              "accuracy_scope": "per_value",
+              "error": {
+                "factors": [
+                  {
+                    "op": "constant",
+                    "value": 0.05
+                  },
+                  {
+                    "op": "unknown",
+                    "statistic": "values_non_negative[data]"
+                  }
+                ],
+                "op": "product"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 3,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "quantile",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryEstimate": {
+                "query": {
+                  "Quantile": {
+                    "q": 0.9
+                  }
+                },
+                "summary_input": 2
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "algorithm": "DDSketch",
+                "contract": "ddsketch_relative_error_alpha_v1",
+                "kind": "sketch_evaluation",
+                "params": {
+                  "DDSketch": {
+                    "alpha": 0.05
+                  }
+                },
+                "query": "Quantile { q: 0.9 }"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "relative",
+              "accuracy_scope": "per_value",
+              "error": {
+                "factors": [
+                  {
+                    "op": "constant",
+                    "value": 0.05
+                  },
+                  {
+                    "op": "unknown",
+                    "statistic": "values_non_negative[data]"
+                  }
+                ],
+                "op": "product"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 4,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Project": {
+                "child": 3,
+                "cols": [
+                  {
+                    "alias": "ts",
+                    "expr": {
+                      "Column": 0
+                    }
+                  },
+                  {
+                    "alias": "value",
+                    "expr": {
+                      "Column": 1
+                    }
+                  },
+                  {
+                    "alias": "region",
+                    "expr": {
+                      "Column": 2
+                    }
+                  },
+                  {
+                    "alias": "$promql_series_identity",
+                    "expr": {
+                      "Column": 3
+                    }
+                  }
+                ],
+                "qualifier": null
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 5,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "ExactAggregate": [
+                    "Sum",
+                    "Sum"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryAgg": {
+                "child": 4,
+                "family": {
+                  "ExactAggregate": [
+                    "Sum",
+                    "Sum"
+                  ]
+                },
+                "filter": null,
+                "grouping": "PerSubpopulationInstance",
+                "input": {
+                  "item": null,
+                  "weight": {
+                    "Column": "SampleValue"
+                  },
+                  "weight_domain": {
+                    "kind": "unknown_or_signed"
+                  }
+                },
+                "reduction": {
+                  "Reduce": [
+                    2
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "unavailable_statistic",
+                "statistic": "input_row_count"
+              },
+              {
+                "kind": "unavailable_statistic",
+                "statistic": "values_non_negative[data]"
+              },
+              {
+                "guarantee": {
+                  "provenance": [
+                    {
+                      "algorithm": "DDSketch",
+                      "contract": "ddsketch_relative_error_alpha_v1",
+                      "kind": "sketch_evaluation",
+                      "params": {
+                        "DDSketch": {
+                          "alpha": 0.05
+                        }
+                      },
+                      "query": "Quantile { q: 0.9 }"
+                    }
+                  ],
+                  "spec": {
+                    "accuracy_metric": "relative",
+                    "accuracy_scope": "per_value",
+                    "error": {
+                      "factors": [
+                        {
+                          "op": "constant",
+                          "value": 0.05
+                        },
+                        {
+                          "op": "unknown",
+                          "statistic": "values_non_negative[data]"
+                        }
+                      ],
+                      "op": "product"
+                    },
+                    "failure_probability": {
+                      "op": "zero"
+                    }
+                  }
+                },
+                "input_index": 0,
+                "kind": "child_guarantee"
+              },
+              {
+                "kind": "exact",
+                "reason": "exact aggregation"
+              },
+              {
+                "kind": "composition_step",
+                "operator": {
+                  "op": "exact_sum"
+                },
+                "rule": "exact_sum_relative"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "relative",
+              "accuracy_scope": "per_value",
+              "error": {
+                "factors": [
+                  {
+                    "op": "max",
+                    "terms": [
+                      {
+                        "factors": [
+                          {
+                            "op": "constant",
+                            "value": 0.05
+                          },
+                          {
+                            "op": "unknown",
+                            "statistic": "values_non_negative[data]"
+                          }
+                        ],
+                        "op": "product"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "unknown",
+                    "statistic": "values_non_negative[data]"
+                  }
+                ],
+                "op": "product"
+              },
+              "failure_probability": {
+                "count": {
+                  "op": "unknown",
+                  "statistic": "input_row_count"
+                },
+                "inner": {
+                  "op": "union_bound",
+                  "terms": [
+                    {
+                      "op": "zero"
+                    }
+                  ]
+                },
+                "op": "scaled"
+              }
+            }
+          },
+          "id": 6,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "sum",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "FinalizeExactAccumulator": {
+                "child": 5
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 7,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "ExactAggregate": [
+                    "Count",
+                    "Count"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryAgg": {
+                "child": 4,
+                "family": {
+                  "ExactAggregate": [
+                    "Count",
+                    "Count"
+                  ]
+                },
+                "filter": null,
+                "grouping": "PerSubpopulationInstance",
+                "input": {
+                  "item": null,
+                  "weight": {
+                    "Column": "SampleValue"
+                  },
+                  "weight_domain": {
+                    "kind": "unknown_or_signed"
+                  }
+                },
+                "reduction": {
+                  "Reduce": [
+                    2
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "count of rows"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 8,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "count",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "FinalizeExactAccumulator": {
+                "child": 7
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 9,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "col_1",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Project": {
+                "child": 8,
+                "cols": [
+                  {
+                    "alias": null,
+                    "expr": {
+                      "Column": 0
+                    }
+                  },
+                  {
+                    "alias": null,
+                    "expr": {
+                      "Cast": {
+                        "expr": {
+                          "Column": 1
+                        },
+                        "to": "float64",
+                        "try_cast": false
+                      }
+                    }
+                  }
+                ],
+                "qualifier": null
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "unavailable_statistic",
+                "statistic": "input_row_count"
+              },
+              {
+                "kind": "unavailable_statistic",
+                "statistic": "values_non_negative[data]"
+              },
+              {
+                "guarantee": {
+                  "provenance": [
+                    {
+                      "algorithm": "DDSketch",
+                      "contract": "ddsketch_relative_error_alpha_v1",
+                      "kind": "sketch_evaluation",
+                      "params": {
+                        "DDSketch": {
+                          "alpha": 0.05
+                        }
+                      },
+                      "query": "Quantile { q: 0.9 }"
+                    }
+                  ],
+                  "spec": {
+                    "accuracy_metric": "relative",
+                    "accuracy_scope": "per_value",
+                    "error": {
+                      "factors": [
+                        {
+                          "op": "constant",
+                          "value": 0.05
+                        },
+                        {
+                          "op": "unknown",
+                          "statistic": "values_non_negative[data]"
+                        }
+                      ],
+                      "op": "product"
+                    },
+                    "failure_probability": {
+                      "op": "zero"
+                    }
+                  }
+                },
+                "input_index": 0,
+                "kind": "child_guarantee"
+              },
+              {
+                "kind": "exact",
+                "reason": "exact aggregation"
+              },
+              {
+                "kind": "composition_step",
+                "operator": {
+                  "op": "exact_sum"
+                },
+                "rule": "exact_sum_relative"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "relative",
+              "accuracy_scope": "per_value",
+              "error": {
+                "factors": [
+                  {
+                    "op": "max",
+                    "terms": [
+                      {
+                        "factors": [
+                          {
+                            "op": "constant",
+                            "value": 0.05
+                          },
+                          {
+                            "op": "unknown",
+                            "statistic": "values_non_negative[data]"
+                          }
+                        ],
+                        "op": "product"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "unknown",
+                    "statistic": "values_non_negative[data]"
+                  }
+                ],
+                "op": "product"
+              },
+              "failure_probability": {
+                "count": {
+                  "op": "unknown",
+                  "statistic": "input_row_count"
+                },
+                "inner": {
+                  "op": "union_bound",
+                  "terms": [
+                    {
+                      "op": "zero"
+                    }
+                  ]
+                },
+                "op": "scaled"
+              }
+            }
+          },
+          "id": 10,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "sum",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "BinaryOp": {
+                "lhs": 6,
+                "operator": {
+                  "checked_finite_division": false,
+                  "checked_relative_division": false,
+                  "kind": {
+                    "Arithmetic": "Div"
+                  },
+                  "vector_match": null
+                },
+                "return_bool": false,
+                "rhs": 9
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "unavailable_statistic",
+                "statistic": "input_row_count"
+              },
+              {
+                "kind": "unavailable_statistic",
+                "statistic": "values_non_negative[data]"
+              },
+              {
+                "guarantee": {
+                  "provenance": [
+                    {
+                      "algorithm": "DDSketch",
+                      "contract": "ddsketch_relative_error_alpha_v1",
+                      "kind": "sketch_evaluation",
+                      "params": {
+                        "DDSketch": {
+                          "alpha": 0.05
+                        }
+                      },
+                      "query": "Quantile { q: 0.9 }"
+                    }
+                  ],
+                  "spec": {
+                    "accuracy_metric": "relative",
+                    "accuracy_scope": "per_value",
+                    "error": {
+                      "factors": [
+                        {
+                          "op": "constant",
+                          "value": 0.05
+                        },
+                        {
+                          "op": "unknown",
+                          "statistic": "values_non_negative[data]"
+                        }
+                      ],
+                      "op": "product"
+                    },
+                    "failure_probability": {
+                      "op": "zero"
+                    }
+                  }
+                },
+                "input_index": 0,
+                "kind": "child_guarantee"
+              },
+              {
+                "kind": "exact",
+                "reason": "exact aggregation"
+              },
+              {
+                "kind": "composition_step",
+                "operator": {
+                  "op": "exact_sum"
+                },
+                "rule": "exact_sum_relative"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "relative",
+              "accuracy_scope": "per_value",
+              "error": {
+                "factors": [
+                  {
+                    "op": "max",
+                    "terms": [
+                      {
+                        "factors": [
+                          {
+                            "op": "constant",
+                            "value": 0.05
+                          },
+                          {
+                            "op": "unknown",
+                            "statistic": "values_non_negative[data]"
+                          }
+                        ],
+                        "op": "product"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "unknown",
+                    "statistic": "values_non_negative[data]"
+                  }
+                ],
+                "op": "product"
+              },
+              "failure_probability": {
+                "count": {
+                  "op": "unknown",
+                  "statistic": "input_row_count"
+                },
+                "inner": {
+                  "op": "union_bound",
+                  "terms": [
+                    {
+                      "op": "zero"
+                    }
+                  ]
+                },
+                "op": "scaled"
+              }
+            }
+          },
+          "id": 11,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "avg",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Project": {
+                "child": 10,
+                "cols": [
+                  {
+                    "alias": "region",
+                    "expr": {
+                      "Column": 0
+                    }
+                  },
+                  {
+                    "alias": "avg",
+                    "expr": {
+                      "Column": 1
+                    }
+                  }
+                ],
+                "qualifier": null
+              }
+            }
+          }
+        }
+      ],
+      "roots": [
+        11
+      ],
+      "scalar_roots": []
+    },
+    "display_name": "Q1 Sum acc + DDSketch ×30 panes + Count acc · ingestion time: DDSketch for Q1, 30 × 10s panes"
+  }
+}
