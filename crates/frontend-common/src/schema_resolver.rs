@@ -1,6 +1,6 @@
 //! The **SchemaResolver** — name resolution as an explicit pass.
 //!
-//! [`SchemaResolver::resolve_schema`] produces the complete, self-contained
+//! [`SchemaResolver::resolve_schema_with_inherited`] produces the complete, self-contained
 //! [`Schema`] every `ColumnId` in a schemaless leaf's scope indexes into, so
 //! positional resolution in [`resolve`](crate::resolve) is total.
 //!
@@ -20,14 +20,14 @@ use crate::unresolved::{UnresolvedOp, UnresolvedScalar};
 /// the *resolved* binding schema this feeds. Even a registry-backed PromQL
 /// catalog yields an **open** schema: a metric's labels are per-series and
 /// time-varying, so the registry is a superset hint, not a per-row contract.
-pub trait SchemaCatalog {
+pub(crate) trait SchemaCatalog {
     /// Columns known for `source`. `None` when unknown — the resolver then
     /// falls back to a usage-derived column set.
     fn columns_for(&self, source: &str) -> Option<Vec<Field>>;
 }
 
 /// The default catalog: knows nothing.
-pub struct UsageDerivedCatalog;
+pub(crate) struct UsageDerivedCatalog;
 
 impl SchemaCatalog for UsageDerivedCatalog {
     fn columns_for(&self, _source: &str) -> Option<Vec<Field>> {
@@ -36,7 +36,7 @@ impl SchemaCatalog for UsageDerivedCatalog {
 }
 
 /// The explicit name-resolution pass.
-pub struct SchemaResolver<C: SchemaCatalog = UsageDerivedCatalog> {
+pub(crate) struct SchemaResolver<C: SchemaCatalog = UsageDerivedCatalog> {
     catalog: C,
 }
 
@@ -47,7 +47,7 @@ impl Default for SchemaResolver<UsageDerivedCatalog> {
 }
 
 impl SchemaResolver<UsageDerivedCatalog> {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             catalog: UsageDerivedCatalog,
         }
@@ -55,24 +55,26 @@ impl SchemaResolver<UsageDerivedCatalog> {
 }
 
 impl<C: SchemaCatalog> SchemaResolver<C> {
-    pub fn with_catalog(catalog: C) -> Self {
+    #[cfg(test)]
+    fn with_catalog(catalog: C) -> Self {
         Self { catalog }
     }
 
     /// The complete [`Schema`] in scope for a query rooted at `tree`: the
     /// time axis, the synthetic `value` column, and one column per distinct
     /// name referenced anywhere in the tree.
-    pub fn resolve_schema(&self, tree: &UnresolvedOp) -> Schema {
+    #[cfg(test)]
+    fn resolve_schema(&self, tree: &UnresolvedOp) -> Schema {
         self.resolve_schema_with_inherited(tree, &[])
     }
 
-    /// Like [`resolve_schema`](Self::resolve_schema), but also seeds
+    /// Like `resolve_schema`, but also seeds
     /// `inherited` label names referenced by an **enclosing** scope rather
     /// than by `tree` itself. This is how an independently-bound `BinaryOp`
     /// side still sees an outer aggregate's group keys — the `__name__` /
     /// `job` in `sum by (__name__)(a or b)`, which appear in neither side's
     /// own matchers (issue #52).
-    pub fn resolve_schema_with_inherited(
+    pub(crate) fn resolve_schema_with_inherited(
         &self,
         tree: &UnresolvedOp,
         inherited: &[String],
@@ -168,7 +170,7 @@ fn leftmost_scan_name(tree: &UnresolvedOp) -> Option<&str> {
 /// `Concat.discriminator_unique_key`. Operators referenced from scalar
 /// positions (`scalar(v)`, subqueries) are walked too, as the old
 /// `PromqlScalarFromVector` operator child was. Sorted and deduplicated.
-pub fn collect_referenced_columns(tree: &UnresolvedOp) -> Vec<String> {
+pub(crate) fn collect_referenced_columns(tree: &UnresolvedOp) -> Vec<String> {
     use UnresolvedOp as U;
     fn named(expr: &UnresolvedScalar, out: &mut Vec<String>) {
         for c in expr.columns_referenced() {

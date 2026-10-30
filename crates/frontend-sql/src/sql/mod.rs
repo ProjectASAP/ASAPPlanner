@@ -117,13 +117,14 @@ fn current_accuracy() -> AccuracyTarget {
 /// tree over a table [`SqlCatalog`]. Call
 /// [`resolve_root`](asap_frontend_common::resolve_root) on the result for
 /// the resolved operator DAG.
-pub struct SqlLowerer<'a> {
+pub(crate) struct SqlLowerer<'a> {
     catalog: &'a SqlCatalog,
     dialect: SqlDialect,
 }
 
 impl<'a> SqlLowerer<'a> {
-    pub fn new(catalog: &'a SqlCatalog) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn new(catalog: &'a SqlCatalog) -> Self {
         Self {
             catalog,
             dialect: SqlDialect::DataFusionSQL,
@@ -138,7 +139,7 @@ impl<'a> SqlLowerer<'a> {
     /// `countIf` are; most of ClickHouse's builtin surface isn't yet) is
     /// still unknown to DataFusion's planner and still fails there, and
     /// `ElasticSQL` has no vendored parser at all.
-    pub fn with_dialect(catalog: &'a SqlCatalog, dialect: SqlDialect) -> Self {
+    pub(crate) fn with_dialect(catalog: &'a SqlCatalog, dialect: SqlDialect) -> Self {
         Self { catalog, dialect }
     }
 
@@ -171,7 +172,7 @@ impl<'a> SqlLowerer<'a> {
     /// check would. Going straight to `ApplyFunctionRewrites` avoids that
     /// entirely. TypeCoercion then records implicit conversions explicitly,
     /// including timestamp literals in predicates, before IR validation.
-    pub async fn lower(
+    pub(crate) async fn lower(
         &self,
         sql: &str,
         accuracy: &AccuracyTarget,

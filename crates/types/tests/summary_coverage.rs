@@ -188,10 +188,7 @@ fn rejected(children: Vec<Rc<OperatorNode>>) -> CoverageError {
 }
 
 fn column(name: &str) -> ColumnIdentity {
-    ColumnIdentity {
-        table: None,
-        name: name.into(),
-    }
+    ColumnIdentity::new(None, name)
 }
 
 fn utf8(values: &[&str]) -> Constraint {
@@ -213,13 +210,13 @@ fn filters_lift_into_the_selection() {
     let scan = table();
     let us = kll(filter(Rc::clone(&scan), eq(REGION, "us")), "latency");
     let coverage = us.coverage().unwrap();
-    assert!(Rc::ptr_eq(coverage.definition.children()[0], &scan));
+    assert!(Rc::ptr_eq(coverage.definition().children()[0], &scan));
     assert_eq!(
-        coverage.selection,
-        vec![SelectionBox {
-            columns: [(column("region"), utf8(&["us"]))].into(),
-            relative_time: None,
-        }]
+        coverage.selection(),
+        vec![SelectionBox::new(
+            [(column("region"), utf8(&["us"]))].into(),
+            None
+        )]
     );
 }
 
@@ -233,7 +230,7 @@ fn populations_merge_when_disjoint() {
     ])
     .unwrap();
     assert_eq!(
-        merged.coverage().unwrap().selection[0].columns[&column("region")],
+        merged.coverage().unwrap().selection()[0].columns()[&column("region")],
         utf8(&["us", "eu"])
     );
     assert_eq!(
@@ -312,23 +309,20 @@ fn qualified_columns_stay_distinct() {
 fn time_panes_merge_and_keep_gaps() {
     let first = pane(0, vec![]);
     assert_eq!(
-        first.coverage().unwrap().selection[0].relative_time,
+        first.coverage().unwrap().selection()[0].relative_time(),
         relative(-60_000, 0)
     );
     assert!(Rc::ptr_eq(
-        first.coverage().unwrap().definition.children()[0],
+        first.coverage().unwrap().definition().children()[0],
         first.children()[0].children()[0].children()[0]
     ));
     let joined = merge(vec![first.clone(), pane(60_000, vec![])]).unwrap();
     assert_eq!(
-        joined.coverage().unwrap().selection,
-        vec![SelectionBox {
-            columns: Default::default(),
-            relative_time: relative(-120_000, 0),
-        }]
+        joined.coverage().unwrap().selection(),
+        vec![SelectionBox::new(Default::default(), relative(-120_000, 0))]
     );
     let gapped = merge(vec![first.clone(), pane(120_000, vec![])]).unwrap();
-    assert_eq!(gapped.coverage().unwrap().selection.len(), 2);
+    assert_eq!(gapped.coverage().unwrap().selection().len(), 2);
     assert_eq!(
         rejected(vec![first.clone(), first]),
         CoverageError::InputsOverlap {
@@ -347,7 +341,7 @@ fn counter_panes_merge_only_disjoint_in_time() {
     ])
     .unwrap();
     assert_eq!(
-        joined.coverage().unwrap().selection[0].relative_time,
+        joined.coverage().unwrap().selection()[0].relative_time(),
         relative(-120_000, 0)
     );
     let by_job = |job| increase_pane(0, vec![Predicate(eq(2, job))]);
@@ -372,15 +366,16 @@ fn a_day_of_minute_panes_merges_into_one_window() {
     for panes in [newest_first.clone(), oldest_first] {
         let merged = merge(panes).unwrap();
         merged.validate_structure().unwrap();
-        let selection = merged.coverage().unwrap().selection;
+        let coverage = merged.coverage().unwrap();
+        let selection = coverage.selection();
         assert_eq!(selection.len(), 1);
-        assert_eq!(selection[0].relative_time, day);
+        assert_eq!(selection[0].relative_time(), day);
     }
     let counters: Vec<_> = (0..PANES)
         .map(|i| increase_pane(i * 60_000, vec![]))
         .collect();
     assert_eq!(
-        merge(counters).unwrap().coverage().unwrap().selection[0].relative_time,
+        merge(counters).unwrap().coverage().unwrap().selection()[0].relative_time(),
         day
     );
     let mut repeated = newest_first;
@@ -418,9 +413,9 @@ fn a_long_window_spanning_others_is_rejected() {
         apart
             .coverage()
             .unwrap()
-            .selection
+            .selection()
             .iter()
-            .map(|b| b.relative_time)
+            .map(|b| b.relative_time())
             .collect::<Vec<_>>(),
         [relative(-60_000, -50_000), relative(-20_000, -10_000)]
     );
@@ -432,10 +427,10 @@ fn scan_predicates_lift() {
     let api = pane(0, vec![Predicate(eq(2, "api"))]);
     let coverage = api.coverage().unwrap();
     assert_eq!(
-        coverage.selection[0].columns[&column("job")],
+        coverage.selection()[0].columns()[&column("job")],
         utf8(&["api"])
     );
-    let scan = coverage.definition.children()[0];
+    let scan = coverage.definition().children()[0];
     assert!(matches!(
         scan.non_asap(),
         Some(NonASAPOp::Scan { predicates, .. }) if predicates.is_empty()
@@ -468,9 +463,9 @@ fn touching_value_ranges_join() {
     ])
     .unwrap();
     assert_eq!(
-        joined.coverage().unwrap().selection,
-        vec![SelectionBox {
-            columns: [(
+        joined.coverage().unwrap().selection(),
+        vec![SelectionBox::new(
+            [(
                 column("latency"),
                 Constraint::Interval {
                     lower: Bound::Unbounded,
@@ -478,15 +473,15 @@ fn touching_value_ranges_join() {
                 },
             )]
             .into(),
-            relative_time: None,
-        }]
+            None
+        )]
     );
     let gap = merge(vec![
         latency(CompareOpKind::Lt, 100.0),
         latency(CompareOpKind::Gt, 100.0),
     ])
     .unwrap();
-    assert_eq!(gap.coverage().unwrap().selection.len(), 2);
+    assert_eq!(gap.coverage().unwrap().selection().len(), 2);
 }
 
 /// A predicate that is not a value set or interval on one column stays in
@@ -511,7 +506,8 @@ fn residual_predicates_stay_in_the_definition() {
         ]))
     };
     let state = doubled_above(10.0, "us");
-    let definition = &state.coverage().unwrap().definition;
+    let coverage = state.coverage().unwrap();
+    let definition = coverage.definition();
     assert!(matches!(
         definition.children()[0].non_asap(),
         Some(NonASAPOp::Filter { .. })
@@ -535,8 +531,8 @@ fn instant_selectors_stay_in_the_definition() {
     .unwrap();
     let state = kll(Rc::clone(&instant), "value");
     let coverage = state.coverage().unwrap();
-    assert_eq!(coverage.selection[0].relative_time, None);
-    assert!(Rc::ptr_eq(coverage.definition.children()[0], &instant));
+    assert_eq!(coverage.selection()[0].relative_time(), None);
+    assert!(Rc::ptr_eq(coverage.definition().children()[0], &instant));
 }
 
 /// A merge is a state with coverage, so merges nest.
@@ -762,9 +758,9 @@ fn design_doc_worked_example() {
 
     let coverage = state.coverage().unwrap();
     assert_eq!(
-        coverage.selection,
-        vec![SelectionBox {
-            columns: [
+        coverage.selection(),
+        vec![SelectionBox::new(
+            [
                 (column("r"), utf8(&["us"])),
                 (
                     column("latency"),
@@ -775,12 +771,12 @@ fn design_doc_worked_example() {
                 ),
             ]
             .into(),
-            relative_time: None,
-        }]
+            None
+        )]
     );
     // definition: SummaryAgg (no filter) over Project over
     // Scan t with only `latency * 2 > 10` left in its predicates.
-    let Some(ASAPOp::SummaryAgg { filter, child, .. }) = coverage.definition.asap() else {
+    let Some(ASAPOp::SummaryAgg { filter, child, .. }) = coverage.definition().asap() else {
         panic!("definition is a SummaryAgg");
     };
     assert!(filter.is_none());
@@ -829,21 +825,21 @@ fn panes_of_an_hour_share_one_definition_with_distinct_times() {
         let i = i as i64;
         assert_eq!(definition_id(coverage), definition_id(&coverages[0]));
         assert_eq!(
-            coverage.selection,
-            [SelectionBox {
-                relative_time: relative(-(i + 1) * 600_000, -i * 600_000),
-                ..SelectionBox::default()
-            }]
+            coverage.selection(),
+            [SelectionBox::new(
+                Default::default(),
+                relative(-(i + 1) * 600_000, -i * 600_000)
+            )]
         );
     }
     let hour = coverage_of(&merge(panes).unwrap());
     assert_eq!(definition_id(&hour), definition_id(&coverages[0]));
     assert_eq!(
-        hour.selection,
-        [SelectionBox {
-            relative_time: relative(-3_600_000, 0),
-            ..SelectionBox::default()
-        }]
+        hour.selection(),
+        [SelectionBox::new(
+            Default::default(),
+            relative(-3_600_000, 0)
+        )]
     );
 }
 
@@ -851,8 +847,8 @@ fn panes_of_an_hour_share_one_definition_with_distinct_times() {
 /// name their kind.
 #[test]
 fn selections_round_trip_through_json() {
-    let selection = SelectionBox {
-        columns: [
+    let selection = SelectionBox::new(
+        [
             (column("region"), utf8(&["eu", "us"])),
             (
                 column("latency"),
@@ -863,8 +859,8 @@ fn selections_round_trip_through_json() {
             ),
         ]
         .into(),
-        relative_time: relative(-120_000, -60_000),
-    };
+        relative(-120_000, -60_000),
+    );
     let json = serde_json::to_value(&selection).unwrap();
     assert_eq!(
         json["relative_time"],
@@ -943,9 +939,9 @@ fn a_rollup_covers_the_coarser_build() {
     assert_eq!(rolled.schema, coarse.schema);
     let (rolled, coarse) = (rolled.coverage().unwrap(), coarse.coverage().unwrap());
     assert_eq!(definition_id(&rolled), definition_id(&coarse));
-    assert_eq!(rolled.selection, coarse.selection);
+    assert_eq!(rolled.selection(), coarse.selection());
     assert_eq!(
-        rolled.selection[0].columns[&column("region")],
+        rolled.selection()[0].columns()[&column("region")],
         utf8(&["us", "eu"])
     );
 }

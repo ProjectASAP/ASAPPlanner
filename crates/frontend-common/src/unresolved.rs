@@ -231,7 +231,7 @@ pub enum UnresolvedOp {
 impl UnresolvedScalar {
     /// The direct scalar sub-expressions (not the operators this expression
     /// reads — see [`operator_refs`](Self::operator_refs)).
-    pub fn children(&self) -> Vec<&UnresolvedScalar> {
+    pub(crate) fn children(&self) -> Vec<&UnresolvedScalar> {
         use UnresolvedScalar::*;
         match self {
             Column(_)
@@ -278,7 +278,7 @@ impl UnresolvedScalar {
 
     /// Every column referenced in this expression, not inside the operators
     /// it reads (those have their own scope).
-    pub fn columns_referenced(&self) -> Vec<&ColumnRef> {
+    pub(crate) fn columns_referenced(&self) -> Vec<&ColumnRef> {
         let mut out = Vec::new();
         self.collect_columns(&mut out);
         out
@@ -294,7 +294,7 @@ impl UnresolvedScalar {
     }
 
     /// The operators this expression (transitively) reads.
-    pub fn operator_refs(&self) -> Vec<&Rc<UnresolvedOp>> {
+    pub(crate) fn operator_refs(&self) -> Vec<&Rc<UnresolvedOp>> {
         let mut out = Vec::new();
         self.collect_operator_refs(&mut out);
         out
@@ -324,7 +324,8 @@ impl UnresolvedOp {
 
     /// A `Concat` whose output carries the caller-proven compound unique key
     /// `(discriminator, inner_key)`. Nothing verifies the claim.
-    pub fn concat_with_discriminator(
+    #[cfg(test)]
+    pub(crate) fn concat_with_discriminator(
         children: Vec<UnresolvedOp>,
         discriminator: ColumnRef,
         inner_key: Vec<ColumnRef>,
@@ -332,44 +333,6 @@ impl UnresolvedOp {
         UnresolvedOp::Concat {
             children: children.into_iter().map(Rc::new).collect(),
             discriminator_unique_key: Some(ConcatDiscriminatorKey::new(discriminator, inner_key)),
-        }
-    }
-
-    /// Every scalar expression this operator owns.
-    pub fn scalar_exprs(&self) -> Vec<&UnresolvedScalar> {
-        use UnresolvedOp::*;
-        match self {
-            Scan { predicates, .. } => predicates.iter().map(|p| &p.0).collect(),
-            Values { rows, .. } => rows.iter().flatten().collect(),
-            Filter { pred, .. } | Join { pred, .. } => vec![&pred.0],
-            Project { cols, .. } => cols.iter().map(|c| &c.expr).collect(),
-            Aggregate {
-                filters, having, ..
-            } => filters
-                .iter()
-                .flatten()
-                .chain(having.iter())
-                .map(|p| &p.0)
-                .collect(),
-            Sort { keys, .. } => keys.iter().map(|k| &k.expr).collect(),
-            SQLWindowFunc { args, order_by, .. } => args
-                .iter()
-                .chain(order_by.iter().map(|k| &k.expr))
-                .collect(),
-            PromqlVectorFromScalar(e) => vec![e],
-            PromqlScalarOp { scalar, .. } => vec![scalar],
-            PromqlMap { sample, .. } => vec![sample],
-            PromqlRelabel { value, .. } => vec![value],
-            SetOp { .. }
-            | Concat { .. }
-            | Dedup { .. }
-            | Limit { .. }
-            | BinaryOp { .. }
-            | TimeRange { .. }
-            | TimeShift { .. }
-            | PromqlInfoEnrich { .. }
-            | PromqlSeriesSample { .. }
-            | PromqlSubquery { .. } => vec![],
         }
     }
 }

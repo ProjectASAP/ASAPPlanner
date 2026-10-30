@@ -28,8 +28,14 @@ datafusion = { version = "54", default-features = false, features = [
 # -- opaque JSON, matching how `asap-types` itself carries it.
 serde_json = "1"
 
+[features]
+# Exposes `test_support` (lowering to the name-based tree, before binding)
+# to tests.
+test-support = []
+
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
+asap-frontend-sql = { path = ".", features = ["test-support"] }
 asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
 asap-plan-selection = { path = "../plan-selection" }
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

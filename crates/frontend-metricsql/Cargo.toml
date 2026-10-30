@@ -10,9 +10,15 @@ asap-frontend-common = { path = "../frontend-common" }
 metricsql_parser = { path = "../metricsql-parser-vendored" }
 thiserror = "2"
 
+[features]
+# Exposes `test_support` (parsing, printing and single-query lowering) to
+# tests; production lowers whole workloads.
+test-support = []
+
 [[test]]
 name = "metricsql"
 path = "tests/main.rs"
 
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
+asap-frontend-metricsql = { path = ".", features = ["test-support"] }

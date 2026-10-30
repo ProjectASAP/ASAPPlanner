@@ -64,6 +64,17 @@ fn fixture() -> (planner_types::ir::NonASAPOp, SchemaRef, Vec<Batch>) {
     ];
     (scan, output, batches)
 }
+/// The scan with its (absent) children as DAG node ids.
+fn scan_payload(scan: planner_types::ir::NonASAPOp) -> planner_types::ir::NonASAPOp<usize> {
+    use planner_types::ir::Operator;
+    let Operator::NonASAP(scan) =
+        Operator::NonASAP(scan).map_children(|_| -> usize { panic!("no plan refs") })
+    else {
+        unreachable!("mapping children keeps the category")
+    };
+    scan
+}
+
 fn plan(
     scan: planner_types::ir::NonASAPOp,
     schema: &SchemaRef,
@@ -78,23 +89,20 @@ fn plan(
         guarantee: None,
         retention_ms: None,
     };
-    let edge = |producer, consumer| PhysicalASAPDAGEdge {
-        producer,
-        consumer,
-        role: EdgeRole::Input,
-        intermediate_schema: (**schema).clone(),
-        data_state: state,
-        grouping: GroupingEdgeCompatibility::NotApplicable,
-        window: WindowEdgeCompatibility::NotApplicable,
+    let edge = |producer, consumer| {
+        PhysicalASAPDAGEdge::new(
+            producer,
+            consumer,
+            EdgeRole::Input,
+            (**schema).clone(),
+            state,
+            GroupingEdgeCompatibility::NotApplicable,
+            WindowEdgeCompatibility::NotApplicable,
+        )
     };
     PhysicalASAPDAG {
         nodes: vec![
-            node(
-                0,
-                PhysicalASAPOperatorPayload::NonASAP(
-                    scan.map_children(|_| -> usize { panic!("no plan refs") }),
-                ),
-            ),
+            node(0, PhysicalASAPOperatorPayload::NonASAP(scan_payload(scan))),
             node(
                 1,
                 PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Sort {
@@ -501,14 +509,16 @@ fn windowed_plan(shift_ms: Option<i64>) -> PhysicalASAPDAG {
         guarantee: None,
         retention_ms: None,
     };
-    let edge = |producer, consumer| PhysicalASAPDAGEdge {
-        producer,
-        consumer,
-        role: EdgeRole::Input,
-        intermediate_schema: schema.clone(),
-        data_state: state,
-        grouping: GroupingEdgeCompatibility::NotApplicable,
-        window: WindowEdgeCompatibility::NotApplicable,
+    let edge = |producer, consumer| {
+        PhysicalASAPDAGEdge::new(
+            producer,
+            consumer,
+            EdgeRole::Input,
+            schema.clone(),
+            state,
+            GroupingEdgeCompatibility::NotApplicable,
+            WindowEdgeCompatibility::NotApplicable,
+        )
     };
     let status_is_500 = Predicate(planner_types::ir::ScalarExpr::Compare {
         semantics: planner_types::ir::ExprSemantics::Sql,
@@ -857,15 +867,15 @@ fn windowed_count_plan(shift_ms: Option<i64>) -> PhysicalASAPDAG {
         ExecutionDataState::QUERY_ROWS,
     ));
     let edge = |producer, consumer, schema: &planner_types::ir::schema::Schema, data_state| {
-        PhysicalASAPDAGEdge {
+        PhysicalASAPDAGEdge::new(
             producer,
             consumer,
-            role: EdgeRole::Input,
-            intermediate_schema: schema.clone(),
+            EdgeRole::Input,
+            schema.clone(),
             data_state,
-            grouping: GroupingEdgeCompatibility::NotApplicable,
-            window: WindowEdgeCompatibility::NotApplicable,
-        }
+            GroupingEdgeCompatibility::NotApplicable,
+            WindowEdgeCompatibility::NotApplicable,
+        )
     };
     dag.edges.extend([
         edge(2, 3, &requests_schema(), ExecutionDataState::QUERY_ROWS),

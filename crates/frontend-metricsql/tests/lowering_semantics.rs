@@ -16,7 +16,7 @@ fn lower_metricsql(
     query: &str,
     accuracy: AccuracyTarget,
 ) -> Result<std::rc::Rc<OperatorNode>, MetricsqlError> {
-    asap_frontend_metricsql::lower_metricsql(query, accuracy, INTERVAL)
+    asap_frontend_metricsql::test_support::lower_metricsql(query, accuracy, INTERVAL)
 }
 
 fn workload(language: QueryLanguage, query: &str) -> PlanningWorkload {

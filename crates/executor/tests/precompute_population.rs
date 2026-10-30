@@ -102,15 +102,15 @@ fn edge(
     consumer: usize,
     role: EdgeRole,
 ) -> PhysicalASAPDAGEdge {
-    PhysicalASAPDAGEdge {
+    PhysicalASAPDAGEdge::new(
         producer,
         consumer,
         role,
-        intermediate_schema: nodes[producer].output_schema.clone(),
-        data_state: nodes[producer].output_state,
-        grouping: GroupingEdgeCompatibility::NotApplicable,
-        window: WindowEdgeCompatibility::NotApplicable,
-    }
+        nodes[producer].output_schema.clone(),
+        nodes[producer].output_state,
+        GroupingEdgeCompatibility::NotApplicable,
+        WindowEdgeCompatibility::NotApplicable,
+    )
 }
 fn state_dag(
     family: FieldDataType,

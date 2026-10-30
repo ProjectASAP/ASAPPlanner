@@ -348,6 +348,7 @@ impl Schema {
     }
 
     /// Whether this schema has *any* provable unique key.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn has_unique_key(&self) -> bool {
         !self.unique_keys.is_empty()
     }

@@ -237,7 +237,7 @@ impl<C> ASAPOp<C> {
         }
     }
 
-    pub fn kind_name(&self) -> &'static str {
+    pub(crate) fn kind_name(&self) -> &'static str {
         use ASAPOp::*;
         match self {
             SummaryAgg { .. } => "SummaryAgg",
@@ -548,7 +548,7 @@ impl ASAPOp {
     }
 
     /// Local input-contract checks.
-    pub fn validate_inputs(&self) -> Result<(), SchemaDerivationError> {
+    pub(crate) fn validate_inputs(&self) -> Result<(), SchemaDerivationError> {
         use ASAPOp::*;
         let needs_state = |node: &OperatorNode, what: &str| {
             if node.result_kind != OperatorResultKind::State {

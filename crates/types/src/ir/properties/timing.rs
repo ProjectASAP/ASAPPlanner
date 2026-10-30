@@ -203,7 +203,7 @@ impl NodeToTimedNodeCache {
     }
 
     /// The timed node produced for `input`, if the pass has reached it.
-    pub fn timed(&self, input: &Rc<OperatorNode>) -> Option<&Rc<OperatorNode>> {
+    pub(crate) fn timed(&self, input: &Rc<OperatorNode>) -> Option<&Rc<OperatorNode>> {
         self.timed_node_of.get(&Rc::as_ptr(input))
     }
 }

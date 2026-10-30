@@ -10,7 +10,7 @@ use asap_types::ir::operator::{
 };
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
-use asap_types::ir::{BinaryOperator, ExprSemantics, OperatorNode, TimeRangeKind};
+use asap_types::ir::{BinaryOperator, ExprSemantics, TimeRangeKind};
 use asap_types::workload::{DurationMs, PlanningWorkload, QueryLanguage, WorkloadError};
 use metricsql_parser::ast::{AggregateModifier, DurationExpr, Expr, MetricExpr, RollupExpr};
 use metricsql_parser::functions::{AggregateFunction, BuiltinFunction, RollupFunction};
@@ -18,6 +18,9 @@ use metricsql_parser::label::{LabelFilter, LabelFilterOp, NAME_LABEL};
 use thiserror::Error;
 
 pub use metricsql_parser::ast::Expr as MetricsqlExpr;
+
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 #[derive(Debug, Error)]
 pub enum MetricsqlError {
@@ -33,12 +36,8 @@ pub enum MetricsqlError {
     Resolve(String),
 }
 
-pub fn parse_metricsql(query: &str) -> Result<MetricsqlExpr, MetricsqlError> {
+pub(crate) fn parse_metricsql(query: &str) -> Result<MetricsqlExpr, MetricsqlError> {
     metricsql_parser::parser::parse(query).map_err(|e| MetricsqlError::Parse(e.to_string()))
-}
-
-pub fn canonical_metricsql(query: &str) -> Result<String, MetricsqlError> {
-    Ok(parse_metricsql(query)?.to_string())
 }
 
 /// Lower every MetricsQL workload entry, as `lower_promql_query_workload`
@@ -74,36 +73,11 @@ pub fn lower_metricsql_query_workload(
         .collect()
 }
 
-/// Lower one MetricsQL query whose metrics are all sampled every
-/// `sample_interval`, to an operator root; a scalar query is an error (use
-/// [`lower_metricsql_query`]).
-pub fn lower_metricsql(
-    query: &str,
-    accuracy: AccuracyTarget,
-    sample_interval: Duration,
-) -> Result<Rc<OperatorNode>, MetricsqlError> {
-    match lower_metricsql_query(query, accuracy, sample_interval)? {
-        asap_types::ir::QueryRoot::Operator(node) => Ok(node),
-        _ => Err(unsupported("scalar root: use lower_metricsql_query")),
-    }
-}
-
-/// Lower scalar constants without fabricating a relational operator. Every
-/// metric is sampled every `sample_interval`: a bare instant selector looks
-/// back that long for its latest sample.
-pub fn lower_metricsql_query(
-    query: &str,
-    accuracy: AccuracyTarget,
-    sample_interval: Duration,
-) -> Result<asap_types::ir::QueryRoot, MetricsqlError> {
-    lower_with_sample_intervals(query, accuracy, &|_| Some(sample_interval))
-}
-
-/// [`lower_metricsql_query`] with each metric's sample interval from
+/// Lower one query with each metric's sample interval from
 /// `sample_interval_of`, `None` when the metric declares none: a bare
 /// instant selector over it then fails with
 /// [`WorkloadError::MissingSampleInterval`].
-fn lower_with_sample_intervals(
+pub(crate) fn lower_with_sample_intervals(
     query: &str,
     accuracy: AccuracyTarget,
     sample_interval_of: &dyn Fn(&str) -> Option<Duration>,

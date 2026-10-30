@@ -1,7 +1,8 @@
 //! The SQL frontend names the natural-log entropy idiom as a
 //! `FrequencyEntropy` intent (#509 Example 2's Q2).
 use asap_frontend_common::resolve_root;
-use asap_frontend_sql::{lower_sql, SqlCatalog, SqlLowerer};
+use asap_frontend_sql::test_support::lower_unresolved;
+use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
@@ -35,8 +36,7 @@ async fn recognizes_sql_entropy_in_nats() {
         .await
         .unwrap();
     let original = resolve_root(
-        &SqlLowerer::new(&catalog(false))
-            .lower(sql, &AccuracyTarget::exact())
+        &lower_unresolved(sql, &catalog(false), &AccuracyTarget::exact())
             .await
             .unwrap(),
     )

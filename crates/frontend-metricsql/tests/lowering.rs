@@ -1,9 +1,10 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use asap_frontend_metricsql::{
-    canonical_metricsql, lower_metricsql, parse_metricsql, MetricsqlError,
+use asap_frontend_metricsql::test_support::{
+    canonical_metricsql, lower_metricsql, parse_metricsql,
 };
+use asap_frontend_metricsql::MetricsqlError;
 use asap_types::ir::operator::{AggIntent, Reduction, Source};
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{NonASAPOp, OperatorNode, TimeRangeKind};

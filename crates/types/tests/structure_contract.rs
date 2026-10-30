@@ -4,6 +4,7 @@ use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{
     ExprSemantics, NonASAPOp, OperatorNode, OperatorResultKind, Predicate, ScalarExpr,
 };
+use asap_types::test_support::validate_asap_inputs;
 use std::rc::Rc;
 fn scan() -> Rc<OperatorNode> {
     OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
@@ -27,7 +28,7 @@ fn invalid_predicates_are_rejected() {
             child: scan(),
             pred: Predicate(expr),
         };
-        assert!(op.validate_inputs().is_err());
+        assert!(asap_types::test_support::validate_non_asap_inputs(&op).is_err());
     }
 }
 /// Common metadata must agree with the actual operation, including result kind.
@@ -49,7 +50,7 @@ fn values_contract_is_checked() {
             rows: vec![row],
             schema: scan().schema.clone(),
         };
-        assert!(op.validate_inputs().is_err());
+        assert!(asap_types::test_support::validate_non_asap_inputs(&op).is_err());
     }
 }
 /// Scalar typing validates every branch and never assigns placeholder types.
@@ -127,21 +128,17 @@ fn state_evaluations_and_passthrough_keep_their_contracts() {
     pass.validate_structure().unwrap();
     assert_eq!(pass.result_kind, OperatorResultKind::State);
     assert!(ScalarExpr::Column(0).scalar_type(&pass.schema).is_err());
-    assert!(ASAPOp::SummaryEstimate {
+    assert!(validate_asap_inputs(&ASAPOp::SummaryEstimate {
         summary_input: state.clone(),
         query: SketchStatistic::Cardinality
-    }
-    .validate_inputs()
+    })
     .is_err());
-    assert!(ASAPOp::SummaryEstimate {
+    assert!(validate_asap_inputs(&ASAPOp::SummaryEstimate {
         summary_input: state.clone(),
         query: SketchStatistic::Quantile { q: 0.99 }
-    }
-    .validate_inputs()
+    })
     .is_ok());
-    assert!(ASAPOp::FinalizeExactAccumulator { child: state }
-        .validate_inputs()
-        .is_err());
+    assert!(validate_asap_inputs(&ASAPOp::FinalizeExactAccumulator { child: state }).is_err());
 }
 
 /// Phase validation checks dependencies, without declaring a computation query-only.

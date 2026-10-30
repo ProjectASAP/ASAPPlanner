@@ -24,7 +24,7 @@ use std::rc::Rc;
 
 /// The recognized form of a query whose root is the L2 or natural-log entropy
 /// idiom over grouped unit counts, or `None` when neither rule applies.
-pub fn recognize_frequency_idioms(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
+pub(crate) fn recognize_frequency_idioms(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
     frequency_entropy_rewrite(root).or_else(|| frequency_l2_rewrite(root))
 }
 

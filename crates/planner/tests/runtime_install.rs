@@ -281,16 +281,21 @@ fn state_key(view: &MaterializedView, evaluation_ms: i64) -> String {
         Bound::Excluded(at) => Bound::Excluded(evaluation_ms + at),
         Bound::Unbounded => Bound::Unbounded,
     };
-    let mut selection = view.coverage.selection.clone();
-    let timed = selection.iter().any(|b| b.relative_time.is_some());
-    for selection_box in &mut selection {
-        selection_box.relative_time = selection_box
-            .relative_time
-            .as_ref()
-            .map(|(lower, upper)| (absolute(lower), absolute(upper)));
-    }
+    let boxes = view.coverage().selection();
+    let timed = boxes.iter().any(|b| b.relative_time().is_some());
+    let selection: Vec<SelectionBox> = boxes
+        .iter()
+        .map(|selection_box| {
+            SelectionBox::new(
+                selection_box.columns().clone(),
+                selection_box
+                    .relative_time()
+                    .map(|(lower, upper)| (absolute(&lower), absolute(&upper))),
+            )
+        })
+        .collect();
     serde_json::json!({
-        "definition_id": view.coverage.definition_id,
+        "definition_id": view.coverage().definition_id(),
         "selection": selection,
         "evaluation_ms": (!timed).then_some(evaluation_ms),
     })
@@ -360,13 +365,13 @@ fn run_data_plane_on(
     for view in &views {
         // The evaluation its windows end at: this one, or for a tumbling
         // at-ingestion view the newest point of its grid at or before it.
-        let built_for_ms = match (ingestion, view.refresh) {
+        let built_for_ms = match (ingestion, view.refresh()) {
             (IngestionBuilds::Tumbling, MaterializedViewRefresh::AtIngestion) => view
                 .inputs
-                .raw_data_windows
+                .raw_data_windows()
                 .first()
                 .map_or(evaluation_ms, |window| {
-                    evaluation_ms - evaluation_ms.rem_euclid(window.width_ms)
+                    evaluation_ms - evaluation_ms.rem_euclid(window.width_ms())
                 }),
             _ => evaluation_ms,
         };
@@ -374,7 +379,7 @@ fn run_data_plane_on(
         // it reads spans together.
         let span = view
             .inputs
-            .raw_data_windows
+            .raw_data_windows()
             .iter()
             .map(|window| window.bounds_ms(built_for_ms))
             .chain(
@@ -395,7 +400,7 @@ fn run_data_plane_on(
             // The run that refreshes it: an ingestion run over its data's span
             // once its inputs are complete (each window ends at the run's
             // end), or the query run of this evaluation.
-            let scope = match view.refresh {
+            let scope = match view.refresh() {
                 MaterializedViewRefresh::AtIngestion => Scope::Ingestion {
                     window_start_ms: span.0,
                     window_end_ms: span.1,
@@ -413,7 +418,7 @@ fn run_data_plane_on(
                 StoredState {
                     state: Batch::try_new(schema, state_rows).unwrap(),
                     start_ms: span.0,
-                    retention_ms: view.retention_ms,
+                    retention_ms: view.retention_ms(),
                 },
             );
             outputs_built += 1;
@@ -421,7 +426,7 @@ fn run_data_plane_on(
         // One stored state serves every view with its key, so it is kept
         // for the largest retention any of them requires.
         let stored = store.get_mut(&key).unwrap();
-        stored.retention_ms = stored.retention_ms.max(view.retention_ms);
+        stored.retention_ms = stored.retention_ms.max(view.retention_ms());
         built.insert(view.node_id as u64, (stored.state.clone(), span));
     }
     // The query run reads the views it reaches from the queries' roots
@@ -685,7 +690,7 @@ async fn assert_phased_copies_answer_as_reference(phases_ms: &[i64]) {
     assert!(
         views
             .iter()
-            .any(|view| view.refresh == MaterializedViewRefresh::AtIngestion),
+            .any(|view| view.refresh() == MaterializedViewRefresh::AtIngestion),
         "{views:#?}"
     );
     // Samples of `m`, `job` a (instances 1-3) and b (4-6), every second
@@ -799,7 +804,7 @@ async fn assert_answers_as_reference_without_raw_data(
     assert!(
         views
             .iter()
-            .any(|view| view.refresh == MaterializedViewRefresh::AtIngestion),
+            .any(|view| view.refresh() == MaterializedViewRefresh::AtIngestion),
         "{views:#?}"
     );
     assert!(
@@ -893,7 +898,7 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
         .unwrap_or_else(|r: Vec<_>| {
             panic!("{r:?}");
         });
-    assert_eq!(retention.lookback_ms, Some(1_000));
+    assert_eq!(retention.lookback_ms(), Some(1_000));
     let samples = [
         sample("latency_ms", "a", EVALUATION_MS - 900, 1.0),
         sample("latency_ms", "a", EVALUATION_MS - 100, 10.0),
@@ -941,21 +946,24 @@ async fn query_time_results_kept_across_evaluations_are_built_in_query_runs() {
     assert_eq!(views.len(), 5);
     assert!(views
         .iter()
-        .all(|v| v.refresh == MaterializedViewRefresh::OnFirstRead
-            && v.inputs.raw_data_windows[0].width_ms == 60_000));
+        .all(|v| v.refresh() == MaterializedViewRefresh::OnFirstRead
+            && v.inputs.raw_data_windows()[0].width_ms() == 60_000));
     // Raw data is kept for refreshing the oldest pane at the oldest step:
     // the five panes' 5 minutes plus the hour of steps, as long as the panes
     // themselves are kept.
     let pane_lookback_ms = views
         .iter()
-        .flat_map(|v| &v.inputs.raw_data_windows)
-        .map(|w| w.lookback_ms())
+        .flat_map(|v| v.inputs.raw_data_windows())
+        .map(asap_types::test_support::lookback_ms)
         .max();
     assert_eq!(pane_lookback_ms, Some(300_000));
-    assert!(views.iter().all(|v| v.retention_ms == 3_900_000));
+    assert!(views.iter().all(|v| v.retention_ms() == 3_900_000));
     let retention = installed.raw_data_retention().unwrap();
     assert_eq!(
-        retention.iter().map(|r| r.lookback_ms).collect::<Vec<_>>(),
+        retention
+            .iter()
+            .map(|r| r.lookback_ms())
+            .collect::<Vec<_>>(),
         vec![Some(3_900_000)],
         "{retention:?}"
     );
@@ -1346,10 +1354,10 @@ fn job_samples() -> Vec<RawDataSample> {
 
 /// The time selection `(from_ms, to_ms]` relative to the evaluation.
 fn relative_time(from_ms: i64, to_ms: i64) -> Vec<SelectionBox> {
-    vec![SelectionBox {
-        relative_time: Some((Bound::Excluded(from_ms), Bound::Included(to_ms))),
-        ..SelectionBox::default()
-    }]
+    vec![SelectionBox::new(
+        Default::default(),
+        Some((Bound::Excluded(from_ms), Bound::Included(to_ms))),
+    )]
 }
 
 /// A per-group maximum and a per-group sum (`max by (job)` and
@@ -1383,23 +1391,23 @@ async fn group_outputs_from_one_stored_per_series_sum_are_listed_and_built() {
     };
     assert_eq!(sums.len(), 2, "{:#?}", views);
     assert!(per_series.inputs.materialized_views.is_empty());
-    assert_eq!(per_series.inputs.raw_data_windows.len(), 1);
+    assert_eq!(per_series.inputs.raw_data_windows().len(), 1);
     for sum in sums {
         assert_eq!(sum.inputs.materialized_views, [per_series.node_id]);
-        assert!(sum.inputs.raw_data_windows.is_empty());
+        assert!(sum.inputs.raw_data_windows().is_empty());
         assert_ne!(
-            sum.coverage.definition_id,
-            per_series.coverage.definition_id
+            sum.coverage().definition_id(),
+            per_series.coverage().definition_id()
         );
     }
     assert_ne!(
-        sums[0].coverage.definition_id,
-        sums[1].coverage.definition_id
+        sums[0].coverage().definition_id(),
+        sums[1].coverage().definition_id()
     );
     for output in &views {
-        assert_eq!(output.refresh, MaterializedViewRefresh::AtIngestion);
-        assert_eq!(output.coverage.selection, relative_time(-60_000, 0));
-        assert_eq!(output.retention_ms, 60_000);
+        assert_eq!(output.refresh(), MaterializedViewRefresh::AtIngestion);
+        assert_eq!(output.coverage().selection(), relative_time(-60_000, 0));
+        assert_eq!(output.retention_ms(), 60_000);
     }
     assert!(plan.raw_data_retention().unwrap().is_empty());
     let run = run_data_plane(
@@ -1441,7 +1449,7 @@ async fn a_coarse_sum_rolls_up_from_the_stored_fine_sum() {
     };
     assert!(first.inputs.materialized_views.is_empty());
     assert_eq!(rolled_up.inputs.materialized_views, [first.node_id]);
-    assert!(rolled_up.inputs.raw_data_windows.is_empty());
+    assert!(rolled_up.inputs.raw_data_windows().is_empty());
     let run = run_data_plane(
         &plan_json,
         &job_samples(),
@@ -1479,14 +1487,14 @@ async fn a_summary_across_series_from_per_series_summaries_is_listed_and_built()
     };
     assert!(per_series.inputs.materialized_views.is_empty());
     assert_eq!(across.inputs.materialized_views, [per_series.node_id]);
-    assert!(across.inputs.raw_data_windows.is_empty());
+    assert!(across.inputs.raw_data_windows().is_empty());
     for output in [per_series, across] {
-        assert_eq!(output.refresh, MaterializedViewRefresh::AtIngestion);
-        assert_eq!(output.coverage.selection, relative_time(-60_000, 0));
+        assert_eq!(output.refresh(), MaterializedViewRefresh::AtIngestion);
+        assert_eq!(output.coverage().selection(), relative_time(-60_000, 0));
     }
     assert_ne!(
-        across.coverage.definition_id,
-        per_series.coverage.definition_id
+        across.coverage().definition_id(),
+        per_series.coverage().definition_id()
     );
     let run = run_data_plane(
         &plan_json,
@@ -1535,18 +1543,21 @@ async fn a_kept_sliding_window_merge_is_listed_and_built() {
         merge.inputs.materialized_views,
         panes.iter().map(|pane| pane.node_id).collect::<Vec<_>>()
     );
-    assert!(merge.inputs.raw_data_windows.is_empty());
-    assert_eq!(merge.refresh, MaterializedViewRefresh::OnFirstRead);
-    assert_eq!(merge.coverage.selection, relative_time(-300_000, 0));
-    assert_eq!(merge.retention_ms, 300_000 + 3_600_000);
+    assert!(merge.inputs.raw_data_windows().is_empty());
+    assert_eq!(merge.refresh(), MaterializedViewRefresh::OnFirstRead);
+    assert_eq!(merge.coverage().selection(), relative_time(-300_000, 0));
+    assert_eq!(merge.retention_ms(), 300_000 + 3_600_000);
     for (i, pane) in panes.iter().enumerate() {
         let i = i as i64;
-        assert_eq!(pane.coverage.definition_id, merge.coverage.definition_id);
         assert_eq!(
-            pane.coverage.selection,
+            pane.coverage().definition_id(),
+            merge.coverage().definition_id()
+        );
+        assert_eq!(
+            pane.coverage().selection(),
             relative_time(-(i + 1) * 60_000, -i * 60_000)
         );
-        assert!(pane.retention_ms >= merge.retention_ms);
+        assert!(pane.retention_ms() >= merge.retention_ms());
     }
     let mut store = SummaryStore::new();
     let first = run_data_plane(&plan_json, &job_samples(), EVALUATION_MS, &mut store);
@@ -1573,8 +1584,8 @@ async fn panes_of_an_hour_share_one_definition_with_distinct_times() {
     let views = plan.materialized_views().unwrap();
     assert!(!views.is_empty());
     let mut panes: Vec<&MaterializedView> = views.iter().collect();
-    panes.sort_by_key(|o| o.inputs.raw_data_windows[0].end_offset_ms);
-    let width_ms = panes[0].inputs.raw_data_windows[0].width_ms;
+    panes.sort_by_key(|o| o.inputs.raw_data_windows()[0].end_offset_ms());
+    let width_ms = panes[0].inputs.raw_data_windows()[0].width_ms();
     assert!(width_ms > 0);
     assert_eq!(
         width_ms * panes.len() as i64,
@@ -1583,17 +1594,20 @@ async fn panes_of_an_hour_share_one_definition_with_distinct_times() {
     );
     for (i, pane) in panes.iter().enumerate() {
         let i = i as i64;
-        let [window] = pane.inputs.raw_data_windows.as_slice() else {
+        let [window] = pane.inputs.raw_data_windows() else {
             panic!("{pane:?}");
         };
         assert_eq!(
-            (window.width_ms, window.end_offset_ms),
+            (window.width_ms(), window.end_offset_ms()),
             (width_ms, i * width_ms)
         );
         assert!(pane.inputs.materialized_views.is_empty());
-        assert_eq!(pane.coverage.definition_id, panes[0].coverage.definition_id);
         assert_eq!(
-            pane.coverage.selection,
+            pane.coverage().definition_id(),
+            panes[0].coverage().definition_id()
+        );
+        assert_eq!(
+            pane.coverage().selection(),
             relative_time(-(i + 1) * width_ms, -i * width_ms)
         );
     }
@@ -2551,7 +2565,7 @@ fn stored_definitions(plan: &InstallablePlan, family: &str) -> BTreeSet<String> 
                 .unwrap()
                 .contains(family)
         })
-        .map(|view| view.coverage.definition_id.clone())
+        .map(|view| view.coverage().definition_id().to_owned())
         .collect()
 }
 

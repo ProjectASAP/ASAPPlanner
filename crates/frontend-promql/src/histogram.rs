@@ -28,7 +28,7 @@ pub enum HistogramKind {
 impl HistogramKind {
     /// Whether `histogram_quantile` over this kind lowers to the sketch-able
     /// generic `Quantile` (`true`) rather than exact bucket interpolation.
-    pub fn is_sketchable(self) -> bool {
+    pub(crate) fn is_sketchable(self) -> bool {
         matches!(self, HistogramKind::RawDataSamples)
     }
 }
@@ -51,12 +51,8 @@ impl HistogramCatalog {
     }
 
     /// The declared kind for `metric`, if any.
-    pub fn kind_of(&self, metric: &str) -> Option<HistogramKind> {
+    pub(crate) fn kind_of(&self, metric: &str) -> Option<HistogramKind> {
         self.0.get(metric).copied()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
     }
 }
 

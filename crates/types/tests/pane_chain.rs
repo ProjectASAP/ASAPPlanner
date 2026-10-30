@@ -83,10 +83,10 @@ fn merge(children: Vec<Rc<OperatorNode>>) -> Rc<OperatorNode> {
 
 fn relative_time(node: &OperatorNode) -> (Bound<i64>, Bound<i64>) {
     let coverage = node.coverage().expect("coverage");
-    let [selection] = coverage.selection.as_slice() else {
+    let [selection] = coverage.selection() else {
         panic!("one box: {coverage:?}")
     };
-    selection.relative_time.expect("a time window")
+    selection.relative_time().expect("a time window")
 }
 
 /// The merged chain is a state of the build over the whole 5-min window:
@@ -394,8 +394,8 @@ fn expansion_keeps_a_rollup_of_the_panes() {
     assert_eq!((children.len(), group_by), (5, &Some(vec![])));
     let coverage = rollup.coverage().unwrap();
     assert_eq!(expanded.coverage(), Some(coverage.clone()));
-    let Some(ASAPOp::SummaryAgg { reduction, .. }) = coverage.definition.asap() else {
-        panic!("{:?}", coverage.definition.operator)
+    let Some(ASAPOp::SummaryAgg { reduction, .. }) = coverage.definition().asap() else {
+        panic!("{:?}", coverage.definition().operator)
     };
     assert_eq!(*reduction, Reduction::by(vec![]));
     // A rollup merges every input state: it reads a merge of the newest
@@ -421,12 +421,12 @@ fn a_rollup_of_the_newest_panes_covers_their_window() {
     .unwrap();
     rollup.validate_structure().unwrap();
     let coverage = rollup.coverage().unwrap();
-    let Some(ASAPOp::SummaryAgg { reduction, .. }) = coverage.definition.asap() else {
-        panic!("{:?}", coverage.definition.operator)
+    let Some(ASAPOp::SummaryAgg { reduction, .. }) = coverage.definition().asap() else {
+        panic!("{:?}", coverage.definition().operator)
     };
     assert_eq!(*reduction, Reduction::by(vec![]));
     assert_eq!(
-        coverage.selection[0].relative_time,
+        coverage.selection()[0].relative_time(),
         Some((Bound::Excluded(-2 * MINUTE as i64), Bound::Included(0)))
     );
 }

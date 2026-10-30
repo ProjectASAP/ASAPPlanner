@@ -92,7 +92,7 @@ fn timed_plan_exports_with_timing() {
 fn query_time_input_to_ingestion_is_rejected() {
     let mut dag = compile_physical_asap_dag(&timed_at_ingestion()).unwrap();
     dag.nodes[0].output_state.timing = ExecutionTiming::QueryTime;
-    dag.edges[0].data_state = dag.nodes[0].output_state;
+    *dag.edges[0].data_state_mut() = dag.nodes[0].output_state;
     assert!(matches!(
         dag.validate(),
         Err(PhysicalASAPDAGValidationError::QueryDependencyInIngestion { .. })
@@ -105,7 +105,7 @@ fn query_time_input_to_ingestion_is_rejected() {
 fn materialization_inconsistent_with_timing_is_rejected() {
     let mut dag = compile_physical_asap_dag(&timed_at_ingestion()).unwrap();
     dag.nodes[1].output_state.timing = ExecutionTiming::QueryTime;
-    dag.edges[1].data_state = dag.nodes[1].output_state;
+    *dag.edges[1].data_state_mut() = dag.nodes[1].output_state;
     assert_eq!(
         dag.validate(),
         Err(
@@ -396,7 +396,9 @@ fn exports_summary_over_summary_as_typed_precompute_edges() {
     let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
     assert_eq!(compiled.node_ids.node_id(&timed), Some(3));
     assert_eq!(
-        compiled.node_ids.node_id(cache.timed(&inner).unwrap()),
+        compiled
+            .node_ids
+            .node_id(asap_types::test_support::timed(&cache, &inner).unwrap()),
         Some(1)
     );
     let dag = compiled.dag;
@@ -414,14 +416,17 @@ fn exports_summary_over_summary_as_typed_precompute_edges() {
         .iter()
         .find(|e| e.producer == 1 && e.consumer == 2)
         .unwrap();
-    assert_eq!(dependency.data_state, ExecutionDataState::INGESTION_SUMMARY);
-    assert_eq!(dependency.grouping, GroupingEdgeCompatibility::Identical);
     assert_eq!(
-        dependency.window,
+        dependency.data_state(),
+        ExecutionDataState::INGESTION_SUMMARY
+    );
+    assert_eq!(dependency.grouping(), GroupingEdgeCompatibility::Identical);
+    assert_eq!(
+        dependency.window(),
         WindowEdgeCompatibility::RequiresAlignedPanePhaseOrExactWindowEdgeResidual
     );
     assert!(matches!(
-        dependency.intermediate_schema.fields[0].dtype,
+        dependency.intermediate_schema().fields[0].dtype,
         FieldDataType::ExactAggregate(ExactKind::Sum, _)
     ));
     assert!(matches!(
@@ -451,13 +456,13 @@ fn retention_is_only_on_materialized_views_and_query_time_scans() {
     let view = dag
         .nodes
         .iter()
-        .position(|node| node.materialization.is_materialized_view())
+        .position(|node| asap_types::test_support::is_materialized_view(node.materialization))
         .expect("a node built at ingestion");
     let other = dag
         .nodes
         .iter()
         .position(|node| {
-            !node.materialization.is_materialized_view()
+            !asap_types::test_support::is_materialized_view(node.materialization)
                 && node.output_state.timing == ExecutionTiming::IngestionTime
         })
         .expect("an ingestion-time node that is not a view");
@@ -527,15 +532,15 @@ fn every_node_at_query_time_keeps_the_operators_and_stores_nothing() {
 /// `(2,700,000, 3,300,000]`, and reaches 900,000 ms back.
 #[test]
 fn a_raw_data_window_ends_its_offset_before_the_evaluation() {
-    let window = asap_types::ir::materialized_view::RawDataWindow {
-        source: Source::TimeSeries {
+    let window = asap_types::ir::materialized_view::RawDataWindow::new(
+        Source::TimeSeries {
             metric: "latency".into(),
         },
-        width_ms: 600_000,
-        end_offset_ms: 300_000,
-    };
+        300_000,
+        600_000,
+    );
     assert_eq!(window.bounds_ms(3_600_000), (2_700_000, 3_300_000));
-    assert_eq!(window.lookback_ms(), 900_000);
+    assert_eq!(asap_types::test_support::lookback_ms(&window), 900_000);
 }
 
 /// `TimeRange(Range, width_ms)` over `shift` (if any) over `scan`, untimed.
@@ -733,14 +738,16 @@ fn high_fan_in_edges_preserve_multiplicity_without_order_dependence() {
         scalar_roots: vec![],
         edges: inputs
             .into_iter()
-            .map(|producer| PhysicalASAPDAGEdge {
-                producer,
-                consumer: count,
-                role: EdgeRole::Input,
-                intermediate_schema: schema.clone(),
-                data_state: ExecutionDataState::QUERY_ROWS,
-                grouping: GroupingEdgeCompatibility::NotApplicable,
-                window: WindowEdgeCompatibility::NotApplicable,
+            .map(|producer| {
+                PhysicalASAPDAGEdge::new(
+                    producer,
+                    count,
+                    EdgeRole::Input,
+                    schema.clone(),
+                    ExecutionDataState::QUERY_ROWS,
+                    GroupingEdgeCompatibility::NotApplicable,
+                    WindowEdgeCompatibility::NotApplicable,
+                )
             })
             .collect(),
     };

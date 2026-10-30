@@ -32,8 +32,8 @@ fn aggregate(node: &OperatorNode) -> (&FieldDataType, &SummaryUpdate, &Reduction
         Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => aggregate(summary_input),
         Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => aggregate(child),
         // A value operation (Project/Filter/Sort/Limit/...) over the state.
-        Operator::NonASAP(op) if op.children().len() == 1 && node.contains_asap() => {
-            aggregate(op.children()[0])
+        Operator::NonASAP(_) if node.children().len() == 1 && node.contains_asap() => {
+            aggregate(node.children()[0])
         }
         other => panic!("not a maintained accumulator: {other:?}"),
     }
