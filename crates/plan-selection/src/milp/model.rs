@@ -1247,7 +1247,7 @@ pub(crate) fn solve_selection_milp(
         Err(no_plan) => (None, Some(no_plan)),
     };
     let warm_start_ms = warm_started.elapsed().as_millis() as u64;
-    let scale = objective_scale(&milp.objective_terms);
+    let scale = objective_scale(&milp.objective_terms, start.as_deref());
     let objective: Expression = milp
         .objective_terms
         .iter()
@@ -1281,11 +1281,11 @@ pub(crate) fn solve_selection_milp(
         .map_err(|error| SelectionMilpError::Solver(error.to_string()))?;
     model.set_option("mip_rel_gap", 0.0);
     model.set_option("mip_abs_gap", 0.0);
-    model.set_option("output_flag", std::env::var_os("ASAP_HIGHS_LOG").is_some());
-    model.set_option(
-        "log_to_console",
-        std::env::var_os("ASAP_HIGHS_LOG").is_some(),
-    );
+    model.set_option("output_flag", false);
+    // HiGHS's MIP search is mostly serial; a thread per core (each with
+    // its own malloc arenas) costs gigabytes of address space on a large
+    // host and breaks an 8 GB `ulimit -v` (#1036 workload-01 on 56 cores).
+    model.set_option("threads", HIGHS_THREADS);
     // The warm start: its binaries; HiGHS completes the continuous
     // variables by an LP with the binaries fixed.
     if let Some(start) = start {
@@ -1417,18 +1417,37 @@ pub(crate) fn solve_selection_milp(
     })
 }
 
-/// The factor the objective is multiplied by for HiGHS: its largest
-/// coefficient becomes 1,000, so HiGHS's absolute tolerances stay below
-/// the costs it compares.
-fn objective_scale(terms: &[(Variable, f64)]) -> f64 {
+/// HiGHS's threads (its `threads` option).
+const HIGHS_THREADS: i32 = 4;
+
+/// The factor the objective is multiplied by for HiGHS: the warm start's
+/// cost on its binaries becomes about 1,000 (so the costs HiGHS compares
+/// stay well above its absolute tolerances), its largest coefficient at
+/// most 10⁷; without a warm start cost, the largest coefficient becomes
+/// 1,000.
+fn objective_scale(terms: &[(Variable, f64)], start: Option<&[(Variable, f64)]>) -> f64 {
     let largest = terms
         .iter()
         .map(|(_, coefficient)| coefficient.abs())
         .fold(0.0, f64::max);
-    if largest > 0.0 && largest.is_finite() {
-        1_000.0 / largest
+    if !(largest > 0.0 && largest.is_finite()) {
+        return 1.0;
+    }
+    let started: HashSet<Variable> = start
+        .into_iter()
+        .flatten()
+        .filter(|(_, value)| *value > 0.5)
+        .map(|(variable, _)| *variable)
+        .collect();
+    let start_cost: f64 = terms
+        .iter()
+        .filter(|(variable, _)| started.contains(variable))
+        .map(|(_, coefficient)| *coefficient)
+        .sum();
+    if start_cost > 0.0 && start_cost.is_finite() {
+        (1_000.0 / start_cost).min(1e7 / largest)
     } else {
-        1.0
+        1_000.0 / largest
     }
 }
 
