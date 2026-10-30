@@ -192,7 +192,7 @@ fn assert_no_listed_choice_is_cheaper(document: &Value) -> Vec<Value> {
         choices.len() as u64
     );
     let stage3 = &document["stage3_plan_selection"];
-    let selected = &stage3["costs"][stage3["selected"].as_str().unwrap()]["cost_per_second"];
+    let selected = &stage3["cost"]["cost_per_second"];
     assert_eq!(
         enumeration["priced"],
         json!({"count": choices.len(), "cheaper_than_selected": 0, "selected_cost_per_second": selected})

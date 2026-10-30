@@ -363,7 +363,7 @@ fn document_of(
                 "error": format!("Pass 1: {error}"),
             },
             "stage2_physical_asap_optimization": { "candidates": [], "pruned": [], "pruned_candidates": [] },
-            "stage3_plan_selection": { "costs": {}, "selected": null, "rejected": [], "materialized_views": [] },
+            "stage3_plan_selection": { "selected_candidates": null, "materialized_views": [] },
         })),
         Err(error @ PlanningStagesError::Validation(_)) => Err(error.to_string().into()),
     }
