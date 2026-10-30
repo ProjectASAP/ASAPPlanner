@@ -127,52 +127,11 @@ enum OuterIntent {
     Group,
 }
 
-#[derive(Debug, Clone)]
-enum InnerFunc {
-    FrequencyL2,
-    FrequencyEntropy,
-    Cardinality,
-    Quantile(f64),
-    Avg,
-    Min,
-    Max,
-    Sum,
-    StdDev,
-    Variance,
-    Count,
-    // `Rate`/`Increase` carry no window of their own — unlike the old Unresolved
-    // `AggFunc::Rate{window}`, canonical `AggIntent::Rate`/`Increase` have no
-    // window field either; `windowed_aggregate` reads `Inner.window`
-    // uniformly for every intent, so it would be a redundant duplicate here.
-    Rate,
-    IRate,
-    Increase,
-    // Counter-derivative range functions (issue #44). The window rides on the
-    // enclosing `TimeRange` node (like `*_over_time`), so these carry only
-    // their non-window scalar params.
-    Changes,
-    Delta,
-    IDelta,
-    Deriv,
-    Resets,
-    PredictLinear(f64),
-    DoubleExp { smoothing: f64, trend: f64 },
-    // Additional range-vector reducers (issue #51). Per-series over the window
-    // (like `*_over_time`); the window rides on the enclosing Unresolved `Window`.
-    LastOverTime,
-    FirstOverTime,
-    MadOverTime,
-    TsOfMinOverTime,
-    TsOfMaxOverTime,
-    TsOfFirstOverTime,
-    TsOfLastOverTime,
-}
-
 struct Inner {
     metric: String,
     matchers: Vec<Scalar>,
     window: Option<Duration>,
-    func: Option<InnerFunc>,
+    func: Option<AggIntent<ColumnRef>>,
     /// `offset` / `@` on the selector, carried to the `Source` (issue #40).
     shift: TimeShift,
 }
@@ -562,72 +521,89 @@ fn walk_call(call: &Call) -> Result<Unresolved> {
 /// function or its argument isn't a sub-query, so the flat matrix-selector
 /// template still handles `f(m[w])` (issues #42, #55).
 fn range_fn_over_subquery(call: &Call) -> Result<Option<Unresolved>> {
-    // `rate`/`increase`/`irate` carry their window in the `AggFunc`; over a
-    // sub-query that window is the sub-query's own range.
-    if let "rate" | "irate" | "increase" = call.func.name {
-        let arg_expr = arg(call, 0)?;
-        if subquery_range(arg_expr).is_none() {
-            return Ok(None);
-        }
-        let inner = match call.func.name {
-            "rate" => InnerFunc::Rate,
-            "irate" => InnerFunc::IRate,
-            "increase" => InnerFunc::Increase,
-            _ => unreachable!(),
-        };
-        return Ok(Some(per_series_aggregate(
-            vec![],
-            inner_intent(&inner),
-            walk(arg_expr)?,
-        )));
-    }
-
-    // `*_over_time` reducers + counter-derivatives: the func-kind, and the index
-    // of the matrix/sub-query argument (`quantile_over_time` reads φ from arg 0,
-    // so its matrix is arg 1; the rest take arg 0 + trailing scalar params).
-    let (inner, matrix_idx): (InnerFunc, usize) = match call.func.name {
-        "avg_over_time" => (InnerFunc::Avg, 0),
-        "min_over_time" => (InnerFunc::Min, 0),
-        "max_over_time" => (InnerFunc::Max, 0),
-        "sum_over_time" => (InnerFunc::Sum, 0),
-        "stddev_over_time" => (InnerFunc::StdDev, 0),
-        "stdvar_over_time" => (InnerFunc::Variance, 0),
-        "count_over_time" => (InnerFunc::Count, 0),
-        "distinct_over_time" => (InnerFunc::Cardinality, 0),
-        "entropy_over_time" => (InnerFunc::FrequencyEntropy, 0),
-        "l2_over_time" => (InnerFunc::FrequencyL2, 0),
-        "quantile_over_time" => (InnerFunc::Quantile(quantile_param(num_arg(call, 0)?)?), 1),
-        "changes" => (InnerFunc::Changes, 0),
-        "delta" => (InnerFunc::Delta, 0),
-        "idelta" => (InnerFunc::IDelta, 0),
-        "deriv" => (InnerFunc::Deriv, 0),
-        "resets" => (InnerFunc::Resets, 0),
-        "last_over_time" => (InnerFunc::LastOverTime, 0),
-        "first_over_time" => (InnerFunc::FirstOverTime, 0),
-        "mad_over_time" => (InnerFunc::MadOverTime, 0),
-        "ts_of_min_over_time" => (InnerFunc::TsOfMinOverTime, 0),
-        "ts_of_max_over_time" => (InnerFunc::TsOfMaxOverTime, 0),
-        "ts_of_first_over_time" => (InnerFunc::TsOfFirstOverTime, 0),
-        "ts_of_last_over_time" => (InnerFunc::TsOfLastOverTime, 0),
-        "predict_linear" => (InnerFunc::PredictLinear(num_arg(call, 1)?), 0),
-        "double_exponential_smoothing" => (
-            InnerFunc::DoubleExp {
-                smoothing: num_arg(call, 1)?,
-                trend: num_arg(call, 2)?,
-            },
-            0,
-        ),
-        _ => return Ok(None),
+    let Some((intent, matrix_idx)) = range_fn(call)? else {
+        return Ok(None);
     };
     let arg_expr = arg(call, matrix_idx)?;
     if !is_subquery(arg_expr) {
         return Ok(None);
     }
-    Ok(Some(per_series_aggregate(
-        vec![],
-        inner_intent(&inner),
-        walk(arg_expr)?,
-    )))
+    Ok(Some(per_series_aggregate(vec![], intent, walk(arg_expr)?)))
+}
+
+/// A range-vector function's per-series intent and the index of its matrix /
+/// sub-query argument, or `None` when `call` is not one. `quantile_over_time`
+/// reads φ from arg 0, so its matrix is arg 1; the rest take arg 0 plus
+/// trailing scalar params. The window is never part of the intent: it rides on
+/// the enclosing `TimeRange` (or is the sub-query's own range).
+fn range_fn(call: &Call) -> Result<Option<(AggIntent<ColumnRef>, usize)>> {
+    let at0 = |intent| Ok(Some((intent, 0)));
+    match call.func.name {
+        "rate" => at0(AggIntent::Rate),
+        "irate" => at0(AggIntent::IRate),
+        "increase" => at0(AggIntent::Increase),
+        "quantile_over_time" => Ok(Some((
+            AggIntent::Quantile {
+                col: None,
+                q: quantile_param(num_arg(call, 0)?)?,
+                accuracy: current_accuracy(),
+            },
+            1,
+        ))),
+        "avg_over_time" => at0(AggIntent::Avg { col: None }),
+        "min_over_time" => at0(AggIntent::Min { col: None }),
+        "max_over_time" => at0(AggIntent::Max { col: None }),
+        "sum_over_time" => at0(AggIntent::Sum { col: None }),
+        "stddev_over_time" => at0(AggIntent::StdDev {
+            col: None,
+            population: true,
+        }),
+        "stdvar_over_time" => at0(AggIntent::Variance {
+            col: None,
+            population: true,
+        }),
+        "count_over_time" => at0(AggIntent::Count {
+            accuracy: current_accuracy(),
+        }),
+        "distinct_over_time" => at0(AggIntent::Cardinality {
+            cols: vec![],
+            accuracy: current_accuracy(),
+        }),
+        "entropy_over_time" => at0(AggIntent::FrequencyEntropy {
+            col: None,
+            accuracy: current_accuracy(),
+        }),
+        "l2_over_time" => at0(AggIntent::FrequencyL2 {
+            col: None,
+            accuracy: current_accuracy(),
+        }),
+        // Counter-derivative range functions (issue #44). Each has its own
+        // intent — `changes` (value-change count) and `resets` (counter-reset
+        // count) are NOT sample counts, so they are not aliased to
+        // `count_over_time`.
+        "changes" => at0(AggIntent::Changes),
+        "delta" => at0(AggIntent::Delta),
+        "idelta" => at0(AggIntent::IDelta),
+        "deriv" => at0(AggIntent::Deriv),
+        "resets" => at0(AggIntent::Resets),
+        "predict_linear" => at0(AggIntent::PredictLinear {
+            seconds: num_arg(call, 1)?,
+        }),
+        "double_exponential_smoothing" => at0(AggIntent::DoubleExpSmoothing {
+            smoothing: num_arg(call, 1)?,
+            trend: num_arg(call, 2)?,
+        }),
+        // Additional range-vector reducers (issue #51) — same windowed
+        // per-series shape as the `*_over_time` family above.
+        "last_over_time" => at0(AggIntent::LastOverTime),
+        "first_over_time" => at0(AggIntent::FirstOverTime),
+        "mad_over_time" => at0(AggIntent::MadOverTime),
+        "ts_of_min_over_time" => at0(AggIntent::TsOfMinOverTime),
+        "ts_of_max_over_time" => at0(AggIntent::TsOfMaxOverTime),
+        "ts_of_first_over_time" => at0(AggIntent::TsOfFirstOverTime),
+        "ts_of_last_over_time" => at0(AggIntent::TsOfLastOverTime),
+        _ => Ok(None),
+    }
 }
 
 /// A (parenthesised) PromQL sub-query — `<inst>[range:res]`.
@@ -1628,144 +1604,52 @@ fn lower_inner(expr: &Expr) -> Result<Inner> {
 }
 
 fn lower_inner_call(call: &Call) -> Result<Inner> {
-    let name = call.func.name;
-    let at0 = |func: InnerFunc| -> Result<Inner> {
-        let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
-        Ok(Inner {
-            metric,
-            matchers,
-            window: Some(window),
-            func: Some(func),
-            shift,
-        })
+    let Some((intent, matrix_idx)) = range_fn(call)? else {
+        return Err(LoweringError::UnsupportedFunction(
+            call.func.name.to_string(),
+        ));
     };
-    match name {
-        "rate" | "irate" => {
-            let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
-            Ok(Inner {
-                metric,
-                matchers,
-                window: Some(window),
-                func: Some(if name == "irate" {
-                    InnerFunc::IRate
-                } else {
-                    InnerFunc::Rate
-                }),
-                shift,
-            })
-        }
-        "increase" => {
-            let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
-            Ok(Inner {
-                metric,
-                matchers,
-                window: Some(window),
-                func: Some(InnerFunc::Increase),
-                shift,
-            })
-        }
-        "quantile_over_time" => {
-            let phi = quantile_param(num_arg(call, 0)?)?;
-            let (metric, matchers, window, shift) = extract_matrix(arg(call, 1)?)?;
-            Ok(Inner {
-                metric,
-                matchers,
-                window: Some(window),
-                func: Some(InnerFunc::Quantile(phi)),
-                shift,
-            })
-        }
-        "avg_over_time" => at0(InnerFunc::Avg),
-        "min_over_time" => at0(InnerFunc::Min),
-        "max_over_time" => at0(InnerFunc::Max),
-        "sum_over_time" => at0(InnerFunc::Sum),
-        "stddev_over_time" => at0(InnerFunc::StdDev),
-        "stdvar_over_time" => at0(InnerFunc::Variance),
-        "count_over_time" => at0(InnerFunc::Count),
-        "distinct_over_time" => at0(InnerFunc::Cardinality),
-        "entropy_over_time" => at0(InnerFunc::FrequencyEntropy),
-        "l2_over_time" => at0(InnerFunc::FrequencyL2),
-        // Counter-derivative range functions (issue #44). Each has its own
-        // intent — `changes` (value-change count) and `resets` (counter-reset
-        // count) are NOT sample counts, so they are not aliased to
-        // `count_over_time`. The window is arg 0's matrix; scalar params follow.
-        "changes" => at0(InnerFunc::Changes),
-        "delta" => at0(InnerFunc::Delta),
-        "idelta" => at0(InnerFunc::IDelta),
-        "deriv" => at0(InnerFunc::Deriv),
-        "resets" => at0(InnerFunc::Resets),
-        // Additional range-vector reducers (issue #51) — same windowed
-        // per-series shape as the `*_over_time` family above.
-        "last_over_time" => at0(InnerFunc::LastOverTime),
-        "first_over_time" => at0(InnerFunc::FirstOverTime),
-        "mad_over_time" => at0(InnerFunc::MadOverTime),
-        "ts_of_min_over_time" => at0(InnerFunc::TsOfMinOverTime),
-        "ts_of_max_over_time" => at0(InnerFunc::TsOfMaxOverTime),
-        "ts_of_first_over_time" => at0(InnerFunc::TsOfFirstOverTime),
-        "ts_of_last_over_time" => at0(InnerFunc::TsOfLastOverTime),
-        "predict_linear" => {
-            let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
-            let seconds = num_arg(call, 1)?;
-            Ok(Inner {
-                metric,
-                matchers,
-                window: Some(window),
-                func: Some(InnerFunc::PredictLinear(seconds)),
-                shift,
-            })
-        }
-        "double_exponential_smoothing" => {
-            let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
-            let smoothing = num_arg(call, 1)?;
-            let trend = num_arg(call, 2)?;
-            Ok(Inner {
-                metric,
-                matchers,
-                window: Some(window),
-                func: Some(InnerFunc::DoubleExp { smoothing, trend }),
-                shift,
-            })
-        }
-        other => Err(LoweringError::UnsupportedFunction(other.to_string())),
-    }
+    let (metric, matchers, window, shift) = extract_matrix(arg(call, matrix_idx)?)?;
+    Ok(Inner {
+        metric,
+        matchers,
+        window: Some(window),
+        func: Some(intent),
+        shift,
+    })
 }
 
 /// Assemble the Layer-2 DAG from a lowered inner vector, the resolved group
 /// keys, and the enclosing aggregator shape.
-fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved> {
+fn build(mut inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved> {
+    let func = inner.func.take();
     match outer {
-        Outer::None => match &inner.func {
+        Outer::None => match func {
             None => instant_source(inner.metric, inner.matchers, inner.shift),
-            Some(f) => {
-                let intent = inner_intent(f);
-                windowed_aggregate(inner, keys, intent)
-            }
+            Some(intent) => windowed_aggregate(inner, keys, intent),
         },
         // An OUTER aggregation operator (`sum`/`avg`/…/`count`) over an inner
         // range-vector function (`rate`/`increase`/`*_over_time`) is a
         // two-level reduction: the inner func runs per series, the outer op
         // then aggregates across series. Collapsing them into one aggregate
         // silently drops a level — e.g. `sum(rate(m[w]))` must keep the `sum`.
-        Outer::Plain(intent) => Ok(match &inner.func {
+        Outer::Plain(intent) => Ok(match func {
             None => windowed_aggregate(inner, keys, outer_intent(&intent))?,
-            Some(f) => {
-                let inner_i = inner_intent(f);
+            Some(inner_i) => {
                 let inner_agg = windowed_aggregate(inner, vec![], inner_i)?;
                 outer_aggregate(keys, outer_intent(&intent), inner_agg)
             }
         }),
-        Outer::Count => Ok(match &inner.func {
+        Outer::Count => Ok(match func {
             None => windowed_aggregate(inner, keys, count())?,
-            Some(f) => {
-                let inner_i = inner_intent(f);
+            Some(inner_i) => {
                 let inner_agg = windowed_aggregate(inner, vec![], inner_i)?;
                 outer_aggregate(keys, count(), inner_agg)
             }
         }),
-        Outer::CountValues { label } => Ok(match &inner.func {
+        Outer::CountValues { label } => Ok(match func {
             None => windowed_aggregate(inner, keys, AggIntent::CountValues { label })?,
-            Some(f) => {
-                let inner_i = inner_intent(f);
+            Some(inner_i) => {
                 let inner_agg = windowed_aggregate(inner, vec![], inner_i)?;
                 outer_aggregate(keys, AggIntent::CountValues { label }, inner_agg)
             }
@@ -1775,7 +1659,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
             // `topk`, a range-vector argument reduces per series first (label-
             // preserving), a bare selector is sampled directly; neither is
             // wrapped in a reducing aggregate (issue #86).
-            let base = match inner.func.as_ref().map(inner_intent) {
+            let base = match func {
                 Some(intent) => windowed_aggregate(inner, vec![], intent)?,
                 None => instant_source(inner.metric, inner.matchers, inner.shift)?,
             };
@@ -1791,11 +1675,11 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
             // neither is allowed to sum raw counter samples as ranking weights.
             if descending
                 && matches!(
-                    inner.func,
-                    Some(InnerFunc::Rate | InnerFunc::Increase | InnerFunc::IRate)
+                    func,
+                    Some(AggIntent::Rate | AggIntent::Increase | AggIntent::IRate)
                 )
             {
-                let intent = inner_intent(inner.func.as_ref().expect("counter function"));
+                let intent = func.expect("counter function");
                 let ranked = windowed_aggregate(inner, vec![], intent)?;
                 return Ok(Unresolved::Aggregate {
                     reduction: Reduction::Reduce(keys.into()),
@@ -1816,9 +1700,9 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
             // is a generic order-by-value + limit and stays as the `Sort + Limit`
             // operator pair. The descending-plus-measure rule is shared with the
             // canonicalize-pass promotion so the two cannot drift (issue #38).
-            let measure = match inner.func {
-                Some(InnerFunc::Count) => topk::Ranking::Frequency,
-                Some(InnerFunc::Sum) => topk::Ranking::WeightedSum,
+            let measure = match func {
+                Some(AggIntent::Count { .. }) => topk::Ranking::Frequency,
+                Some(AggIntent::Sum { .. }) => topk::Ranking::WeightedSum,
                 _ => topk::Ranking::NonAdditive,
             };
             let additive_ranking = measure.is_supported(descending);
@@ -1829,14 +1713,8 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                 // single-pass heavy-hitter sketch (SpaceSaving /
                 // CMS-with-heap), but that is a cost-model decision, not a
                 // canonical-IR concern.
-                let ranked = match measure {
-                    topk::Ranking::Frequency => InnerFunc::Count,
-                    topk::Ranking::WeightedSum => InnerFunc::Sum,
-                    topk::Ranking::NonAdditive => {
-                        unreachable!("heavy-hitter gate rejected non-additive ranking")
-                    }
-                };
-                let ranked_agg = windowed_aggregate(inner, vec![], inner_intent(&ranked))?;
+                let ranked = func.expect("additive ranking has a range function");
+                let ranked_agg = windowed_aggregate(inner, vec![], ranked)?;
                 Ok(Unresolved::Aggregate {
                     // A ranking always reduces (a `by`-empty TopK ranks the
                     // whole input into one ordering, never per-entity).
@@ -1862,7 +1740,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                 // including the `by (…)` partition keys, so they no longer
                 // resolve (issue #30). Keep the selector label-preserving so
                 // `Sort.partition_by` can rank within each group (issue #12).
-                let base = match inner.func.as_ref().map(inner_intent) {
+                let base = match func {
                     Some(intent) => windowed_aggregate(inner, vec![], intent)?,
                     None => instant_source(inner.metric, inner.matchers, inner.shift)?,
                 };
@@ -1991,63 +1869,6 @@ fn instant_source(metric: String, matchers: Vec<Scalar>, shift: TimeShift) -> Re
 fn count() -> AggIntent<ColumnRef> {
     AggIntent::Count {
         accuracy: current_accuracy(),
-    }
-}
-
-fn inner_intent(f: &InnerFunc) -> AggIntent<ColumnRef> {
-    match f {
-        InnerFunc::FrequencyL2 => AggIntent::FrequencyL2 {
-            col: None,
-            accuracy: current_accuracy(),
-        },
-        InnerFunc::FrequencyEntropy => AggIntent::FrequencyEntropy {
-            col: None,
-            accuracy: current_accuracy(),
-        },
-        InnerFunc::Cardinality => AggIntent::Cardinality {
-            cols: vec![],
-            accuracy: current_accuracy(),
-        },
-        InnerFunc::Quantile(q) => AggIntent::Quantile {
-            col: None,
-            q: *q,
-            accuracy: current_accuracy(),
-        },
-        InnerFunc::Avg => AggIntent::Avg { col: None },
-        InnerFunc::Min => AggIntent::Min { col: None },
-        InnerFunc::Max => AggIntent::Max { col: None },
-        InnerFunc::Sum => AggIntent::Sum { col: None },
-        InnerFunc::StdDev => AggIntent::StdDev {
-            col: None,
-            population: true,
-        },
-        InnerFunc::Variance => AggIntent::Variance {
-            col: None,
-            population: true,
-        },
-        InnerFunc::Count => AggIntent::Count {
-            accuracy: current_accuracy(),
-        },
-        InnerFunc::Rate => AggIntent::Rate,
-        InnerFunc::IRate => AggIntent::IRate,
-        InnerFunc::Increase => AggIntent::Increase,
-        InnerFunc::Changes => AggIntent::Changes,
-        InnerFunc::Delta => AggIntent::Delta,
-        InnerFunc::IDelta => AggIntent::IDelta,
-        InnerFunc::Deriv => AggIntent::Deriv,
-        InnerFunc::Resets => AggIntent::Resets,
-        InnerFunc::PredictLinear(s) => AggIntent::PredictLinear { seconds: *s },
-        InnerFunc::DoubleExp { smoothing, trend } => AggIntent::DoubleExpSmoothing {
-            smoothing: *smoothing,
-            trend: *trend,
-        },
-        InnerFunc::LastOverTime => AggIntent::LastOverTime,
-        InnerFunc::FirstOverTime => AggIntent::FirstOverTime,
-        InnerFunc::MadOverTime => AggIntent::MadOverTime,
-        InnerFunc::TsOfMinOverTime => AggIntent::TsOfMinOverTime,
-        InnerFunc::TsOfMaxOverTime => AggIntent::TsOfMaxOverTime,
-        InnerFunc::TsOfFirstOverTime => AggIntent::TsOfFirstOverTime,
-        InnerFunc::TsOfLastOverTime => AggIntent::TsOfLastOverTime,
     }
 }
 
