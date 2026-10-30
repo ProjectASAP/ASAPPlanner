@@ -85,7 +85,7 @@ mod tests {
                 )
             })
             .collect();
-        crate::search::candidates::scopes::expand_execution_scopes(
+        crate::search::candidates::scopes::expand_execution_scopes_for_tests(
             PhysicalCandidatesWithCosts::from_dag_for_tests(dag, nodes),
             &vec![1; count],
             &[0, 0],
@@ -98,8 +98,8 @@ mod tests {
     // its different cost and identity must survive despite equal reader types.
     #[test]
     fn terminal_quotient_preserves_all_bindings_and_pay_once_costs() {
+        use crate::search::candidates::dag::ReaderConstraint;
         use crate::search::milp::model::select_candidates;
-        use asap_types::stages::ReaderConstraint;
         for assignment in [[0, 0], [0, 1], [1, 0], [1, 1]] {
             let original = with_scopes(terminal_fixture());
             let mut factored = terminal_fixture();

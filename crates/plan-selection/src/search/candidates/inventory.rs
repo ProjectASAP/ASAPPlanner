@@ -469,8 +469,8 @@ mod tests {
         let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
         let mut physical = materialize_selected_candidates(
             &configured.physical,
-            &selected.to_selected_candidates(),
-            &modes,
+            &selected.to_selected_dag(),
+            &selected.materializations_by_node(&modes),
             &roots,
             &entries,
             &data,
@@ -495,7 +495,7 @@ mod tests {
             )));
         }
 
-        assert!(physical.nodes_by_candidate[chains[0].0].is_some());
+        assert!(selected.node_of(*chains[0]).is_some());
         // Validate this exact selected shared graph. Bounded search incumbents
         // need not choose it, and synthetic activation prices are never bills.
         physical.plan.id = "shared-pane-regression".into();
@@ -657,8 +657,8 @@ mod tests {
                 .values_non_negative = true;
             let mut realized = materialize_selected_candidates(
                 &inventory.configured_for_tests().physical,
-                &selected.to_selected_candidates(),
-                &modes,
+                &selected.to_selected_dag(),
+                &selected.materializations_by_node(&modes),
                 &roots,
                 &entries,
                 &data,
@@ -839,8 +839,8 @@ mod tests {
             let mut realized =
                 asap_physical_asap_optimization::catalog::materialize_selected_candidates(
                     &inventory.configured_for_tests().physical,
-                    &selected.to_selected_candidates(),
-                    &modes,
+                    &selected.to_selected_dag(),
+                    &selected.materializations_by_node(&modes),
                     &roots,
                     &entries,
                     &data,
@@ -922,8 +922,8 @@ mod tests {
         )];
         let physical = materialize_selected_candidates(
             &inventory.configured_for_tests().physical,
-            &selected.to_selected_candidates(),
-            &modes,
+            &selected.to_selected_dag(),
+            &selected.materializations_by_node(&modes),
             &roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>(),
             &entries,
             &DataWorkload::default(),
@@ -932,7 +932,7 @@ mod tests {
         .unwrap();
         physical.plan.dag.validate().unwrap();
         assert_eq!(
-            physical.nodes_by_candidate.iter().flatten().count(),
+            physical.operator_node_of_selected_node.len(),
             selected.selected_candidates.len()
         );
         assert_eq!(

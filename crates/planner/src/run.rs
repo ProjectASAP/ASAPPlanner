@@ -32,10 +32,10 @@ use asap_plan_selection::{select_plan, ErrorSelectingPlan, SearchReport, Selecti
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
 use asap_types::stages::{
-    AssignmentRealizer, CandidateForMemoGroupId, CandidateMemo, LogicalASAPMemoCandidates,
-    MemoGroupId, OperatorNodeOfCandidateForMemoGroup, PhysicalASAPMemoCandidates,
-    PhysicalCandidateError, PhysicalCandidateKey, PrunedCandidate, RealizedPlan,
-    SelectedCandidates,
+    AssignmentRealizer, CandidateForMemoGroupId, CandidateMemo, DagOfSelectedCandidates,
+    LogicalASAPMemoCandidates, MemoGroupId, OperatorNodeOfCandidateForMemoGroup,
+    PhysicalASAPMemoCandidates, PhysicalCandidateError, PhysicalCandidateKey, PrunedCandidate,
+    RealizedPlan,
 };
 use asap_types::workload::bounds::with_confirmed_weights_at;
 use asap_types::workload::{DataWorkload, QueryLanguage, QueryWorkloadEntry};
@@ -129,6 +129,9 @@ pub struct PlanningRoundReport {
     /// candidates.
     pub operator_nodes: usize,
     pub physical_candidates: usize,
+    /// Stage 2's producer links: over every physical candidate and input,
+    /// the candidates that may produce it.
+    pub physical_producer_links: usize,
     pub stage2_pruned_candidates: usize,
     pub pass2_ms: f64,
     pub stage2_ms: f64,
@@ -426,14 +429,14 @@ pub fn run_planning(
         memo_steps.selected_chosen_candidates = selected_chosen_candidates(
             &round.logical.memo,
             &round.physical,
-            &selection.selected_candidates,
+            &selection.selected_dag,
         );
-        match realizer.realize(&round.physical, &selection.selected_candidates) {
+        match realizer.realize(&round.physical, &selection.selected_dag) {
             Ok(realized) => {
                 let proven: HashSet<*const OperatorNode> = selection
-                    .candidates_with_proven_non_negative_weights
+                    .nodes_with_proven_non_negative_weights
                     .iter()
-                    .filter_map(|id| realized.nodes_by_candidate.get(id.0)?.as_ref())
+                    .filter_map(|node| realized.operator_node_of_selected_node.get(node.0))
                     .map(Rc::as_ptr)
                     .collect();
                 run.selected_plan = Some(with_confirmed_weights_at(
@@ -490,6 +493,7 @@ fn plan_round(
         logical_candidates: 0,
         operator_nodes: 0,
         physical_candidates: 0,
+        physical_producer_links: 0,
         stage2_pruned_candidates: 0,
         pass2_ms: 0.0,
         stage2_ms: 0.0,
@@ -551,6 +555,12 @@ fn plan_round(
     };
     report.operator_nodes = physical.operator_nodes_of_candidates_for_memo_groups.len();
     report.physical_candidates = physical.candidates.len();
+    report.physical_producer_links = physical
+        .candidates
+        .iter()
+        .flat_map(|candidate| &candidate.producer_candidates_per_input)
+        .map(|producers| producers.len())
+        .sum();
     report.stage2_pruned_candidates = physical.pruned_candidates.len();
     let started = Instant::now();
     let selection = select_plan(
@@ -642,24 +652,25 @@ fn has_pane_window(initial: &DagOfLogicalMemoGroups) -> bool {
 }
 
 /// The selected plan's memo candidate for each group it uses: the memo
-/// candidate whose root each selected candidate is. Factoring may give several
+/// candidate whose root each selected node's candidate is. Factoring may give several
 /// memo candidates of a group one root (identical terminal readers of
 /// different inputs); the one reading the selected producers' groups is taken.
 fn selected_chosen_candidates(
     memo: &CandidateMemo,
     physical: &PhysicalASAPMemoCandidates,
-    selected: &SelectedCandidates,
+    selected: &DagOfSelectedCandidates,
 ) -> Result<ChosenCandidatePerMemoGroup, String> {
     use std::collections::HashMap;
     let mut producer_groups = HashMap::<_, Vec<MemoGroupId>>::new();
-    for connection in &selected.connections {
+    for edge in &selected.edges {
         producer_groups
-            .entry(connection.consumer)
+            .entry(edge.consumer)
             .or_default()
-            .push(physical.memo_group_of(connection.producer));
+            .push(physical.memo_group_of(selected.candidate_of_node[edge.producer.0]));
     }
     let mut chosen_candidates = ChosenCandidatePerMemoGroup::new();
-    for &id in &selected.candidates {
+    for (node_id, &id) in selected.candidate_of_node.iter().enumerate() {
+        let node_id = asap_types::stages::SelectedNodeId(node_id);
         let node = &physical.operator_nodes_of_candidates_for_memo_groups
             [physical.candidates[id.0].operator_node.0];
         if !node.is_implementation_root {
@@ -667,7 +678,7 @@ fn selected_chosen_candidates(
         }
         let options = &node.candidates_for_memo_group;
         let reads = |&&CandidateForMemoGroupId { group, index }: &&CandidateForMemoGroupId| {
-            producer_groups.get(&id).is_none_or(|read| {
+            producer_groups.get(&node_id).is_none_or(|read| {
                 read.iter().all(|&child| {
                     child == group
                         || memo.candidates[group.0 as usize][index]

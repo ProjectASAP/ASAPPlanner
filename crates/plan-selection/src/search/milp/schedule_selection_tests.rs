@@ -1,5 +1,6 @@
 use super::*;
 use crate::search::milp::model::{solve_direct_cost_proposal_with_metrics, CandidateSolveMetrics};
+use asap_types::stages::*;
 use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
 
 fn union(queries: &[QueryRecurrence], mask: usize) -> f64 {

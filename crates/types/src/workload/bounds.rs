@@ -442,7 +442,7 @@ pub fn with_confirmed_weights(roots: &[QueryRoot], data: &DataWorkload) -> Vec<Q
 
 /// [`with_confirmed_weights`] at the summaries `confirm_at` names only: the
 /// selected plan with the weight proofs Stage 3 made for its candidates
-/// applied (`Selection::candidates_with_proven_non_negative_weights`).
+/// applied (`Selection::nodes_with_proven_non_negative_weights`).
 pub fn with_confirmed_weights_at(
     roots: &[QueryRoot],
     data: &DataWorkload,

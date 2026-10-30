@@ -9,15 +9,15 @@ use std::time::{Duration, Instant};
 use asap_cost::{CostInputs, CostModel};
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::stages::{
-    AssignmentRealizer, PhysicalASAPMemoCandidates, PhysicalCandidateError, PhysicalCandidateId,
-    SelectedCandidates,
+    AssignmentRealizer, DagOfSelectedCandidates, PhysicalASAPMemoCandidates,
+    PhysicalCandidateError, SelectedNodeId,
 };
 use asap_types::workload::bounds::confirmed_weights;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::models::{AccuracyCheckInputs, SelectionModels};
 use crate::report::{ErrorSelectingPlan, SearchReport, SearchStatus, Selection};
-use crate::search::candidates::dag::{query_roots_of, PhysicalCandidatesWithCosts};
+use crate::search::candidates::dag::query_roots_of;
 use crate::search::candidates::graph::SelectedCandidateGraph;
 use crate::search::costing::calibration::CandidateCalibration;
 use crate::search::milp::model::CandidateSolveMetrics;
@@ -71,7 +71,12 @@ pub fn select_plan(
             entries: entries.len(),
         });
     }
-    let mut configured = PhysicalCandidatesWithCosts::new(physical.clone());
+    // The engine's MILP runs each candidate at most once: it selects over
+    // execution-scope copies and decodes the selected copies into nodes.
+    let expanded =
+        crate::search::candidates::scopes::expand_execution_scopes(physical, entries, deadline)
+            .map_err(ErrorSelectingPlan::Solver)?;
+    let mut configured = expanded.configured.clone();
     let context = CandidatePlanningContext {
         deadline,
         refine_materialization: true,
@@ -149,10 +154,10 @@ pub fn select_plan(
             )),
         });
     };
-    let selected_candidates = selected.to_selected_candidates();
+    let selected_dag = expanded.decode(&selected);
     let validation_started = Instant::now();
-    let candidates_with_proven_non_negative_weights =
-        proven_non_negative_weights(physical, &selected, &selected_candidates, realizer, data)?;
+    let nodes_with_proven_non_negative_weights =
+        proven_non_negative_weights(physical, &selected_dag, realizer, data)?;
     let validation_seconds =
         outcome.validation_seconds + validation_started.elapsed().as_secs_f64();
     let cost = whole.costs[&whole.selected].clone();
@@ -163,8 +168,8 @@ pub fn select_plan(
         .unwrap_or_default();
     let ms = |seconds: f64| (seconds * 1000.0).round() as u64;
     Ok(Selection {
-        selected_candidates,
-        candidates_with_proven_non_negative_weights,
+        selected_dag,
+        nodes_with_proven_non_negative_weights,
         cost,
         accepted_accuracy_per_query,
         // TODO(#1095): today's engine records no per-candidate prunes.
@@ -194,39 +199,34 @@ struct Outcome {
     lower_bound: Option<f64>,
 }
 
-/// The selected candidates whose summary (`SummaryAgg` or `PaneChain`)
-/// reads update weights `data` proves non-negative although the candidate
-/// leaves the requirement open: the selected plan realized once more, each
-/// candidate's node checked.
+/// The selected nodes whose summary (`SummaryAgg` or `PaneChain`) reads
+/// update weights `data` proves non-negative although the candidate leaves
+/// the requirement open: the selected plan realized once more, each node
+/// checked.
 fn proven_non_negative_weights(
     physical: &PhysicalASAPMemoCandidates,
-    selected: &SelectedCandidateGraph,
-    selected_candidates: &SelectedCandidates,
+    selected: &DagOfSelectedCandidates,
     realizer: &dyn AssignmentRealizer,
     data: &DataWorkload,
-) -> Result<Vec<PhysicalCandidateId>, ErrorSelectingPlan> {
-    let realized =
-        realizer
-            .realize(physical, selected_candidates)
-            .map_err(|error| match error {
-                PhysicalCandidateError::RejectedAssignment(reason) => {
-                    ErrorSelectingPlan::RealizerRejected(reason)
-                }
-                error => ErrorSelectingPlan::RealizerRejected(error.to_string()),
-            })?;
-    Ok(selected
-        .selected_candidates
+) -> Result<Vec<SelectedNodeId>, ErrorSelectingPlan> {
+    let realized = realizer
+        .realize(physical, selected)
+        .map_err(|error| match error {
+            PhysicalCandidateError::RejectedAssignment(reason) => {
+                ErrorSelectingPlan::RealizerRejected(reason)
+            }
+            error => ErrorSelectingPlan::RealizerRejected(error.to_string()),
+        })?;
+    Ok(realized
+        .operator_node_of_selected_node
         .iter()
-        .copied()
-        .filter(|id| {
-            realized.nodes_by_candidate[id.0]
-                .as_ref()
-                .is_some_and(|node| match &node.operator {
-                    Operator::ASAP(
-                        ASAPOp::SummaryAgg { input, .. } | ASAPOp::PaneChain { input, .. },
-                    ) => confirmed_weights(&input.weight_domain, data) != input.weight_domain,
-                    _ => false,
-                })
+        .enumerate()
+        .filter(|(_, node)| match &node.operator {
+            Operator::ASAP(ASAPOp::SummaryAgg { input, .. } | ASAPOp::PaneChain { input, .. }) => {
+                confirmed_weights(&input.weight_domain, data) != input.weight_domain
+            }
+            _ => false,
         })
+        .map(|(node, _)| SelectedNodeId(node))
         .collect())
 }

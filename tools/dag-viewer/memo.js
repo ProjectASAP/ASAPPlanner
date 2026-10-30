@@ -54,7 +54,7 @@ const memoIsNode = (nodes, id) => Number.isInteger(id) && id >= 0 && id < nodes.
 function memoPrunedText(entries, group) {
   const lines = (Array.isArray(entries) ? entries : []).filter((p) => p && p.group === group).map((p) => {
     const what = 'candidate' in p ? p.candidate
-      : `node ${p.operator_node} ${p.operator} ${p.timing} ${JSON.stringify(p.materialization)}${p.scope_copy ? ` copy ${p.scope_copy}` : ''}`;
+      : `node ${p.operator_node} ${p.operator} ${p.timing} ${JSON.stringify(p.materialization)}`;
     return `${what}: ${p.reason}`;
   });
   return lines.length ? lines.join('; ') : 'none';

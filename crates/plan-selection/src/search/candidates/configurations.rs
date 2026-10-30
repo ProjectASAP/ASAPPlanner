@@ -20,8 +20,8 @@ use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
 
 /// [`enumerate_candidate_configurations_before`] with no deadline, its
 /// output references those of `source`, owned by the queries
-/// `output_queries[reference]` ([`query_roots_for_tests`]), and an unpriced
-/// DAG. Multiple references of one scalar query count once for shared-query
+/// `output_queries[reference]` ([`query_roots_for_tests`]), with the
+/// engine's execution-scope copies and an unpriced DAG. Multiple references of one scalar query count once for shared-query
 /// materialization.
 #[cfg(test)]
 pub(in crate::search) fn enumerate_candidate_configurations(
@@ -40,7 +40,12 @@ pub(in crate::search) fn enumerate_candidate_configurations(
         deployment.raw_data_retained,
         None,
     )
-    .map(PhysicalCandidatesWithCosts::new)
+    .map(|physical| {
+        // As `select_plan` does: the engine's execution-scope copies.
+        crate::search::candidates::scopes::expand_execution_scopes(&physical, entries, None)
+            .expect("expansion without a deadline")
+            .configured
+    })
 }
 
 /// A hand-built inventory: node `i` runs `nodes[i].0` and reads, per input,
@@ -451,8 +456,8 @@ mod tests {
         let query_roots = vec![QueryRoot::Operator(root); 2];
         let physical = asap_physical_asap_optimization::catalog::materialize_selected_candidates(
             &expanded.physical,
-            &selected.to_selected_candidates(),
-            &modes,
+            &selected.to_selected_dag(),
+            &selected.materializations_by_node(&modes),
             &query_roots,
             &entries,
             &data,

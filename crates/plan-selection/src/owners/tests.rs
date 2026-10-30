@@ -1,21 +1,28 @@
 use std::rc::Rc;
 
 use super::*;
-use crate::classes::fold_copies_into_classes;
-use crate::classes::tests::{copy_of, values_node};
 use asap_types::ir::properties::{AccuracyMetric, BoundExpr, ProbabilityExpr};
 use asap_types::ir::scalar::expr_ir::ScalarValue;
 use asap_types::ir::schema::{DataType, Field};
 use asap_types::ir::{BinaryOperator, ExprSemantics};
 use asap_types::physical::Medium;
 use asap_types::stages::{
-    CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup, PhysicalCandidate,
-    PhysicalCandidateId,
+    CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
+    OperatorNodeOfCandidateForMemoGroupId, PhysicalCandidate, ProducerCandidates,
 };
 
 // ---------------------------------------------------------------------------
 // Hand-built catalogs
 // ---------------------------------------------------------------------------
+
+/// A one-row `VALUES` node of `value`.
+fn values_node(value: f64) -> Rc<OperatorNode> {
+    OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Values {
+        rows: vec![vec![ScalarExpr::Literal(ScalarValue::Float64(value))]],
+        schema: Schema::lifted(vec![Field::plain("value", DataType::Float64, false)], None),
+    }))
+    .unwrap()
+}
 
 /// A `VALUES` node of `rows` one-column rows.
 fn rows_node(rows: usize) -> Rc<OperatorNode> {
@@ -90,12 +97,25 @@ fn catalog(
     )
 }
 
-/// One candidate of operator node `node` reading `producers` per input, that
-/// may produce a query's output when `output`.
+/// One candidate of operator node `node` at query time, not materialized,
+/// reading `producers` per input, that may produce a query's output when
+/// `output`.
 fn candidate(node: usize, producers: &[&[usize]], output: bool) -> PhysicalCandidate {
     PhysicalCandidate {
+        operator_node: OperatorNodeOfCandidateForMemoGroupId(node),
+        timing: ExecutionTiming::QueryTime,
+        materialization: Materialization::NotMaterialized,
+        producer_candidates_per_input: producers
+            .iter()
+            .map(|input| {
+                input
+                    .iter()
+                    .map(|&id| PhysicalCandidateId(id))
+                    .collect::<ProducerCandidates>()
+            })
+            .collect(),
         may_produce_query_output: output,
-        ..copy_of(node, producers)
+        may_keep_across_evaluations_per_sole_reader_query: Vec::new(),
     }
 }
 
@@ -103,22 +123,19 @@ fn root(group: u32) -> QueryRoot<MemoGroupId> {
     QueryRoot::Operator(MemoGroupId(group))
 }
 
-fn prepared(physical: &PhysicalASAPMemoCandidates) -> (CandidateClasses, MilpInputs) {
-    let classes = fold_copies_into_classes(physical);
+fn prepared(physical: &PhysicalASAPMemoCandidates) -> MilpInputs {
     let parts: Vec<Vec<usize>> = vec![vec![1; 4]; 8];
-    let inputs = prepare_milp_inputs(
+    prepare_milp_inputs(
         physical,
-        &classes,
         &parts,
         &[],
         &DataWorkload::default(),
         &CostInputs::default(),
-    );
-    (classes, inputs)
+    )
 }
 
-fn class_of(classes: &CandidateClasses, candidate: usize) -> CandidateClassId {
-    classes.class_of(PhysicalCandidateId(candidate))
+fn id(candidate: usize) -> PhysicalCandidateId {
+    PhysicalCandidateId(candidate)
 }
 
 // ---------------------------------------------------------------------------
@@ -164,13 +181,12 @@ fn relative(error: f64, failure_probability: f64) -> AccuracyGuarantee {
     )
 }
 
-// Class dominance needs every condition: a class with equal keys, a
-// guarantee at least as strong, at least the capacity and no larger number
-// dominates; changing any one condition stops it.
+// Candidate dominance needs every condition: a candidate with equal keys, a
+// guarantee at least as strong and no larger number dominates; changing any one condition stops it.
 #[test]
 fn dominance_needs_every_condition() {
-    let producers = vec![vec![CandidateClassId(7)]];
-    let other_producers = vec![vec![CandidateClassId(8)]];
+    let producers = vec![vec![PhysicalCandidateId(7)]];
+    let other_producers = vec![vec![PhysicalCandidateId(8)]];
     let keep = vec![false];
     let other_keep = vec![true];
     let schema = rows_node(1).schema.clone();
@@ -185,7 +201,7 @@ fn dominance_needs_every_condition() {
         materialization: Materialization::NotMaterialized,
         shareable: false,
         producer_classes_per_input: &producers,
-        readers: vec![(CandidateClassId(9), 0)],
+        readers: vec![(PhysicalCandidateId(9), 0)],
         output_references: vec![0],
         reader_constraint_ids: vec![1],
         may_keep_across_evaluations_per_sole_reader_query: &keep,
@@ -194,7 +210,6 @@ fn dominance_needs_every_condition() {
     };
     let profile = |guarantee| DominanceProfile {
         same: key.clone(),
-        capacity: 2,
         guarantee,
     };
     let better = profile(Some(&strong));
@@ -245,7 +260,7 @@ fn dominance_needs_every_condition() {
         (
             "readers",
             DominanceKey {
-                readers: vec![(CandidateClassId(10), 0)],
+                readers: vec![(PhysicalCandidateId(10), 0)],
                 ..key.clone()
             },
         ),
@@ -298,7 +313,7 @@ fn dominance_needs_every_condition() {
             "{name}"
         );
     }
-    // (approx, parts), capacity, guarantee.
+    // (approx, parts), guarantee.
     let mut data = better_data.clone();
     data.approximate = false;
     assert!(
@@ -308,12 +323,6 @@ fn dominance_needs_every_condition() {
     let mut data = better_data.clone();
     data.accuracy_budget_parts = 2;
     assert!(!dominates((&better, &data), (&worse, &worse_data)), "parts");
-    let mut by = better.clone();
-    by.capacity = 1;
-    assert!(
-        !dominates((&by, &better_data), (&worse, &worse_data)),
-        "capacity"
-    );
     let by = profile(Some(&weak));
     let class = profile(Some(&strong));
     assert!(
@@ -375,12 +384,12 @@ fn guarantee_strength_compares_constant_bounds_in_one_metric() {
     assert!(!guarantee_at_least_as_strong(Some(&rank), Some(&weak)));
 }
 
-// Among dominated classes the dominating one is reported; of two equal
-// classes the smaller id is kept; a class better in one number and worse in
+// Among dominated candidates the dominating one is reported; of two equal
+// candidates the smaller id is kept; a candidate better in one number and worse in
 // another is kept.
 #[test]
 fn pruning_keeps_the_smallest_equal_class_and_incomparable_ones() {
-    let producers = vec![vec![CandidateClassId(9)]];
+    let producers = vec![vec![PhysicalCandidateId(9)]];
     let keep = Vec::new();
     let schema = rows_node(1).schema.clone();
     let key = DominanceKey {
@@ -402,7 +411,6 @@ fn pruning_keeps_the_smallest_equal_class_and_incomparable_ones() {
     let profiles = vec![
         DominanceProfile {
             same: key.clone(),
-            capacity: 1,
             guarantee: None,
         };
         4
@@ -463,13 +471,8 @@ fn a_dominated_class_is_deleted_with_its_links() {
         ],
         vec![root(2)],
     );
-    let (classes, inputs) = prepared(&physical);
-    let (leaf, kept, deleted, top) = (
-        class_of(&classes, 0),
-        class_of(&classes, 1),
-        class_of(&classes, 2),
-        class_of(&classes, 3),
-    );
+    let inputs = prepared(&physical);
+    let (leaf, kept, deleted, top) = (id(0), id(1), id(2), id(3));
     assert_eq!(
         inputs.class_data[kept.0].usage,
         inputs.class_data[deleted.0].usage
@@ -491,26 +494,25 @@ fn a_dominated_class_is_deleted_with_its_links() {
 // Owners
 // ---------------------------------------------------------------------------
 
-/// A leaf, a materialized (shareable) middle with `copies` copies, and two
-/// queries each reading the middle through its own stateless top; a third
-/// query reads only its own leaf.
-fn shared_middle(copies: usize) -> PhysicalASAPMemoCandidates {
+/// A leaf, a materialized (shareable) middle, and two queries each reading
+/// the middle through its own stateless top; a third query reads only its
+/// own leaf. Candidate `i` runs operator node `i`.
+fn shared_middle() -> PhysicalASAPMemoCandidates {
     let leaf = values_node(1.0);
     let middle = reader_of(&leaf);
     let top_0 = reader_of(&middle);
     let top_1 = reader_of(&middle);
     let lone = values_node(2.0);
-    let middle_copies: Vec<usize> = (1..=copies).collect();
-    let mut candidates = vec![candidate(0, &[], false)];
-    for _ in 0..copies {
-        candidates.push(PhysicalCandidate {
+    let candidates = vec![
+        candidate(0, &[], false),
+        PhysicalCandidate {
             materialization: Materialization::MatAtQuery(Medium::Memory),
             ..candidate(1, &[&[0]], false)
-        });
-    }
-    candidates.push(candidate(2, &[&middle_copies], true));
-    candidates.push(candidate(3, &[&middle_copies], true));
-    candidates.push(candidate(4, &[], true));
+        },
+        candidate(2, &[&[1]], true),
+        candidate(3, &[&[1]], true),
+        candidate(4, &[], true),
+    ];
     catalog(
         vec![(leaf, 0), (middle, 1), (top_0, 2), (top_1, 3), (lone, 4)],
         candidates,
@@ -520,19 +522,14 @@ fn shared_middle(copies: usize) -> PhysicalASAPMemoCandidates {
 
 // Query owners hold their stateless tops and read the shared middle at
 // their boundary; the middle's instance owners hold the leaf below it; a
-// query that cannot reach the middle has only its own class.
+// query that cannot reach the middle has only its own candidate. Two
+// queries reach the middle, so it has `m_s = 2` instance owners.
 #[test]
 fn owners_and_regions_on_a_hand_built_catalog() {
-    let physical = shared_middle(2);
-    let (classes, inputs) = prepared(&physical);
-    let (leaf, middle, top_0, top_1, lone) = (
-        class_of(&classes, 0),
-        class_of(&classes, 1),
-        class_of(&classes, 3),
-        class_of(&classes, 4),
-        class_of(&classes, 5),
-    );
-    assert!(classes.class(middle).is_shareable());
+    let physical = shared_middle();
+    let inputs = prepared(&physical);
+    let (leaf, middle, top_0, top_1, lone) = (id(0), id(1), id(2), id(3), id(4));
+    assert!(CandidateLinks::new(&physical).is_shareable(middle));
     assert!(inputs.pruned_classes.is_empty());
     assert_eq!(
         inputs.query_owners,
@@ -573,27 +570,6 @@ fn owners_and_regions_on_a_hand_built_catalog() {
         inputs.output_classes,
         vec![vec![top_0], vec![top_1], vec![lone]]
     );
-}
-
-// `m_s = min(cap(s), queries that can reach s)`: two queries reach the
-// middle, so three copies give two instances and one copy gives one.
-#[test]
-fn instance_count_is_the_smaller_of_capacity_and_reaching_queries() {
-    for (copies, expected) in [(1, 1), (2, 2), (3, 2)] {
-        let physical = shared_middle(copies);
-        let (classes, inputs) = prepared(&physical);
-        let middle = class_of(&classes, 1);
-        assert_eq!(classes.class(middle).capacity(), copies);
-        assert_eq!(
-            inputs
-                .instance_owners
-                .iter()
-                .map(|owners| (owners.class, owners.instance_count))
-                .collect::<Vec<_>>(),
-            vec![(middle, expected)],
-            "{copies} copies"
-        );
-    }
 }
 
 /// Stage 2's output for `queries` and what Stage 3 also reads.
@@ -686,10 +662,10 @@ fn through_stages_1_and_2(queries: &[&str]) -> ThroughStages1And2 {
 
 // Through the real Stages 1 and 2: two quantile queries over 1m and 5m
 // windows of one metric can share a pane chain. Both queries reach it, it
-// has an instance owner with `min(capacity, 2)` instances, some owner reads
-// it at its boundary, and every region holds only stateless classes, links
-// inside it and boundary reads of shareable classes. No quotient: every
-// approximate class weighs 1.
+// has an instance owner with 2 instances (one per reaching query), some
+// owner reads it at its boundary, and every region holds only stateless
+// candidates, links inside it and boundary reads of shareable candidates.
+// No quotient: every approximate candidate weighs 1.
 #[test]
 fn two_queries_share_a_pane_chain_through_the_real_pipeline() {
     let stages = through_stages_1_and_2(&[
@@ -697,24 +673,21 @@ fn two_queries_share_a_pane_chain_through_the_real_pipeline() {
         "quantile_over_time(0.9, m[1h])",
     ]);
     let physical = &stages.physical;
-    let classes = fold_copies_into_classes(physical);
+    let links = CandidateLinks::new(physical);
     let inputs = prepare_milp_inputs(
         physical,
-        &classes,
         &stages.parts_per_memo_candidate,
         &stages.entries,
         &stages.data,
         &CostInputs::default(),
     );
-    let shared_chains: Vec<CandidateClassId> = (0..classes.classes.len())
-        .map(CandidateClassId)
-        .filter(|class| {
+    let shared_chains: Vec<PhysicalCandidateId> = (0..physical.candidates.len())
+        .map(PhysicalCandidateId)
+        .filter(|candidate| {
             matches!(
-                physical
-                    .physical_node(classes.class(*class).copies[0])
-                    .asap(),
+                physical.physical_node(*candidate).asap(),
                 Some(ASAPOp::PaneChain { .. })
-            ) && inputs.queries_reaching[class.0] == vec![0, 1]
+            ) && inputs.queries_reaching[candidate.0] == vec![0, 1]
         })
         .collect();
     assert!(!shared_chains.is_empty());
@@ -729,10 +702,7 @@ fn two_queries_share_a_pane_chain_through_the_real_pipeline() {
             .iter()
             .find(|owners| owners.class == chain)
             .expect("an instance owner per shared chain");
-        assert_eq!(
-            owners.instance_count,
-            classes.class(chain).capacity().min(2)
-        );
+        assert_eq!(owners.instance_count, 2);
         assert!(all_regions.iter().any(|region| {
             region
                 .boundary_reads
@@ -745,7 +715,7 @@ fn two_queries_share_a_pane_chain_through_the_real_pipeline() {
         assert!(region
             .classes
             .iter()
-            .all(|&class| !classes.class(class).is_shareable()));
+            .all(|&candidate| !links.is_shareable(candidate)));
         assert!(region
             .links
             .iter()
@@ -753,7 +723,7 @@ fn two_queries_share_a_pane_chain_through_the_real_pipeline() {
         assert!(region
             .boundary_reads
             .iter()
-            .all(|&(_, _, read)| classes.class(read).is_shareable()));
+            .all(|&(_, _, read)| links.is_shareable(read)));
     }
     for weights in &inputs.accuracy_weights {
         assert!(!weights.is_empty());
@@ -767,30 +737,27 @@ fn two_queries_share_a_pane_chain_through_the_real_pipeline() {
 // Accuracy weights
 // ---------------------------------------------------------------------------
 
-/// `w(q, k)` of the one query of `physical` whose approximate classes are
-/// those of `approximate_candidates`, by candidate.
+/// `w(q, k)` of the one query of `physical` whose approximate candidates
+/// are `approximate_candidates`, by candidate.
 fn weights_of(
     physical: &PhysicalASAPMemoCandidates,
     approximate_candidates: &[usize],
 ) -> BTreeMap<usize, AccuracyWeight> {
-    let classes = fold_copies_into_classes(physical);
-    let class_data: Vec<ClassData> = (0..classes.classes.len())
-        .map(|class| ClassData {
-            approximate: approximate_candidates
-                .iter()
-                .any(|&candidate| class_of(&classes, candidate).0 == class),
+    let class_data: Vec<ClassData> = (0..physical.candidates.len())
+        .map(|candidate| ClassData {
+            approximate: approximate_candidates.contains(&candidate),
             accuracy_budget_parts: 1,
             usage: Err("not costed".into()),
             usage_depends_on: Vec::new(),
         })
         .collect();
-    let alive = vec![true; classes.classes.len()];
-    let links = producer_classes_left(&classes, &alive);
-    let outputs = output_classes(physical, &classes, &alive);
-    let weights = accuracy_weights(physical, &classes, &class_data, &links, &outputs);
+    let alive = vec![true; physical.candidates.len()];
+    let links = producer_classes_left(&CandidateLinks::new(physical), &alive);
+    let outputs = output_classes(physical, &alive);
+    let weights = accuracy_weights(physical, &class_data, &links, &outputs);
     weights[0]
         .iter()
-        .map(|(class, weight)| (classes.class(*class).copies[0].0, *weight))
+        .map(|(candidate, weight)| (candidate.0, *weight))
         .collect()
 }
 

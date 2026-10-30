@@ -18,11 +18,11 @@ pub use memo::{
     queries_rooted_at, root_groups, CandidateGenerationTimeout, MemoGroup, MemoGroupId,
 };
 pub use physical::{
-    output_references, producer_storage_metrics, validate_selected_connections,
-    CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
-    OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate,
-    PhysicalCandidateId, PhysicalCandidateKey, ProducerCandidates, ProducerConsumerConnection,
-    ProducerSetInterner, ProducerStorageMetrics, ReaderConstraint, SelectedCandidates,
+    output_references, producer_storage_metrics, CandidateForMemoGroupId, DagOfSelectedCandidates,
+    OperatorNodeOfCandidateForMemoGroup, OperatorNodeOfCandidateForMemoGroupId,
+    PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PhysicalCandidateKey,
+    ProducerCandidates, ProducerSetInterner, ProducerStorageMetrics, ReaderConstraint,
+    SelectedEdge, SelectedNodeId,
 };
 pub use pruning::{PruneReason, PrunedCandidate};
 pub use realizer::{AssignmentRealizer, PhysicalCandidateError, RealizedPlan};

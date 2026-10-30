@@ -11,7 +11,6 @@ mod inventory;
 mod pruning;
 mod realize;
 mod reconstruction;
-mod scopes;
 
 pub use asap_types::stages::{PhysicalCandidateError, RealizedPlan};
 pub use configurations::ConfigurationError;
@@ -30,7 +29,7 @@ pub enum ErrorGeneratingPhysicalASAPMemoCandidates {
     /// Lowering the memo's candidates to operator nodes failed.
     #[error(transparent)]
     Inventory(#[from] CandidateInventoryError),
-    /// Enumerating timings, materializations and scope copies failed.
+    /// Enumerating timings and materializations failed.
     #[error(transparent)]
     Configuration(#[from] ConfigurationError),
     /// Structural pruning found the candidates malformed.
@@ -112,27 +111,9 @@ fn validate_candidates(physical: &PhysicalASAPMemoCandidates) -> Result<(), Stri
     let outputs_count = physical.output_reference_count();
     let invalid = |message: &str| format!("invalid physical ASAP memo candidates: {message}");
     for constraint in &physical.reader_constraints {
-        let (candidate, outputs) = match constraint {
-            ReaderConstraint::ActivationRequires {
-                candidate,
-                required_candidate,
-            } => {
-                if required_candidate.0 >= count || candidate == required_candidate {
-                    return Err(invalid(
-                        "activation constraint references missing or identical candidate",
-                    ));
-                }
-                (*candidate, Vec::new())
-            }
-            ReaderConstraint::MinimumQueryReaders {
-                candidate,
-                query_outputs,
-                ..
-            }
-            | ReaderConstraint::HighestSharedQueryMaterialization {
-                candidate,
-                query_outputs,
-            } => {
+        let outputs = match constraint {
+            ReaderConstraint::MinimumQueryReaders { query_outputs, .. }
+            | ReaderConstraint::HighestSharedQueryMaterialization { query_outputs, .. } => {
                 let outputs: Vec<_> = query_outputs.iter().flatten().copied().collect();
                 let unique: std::collections::HashSet<_> = outputs.iter().copied().collect();
                 if outputs.len() != outputs_count || unique.len() != outputs.len() {
@@ -140,18 +121,14 @@ fn validate_candidates(physical: &PhysicalASAPMemoCandidates) -> Result<(), Stri
                         "query reader buckets must partition every output exactly once",
                     ));
                 }
-                (*candidate, outputs)
+                outputs
             }
-            ReaderConstraint::AllowedOutputs { candidate, outputs } => {
-                (*candidate, outputs.clone())
-            }
-            ReaderConstraint::IncompatibleOutputs {
-                candidate,
-                left,
-                right,
-            } => (*candidate, vec![*left, *right]),
+            ReaderConstraint::AllowedOutputs { outputs, .. } => outputs.clone(),
+            ReaderConstraint::IncompatibleOutputs { left, right, .. } => vec![*left, *right],
         };
-        if candidate.0 >= count || outputs.iter().any(|&output| output >= outputs_count) {
+        if constraint.candidate().0 >= count
+            || outputs.iter().any(|&output| output >= outputs_count)
+        {
             return Err(invalid(
                 "reader constraint references missing candidate or output",
             ));
@@ -189,34 +166,6 @@ fn check_deadline(
     }
 }
 
-/// [`validate_selected_connections`](asap_types::stages::validate_selected_connections) against `physical`'s candidates.
-fn validate_selected_graph(
-    physical: &PhysicalASAPMemoCandidates,
-    selected: &asap_types::stages::SelectedCandidates,
-) -> Result<(), String> {
-    let query_output_candidates: Vec<Vec<_>> = (0..physical.output_reference_count())
-        .map(|output| physical.query_output_candidates(output).collect())
-        .collect();
-    let query_output_candidates: Vec<&[_]> =
-        query_output_candidates.iter().map(Vec::as_slice).collect();
-    asap_types::stages::validate_selected_connections(
-        physical.candidates.len(),
-        |candidate| {
-            physical.candidates[candidate.0]
-                .producer_candidates_per_input
-                .len()
-        },
-        |candidate, input| {
-            physical.candidates[candidate.0]
-                .producer_candidates_per_input
-                .get(input)
-        },
-        &query_output_candidates,
-        &physical.reader_constraints,
-        selected,
-    )
-}
-
 /// Catalog internals that plan selection's unit tests exercise together with
 /// its solver.
 #[cfg(feature = "test-support")]
@@ -236,5 +185,4 @@ pub mod test_support {
     pub use super::reconstruction::{
         ordered_inputs, output_contract_satisfied, paired_node_identities,
     };
-    pub use super::scopes::expand_execution_scopes_before;
 }

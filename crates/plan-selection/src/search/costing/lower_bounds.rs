@@ -1032,8 +1032,8 @@ mod tests {
             }
             let physical = materialize_selected_candidates(
                 &configured.physical,
-                &selected.to_selected_candidates(),
-                &modes,
+                &selected.to_selected_dag(),
+                &selected.materializations_by_node(&modes),
                 &roots,
                 &entries,
                 &data,
@@ -1202,8 +1202,8 @@ mod tests {
                 }
                 let physical = materialize_selected_candidates(
                     &configured.physical,
-                    &selected.to_selected_candidates(),
-                    &modes,
+                    &selected.to_selected_dag(),
+                    &selected.materializations_by_node(&modes),
                     &roots,
                     &entries,
                     &data,
@@ -1454,8 +1454,8 @@ mod tests {
             .collect();
         let physical = materialize_selected_candidates(
             &configured.physical,
-            &selected.to_selected_candidates(),
-            &modes,
+            &selected.to_selected_dag(),
+            &selected.materializations_by_node(&modes),
             &roots,
             &entries,
             &data,

@@ -20,7 +20,9 @@ fn initialized(
     }
 }
 
+use crate::search::candidates::dag::ReaderConstraint;
 use crate::search::candidates::dag::*;
+use crate::search::candidates::graph::ProducerConsumerConnection;
 use crate::search::candidates::graph::RejectedQuerySubgraph;
 pub(in crate::search) use crate::search::candidates::graph::{
     QueryRootAssignment, SelectedCandidateGraph,
@@ -1289,11 +1291,13 @@ mod tests {
             );
             let observed = SelectedCandidateGraph {
                 selected_candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
-                connections: vec![asap_types::stages::ProducerConsumerConnection {
-                    consumer: PhysicalCandidateId(1),
-                    requirement: 0,
-                    producer: PhysicalCandidateId(0),
-                }],
+                connections: vec![
+                    crate::search::candidates::graph::ProducerConsumerConnection {
+                        consumer: PhysicalCandidateId(1),
+                        requirement: 0,
+                        producer: PhysicalCandidateId(0),
+                    },
+                ],
                 query_roots: (0..2)
                     .map(
                         |query_root| crate::search::candidates::graph::QueryRootAssignment {

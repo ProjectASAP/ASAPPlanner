@@ -52,17 +52,19 @@
 //     physical candidates Stage 2 pruned in the selected round
 //     (`PhysicalASAPMemoCandidates::pruned_candidates`): each with its memo
 //     `group`, `operator_node`, `operator`, `implementation_root`, `timing`,
-//     `materialization`, `scope_copy` and `reason` (`PruneReason`:
+//     `materialization` and `reason` (`PruneReason`:
 //     `PerEntityAggregateNotExecutable`, `RawDataNotRetained`,
 //     `InputHasNoBuildableProducer`, `ReachesNoQueryOutput`,
-//     `TooFewQueryReaders`, `PreviousScopeCopyPruned`). The document shows at
+//     `TooFewQueryReaders`). The document shows at
 //     most `--max-displayed` (default 64) enumerated physical candidates: the
 //     reference pricer's pick, the other valid ones cheapest first, then the
 //     rejected ones taking each cause in turn;
-//   - stage3_plan_selection: Stage 3's `Selection`: `selected_candidates`
-//     (candidate ids of the selected round's Stage 2 output, their
-//     connections and each output reference's candidate),
-//     `candidates_with_proven_non_negative_weights`, the plan's `cost` (its
+//   - stage3_plan_selection: Stage 3's `Selection`: `selected_dag`
+//     (`DagOfSelectedCandidates`: `candidate_of_node`, the candidate id of
+//     the selected round's Stage 2 output each node runs, one node per run;
+//     `edges`, each `producer` node feeding input `input` of a `consumer`
+//     node; and `node_of_output_reference`),
+//     `nodes_with_proven_non_negative_weights`, the plan's `cost` (its
 //     `usage`, `cost_per_second` and per-node charges: each node's `cost` is
 //     one computation's price times `multiplier`, the times it is computed),
 //     `accepted_accuracy_per_query` (per query: the target's metric or null
@@ -365,7 +367,7 @@ fn document_of(
                 "error": format!("Pass 1: {error}"),
             },
             "stage2_physical_asap_optimization": { "candidates": [], "pruned": [], "pruned_candidates": [] },
-            "stage3_plan_selection": { "selected_candidates": null, "materialized_views": [] },
+            "stage3_plan_selection": { "selected_dag": null, "materialized_views": [] },
         })),
         Err(error @ PlanningStagesError::Validation(_)) => Err(error.to_string().into()),
     }
@@ -1265,8 +1267,8 @@ fn pass1_pruned_candidates_json(steps: Option<&MemoSteps>) -> Vec<Value> {
 /// (`PhysicalASAPMemoCandidates::pruned_candidates`), in pruning order:
 /// each with its memo `group`, its `operator_node` (index into Stage 2's
 /// operator nodes), the node's `operator` label, whether it is an
-/// `implementation_root`, its `timing`, `materialization` and
-/// `scope_copy`, and the `reason` (`PruneReason`, e.g.
+/// `implementation_root`, its `timing` and `materialization`, and the
+/// `reason` (`PruneReason`, e.g.
 /// `RawDataNotRetained`). Empty without memo steps.
 fn stage2_pruned_candidates_json(steps: Option<&MemoSteps>) -> Vec<Value> {
     let Some(steps) = steps else {
@@ -1286,7 +1288,6 @@ fn stage2_pruned_candidates_json(steps: Option<&MemoSteps>) -> Vec<Value> {
                 "implementation_root": node.is_implementation_root,
                 "timing": key.timing,
                 "materialization": key.materialization,
-                "scope_copy": key.scope_copy,
                 "reason": format!("{:?}", pruned.reason),
             })
         })
@@ -1410,32 +1411,32 @@ fn accepted_json(queries: &[AcceptedAccuracy]) -> Value {
         .collect()
 }
 
-/// Stage 3's selection ([`Selection`]): the selected candidates of the
-/// selected round's Stage 2 output, the candidates whose weights it proved
-/// non-negative, the plan's cost, the accuracy accepted per query, the
+/// Stage 3's selection ([`Selection`]): the selected DAG over the selected
+/// round's Stage 2 candidates (one node per run of a candidate), the nodes
+/// whose weights it proved non-negative, the plan's cost, the accuracy accepted per query, the
 /// candidates it pruned and its search report; `error` when the facade
 /// selected no plan.
 fn selection_json(selection: &Result<Selection, SelectionError>) -> Value {
     let selection = match selection {
         Ok(selection) => selection,
-        Err(error) => return json!({ "selected_candidates": null, "error": error.to_string() }),
+        Err(error) => return json!({ "selected_dag": null, "error": error.to_string() }),
     };
-    let ids = |ids: &[asap_types::stages::PhysicalCandidateId]| -> Vec<usize> {
-        ids.iter().map(|id| id.0).collect()
+    let dag = &selection.selected_dag;
+    let nodes = |nodes: &[asap_types::stages::SelectedNodeId]| -> Vec<usize> {
+        nodes.iter().map(|node| node.0).collect()
     };
     json!({
-        "selected_candidates": {
-            "candidates": ids(&selection.selected_candidates.candidates),
-            "connections": selection
-                .selected_candidates
-                .connections
+        "selected_dag": {
+            "candidate_of_node": dag.candidate_of_node.iter().map(|id| id.0).collect::<Vec<_>>(),
+            "edges": dag
+                .edges
                 .iter()
-                .map(|c| json!({ "producer": c.producer.0, "consumer": c.consumer.0, "requirement": c.requirement }))
+                .map(|e| json!({ "producer": e.producer.0, "consumer": e.consumer.0, "input": e.input }))
                 .collect::<Vec<_>>(),
-            "query_output_candidates": ids(&selection.selected_candidates.query_output_candidates),
+            "node_of_output_reference": nodes(&dag.node_of_output_reference),
         },
-        "candidates_with_proven_non_negative_weights":
-            ids(&selection.candidates_with_proven_non_negative_weights),
+        "nodes_with_proven_non_negative_weights":
+            nodes(&selection.nodes_with_proven_non_negative_weights),
         "cost": cost_json(&selection.cost),
         "accepted_accuracy_per_query": accepted_json(&selection.accepted_accuracy_per_query),
         "pruned_candidates": selection

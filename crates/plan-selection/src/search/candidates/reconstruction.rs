@@ -41,10 +41,7 @@ pub(in crate::search) fn reconstruct_candidate_outputs(
             .collect(),
     );
     configured.validate_selected(selected)?;
-    Ok(
-        reconstruct_selected_candidates(&configured.physical, &selected.to_selected_candidates())?
-            .outputs,
-    )
+    Ok(reconstruct_selected_candidates(&configured.physical, &selected.to_selected_dag())?.outputs)
 }
 
 #[cfg(test)]

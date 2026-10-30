@@ -1,5 +1,5 @@
 //! Memoize identical producer interfaces and quotient equivalent terminal readers.
-//! Scope copies preserve independent bindings; internal computations are never merged.
+//! Internal computations are never merged.
 use std::collections::HashMap;
 
 use asap_types::ir::OperatorNode;
@@ -71,10 +71,11 @@ impl MemoGroupOutputToCompatibleProducersCache {
 }
 
 /// Quotient only terminal unary summary readers. Internal consumers and merge
-/// operators retain their original identities. Scope expansion must retain one
-/// independently bound reader copy per possible output reference; then every
-/// old selection maps to these copies, and each new binding expands to an old
-/// reader with the same complete interface.
+/// operators retain their original identities. A selection binds the
+/// factored reader independently per output reference (one selected node
+/// each), so every selection of the unfactored readers maps to one of the
+/// factored reader, and each binding of it is an unfactored reader with the
+/// same complete interface.
 ///
 /// These operators bypass ConcreteRows' witness-based row certification.
 /// certified_price checks every supplied producer; template-based proposal

@@ -29,6 +29,7 @@ mod tests {
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::{ASAPOp, NonASAPOp};
     use asap_types::physical::Medium;
+    use asap_types::stages::*;
 
     use asap_types::workload::{
         DataArrival, Predictability, Query, QueryRecurrence, QueryRequirements, RepeatedDemand,
@@ -191,8 +192,8 @@ mod tests {
         }
         let physical = materialize_selected_candidates(
             &configured.physical,
-            &selected.to_selected_candidates(),
-            &assignments,
+            &selected.to_selected_dag(),
+            &selected.materializations_by_node(&assignments),
             &roots,
             &entries,
             &data,
@@ -224,8 +225,8 @@ mod tests {
         assert!(matches!(
             materialize_selected_candidates(
                 &inventory.configured_for_tests().physical,
-                &selected.to_selected_candidates(),
-                &modes,
+                &selected.to_selected_dag(),
+                &selected.materializations_by_node(&modes),
                 &roots,
                 &entries,
                 &DataWorkload::default(),
@@ -257,8 +258,8 @@ mod tests {
             modes[build] = Some(mode);
             let result = materialize_selected_candidates(
                 &inventory.configured_for_tests().physical,
-                &selected.to_selected_candidates(),
-                &modes,
+                &selected.to_selected_dag(),
+                &selected.materializations_by_node(&modes),
                 &roots,
                 &entries,
                 &data,
@@ -266,9 +267,8 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                result.nodes_by_candidate[build]
-                    .as_ref()
-                    .unwrap()
+                result.operator_node_of_selected_node
+                    [selected.node_of(PhysicalCandidateId(build)).unwrap().0]
                     .materialization,
                 mode
             );
@@ -285,7 +285,8 @@ mod tests {
             assert!(Rc::ptr_eq(&states[0], &states[1]));
             assert!(Rc::ptr_eq(
                 &states[0],
-                result.nodes_by_candidate[build].as_ref().unwrap()
+                &result.operator_node_of_selected_node
+                    [selected.node_of(PhysicalCandidateId(build)).unwrap().0]
             ));
         }
     }
@@ -306,8 +307,8 @@ mod tests {
         }
         let result = materialize_selected_candidates(
             &inventory.configured_for_tests().physical,
-            &selected.to_selected_candidates(),
-            &modes,
+            &selected.to_selected_dag(),
+            &selected.materializations_by_node(&modes),
             &roots,
             &entries,
             &data,
