@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
+use std::time::Duration;
 
 use super::*;
 use crate::owners::{prepare_milp_inputs, AccuracyWeight};
@@ -239,6 +240,16 @@ fn solve_and_check(
     cost_inputs: &CostInputs,
     restrict: impl FnOnce(&mut SelectionMilp<'_>),
 ) -> Result<Checked, SelectionMilpError> {
+    solve_and_check_by(fixture, cost_inputs, restrict, None)
+}
+
+/// [`solve_and_check`] with HiGHS's time limit `limit`.
+fn solve_and_check_by(
+    fixture: &Fixture,
+    cost_inputs: &CostInputs,
+    restrict: impl FnOnce(&mut SelectionMilp<'_>),
+    limit: Option<Duration>,
+) -> Result<Checked, SelectionMilpError> {
     let inputs = prepare_milp_inputs(
         &fixture.physical,
         &fixture.entries,
@@ -254,9 +265,16 @@ fn solve_and_check(
             enforce_accuracy: true,
         },
     )?;
+    for reason in milp.inexact.keys() {
+        assert!(
+            !reason.starts_with("usage: a producer"),
+            "usage-table gap: {:?}",
+            milp.inexact
+        );
+    }
     restrict(&mut milp);
     let query_of_reference = milp.query_of_reference.clone();
-    let solution = solve_selection_milp(milp, None, 0)?;
+    let solution = solve_selection_milp(milp, limit.map(|limit| Instant::now() + limit), 0)?;
     let selected = decode(&solution, &query_of_reference);
     let realizer = asap_physical_asap_optimization::catalog::Stage2AssignmentRealizer {
         original_roots: &fixture.roots,
@@ -506,14 +524,17 @@ fn a_plan_over_a_latency_bound_is_infeasible() {
     below.entries[1].requirements.max_latency_ms = Some(latency * 0.999);
     match solve_and_check(&below, &cost_inputs(), |_| {}) {
         Ok(faster) => assert!(faster.plan.usage.latency_per_query[1].total_ms() <= latency * 0.999),
-        Err(error) => assert_eq!(error, SelectionMilpError::Infeasible),
+        Err(error) => assert!(matches!(
+            error,
+            SelectionMilpError::NoPlanForQuery { query: 1, .. }
+        )),
     }
     let mut tight = shared_sum();
     tight.entries[1].requirements.max_latency_ms = Some(1e-9);
-    assert_eq!(
+    assert!(matches!(
         solve_and_check(&tight, &cost_inputs(), |_| {}).err(),
-        Some(SelectionMilpError::Infeasible)
-    );
+        Some(SelectionMilpError::NoPlanForQuery { query: 1, .. })
+    ));
 }
 
 // Symmetry breaking: instance `j + 1` of a class is active only with
@@ -634,4 +655,41 @@ fn accuracy_rows_admit_a_ratio_at_two_parts_and_reject_a_lone_denominator() {
         require_one_of(milp, &denominators);
     });
     assert_eq!(lone.err(), Some(SelectionMilpError::Infeasible));
+}
+
+// The warm start is a feasible plan with no sharing: with every binary
+// fixed to it, the model is feasible and costs what `plan_cost` says.
+#[test]
+fn the_warm_start_is_a_feasible_plan() {
+    for fixture in [shared_sum(), two_windows()] {
+        solve_and_check(&fixture, &cost_inputs(), |milp| {
+            let start: HashMap<Variable, f64> = crate::milp::warm_start::warm_start(milp)
+                .expect("a plan for every query")
+                .into_iter()
+                .collect();
+            for binary in milp.builder.binaries.clone() {
+                let value = start.get(&binary).copied().unwrap_or(0.0);
+                milp.builder.row("test", constraint!(binary == value));
+            }
+        })
+        .unwrap();
+    }
+}
+
+// A deadline yields a plan: HiGHS starts from the warm start, so even a
+// short limit ends with a validated incumbent, never "no plan".
+#[test]
+fn a_deadline_yields_a_plan() {
+    let fixture = two_windows();
+    let checked = solve_and_check_by(
+        &fixture,
+        &cost_inputs(),
+        |_| {},
+        Some(Duration::from_millis(200)),
+    )
+    .unwrap();
+    assert!(matches!(
+        checked.solution.status,
+        SelectionMilpStatus::Optimal | SelectionMilpStatus::TimeLimit
+    ));
 }

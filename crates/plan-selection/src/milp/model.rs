@@ -5,15 +5,17 @@
 //!
 //! | Family | Meaning |
 //! |---|---|
-//! | `x[i]` | instance `i = (s, j)` of shareable class `s` is active (binary) |
-//! | `s[o, k]` | owner `o` uses stateless class `k` of its region (binary) |
+//! | `x[i]` | instance `i = (s, j)` of shareable candidate `s` is active (binary) |
+//! | `s[o, k]` | owner `o` uses stateless candidate `k` of its region (binary) |
 //! | `e[o, k, n, k']` | in `o`, input `n` of `k` reads stateless `k'` (binary) |
 //! | `b[o, k, n, i]` | in `o`, input `n` of `k` reads instance `i` (binary) |
 //! | `o[r, k]` | output reference `r` is stateless `k` of its query owner (binary) |
 //! | `ob[r, i]` | output reference `r` is instance `i` (binary) |
 //! | `a[q, i]` | query `q` reaches instance `i` (continuous, integral at integral binaries) |
 //! | `t[q, i0, i]` | `q` reaches `i` through `i0`: the upper bounds of `a` (continuous) |
-//! | `w[q, i, k]` | `q` reaches node `k` of instance `i`'s owner (latency, continuous) |
+//! | `u[i]`, `u[q, i]` | the work of instance `i`'s nodes other than its own, and that work when `q` reaches `i` (latency, continuous) |
+//! | `g[i0, i]` | instance `i0`, reading `i`, is reached by at most one query (binary) |
+//! | `N[q]`, `A[q, p]` | approximate values `q` reads; whether it reads one sized for `p` parts (continuous) |
 //! | `L[q]`, `C[q]` | query `q`'s latency and its compaction term, ms (continuous) |
 //!
 //! The cost families are [`super::cost_terms`]'s.
@@ -21,8 +23,8 @@
 //! A query owner's or an instance owner's use of a stateless class is one
 //! node of the plan; an instance is one node. Reach, latency and accuracy
 //! are therefore written per node, as `asap_cost::plan_cost` measures
-//! them, not per class: a query reaching two instances of one class reads
-//! two approximate values and adds both instances' work to its latency.
+//! them: a query reaching two instances of one candidate reads two
+//! approximate values and adds both instances' work to its latency.
 //!
 //! ## Rows
 //!
@@ -40,13 +42,18 @@
 //!    reading such an instance: `a[q, i] ≤ Σ own reads + Σ_{i0} t[q, i0, i]`,
 //!    `t ≤ a[q, i0]`, `t ≤ Σ b(i0 reads i)`.
 //! 7. Reader constraints on the nodes of the constrained class.
-//! 8. Latency: `L[q] ≥ eval + Σ d · (node reached) + C[q]`, `C[q] ≥ c_i ·
-//!    a[q, i]`, `L[q] ≤ bound(q)`, where `bound(q)` is the smaller of
+//! 8. Latency: `L[q] ≥ eval + Σ d · s[q, k] + Σ_i (d_i · a[q, i] + u[q, i])
+//!    + C[q]`, `u[q, i] ≥ u[i] − ū[i] (1 − a[q, i])`, `C[q] ≥ c_i · a[q, i]`,
+//!    `L[q] ≤ bound(q)`, where `bound(q)` is the smaller of
 //!    `max_latency_ms` and the fixed repeat interval.
-//! 9. Accuracy (A1, revised 2026-10-30): `N_q = Σ a[q, i]` over the
-//!    approximate instances `q` may reach; `N_q ≤ parts(k) + M (1 − a[q, i])`
-//!    per instance `i` of approximate `k`; `a[q, i] = 0` for a denominator
-//!    with `parts(k) < 2` and for an unusable position.
+//! 9. Accuracy (A1, revised 2026-10-30): `N[q] = Σ a[q, i]` over the
+//!    approximate instances `q` may reach; per value `p` of `parts`, `A[q,
+//!    p] ≥ a[q, i]` for its instances and `N[q] ≤ p + M (1 − A[q, p])`;
+//!    `a[q, i] = 0` for a denominator with `parts < 2` and for an unusable
+//!    position.
+//!
+//! The solve starts from [`super::warm_start`]'s plan, so a deadline ends
+//! with a plan.
 //!
 //! Every cost row is a lower bound that minimization makes tight; every
 //! structural row is exact at integral binaries.
@@ -60,12 +67,14 @@ use asap_types::stages::{
 use asap_types::workload::QueryWorkloadEntry;
 use good_lp::solvers::highs::highs;
 use good_lp::{
-    constraint, variable, Constraint, Expression, ProblemVariables, SolverModel, Variable,
+    constraint, variable, Constraint, Expression, IntoAffineExpression, ProblemVariables,
+    SolverModel, Variable,
 };
 
 use crate::owners::{held_state, AccuracyWeight, MilpInputs, OwnerRegion};
 
 use super::cost_terms::{self, NodeTerm};
+use super::warm_start;
 
 /// Why the selection MILP was not built or solved.
 #[derive(Debug, Clone, PartialEq)]
@@ -80,6 +89,9 @@ pub(crate) enum SelectionMilpError {
     NoSolution { status: String },
     /// The deadline passed before the solve.
     DeadlineReached,
+    /// No plan meets every row, and query `query` has none even alone (the
+    /// warm start found no derivation, or none within its latency bound).
+    NoPlanForQuery { query: usize, reason: String },
     /// A rate or another number `asap-cost` could not compute.
     Cost(String),
     /// HiGHS failed.
@@ -122,6 +134,8 @@ pub(crate) struct FamilySize {
     pub(crate) variables: usize,
     pub(crate) binaries: usize,
     pub(crate) rows: usize,
+    /// Nonzero coefficients of its rows.
+    pub(crate) nonzeros: usize,
 }
 
 /// Variables and rows, counted per family.
@@ -130,6 +144,8 @@ pub(crate) struct ModelBuilder {
     pub(crate) rows: Vec<Constraint>,
     /// The family of each row of `rows`.
     pub(crate) row_families: Vec<&'static str>,
+    /// Every binary variable, in the order added.
+    pub(crate) binaries: Vec<Variable>,
     pub(crate) families: BTreeMap<&'static str, FamilySize>,
 }
 
@@ -139,6 +155,7 @@ impl ModelBuilder {
             variables: ProblemVariables::new(),
             rows: Vec::new(),
             row_families: Vec::new(),
+            binaries: Vec::new(),
             families: BTreeMap::new(),
         }
     }
@@ -147,7 +164,9 @@ impl ModelBuilder {
         let size = self.families.entry(family).or_default();
         size.variables += 1;
         size.binaries += 1;
-        self.variables.add(variable().binary())
+        let binary = self.variables.add(variable().binary());
+        self.binaries.push(binary);
+        binary
     }
 
     /// A continuous variable in `[0, max]` (unbounded above for `None`).
@@ -161,7 +180,9 @@ impl ModelBuilder {
     }
 
     pub(crate) fn row(&mut self, family: &'static str, row: Constraint) {
-        self.families.entry(family).or_default().rows += 1;
+        let size = self.families.entry(family).or_default();
+        size.rows += 1;
+        size.nonzeros += row.expression().linear_coefficients().count();
         self.rows.push(row);
         self.row_families.push(family);
     }
@@ -216,6 +237,14 @@ pub(crate) struct SelectionMilp<'a> {
     pub(crate) request_cost_per_second: f64,
     /// Terms encoded inexactly, by reason (open questions on #1095).
     pub(crate) inexact: BTreeMap<&'static str, usize>,
+    /// `g[i0, i]`: instance `i0`, which reads instance `i`, is reached by at
+    /// most one query (highest shared materialization).
+    pub(crate) single_query_consumers: Vec<(usize, usize, Variable)>,
+    /// Per producer node and outputs, the variable `≥` its terms giving
+    /// them (`cost_terms::link_output_indicator`).
+    pub(crate) producer_gives: HashMap<(usize, PhysicalCandidateId, Vec<usize>), Variable>,
+    /// The nodes whose terms are being built (cycles of links).
+    pub(crate) terms_in_progress: HashSet<(usize, PhysicalCandidateId)>,
     /// The nodes' terms, cached per `(owner, class)`.
     pub(crate) node_terms_cache: HashMap<(usize, PhysicalCandidateId), Vec<NodeTerm>>,
 }
@@ -226,6 +255,7 @@ pub(crate) struct SelectionMilpSize {
     pub(crate) variables: usize,
     pub(crate) binaries: usize,
     pub(crate) rows: usize,
+    pub(crate) nonzeros: usize,
     pub(crate) families: BTreeMap<&'static str, FamilySize>,
     /// AND rows of usage that depends on more than one input's producer.
     pub(crate) producer_and_rows: usize,
@@ -281,6 +311,8 @@ pub(crate) struct SelectionMilpSolution {
     pub(crate) instances: Vec<(PhysicalCandidateId, usize, ChosenOwner)>,
     pub(crate) size: SelectionMilpSize,
     pub(crate) build_ms: u64,
+    /// Building the warm start, HiGHS's first incumbent.
+    pub(crate) warm_start_ms: u64,
     pub(crate) solve_ms: u64,
 }
 
@@ -344,6 +376,7 @@ impl<'a> SelectionMilp<'a> {
             variables: families.values().map(|f| f.variables).sum(),
             binaries: families.values().map(|f| f.binaries).sum(),
             rows: families.values().map(|f| f.rows).sum(),
+            nonzeros: families.values().map(|f| f.nonzeros).sum(),
             producer_and_rows: families.get("t_producers (AND)").map_or(0, |f| f.rows),
             families,
             inexact: self.inexact.clone(),
@@ -448,6 +481,9 @@ pub(crate) fn build_selection_milp<'a>(
         objective_terms: Vec::new(),
         request_cost_per_second: 0.0,
         inexact: BTreeMap::new(),
+        single_query_consumers: Vec::new(),
+        terms_in_progress: HashSet::new(),
+        producer_gives: HashMap::new(),
         node_terms_cache: HashMap::new(),
         instances,
     };
@@ -711,7 +747,7 @@ fn reach_rows(milp: &mut SelectionMilp<'_>) {
 }
 
 /// The reader constraints of each candidate.
-fn reader_constraints_of_candidates<'a>(
+pub(crate) fn reader_constraints_of_candidates<'a>(
     milp: &SelectionMilp<'a>,
 ) -> BTreeMap<PhysicalCandidateId, Vec<&'a ReaderConstraint>> {
     let physical: &'a PhysicalASAPMemoCandidates = milp.physical;
@@ -890,6 +926,7 @@ fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
                                 .sum();
                             let (count, most) = reach_count(milp, reader);
                             let single = milp.builder.binary("g (single-query consumers)");
+                            milp.single_query_consumers.push((reader, instance, single));
                             milp.builder
                                 .row("7 reader constraints", constraint!(single <= reads));
                             let slack = (most - 1.0).max(0.0);
@@ -1002,7 +1039,7 @@ fn forbid_reach(
 
 /// Query `query`'s latency bound: the smaller of its `max_latency_ms` and
 /// its fixed repeat interval (`checks::latency_violation`).
-fn latency_bound_ms(entry: &QueryWorkloadEntry) -> Option<f64> {
+pub(crate) fn latency_bound_ms(entry: &QueryWorkloadEntry) -> Option<f64> {
     let interval = entry.recurrence.fixed_interval_ms().map(|ms| ms as f64);
     match (entry.requirements.max_latency_ms, interval) {
         (Some(bound), Some(interval)) => Some(bound.min(interval)),
@@ -1027,6 +1064,9 @@ fn latency_rows(milp: &mut SelectionMilp<'_>) -> Result<(), SelectionMilpError> 
     for reached in &mut instances_reached {
         reached.sort_unstable();
     }
+    let latency_of_instance: Vec<(f64, Option<(Variable, f64)>)> = (0..milp.instances.len())
+        .map(|instance| region_latency(milp, instance))
+        .collect();
     for query in 0..query_count {
         let mut work = Expression::from(request_ms);
         let mut most = request_ms;
@@ -1044,29 +1084,30 @@ fn latency_rows(milp: &mut SelectionMilp<'_>) -> Result<(), SelectionMilpError> 
         let mut compactions = Vec::new();
         for &instance in &instances_reached[query] {
             let reach = milp.reach[&(query, instance)];
-            let owner = milp.instance_owner(instance);
             if let Some(&ms) = compaction.get(&instance) {
                 if ms > 0.0 {
                     compactions.push((ms, reach));
                     longest_compaction = longest_compaction.max(ms);
                 }
             }
-            for class in milp.nodes_of_owner(owner) {
-                for term in milp.node_terms(owner, class) {
-                    if term.numbers.latency_ms <= 0.0 {
-                        continue;
-                    }
-                    most += term.numbers.latency_ms;
-                    if term.plain && class == milp.instances[instance].class {
-                        work += term.numbers.latency_ms * reach;
-                    } else {
-                        let reached = milp.builder.and_at_least(
-                            "w (latency of reached nodes)",
-                            &[reach.into(), term.indicator.clone()],
-                        );
-                        work += term.numbers.latency_ms * reached;
-                    }
-                }
+            // The instance's own work, on the reach itself, and its other
+            // terms' work as one sum `D_i`, charged when reached:
+            // `u ≥ D_i − D̄_i (1 − a[q, i])`.
+            let (own_ms, region) = latency_of_instance[instance];
+            if own_ms > 0.0 {
+                work += own_ms * reach;
+                most += own_ms;
+            }
+            if let Some((region_latency, region_most)) = region {
+                let reached = milp
+                    .builder
+                    .continuous("u (latency of an instance's region)", None);
+                milp.builder.row(
+                    "8 latency",
+                    constraint!(reached >= region_latency - region_most * (1.0 - reach)),
+                );
+                work += reached;
+                most += region_most;
             }
         }
         if !compactions.is_empty() {
@@ -1091,6 +1132,39 @@ fn latency_rows(milp: &mut SelectionMilp<'_>) -> Result<(), SelectionMilpError> 
             .push(bound.map_or(most, |bound| bound.min(most)));
     }
     Ok(())
+}
+
+/// Instance `instance`'s latency terms: its own work on `x[i]` (ms), and
+/// the sum of its other terms' work with the most it can be, when any.
+fn region_latency(milp: &mut SelectionMilp<'_>, instance: usize) -> (f64, Option<(Variable, f64)>) {
+    let owner = milp.instance_owner(instance);
+    let own = milp.instances[instance].class;
+    let mut own_ms = 0.0;
+    let mut sum = Expression::from(0.0);
+    let mut most = 0.0;
+    for class in milp.nodes_of_owner(owner) {
+        for term in milp.node_terms(owner, class) {
+            let ms = term.numbers.latency_ms;
+            if ms <= 0.0 {
+                continue;
+            }
+            if term.plain && class == own {
+                own_ms += ms;
+            } else {
+                sum += ms * term.indicator;
+                most += ms;
+            }
+        }
+    }
+    if most <= 0.0 {
+        return (own_ms, None);
+    }
+    // One variable `≥` the region's work, shared by every reaching query.
+    let region = milp
+        .builder
+        .continuous("u (latency of an instance's region)", None);
+    milp.builder.row("8 latency", constraint!(region >= sum));
+    (own_ms, Some((region, most)))
 }
 
 /// Row 9: accuracy (A1, revised 2026-10-30), per instance read.
@@ -1122,20 +1196,36 @@ fn accuracy_rows(milp: &mut SelectionMilp<'_>) {
                 milp.builder.row("9 accuracy", constraint!(reach <= 0.0));
             }
         }
-        let shares: Expression = counted
+        // `N_q` as one variable; per distinct `parts`, an indicator that the
+        // query reads some instance sized for that many shares.
+        let most = counted.len() as f64;
+        if counted.iter().all(|&(_, parts)| parts as f64 >= most) {
+            continue;
+        }
+        let shares = milp.builder.continuous("N (approximate values read)", None);
+        let sum: Expression = counted
             .iter()
             .map(|&(instance, _)| milp.reach[&(query, instance)])
             .sum();
-        let most = counted.len() as f64;
+        milp.builder.row("9 accuracy", constraint!(shares == sum));
+        let mut by_parts: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for &(instance, parts) in &counted {
-            let slack = most - parts as f64;
-            if slack <= 0.0 {
-                continue;
+            if (parts as f64) < most {
+                by_parts.entry(parts).or_default().push(instance);
             }
-            let reach = milp.reach[&(query, instance)];
+        }
+        for (parts, instances) in by_parts {
+            let reads = milp
+                .builder
+                .continuous("A (reads at a parts value)", Some(1.0));
+            for instance in instances {
+                let reach = milp.reach[&(query, instance)];
+                milp.builder.row("9 accuracy", constraint!(reads >= reach));
+            }
+            let slack = most - parts as f64;
             milp.builder.row(
                 "9 accuracy",
-                constraint!(shares.clone() <= parts as f64 + slack * (1.0 - reach)),
+                constraint!(shares <= parts as f64 + slack * (1.0 - reads)),
             );
         }
     }
@@ -1149,6 +1239,14 @@ pub(crate) fn solve_selection_milp(
     build_ms: u64,
 ) -> Result<SelectionMilpSolution, SelectionMilpError> {
     let size = milp.size();
+    let warm_started = Instant::now();
+    // A query with no plan alone may still have one with sharing: then the
+    // solve starts without an incumbent, and an infeasible model names it.
+    let (start, no_plan_alone) = match warm_start::warm_start(&milp) {
+        Ok(start) => (Some(start), None),
+        Err(no_plan) => (None, Some(no_plan)),
+    };
+    let warm_start_ms = warm_started.elapsed().as_millis() as u64;
     let scale = objective_scale(&milp.objective_terms);
     let objective: Expression = milp
         .objective_terms
@@ -1183,7 +1281,22 @@ pub(crate) fn solve_selection_milp(
         .map_err(|error| SelectionMilpError::Solver(error.to_string()))?;
     model.set_option("mip_rel_gap", 0.0);
     model.set_option("mip_abs_gap", 0.0);
-    model.set_option("output_flag", false);
+    model.set_option("output_flag", std::env::var_os("ASAP_HIGHS_LOG").is_some());
+    model.set_option(
+        "log_to_console",
+        std::env::var_os("ASAP_HIGHS_LOG").is_some(),
+    );
+    // The warm start: its binaries; HiGHS completes the continuous
+    // variables by an LP with the binaries fixed.
+    if let Some(start) = start {
+        let mut columns = vec![0.0; column_of.len()];
+        for (variable, value) in start {
+            columns[column_of[&variable]] = value;
+        }
+        model
+            .try_set_solution(Some(&columns), None, None, None)
+            .map_err(|status| SelectionMilpError::Solver(format!("warm start: {status:?}")))?;
+    }
     if let Some(deadline) = deadline {
         let seconds = deadline
             .saturating_duration_since(Instant::now())
@@ -1202,7 +1315,7 @@ pub(crate) fn solve_selection_milp(
     let status = match solved.status() {
         HighsModelStatus::Optimal => SelectionMilpStatus::Optimal,
         HighsModelStatus::Infeasible | HighsModelStatus::UnboundedOrInfeasible => {
-            return Err(SelectionMilpError::Infeasible)
+            return Err(no_plan_alone.unwrap_or(SelectionMilpError::Infeasible))
         }
         HighsModelStatus::ReachedTimeLimit
         | HighsModelStatus::ReachedInterrupt
@@ -1299,6 +1412,7 @@ pub(crate) fn solve_selection_milp(
             .collect(),
         size,
         build_ms,
+        warm_start_ms,
         solve_ms,
     })
 }

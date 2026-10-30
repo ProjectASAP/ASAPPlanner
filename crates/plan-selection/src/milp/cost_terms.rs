@@ -1,5 +1,5 @@
 //! #1095 §3: the cost model 1 objective of the selection MILP. Every number is
-//! `asap-cost`'s: a class's usage per execution and standing cost
+//! `asap-cost`'s: a candidate's usage per execution and standing cost
 //! ([`CandidateUsage`], from [`asap_cost::node_usage`] in `owners.rs`), the
 //! schedule groups ([`asap_cost::execution_demand::schedule_groups`]) and
 //! rates ([`asap_cost::execution_demand::evaluation_rate`]) and the unit
@@ -17,37 +17,46 @@
 //! | raw retention | per source, the largest raw data a query-time scan keeps, on disk | levels `v[src, ℓ]` |
 //! | request fees | per query, a fixed time per request | none: the same for every plan, reported apart |
 //!
-//! **Indicators.** A node's numbers may depend on which producer class an
-//! input reads (`CandidateData::usage_per_producers`): its terms then sit on
-//! the links of that input, `Σ` over the producer's links (one producer per
-//! used input), or, for several such inputs, on an AND binary over them
-//! (`t_producers`, `t ≥ Σ links − (n − 1)`). A query-time scan whose usage
-//! depends on the window its readers read gets one level `λ[i, ℓ] ≥` each
-//! read at a window of level `ℓ` or wider; the scan reads the widest one.
+//! **Indicators.** A node's numbers and its output (the statistics its
+//! readers are costed from) may depend on which producer an input reads,
+//! and on that producer's own output (`CandidateData::usage_per_producers`,
+//! tabulated per producer output). Its terms then sit on `AND(link,
+//! t_outputs)`, where `t_outputs ≥` the producer node's terms giving that
+//! output (one variable per producer node and outputs, shared by its
+//! readers), or on the link alone when every output of the producer gives
+//! the same; for several such inputs, on an AND over them (`t_producers`,
+//! `t ≥ Σ − (n − 1)`). A query-time scan whose usage depends on the window
+//! its readers read gets one level `λ[i, ℓ] ≥` each read at a window of
+//! level `ℓ` or wider; the scan reads the widest one, and a reader of it
+//! is costed at that window through `AND(read, λ[i, low] − λ[i, high + 1])`.
 //!
-//! **Executions per second** `R[i]` of instance `i`:
-//! - ingestion time: 1 (`R` is `x[i]` itself);
-//! - `MatAtQuery`, kept across evaluations: one `z[i, G, ℓ]` per schedule
-//!   group `G` of its possible readers and per level `ℓ` of the readers'
-//!   own rates in it, `z ≥ a[q, i]` for each reader `q` at that level or
-//!   above: the group's rate is its fastest reader's (`R ≥ Σ Δrate · z`);
-//! - not materialized: once per consumer, as `plan_cost`'s `computations`
-//!   counts it: the queries reaching it through nodes that are not
-//!   materialized (`y[q, i]`, or `a[q, i]` when no materialized node can be
-//!   in between) at their own rates, plus each materialized instance `m`
-//!   reaching it so, at `R[m]` (`P[m, i] ≥ R[m] − R̄[m] (1 − y[m, i])`).
+//! **Executions per second** of instance `i`:
+//! - a fixed `rate · x[i]`: at ingestion time (once per second), for a
+//!   materialized instance whose possible readers form one schedule group
+//!   at one rate, and for a not-materialized one with one consumer query;
+//! - otherwise `Σ rate · u` over components `u ∈ [0, 1]`:
+//!   - `MatAtQuery`, kept across evaluations: one `z[i, G, ℓ]` per schedule
+//!     group `G` of its possible readers and per level `ℓ` of the readers'
+//!     own rates in it, `z ≥ a[q, i]` for each reader `q` at that level or
+//!     above: the group's rate is its fastest reader's;
+//!   - not materialized: once per consumer, as `plan_cost`'s
+//!     `computations` counts it: the queries reaching it through nodes that
+//!     are not materialized (`y[q, i]`, or `a[q, i]` when no materialized
+//!     node can be in between) at their own rates, plus each materialized
+//!     instance `m` reaching it so, at `m`'s rate (`AND(z_m, y[m, i])` per
+//!     component of `m`).
 //!
-//! A query owner's node runs at its query's rate; an instance owner's node
-//! at its instance's `R` (`Q ≥ R − R̄ (1 − indicator)`, with `R̄` the most
-//! `R` can be).
+//! A query owner's node runs at its query's rate. An instance owner's nodes
+//! other than the instance's own plain term are summed once, `E[i] ≥ Σ
+//! cost · indicator`, and charged per rate component, `V ≥ E[i] − Ē[i] (1 −
+//! u)`.
 //!
 //! **Held memory** (`plan_cost`'s `held`): a `MatAtQuery` result is held
 //! for the longest reader's latency, `H[i] ≥ L[q] − M (1 − a[q, i])`, once
-//! per execution: `W[i, G, ℓ] ≥ H[i] − M (1 − z[i, G, ℓ])`, charged
-//! `Δrate · bytes · unit memory cost`. A not-materialized node's working
-//! memory is held for each consumer query's latency at its rate:
-//! `G[q, ·] ≥ L[q] − M (1 − reach)`, charged `rate(q) · bytes · unit
-//! memory cost`.
+//! per execution: `H` at a fixed rate, or `W ≥ H − M (1 − u)` per rate
+//! component. A not-materialized node's working memory is held for each
+//! consumer query's latency at its rate: `G[q, ·] ≥ L[q] − M (1 − reach)`,
+//! charged `rate(q) · bytes · unit memory cost`.
 //!
 //! **Raw retention**: per source, levels at each distinct raw-data size a
 //! scan may keep, `v[src, ℓ] ≥` each scan's indicator of keeping at least
@@ -69,7 +78,7 @@ use asap_types::workload::bounds::source_name;
 use asap_types::workload::{QueryRecurrence, RepeatedDemand};
 use good_lp::{constraint, Expression, IntoAffineExpression, Variable};
 
-use crate::owners::{CandidateUsage, ProducerChoice, UsageContext};
+use crate::owners::{CandidateUsage, UsageAndOutput, UsageContext};
 
 use super::model::{candidates_below, SelectionMilp, SelectionMilpError};
 
@@ -127,17 +136,18 @@ impl NodeNumbers {
     }
 }
 
-/// A reader's usage per window of the scan it reads (`None`: no window).
-type UsagePerWindow = Vec<(Option<ScanWindow>, Option<CandidateUsage>)>;
-
-/// One term of a node: its numbers count when `indicator` is 1. A node's
-/// numbers are the sum of its terms' at integral binaries.
+/// One term of a node: its numbers count, and it gives its readers output
+/// `output`, when `indicator` is 1. At integral binaries exactly one term
+/// of a used node is 1, except a windowed scan's, whose levels add up
+/// (`window_terms`).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NodeTerm {
     pub(crate) indicator: Expression,
     pub(crate) numbers: NodeNumbers,
     /// Whether `indicator` is the node's own variable (`s[o, k]` or `x[i]`).
     pub(crate) plain: bool,
+    /// Its output (an index below `CandidateData::output_count`).
+    pub(crate) output: usize,
 }
 
 /// Owner `owner`'s use of `class` as terms (module documentation,
@@ -167,7 +177,7 @@ pub(crate) fn node_terms(
         }
     }
     if data.producer_usage_ambiguous {
-        milp.note_inexact("usage: a producer whose own output depends on its context");
+        milp.note_inexact("usage: a context option other than producers or windows");
     }
     let own_instance = milp
         .instance_of_owner(owner)
@@ -182,179 +192,237 @@ pub(crate) fn node_terms(
         indicator: node.into(),
         numbers: NodeNumbers::of(base),
         plain: true,
+        output: 0,
     }]
 }
 
-/// The indicator that input `input` of `class` in owner `owner` reads
-/// producer class `producer`: the sum of those links; `None` when the owner
-/// has none.
-fn link_indicator(
+/// One link of a node's input: the link's variable and the producer node
+/// (its owner and candidate).
+#[derive(Debug, Clone, Copy)]
+struct Link {
+    variable: Variable,
+    producer_owner: usize,
+    producer: PhysicalCandidateId,
+    /// The instance read, for a read of one.
+    instance: Option<usize>,
+}
+
+/// The links input `input` of `class` in owner `owner` may take.
+fn links_of(
     milp: &SelectionMilp<'_>,
     owner: usize,
     class: PhysicalCandidateId,
     input: usize,
-    producer: PhysicalCandidateId,
-) -> Option<Expression> {
+) -> Vec<Link> {
     let variables = &milp.owners[owner];
-    let mut sum = Expression::from(0.0);
-    let mut any = false;
-    for &((reader, at, stateless), link) in &variables.links {
-        if reader == class && at == input && stateless == producer {
-            sum += link;
-            any = true;
+    let mut links = Vec::new();
+    for &((reader, at, producer), variable) in &variables.links {
+        if reader == class && at == input {
+            links.push(Link {
+                variable,
+                producer_owner: owner,
+                producer,
+                instance: None,
+            });
         }
     }
-    for &((reader, at, instance), read) in &variables.reads {
-        if reader == class && at == input && milp.instances[instance].class == producer {
-            sum += read;
-            any = true;
+    for &((reader, at, instance), variable) in &variables.reads {
+        if reader == class && at == input {
+            links.push(Link {
+                variable,
+                producer_owner: milp.instance_owner(instance),
+                producer: milp.instances[instance].class,
+                instance: Some(instance),
+            });
         }
     }
-    any.then_some(sum)
+    links
 }
 
-/// Terms of a node whose usage depends on its producers.
+/// The indicator that `link` is taken and its producer gives `output`
+/// (`None`: any output): the link itself, or `AND(link, the producer's
+/// terms giving that output)`. `None` when the producer never gives it, or
+/// its terms are being built (a cycle of links; then the link stands for
+/// every output, counted as inexact).
+fn link_output_indicator(
+    milp: &mut SelectionMilp<'_>,
+    link: Link,
+    outputs: Option<&BTreeSet<usize>>,
+) -> Option<Expression> {
+    let Some(outputs) = outputs else {
+        return Some(link.variable.into());
+    };
+    if milp
+        .terms_in_progress
+        .contains(&(link.producer_owner, link.producer))
+    {
+        milp.note_inexact("usage: a producer's output on a cycle of links (every output kept)");
+        return Some(link.variable.into());
+    }
+    let producer_terms = milp.node_terms(link.producer_owner, link.producer);
+    if producer_terms
+        .iter()
+        .all(|term| outputs.contains(&term.output))
+    {
+        return Some(link.variable.into());
+    }
+    let gives: Vec<&NodeTerm> = producer_terms
+        .iter()
+        .filter(|term| outputs.contains(&term.output))
+        .collect();
+    if gives.is_empty() {
+        return None;
+    }
+    // `gives` as one variable per producer node and outputs, `≥` the sum of
+    // its terms giving them, shared by every reader of that node.
+    let key = (
+        link.producer_owner,
+        link.producer,
+        outputs.iter().copied().collect::<Vec<_>>(),
+    );
+    let gives = match milp.producer_gives.get(&key) {
+        Some(&gives) => gives,
+        None => {
+            let sum: Expression = gives.iter().map(|term| term.indicator.clone()).sum();
+            let variable = milp
+                .builder
+                .continuous("t_outputs (a producer gives outputs)", Some(1.0));
+            milp.builder.row(
+                "t_outputs (a producer gives outputs)",
+                constraint!(variable >= sum),
+            );
+            milp.producer_gives.insert(key, variable);
+            variable
+        }
+    };
+    Some(
+        milp.builder
+            .and_at_least("t_producers (AND)", &[link.variable.into(), gives.into()])
+            .into(),
+    )
+}
+
+/// A schedule group's readers with their own rates, and its rate levels.
+type GroupLevels = (Vec<(usize, f64)>, Vec<f64>);
+
+/// A producer choice with the outputs it stands for (`None`: any output).
+type OutputsOfProducer = (PhysicalCandidateId, Option<BTreeSet<usize>>);
+
+/// Terms of a node whose usage or output depends on its producers (and
+/// their outputs): one per choice, on `AND(link, producer's output)` for
+/// one changing input, or on an AND over the inputs for several.
 fn producer_terms(
     milp: &mut SelectionMilp<'_>,
     owner: usize,
     class: PhysicalCandidateId,
     node: Variable,
 ) -> Vec<NodeTerm> {
+    milp.terms_in_progress.insert((owner, class));
     let data = &milp.inputs.candidate_data[class.0];
     let changing = data.inputs_changing_usage.clone();
-    let mut table = data.usage_per_producers.clone();
     let base = *data.usage.as_ref().expect("costed");
+    // The choices, each with the outputs it stands for; for one changing
+    // input, the outputs of a producer that give the same usage and output
+    // are one choice.
+    let mut table: Vec<(Vec<OutputsOfProducer>, Option<UsageAndOutput>)> = Vec::new();
+    for (choices, gives) in &data.usage_per_producers {
+        let choices: Vec<OutputsOfProducer> = choices
+            .iter()
+            .map(|choice| {
+                (
+                    choice.class,
+                    choice.output.map(|output| BTreeSet::from([output])),
+                )
+            })
+            .collect();
+        if changing.len() == 1 {
+            if let Some((known, _)) = table
+                .iter_mut()
+                .find(|(known, known_gives)| known[0].0 == choices[0].0 && known_gives == gives)
+            {
+                if let (Some(outputs), Some(more)) = (&mut known[0].1, &choices[0].1) {
+                    outputs.extend(more);
+                }
+                continue;
+            }
+        }
+        table.push((choices, *gives));
+    }
+    let links: Vec<Vec<Link>> = changing
+        .iter()
+        .map(|&input| links_of(milp, owner, class, input))
+        .collect();
     let mut terms = Vec::new();
     let mut covered: Vec<BTreeSet<PhysicalCandidateId>> = vec![BTreeSet::new(); changing.len()];
-    if changing.len() == 1 {
-        // On the links of the one input, per producer class; for a scan
-        // whose output depends on its window, per level of the scan
-        // instance read.
-        let input = changing[0];
-        let mut by_class: BTreeMap<PhysicalCandidateId, UsagePerWindow> = BTreeMap::new();
-        for (choices, usage) in &table {
-            by_class
-                .entry(choices[0].class)
-                .or_default()
-                .push((choices[0].window, *usage));
-        }
-        for (producer, entries) in by_class {
-            let Some(indicator) = link_indicator(milp, owner, class, input, producer) else {
-                continue;
-            };
-            covered[0].insert(producer);
-            if entries.iter().all(|(window, _)| window.is_none()) {
-                match entries[0].1 {
-                    None => milp
-                        .builder
-                        .row("t_producers (AND)", constraint!(indicator <= 0.0)),
-                    Some(usage) => terms.push(NodeTerm {
-                        indicator,
-                        numbers: NodeNumbers::of(&usage),
-                        plain: false,
-                    }),
-                }
-                continue;
-            }
-            terms.extend(scan_reader_terms(
-                milp, owner, class, input, producer, &entries,
-            ));
-        }
-    } else {
-        // Several inputs: windows are merged, the costliest kept.
-        if table
-            .iter()
-            .any(|(choices, _)| choices.iter().any(|choice| choice.window.is_some()))
-        {
-            milp.note_inexact(
-                "usage: several changing inputs, one a windowed scan (costliest kept)",
-            );
-            let mut merged: Vec<(Vec<ProducerChoice>, Option<CandidateUsage>)> = Vec::new();
-            for (choices, usage) in table {
-                let key: Vec<ProducerChoice> = choices
-                    .iter()
-                    .map(|choice| ProducerChoice {
-                        class: choice.class,
-                        window: None,
-                    })
-                    .collect();
-                match merged.iter_mut().find(|(known, _)| *known == key) {
-                    Some((_, known)) => {
-                        let total = |usage: &Option<CandidateUsage>| {
-                            usage.map_or(f64::INFINITY, |usage| {
-                                NodeNumbers::of(&usage).execution_cost
-                                    + NodeNumbers::of(&usage).standing_cost
-                            })
-                        };
-                        if total(&usage) > total(known) {
-                            *known = usage;
-                        }
-                    }
-                    None => merged.push((key, usage)),
-                }
-            }
-            table = merged;
-        }
-        for (choices, usage) in &table {
-            let indicators: Option<Vec<Expression>> = changing
+    for (choices, gives) in &table {
+        // Per changing input, the indicator that it takes this choice.
+        let mut per_input = Vec::with_capacity(choices.len());
+        for (position, choice) in choices.iter().enumerate() {
+            let mut sum = Expression::from(0.0);
+            let mut any = false;
+            let (class_chosen, outputs) = choice;
+            for &link in links[position]
                 .iter()
-                .zip(choices)
-                .map(|(&input, choice)| link_indicator(milp, owner, class, input, choice.class))
-                .collect();
-            let Some(indicators) = indicators else {
-                continue;
-            };
-            for (position, choice) in choices.iter().enumerate() {
-                covered[position].insert(choice.class);
+                .filter(|link| link.producer == *class_chosen)
+            {
+                covered[position].insert(*class_chosen);
+                let indicator = match scan_window_of(milp, link, outputs.as_ref()) {
+                    Some(window_indicator) => window_indicator,
+                    None => link_output_indicator(milp, link, outputs.as_ref()),
+                };
+                if let Some(indicator) = indicator {
+                    sum += indicator;
+                    any = true;
+                }
             }
-            let count = indicators.len() as f64;
-            match usage {
-                None => {
-                    // `asap-cost` cannot cost this choice: no plan makes it.
-                    let sum: Expression = indicators.into_iter().sum();
-                    milp.builder
-                        .row("t_producers (AND)", constraint!(sum <= count - 1.0));
-                }
-                Some(usage) => {
-                    let indicator = milp
+            if !any {
+                break;
+            }
+            per_input.push(sum);
+        }
+        if per_input.len() < choices.len() {
+            continue;
+        }
+        let count = per_input.len() as f64;
+        match gives {
+            None => {
+                // `asap-cost` cannot cost this choice: no plan makes it.
+                let sum: Expression = per_input.into_iter().sum();
+                milp.builder
+                    .row("t_producers (AND)", constraint!(sum <= count - 1.0));
+            }
+            Some((usage, output)) => {
+                let indicator = match per_input.len() {
+                    1 => per_input.into_iter().next().expect("one"),
+                    _ => milp
                         .builder
-                        .and_at_least("t_producers (AND)", &indicators)
-                        .into();
-                    terms.push(NodeTerm {
-                        indicator,
-                        numbers: NodeNumbers::of(usage),
-                        plain: false,
-                    });
-                }
+                        .and_at_least("t_producers (AND)", &per_input)
+                        .into(),
+                };
+                terms.push(NodeTerm {
+                    indicator,
+                    numbers: NodeNumbers::of(usage),
+                    plain: false,
+                    output: *output,
+                });
             }
         }
     }
     // A producer missing from the table (not costed with this class): its
     // links carry the first costed usage.
     let mut missing = false;
-    for (position, &input) in changing.iter().enumerate() {
-        let producers: BTreeSet<PhysicalCandidateId> = milp.owners[owner]
-            .links
-            .iter()
-            .filter(|((reader, at, _), _)| *reader == class && *at == input)
-            .map(|&((_, _, producer), _)| producer)
-            .chain(
-                milp.owners[owner]
-                    .reads
-                    .iter()
-                    .filter(|((reader, at, _), _)| *reader == class && *at == input)
-                    .map(|&((_, _, instance), _)| milp.instances[instance].class),
-            )
-            .collect();
-        for producer in producers.difference(&covered[position]) {
-            missing = true;
-            if let Some(indicator) = link_indicator(milp, owner, class, input, *producer) {
-                terms.push(NodeTerm {
-                    indicator,
-                    numbers: NodeNumbers::of(&base),
-                    plain: false,
-                });
+    for (position, links) in links.iter().enumerate() {
+        for link in links {
+            if covered[position].contains(&link.producer) {
+                continue;
             }
+            missing = true;
+            terms.push(NodeTerm {
+                indicator: link.variable.into(),
+                numbers: NodeNumbers::of(&base),
+                plain: false,
+                output: 0,
+            });
         }
     }
     if missing {
@@ -365,87 +433,80 @@ fn producer_terms(
         milp.builder
             .row("t_producers (AND)", constraint!(node <= 0.0));
     }
+    milp.terms_in_progress.remove(&(owner, class));
     terms
 }
 
-/// The terms of `class` (input `input`) in `owner` reading instances of
-/// windowed scan class `scan`: per instance read, the reader's numbers at
-/// the scan's narrowest window on the read, and each wider level's increase
-/// on `AND(read, λ[i, ℓ])`. `entries` are the reader's usages per window.
-fn scan_reader_terms(
+/// For a read of a windowed scan instance: the indicator that the read is
+/// taken and the scan gives `output`, i.e. its widest window read is one of
+/// the levels giving that output: `AND(read, λ[i, low] − λ[i, high + 1])`
+/// (`λ[i, 0] = x[i]`, `window_terms`). Exact when a reader's numbers do not
+/// fall as the scan's window widens (the levels are lower bounds). `None`
+/// unless `link` reads a windowed scan; `Some(None)` when the scan never
+/// gives `output`.
+fn scan_window_of(
     milp: &mut SelectionMilp<'_>,
-    owner: usize,
-    class: PhysicalCandidateId,
-    input: usize,
-    scan: PhysicalCandidateId,
-    entries: &UsagePerWindow,
-) -> Vec<NodeTerm> {
-    let levels: Vec<ScanWindow> = sorted_windows(milp, scan)
-        .into_iter()
-        .map(|(window, _)| window)
-        .collect();
-    let reads: Vec<(usize, Variable)> = milp.owners[owner]
-        .reads
-        .iter()
-        .filter(|((reader, at, instance), _)| {
-            *reader == class && *at == input && milp.instances[*instance].class == scan
-        })
-        .map(|&((_, _, instance), read)| (instance, read))
-        .collect();
-    let usage_at = |window: ScanWindow| {
-        entries
-            .iter()
-            .find(|(known, _)| *known == Some(window))
-            .and_then(|(_, usage)| *usage)
-    };
-    let mut terms = Vec::new();
-    for (instance, read) in reads {
-        let scan_terms = milp.node_terms(milp.instance_owner(instance), scan);
-        let mut previous: Option<NodeNumbers> = None;
-        for (level, &window) in levels.iter().enumerate() {
-            let Some(usage) = usage_at(window) else {
-                milp.note_inexact("usage: a reader not costed at one of its scan's windows");
-                continue;
-            };
-            let numbers = NodeNumbers::of(&usage);
-            let (numbers, negative) = match previous {
-                None => (numbers, false),
-                Some(previous) => numbers.minus(previous),
-            };
-            if negative {
-                milp.note_inexact("usage: a reader cheaper over a wider scan window");
-            }
-            previous = Some(NodeNumbers::of(&usage));
-            let indicator = match level {
-                0 => read.into(),
-                _ => match scan_terms.get(level) {
-                    Some(term) => milp
-                        .builder
-                        .and_at_least("t_producers (AND)", &[read.into(), term.indicator.clone()])
-                        .into(),
-                    None => continue,
-                },
-            };
-            terms.push(NodeTerm {
-                indicator,
-                numbers,
-                plain: false,
-            });
-        }
+    link: Link,
+    outputs: Option<&BTreeSet<usize>>,
+) -> Option<Option<Expression>> {
+    let instance = link.instance?;
+    let scan = link.producer;
+    if milp.inputs.candidate_data[scan.0]
+        .usage_per_window
+        .is_empty()
+    {
+        return None;
     }
-    terms
+    let outputs = outputs?;
+    // Per level (narrowest first), whether the scan gives one of `outputs`.
+    let gives: Vec<bool> = sorted_windows(milp, scan)
+        .iter()
+        .map(|(_, _, given)| outputs.contains(given))
+        .collect();
+    if gives.iter().all(|&gives| gives) {
+        return Some(Some(link.variable.into()));
+    }
+    let scan_terms = milp.node_terms(milp.instance_owner(instance), scan);
+    // Per run of levels `low..=high` giving one of them, `λ_low −
+    // λ_{high+1}` (`λ_0 = x[i]`): the widest window read is in the run.
+    let mut within_runs = Expression::from(0.0);
+    let mut any = false;
+    let mut level = 0;
+    while level < gives.len() {
+        if !gives[level] {
+            level += 1;
+            continue;
+        }
+        let low = level;
+        while level < gives.len() && gives[level] {
+            level += 1;
+        }
+        within_runs += scan_terms.get(low)?.indicator.clone();
+        if let Some(above) = scan_terms.get(level) {
+            within_runs -= above.indicator.clone();
+        }
+        any = true;
+    }
+    if !any {
+        return Some(None);
+    }
+    Some(Some(
+        milp.builder
+            .and_at_least("t_producers (AND)", &[link.variable.into(), within_runs])
+            .into(),
+    ))
 }
 
-/// A windowed scan class's windows with their numbers, narrowest first:
-/// the levels of [`window_terms`].
+/// A windowed scan class's windows with their numbers and outputs,
+/// narrowest first: the levels of [`window_terms`].
 fn sorted_windows(
     milp: &SelectionMilp<'_>,
     scan: PhysicalCandidateId,
-) -> Vec<(ScanWindow, NodeNumbers)> {
-    let mut windows: Vec<(ScanWindow, NodeNumbers)> = milp.inputs.candidate_data[scan.0]
+) -> Vec<(ScanWindow, NodeNumbers, usize)> {
+    let mut windows: Vec<(ScanWindow, NodeNumbers, usize)> = milp.inputs.candidate_data[scan.0]
         .usage_per_window
         .iter()
-        .map(|(window, usage)| (*window, NodeNumbers::of(usage)))
+        .map(|(window, usage, output)| (*window, NodeNumbers::of(usage), *output))
         .collect();
     windows.sort_by(|a, b| {
         (a.1.raw_kept_bytes, a.1.execution_cost, a.1.latency_ms)
@@ -479,7 +540,8 @@ fn within(inner: ScanWindow, outer: ScanWindow) -> bool {
 
 /// Terms of query-time scan instance `instance` whose usage depends on the
 /// window its readers read: the narrowest window's numbers on `x[i]`, and
-/// each wider level's increase on `λ[i, ℓ]`.
+/// each wider level's increase on `λ[i, ℓ]`, where `λ[i, ℓ] ≥` every read
+/// at level `ℓ` or wider (the scan reads the widest window read).
 fn window_terms(
     milp: &mut SelectionMilp<'_>,
     instance: usize,
@@ -513,7 +575,7 @@ fn window_terms(
         }
         let level = read_windows
             .iter()
-            .map(|window| windows.iter().position(|(known, _)| known == window))
+            .map(|window| windows.iter().position(|(known, _, _)| known == window))
             .collect::<Option<Vec<usize>>>()
             .and_then(|levels| levels.into_iter().max());
         match level {
@@ -529,6 +591,7 @@ fn window_terms(
         indicator: milp.active[instance].into(),
         numbers: windows.first().map_or_else(NodeNumbers::default, |w| w.1),
         plain: true,
+        output: windows.first().map_or(0, |w| w.2),
     }];
     for level in 1..windows.len() {
         let (increase, negative) = windows[level].1.minus(windows[level - 1].1);
@@ -544,6 +607,7 @@ fn window_terms(
             indicator: at_least.into(),
             numbers: increase,
             plain: false,
+            output: windows[level].2,
         });
     }
     terms
@@ -579,15 +643,14 @@ pub(crate) fn compaction_ms(milp: &mut SelectionMilp<'_>) -> HashMap<usize, f64>
 /// How an instance's executions per second are encoded.
 #[derive(Debug, Clone)]
 enum InstanceRate {
-    /// Ingestion time: once per second while active (`x[i]`).
-    Ingestion,
-    /// `rate` ≤ `most`; `groups` are the `(z, Δrate)` of a materialized
-    /// instance's schedule groups (empty for a not-materialized one).
-    Variable {
-        rate: Variable,
-        most: f64,
-        groups: Vec<(Variable, f64)>,
-    },
+    /// `rate · x[i]`: ingestion time (once per second), or readers that
+    /// all run it at one rate.
+    Fixed(f64),
+    /// `Σ rate · u` over indicators `u ∈ [0, 1]`, each tight under the
+    /// costs it carries: a materialized instance's schedule-group levels
+    /// `z`, or a not-materialized one's consumers (`y`, `a`, or
+    /// `AND(z_m, y_m)` for a materialized consumer `m`).
+    Components(Vec<(Variable, f64)>),
 }
 
 /// Who may read a class at an owner boundary: a query owner, or the owners
@@ -637,6 +700,9 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
     // The longest latency any query can have, for products with a latency.
     let most_latency = milp.latency_max_ms.iter().copied().fold(0.0, f64::max);
     let mut held_time: HashMap<usize, Variable> = HashMap::new();
+    // Per instance at a varying rate, the execution cost of its nodes other
+    // than its own plain term, and the most it can be.
+    let mut region_execution: BTreeMap<usize, (Expression, f64)> = BTreeMap::new();
     let readers = boundary_readers(milp);
     let mut pure: HashMap<PhysicalCandidateId, bool> = HashMap::new();
     for owner in 0..milp.owners.len() {
@@ -650,25 +716,23 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
                 let numbers = term.numbers;
                 charge(&term.indicator, numbers.standing_cost);
                 // Execution.
-                match instance.map(|i| &rates[i]) {
+                match instance.map(|i| (i, &rates[i])) {
                     None => charge(&term.indicator, numbers.execution_cost * query_rate[owner]),
-                    Some(InstanceRate::Ingestion) => {
-                        charge(&term.indicator, numbers.execution_cost)
+                    Some((_, InstanceRate::Fixed(rate))) => {
+                        charge(&term.indicator, numbers.execution_cost * rate)
                     }
-                    Some(InstanceRate::Variable { rate, most, .. }) => {
+                    Some((instance, InstanceRate::Components(components))) => {
                         if numbers.execution_cost == 0.0 {
                         } else if term.plain && own_class {
-                            charge(&(*rate).into(), numbers.execution_cost);
+                            for &(component, rate) in components {
+                                charge(&component.into(), numbers.execution_cost * rate);
+                            }
                         } else {
-                            let at_rate = milp
-                                .builder
-                                .continuous("Q (node at its instance's rate)", None);
-                            let indicator = term.indicator.clone();
-                            milp.builder.row(
-                                "Q (node at its instance's rate)",
-                                constraint!(at_rate >= *rate - *most * (1.0 - indicator)),
-                            );
-                            charge(&at_rate.into(), numbers.execution_cost);
+                            let (sum, most) = region_execution
+                                .entry(instance)
+                                .or_insert_with(|| (Expression::from(0.0), 0.0));
+                            *sum += numbers.execution_cost * term.indicator.clone();
+                            *most += numbers.execution_cost;
                         }
                     }
                 }
@@ -702,10 +766,13 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
                 {
                     // Held for the longest reader's latency, once per
                     // execution of the instance.
-                    let Some(InstanceRate::Variable { groups, .. }) = rates.get(instance) else {
-                        continue;
+                    let components = match &rates[instance] {
+                        InstanceRate::Fixed(rate) => vec![(None, *rate)],
+                        InstanceRate::Components(components) => components
+                            .iter()
+                            .map(|&(component, rate)| (Some(component), rate))
+                            .collect(),
                     };
-                    let groups = groups.clone();
                     if !own_class && milp.inputs.queries_reaching[instance_class.0].len() > 1 {
                         milp.note_inexact(
                             "working memory below a shared materialization (longest reader, \
@@ -727,22 +794,31 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
                         }
                         longest
                     });
-                    for (group, increase) in groups {
+                    for (component, rate) in components {
+                        // `held ≥ H − M (slack − Σ indicators)` over the
+                        // component and the term (when not `x[i]` itself).
+                        let mut both = Expression::from(0.0);
+                        let mut slack = 0.0;
+                        if let Some(component) = component {
+                            both += component;
+                            slack += 1.0;
+                        }
+                        if !(term.plain && own_class) {
+                            both += term.indicator.clone();
+                            slack += 1.0;
+                        }
+                        if slack == 0.0 {
+                            charge(&longest.into(), per_byte_ms * rate);
+                            continue;
+                        }
                         let held = milp
                             .builder
                             .continuous("W (held time × schedule group)", None);
-                        let indicator = term.indicator.clone();
-                        let slack = if term.plain && own_class { 1.0 } else { 2.0 };
-                        let both = if term.plain && own_class {
-                            Expression::from(group)
-                        } else {
-                            group + indicator
-                        };
                         milp.builder.row(
                             "W (held time × schedule group)",
                             constraint!(held >= longest - most_latency * (slack - both)),
                         );
-                        charge(&held.into(), per_byte_ms * increase);
+                        charge(&held.into(), per_byte_ms * rate);
                     }
                 } else {
                     // A not-materialized instance or a node below one: each
@@ -773,6 +849,30 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
                     }
                 }
             }
+        }
+    }
+    // A region's execution at its instance's varying rate:
+    // `V ≥ E_i − Ē_i (1 − u)` per rate component `u`.
+    for (instance, (sum, most)) in region_execution {
+        let InstanceRate::Components(components) = &rates[instance] else {
+            continue;
+        };
+        let region = milp
+            .builder
+            .continuous("V (region execution at a rate component)", None);
+        milp.builder.row(
+            "V (region execution at a rate component)",
+            constraint!(region >= sum),
+        );
+        for &(component, rate) in components {
+            let at_rate = milp
+                .builder
+                .continuous("V (region execution at a rate component)", None);
+            milp.builder.row(
+                "V (region execution at a rate component)",
+                constraint!(at_rate >= region - most * (1.0 - component)),
+            );
+            charge(&at_rate.into(), rate);
         }
     }
     raw_retention(milp, unit_cost.cost_per_disk_byte_second, &mut charge);
@@ -868,7 +968,7 @@ fn instance_rates(
         let per_request = match candidate.materialization {
             Materialization::NotMaterialized => continue,
             Materialization::MatAtIngestion(_) => {
-                rates[instance] = Some(InstanceRate::Ingestion);
+                rates[instance] = Some(InstanceRate::Fixed(1.0));
                 continue;
             }
             Materialization::MatAtQuery(_) => false,
@@ -896,10 +996,8 @@ fn instance_rates(
         }
         let groups =
             schedule_groups(readers.iter().map(|&query| demand(query)), horizon).map_err(cost)?;
-        let rate = milp.builder.continuous("R (instance rates)", None);
-        let mut sum = Expression::from(0.0);
-        let mut most = 0.0;
-        let mut group_terms = Vec::new();
+        // Per group, its members with their own rates, and its levels.
+        let mut levels_per_group: Vec<GroupLevels> = Vec::new();
         for group in groups {
             let members: Vec<usize> = group
                 .readers
@@ -913,7 +1011,6 @@ fn instance_rates(
                 .map_err(cost)?;
             let fastest = alone.iter().copied().fold(0.0, f64::max);
             let full = group.evaluations_per_second;
-            most += full;
             // Levels of the members' own rates; the group runs at its
             // fastest member's when that is its rate.
             let mut levels: Vec<f64> = alone.clone();
@@ -923,28 +1020,32 @@ fn instance_rates(
             }
             levels.sort_by(f64::total_cmp);
             levels.dedup();
+            levels_per_group.push((members.into_iter().zip(alone).collect(), levels));
+        }
+        // One group at one level: every reader runs it at that rate.
+        if let [(_, levels)] = levels_per_group.as_slice() {
+            if let [level] = levels.as_slice() {
+                rates[instance] = Some(InstanceRate::Fixed(*level));
+                continue;
+            }
+        }
+        let mut components = Vec::new();
+        for (members, levels) in levels_per_group {
             let mut below = 0.0;
             for &level in &levels {
                 let z = milp.builder.continuous("z (schedule groups)", Some(1.0));
-                for (&query, &own) in members.iter().zip(&alone) {
+                for &(query, own) in &members {
                     if own >= level || levels.len() == 1 {
                         let reach = milp.reach[&(query, instance)];
                         milp.builder
                             .row("z (schedule groups)", constraint!(z >= reach));
                     }
                 }
-                sum += (level - below) * z;
-                group_terms.push((z, level - below));
+                components.push((z, level - below));
                 below = level;
             }
         }
-        milp.builder
-            .row("R (instance rates)", constraint!(rate >= sum));
-        rates[instance] = Some(InstanceRate::Variable {
-            rate,
-            most,
-            groups: group_terms,
-        });
+        rates[instance] = Some(InstanceRate::Components(components));
     }
     // Not-materialized instances: once per consumer.
     let readers = boundary_readers(milp);
@@ -1048,13 +1149,16 @@ fn instance_rates(
         }
         let class = milp.instances[instance].class;
         let (queries, materialized) = consumers_of_class[&class].clone();
-        let rate = milp.builder.continuous("R (instance rates)", None);
-        let mut sum = Expression::from(0.0);
-        let mut most = 0.0;
+        if materialized.is_empty() && queries.len() == 1 {
+            // Its one consumer query's rate.
+            let query = *queries.first().expect("one");
+            rates[instance] = Some(InstanceRate::Fixed(query_rate[query]));
+            continue;
+        }
+        let mut components = Vec::new();
         for &query in &queries {
             if let Some(y) = consumer_of(milp, Consumer::Query(query), instance) {
-                sum += query_rate[query] * y;
-                most += query_rate[query];
+                components.push((y, query_rate[query]));
             }
         }
         for class in &materialized {
@@ -1062,38 +1166,22 @@ fn instance_rates(
                 let Some(&y) = through.get(&(Consumer::Instance(consumer), instance)) else {
                     continue;
                 };
-                match &rates[consumer] {
-                    Some(InstanceRate::Ingestion) => {
-                        sum += y;
-                        most += 1.0;
-                    }
-                    Some(InstanceRate::Variable {
-                        rate: consumer_rate,
-                        most: consumer_most,
-                        ..
-                    }) => {
-                        let (consumer_rate, consumer_most) = (*consumer_rate, *consumer_most);
-                        let at_rate = milp
-                            .builder
-                            .continuous("P (materialized consumers' rates)", None);
-                        milp.builder.row(
-                            "P (materialized consumers' rates)",
-                            constraint!(at_rate >= consumer_rate - consumer_most * (1.0 - y)),
-                        );
-                        sum += at_rate;
-                        most += consumer_most;
+                match rates[consumer].clone() {
+                    Some(InstanceRate::Fixed(rate)) => components.push((y, rate)),
+                    Some(InstanceRate::Components(consumer_components)) => {
+                        for (z, rate) in consumer_components {
+                            let both = milp.builder.and_at_least(
+                                "P (materialized consumers' rates, AND)",
+                                &[z.into(), y.into()],
+                            );
+                            components.push((both, rate));
+                        }
                     }
                     None => {}
                 }
             }
         }
-        milp.builder
-            .row("R (instance rates)", constraint!(rate >= sum));
-        rates[instance] = Some(InstanceRate::Variable {
-            rate,
-            most,
-            groups: Vec::new(),
-        });
+        rates[instance] = Some(InstanceRate::Components(components));
     }
     Ok(rates
         .into_iter()

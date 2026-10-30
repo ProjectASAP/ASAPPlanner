@@ -170,18 +170,22 @@ pub(crate) struct CandidateData {
     /// The context options that changed its usage, ascending; empty when it
     /// is plan-independent.
     pub(crate) usage_depends_on: Vec<UsageContext>,
-    /// The inputs whose producer changes its usage, ascending; empty unless
-    /// [`UsageContext::ProducerOutput`] is among `usage_depends_on`.
+    /// The inputs whose producer (or that producer's output) changes its
+    /// usage or its own output, ascending.
     pub(crate) inputs_changing_usage: Vec<usize>,
-    /// Its usage per choice of a producer for each of
+    /// Its usage and its own output (an index below `output_count`) per
+    /// choice of a producer and that producer's output for each of
     /// `inputs_changing_usage` (in that order); `None` when `asap-cost` could
     /// not cost that choice, so no plan can make it. Empty when
     /// `inputs_changing_usage` is.
-    pub(crate) usage_per_producers: Vec<(Vec<ProducerChoice>, Option<CandidateUsage>)>,
+    pub(crate) usage_per_producers: Vec<(Vec<ProducerChoice>, Option<UsageAndOutput>)>,
     /// For a query-time scan whose usage depends on the window its reader
     /// reads ([`UsageContext::ScanWindowOfReader`]): its usage per window it
-    /// can be costed at. Empty otherwise.
-    pub(crate) usage_per_window: Vec<(ScanWindow, CandidateUsage)>,
+    /// can be costed at, with its output there. Empty otherwise.
+    pub(crate) usage_per_window: Vec<(ScanWindow, CandidateUsage, usize)>,
+    /// How many distinct outputs (statistics its readers are costed from)
+    /// it can give, by context.
+    pub(crate) output_count: usize,
     /// For a query-time scan: per reader, the windows it may read the scan
     /// at (through time shifts, [`window_read_through`]). Empty for any
     /// other candidate.
@@ -202,6 +206,7 @@ impl Default for CandidateData {
             inputs_changing_usage: Vec::new(),
             usage_per_producers: Vec::new(),
             usage_per_window: Vec::new(),
+            output_count: 1,
             windows_per_reader: Vec::new(),
             producer_usage_ambiguous: false,
         }
@@ -247,13 +252,16 @@ pub(crate) struct CandidateUsage {
     pub(crate) output_bytes: u64,
 }
 
-/// One producer choice for an input: a producer candidate, and for a
-/// query-time scan whose output depends on its window, that window (the
-/// widest any of the scan's readers reads).
+/// A candidate's usage and its output (an index below
+/// [`CandidateData::output_count`]) in one context.
+pub(crate) type UsageAndOutput = (CandidateUsage, usize);
+
+/// One producer choice for an input: a producer candidate, and for one
+/// with several outputs ([`CandidateData::output_count`]), which output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProducerChoice {
     pub(crate) class: PhysicalCandidateId,
-    pub(crate) window: Option<ScanWindow>,
+    pub(crate) output: Option<usize>,
 }
 
 /// A context option that changed a candidate's usage.
@@ -964,10 +972,6 @@ fn candidate_data(
     // Per candidate, the distinct outputs it may give its readers; `None` until
     // it is costed.
     let mut outputs: Vec<Option<Result<Vec<ProducerOutput<'_>>, String>>> = vec![None; count];
-    // Per class, for each of its outputs, the windows it gives that output
-    // at: a query-time scan whose usage depends on its window; empty for
-    // any other class.
-    let mut output_windows: Vec<Vec<Vec<ScanWindow>>> = vec![Vec::new(); count];
     let mut result: Vec<CandidateData> = (0..count)
         .map(|class| {
             let node = physical.physical_node(PhysicalCandidateId(class));
@@ -1151,18 +1155,42 @@ fn candidate_data(
         }
         let first = costed[0].0;
         let mut depends_on = Vec::new();
-        // The inputs whose option changes the usage, and whether the window
-        // does: two costed combinations differing only there differ in usage.
-        let changes_usage = |differs: &dyn Fn(&Picks, &Picks) -> bool| {
-            costed.iter().any(|(usage, _, picks)| {
+        // Its distinct outputs, and the one each costed combination gives.
+        let mut produced: Vec<ProducerOutput<'_>> = Vec::new();
+        let mut output_of_combination = Vec::with_capacity(costed.len());
+        for (_, output, _) in &costed {
+            let at = match produced
+                .iter()
+                .position(|known| same_producer_output(known, output))
+            {
+                Some(at) => at,
+                None => {
+                    produced.push(output.clone());
+                    produced.len() - 1
+                }
+            };
+            output_of_combination.push(at);
+        }
+        // What a combination gives its plan: its usage and its output.
+        let given: Vec<(CandidateUsage, usize)> = costed
+            .iter()
+            .zip(&output_of_combination)
+            .map(|((usage, _, _), &output)| (*usage, output))
+            .collect();
+        // The inputs whose option changes the usage or the output, and
+        // whether the window does: two costed combinations differing only
+        // there give different usages or outputs.
+        let changes = |differs: &dyn Fn(&Picks, &Picks) -> bool| {
+            costed.iter().zip(&given).any(|((_, _, picks), gives)| {
                 costed
                     .iter()
-                    .any(|(other, _, others)| differs(picks, others) && usage != other)
+                    .zip(&given)
+                    .any(|((_, _, others), other)| differs(picks, others) && gives != other)
             })
         };
         let inputs_changing_usage: Vec<usize> = (0..producer_options.len())
             .filter(|&input| {
-                changes_usage(&|a: &Picks, b: &Picks| {
+                changes(&|a: &Picks, b: &Picks| {
                     a.window == b.window
                         && a.retained == b.retained
                         && a.options[input] != b.options[input]
@@ -1171,14 +1199,12 @@ fn candidate_data(
                 })
             })
             .collect();
-        let window_changes_usage = changes_usage(&|a: &Picks, b: &Picks| {
+        let window_changes_usage = changes(&|a: &Picks, b: &Picks| {
             a.window != b.window && a.retained == b.retained && a.options == b.options
         });
         if !inputs_changing_usage.is_empty() {
-            // Per changing input, each producer class and the options it
-            // gives (its own output may depend on its context).
-            // A scan whose output depends on its window is one choice per
-            // window.
+            // Per changing input, each producer and the options it gives:
+            // one choice per output of a producer with several.
             let options_of_producers: Vec<Vec<(ProducerChoice, Vec<usize>)>> =
                 inputs_changing_usage
                     .iter()
@@ -1193,27 +1219,24 @@ fn candidate_data(
                                     .iter()
                                     .position(|known| same_producer_output(known, output))
                             };
-                            let windows = &output_windows[producer.0];
-                            if windows.is_empty() {
+                            if produced.len() == 1 {
                                 choices.push((
                                     ProducerChoice {
                                         class: producer,
-                                        window: None,
+                                        output: None,
                                     },
                                     produced.iter().filter_map(option_of).collect(),
                                 ));
                                 continue;
                             }
-                            for (output, windows) in produced.iter().zip(windows) {
-                                for &window in windows {
-                                    choices.push((
-                                        ProducerChoice {
-                                            class: producer,
-                                            window: Some(window),
-                                        },
-                                        option_of(output).into_iter().collect(),
-                                    ));
-                                }
+                            for (at, output) in produced.iter().enumerate() {
+                                choices.push((
+                                    ProducerChoice {
+                                        class: producer,
+                                        output: Some(at),
+                                    },
+                                    option_of(output).into_iter().collect(),
+                                ));
                             }
                         }
                         choices
@@ -1238,14 +1261,15 @@ fn candidate_data(
                             picked
                         })
                         .collect();
-                    let matching: Vec<&CandidateUsage> = costed
+                    let matching: Vec<&(CandidateUsage, usize)> = costed
                         .iter()
-                        .filter(|(_, _, picks)| {
+                        .zip(&given)
+                        .filter(|((_, _, picks), _)| {
                             inputs_changing_usage.iter().zip(&chosen).all(
                                 |(&input, (_, options))| options.contains(&picks.options[input]),
                             )
                         })
-                        .map(|(usage, _, _)| usage)
+                        .map(|(_, gives)| gives)
                         .collect();
                     let costliest = matching.iter().copied().max_by(|a, b| {
                         let total = |usage: &CandidateUsage| {
@@ -1253,9 +1277,9 @@ fn candidate_data(
                                 + usage.standing_cost_per_second.unwrap_or(0.0)
                                 + usage.work_ms_per_execution
                         };
-                        total(a).total_cmp(&total(b))
+                        total(&a.0).total_cmp(&total(&b.0))
                     });
-                    if matching.iter().any(|usage| Some(*usage) != costliest) {
+                    if matching.iter().any(|gives| Some(*gives) != costliest) {
                         result[class.0].producer_usage_ambiguous = true;
                     }
                     result[class.0].usage_per_producers.push((
@@ -1268,14 +1292,15 @@ fn candidate_data(
         }
         if window_changes_usage {
             for (pick, window) in windows.iter().enumerate() {
-                if let Some((usage, _, _)) =
-                    costed.iter().find(|(_, _, picks)| picks.window == pick)
-                {
-                    result[class.0].usage_per_window.push((*window, *usage));
+                if let Some(at) = costed.iter().position(|(_, _, picks)| picks.window == pick) {
+                    let (usage, output) = given[at];
+                    result[class.0]
+                        .usage_per_window
+                        .push((*window, usage, output));
                 }
             }
         }
-        if costed.iter().any(|(usage, _, _)| *usage != first) {
+        if given.iter().any(|gives| gives.0 != first) {
             if producer_options.iter().any(|options| options.len() > 1) {
                 depends_on.push(UsageContext::ProducerOutput);
             }
@@ -1295,27 +1320,7 @@ fn candidate_data(
         if combinations > MAX_CONTEXTS {
             depends_on.push(UsageContext::TooManyContexts);
         }
-        let mut produced: Vec<ProducerOutput<'_>> = Vec::new();
-        let mut windows_of_output: Vec<Vec<ScanWindow>> = Vec::new();
-        for (_, output, picks) in costed {
-            let at = match produced
-                .iter()
-                .position(|known| same_producer_output(known, &output))
-            {
-                Some(at) => at,
-                None => {
-                    produced.push(output);
-                    windows_of_output.push(Vec::new());
-                    produced.len() - 1
-                }
-            };
-            if window_changes_usage && !windows_of_output[at].contains(&windows[picks.window]) {
-                windows_of_output[at].push(windows[picks.window]);
-            }
-        }
-        if window_changes_usage {
-            output_windows[class.0] = windows_of_output;
-        }
+        result[class.0].output_count = produced.len();
         outputs[class.0] = Some(Ok(produced));
         result[class.0].usage = Ok(first);
         result[class.0].usage_depends_on = depends_on;
