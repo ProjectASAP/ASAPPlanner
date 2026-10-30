@@ -44,16 +44,13 @@ pub struct Rejection {
     pub reason: String,
 }
 
-/// Why Stage 3 did not select a candidate. The first ten mean the
+/// Why Stage 3 did not select a candidate. The first nine mean the
 /// candidate failed a check and is invalid ([`Self::failed_a_check`]); the
 /// rest mean it was valid and lost under the cost model. JSON: the
 /// snake_case variant name, e.g. `"costlier"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RejectionCause {
-    /// Its summaries, resized for the queries' failure probabilities, do
-    /// not rebuild into a plan.
-    FailureProbabilityResizeFailed,
     /// A query's accuracy target is not met: its output's guarantee misses
     /// it and no deployment evidence meets it.
     AccuracyTargetMissed,
@@ -109,8 +106,7 @@ impl RejectionCause {
     pub fn failed_a_check(self) -> bool {
         matches!(
             self,
-            Self::FailureProbabilityResizeFailed
-                | Self::AccuracyTargetMissed
+            Self::AccuracyTargetMissed
                 | Self::CountMinWeightsNotProvenNonNegative
                 | Self::PerEntityAggregateNotExecutable
                 | Self::NoAccuracyGuarantee

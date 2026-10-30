@@ -345,7 +345,6 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
     );
 
     let causes = [
-        C::FailureProbabilityResizeFailed,
         C::AccuracyTargetMissed,
         C::CountMinWeightsNotProvenNonNegative,
         C::PerEntityAggregateNotExecutable,
@@ -363,8 +362,7 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
     ];
     for cause in causes {
         match cause {
-            C::FailureProbabilityResizeFailed
-            | C::AccuracyTargetMissed
+            C::AccuracyTargetMissed
             | C::CountMinWeightsNotProvenNonNegative
             | C::PerEntityAggregateNotExecutable
             | C::NoAccuracyGuarantee

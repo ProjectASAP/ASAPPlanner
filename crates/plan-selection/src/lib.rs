@@ -244,7 +244,6 @@ mod checks;
 mod pricing;
 mod report;
 mod selector;
-mod sizing;
 pub(crate) use accuracy_binding::bound_root_guarantee;
 pub use asap_types::workload::bounds::with_confirmed_weights;
 pub(crate) use checks::{accuracy_targets, guarantee_check};
@@ -255,8 +254,18 @@ pub use report::{
 };
 pub(crate) use selector::{cheaper, checked_candidate, choose, Ranking};
 pub use selector::{select_plan, PlanSelector};
-pub use sizing::resize_for_failure_probability;
-pub(crate) use sizing::sized_for_failure_probability;
+
+/// `roots` sized as Pass 1 sizes them for `targets` over `data`
+/// ([`with_summaries_sized_for_targets`](asap_accuracy::sizing::with_summaries_sized_for_targets)).
+#[cfg(test)]
+pub(crate) fn sized_as_pass1(
+    roots: &[asap_types::ir::QueryRoot],
+    targets: &[asap_types::ir::properties::AccuracyTarget],
+    data: &asap_types::workload::DataWorkload,
+) -> Vec<asap_types::ir::QueryRoot> {
+    asap_accuracy::sizing::with_summaries_sized_for_targets(roots, targets, data)
+        .expect("sized summaries rebuild")
+}
 
 /// The Stage 1 to Stage 3 driver and the optimization-pass interface.
 pub mod search;
@@ -437,10 +446,8 @@ mod tests {
     /// Exact (P1), whole-expression CMS+heap (P2) and CountSketch+heap (P3) realizations of
     /// one approximate top-k query, in Pass 1 catalog order.
     fn candidates() -> Vec<PhysicalWorkloadPlan> {
-        let root = lower_promql(
-            "topk by (job) (10, sum_over_time(m[1m]))",
-            AccuracyTarget::max_error(0.01).failure_probability(0.001),
-        );
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
+        let root = lower_promql("topk by (job) (10, sum_over_time(m[1m]))", target.clone());
         let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(
             vec![(0, QueryRoot::Operator(root))],
         )
@@ -462,6 +469,7 @@ mod tests {
                 .into_iter()
                 .map(|(_, root)| root)
                 .collect();
+                let roots = sized_as_pass1(&roots, std::slice::from_ref(&target), &data());
                 let mut candidate = optimize_physical_asap(
                     "L",
                     &roots,
@@ -1138,6 +1146,16 @@ mod tests {
     /// Every combination of Pass 1 candidates of one query, as Stage 2
     /// candidates `P1`, `P2`, ...
     fn all_candidates(query: &str, target: &AccuracyTarget) -> Vec<PhysicalWorkloadPlan> {
+        all_candidates_sized(query, target, &|roots| roots)
+    }
+
+    /// [`all_candidates`] with each candidate's logical roots passed through
+    /// `size` before Stage 2.
+    fn all_candidates_sized(
+        query: &str,
+        target: &AccuracyTarget,
+        size: &dyn Fn(Vec<QueryRoot>) -> Vec<QueryRoot>,
+    ) -> Vec<PhysicalWorkloadPlan> {
         let root = lower_promql(query, target.clone());
         let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(
             vec![(0, QueryRoot::Operator(root))],
@@ -1167,6 +1185,7 @@ mod tests {
                 .into_iter()
                 .map(|(_, root)| root)
                 .collect();
+                let roots = size(roots);
                 let mut candidate = optimize_physical_asap(
                     "L",
                     &roots,
@@ -1190,6 +1209,24 @@ mod tests {
             .any(|n| matches!(n.payload, Payload::ASAP(ASAPOp::SummaryEstimate { .. })))
     }
 
+    /// [`per_series_kll`]'s candidates with their summaries sized as Pass 1
+    /// sizes them for the target over `data` ([`sized_as_pass1`]).
+    fn per_series_kll_sized_as_pass1(
+        scope: AccuracyScope,
+        data: &DataWorkload,
+    ) -> (Vec<PhysicalWorkloadPlan>, AccuracyTarget) {
+        let (_, target) = per_series_kll(scope);
+        let requested = target.clone().accuracy_scope(AccuracyScope::PerValue);
+        let candidates =
+            all_candidates_sized("quantile_over_time(0.99, x[5m])", &requested, &|roots| {
+                sized_as_pass1(&roots, std::slice::from_ref(&target), data)
+            })
+            .into_iter()
+            .filter(|c| !kll_params(&c.roots).is_empty())
+            .collect();
+        (candidates, target)
+    }
+
     /// The KLL candidates of `quantile_over_time(0.99, x[5m])`, per series,
     /// within rank error 0.01 at δ = 0.01 over `scope`.
     fn per_series_kll(scope: AccuracyScope) -> (Vec<PhysicalWorkloadPlan>, AccuracyTarget) {
@@ -1206,52 +1243,6 @@ mod tests {
             .accuracy_metric(AccuracyMetric::Rank)
             .accuracy_scope(scope);
         (candidates, target)
-    }
-
-    /// A candidate whose summaries, resized for its query's failure
-    /// probability, do not rebuild into a plan (here a root with no
-    /// execution timing) is rejected with the reason; selection goes on and
-    /// selects another candidate instead of failing.
-    #[test]
-    fn a_candidate_that_fails_to_resize_is_rejected_alone() {
-        let requested = AccuracyTarget::max_error(0.01)
-            .failure_probability(0.01)
-            .accuracy_metric(AccuracyMetric::Rank);
-        let mut candidates = all_candidates("quantile_over_time(0.99, x[5m])", &requested);
-        let broken = candidates
-            .iter()
-            .position(|c| !kll_params(&c.roots).is_empty())
-            .expect("a KLL candidate");
-        let QueryRoot::Operator(node) = &candidates[broken].roots[0] else {
-            panic!("an operator root")
-        };
-        let mut untimed = (**node).clone();
-        untimed.timing = None;
-        candidates[broken].roots = vec![QueryRoot::Operator(Rc::new(untimed))];
-        let selection = select_plan(
-            &candidates,
-            &[entry_with(requested, repeating(10_000))],
-            &data(),
-            PlanningModels::builtin(),
-        )
-        .expect("the other candidates are still judged");
-        let rejection = selection
-            .rejected
-            .iter()
-            .find(|r| r.id == candidates[broken].id)
-            .unwrap();
-        assert_eq!(
-            rejection.cause,
-            RejectionCause::FailureProbabilityResizeFailed
-        );
-        assert!(
-            rejection
-                .reason
-                .starts_with("resizing for the failure probability failed"),
-            "{}",
-            rejection.reason
-        );
-        assert_ne!(selection.selected, candidates[broken].id);
     }
 
     /// Bad input: a workload with a different number of entries than a
@@ -1286,40 +1277,44 @@ mod tests {
             .collect()
     }
 
-    /// A whole-result target over `G` = 10 000 series (the declared input
-    /// cardinality) needs each series' KLL to fail with probability at most
-    /// δ / G = 1e-6 (#669b): Stage 3 enlarges it before pricing, and the
-    /// selected plan runs the enlarged sketch. A per-value target keeps the
-    /// Stage 1 size.
+    /// Stage 3 only checks: a KLL Pass 1 sized per value (δ) misses a
+    /// whole-result target over `G` = 10 000 series and is rejected, not
+    /// enlarged; sized as Pass 1 sizes it for that target (δ / G = 1e-6, a
+    /// larger `k`), it is valid, and the selected plan runs that size.
     #[test]
-    fn a_whole_result_target_enlarges_each_sketch_for_g_values() {
-        let (candidates, whole) = per_series_kll(AccuracyScope::WholeResult);
-        let select = |target: &AccuracyTarget| {
-            select_plan(
-                &candidates,
-                &[entry_with(target.clone(), repeating(10_000))],
-                &data(),
-                PlanningModels::builtin(),
-            )
-            .unwrap()
+    fn a_whole_result_target_is_checked_not_resized() {
+        let (per_value_sized, whole) = per_series_kll(AccuracyScope::WholeResult);
+        let entries = [entry_with(whole.clone(), repeating(10_000))];
+        let Err(SelectionError::NoValidCandidate(rejected)) = select_plan(
+            &per_value_sized,
+            &entries,
+            &data(),
+            PlanningModels::builtin(),
+        ) else {
+            panic!("a per-value size misses the whole-result target")
         };
-        let stage1 = kll_params(&candidates[0].roots);
-        let enlarged = kll_params(&select(&whole).plan);
-        assert_eq!(enlarged.len(), 1);
+        assert!(rejected
+            .iter()
+            .all(|r| r.cause == RejectionCause::AccuracyTargetMissed));
+        let (sized, _) = per_series_kll_sized_as_pass1(AccuracyScope::WholeResult, &data());
+        let selection = select_plan(&sized, &entries, &data(), PlanningModels::builtin()).unwrap();
         let (
-            SketchParams::Kll { k: k1, .. },
+            SketchParams::Kll { k: per_value_k, .. },
             SketchParams::Kll {
                 k,
                 failure_probability,
             },
-        ) = (&stage1[0], &enlarged[0])
+        ) = (
+            &kll_params(&per_value_sized[0].roots)[0],
+            &kll_params(&selection.plan)[0],
+        )
         else {
-            panic!("{stage1:?} {enlarged:?}")
+            panic!("KLL builds")
         };
         assert_eq!(*failure_probability, Some(0.01 / 10_000.0));
-        assert!(k > k1, "{k} vs {k1}");
-        let per_value = whole.clone().accuracy_scope(AccuracyScope::PerValue);
-        assert_eq!(kll_params(&select(&per_value).plan), stage1);
+        assert!(k > per_value_k, "{k} vs {per_value_k}");
+        let selected = sized.iter().find(|c| c.id == selection.selected).unwrap();
+        assert_eq!(kll_params(&selection.plan), kll_params(&selected.roots));
     }
 
     /// With its metric declared a counter, the whole-expression CMS+heap
@@ -1355,32 +1350,6 @@ mod tests {
         assert_eq!(cost.cost_per_second.unwrap(), sum);
     }
 
-    /// One summary two queries read is sized for the stricter one: its
-    /// failure probability is the smallest share either query needs (the
-    /// largest `n · G` over its readers).
-    #[test]
-    fn a_shared_summary_takes_the_smallest_failure_probability_share() {
-        let (candidates, lenient) = per_series_kll(AccuracyScope::PerValue);
-        let root = candidates[0].roots[0].clone();
-        let strict = lenient.clone().failure_probability(0.001);
-        let roots = [root.clone(), root];
-        for targets in [[lenient.clone(), strict.clone()], [strict, lenient]] {
-            let resized = resize_for_failure_probability(&roots, &targets, &data()).unwrap();
-            let kll = kll_params(&resized);
-            assert_eq!(kll.len(), 2, "{kll:?}");
-            for params in kll {
-                let SketchParams::Kll {
-                    failure_probability,
-                    ..
-                } = params
-                else {
-                    panic!("{params:?}")
-                };
-                assert_eq!(failure_probability, Some(0.001));
-            }
-        }
-    }
-
     /// The KLL failure probability each selected sketch is sized for.
     fn kll_failure_probabilities(roots: &[QueryRoot]) -> Vec<Option<f64>> {
         kll_params(roots)
@@ -1396,16 +1365,18 @@ mod tests {
     }
 
     /// A target on the groups holding at least 5% of the records covers at
-    /// most 20 of them, so each sketch is sized for δ / 20 and the target is
+    /// most 20 of them, so Pass 1 sizes each sketch for δ / 20 and the target is
     /// met even when the number of values the result returns is unbound
     /// (here a source with no declared series count), where a whole-result
     /// target stays unmet. With 10 000 series declared it still needs only
     /// δ / 20, not the whole result's δ / 10 000.
     #[test]
     fn a_record_share_target_sizes_each_sketch_for_one_over_share_groups() {
-        let (candidates, five_percent) =
-            per_series_kll(AccuracyScope::GroupsWithRecordShareAtLeast(0.05));
         for data in [with_series(None), data()] {
+            let (candidates, five_percent) = per_series_kll_sized_as_pass1(
+                AccuracyScope::GroupsWithRecordShareAtLeast(0.05),
+                &data,
+            );
             let selection = select_plan(
                 &candidates,
                 &[entry_with(five_percent.clone(), repeating(10_000))],
@@ -1417,35 +1388,6 @@ mod tests {
                 kll_failure_probabilities(&selection.plan),
                 vec![Some(0.01 / 20.0)]
             );
-        }
-    }
-
-    /// One summary read by queries over different scopes is sized for the
-    /// strictest: every group (here `G` = 10 000 series) is stricter than
-    /// groups holding at least 1% of the records (100 groups), which is
-    /// stricter than 5% (20 groups), which is stricter than one value.
-    #[test]
-    fn a_shared_summary_is_sized_for_its_strictest_scope() {
-        let (candidates, per_value) = per_series_kll(AccuracyScope::PerValue);
-        let root = candidates[0].roots[0].clone();
-        let roots = [root.clone(), root];
-        let scoped = |scope| per_value.clone().accuracy_scope(scope);
-        let one_percent = scoped(AccuracyScope::GroupsWithRecordShareAtLeast(0.01));
-        let five_percent = scoped(AccuracyScope::GroupsWithRecordShareAtLeast(0.05));
-        let every_group = scoped(AccuracyScope::WholeResult);
-        for (pair, delta) in [
-            ([per_value.clone(), five_percent.clone()], 0.01 / 20.0),
-            ([five_percent.clone(), one_percent.clone()], 0.01 / 100.0),
-            ([one_percent, every_group], 0.01 / 10_000.0),
-        ] {
-            for targets in [pair.clone(), [pair[1].clone(), pair[0].clone()]] {
-                let resized = resize_for_failure_probability(&roots, &targets, &data()).unwrap();
-                assert_eq!(
-                    kll_failure_probabilities(&resized),
-                    vec![Some(delta); 2],
-                    "{targets:?}"
-                );
-            }
         }
     }
 
@@ -2522,7 +2464,10 @@ mod tests {
             ("quantile(0.99, rate(x[5m]))", true),
             ("quantile by (job) (0.99, rate(x[5m]))", false),
         ] {
-            let candidates = keeping_state(all_candidates(query, &target));
+            let checked = target.clone().accuracy_metric(AccuracyMetric::Rank);
+            let candidates = keeping_state(all_candidates_sized(query, &target, &|roots| {
+                sized_as_pass1(&roots, std::slice::from_ref(&checked), &data)
+            }));
             let selection = select_plan(
                 &candidates,
                 &[entry_with(
@@ -3998,6 +3943,7 @@ mod tests {
             .into_iter()
             .map(|(_, root)| root)
             .collect();
+        let roots = sized_as_pass1(&roots, &[p99_target()], &arriving(rows_per_s));
         let rule_candidates =
             asap_logical_asap_optimization::pass2::asap_aware_cse::pane_candidates(
                 &roots,
@@ -5300,7 +5246,7 @@ mod tests {
         ));
     }
 
-    /// A KLL with `k` = 469, as Stage 3 sizes it from the data, is priced
+    /// A KLL with `k` = 469, as Pass 1 sizes it from the data, is priced
     /// between the measured `k` = 200 and `k` = 1024, linearly in the log
     /// of the state's size; a measured `k` matches exactly whatever failure
     /// probability it was sized for, and a `k` beyond the measured ones
@@ -5399,6 +5345,7 @@ mod tests {
             .into_iter()
             .map(|(_, root)| root)
             .collect();
+            let roots = sized_as_pass1(&roots, &[p99_target()], &arriving(10_000.0));
             let candidates =
                 optimize_physical_asap("L", &roots, &[every_minute()], &arriving(10_000.0), false)
                     .unwrap();

@@ -300,7 +300,7 @@ are ignored, `stage_pipeline`'s default.
   `cpu_core_seconds_per_second` is its nodes' sum. These CPU fields are
   report-only: prices do not read them back.
 - Each `stage3_plan_selection.rejected` entry has a `cause`: a failed check
-  (`failure_probability_resize_failed`, `accuracy_target_missed`,
+  (`accuracy_target_missed`,
   `count_min_weights_not_proven_non_negative`,
   `per_entity_aggregate_not_executable`, `no_accuracy_guarantee`,
   `raw_data_not_retained`, `latency_bound_exceeded`,

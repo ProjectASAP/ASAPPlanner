@@ -1071,45 +1071,43 @@ pub(in crate::search) fn reconstruct_configured_candidate(
     else {
         return Ok(None);
     };
-    // Reuse the accuracy evaluator's size-independent proof after its normal
-    // resizing step. Other consumers can change sizes, but cannot repair this
-    // certified failure of the same complete query dependency subgraph.
+    // Reuse the accuracy evaluator's size-independent proof. Other consumers
+    // can change sizes, but cannot repair this certified failure of the same
+    // complete query dependency subgraph.
     let targets = crate::accuracy_targets(context.entries);
-    if let Ok(sized) = crate::sized_for_failure_probability(&physical, &targets, context.data) {
-        let mut output_index = 0;
-        for (query, root) in sized.roots.iter().enumerate() {
-            let mut outputs = Vec::new();
-            match &context.original_roots[query] {
-                QueryRoot::Operator(_) => {
+    let mut output_index = 0;
+    for (query, root) in physical.roots.iter().enumerate() {
+        let mut outputs = Vec::new();
+        match &context.original_roots[query] {
+            QueryRoot::Operator(_) => {
+                outputs.push(output_index);
+                output_index += 1;
+            }
+            QueryRoot::Scalar(expression) => {
+                expression.map_operator_refs(&mut |node| {
                     outputs.push(output_index);
                     output_index += 1;
-                }
-                QueryRoot::Scalar(expression) => {
-                    expression.map_operator_refs(&mut |node| {
-                        outputs.push(output_index);
-                        output_index += 1;
-                        std::rc::Rc::clone(node)
-                    });
-                }
-            }
-            if let Err(failure) =
-                crate::guarantee_check(query, root, &targets[query], context.data, &context.models)
-            {
-                if failure.size_independent && !outputs.is_empty() {
-                    rejected_queries.push(RejectedQuerySubgraph::from_query_outputs(
-                        selected, &outputs,
-                    )?);
-                    let category = serde_json::to_value(failure.cause)
-                        .ok()
-                        .and_then(|value| value.as_str().map(str::to_owned))
-                        .unwrap_or_else(|| format!("{:?}", failure.cause));
-                    rejections.record(category, &failure.reason);
-                }
+                    std::rc::Rc::clone(node)
+                });
             }
         }
-        if !rejected_queries.is_empty() {
-            return Ok(None);
+        if let Err(failure) =
+            crate::guarantee_check(query, root, &targets[query], context.data, &context.models)
+        {
+            if failure.size_independent && !outputs.is_empty() {
+                rejected_queries.push(RejectedQuerySubgraph::from_query_outputs(
+                    selected, &outputs,
+                )?);
+                let category = serde_json::to_value(failure.cause)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| format!("{:?}", failure.cause));
+                rejections.record(category, &failure.reason);
+            }
         }
+    }
+    if !rejected_queries.is_empty() {
+        return Ok(None);
     }
     Ok(Some(physical))
 }

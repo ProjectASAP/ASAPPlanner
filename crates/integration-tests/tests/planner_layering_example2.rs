@@ -792,14 +792,15 @@ fn stage3_plan_selection_accepts_hll_given_a_distinct_bound() {
     }
 }
 
-/// A bound too large for the precision Pass 1 chose (17 certifies at most
-/// 1,842 distinct items) is met by a larger precision: plan selection
-/// enlarges HLL until its failure probability over the bound at ε = 0.02
-/// meets the target, up to precision 18 (#669b), which certifies up to
-/// 3,791. Past that, up to Example 2's 10M source IPs, classic HLL's
-/// linear-counting contract certifies nothing.
+/// A bound too large for the precision sized for ε alone (17 certifies at
+/// most 1,842 distinct items) is met by a larger precision: Pass 1's sizing
+/// for the failure probability raises HLL's precision until its failure
+/// probability over the bound at ε = 0.02 meets the target, up to precision
+/// 18 (#669b), which certifies up to 3,791; Stage 3 only checks it. Past
+/// that, up to Example 2's 10M source IPs, classic HLL's linear-counting
+/// contract certifies nothing.
 #[test]
-fn stage3_plan_selection_enlarges_hll_for_a_larger_distinct_bound() {
+fn pass1_sizing_enlarges_hll_for_a_larger_distinct_bound() {
     let run = pipeline_with_distinct_bound(Some(3_000));
     for id in hll_only_candidates(&run) {
         assert!(run.cost(id).is_some(), "{id}: {:?}", run.invalid().get(id));
@@ -879,12 +880,12 @@ fn tumbling<'a>(run: &Run, ids: Vec<&'a str>) -> Vec<&'a str> {
         .collect()
 }
 
-/// Plan selection's enlargement reaches a sketch carried by a tumbling-pane
+/// The enlarged precision reaches a sketch carried by a tumbling-pane
 /// `PaneChain` too (#713): Q1's HLL over a bound of 3,000 is valid only at
-/// precision 18, above Pass 1's 17, so a valid tumbling-pane HLL candidate
-/// had its chain's precision enlarged.
+/// precision 18, above the 17 sized for ε alone, so a valid tumbling-pane
+/// HLL candidate carries precision 18 in its chain.
 #[test]
-fn stage3_plan_selection_enlarges_tumbling_pane_hll() {
+fn pass1_sizing_enlarges_tumbling_pane_hll() {
     let run = pipeline_with_distinct_bound(Some(3_000));
     let hll = tumbling(&run, hll_only_candidates(&run));
     assert!(!hll.is_empty(), "a tumbling-pane HLL candidate answers Q1");

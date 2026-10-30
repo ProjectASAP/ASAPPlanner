@@ -96,15 +96,15 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
   whole selection.
 - Each candidate is then either invalid or valid, recorded as a `Rejection`
   with its `cause` (`RejectionCause`) and reason: a failed check
-  (`FailureProbabilityResizeFailed`, `AccuracyTargetMissed`,
+  (`AccuracyTargetMissed`,
   `CountMinWeightsNotProvenNonNegative`, `PerEntityAggregateNotExecutable`,
   `NoAccuracyGuarantee`, `RawDataNotRetained`, `LatencyBoundExceeded`, `LatencyOverRepeatInterval`
   (a repeating query's latency per evaluation is over its repeat interval,
   checked with or without a latency bound), or `OverClusterCapacity` under
   cost model 3) or a loss under the cost model (`Costlier`, `Slower`,
   `MoreMemory`, `NotLowestLatencyOnParetoFront`, `Dominated`,
-  `TiedLostOnEnumerationOrder`). A candidate that cannot be resized for its failure
-  probability is rejected alone.
+  `TiedLostOnEnumerationOrder`). Stage 3 never resizes a summary: a candidate
+  whose Stage 1 sizes miss its composed accuracy target is rejected alone.
 - Usage (`ResourceUsage`) is measured without prices; the `CostModel` in
   `CostInputs` turns it into a choice. Ties keep enumeration order
   under every cost model.

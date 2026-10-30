@@ -76,10 +76,12 @@ bound, without assuming independence, so a sketch shared by several groups
 unknown (generic HLL) stays unmet under every scope with a δ, and top-k
 membership needs its own evidence under every scope.
 
-Plan selection sizes each approximate input of a query with `n` approximate
-inputs for `δ / (n · V)`, so the union bound gives δ over the covered values.
-A summary several queries read is sized for the smallest `δ / (n · V)` among
-its readers. At equal δ and `n`, the scope covering the most values is the
+Pass 1 sizes each approximate input of a candidate with `n` accuracy-budget
+parts for `δ / (n · V)`, so the union bound gives δ over the covered values.
+A candidate several queries reach is sized for the smallest `δ / (n · V)`
+among them, and a build Pass 2 shares among several readers takes the
+strictest reader's size. Stage 3 only checks the composed guarantee; it never
+resizes. At equal δ and `n`, the scope covering the most values is the
 strictest: every group (`G`, when `G` is above 100), then a 1% share (100),
 then a 5% share (20), then a single value (1). A whole-result target with an unbound `G`
 enlarges nothing and stays unmet. A grouped result's `G` is bound by the
@@ -289,9 +291,10 @@ distinct population per evaluation, including all merged panes; the classic
 estimator and independent uniform bucket hashing are the model's
 assumptions. Stage 1 sizes the precision from the query or allocated local
 target and leaves the failure probability symbolic, as
-`classic_hll_failure_probability[p=P,eps=ε](max_distinct[source])`. Stage 3
-binds it from the source's declared bound, enlarges the precision when the
-bound needs it, and uses the normal selection checks. A bound outside the
+`classic_hll_failure_probability[p=P,eps=ε](max_distinct[source])`. Pass 1
+then raises the precision when the source's declared bound needs it (for its
+share of the failure probability), and Stage 3 binds the failure probability
+from that bound in the normal selection checks. A bound outside the
 contract's range gives a failure probability of 1; a missing bound leaves it
 unknown, so the target is not met.
 

@@ -199,7 +199,9 @@ fn assert_no_listed_choice_is_cheaper(document: &Value) -> Vec<Value> {
     choices
 }
 
-/// #509 Example 1: its Pass 1 memo (the listed step) stands for 5 DAGs;
+/// #509 Example 1: its Pass 1 memo (the listed step) stands for 3 DAGs
+/// (Q2's top-k group: exact, Count-Min with a heap and Count Sketch with a
+/// heap);
 /// Q2's summary reads miss its 100 ms latency bound, and no valid DAG is
 /// cheaper than the selection.
 #[test]
@@ -207,7 +209,7 @@ fn example1_no_listed_choice_is_cheaper_than_the_selected_plan() {
     let document = priced_document(&["--example", "planner-layering-1"]);
     let choices = assert_no_listed_choice_is_cheaper(&document);
     assert_eq!(document["memo"]["enumeration"]["step"], "pass1");
-    assert_eq!(choices.len(), 5);
+    assert_eq!(choices.len(), 3);
     assert!(choices
         .iter()
         .any(|c| c["rejection"] == "latency_bound_exceeded"));
@@ -223,7 +225,7 @@ fn ratio_of_quantiles_no_listed_choice_is_cheaper_than_the_selected_plan() {
         let mut args = vec!["--workload", RATIO_OF_QUANTILES_WORKLOAD];
         args.extend_from_slice(enforce);
         let choices = assert_no_listed_choice_is_cheaper(&priced_document(&args));
-        assert!(choices.len() >= 49);
+        assert!(choices.len() >= 25);
     }
 }
 

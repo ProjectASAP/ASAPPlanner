@@ -220,7 +220,7 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
         local_candidate_generation_ms,
         &mut archive,
     );
-    let mut run = memo_run(pruned, found, entries, data);
+    let mut run = memo_run(pruned, found, data);
     run.stage1_logical_asap_optimization = archive.logical;
     run.stage2_physical_asap_optimization = archive.physical;
     run.stage2_pruned = archive.pruned;
@@ -234,7 +234,6 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
 fn memo_run<Id: Clone + std::fmt::Debug>(
     per_computation: PerComputationCandidates<Id>,
     found: crate::search::pipeline::PlanSearchResult,
-    entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
 ) -> Stage1ToStage3Run<Id> {
     let combinations = per_computation.combinations();
@@ -242,9 +241,7 @@ fn memo_run<Id: Clone + std::fmt::Debug>(
         Ok((selection, selected, logical)) => (Ok(selection), Some(selected), Some(logical)),
         Err(error) => (Err(error), None, None),
     };
-    let selected_logical = logical
-        .as_ref()
-        .and_then(|roots| selected_logical(roots, entries, data));
+    let selected_logical = logical.as_ref().map(|roots| selected_logical(roots, data));
     let from_logical = selected.as_ref().map(|s| s.from_logical.clone());
     Stage1ToStage3Run {
         stage1_pass1_per_computation: per_computation,
@@ -267,19 +264,10 @@ fn memo_run<Id: Clone + std::fmt::Debug>(
     }
 }
 
-/// `roots`, the selected candidate's Stage 1 roots, as Stage 3 sized them
-/// for their queries' failure probabilities, with the weight requirements
-/// it confirmed made proofs.
-pub(crate) fn selected_logical(
-    roots: &[QueryRoot],
-    entries: &[QueryWorkloadEntry],
-    data: &DataWorkload,
-) -> Option<Vec<QueryRoot>> {
-    let targets = &crate::accuracy_targets(entries);
-    let sized = crate::resize_for_failure_probability(roots, targets, data).ok()?;
-    Some(asap_types::workload::bounds::with_confirmed_weights(
-        &sized, data,
-    ))
+/// `roots`, the selected candidate's Stage 1 roots, with the weight
+/// requirements Stage 3 confirmed made proofs.
+pub(crate) fn selected_logical(roots: &[QueryRoot], data: &DataWorkload) -> Vec<QueryRoot> {
+    asap_types::workload::bounds::with_confirmed_weights(roots, data)
 }
 
 /// The planner pipeline behind the optimization-pass interface: the

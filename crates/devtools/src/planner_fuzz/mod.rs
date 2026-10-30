@@ -487,7 +487,8 @@ impl Planner {
     /// queries (one root per query, in order): every materialization
     /// assignment implemented and priced, the cheapest selected, with the
     /// same models as [`plan`](Self::plan). Guarantees are composed again
-    /// first, so a derived node carries the guarantee of what it reads.
+    /// first, so a derived node carries the guarantee of what it reads, and
+    /// summaries are sized for their readers as Pass 1 sizes them.
     /// With `last_root_is_key_filter`, the last root is a `Filter` on
     /// group-key columns only and keeps its input's guarantee (whole groups
     /// selected by an exact key keep each remaining row's bound), which
@@ -505,13 +506,25 @@ impl Planner {
         }
         let mut roots = asap_accuracy::propagation::recompose_guarantees(roots)
             .map_err(|e| format!("witness guarantees: {e}"))?;
+        let planning = workload.planning_workload();
+        let entries: Vec<_> = planning.query_workload.entries().collect();
+        // A witness is built outside the memo: size its summaries as Pass 1
+        // sizes a candidate for these readers, which Stage 3 only checks.
+        let targets: Vec<_> = entries
+            .iter()
+            .map(|entry| entry.requirements.accuracy.clone())
+            .collect();
+        roots = asap_accuracy::sizing::with_summaries_sized_for_targets(
+            &roots,
+            &targets,
+            &workload.data,
+        )
+        .map_err(|e| format!("witness sizing: {e}"))?;
         if let (true, Some(last)) = (last_root_is_key_filter, roots.last_mut()) {
             let filter = last.as_operator().ok_or("a scalar root")?;
             let input = filter.operator.children()[0].guarantee.clone();
             *last = QueryRoot::Operator(Rc::new((**filter).clone().with_guarantee(input)));
         }
-        let planning = workload.planning_workload();
-        let entries: Vec<_> = planning.query_workload.entries().collect();
         let plan_selection = self.plan_selection_settings();
         let deployment = workload.deployment();
         let models = PlanningModels::builtin()

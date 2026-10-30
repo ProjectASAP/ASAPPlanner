@@ -225,8 +225,10 @@ impl ClassicHllConfidence {
 /// The smallest precision, at least `at_least`, whose classic failure
 /// probability at `relative_error` over a source of at most `max_distinct`
 /// distinct items is at most `failure_probability`; `at_least` when none up
-/// to 18 is. Plan selection's enlargement (#669b) applies this rule to the
-/// source's bound, Pass 1's sizing ([`hll_precision`]) to a bound of `⌈1/ε⌉`.
+/// to 18 is. Pass 1's sizing for a failure probability
+/// ([`sized_for_failure_probability`](crate::sizing::sized_for_failure_probability))
+/// applies this rule to the source's bound, its sizing for `ε`
+/// ([`hll_precision`]) to a bound of `⌈1/ε⌉`.
 pub fn min_precision(
     relative_error: f64,
     failure_probability: f64,
@@ -246,10 +248,9 @@ pub fn min_precision(
 /// one is about `N²/(2m)`; a certificate for any bound of at least `1/ε`
 /// therefore needs `m ≥ 1/(2ε²δ)`. This is the smallest such precision at
 /// which [`ClassicHllConfidence`] certifies `delta` at `eps` for every
-/// bound up to `⌈1/ε⌉` (18 when none up to 18 does). Plan selection then
-/// binds the source's own bound, and enlarges the precision by the same
-/// rule ([`min_precision`]) when the bound or a smaller failure
-/// probability needs it.
+/// bound up to `⌈1/ε⌉` (18 when none up to 18 does). Pass 1 then raises
+/// the precision by the same rule ([`min_precision`]) when the source's own
+/// bound or a smaller failure probability needs it.
 pub(crate) fn hll_precision(eps: f64, delta: f64) -> u8 {
     if !(eps.is_finite() && eps > 0.0 && delta.is_finite() && delta > 0.0) {
         return 18;

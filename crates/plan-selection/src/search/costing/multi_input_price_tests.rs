@@ -190,8 +190,7 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
                    "n":{"rows_held":3000,"series_count":1,"values_non_negative":true}}
     }))
     .unwrap();
-    let sized = crate::resize_for_failure_probability(&roots, std::slice::from_ref(&target), &data)
-        .unwrap();
+    let sized = crate::sized_as_pass1(&roots, std::slice::from_ref(&target), &data);
     let QueryRoot::Operator(root) = &sized[0] else {
         panic!("operator root")
     };

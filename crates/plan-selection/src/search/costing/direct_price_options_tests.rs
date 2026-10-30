@@ -2,7 +2,7 @@
 //! because their statistics differ from the template's input.
 use super::*;
 use asap_logical_asap_optimization::test_support::lower_promql;
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::properties::{AccuracyScope, AccuracyTarget};
 use asap_types::ir::{Operator, OperatorNode, ProjectItem, ScalarExpr};
 
 use crate::search::candidates::dag::{
@@ -447,8 +447,7 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
             "latency":{"series_count":1,"sample_interval":100,"rows_held":3000,"values_non_negative":true}
         }
     })).unwrap();
-    let sized = crate::resize_for_failure_probability(&roots, std::slice::from_ref(&target), &data)
-        .unwrap();
+    let sized = crate::sized_as_pass1(&roots, std::slice::from_ref(&target), &data);
     let mut configured = PhysicalCandidatesWithCosts::empty_for_tests();
     let QueryRoot::Operator(root) = &sized[0] else {
         panic!("operator")

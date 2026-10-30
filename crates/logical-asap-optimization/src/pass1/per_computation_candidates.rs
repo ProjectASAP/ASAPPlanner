@@ -20,9 +20,11 @@
 //!   `sum` or `count` (`Summary` of a heap family) and the nested sum, a
 //!   grouped `sum` over a `sum` (`ExactAccumulator([Sum])`).
 //! - Summary choices here are unsized families. Attaching them to memo
-//!   groups sizes each one per split of the accuracy budget
-//!   (`CandidateForMemoGroup::accuracy_budget_parts`); Pass 2 inherits sizes or
-//!   takes the strictest shared reader's, and Stage 3 only checks.
+//!   groups creates sized candidates, one per split of the accuracy budget
+//!   (`CandidateForMemoGroup::accuracy_budget_parts`), each sized for ε, its
+//!   budget share and δ over the values its readers' targets cover; Pass 2
+//!   inherits sizes or takes the strictest shared reader's, and Stage 3 only
+//!   checks.
 //! - Candidates are pruned only when provably unable to meet the accuracy
 //!   requirement or to run, or when the exact candidate provably dominates
 //!   them (a PromQL top-k's heap over its instant vector, one row per item:
@@ -77,11 +79,13 @@
 //! summary below its root, when its guarantee is not exact), each is sized
 //! for an equal share of that requirement: `ε/n` (a relative error
 //! `1 − (1 + ε)^{−1/n}`) and `δ/n` for `n` inputs (#669b). Only the inputs
-//! approximate in this candidate count. Stage 1 sizes for ε and δ per output
-//! value; plan selection enlarges the parameters that depend on δ for a
-//! target over the whole result. These local sizes seed the memo; shared
-//! state configurations must satisfy the requirements of their selected
-//! consumers and are checked during joint selection.
+//! approximate in this candidate count. This composition sizes for ε and δ
+//! per output value; attached to the memo groups, each candidate's
+//! approximate inputs are sized for the values its readers' targets cover
+//! (`δ / (n · V)`,
+//! [`generate_per_computation_logical_memo_candidates`](crate::pass1::logical_memo_candidates::generate_per_computation_logical_memo_candidates)),
+//! their final sizes. Pass 2 inherits them or takes the strictest shared
+//! reader's, and Stage 3 only checks the composed accuracy.
 //!
 //! Every node of the candidate gets a theoretical guarantee, composed with
 //! the built-in accuracy model through operators (#669): exact over exact

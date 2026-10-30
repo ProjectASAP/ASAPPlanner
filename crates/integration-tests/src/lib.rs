@@ -369,6 +369,14 @@ pub mod planning {
             // `run_explicit_candidates` does.
             let roots = asap_accuracy::propagation::recompose_guarantees(roots)
                 .unwrap_or_else(|error| panic!("{name} composes guarantees: {error}"));
+            // Composed outside the memo: sized as Pass 1 sizes a candidate.
+            let targets: Vec<_> = entries
+                .iter()
+                .map(|entry| entry.requirements.accuracy.clone())
+                .collect();
+            let roots =
+                asap_accuracy::sizing::with_summaries_sized_for_targets(&roots, &targets, data)
+                    .unwrap_or_else(|error| panic!("{name} sizes its summaries: {error}"));
             let mut plans = asap_physical_asap_optimization::optimize_physical_asap(
                 name,
                 &roots,

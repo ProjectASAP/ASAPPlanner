@@ -275,6 +275,13 @@ fn independent_kll_cost(
         .into_iter()
         .map(|(_, root)| root)
         .collect();
+    // Composed outside the memo: sized as Pass 1 sizes a candidate.
+    let targets: Vec<_> = entries
+        .iter()
+        .map(|entry| entry.requirements.accuracy.clone())
+        .collect();
+    let roots =
+        asap_accuracy::sizing::with_summaries_sized_for_targets(&roots, &targets, data).unwrap();
     let mut settings = CostInputs::default();
     settings.cost_model = CostModel::UsageOverTime(ResourceUnitCost::aws_fargate_us_east_1(
         settings.resource_speed,
