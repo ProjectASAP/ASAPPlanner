@@ -539,7 +539,7 @@ pub enum PerComputationCandidateError {
     AssignedPhysicalAnnotation,
     #[error("logical candidate input already contains ASAP operators")]
     ContainsAsap,
-    /// `root` (the root id's `Debug` form) and `measure` locate the target;
+    /// `root` (the query's index in the workload) and `measure` locate the target;
     /// [`computation_candidates_for_intent`] alone leaves them `None`.
     #[error(
         "approximate accuracy of root {}, measure {} requires epsilon and delta in (0, 1)",

@@ -786,7 +786,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
             node.output_state.timing = phase;
         }
         for edge in &mut dag.edges {
-            edge.data_state().timing = phase;
+            edge.data_state_mut().timing = phase;
         }
         let store = with_table(
             Default::default(),
