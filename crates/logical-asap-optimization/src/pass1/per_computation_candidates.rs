@@ -2316,10 +2316,11 @@ mod tests {
         QUOTIENT_OPERAND_DOMAINS,
     };
     use asap_accuracy::estimators::local_guarantee;
-    use asap_accuracy::propagation::{
+    use asap_accuracy::propagation::operand_guarantee;
+    use asap_accuracy::test_support::{
         composed_guarantee, estimate_bound_over_raw_data_samples, estimate_has_bound,
-        estimates_raw_data_samples_of, fold_stats, operand_guarantee, scalar_guarantee,
-        source_distinct_guarantee, stream_norm,
+        estimates_raw_data_samples_of, fold_stats, scalar_guarantee, source_distinct_guarantee,
+        stream_norm,
     };
     use asap_types::ir::properties::guarantee::{
         AccuracyGuarantee, AccuracyMetric, BoundExpr, ProbabilityExpr,

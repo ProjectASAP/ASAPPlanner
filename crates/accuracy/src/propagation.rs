@@ -398,7 +398,7 @@ fn selected_group_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
 /// selection states it over a whole result of `G` points as `G·δ`.
 ///
 /// [`AccuracyScope::PerValue`]: asap_types::ir::properties::AccuracyScope::PerValue
-pub fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
+pub(crate) fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
     if let Some(guarantee) = selected_group_guarantee(node) {
         return Some(guarantee);
     }
@@ -679,7 +679,7 @@ fn merged_panes_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarante
 ///
 /// `None` for any other summary, or one over computed rows, whose distinct
 /// items the source's bound does not bound.
-pub fn source_distinct_guarantee(
+pub(crate) fn source_distinct_guarantee(
     family: &FieldDataType,
     query: &SketchStatistic,
     input: &Rc<OperatorNode>,
@@ -710,7 +710,10 @@ pub fn source_distinct_guarantee(
 /// (`PerEntity`) they are one series' samples in the window: the steps of a
 /// subquery with an explicit resolution, `⌈range / resolution⌉`. `None`
 /// when that count is not in the query.
-pub fn fold_stats(reduction: &Reduction, input: &Rc<OperatorNode>) -> Option<PropagationStats> {
+pub(crate) fn fold_stats(
+    reduction: &Reduction,
+    input: &Rc<OperatorNode>,
+) -> Option<PropagationStats> {
     let sign_statistic =
         estimates_raw_data_samples_of(input).map(|metric| raw_data_samples_sign_statistic(&metric));
     let stats = match reduction {
@@ -749,7 +752,7 @@ pub fn fold_stats(reduction: &Reduction, input: &Rc<OperatorNode>) -> Option<Pro
 /// from its tumbling panes: it is one of them, or between two of them, so it
 /// shares their sign. Anything else (rate, arithmetic, other
 /// functions) ends it. Only the sign of the values is read from it.
-pub fn estimates_raw_data_samples_of(node: &OperatorNode) -> Option<String> {
+pub(crate) fn estimates_raw_data_samples_of(node: &OperatorNode) -> Option<String> {
     match &node.operator {
         Operator::NonASAP(NonASAPOp::TimeRange { child, .. }) => {
             estimates_raw_data_samples_of(child)
@@ -1119,7 +1122,7 @@ pub fn project_column_guarantee(
 /// [`lipschitz_guarantee`]. Any other expression (a comparison, a rounding,
 /// a non-linear function) is exact over exact operands and has none
 /// otherwise.
-pub fn scalar_guarantee(
+pub(crate) fn scalar_guarantee(
     expr: &ScalarExpr,
     column: &dyn Fn(usize) -> Option<AccuracyGuarantee>,
 ) -> Option<AccuracyGuarantee> {
@@ -1208,7 +1211,7 @@ pub fn operand_guarantee(node: &Rc<OperatorNode>) -> Option<AccuracyGuarantee> {
 /// row count for a constant weight `c`. `None` for any other weight (a
 /// computed value such as `m * 1000` or `rate(…)`), several summaries or
 /// sources, or none.
-pub fn stream_norm(node: &Rc<OperatorNode>) -> Option<StreamNorm> {
+pub(crate) fn stream_norm(node: &Rc<OperatorNode>) -> Option<StreamNorm> {
     let summaries: Vec<_> = OperatorNode::reachable(node)
         .into_iter()
         .filter(|node| {
@@ -1587,7 +1590,7 @@ fn binary_guarantee(
 /// Whether the default accuracy model's bound for `family` answers `query`
 /// over `update`. A heap sketch's bound is per item frequency, not Top-K
 /// membership; a Count-Min bound assumes non-negative weights.
-pub fn estimate_has_bound(
+pub(crate) fn estimate_has_bound(
     family: &FieldDataType,
     update: &SummaryUpdate,
     query: &SketchStatistic,
@@ -1645,7 +1648,7 @@ fn interpolation_guarantee(
 /// guarantee with the bound gated on that metric's sign
 /// ([`raw_data_samples_sign_statistic`]), which plan selection binds to 1 when the
 /// metric is declared a counter. `None` for any other estimate.
-pub fn estimate_bound_over_raw_data_samples(
+pub(crate) fn estimate_bound_over_raw_data_samples(
     family: &FieldDataType,
     update: &SummaryUpdate,
     query: &SketchStatistic,

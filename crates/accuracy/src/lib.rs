@@ -24,6 +24,8 @@ pub mod function_rules;
 mod model;
 pub mod propagation;
 pub mod sizing;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 pub use budget::per_input_target;
 pub use evidence::{OperandDomain, PropagationStats};
