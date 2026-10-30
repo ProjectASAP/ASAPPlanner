@@ -18,8 +18,9 @@ pub struct PrunedCandidate<C> {
     pub reason: PruneReason,
 }
 
-/// Why a stage removed a candidate. The first six are Pass 1's: the
-/// candidate cannot compute its measure, or the deployment cannot run it.
+/// Why a stage removed a candidate. The first seven are Pass 1's: the
+/// candidate cannot compute its measure, the deployment cannot run it, or
+/// no query that reads it can meet its accuracy target with it.
 /// The rest are Stage 2's: the physical candidate cannot be built, used or
 /// kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -50,6 +51,16 @@ pub enum PruneReason {
     /// aggregate's input, where an item's rows repeat, is offered (Pass 1's
     /// fused computation).
     TopKHeapOverOneRowPerItem,
+    /// Pass 1: for every query that reads its memo group, the query's
+    /// output has no error bound that can meet the query's accuracy target
+    /// at any summary size: guarantee propagation has no rule above it
+    /// (e.g. a rank error through `avg`, or a value `HAVING` above an
+    /// estimate), its bound stays unknown once the data workload's
+    /// declarations are applied (e.g. a relative error through `avg` over
+    /// samples not declared non-negative), or its bound is in a metric the
+    /// target does not accept. Pruned only when the deployment's accuracy
+    /// model and evidence cannot accept an output without its guarantee.
+    NoErrorBoundForQueryTarget,
     /// Stage 2: the executor cannot run its operator node, an exact
     /// per-entity `Aggregate` (a per-series range reduction over raw data
     /// samples) with more than one measure, a measure without an exact

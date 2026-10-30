@@ -235,7 +235,9 @@
 // accuracy guarantee, and candidates are compared on cost alone;
 // executability checks still apply. `--enforce-accuracy-guarantees` clears
 // it, and Stage 3 rejects an output whose guarantee does not meet its
-// query's target, as `plan_installable` does with the default models. The document's top-level `accuracy_guarantees` is
+// query's target, as `plan_installable` does with the default models; Pass 1
+// then also prunes each summary with which no query reading it can meet its
+// target (`NoErrorBoundForQueryTarget`). The document's top-level `accuracy_guarantees` is
 // `"ignored"` or `"enforced"`.
 // `--sample-interval-ms` is the sample interval declared for every metric the
 // PromQL queries read (default 15000). `--series-count <n>`,

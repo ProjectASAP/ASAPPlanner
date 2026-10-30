@@ -11,19 +11,22 @@ use crate::time_series;
 use asap_executor::physical_planner::compile;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, Value};
+use asap_logical_asap_optimization::pass1::per_computation_candidates::HowToComputeAggregateMeasure;
 use asap_planner::{
-    plan_installable, CostInputs, DeploymentCapabilities, FrontendInput, InstallablePlan,
-    InstallablePlanError, MaterializedView, MaterializedViewRefresh, OperatorKind,
+    plan_installable, run_planning, CostInputs, DeploymentCapabilities, FrontendInput,
+    InstallablePlan, InstallablePlanError, MaterializedView, MaterializedViewRefresh, OperatorKind,
     OptimizationInput, OptimizationPass, OptimizeError, PhysicalASAPDAG, PlanOutput,
-    PlanningModels, PlanningWorkload, SelectedPlanReport, SelectionBox, Stage1ToStage3Pass,
-    UserInput,
+    PlanSearchSettings, PlanningModels, PlanningWorkload, SelectedPlanReport, SelectionBox,
+    Stage1ToStage3Pass, UserInput,
 };
+use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::ir::{
     apply_materialization_timings_to_roots, split_shared_by_timing, ASAPOp,
     MaterializationAssignment, OperatorNode, QueryRoot,
 };
 use asap_types::physical::{Materialization, Medium};
+use asap_types::stages::PruneReason;
 use futures::{executor::block_on, StreamExt};
 use std::collections::HashMap;
 use std::ops::Bound;
@@ -1890,14 +1893,72 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
 
 /// Without a non-negative declaration, relative sketch error cannot propagate
 /// through the average, so this no-raw deployment has no valid plan: plan
-/// selection selects none. Today's engine cannot prove the catalog
-/// infeasible within its budget, so it reports no plan by the deadline
-/// rather than an infeasible catalog (early query pruning, which proved it,
-/// is gone; #1047 P6b).
+/// selection selects none. Pass 1 prunes the quantile sketches for that
+/// reason (`NoErrorBoundForQueryTarget`) and Stage 2 the exact candidates,
+/// which scan raw data at query time.
 #[tokio::test]
 async fn an_undeclared_gauges_merged_ddsketch_panes_get_no_relative_bound_through_avg() {
     let error = plan_p99_avg(false).await.expect_err("no valid plan");
     assert_plan_selection_selected_none(&error);
+    // Pass 1 prunes both quantile sketches for that reason: DDSketch's
+    // relative bound does not pass through the average of an undeclared
+    // gauge, and no rule carries KLL's rank bound through it.
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let models = PlanningModels::builtin().with_deployment_capabilities(&capabilities);
+    let no_bound = pass1_pruned_for_no_error_bound(&p99_avg_workload(false), models);
+    assert!(
+        no_bound.contains(&"DDSketch".to_string()) && no_bound.contains(&"Kll".to_string()),
+        "{no_bound:?}"
+    );
+    // Declared non-negative, DDSketch's bound passes through the average.
+    let no_bound = pass1_pruned_for_no_error_bound(&p99_avg_workload(true), models);
+    assert!(!no_bound.contains(&"DDSketch".to_string()), "{no_bound:?}");
+}
+
+/// The summaries Pass 1 pruned planning `workload` (PromQL) with `models`
+/// because no query reading them can meet its target
+/// ([`PruneReason::NoErrorBoundForQueryTarget`]), as the facade's planning
+/// run reports them (`MemoSteps::pass1_pruned_candidates`): each family's
+/// name (e.g. `"Kll"`).
+fn pass1_pruned_for_no_error_bound(
+    workload: &PlanningWorkload,
+    models: PlanningModels<'_>,
+) -> Vec<String> {
+    let roots = asap_frontend_promql::lower_promql_query_workload(workload)
+        .unwrap()
+        .into_iter()
+        .map(|root| match root {
+            QueryRoot::Operator(node) => {
+                QueryRoot::Operator(with_promql_series_identity(&node).unwrap_or(node))
+            }
+            scalar => scalar,
+        })
+        .collect();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap_or_default();
+    let run = run_planning(
+        roots,
+        &entries,
+        &data,
+        models,
+        PlanSearchSettings {
+            time_limit_ms: Some(5_000),
+        },
+    )
+    .unwrap();
+    run.memo_steps
+        .expect("the memo after Pass 1")
+        .pass1_pruned_candidates
+        .iter()
+        .filter(|pruned| pruned.reason == PruneReason::NoErrorBoundForQueryTarget)
+        .filter_map(|pruned| match &pruned.candidate {
+            HowToComputeAggregateMeasure::Summary(family) => Some(format!("{family:?}")),
+            _ => None,
+        })
+        .collect()
 }
 
 /// `error` says plan selection found no valid plan: no candidate is valid,
@@ -2078,6 +2139,20 @@ async fn ignoring_accuracy_guarantees_selects_a_sketch_plan_that_runs() {
         .await
         .expect_err("no candidate is valid without the setting");
     assert_plan_selection_selected_none(&error.to_string());
+    // Pass 1 prunes every quantile sketch for it: no rule carries a rank
+    // bound through the average, and a relative one does not meet a rank
+    // target. With the setting, Stage 3 may accept an output without its
+    // guarantee, so Pass 1 prunes none.
+    let models = PlanningModels::builtin().with_deployment_capabilities(&capabilities);
+    let no_bound = pass1_pruned_for_no_error_bound(&workload, models);
+    assert!(
+        no_bound.contains(&"DDSketch".to_string()) && no_bound.contains(&"Kll".to_string()),
+        "{no_bound:?}"
+    );
+    assert_eq!(
+        pass1_pruned_for_no_error_bound(&workload, models.with_ignore_accuracy_guarantees(true)),
+        Vec::<String>::new()
+    );
     // With it.
     let (installed, report) = plan(true).await.expect("a sketch plan is selected");
     // A per-series KLL or DDSketch plan.
