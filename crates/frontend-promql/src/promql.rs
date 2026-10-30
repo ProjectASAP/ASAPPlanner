@@ -199,34 +199,25 @@ pub(crate) fn value_aggregation_metrics(
     query: &str,
 ) -> Result<std::collections::BTreeSet<(&'static str, String)>> {
     fn collect(expr: &Expr, out: &mut std::collections::BTreeSet<(&'static str, String)>) {
-        match expr {
-            Expr::Paren(p) => collect(&p.expr, out),
-            Expr::Unary(u) => collect(&u.expr, out),
-            Expr::Subquery(s) => collect(&s.expr, out),
-            Expr::Aggregate(a) => {
-                let op = a.op.id();
-                let aggregation = [
-                    (token::T_SUM, "sum"),
-                    (token::T_AVG, "avg"),
-                    (token::T_QUANTILE, "quantile"),
-                    (token::T_STDDEV, "stddev"),
-                    (token::T_STDVAR, "stdvar"),
-                ]
-                .into_iter()
-                .find_map(|(id, name)| (id == op).then_some(name));
-                if let Some(aggregation) = aggregation {
-                    let mut metrics = Vec::new();
-                    collect_metric_names(&a.expr, &mut metrics);
-                    out.extend(metrics.into_iter().map(|m| (aggregation, m)));
-                }
-                collect(&a.expr, out);
+        if let Expr::Aggregate(a) = expr {
+            let op = a.op.id();
+            let aggregation = [
+                (token::T_SUM, "sum"),
+                (token::T_AVG, "avg"),
+                (token::T_QUANTILE, "quantile"),
+                (token::T_STDDEV, "stddev"),
+                (token::T_STDVAR, "stdvar"),
+            ]
+            .into_iter()
+            .find_map(|(id, name)| (id == op).then_some(name));
+            if let Some(aggregation) = aggregation {
+                let mut metrics = Vec::new();
+                collect_metric_names(&a.expr, &mut metrics);
+                out.extend(metrics.into_iter().map(|m| (aggregation, m)));
             }
-            Expr::Binary(b) => {
-                collect(&b.lhs, out);
-                collect(&b.rhs, out);
-            }
-            Expr::Call(c) => c.args.args.iter().for_each(|a| collect(a, out)),
-            _ => {}
+        }
+        for child in children(expr) {
+            collect(child, out);
         }
     }
     let ast = parser::parse(query).map_err(LoweringError::Parse)?;
@@ -247,27 +238,15 @@ fn call_argument_metrics(
         functions: &[&'static str],
         out: &mut std::collections::BTreeSet<(&'static str, String)>,
     ) {
-        match expr {
-            Expr::Paren(p) => collect(&p.expr, functions, out),
-            Expr::Unary(u) => collect(&u.expr, functions, out),
-            Expr::Subquery(s) => collect(&s.expr, functions, out),
-            Expr::Aggregate(a) => collect(&a.expr, functions, out),
-            Expr::Binary(b) => {
-                collect(&b.lhs, functions, out);
-                collect(&b.rhs, functions, out);
+        if let Expr::Call(c) = expr {
+            if let Some(&function) = functions.iter().find(|&&f| f == c.func.name) {
+                let mut metrics = Vec::new();
+                collect_metric_names(expr, &mut metrics);
+                out.extend(metrics.into_iter().map(|m| (function, m)));
             }
-            Expr::Call(c) => {
-                let function = functions.iter().find(|&&f| f == c.func.name).copied();
-                for arg in &c.args.args {
-                    if let Some(function) = function {
-                        let mut metrics = Vec::new();
-                        collect_metric_names(arg, &mut metrics);
-                        out.extend(metrics.into_iter().map(|m| (function, m)));
-                    }
-                    collect(arg, functions, out);
-                }
-            }
-            _ => {}
+        }
+        for child in children(expr) {
+            collect(child, functions, out);
         }
     }
     let mut calls = std::collections::BTreeSet::new();
@@ -369,32 +348,33 @@ fn check_depth(expr: &Expr, budget: usize) -> Result<()> {
             "query nesting exceeds the {MAX_DEPTH}-level limit"
         )));
     };
+    for child in children(expr) {
+        check_depth(child, budget)?;
+    }
+    if let Expr::Aggregate(a) = expr {
+        if let Some(p) = &a.param {
+            check_depth(p, budget)?;
+        }
+    }
+    Ok(())
+}
+
+/// The sub-expressions of `expr`, in source order. An aggregate's parameter
+/// (`k`, `φ`, a label) is not included: callers that need it read it directly.
+fn children(expr: &Expr) -> Vec<&Expr> {
     match expr {
-        Expr::Aggregate(a) => {
-            check_depth(&a.expr, budget)?;
-            if let Some(p) = &a.param {
-                check_depth(p, budget)?;
-            }
-        }
-        Expr::Unary(u) => check_depth(&u.expr, budget)?,
-        Expr::Binary(b) => {
-            check_depth(&b.lhs, budget)?;
-            check_depth(&b.rhs, budget)?;
-        }
-        Expr::Paren(p) => check_depth(&p.expr, budget)?,
-        Expr::Subquery(s) => check_depth(&s.expr, budget)?,
-        Expr::Call(c) => {
-            for arg in &c.args.args {
-                check_depth(arg, budget)?;
-            }
-        }
+        Expr::Aggregate(a) => vec![&a.expr],
+        Expr::Unary(u) => vec![&u.expr],
+        Expr::Paren(p) => vec![&p.expr],
+        Expr::Subquery(s) => vec![&s.expr],
+        Expr::Binary(b) => vec![&b.lhs, &b.rhs],
+        Expr::Call(c) => c.args.args.iter().map(|a| a.as_ref()).collect(),
         Expr::MatrixSelector(_)
         | Expr::VectorSelector(_)
         | Expr::NumberLiteral(_)
         | Expr::StringLiteral(_)
-        | Expr::Extension(_) => {}
+        | Expr::Extension(_) => vec![],
     }
-    Ok(())
 }
 
 fn walk(expr: &Expr) -> Result<Unresolved> {
@@ -1383,20 +1363,9 @@ fn collect_metric_names(expr: &Expr, out: &mut Vec<String>) {
                 out.push(metric);
             }
         }
-        Expr::Paren(p) => collect_metric_names(&p.expr, out),
-        Expr::Unary(u) => collect_metric_names(&u.expr, out),
-        Expr::Subquery(s) => collect_metric_names(&s.expr, out),
-        Expr::Aggregate(a) => collect_metric_names(&a.expr, out),
-        Expr::Binary(b) => {
-            collect_metric_names(&b.lhs, out);
-            collect_metric_names(&b.rhs, out);
-        }
-        Expr::Call(c) => c
-            .args
-            .args
-            .iter()
-            .for_each(|a| collect_metric_names(a, out)),
-        _ => {}
+        _ => children(expr)
+            .into_iter()
+            .for_each(|child| collect_metric_names(child, out)),
     }
 }
 
