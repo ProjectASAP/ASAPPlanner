@@ -1,5 +1,6 @@
 use std::rc::Rc;
 
+use datafusion::logical_expr::utils::{split_binary, split_conjunction};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
 use asap_frontend_common::UnresolvedScalar as Unresolved;
@@ -10,21 +11,6 @@ use crate::error::SqlError as LoweringError;
 
 use super::types::{cast_target, scalar_value_to_asap};
 use super::SqlLowerer;
-
-pub(super) fn split_conjuncts(expr: &Expr) -> Vec<&Expr> {
-    match expr {
-        Expr::BinaryExpr(BinaryExpr {
-            left,
-            op: Operator::And,
-            right,
-        }) => {
-            let mut v = split_conjuncts(left);
-            v.extend(split_conjuncts(right));
-            v
-        }
-        _ => vec![expr],
-    }
-}
 
 impl SqlLowerer<'_> {
     /// Translate a DataFusion `Expr` to the name-based scalar tree. Every
@@ -73,13 +59,13 @@ impl SqlLowerer<'_> {
 
             Expr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
                 Operator::And => {
-                    let parts = split_conjuncts(expr);
+                    let parts = split_conjunction(expr);
                     let lowered: Result<Vec<_>, _> =
                         parts.iter().map(|e| self.lower_expr(e)).collect();
                     Ok(Unresolved::BoolAnd(lowered?))
                 }
                 Operator::Or => {
-                    let parts = split_disjuncts(expr);
+                    let parts = split_binary(expr, Operator::Or);
                     let lowered: Result<Vec<_>, _> =
                         parts.iter().map(|e| self.lower_expr(e)).collect();
                     Ok(Unresolved::BoolOr(lowered?))
@@ -308,21 +294,6 @@ impl SqlLowerer<'_> {
             right: Box::new(self.lower_expr(right)?),
             semantics: ExprSemantics::Sql,
         })
-    }
-}
-
-pub(super) fn split_disjuncts(expr: &Expr) -> Vec<&Expr> {
-    match expr {
-        Expr::BinaryExpr(BinaryExpr {
-            left,
-            op: Operator::Or,
-            right,
-        }) => {
-            let mut v = split_disjuncts(left);
-            v.extend(split_disjuncts(right));
-            v
-        }
-        _ => vec![expr],
     }
 }
 
