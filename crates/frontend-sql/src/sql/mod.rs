@@ -1706,8 +1706,8 @@ fn conditional_count_arm(expr: &Expr) -> Option<(&Expr, &Expr)> {
 /// (issue #225) as flat data (`NATIVE_FUNCTIONS`); what stays here is
 /// call-site logic that isn't a function of the name alone — the DISTINCT
 /// modifier rule, the "reducer argument must be a bare column" rule
-/// (`reducer_col`), φ extraction from a literal argument, and the ambient
-/// `AccuracyTarget`. `resolve_root` resolves `col` to a positional
+/// (`reducer_col`), φ extraction from a literal argument, and attaching
+/// `accuracy` to approximate intents. `resolve_root` resolves `col` to a positional
 /// `ColumnId`; the output name (DataFusion's own, e.g.
 /// `"sum(metrics.bytes)"`) is threaded separately as `Aggregate.output_names`,
 /// not carried here.
