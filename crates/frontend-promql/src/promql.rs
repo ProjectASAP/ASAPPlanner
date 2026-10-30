@@ -596,7 +596,7 @@ fn range_fn_over_subquery(call: &Call) -> Result<Option<Unresolved>> {
         "distinct_over_time" => (InnerFunc::Cardinality, 0),
         "entropy_over_time" => (InnerFunc::FrequencyEntropy, 0),
         "l2_over_time" => (InnerFunc::FrequencyL2, 0),
-        "quantile_over_time" => (InnerFunc::Quantile(quantile_param(num_arg(call, 0)?)?), 1),
+        "quantile_over_time" => (InnerFunc::Quantile(num_arg(call, 0)?), 1),
         "changes" => (InnerFunc::Changes, 0),
         "delta" => (InnerFunc::Delta, 0),
         "idelta" => (InnerFunc::IDelta, 0),
@@ -751,7 +751,7 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
     } else if op == token::T_STDVAR {
         Outer::Plain(OuterIntent::Variance)
     } else if op == token::T_QUANTILE {
-        Outer::Plain(OuterIntent::Quantile(quantile_param(num_param(agg)?)?))
+        Outer::Plain(OuterIntent::Quantile(num_param(agg)?))
     } else {
         return Err(LoweringError::UnsupportedAggregateOp(format!(
             "aggregate token {op}"
@@ -915,7 +915,7 @@ fn walk_histogram(call: &Call) -> Result<Unresolved> {
         return walk_histogram_quantiles(call);
     }
     if call.func.name == "histogram_quantile" {
-        let phi = quantile_param(num_arg(call, 0)?)?;
+        let phi = num_arg(call, 0)?;
         let arg_expr = arg(call, 1)?;
         // Two lowerings of `histogram_quantile(φ, …)`:
         //  - classic `le`-bucket form → `HistogramQuantile`, exact interpolation
@@ -993,7 +993,7 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
     let sketchable = histogram_arg_is_sketchable(vec_expr)?;
     let branches = (2..call.args.args.len())
         .map(|i| {
-            let phi = quantile_param(num_arg(call, i)?)?;
+            let phi = num_arg(call, i)?;
             let child = walk(vec_expr)?;
             // Each branch aliases its value column to "value" (not the
             // intent-keyed default) so `Concat` — which derives its schema
@@ -1665,7 +1665,7 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
             })
         }
         "quantile_over_time" => {
-            let phi = quantile_param(num_arg(call, 0)?)?;
+            let phi = num_arg(call, 0)?;
             let (metric, matchers, window, shift) = extract_matrix(arg(call, 1)?)?;
             Ok(Inner {
                 metric,
@@ -2369,11 +2369,6 @@ fn ratio_param(agg: &AggregateExpr) -> Result<f64> {
 }
 
 /// Preserve the full Prometheus quantile parameter domain, including special values.
-fn quantile_param(q: f64) -> Result<f64> {
-    // Prometheus returns NaN/-Inf/+Inf for these parameters at execution time.
-    Ok(q)
-}
-
 fn binop(id: token::TokenId) -> Result<BinaryOpKind> {
     Ok(if id == token::T_ADD {
         BinaryOpKind::Arithmetic(ArithmeticOpKind::Add)
