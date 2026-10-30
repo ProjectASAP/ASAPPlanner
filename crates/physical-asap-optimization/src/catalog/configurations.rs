@@ -68,8 +68,8 @@ pub enum ConfigurationError {
 }
 
 /// Each operator node of `source` with every timing and materialization
-/// Stage 2 allows, and its execution-scope copies. `query_roots` are the
-/// memo's; their group references are `source`'s output references.
+/// Stage 2 allows, one candidate each. `query_roots` are the memo's; their
+/// group references are `source`'s output references.
 pub fn enumerate_candidate_configurations_before(
     source: &CandidateInventory,
     query_roots: &[QueryRoot<MemoGroupId>],
@@ -204,7 +204,7 @@ pub fn enumerate_candidate_configurations_before(
             ));
         }
         // Configurations the deployment cannot run are not generated; each is
-        // recorded as pruned, copy 0 standing for its scope copies.
+        // recorded as pruned.
         let group = source.operator_nodes_of_candidates_for_memo_groups[source_id].group();
         let mut prune_modes = |reason, applies: &dyn Fn(ExecutionTiming) -> bool| {
             modes.retain(|&(materialization, timing)| {
@@ -216,7 +216,6 @@ pub fn enumerate_candidate_configurations_before(
                             operator_node: OperatorNodeOfCandidateForMemoGroupId(source_id),
                             timing,
                             materialization,
-                            scope_copy: 0,
                         },
                         reason,
                     });
@@ -377,45 +376,8 @@ pub fn enumerate_candidate_configurations_before(
     );
     result.pruned_candidates = pruned_candidates;
     super::validate_candidates(&result).map_err(|error| invalid(&error))?;
-    // Repeated identical workload entries and identical logical outputs have
-    // identical timing, accuracy and pricing requirements. Their request counts
-    // remain in the evaluator, but they do not require distinct binding scopes.
-    let mut context_ids = std::collections::HashMap::new();
-    let mut output_contexts = Vec::new();
-    for (output, root) in source.query_output_nodes.iter().enumerate() {
-        let producer_candidates: Vec<_> = root.iter().map(|id| id.0).collect();
-        let key = serde_json::to_string(&(&entries[output_queries[output]], producer_candidates))
-            .map_err(|error| invalid(&error.to_string()))?;
-        let next = context_ids.len();
-        output_contexts.push(*context_ids.entry(key).or_insert(next));
-    }
-    let mut uses = vec![std::collections::HashSet::new(); source_count];
-    for (consumer, inputs) in source.producer_nodes_per_input.iter().enumerate() {
-        super::check_deadline(deadline)?;
-        let group = source.operator_nodes_of_candidates_for_memo_groups[consumer].group();
-        for (position, input) in inputs.iter().enumerate() {
-            for producer in input {
-                uses[producer.0].insert((group, position));
-            }
-        }
-    }
-    let mut root_uses = vec![std::collections::HashSet::new(); source_count];
-    for (output, root) in source.query_output_nodes.iter().enumerate() {
-        for candidate in root {
-            root_uses[candidate.0].insert(output_contexts[output]);
-        }
-    }
-    let original_uses: Vec<_> = uses
-        .iter()
-        .zip(root_uses)
-        .map(|(uses, roots)| uses.len() + roots.len())
-        .collect();
-    super::scopes::expand_execution_scopes_before(
-        result,
-        &original_uses,
-        &output_contexts,
-        deadline,
-    )
+    super::check_deadline(deadline)?;
+    Ok(result)
 }
 
 /// Whether the executor can run `node`: false only for an exact per-entity

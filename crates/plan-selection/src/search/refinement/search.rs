@@ -266,7 +266,7 @@ fn search_with_solver(
             // Seed with one copy per configuration to avoid spending the warm-start
             // budget on interchangeable execution bindings. The certified search
             // retains every copy, including when this restricted seed is infeasible.
-            use asap_types::stages::ReaderConstraint;
+            use crate::search::candidates::dag::ReaderConstraint;
             let mut extra_copies: Vec<_> = heuristic
                 .reader_constraints
                 .iter()
@@ -1060,7 +1060,7 @@ mod tests {
     // certified search when two incompatible query contexts need both copies.
     #[test]
     fn baseline_scope_restriction_falls_back_to_complete_graph() {
-        use asap_types::stages::ReaderConstraint;
+        use crate::search::candidates::dag::ReaderConstraint;
         let mut graph = choices(&[1.0, 1.0]);
         graph.query_roots.push(graph.query_roots[0].clone());
         graph.reader_constraints = vec![

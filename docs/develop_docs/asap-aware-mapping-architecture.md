@@ -52,7 +52,7 @@ LogicalASAPMemoCandidates
 PhysicalASAPMemoCandidates (operator nodes per timing/materialization + pruned_candidates)
   │  asap_plan_selection::select_plan (with Stage 2's AssignmentRealizer) Stage 3
   ▼
-Selection (selected_candidates, cost, accepted_accuracy_per_query, search_report)
+Selection (selected_dag, cost, accepted_accuracy_per_query, search_report)
 ```
 
 `asap_planner::run_planning` runs all of it over lowered roots: Pass 1 once,

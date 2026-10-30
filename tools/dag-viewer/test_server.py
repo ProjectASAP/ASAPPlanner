@@ -382,13 +382,13 @@ class PlanEndpointTests(unittest.TestCase):
         self.assertEqual(document["search"], "candidate-connections")
         self.assertEqual(document["workload"]["data_workload"]["sources"]["m"]["series_count"], 100)
         self.assertFalse(document["deployment_capabilities"]["raw_data_retained"])
-        self.assertIsNotNone(document["stage3_plan_selection"]["selected_candidates"])
+        self.assertIsNotNone(document["stage3_plan_selection"]["selected_dag"])
         self.assertTrue(document["stage3_plan_selection"]["materialized_views"])
 
     def test_plan_workload_endpoint_plans_a_sql_workload_with_its_tables(self):
         document = post_plan({"workload": SQL_WORKLOAD, "tables": [FLOWS_TABLE]}, "/api/plan-workload")
         self.assertEqual(document["workload"]["queries"][0]["language"], "sql")
-        self.assertIsNotNone(document["stage3_plan_selection"]["selected_candidates"])
+        self.assertIsNotNone(document["stage3_plan_selection"]["selected_dag"])
 
     def test_plan_endpoint_returns_the_stage_pipeline_document(self):
         document = post_plan({"queries": [{"name": "job_rate", "language": "promql", "text": "sum by (job) (rate(m[1m]))"}],
@@ -396,7 +396,7 @@ class PlanEndpointTests(unittest.TestCase):
         self.assertEqual(document["format"], "asap-stage-pipeline/v1")
         self.assertEqual(document["workload"]["queries"][0]["text"], "sum by (job) (rate(m[1m]))")
         self.assertEqual(document["workload"]["queries"][0]["id"], "job_rate")
-        self.assertIsNotNone(document["stage3_plan_selection"]["selected_candidates"])
+        self.assertIsNotNone(document["stage3_plan_selection"]["selected_dag"])
 
     def test_a_plan_without_a_rate_fact_names_the_missing_fact(self):
         """Pricing uses only declared facts: with no series count (and no
@@ -404,7 +404,7 @@ class PlanEndpointTests(unittest.TestCase):
         says which source lacks which fact."""
         document = post_plan({"queries": [{"language": "promql", "text": "sum(rate(m[1m]))"}]})
         selection = document["stage3_plan_selection"]
-        self.assertIsNone(selection["selected_candidates"])
+        self.assertIsNone(selection["selected_dag"])
         self.assertIn("pricing source m needs an arrival rate", json.dumps(selection))
 
     def test_a_quantile_query_plans_with_or_without_a_metric(self):
@@ -413,11 +413,11 @@ class PlanEndpointTests(unittest.TestCase):
         query = {"name": "p99", "language": "promql", "text": "quantile_over_time(0.99, m[1m])"}
         named = post_plan({"queries": [query], "max_error": 0.01, "accuracy_metric": "rank", "series_count": 1000})
         self.assertEqual(named["workload"]["queries"][0]["requirements"]["accuracy"]["accuracy_metric"], "rank")
-        self.assertIsNotNone(named["stage3_plan_selection"]["selected_candidates"])
+        self.assertIsNotNone(named["stage3_plan_selection"]["selected_dag"])
         self.assertTrue(named["stage3_plan_selection"]["accepted_accuracy_per_query"][0]["summary"].startswith("metric rank; accepted "))
         unnamed = post_plan({"queries": [query], "max_error": 0.01, "series_count": 1000})
         self.assertNotIn("accuracy_metric", unnamed["workload"]["queries"][0]["requirements"]["accuracy"])
-        self.assertIsNotNone(unnamed["stage3_plan_selection"]["selected_candidates"])
+        self.assertIsNotNone(unnamed["stage3_plan_selection"]["selected_dag"])
         self.assertTrue(unnamed["stage3_plan_selection"]["accepted_accuracy_per_query"][0]["summary"].startswith("metric not set; accepted "))
 
 if __name__ == "__main__":

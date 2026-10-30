@@ -173,7 +173,8 @@ pub(in crate::search) fn optimize_configured_candidates(
     let maintained_graph = maintained
         .as_ref()
         .map(|profile| {
-            use asap_types::stages::{PhysicalCandidateId, ReaderConstraint};
+            use crate::search::candidates::dag::ReaderConstraint;
+            use asap_types::stages::PhysicalCandidateId;
             let mut graph = configured.dag.clone();
             for (id, candidate) in graph.candidates.iter_mut().enumerate() {
                 candidate.local_cost = weights[id];
@@ -423,8 +424,10 @@ fn joint_cost_seed(
     // execution copies in this bounded proposal. Every producer price option
     // remains available on the first copy; the full search retains all copies.
     for constraint in &configured.dag.reader_constraints {
-        if let asap_types::stages::ReaderConstraint::ActivationRequires { candidate, .. } =
-            constraint
+        if let crate::search::candidates::dag::ReaderConstraint::ActivationRequires {
+            candidate,
+            ..
+        } = constraint
         {
             profile.candidates[candidate.0].clear();
         }
@@ -460,10 +463,11 @@ fn direct_cost_seed(
     )>,
     String,
 > {
+    use crate::search::candidates::dag::ReaderConstraint;
     use crate::search::costing::direct_profile::{
         extract, extract_latest_panes, DirectProfileError,
     };
-    use asap_types::stages::{PhysicalCandidateId, ReaderConstraint};
+    use asap_types::stages::PhysicalCandidateId;
     let extracted = if latest_panes {
         extract_latest_panes(configured, context)
     } else {
@@ -1004,7 +1008,7 @@ pub(in crate::search) fn materialize_configured_candidate_with_diagnostics(
         .map_err(|error| PhysicalCandidateError::InvalidOrUnsupported(error).to_string())?;
     let mut realized = match context
         .realizer
-        .realize(&configured.physical, &selected.to_selected_candidates())
+        .realize(&configured.physical, &selected.to_selected_dag())
     {
         Ok(realized) => realized,
         Err(PhysicalCandidateError::RejectedAssignment(reason)) => {
@@ -1252,7 +1256,7 @@ mod tests {
                 Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
             ) {
                 configured.dag.reader_constraints.push(
-                    asap_types::stages::ReaderConstraint::AllowedOutputs {
+                    crate::search::candidates::dag::ReaderConstraint::AllowedOutputs {
                         candidate: asap_types::stages::PhysicalCandidateId(id),
                         outputs: Vec::new(),
                     },
@@ -2186,7 +2190,7 @@ mod tests {
                 Materialization::MatAtIngestion(_)
             ) {
                 ingestion_graph.reader_constraints.push(
-                    asap_types::stages::ReaderConstraint::AllowedOutputs {
+                    crate::search::candidates::dag::ReaderConstraint::AllowedOutputs {
                         candidate: asap_types::stages::PhysicalCandidateId(id),
                         outputs: vec![],
                     },

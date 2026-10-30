@@ -573,16 +573,14 @@ The sections below describe each stage.
 | 0. Frontends | nothing: a query that cannot be lowered fails planning with an error | — | — |
 | 1, Pass 1 | what the measure or the deployment cannot compute: `RequiresExact`, `NullableAvgInput`, `NoRelationalCountSketchRealization`, `UnsupportedByDeployment`, `QuantileOutsideUnitInterval`, `TopKHeapOverOneRowPerItem` | `PerComputationLogicalMemoCandidates::pruned_candidates`, each on its aggregate's memo group | the way to compute the measure (`HowToComputeAggregateMeasure`) |
 | 1, Pass 2 | nothing: it only adds candidates | — | — |
-| 2 | what cannot be implemented, built or kept: `PerEntityAggregateNotExecutable` (an exact per-entity `Aggregate` the executor has no kernel for), `RawDataNotRetained` (a query-time scan of raw data the deployment does not keep), `InputHasNoBuildableProducer`, `ReachesNoQueryOutput`, `TooFewQueryReaders` (shared within one evaluation with fewer than two reading queries), `PreviousScopeCopyPruned` | `PhysicalASAPMemoCandidates::pruned_candidates`, each on its operator node's memo group | `PhysicalCandidateKey { operator_node, timing, materialization, scope_copy }` |
+| 2 | what cannot be implemented, built or kept: `PerEntityAggregateNotExecutable` (an exact per-entity `Aggregate` the executor has no kernel for), `RawDataNotRetained` (a query-time scan of raw data the deployment does not keep), `InputHasNoBuildableProducer`, `ReachesNoQueryOutput`, `TooFewQueryReaders` (shared within one evaluation with fewer than two reading queries) | `PhysicalASAPMemoCandidates::pruned_candidates`, each on its operator node's memo group | `PhysicalCandidateKey { operator_node, timing, materialization }` |
 | 3 | valid candidates that lose, and the checks only a whole plan can make (accuracy, latency, cluster capacity) | its own `RejectionCause` | — |
 
 Stage 2's key names what a pruned candidate would have been, since kept
 candidates are renumbered after pruning and a pruned one has no
-`PhysicalCandidateId`. An operator node has at most one candidate per
-timing and materialization before its execution-scope copies are made, so
-(`operator_node`, `timing`, `materialization`, `scope_copy`) is unique; a
-configuration Stage 2 does not generate (`PerEntityAggregateNotExecutable`,
-`RawDataNotRetained`) is copy 0 and stands for all its copies. Operator
+`PhysicalCandidateId`. Stage 2 emits one candidate per operator node,
+timing and materialization, and makes no copies of it, so (`operator_node`,
+`timing`, `materialization`) is unique. Operator
 nodes are kept whole, so `operator_node` indexes the output's
 `operator_nodes_of_candidates_for_memo_groups`. The per-query accuracy
 proof that removes Pass 1 choices before the memo is built (early query
@@ -607,8 +605,8 @@ the memo path's entry points.
 | 1, Pass 1 | Logical roots; the deployment's supported summaries → the Pass 1 inventory, every computation's candidates (`PerComputationCandidates`) | Logical roots → `DagOfLogicalMemoGroups` (hash-consed `MemoGroup`s); with the Pass 1 inventory, less the summaries the deployment does not support → `PerComputationLogicalMemoCandidates`: the `CandidateMemo` (each group's `CandidateForMemoGroup`s, with the accuracy-scoped sizes), the computation targets and the pruned candidates (`PrunedCandidate<HowToComputeAggregateMeasure>`) | `DagOfLogicalMemoGroups::from_roots`, `generate_per_computation_candidates`, `without_unsupported_summaries`, `generate_per_computation_logical_memo_candidates` |
 | 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (no longer in the code) | `CandidateMemo`; the entries' recurrence and range steps → the same memo with each rule's candidates added to the groups they implement | the memo rules (`pass2/memo/rules/`), `pass2::memo::window_candidates` |
 | 1, concrete summary-state groups | (part of Pass 2) | `CandidateMemo` → the memo with concrete summary-state groups: one group per shared size or pane layout that readers can read | `add_shared_summary_state_groups`, Pass 2's last step; the Pass 2 output is `LogicalASAPMemoCandidates` (`generate_logical_asap_memo_candidates`) |
-| 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per materialization assignment | `LogicalASAPMemoCandidates`; entries, `DataWorkload`, query-time and raw-data retention → `PhysicalASAPMemoCandidates`: every operator node of every candidate with each allowed timing, materialization and scope copy, the producers of each input, reader constraints, and the pruned candidates (`PrunedCandidate<PhysicalCandidateKey>`) | `generate_physical_asap_memo_candidates` (`asap_physical_asap_optimization::catalog`) |
-| 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model → one plan | `PhysicalASAPMemoCandidates`; entries, `DataWorkload`, `AccuracyCheckInputs`, `CostInputs`, Stage 2's realizer, a deadline → `Selection`: the selected candidates (`SelectedCandidates`: one candidate per needed group, connected into one plan), its cost, the accepted accuracy per query and the search report | `select_plan` (`asap_plan_selection`); the facade (`run_planning`, output `PlanningRun`) runs it per pane-width round and builds the selected `PhysicalWorkloadPlan` with `AssignmentRealizer::realize` |
+| 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per materialization assignment | `LogicalASAPMemoCandidates`; entries, `DataWorkload`, query-time and raw-data retention → `PhysicalASAPMemoCandidates`: every operator node of every candidate with each allowed timing and materialization (one physical candidate each, no copies), the producers of each input, reader constraints (each applied to every selected run of its candidate), and the pruned candidates (`PrunedCandidate<PhysicalCandidateKey>`) | `generate_physical_asap_memo_candidates` (`asap_physical_asap_optimization::catalog`) |
+| 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model → one plan | `PhysicalASAPMemoCandidates`; entries, `DataWorkload`, `AccuracyCheckInputs`, `CostInputs`, Stage 2's realizer, a deadline → `Selection`: the selected plan (`selected_dag`, a `DagOfSelectedCandidates`: one node per run of a candidate, so a candidate recomputed by two readers or shared as two instances over different inputs is two nodes, with an edge per input), its cost, the accepted accuracy per query and the search report | `select_plan` (`asap_plan_selection`); the facade (`run_planning`, output `PlanningRun`) runs it per pane-width round and builds the selected `PhysicalWorkloadPlan` with `AssignmentRealizer::realize`, one plan node per selected node |
 | 4. Execution | The selected `PhysicalASAPDAG` → query results | Same: an `InstallablePlan` (`{dag, query_texts}`) → query results | The deployment runtime installs the `InstallablePlan` |
 
 What changed with the memo:
@@ -1296,8 +1294,13 @@ measure, a measure without an exact per-entity kernel such as
 plan is needed), and, without raw data retained, a query-time scan of raw
 data (`RawDataNotRetained`). It then removes the candidates no buildable
 input, query output or reader count can use (`InputHasNoBuildableProducer`,
-`ReachesNoQueryOutput`, `TooFewQueryReaders`, `PreviousScopeCopyPruned`),
-repeating until nothing more is removed.
+`ReachesNoQueryOutput`, `TooFewQueryReaders`),
+repeating until nothing more is removed. Stage 2 makes no execution-scope
+copies: how many times a candidate runs is Stage 3's choice, and a
+selection names each run as a node of its `DagOfSelectedCandidates`.
+Today's Stage 3 engine, whose MILP runs each candidate at most once, makes
+the copies it needs itself before solving and decodes each selected copy
+into a node.
 
 *Example for Algorithm 3* ([Example 4, Pattern B](#example-4-materialization-of-window-summaries-in-physical-planning)).
 The logical candidate is the `Tumbling(1m)` KLL option from Algorithm 2. The

@@ -111,9 +111,7 @@ mod tests {
     // share one allocation; storage compression adds no selection equality.
     #[test]
     fn shared_producer_storage_keeps_input_choices_independent() {
-        use super::super::graph::{
-            validate_selected_connections, ProducerConsumerConnection, SelectedCandidates,
-        };
+        use super::super::graph::{DagOfSelectedCandidates, SelectedEdge, SelectedNodeId};
         use super::super::memo_candidates::{
             CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
             OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate,
@@ -160,34 +158,18 @@ mod tests {
             vec![QueryRoot::Operator(MemoGroupId(2))],
             Vec::new(),
         );
-        let selected = SelectedCandidates {
-            candidates: vec![
-                PhysicalCandidateId(0),
-                PhysicalCandidateId(1),
-                PhysicalCandidateId(2),
-            ],
-            connections: (0..2)
-                .map(|requirement| ProducerConsumerConnection {
-                    producer: PhysicalCandidateId(requirement),
-                    consumer: PhysicalCandidateId(2),
-                    requirement,
+        let selected = DagOfSelectedCandidates {
+            candidate_of_node: (0..3).map(PhysicalCandidateId).collect(),
+            edges: (0..2)
+                .map(|input| SelectedEdge {
+                    producer: SelectedNodeId(input),
+                    consumer: SelectedNodeId(2),
+                    input,
                 })
                 .collect(),
-            query_output_candidates: vec![PhysicalCandidateId(2)],
+            node_of_output_reference: vec![SelectedNodeId(2)],
         };
-        validate_selected_connections(
-            3,
-            |c| physical.candidates[c.0].producer_candidates_per_input.len(),
-            |c, input| {
-                physical.candidates[c.0]
-                    .producer_candidates_per_input
-                    .get(input)
-            },
-            &[&physical.query_output_candidates(0).collect::<Vec<_>>()],
-            &physical.reader_constraints,
-            &selected,
-        )
-        .unwrap();
+        selected.validate(&physical).unwrap();
         assert_eq!(
             producer_storage_metrics(&physical),
             ProducerStorageMetrics {

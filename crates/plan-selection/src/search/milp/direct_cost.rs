@@ -17,7 +17,7 @@ mod schedule_selection_tests;
 pub(crate) use general_schedule_rates::QueryScheduleRates;
 
 use crate::search::candidates::dag::*;
-use asap_types::stages::*;
+use crate::search::candidates::graph::ProducerConsumerConnection;
 
 /// Smallest/largest monetary coefficient ratio after lifetime normalization.
 /// The minimum is scaled to one; no positive cost is rounded away.
@@ -754,6 +754,7 @@ mod tests {
     use crate::search::milp::model::{
         solve_direct_cost_proposal_with_metrics, CandidateSolveMetrics,
     };
+    use asap_types::stages::*;
 
     fn node(input: Option<usize>) -> PhysicalCandidateWithCost {
         PhysicalCandidateWithCost {

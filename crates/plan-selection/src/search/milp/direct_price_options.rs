@@ -28,9 +28,10 @@ pub(crate) struct JointPriceProfile {
 
 use super::direct_cost::DirectCostProfile;
 use super::model::{CandidateProposal, CandidateSolveMetrics, ObservedAssignment};
+use crate::search::candidates::dag::ReaderConstraint;
 use crate::search::candidates::dag::*;
+use crate::search::candidates::graph::ProducerConsumerConnection;
 use crate::search::candidates::graph::QueryRootAssignment;
-use asap_types::stages::*;
 use good_lp::{constraint, variable, Constraint, Expression, ProblemVariables, Variable};
 
 /// Internal option nodes share an original physical identity. At most one may
@@ -465,6 +466,7 @@ pub(crate) fn solve_joint_price_proposal_with_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::candidates::dag::ReaderConstraint;
 
     fn candidate(inputs: &[usize]) -> PhysicalCandidateWithCost {
         PhysicalCandidateWithCost {

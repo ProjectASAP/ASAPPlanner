@@ -28,7 +28,7 @@ and [frontend dependencies](#frontend-specific-dependencies).
 
 | Output | Fields or contents | Meaning |
 |---|---|---|
-| `PlanOutput` | `plans`: one `QueryPlan { entry_index, root }` per query; `selection`: Stage 3's `Selection` (`selected_candidates`, `candidates_with_proven_non_negative_weights`, `cost`, `accepted_accuracy_per_query`, `pruned_candidates`, `search_report`), set by the default pass `Stage1ToStage3Pass`; `pane_retention_ms`: how long each kept pane chain keeps its panes; standalone scalar queries in `scalar_roots` and `scalar_plans` | The selected plan; `physical_asap_dag()` exports it as one `PhysicalASAPDAG` |
+| `PlanOutput` | `plans`: one `QueryPlan { entry_index, root }` per query; `selection`: Stage 3's `Selection` (`selected_dag`, `nodes_with_proven_non_negative_weights`, `cost`, `accepted_accuracy_per_query`, `pruned_candidates`, `search_report`), set by the default pass `Stage1ToStage3Pass`; `pane_retention_ms`: how long each kept pane chain keeps its panes; standalone scalar queries in `scalar_roots` and `scalar_plans` | The selected plan; `physical_asap_dag()` exports it as one `PhysicalASAPDAG` |
 | `PlanningRun` (from `asap_planner::run_planning`) | Every stage's output: Pass 1's per-computation candidates, the selected round's Pass 2 and Stage 2 outputs (with Stage 2's pruned candidates), the selection, the selected plan, the memo after each step and a report per pane-width round | For callers that inspect or display the alternatives |
 
 The selected plan is a planning artifact. ASAPPlanner does **not** deploy
@@ -282,8 +282,10 @@ candidate whose output has no guarantee for an approximate target.
 `PlanOutput` holds the selected plan and Stage 3's record of the selection:
 
 * `plans`: one plan root per query, in `QueryWorkload::entries()` order;
-* `selection.selected_candidates`: the selected physical candidates, their
-  connections and the candidate producing each query output;
+* `selection.selected_dag`: the selected plan as a `DagOfSelectedCandidates`:
+  the physical candidate each node runs (one node per run, so a candidate
+  run twice is two nodes), the edge feeding each input of each node, and the
+  node producing each query output;
 * `selection.cost`: the selected plan's resource usage and, under cost
   models 1 and 2, its cost per second;
 * `selection.accepted_accuracy_per_query`: per query, the accuracy metric

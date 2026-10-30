@@ -16,18 +16,8 @@ pub fn prune(configured: PhysicalASAPMemoCandidates) -> Result<PhysicalASAPMemoC
     let count = configured.candidates.len();
     let reasons = prune_reasons(&configured);
     let keep: Vec<bool> = reasons.iter().map(Option::is_none).collect();
-    // Scope copies of one (operator node, timing, materialization) are
-    // contiguous and in copy order.
-    let mut copies_seen = HashMap::new();
     let mut pruned_candidates = configured.pruned_candidates.clone();
     for (candidate, reason) in configured.candidates.iter().zip(&reasons) {
-        let copy = copies_seen
-            .entry((
-                candidate.operator_node,
-                candidate.timing,
-                candidate.materialization,
-            ))
-            .or_insert(0usize);
         if let Some(reason) = *reason {
             pruned_candidates.push(PrunedCandidate {
                 group: configured.operator_nodes_of_candidates_for_memo_groups
@@ -37,12 +27,10 @@ pub fn prune(configured: PhysicalASAPMemoCandidates) -> Result<PhysicalASAPMemoC
                     operator_node: candidate.operator_node,
                     timing: candidate.timing,
                     materialization: candidate.materialization,
-                    scope_copy: *copy,
                 },
                 reason,
             });
         }
-        *copy += 1;
     }
     let mut mapping = vec![None; count];
     let mut next = 0;
@@ -82,20 +70,8 @@ pub fn prune(configured: PhysicalASAPMemoCandidates) -> Result<PhysicalASAPMemoC
         .reader_constraints
         .into_iter()
         .filter_map(|mut constraint| {
-            let id = match &mut constraint {
-                ReaderConstraint::AllowedOutputs { candidate, .. }
-                | ReaderConstraint::HighestSharedQueryMaterialization { candidate, .. }
-                | ReaderConstraint::MinimumQueryReaders { candidate, .. }
-                | ReaderConstraint::IncompatibleOutputs { candidate, .. }
-                | ReaderConstraint::ActivationRequires { candidate, .. } => candidate,
-            };
+            let id = constraint.candidate_mut();
             *id = mapping[id.0]?;
-            if let ReaderConstraint::ActivationRequires {
-                required_candidate, ..
-            } = &mut constraint
-            {
-                *required_candidate = mapping[required_candidate.0]?;
-            }
             Some(constraint)
         })
         .collect();
@@ -123,7 +99,7 @@ pub fn usable_candidates(physical: &PhysicalASAPMemoCandidates) -> Vec<bool> {
 /// Why each candidate of `physical` cannot be used, `None` for a usable
 /// one: the reason of the first round that ruled it out, and within a
 /// round the first of: an input with no buildable producer, no query output
-/// reached, the previous scope copy pruned, too few query readers.
+/// reached, too few query readers.
 fn prune_reasons(physical: &PhysicalASAPMemoCandidates) -> Vec<Option<PruneReason>> {
     let count = physical.candidates.len();
     let query_output_candidates = super::query_output_candidates(physical);
@@ -190,17 +166,6 @@ fn prune_reasons(physical: &PhysicalASAPMemoCandidates) -> Vec<Option<PruneReaso
             })
             .collect();
         for constraint in &physical.reader_constraints {
-            if let ReaderConstraint::ActivationRequires {
-                candidate,
-                required_candidate,
-            } = constraint
-            {
-                // This is a selection implication, not an execution input.
-                // Do not reject legal mutually dependent activation decisions.
-                if !enabled[required_candidate.0] {
-                    round[candidate.0].get_or_insert(PruneReason::PreviousScopeCopyPruned);
-                }
-            }
             if let ReaderConstraint::MinimumQueryReaders {
                 candidate,
                 query_outputs,

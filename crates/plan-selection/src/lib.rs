@@ -238,11 +238,8 @@ use asap_cost::state_bytes::{sketch_shape, summary_shape, StateInputRows};
 
 mod accuracy_binding;
 mod checks;
-// #1095 Steps 1–2; the region DP and class-level MILP (later PRs) read it.
-#[cfg_attr(not(test), allow(dead_code))]
-mod classes;
 mod models;
-// #1095 C3: the MILP's inputs; the class-level MILP (C4) reads them.
+// #1095 C3: the MILP's inputs; the candidate MILP (C4) reads them.
 #[cfg_attr(not(test), allow(dead_code))]
 mod owners;
 mod report;

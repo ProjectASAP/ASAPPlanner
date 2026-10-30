@@ -55,8 +55,9 @@ impl OperatorNodeOfCandidateForMemoGroup {
     }
 }
 
-/// One operator node with one timing, materialization and scope copy: what
-/// Stage 3 selects.
+/// One operator node with one timing and materialization: what Stage 3
+/// selects. A selection may run it more than once, each run a node of the
+/// [`DagOfSelectedCandidates`](super::DagOfSelectedCandidates).
 #[derive(Debug, Clone)]
 pub struct PhysicalCandidate {
     /// The operator node it runs.
@@ -67,7 +68,7 @@ pub struct PhysicalCandidate {
     /// Whether and where its result is kept.
     pub materialization: Materialization,
     /// Per input of its operator node (in `map_children` order), the
-    /// candidates that may produce it. Depends on its timing and scope copy.
+    /// candidates that may produce it. Depends on its timing.
     pub producer_candidates_per_input: Vec<ProducerCandidates>,
     /// Whether it may produce a query's output: an implementation root at
     /// query time whose output matches its group's logical node, in a group
@@ -84,7 +85,7 @@ pub struct PhysicalCandidate {
 /// candidates are renumbered after pruning, so a pruned one has no
 /// [`PhysicalCandidateId`]. Unique among a [`PhysicalASAPMemoCandidates`]'
 /// `pruned_candidates`: an operator node has at most one candidate per
-/// timing and materialization before its execution-scope copies are made.
+/// timing and materialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PhysicalCandidateKey {
     /// Its operator node: an index into the output's
@@ -93,11 +94,6 @@ pub struct PhysicalCandidateKey {
     pub operator_node: OperatorNodeOfCandidateForMemoGroupId,
     pub timing: ExecutionTiming,
     pub materialization: Materialization,
-    /// Which execution-scope copy of (`operator_node`, `timing`,
-    /// `materialization`) it is, from 0. A configuration pruned before the
-    /// copies are made (raw data not retained, per-entity aggregate not
-    /// executable) is copy 0 and stands for all of them.
-    pub scope_copy: usize,
 }
 
 /// Stage 2's output, which Stage 3 selects from.
@@ -106,8 +102,8 @@ pub struct PhysicalASAPMemoCandidates {
     /// One per operator node of an implementation, before Stage 2 chose its
     /// timing and materialization.
     pub operator_nodes_of_candidates_for_memo_groups: Vec<OperatorNodeOfCandidateForMemoGroup>,
-    /// One per (operator node, timing, materialization, scope copy): what
-    /// Stage 3 selects. Indexed by [`PhysicalCandidateId`].
+    /// One per (operator node, timing, materialization): what Stage 3
+    /// selects. Indexed by [`PhysicalCandidateId`].
     pub candidates: Vec<PhysicalCandidate>,
     /// Each query's root over groups, by index in the workload, passed
     /// through from Pass 2. Its group references, in order, are the output

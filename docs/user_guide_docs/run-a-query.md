@@ -48,7 +48,7 @@ missing fact.
 Without `--enforce-accuracy-guarantees`, `stage_pipeline` ignores accuracy
 guarantees: every output is accepted whatever its guarantee, and plans are
 compared on cost alone. The document's top-level `accuracy_guarantees` says
-`ignored` or `enforced`. The document's `stage3_plan_selection.selected_candidates`
+`ignored` or `enforced`. The document's `stage3_plan_selection.selected_dag`
 names the selected physical candidates, and `stage3_plan_selection.cost`
 holds the selected plan's `cost_per_second`. For this query the selected plan
 is the exact plan. The Count-Min top-k plan is not selected because the

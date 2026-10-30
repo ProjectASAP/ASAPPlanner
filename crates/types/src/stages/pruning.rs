@@ -87,7 +87,4 @@ pub enum PruneReason {
     /// (`MatAtQuery`), which needs at least two reading queries, and fewer
     /// queries can reach it.
     TooFewQueryReaders,
-    /// Stage 2: it is an extra execution-scope copy, which may be selected
-    /// only with the copy before it, and that copy was pruned.
-    PreviousScopeCopyPruned,
 }

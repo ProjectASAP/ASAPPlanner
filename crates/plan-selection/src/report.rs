@@ -8,7 +8,9 @@ use asap_cost::{CostModel, PlanCost};
 use asap_types::ir::physical_export::PhysicalASAPNodeId;
 use asap_types::ir::properties::AccuracyMetric;
 use asap_types::ir::QueryRoot;
-use asap_types::stages::{PhysicalCandidateId, PrunedCandidate, SelectedCandidates};
+use asap_types::stages::{
+    DagOfSelectedCandidates, PhysicalCandidateId, PrunedCandidate, SelectedNodeId,
+};
 use thiserror::Error;
 
 /// Peak memory above which a candidate's report carries a warning when the
@@ -197,17 +199,19 @@ pub struct WholePlanSelection {
     pub candidates_checked: u64,
 }
 
-/// Stage 3's result ([`select_plan`](crate::select_plan)): the selected
-/// physical candidates of the [`PhysicalASAPMemoCandidates`](asap_types::stages::PhysicalASAPMemoCandidates)
-/// it was given, their cost and accepted accuracy, and the search report.
-/// The facade builds the plan from `selected_candidates` with the same
+/// Stage 3's result ([`select_plan`](crate::select_plan)): the selected DAG
+/// over the [`PhysicalASAPMemoCandidates`](asap_types::stages::PhysicalASAPMemoCandidates)
+/// it was given, its cost and accepted accuracy, and the search report.
+/// The facade builds the plan from `selected_dag` with the same
 /// [`AssignmentRealizer`](asap_types::stages::AssignmentRealizer).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Selection {
-    pub selected_candidates: SelectedCandidates,
-    /// Selected candidates whose open count-min weight requirement Stage 3
-    /// proved; the facade applies the proof when it builds the plan.
-    pub candidates_with_proven_non_negative_weights: Vec<PhysicalCandidateId>,
+    /// The selected plan: one node per run of a candidate.
+    pub selected_dag: DagOfSelectedCandidates,
+    /// Nodes of `selected_dag` whose open count-min weight requirement
+    /// Stage 3 proved; the facade applies the proof to each node's operator
+    /// node when it builds the plan.
+    pub nodes_with_proven_non_negative_weights: Vec<SelectedNodeId>,
     pub cost: PlanCost,
     /// Per query, the accuracy Stage 3 accepted for the selected plan.
     pub accepted_accuracy_per_query: Vec<AcceptedAccuracy>,

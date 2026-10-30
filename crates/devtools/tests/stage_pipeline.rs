@@ -65,7 +65,7 @@ fn generate_bounded_example(example: &str, extra: &[&str]) -> Value {
 /// whose plan is the physical candidate [`SELECTED`] with its `cost` and
 /// `accepted_accuracy_per_query`.
 fn selects_a_plan(selection: &Value) -> bool {
-    selection["selected_candidates"].is_object() && selection["cost"].is_object()
+    selection["selected_dag"].is_object() && selection["cost"].is_object()
 }
 
 /// The id of the selected plan among the physical candidates: the facade's

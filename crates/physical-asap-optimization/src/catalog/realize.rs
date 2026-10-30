@@ -12,21 +12,24 @@ use asap_types::physical::Materialization;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use asap_types::stages::{
-    AssignmentRealizer, PhysicalASAPMemoCandidates, PhysicalCandidateError, RealizedPlan,
-    SelectedCandidates,
+    AssignmentRealizer, DagOfSelectedCandidates, PhysicalASAPMemoCandidates,
+    PhysicalCandidateError, RealizedPlan,
 };
 
 use super::reconstruction::{
     output_contract_satisfied, paired_node_identities, reconstruct_selected_candidates,
 };
 
-/// Output references must follow `map_operator_refs` traversal of the original
-/// roots in workload order (one reference for an operator root). Repeated scalar
-/// references remain separate positions; literal-only scalar roots use none.
+/// Realize `selected` with `materializations[i]` requested for selected
+/// node `i` (a test may request another than its candidate's). Output
+/// references must follow `map_operator_refs` traversal of the original
+/// roots in workload order (one reference for an operator root). Repeated
+/// scalar references remain separate positions; literal-only scalar roots
+/// use none.
 pub fn materialize_selected_candidates(
     physical_candidates: &PhysicalASAPMemoCandidates,
-    selected: &SelectedCandidates,
-    materializations: &[Option<Materialization>],
+    selected: &DagOfSelectedCandidates,
+    materializations: &[Materialization],
     original_roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
@@ -36,20 +39,12 @@ pub fn materialize_selected_candidates(
         return Err("workload entries and query roots differ in length".into());
     }
     let rebuilt = reconstruct_selected_candidates(physical_candidates, selected)?;
-    if materializations.len() != rebuilt.nodes_by_candidate.len() {
-        return Err("materialization vector must be indexed by candidate ID".into());
+    if materializations.len() != rebuilt.operator_node_of_selected_node.len() {
+        return Err("materialization vector must be indexed by selected node".into());
     }
-    let mut ids_by_pointer = HashMap::new();
-    for (id, node) in rebuilt.nodes_by_candidate.iter().enumerate() {
-        if node.is_some() != materializations[id].is_some() {
-            return Err(format!(
-                "candidate {id} activation and materialization assignment disagree"
-            )
-            .into());
-        }
-        if let Some(node) = node {
-            ids_by_pointer.insert(Rc::as_ptr(node), id);
-        }
+    let mut node_by_pointer = HashMap::new();
+    for (node, operator_node) in rebuilt.operator_node_of_selected_node.iter().enumerate() {
+        node_by_pointer.insert(Rc::as_ptr(operator_node), node);
     }
     let roots = restore_query_roots(original_roots, &rebuilt.outputs)?;
     let mut assignment_error = None;
@@ -61,18 +56,18 @@ pub fn materialize_selected_candidates(
         data,
         query_time_results_retained,
         &mut |logical, _, options| {
-            let requested = if let Some(&id) = ids_by_pointer.get(&logical) {
-                seen[id] = true;
-                materializations[id].unwrap()
+            let node = node_by_pointer.get(&logical).copied();
+            let requested = if let Some(node) = node {
+                seen[node] = true;
+                materializations[node]
             } else {
                 Materialization::NotMaterialized
             };
             if !options.contains(&requested) {
                 let message = format!(
-                    "selected materialization {requested:?} is not offered for candidate {:?}",
-                    ids_by_pointer.get(&logical)
+                    "selected materialization {requested:?} is not offered for selected node {node:?}"
                 );
-                assignment_error = Some(if ids_by_pointer.contains_key(&logical) {
+                assignment_error = Some(if node.is_some() {
                     PhysicalCandidateError::RejectedAssignment(message)
                 } else {
                     PhysicalCandidateError::InvalidOrUnsupported(message)
@@ -94,34 +89,31 @@ pub fn materialize_selected_candidates(
     physical.dag.validate().map_err(|error| error.to_string())?;
     let physical_outputs = ordered_output_references(&physical.roots);
     let identities = paired_node_identities(&rebuilt.outputs, &physical_outputs)?;
-    for (id, mode) in materializations.iter().enumerate() {
-        if mode.is_some_and(|mode| mode != Materialization::NotMaterialized) && !seen[id] {
-            // The decoder already established candidate identity. Stage 2 did
+    for (node, mode) in materializations.iter().enumerate() {
+        if *mode != Materialization::NotMaterialized && !seen[node] {
+            // The decoder already established node identity. Stage 2 did
             // not offer this selected node (e.g. a lower shared non-summary),
             // so the assignment is infeasible rather than an adapter failure.
             return Err(PhysicalCandidateError::RejectedAssignment(format!(
-                "candidate {id} is not an eligible materialization node in the selected graph"
+                "selected node {node} is not an eligible materialization node in the selected graph"
             )));
         }
     }
-    let nodes_by_candidate = rebuilt
-        .nodes_by_candidate
+    let operator_node_of_selected_node = rebuilt
+        .operator_node_of_selected_node
         .into_iter()
         .enumerate()
-        .map(|(id, node)| {
-            node.map(|node| {
-                let physical = identities
-                    .get(&Rc::as_ptr(&node))
-                    .cloned()
-                    .ok_or_else(|| format!("candidate {id} has no physical identity"))?;
-                if Some(physical.materialization) != materializations[id] {
-                    return Err(format!(
-                        "candidate {id} materialization changed during physical reconstruction"
-                    ));
-                }
-                Ok(physical)
-            })
-            .transpose()
+        .map(|(node, operator_node)| {
+            let physical = identities
+                .get(&Rc::as_ptr(&operator_node))
+                .cloned()
+                .ok_or_else(|| format!("selected node {node} has no physical identity"))?;
+            if physical.materialization != materializations[node] {
+                return Err(format!(
+                    "selected node {node} materialization changed during physical reconstruction"
+                ));
+            }
+            Ok(physical)
         })
         .collect::<Result<Vec<_>, String>>()?;
     let range_evaluations: Vec<_> = entries.iter().map(|entry| entry.range_evaluation).collect();
@@ -129,7 +121,7 @@ pub fn materialize_selected_candidates(
     Ok(RealizedPlan {
         plan: physical,
         pane_retention_ms,
-        nodes_by_candidate,
+        operator_node_of_selected_node,
     })
 }
 
@@ -147,24 +139,30 @@ pub struct Stage2AssignmentRealizer<'a> {
 }
 
 impl AssignmentRealizer for Stage2AssignmentRealizer<'_> {
-    /// [`materialize_selected_candidates`] with each selected candidate's
-    /// own materialization; each selected candidate also keeps its own
+    /// [`materialize_selected_candidates`] with each selected node at its
+    /// candidate's materialization; each node also keeps its candidate's
     /// timing.
     fn realize(
         &self,
         physical: &PhysicalASAPMemoCandidates,
-        selected: &SelectedCandidates,
+        selected: &DagOfSelectedCandidates,
     ) -> Result<RealizedPlan, PhysicalCandidateError> {
-        let mut materializations = vec![None; physical.candidates.len()];
-        for id in &selected.candidates {
-            let candidate = physical.candidates.get(id.0).ok_or_else(|| {
-                PhysicalCandidateError::InvalidOrUnsupported(format!(
-                    "selected candidate {} does not exist",
-                    id.0
-                ))
-            })?;
-            materializations[id.0] = Some(candidate.materialization);
-        }
+        let materializations = selected
+            .candidate_of_node
+            .iter()
+            .map(|id| {
+                physical
+                    .candidates
+                    .get(id.0)
+                    .map(|candidate| candidate.materialization)
+                    .ok_or_else(|| {
+                        PhysicalCandidateError::InvalidOrUnsupported(format!(
+                            "selected candidate {} does not exist",
+                            id.0
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let realized = materialize_selected_candidates(
             physical,
             selected,
@@ -174,13 +172,11 @@ impl AssignmentRealizer for Stage2AssignmentRealizer<'_> {
             self.data,
             self.query_time_results_retained,
         )?;
-        for id in &selected.candidates {
-            let node = realized.nodes_by_candidate[id.0].as_ref().ok_or_else(|| {
-                PhysicalCandidateError::InvalidOrUnsupported(format!(
-                    "candidate {} has no physical node",
-                    id.0
-                ))
-            })?;
+        for (id, node) in selected
+            .candidate_of_node
+            .iter()
+            .zip(&realized.operator_node_of_selected_node)
+        {
             let timing = physical.candidates[id.0].timing;
             if node.timing != Some(timing) {
                 return Err(PhysicalCandidateError::InvalidOrUnsupported(format!(
@@ -249,22 +245,21 @@ mod tests {
     };
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::stages::{
-        LogicalASAPMemoCandidates, PhysicalCandidateId, ProducerConsumerConnection,
+        LogicalASAPMemoCandidates, PhysicalCandidateId, SelectedEdge, SelectedNodeId,
     };
     use asap_types::workload::QueryRecurrence;
 
-    /// Select `candidate` and, for each input, its first unmaterialized
-    /// producer (else its first producer), recursively.
+    /// Add a node running `candidate` and, for each input, a node of its
+    /// first unmaterialized producer (else its first producer),
+    /// recursively; returns the new node.
     fn select_from(
         physical: &PhysicalASAPMemoCandidates,
         candidate: PhysicalCandidateId,
-        selected: &mut SelectedCandidates,
-    ) {
-        if selected.candidates.contains(&candidate) {
-            return;
-        }
-        selected.candidates.push(candidate);
-        for (requirement, producer_candidates) in physical.candidates[candidate.0]
+        selected: &mut DagOfSelectedCandidates,
+    ) -> SelectedNodeId {
+        let node = SelectedNodeId(selected.candidate_of_node.len());
+        selected.candidate_of_node.push(candidate);
+        for (input, producer_candidates) in physical.candidates[candidate.0]
             .producer_candidates_per_input
             .iter()
             .enumerate()
@@ -276,13 +271,14 @@ mod tests {
                     physical.candidates[s.0].materialization == Materialization::NotMaterialized
                 })
                 .unwrap_or(producer_candidates[0]);
-            selected.connections.push(ProducerConsumerConnection {
+            let producer = select_from(physical, producer, selected);
+            selected.edges.push(SelectedEdge {
                 producer,
-                consumer: candidate,
-                requirement,
+                consumer: node,
+                input,
             });
-            select_from(physical, producer, selected);
         }
+        node
     }
 
     // The trait object returns what the catalog function returns with each
@@ -315,17 +311,18 @@ mod tests {
         let selected = physical
             .query_output_candidates(0)
             .map(|candidate| {
-                let mut selected = SelectedCandidates {
-                    candidates: Vec::new(),
-                    connections: Vec::new(),
-                    query_output_candidates: vec![candidate],
+                let mut selected = DagOfSelectedCandidates {
+                    candidate_of_node: Vec::new(),
+                    edges: Vec::new(),
+                    node_of_output_reference: Vec::new(),
                 };
-                select_from(&physical, candidate, &mut selected);
+                let root = select_from(&physical, candidate, &mut selected);
+                selected.node_of_output_reference.push(root);
                 selected
             })
             .find(|selected| reconstruct_selected_candidates(&physical, selected).is_ok())
             .expect("some selection reconstructs");
-        assert!(selected.candidates.len() > 1);
+        assert!(selected.candidate_of_node.len() > 1);
         let realizer = Stage2AssignmentRealizer {
             original_roots: &roots,
             entries: &entries,
@@ -334,10 +331,11 @@ mod tests {
         };
         let realizer: &dyn AssignmentRealizer = &realizer;
 
-        let mut materializations = vec![None; physical.candidates.len()];
-        for id in &selected.candidates {
-            materializations[id.0] = Some(physical.candidates[id.0].materialization);
-        }
+        let materializations: Vec<_> = selected
+            .candidate_of_node
+            .iter()
+            .map(|id| physical.candidates[id.0].materialization)
+            .collect();
         let direct = materialize_selected_candidates(
             &physical,
             &selected,
@@ -353,7 +351,10 @@ mod tests {
             format!("{:?}", direct.plan),
             format!("{:?}", through_trait.plan)
         );
-        assert_eq!(direct.nodes_by_candidate, through_trait.nodes_by_candidate);
+        assert_eq!(
+            direct.operator_node_of_selected_node,
+            through_trait.operator_node_of_selected_node
+        );
         assert_eq!(direct.pane_retention_ms, through_trait.pane_retention_ms);
     }
 }

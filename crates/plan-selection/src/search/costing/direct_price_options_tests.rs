@@ -136,11 +136,12 @@ fn differing_producer_statistics_keep_both_price_interfaces() {
     // Force each structurally legal producer in turn. The model must price
     // the selected binding rather than only returning the cheapest interface.
     for producer in [PhysicalCandidateId(0), PhysicalCandidateId(1)] {
-        configured.dag.reader_constraints =
-            vec![asap_types::stages::ReaderConstraint::ActivationRequires {
+        configured.dag.reader_constraints = vec![
+            crate::search::candidates::dag::ReaderConstraint::ActivationRequires {
                 candidate: PhysicalCandidateId(2),
                 required_candidate: producer,
-            }];
+            },
+        ];
         configured.sync_physical_for_tests();
         let proposal =
             crate::search::milp::direct_price_options::solve_joint_price_proposal_with_metrics(
@@ -590,15 +591,16 @@ fn producer_worker_buckets_remain_joint_choices_and_match_evaluator() {
     assert_eq!(raw_option.profile.compaction_seconds, 0.0);
     assert!(projected_option.profile.compaction_seconds > 0.0);
     for supplier in [raw_producer, projected_producer] {
-        configured.dag.reader_constraints =
-            vec![asap_types::stages::ReaderConstraint::ActivationRequires {
+        configured.dag.reader_constraints = vec![
+            crate::search::candidates::dag::ReaderConstraint::ActivationRequires {
                 candidate: root_id,
                 required_candidate: supplier,
-            }];
+            },
+        ];
         configured.sync_physical_for_tests();
         if supplier == raw_producer {
             configured.dag.reader_constraints.push(
-                asap_types::stages::ReaderConstraint::AllowedOutputs {
+                crate::search::candidates::dag::ReaderConstraint::AllowedOutputs {
                     candidate: projected_producer,
                     outputs: vec![],
                 },

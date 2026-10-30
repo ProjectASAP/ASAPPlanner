@@ -73,7 +73,7 @@ def selected_id(doc: dict) -> str:
     section is the `Selection` (stage_pipeline's current output), the
     section's `selected` in an archived one."""
     selection = doc["stage3_plan_selection"]
-    return "P1" if "selected_candidates" in selection else selection["selected"]
+    return "P1" if "selected_dag" in selection else selection["selected"]
 
 
 def stages_js():
@@ -490,7 +490,7 @@ class DefaultSearchTests(unittest.TestCase):
         self.assertIn(f"search {report['status'].replace('_', ' ')}", text)
         self.assertIn(f"MILP {report['milp_variables']} variables", text)
         self.assertIn("pane-width round", text)
-        outputs = self.doc["stage3_plan_selection"]["selected_candidates"]["query_output_candidates"]
+        outputs = self.doc["stage3_plan_selection"]["selected_dag"]["node_of_output_reference"]
         self.assertEqual(len(outputs), 2)
         # Archived documents (before Stage 3's `Selection`) still render
         # their search's checked candidates and component list.

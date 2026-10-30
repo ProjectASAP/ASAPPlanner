@@ -2,8 +2,9 @@
 //! (`asap_physical_asap_optimization::catalog`) that select with the solver.
 use crate::search::candidates::dag::DagOfPhysicalCandidatesWithCosts;
 use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
+use crate::search::candidates::dag::ReaderConstraint;
 use asap_physical_asap_optimization::catalog::test_support::usable_candidates;
-use asap_types::stages::{PhysicalCandidateId, ReaderConstraint};
+use asap_types::stages::PhysicalCandidateId;
 
 #[cfg(test)]
 mod tests {
@@ -177,36 +178,5 @@ mod tests {
         inventory.prune_for_tests();
         assert_eq!(inventory.dag.query_roots.len(), 1);
         assert!(select_candidates(&inventory.dag).unwrap().is_none());
-    }
-
-    // Activation implications do not create execution cycles; an unreachable
-    // required copy does make the dependent choice unusable.
-    #[test]
-    fn activation_requirements_preserve_selection_semantics() {
-        let mut graph = DagOfPhysicalCandidatesWithCosts {
-            candidates: vec![candidate(1.0, &[]), candidate(2.0, &[])],
-            query_roots: vec![
-                QueryOutputCandidates {
-                    candidates: vec![PhysicalCandidateId(0)],
-                },
-                QueryOutputCandidates {
-                    candidates: vec![PhysicalCandidateId(1)],
-                },
-            ],
-            reader_constraints: vec![
-                ReaderConstraint::ActivationRequires {
-                    candidate: PhysicalCandidateId(0),
-                    required_candidate: PhysicalCandidateId(1),
-                },
-                ReaderConstraint::ActivationRequires {
-                    candidate: PhysicalCandidateId(1),
-                    required_candidate: PhysicalCandidateId(0),
-                },
-            ],
-            ..Default::default()
-        };
-        assert_eq!(usable(&graph), vec![true, true]);
-        graph.query_roots.pop();
-        assert_eq!(usable(&graph), vec![false, false]);
     }
 }
