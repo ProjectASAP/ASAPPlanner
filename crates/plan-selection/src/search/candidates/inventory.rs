@@ -255,7 +255,7 @@ mod tests {
     }
 
     fn stage2_smoke(outputs: &[Rc<OperatorNode>]) {
-        use asap_physical_asap_optimization::optimize_physical_asap_chosen;
+        use asap_physical_asap_optimization::test_support::optimize_physical_asap_chosen;
         use asap_types::physical::Medium;
         use asap_types::workload::{
             DataArrival, DataWorkload, DurationMs, MetricType, Predictability, Query,
@@ -1117,10 +1117,10 @@ mod tests {
     #[test]
     fn ratio_accuracy_is_validated_after_selecting_concrete_budget_shares() {
         use crate::{PlanSelector, PlanningModels, SelectionError};
-        use asap_accuracy::satisfies;
+        use asap_accuracy::test_support::satisfies;
         use asap_cost::CalibrationFit;
         use asap_logical_asap_optimization::test_support::entry_with;
-        use asap_physical_asap_optimization::optimize_physical_asap_chosen;
+        use asap_physical_asap_optimization::test_support::optimize_physical_asap_chosen;
         use asap_types::ir::properties::AccuracyMetric;
         use asap_types::workload::{
             DataArrival, DataWorkload, QueryRecurrence, RepeatedDemand, RepetitionInterval,

@@ -24,4 +24,6 @@ pub mod ir;
 pub mod physical;
 pub mod serde_f64;
 pub mod stages;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod workload;

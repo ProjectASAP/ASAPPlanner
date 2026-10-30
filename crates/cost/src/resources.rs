@@ -3,11 +3,11 @@
 //! The CPU payload establishes its unit and operation scope; CPU operations
 //! must never be interpreted as nanoseconds. `None` means unavailable, not zero.
 
-pub mod cpu;
-pub mod physical;
+mod cpu;
+mod physical;
 
-pub use cpu::ModeledCpu;
-pub use physical::PhysicalResources;
+pub(crate) use cpu::ModeledCpu;
+pub(crate) use physical::PhysicalResources;
 #[cfg(test)]
 mod tests {
     use super::*;

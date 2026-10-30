@@ -1,8 +1,7 @@
 use std::rc::Rc;
 
 use crate::support;
-use asap_accuracy::estimators::local_guarantee;
-use asap_accuracy::satisfies;
+use asap_accuracy::test_support::{local_guarantee, satisfies};
 use asap_logical_asap_optimization::pass2::cse::share_common_sub_dags;
 use asap_types::ir::properties::AccuracyMetric;
 use asap_types::ir::properties::AccuracyTarget;

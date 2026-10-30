@@ -4,9 +4,9 @@
 //! A chain of `n` panes of width `w` over `child` is pane `i` (newest first,
 //! `0 ≤ i < n`): the chain's `SummaryAgg` over a range `TimeRange(w)` over
 //! `child` shifted back by `i·w`. A `SummaryMerge` over the chain is the
-//! state of one build over `TimeRange(n·w)` ([`whole_window_build`]) when
+//! state of one build over `TimeRange(n·w)` (`whole_window_build`) when
 //! the family merges (the family-capability table), and the executor runs
-//! the chain as its panes ([`expand_pane_chains`]). A merge of only the
+//! the chain as its panes (`expand_pane_chains`). A merge of only the
 //! newest `m < n` panes (`SummaryMerge::newest_panes`) is the state of one
 //! build over `TimeRange(m·w)` ([`merged_window_build`]): one chain kept for
 //! the longest window serves every query whose window, on the same panes,
@@ -64,7 +64,9 @@ fn merged_pane_count(state: &OperatorNode) -> Option<u32> {
 
 /// The `SummaryAgg` over `TimeRange(pane_count · pane_width_ms)` over the
 /// chain's input whose state the merged panes of `chain` equal.
-pub fn whole_window_build(chain: &OperatorNode) -> Result<OperatorNode, SchemaDerivationError> {
+pub(crate) fn whole_window_build(
+    chain: &OperatorNode,
+) -> Result<OperatorNode, SchemaDerivationError> {
     let Some(ASAPOp::PaneChain { pane_count, .. }) = chain.asap() else {
         return Err(invalid("expected a pane chain"));
     };
@@ -104,7 +106,10 @@ fn newest_panes_build(
 /// Pane `index` (0 = newest) of `chain`: its `SummaryAgg` over the range
 /// `TimeRange(pane_width_ms)` ending `index · pane_width_ms` before the
 /// chain's input.
-pub fn pane(chain: &OperatorNode, index: u32) -> Result<OperatorNode, SchemaDerivationError> {
+pub(crate) fn pane(
+    chain: &OperatorNode,
+    index: u32,
+) -> Result<OperatorNode, SchemaDerivationError> {
     let Some(ASAPOp::PaneChain {
         child,
         pane_width_ms,
@@ -225,6 +230,7 @@ fn without_deadline(error: PaneChainExpansionError) -> SchemaDerivationError {
 /// panes each built and stored at ingestion time. Expanding before timings
 /// are applied leaves the panes untimed. A chain read by anything but a
 /// `SummaryMerge` is an error.
+#[cfg(any(test, feature = "test-support"))]
 pub fn expand_pane_chains(
     root: &Rc<OperatorNode>,
 ) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
@@ -258,7 +264,7 @@ pub struct ExpandedPaneChain {
     pub panes: Vec<Rc<OperatorNode>>,
 }
 
-/// [`expand_pane_chains`] over every root of one workload, with one cache, so
+/// `expand_pane_chains` over every root of one workload, with one cache, so
 /// a node several roots share stays one node and a chain several merges
 /// read expands into one set of panes. A standalone scalar root has the
 /// operators it reads expanded. Also returns each chain's panes, so a
@@ -271,7 +277,7 @@ pub fn expand_pane_chains_in_workload(
 }
 
 /// Expand the same legal pane domain, abandoning partial expansion on timeout.
-pub fn expand_pane_chains_in_workload_before(
+pub(crate) fn expand_pane_chains_in_workload_before(
     roots: &[QueryRoot],
     deadline: Option<Instant>,
 ) -> Result<PaneChainExpansion, PaneChainExpansionError> {

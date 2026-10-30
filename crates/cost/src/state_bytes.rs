@@ -93,7 +93,7 @@ impl StateInputRows {
 /// [`summary_shape`] of one sketch: its update operations per row and its
 /// bytes per state. With [`StateInputRows::UNKNOWN`], the bytes are also the
 /// size the measured table interpolates between
-/// ([`crate::measured`]).
+/// (`crate::measured`).
 pub fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, u64) {
     use asap_sketchlib::{
         Classic, CountMinF64, CountMinSketchWithHeap, CountSketch, CountSketchWithHeap, DataInput,

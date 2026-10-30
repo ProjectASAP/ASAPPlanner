@@ -167,14 +167,6 @@ impl<'de, C: Deserialize<'de>> Deserialize<'de> for GroupKeys<C> {
     }
 }
 
-/// Which data model a `Source` / `AggIntent` operates over.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DataModel {
-    TimeSeries,
-    Tabular,
-    Any,
-}
-
 /// The leaf data source of a `Scan`. The schema itself rides on the
 /// `Scan.schema` field (SchemaResolver-built); `Source` carries only the leaf's
 /// identity.
@@ -475,6 +467,7 @@ impl<C> Reduction<C> {
     /// (tests, mostly) that already know, from the shape they built or are
     /// asserting on, that this must be a genuine reduction. Prefer
     /// [`group_keys`](Self::group_keys) wherever the caller can't assume that.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn expect_reduce(&self) -> &GroupKeys<C> {
         match self {
             Self::Reduce(by) => by,

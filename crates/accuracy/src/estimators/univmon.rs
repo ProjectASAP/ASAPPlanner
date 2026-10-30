@@ -9,7 +9,7 @@
 //! - the distinct count is unbiased with `Var ≤ 1.35 F0²/k` for a heap of
 //!   `k ≥ 8` once the top layer is complete, which needs the source's
 //!   distinct bound, so its guarantee is built where the source is known
-//!   ([`distinct_guarantee`]) and plan selection binds it;
+//!   (`distinct_guarantee`) and plan selection binds it;
 //! - entropy has no certified bound.
 //!
 //! Every bound assumes the key hash is uniformly random and the shape keeps
@@ -257,7 +257,7 @@ pub fn incomplete_top_layer_probability(heap_size: u32, layers: u8, max_distinct
 /// `δ_c` plus the chance of an incomplete top layer, left symbolic in the
 /// source's distinct bound. `None` for a shape that was not sized for a
 /// distinct count, a heap under 8, or a shape the library would not build.
-pub fn distinct_guarantee(params: &SketchParams, source: &str) -> Option<AccuracyGuarantee> {
+pub(crate) fn distinct_guarantee(params: &SketchParams, source: &str) -> Option<AccuracyGuarantee> {
     let SketchParams::UnivMon {
         heap_size,
         sketch_rows,

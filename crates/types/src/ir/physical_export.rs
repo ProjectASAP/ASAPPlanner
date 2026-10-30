@@ -24,10 +24,11 @@ use crate::ir::properties::execution_data_state::{
     ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
 };
 use crate::ir::properties::guarantee::AccuracyGuarantee;
+#[cfg(any(test, feature = "test-support"))]
 use crate::ir::properties::timing::{
-    apply_materialization_timings_to_roots, data_state, is_materialization_point,
-    MaterializationAssignment,
+    apply_materialization_timings_to_roots, MaterializationAssignment,
 };
+use crate::ir::properties::timing::{data_state, is_materialization_point};
 use crate::ir::schema::{FieldDataType, Schema};
 use crate::physical::materialization::Materialization;
 
@@ -185,7 +186,7 @@ pub enum ScanWindow {
 
 impl ScanWindow {
     /// The smallest window holding both.
-    pub fn union(self, other: Self) -> Self {
+    pub(crate) fn union(self, other: Self) -> Self {
         let (
             Self::Within {
                 end_offset_ms: a_end,
@@ -268,7 +269,7 @@ pub fn time_range_window<'a>(
     }
 }
 
-/// Why [`PhysicalASAPDAG::with_every_node_at_query_time`] failed.
+/// Why `PhysicalASAPDAG::with_every_node_at_query_time` failed.
 #[derive(Debug, Error)]
 pub enum ReferencePlanError {
     /// Bad input: the DAG is not a valid physical ASAP DAG.
@@ -291,6 +292,7 @@ impl PhysicalASAPDAG {
     /// compares the answers of the plan it installed with the executor
     /// running this one over raw data, which needs the raw data the
     /// installed plan may not keep.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_every_node_at_query_time(&self) -> Result<PhysicalASAPDAG, ReferencePlanError> {
         let roots = self.untimed_query_roots()?;
         let timed =
@@ -421,11 +423,12 @@ impl PhysicalASAPDAG {
     /// expanded pane, its pane; for a view built from panes, all of them.
     /// `Unbounded` when no `TimeRange` is below it or one of them is
     /// unbounded (a whole SQL table, an `@` anchor). O(nodes + edges).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn view_window(&self, node: PhysicalASAPNodeId) -> ScanWindow {
         self.view_windows([node])[&node]
     }
 
-    /// [`Self::view_window`] of each of `nodes`, by id, with the DAG indexed
+    /// `Self::view_window` of each of `nodes`, by id, with the DAG indexed
     /// once for all of them: O(nodes + edges + the nodes walked below each).
     pub fn view_windows(
         &self,
@@ -470,6 +473,7 @@ impl PhysicalASAPDAG {
     /// The IR this DAG exports, one root per query in batch order, every
     /// node untimed and `NotMaterialized`: the inverse of
     /// [`compile_physical_asap_workload`] up to `Rc` identity and timing.
+    #[cfg(any(test, feature = "test-support"))]
     fn untimed_query_roots(&self) -> Result<Vec<QueryRoot>, PhysicalASAPDAGValidationError> {
         let rebuilt = self.operator_nodes()?;
         let mut operator_roots = self.roots.iter();
@@ -710,6 +714,7 @@ pub struct PhysicalASAPNodeIdentityMap {
 }
 
 impl PhysicalASAPNodeIdentityMap {
+    #[cfg(any(test, feature = "test-support"))]
     pub fn node_id(&self, node: &Rc<OperatorNode>) -> Option<PhysicalASAPNodeId> {
         self.nodes_by_id
             .iter()
@@ -736,7 +741,7 @@ pub fn compile_physical_asap_dag(
 /// Export the timed DAG below `root`. Every reachable node must carry a
 /// timing (see [`crate::ir::properties::timing::apply_materialization_timings`]); the data-state
 /// rules were checked by that pass and are not re-run here.
-pub fn compile_physical_asap_dag_with_node_ids(
+pub(crate) fn compile_physical_asap_dag_with_node_ids(
     root: &Rc<OperatorNode>,
 ) -> Result<PhysicalASAPDAGCompilation, ExecutionDataStateError> {
     compile_physical_asap_workload_with_node_ids(&[QueryRoot::Operator(Rc::clone(root))])
@@ -770,7 +775,7 @@ pub fn compile_physical_asap_workload_with_node_ids(
     })
 }
 
-pub fn compile_physical_asap_workload_with_node_ids_before(
+pub(crate) fn compile_physical_asap_workload_with_node_ids_before(
     roots: &[QueryRoot],
     deadline: Option<std::time::Instant>,
 ) -> Result<PhysicalASAPDAGCompilation, PhysicalASAPCompilationError> {

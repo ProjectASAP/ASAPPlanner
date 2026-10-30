@@ -1743,7 +1743,7 @@ mod tests {
                             };
                             let mut measured = settings.clone();
                             measured.measured_operation_costs.operators.push(
-                                asap_cost::measured::OperatorCost {
+                                asap_cost::OperatorCost {
                                     operator: asap_cost::OperatorKind::SummaryMerge,
                                     phase: Some(ExecutionTiming::QueryTime),
                                     sketch: Some(kind.params().clone()),

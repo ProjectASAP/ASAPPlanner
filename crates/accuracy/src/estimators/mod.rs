@@ -4,11 +4,11 @@ use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::FamilyCapability;
 
 pub(crate) mod cardinality;
-pub mod cms;
+pub(crate) mod cms;
 pub(crate) mod count_sketch;
 pub(crate) mod ddsketch;
 pub mod hll;
-pub mod kll;
+pub(crate) mod kll;
 pub mod univmon;
 
 pub(super) fn sketch_guarantee(
@@ -62,7 +62,7 @@ fn bounded_guarantee(
 /// (`SummarySample`, `Wavelet`, `StatModel`, and sketch evaluations without a
 /// certified bound): Pass 1 then leaves the guarantee `None` and keeps the
 /// candidate for plan selection to decide.
-pub fn local_guarantee(
+pub(crate) fn local_guarantee(
     family: &FieldDataType,
     query: &SketchStatistic,
 ) -> Option<AccuracyGuarantee> {
@@ -136,7 +136,7 @@ pub fn with_failure_probability(params: &SketchParams, delta: f64) -> SketchPara
     }
 }
 
-pub fn size_params(
+pub(crate) fn size_params(
     kind: SketchAlgorithm,
     intent: &AggIntent,
     eps: f64,

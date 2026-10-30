@@ -7,7 +7,7 @@
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use std::rc::Rc;
 
-use asap_accuracy::sizing::{default_size_params, DEFAULT_DELTA};
+use asap_accuracy::test_support::{default_size_params, DEFAULT_DELTA};
 use asap_frontend_promql::{lower_promql_query_workload, promql_metric_names};
 use asap_frontend_sql::SqlCatalog;
 use asap_plan_selection::pass::{PlanOutput, PlanningModels, QueryPlan};
@@ -140,16 +140,17 @@ fn composed_summary_candidates(
                 .into_iter()
                 .map(|(_, root)| root)
                 .collect();
-            let mut candidate = asap_physical_asap_optimization::optimize_physical_asap_chosen(
-                "explicit-composition",
-                &roots,
-                &entries,
-                data,
-                models.deployment_capabilities.query_time_results_retained,
-                &mut |_, _, _| asap_types::physical::Materialization::NotMaterialized,
-            )
-            .unwrap()
-            .expect("supported physical computation");
+            let mut candidate =
+                asap_physical_asap_optimization::test_support::optimize_physical_asap_chosen(
+                    "explicit-composition",
+                    &roots,
+                    &entries,
+                    data,
+                    models.deployment_capabilities.query_time_results_retained,
+                    &mut |_, _, _| asap_types::physical::Materialization::NotMaterialized,
+                )
+                .unwrap()
+                .expect("supported physical computation");
             candidate.id = format!("composition-{index}");
             candidate
         })
@@ -202,16 +203,17 @@ fn shared_kll_candidate(
     .into_iter()
     .map(|(_, node)| QueryRoot::Operator(node))
     .collect();
-    let mut physical = asap_physical_asap_optimization::optimize_physical_asap_chosen(
-        "shared-kll",
-        &roots,
-        &workload.query_workload.entries().collect::<Vec<_>>(),
-        workload.data_workload.as_ref().unwrap(),
-        false,
-        &mut |_, _, _| Materialization::NotMaterialized,
-    )
-    .unwrap()
-    .unwrap();
+    let mut physical =
+        asap_physical_asap_optimization::test_support::optimize_physical_asap_chosen(
+            "shared-kll",
+            &roots,
+            &workload.query_workload.entries().collect::<Vec<_>>(),
+            workload.data_workload.as_ref().unwrap(),
+            false,
+            &mut |_, _, _| Materialization::NotMaterialized,
+        )
+        .unwrap()
+        .unwrap();
     physical.id = "shared-kll".into();
     asap_plan_selection::select_plan(
         std::slice::from_ref(&physical),

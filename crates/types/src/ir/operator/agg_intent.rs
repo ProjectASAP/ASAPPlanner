@@ -16,7 +16,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::ir::operator::operator_properties::DataModel;
 use crate::ir::properties::AccuracyTarget;
 use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType};
 
@@ -281,8 +280,7 @@ pub enum AggIntent<C = ColumnId> {
     /// it here, tagged by its own `kind` string, and owns all
     /// interpretation of `payload` itself.
     ///
-    /// Core treats this opaquely: [`AggIntent::requires`] returns
-    /// [`DataModel::Any`], [`AggIntent::is_per_series`] returns `false`,
+    /// Core treats this opaquely: [`AggIntent::is_per_series`] returns `false`,
     /// [`AggIntent::input_col`] returns `None`, and
     /// `AggIntent::output_column` names the output column after `kind`
     /// with an unconstrained `Utf8` type — a deployment model that binds
@@ -419,42 +417,6 @@ impl AggIntent<ColumnId> {
 }
 
 impl<C: Clone> AggIntent<C> {
-    /// Which data model this intent semantically requires. Post-ASAP binding
-    /// rules consult this to skip non-applicable intents (e.g. `Rate` over a
-    /// tabular source).
-    pub fn requires(&self) -> DataModel {
-        match self {
-            Self::Rate
-            | Self::IRate
-            | Self::Increase
-            | Self::Changes
-            | Self::Delta
-            | Self::IDelta
-            | Self::Deriv
-            | Self::Resets
-            | Self::PredictLinear { .. }
-            | Self::DoubleExpSmoothing { .. }
-            | Self::HistogramCount
-            | Self::HistogramSum
-            | Self::HistogramAvg
-            | Self::HistogramStdDev
-            | Self::HistogramStdVar
-            | Self::HistogramFraction { .. }
-            | Self::Absent { .. }
-            | Self::AbsentOverTime
-            | Self::PresentOverTime
-            | Self::TimeFn(_)
-            | Self::LastOverTime
-            | Self::FirstOverTime
-            | Self::MadOverTime
-            | Self::TsOfMinOverTime
-            | Self::TsOfMaxOverTime
-            | Self::TsOfFirstOverTime
-            | Self::TsOfLastOverTime => DataModel::TimeSeries,
-            _ => DataModel::Any,
-        }
-    }
-
     /// Whether this is a *per-series* reduction — it reduces a single series'
     /// samples over its range window (one value out per series), so it does
     /// **not** collapse across series and every label column is preserved.

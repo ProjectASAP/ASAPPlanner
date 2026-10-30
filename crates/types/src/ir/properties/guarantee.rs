@@ -102,7 +102,7 @@ impl BoundExpr {
     }
 
     /// See [`AccuracyGuarantee::bind`].
-    pub fn bind(&self, value: &dyn Fn(&str) -> Option<f64>) -> Self {
+    pub(crate) fn bind(&self, value: &dyn Fn(&str) -> Option<f64>) -> Self {
         let all = |terms: &[BoundExpr]| terms.iter().map(|t| t.bind(value)).collect();
         match self {
             BoundExpr::Zero | BoundExpr::Constant { .. } => self.clone(),
@@ -122,6 +122,7 @@ impl BoundExpr {
     }
 
     /// Whether evaluation depends on a statistic not yet supplied.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn has_unknown(&self) -> bool {
         match self {
             BoundExpr::Zero | BoundExpr::Constant { .. } => false,
@@ -215,7 +216,8 @@ impl ProbabilityExpr {
     }
 
     /// Whether evaluation depends on a statistic not yet supplied.
-    pub fn has_unknown(&self) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn has_unknown(&self) -> bool {
         match self {
             ProbabilityExpr::Zero | ProbabilityExpr::Constant { .. } => false,
             ProbabilityExpr::UnionBound { terms } => terms.iter().any(ProbabilityExpr::has_unknown),
@@ -242,7 +244,7 @@ impl ProbabilityExpr {
     }
 
     /// See [`AccuracyGuarantee::bind`].
-    pub fn bind(&self, value: &dyn Fn(&str) -> Option<f64>) -> Self {
+    pub(crate) fn bind(&self, value: &dyn Fn(&str) -> Option<f64>) -> Self {
         match self {
             ProbabilityExpr::Zero | ProbabilityExpr::Constant { .. } => self.clone(),
             ProbabilityExpr::UnionBound { terms } => ProbabilityExpr::UnionBound {
@@ -438,6 +440,7 @@ impl AccuracyGuarantee {
     }
 
     /// An unresolved bound or failure probability is not a certificate.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn has_unknown(&self) -> bool {
         self.spec.error.has_unknown() || self.spec.failure_probability.has_unknown()
     }
@@ -502,6 +505,7 @@ impl AccuracyGuarantee {
     /// `1` for a plain evaluation, `0` for an exact value, and the transitive
     /// count through every [`GuaranteeSource::ChildGuarantee`] for a
     /// composition.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn approximate_layer_count(&self) -> usize {
         self.provenance
             .iter()

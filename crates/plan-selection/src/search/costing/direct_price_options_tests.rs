@@ -538,7 +538,7 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
     settings
         .measured_operation_costs
         .operators
-        .push(asap_cost::measured::OperatorCost {
+        .push(asap_cost::OperatorCost {
             operator: asap_cost::OperatorKind::Project,
             phase: Some(ExecutionTiming::IngestionTime),
             sketch: None,

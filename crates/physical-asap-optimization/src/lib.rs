@@ -15,7 +15,7 @@
 //!
 //! * `NotMaterialized`: rebuilt at query time by every query that reads it;
 //! * `MatAtIngestion(Memory)`: maintained as data arrives and kept for the
-//!   queries, when the build is eligible ([`IngestionPruneReason`]);
+//!   queries, when the build is eligible (`IngestionPruneReason`);
 //! * `MatAtQuery(Memory)`: built once at query time for every query of one
 //!   evaluation that reads it and reused only within that evaluation,
 //!   offered for a build two or more queries read;
@@ -100,7 +100,7 @@
 //! A summary needs no rewrite: `SummaryAgg` → `SummaryEstimate` already is
 //! build → estimate. Every node keeps the guarantee Stage 1 composed for it.
 pub mod catalog;
-pub mod summary_window;
+mod summary_window;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
@@ -144,17 +144,12 @@ pub struct PhysicalWorkloadPlan {
     /// (a shared node built once per evaluation). A build one query reads
     /// at ingestion time and another at query time appears once per copy.
     pub materialization: BTreeMap<PhysicalASAPNodeId, Materialization>,
-    /// The option chosen for each materialization candidate of its logical
-    /// candidate: each summary build in discovery order (query by query,
-    /// each query's builds as a walk from its root meets them), then each
-    /// highest shared non-summary node in the same order. What
-    /// [`optimize_physical_asap_assigned`] rebuilds it from.
-    pub assignment: Vec<Materialization>,
 }
 
 impl PhysicalWorkloadPlan {
     /// Whether any node is materialized: a summary build, or a shared
     /// non-summary node built once per evaluation.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn materializes_any(&self) -> bool {
         self.materialization
             .values()
@@ -192,7 +187,7 @@ pub enum PhysicalASAPOptimizationError {
 /// Why a summary build cannot be materialized at ingestion time (S4).
 /// Shared by complete-plan Stage 2 and explicit selected-reader eligibility.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IngestionPruneReason {
+pub(crate) enum IngestionPruneReason {
     /// The data workload is at rest, or its arrival is unknown.
     NotIngesting,
     /// A query reading it is not repeated.
@@ -232,16 +227,15 @@ pub enum IngestionPruneReason {
 /// These are local options, not a complete physical assignment. Ingestion still
 /// requires selected upstream implementations to pass timing/down-closure checks.
 #[derive(Debug)]
-pub struct SummaryMaterializationEligibility {
-    pub at_ingestion: Result<(), IngestionPruneReason>,
-    pub may_keep_across_evaluations: bool,
-    pub may_materialize_at_query: bool,
+pub(crate) struct SummaryMaterializationEligibility {
+    pub(crate) at_ingestion: Result<(), IngestionPruneReason>,
+    pub(crate) may_keep_across_evaluations: bool,
     /// A pane's selected readers must also meet their range-step grids.
-    pub range_compatibility: Result<(), PhysicalASAPOptimizationError>,
+    pub(crate) range_compatibility: Result<(), PhysicalASAPOptimizationError>,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SummaryEligibilityError {
+pub(crate) enum SummaryEligibilityError {
     #[error("selected reader {query} has no workload entry")]
     UnknownReader { query: usize },
     #[error("materialization eligibility requires a summary build or pane chain")]
@@ -257,7 +251,7 @@ pub enum SummaryEligibilityError {
 /// missing workload entries are rejected as malformed reader references. The node must carry the actual bound source/filter/window subtree,
 /// and `data` describes that source's arrival. This function does not implement
 /// operators, assign upstream timing, or prove complete execution legality.
-pub fn summary_materialization_eligibility(
+pub(crate) fn summary_materialization_eligibility(
     node: &OperatorNode,
     selected_readers: &[usize],
     entries: &[QueryWorkloadEntry],
@@ -318,7 +312,6 @@ fn summary_reader_eligibility(
     SummaryMaterializationEligibility {
         at_ingestion: ingestion_eligibility(node, readers, entries, data),
         may_keep_across_evaluations,
-        may_materialize_at_query: readers.len() > 1,
         range_compatibility: check_summary_range_steps(node, readers, entries),
     }
 }
@@ -459,10 +452,13 @@ pub fn optimize_physical_asap(
 /// Stage 2 for one CandidateLogicalASAPDAG and one materialization
 /// assignment: the physical candidate [`optimize_physical_asap`] lists for
 /// it. `choose(readers)` gives the option for each materialization
-/// candidate in the order of [`PhysicalWorkloadPlan::assignment`], `readers`
-/// being the queries that read it. `None` when
+/// candidate (each summary build in discovery order, query by query, each
+/// query's builds as a walk from its root meets them, then each highest
+/// shared non-summary node in the same order), `readers` being the queries
+/// that read it. `None` when
 /// a chosen option is not one of the build's, or the assignment
 /// materializes a build at ingestion time above one at query time.
+#[cfg(feature = "test-support")]
 pub fn optimize_physical_asap_assigned(
     from_logical: &str,
     roots: &[QueryRoot],
@@ -493,7 +489,7 @@ pub fn optimize_physical_asap_assigned(
 /// [`optimize_physical_asap_chosen`]'s choice per materialization
 /// candidate: from the logical node it implements, its readers and its
 /// options.
-pub type ChooseMaterialization<'a> =
+pub(crate) type ChooseMaterialization<'a> =
     dyn FnMut(*const OperatorNode, &[usize], &[Materialization]) -> Materialization + 'a;
 
 /// Stage 2 for one CandidateLogicalASAPDAG and one materialization
@@ -505,7 +501,7 @@ pub type ChooseMaterialization<'a> =
 /// candidate's, or the assignment materializes a build at ingestion time
 /// above one at query time. The search that decodes one plan from a model
 /// solution uses it to build that plan alone, not every assignment.
-pub fn optimize_physical_asap_chosen(
+pub(crate) fn optimize_physical_asap_chosen(
     from_logical: &str,
     roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
@@ -595,7 +591,6 @@ fn assigned_candidate(
         roots: timed,
         dag,
         materialization,
-        assignment,
     })
 }
 
@@ -1019,7 +1014,7 @@ fn map_roots(
 /// rules (currently exact top-k -> Project/Limit/Sort), without assigning timing
 /// or materialization and without recursively implementing another group's input.
 /// Returned new operators must be enumerated and priced before plan selection.
-pub fn implement_candidate_operators(
+pub(crate) fn implement_candidate_operators(
     root: &Rc<OperatorNode>,
     inputs: &[Rc<OperatorNode>],
 ) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
@@ -1163,6 +1158,50 @@ fn rebuilt(
     } else {
         node.clone()
     })
+}
+
+/// Stage 2 internals that other crates' tests call: building one physical
+/// candidate for a chosen assignment, implementing one candidate's
+/// operators, and the pane-coverage check.
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    use std::rc::Rc;
+
+    use asap_types::ir::{OperatorNode, QueryRoot};
+    use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
+
+    use crate::{PhysicalASAPOptimizationError, PhysicalWorkloadPlan};
+
+    pub use crate::summary_window::{
+        validate_pane_coverage, PaneCoverageError, PaneLayout, WindowEdgeCoverage,
+    };
+
+    /// See `optimize_physical_asap_chosen` in this crate.
+    pub fn optimize_physical_asap_chosen(
+        from_logical: &str,
+        roots: &[QueryRoot],
+        entries: &[QueryWorkloadEntry],
+        data: &DataWorkload,
+        query_time_results_retained: bool,
+        choose: &mut crate::ChooseMaterialization<'_>,
+    ) -> Result<Option<PhysicalWorkloadPlan>, PhysicalASAPOptimizationError> {
+        crate::optimize_physical_asap_chosen(
+            from_logical,
+            roots,
+            entries,
+            data,
+            query_time_results_retained,
+            choose,
+        )
+    }
+
+    /// See `implement_candidate_operators` in this crate.
+    pub fn implement_candidate_operators(
+        root: &Rc<OperatorNode>,
+        inputs: &[Rc<OperatorNode>],
+    ) -> Result<Rc<OperatorNode>, PhysicalASAPOptimizationError> {
+        crate::implement_candidate_operators(root, inputs)
+    }
 }
 
 #[cfg(test)]
@@ -1584,10 +1623,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(selected.at_ingestion, Ok(()));
-        assert!(
-            !selected.may_materialize_at_query,
-            "duplicate reader indices are one query"
-        );
         assert!(matches!(
             summary_materialization_eligibility(&node, &[0, entries.len()], &entries, &data, query_time_results_retained),
             Err(SummaryEligibilityError::UnknownReader { query }) if query == entries.len()
@@ -1604,7 +1639,6 @@ mod tests {
             combined.at_ingestion,
             Err(IngestionPruneReason::NotPredictable)
         );
-        assert!(combined.may_materialize_at_query);
         // The complete-DAG path uses the same selected-reader workload rules.
         let candidates =
             materialization_candidates(&[root], &entries, &data, query_time_results_retained);

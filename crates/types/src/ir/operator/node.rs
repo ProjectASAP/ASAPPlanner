@@ -157,6 +157,7 @@ impl OperatorNode {
     /// What this summary state covers; `None` for a node that is not a
     /// `SummaryAgg` or a valid `SummaryMerge`. Derived on each call, since
     /// the public fields can be edited in place.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn coverage(&self) -> Option<SummaryCoverage> {
         SummaryCoverage::derive(self).ok()
     }
@@ -164,7 +165,7 @@ impl OperatorNode {
     /// The build whose state this summary-state node carries: a
     /// `SummaryAgg` or `PaneChain` itself, or the first input's build under
     /// `SummaryMerge`s (merged inputs have one definition, which
-    /// [`coverage`](Self::coverage) checks). `None` under a regrouping
+    /// `coverage` checks). `None` under a regrouping
     /// merge, whose states no build in the DAG carries (its coverage's
     /// `definition` is the build it stands for), and for any other node.
     pub fn summary_build(&self) -> Option<&ASAPOp> {
@@ -212,6 +213,7 @@ impl OperatorNode {
 
     /// The non-ASAP operator of a node that is known to be one; a front-end
     /// DAG never contains an ASAP node, so one here is a caller bug.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn expect_non_asap(&self) -> &NonASAPOp {
         self.non_asap().unwrap_or_else(|| {
             panic!(
@@ -299,6 +301,7 @@ impl OperatorNode {
     }
 
     /// Validate assigned phases without imposing any particular runtime implementation.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn validate_execution_timing(self: &Rc<Self>) -> Result<(), SchemaDerivationError> {
         self.validate_structure()?;
         for node in Self::reachable(self) {

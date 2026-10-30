@@ -21,7 +21,7 @@ use asap_logical_asap_optimization::pass2::asap_aware_cse::{
 };
 use asap_types::ir::operator::operator_properties::TimeShift;
 use asap_types::ir::operator::pane_chain::expand_pane_chains;
-use asap_types::ir::physical_export::{compile_physical_asap_dag_with_node_ids, PhysicalASAPDAG};
+use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::Schema;
 use asap_types::ir::{
@@ -29,6 +29,7 @@ use asap_types::ir::{
     NonASAPOp, Operator, OperatorNode, QueryRoot,
 };
 use asap_types::physical::{Materialization, Medium};
+use asap_types::test_support::compile_physical_asap_dag_with_node_ids;
 
 const EVALUATION_MS: i64 = 300_000;
 const PANE_MS: i64 = 60_000;

@@ -13,13 +13,13 @@ pub struct CurrentSeriesInput {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CurrentSeriesMatcher {
-    pub label: String,
-    pub value: String,
-    pub operation: CurrentSeriesMatch,
+    pub(crate) label: String,
+    pub(crate) value: String,
+    pub(crate) operation: CurrentSeriesMatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum CurrentSeriesMatch {
+pub(crate) enum CurrentSeriesMatch {
     Equal,
     NotEqual,
     Regex,

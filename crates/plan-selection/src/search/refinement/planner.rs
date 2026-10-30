@@ -603,7 +603,7 @@ fn seed_dds_budgets(
     context: &CandidatePlanningContext<'_>,
     output_queries: &[usize],
 ) -> Vec<f64> {
-    use asap_accuracy::budget::per_input_target;
+    use asap_accuracy::per_input_target;
     use asap_types::ir::{
         operator::AggIntent, properties::AccuracyMetric, NonASAPOp, OperatorNode,
     };

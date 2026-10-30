@@ -36,32 +36,32 @@ pub struct UnaryEdgeStatistics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScalarInputStatistics {
-    pub edge: EdgeStatistics,
+    pub(crate) edge: EdgeStatistics,
     #[serde(default)]
-    pub promql: Option<PromqlEdgeStatistics>,
+    pub(crate) promql: Option<PromqlEdgeStatistics>,
 }
 
 /// Input and output evidence for a binary physical operator. The input order
 /// is the physical operator's left/right order and must match its DAG children.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BinaryEdgeStatistics {
-    pub inputs: [EdgeStatistics; 2],
-    pub output: EdgeStatistics,
+    pub(crate) inputs: [EdgeStatistics; 2],
+    pub(crate) output: EdgeStatistics,
     #[serde(default)]
-    pub promql: Option<PromqlBinaryEdgeStatistics>,
+    pub(crate) promql: Option<PromqlBinaryEdgeStatistics>,
 }
 
 /// PromQL value shape carried alongside rows/bytes on a physical edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromqlEdgeStatistics {
-    pub series: u64,
-    pub evaluation_steps: u64,
-    pub value_kind: PromqlValueKind,
+    pub(crate) series: u64,
+    pub(crate) evaluation_steps: u64,
+    pub(crate) value_kind: PromqlValueKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PromqlValueKind {
+pub(crate) enum PromqlValueKind {
     Scalar,
     /// Vector/sample data. Operator semantics determine whether rows are
     /// instant results or decoded source samples for a range evaluation.
@@ -71,20 +71,20 @@ pub enum PromqlValueKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromqlUnaryEdgeStatistics {
-    pub input: PromqlEdgeStatistics,
-    pub output: PromqlEdgeStatistics,
+    pub(crate) input: PromqlEdgeStatistics,
+    pub(crate) output: PromqlEdgeStatistics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PromqlBinaryEdgeStatistics {
-    pub inputs: [PromqlEdgeStatistics; 2],
-    pub output: PromqlEdgeStatistics,
+pub(crate) struct PromqlBinaryEdgeStatistics {
+    pub(crate) inputs: [PromqlEdgeStatistics; 2],
+    pub(crate) output: PromqlEdgeStatistics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromqlNaryEdgeStatistics {
-    pub inputs: Vec<PromqlEdgeStatistics>,
-    pub output: PromqlEdgeStatistics,
+    pub(crate) inputs: Vec<PromqlEdgeStatistics>,
+    pub(crate) output: PromqlEdgeStatistics,
 }
 
 /// Input distribution for an algorithm that independently orders partitions.
@@ -212,34 +212,7 @@ pub enum OperatorStatistics {
 }
 
 impl OperatorStatistics {
-    pub fn input_count(&self) -> usize {
-        match self {
-            Self::Filter { scalar_inputs, .. } | Self::Project { scalar_inputs, .. } => {
-                1 + scalar_inputs.len()
-            }
-            Self::Scan { .. }
-            | Self::HashAggregate { .. }
-            | Self::InMemoryComparisonSort { .. }
-            | Self::TopK { .. }
-            | Self::HashDeduplicate { .. }
-            | Self::InMemoryAnalyticWindow { .. }
-            | Self::Limit { .. }
-            | Self::PassThrough { .. }
-            | Self::PromqlRange { .. }
-            | Self::PromqlSubquery { .. }
-            | Self::PromqlRelabel { .. }
-            | Self::PromqlSeriesSample { .. }
-            | Self::PromqlScalarToVector { .. }
-            | Self::PromqlVectorToScalar { .. }
-            | Self::PromqlPerSeries { .. }
-            | Self::PromqlPresence { .. } => 1,
-            Self::HashJoin { .. } | Self::PromqlBinary { .. } | Self::PromqlInfoEnrich { .. } => 2,
-            Self::Concat { inputs, .. } => inputs.len(),
-            Self::PromqlScalarLeaf { .. } => 0,
-        }
-    }
-
-    pub fn input(&self, index: usize) -> Option<EdgeStatistics> {
+    pub(crate) fn input(&self, index: usize) -> Option<EdgeStatistics> {
         match self {
             Self::Scan { edges, .. }
             | Self::HashAggregate { edges, .. }
@@ -276,7 +249,7 @@ impl OperatorStatistics {
         }
     }
 
-    pub fn output(&self) -> EdgeStatistics {
+    pub(crate) fn output(&self) -> EdgeStatistics {
         match self {
             Self::Scan { edges, .. }
             | Self::HashAggregate { edges, .. }
@@ -304,34 +277,7 @@ impl OperatorStatistics {
         }
     }
 
-    pub fn promql_input(&self, index: usize) -> Option<PromqlEdgeStatistics> {
-        match self {
-            Self::Concat {
-                promql: Some(edges),
-                ..
-            } => edges.inputs.get(index).copied(),
-            Self::PromqlScalarLeaf { .. } => None,
-            Self::HashJoin { edges }
-            | Self::PromqlBinary { edges, .. }
-            | Self::PromqlInfoEnrich { edges, .. } => edges.promql?.inputs.get(index).copied(),
-            Self::Filter { scalar_inputs, .. } | Self::Project { scalar_inputs, .. }
-                if index > 0 =>
-            {
-                scalar_inputs.get(index - 1)?.promql
-            }
-            _ => self.unary_promql().and_then(
-                |edges| {
-                    if index == 0 {
-                        Some(edges.input)
-                    } else {
-                        None
-                    }
-                },
-            ),
-        }
-    }
-
-    pub fn promql_output(&self) -> Option<PromqlEdgeStatistics> {
+    pub(crate) fn promql_output(&self) -> Option<PromqlEdgeStatistics> {
         match self {
             Self::Concat {
                 promql: Some(edges),

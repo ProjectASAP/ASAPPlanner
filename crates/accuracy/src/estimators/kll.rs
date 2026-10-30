@@ -48,7 +48,7 @@ pub(crate) const KLL_RANK_ERROR_EXPONENT_99: f64 = 0.9723;
 /// The failure probability of the empirical 99% calibration.
 pub(crate) const KLL_CALIBRATED_FAILURE_PROBABILITY: f64 = 0.01;
 
-pub fn kll_rank_error_99(k: u32) -> f64 {
+pub(crate) fn kll_rank_error_99(k: u32) -> f64 {
     KLL_RANK_ERROR_COEFFICIENT_99 / f64::from(k).powf(KLL_RANK_ERROR_EXPONENT_99)
 }
 

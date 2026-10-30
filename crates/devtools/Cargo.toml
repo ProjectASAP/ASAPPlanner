@@ -32,6 +32,10 @@ serde_json = "1"
 serde_yaml = "0.9"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 
+[dev-dependencies]
+asap-types = { path = "../types", features = ["test-support"] }
+asap-physical-asap-optimization = { path = "../physical-asap-optimization", features = ["test-support"] }
+
 
 [[test]]
 name = "devtools"

@@ -44,7 +44,7 @@ pub fn classic_relative_error(precision: u8, relative_error: Option<f64>) -> f64
 }
 
 /// The statistic classic HLL's failure probability at `precision` and
-/// `relative_error` over `source` is left as ([`classic_guarantee`]).
+/// `relative_error` over `source` is left as (`classic_guarantee`).
 /// `relative_error` is written in Rust's shortest round-trip form, so it
 /// parses back to the same value.
 pub fn classic_failure_statistic(precision: u8, relative_error: f64, source: &str) -> String {
@@ -81,7 +81,7 @@ pub fn parse_classic_failure_statistic(statistic: &str) -> Option<(u8, f64, &str
 /// distinct bound ([`classic_failure_statistic`]). The failure probability
 /// is per output row: each group's estimate fails with at most it. `None`
 /// for a precision outside the contract's.
-pub fn classic_guarantee(
+pub(crate) fn classic_guarantee(
     precision: u8,
     relative_error: Option<f64>,
     source: &str,
@@ -135,13 +135,13 @@ const MAX_CONTRACT_DISTINCT: u32 = 1 << 17;
 /// The deployment must establish the population bound; observations alone do
 /// not establish it. Unsupported precisions/populations return no certificate.
 #[derive(Debug, Clone, Copy)]
-pub struct ClassicHllConfidence {
+pub(crate) struct ClassicHllConfidence {
     max_distinct: u32,
     relative_error: f64,
 }
 
 impl ClassicHllConfidence {
-    pub fn new(max_distinct: u32, relative_error: f64) -> Option<Self> {
+    pub(crate) fn new(max_distinct: u32, relative_error: f64) -> Option<Self> {
         (max_distinct > 0
             && max_distinct <= MAX_CONTRACT_DISTINCT
             && relative_error.is_finite()
@@ -152,7 +152,8 @@ impl ClassicHllConfidence {
         })
     }
 
-    pub fn guarantee(&self, precision: u8) -> Option<AccuracyGuarantee> {
+    #[cfg(test)]
+    pub(crate) fn guarantee(&self, precision: u8) -> Option<AccuracyGuarantee> {
         let delta = self.failure_probability(precision)?;
         Some(AccuracyGuarantee::new(
             AccuracyMetric::Relative,
@@ -172,7 +173,8 @@ impl ClassicHllConfidence {
         ))
     }
 
-    pub fn precision(&self, delta: f64) -> Option<u8> {
+    #[cfg(test)]
+    pub(crate) fn precision(&self, delta: f64) -> Option<u8> {
         if !delta.is_finite() || !(0.0..1.0).contains(&delta) || delta == 0.0 {
             return None;
         }

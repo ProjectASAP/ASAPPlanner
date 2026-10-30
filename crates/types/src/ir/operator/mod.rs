@@ -24,8 +24,8 @@ pub use agg_intent::{
     TimeFunc,
 };
 pub use operator_properties::{
-    AtModifier, BinaryOpKind, ColState, ConcatDiscriminatorKey, DataModel, GroupKeys, GroupSide,
-    InfoMatcher, JoinKind, PromQLVectorSetOpKind, Reduction, RelationalSetOpKind, SampleKind,
-    Source, TimeShift, VectorGrouping, VectorMatch, VectorMatchKind, WindowFrame, WindowFrameBound,
-    WindowFrameOffset, WindowFrameUnits, WindowFuncKind,
+    AtModifier, BinaryOpKind, ColState, ConcatDiscriminatorKey, GroupKeys, GroupSide, InfoMatcher,
+    JoinKind, PromQLVectorSetOpKind, Reduction, RelationalSetOpKind, SampleKind, Source, TimeShift,
+    VectorGrouping, VectorMatch, VectorMatchKind, WindowFrame, WindowFrameBound, WindowFrameOffset,
+    WindowFrameUnits, WindowFuncKind,
 };

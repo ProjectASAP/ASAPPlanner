@@ -260,7 +260,7 @@ impl SummaryCoverage {
     /// `materialization`). Two equal definitions (the equality a merge
     /// requires) get equal ids on any node and in any process, so a summary
     /// store can key states by this id and a concrete selection.
-    pub fn definition_id(&self) -> String {
+    pub(crate) fn definition_id(&self) -> String {
         format!(
             "{:032x}",
             definition_hash(&self.definition, &mut HashMap::new())

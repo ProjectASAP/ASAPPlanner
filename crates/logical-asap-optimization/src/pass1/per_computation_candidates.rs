@@ -2311,16 +2311,13 @@ mod tests {
     }
 
     use super::*;
-    use asap_accuracy::composition::{
-        raw_data_samples_sign_statistic, StreamNorm, PRODUCT_OPERAND_DOMAINS,
-        QUOTIENT_OPERAND_DOMAINS,
-    };
-    use asap_accuracy::estimators::local_guarantee;
+    use asap_accuracy::composition::{StreamNorm, PRODUCT_OPERAND_DOMAINS};
     use asap_accuracy::propagation::operand_guarantee;
     use asap_accuracy::test_support::{
         composed_guarantee, estimate_bound_over_raw_data_samples, estimate_has_bound,
-        estimates_raw_data_samples_of, fold_stats, scalar_guarantee, source_distinct_guarantee,
-        stream_norm,
+        estimates_raw_data_samples_of, fold_stats, local_guarantee,
+        raw_data_samples_sign_statistic, scalar_guarantee, sign_statistic,
+        source_distinct_guarantee, stream_norm, QUOTIENT_OPERAND_DOMAINS,
     };
     use asap_types::ir::properties::guarantee::{
         AccuracyGuarantee, AccuracyMetric, BoundExpr, ProbabilityExpr,
@@ -2949,7 +2946,8 @@ mod tests {
     mod stream_norms {
         use super::*;
         use crate::test_support::{cms_summary, weighted};
-        use asap_accuracy::composition::{source_norm_statistic, STREAM_L1_NORM, STREAM_ROW_COUNT};
+        use asap_accuracy::composition::STREAM_L1_NORM;
+        use asap_accuracy::test_support::{source_norm_statistic, STREAM_ROW_COUNT};
 
         /// A count (constant weight) is bounded by its weight times the
         /// source's row count; a sum of the source's raw value column by
@@ -3777,10 +3775,8 @@ mod tests {
             Some("m")
         );
         assert_eq!(
-            fold_stats(&Reduction::by(vec![]), &Rc::new(read(0.99)))
-                .unwrap()
-                .sign_statistic,
-            Some(raw_data_samples_sign_statistic("m"))
+            sign_statistic(&fold_stats(&Reduction::by(vec![]), &Rc::new(read(0.99))).unwrap()),
+            Some(raw_data_samples_sign_statistic("m").as_str())
         );
         for q in [-1.0, 2.0] {
             assert_eq!(estimates_raw_data_samples_of(&read(q)), None, "q = {q}");
@@ -3815,10 +3811,8 @@ mod tests {
             );
             let stats = fold_stats(&Reduction::by(vec![]), &estimate).unwrap();
             assert_eq!(
-                stats.sign_statistic,
-                Some(asap_accuracy::composition::raw_data_samples_sign_statistic(
-                    "m"
-                ))
+                asap_accuracy::test_support::sign_statistic(&stats),
+                Some(asap_accuracy::test_support::raw_data_samples_sign_statistic("m").as_str())
             );
         }
         let rate = inventory_root("sum by (job) (rate(m[1m]))");
@@ -3831,7 +3825,7 @@ mod tests {
             assert_eq!(estimates_raw_data_samples_of(&node), None);
         }
         let stats = fold_stats(&Reduction::by(vec![]), &rate).unwrap();
-        assert_eq!(stats.sign_statistic, None);
+        assert_eq!(sign_statistic(&stats), None);
     }
 
     /// The sketch parameters of every summary state below `root`.
@@ -3880,8 +3874,8 @@ mod tests {
 
     fn cms(eps: f64, delta: f64) -> SketchParams {
         SketchParams::Cms {
-            width: asap_accuracy::estimators::cms::cms_width(eps),
-            depth: asap_accuracy::estimators::cms::cms_depth(delta),
+            width: asap_accuracy::test_support::cms_width(eps),
+            depth: asap_accuracy::test_support::cms_depth(delta),
         }
     }
 
@@ -4588,7 +4582,7 @@ mod tests {
         assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Rank);
         assert_eq!(
             guarantee.spec.error.evaluate(),
-            Some(asap_accuracy::estimators::kll::kll_rank_error_99(269))
+            Some(asap_accuracy::test_support::kll_rank_error_99(269))
         );
     }
 }

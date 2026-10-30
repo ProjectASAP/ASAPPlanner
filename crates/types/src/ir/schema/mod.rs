@@ -168,11 +168,11 @@ pub enum FieldDataType {
 }
 
 impl FieldDataType {
-    pub fn is_plain(&self) -> bool {
+    pub(crate) fn is_plain(&self) -> bool {
         matches!(self, FieldDataType::Plain(_))
     }
 
-    pub fn plain(&self) -> Option<&DataType> {
+    pub(crate) fn plain(&self) -> Option<&DataType> {
         match self {
             FieldDataType::Plain(dtype) => Some(dtype),
             _ => None,

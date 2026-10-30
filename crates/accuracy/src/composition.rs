@@ -10,7 +10,7 @@ pub const INPUT_ROW_COUNT: &str = "input_row_count";
 /// Rows one group of a SQL fold over an approximate relation folds: not
 /// bounded by the series count of the sources it reads, so plan selection
 /// leaves it unbound.
-pub const GROUP_ROW_COUNT: &str = "group_row_count";
+pub(crate) const GROUP_ROW_COUNT: &str = "group_row_count";
 /// Whether every input value is non-negative.
 pub(crate) const VALUES_NON_NEGATIVE: &str = "values_non_negative";
 /// The absolute bound of a product of two estimates,
@@ -19,21 +19,21 @@ pub const PRODUCT_OPERAND_DOMAINS: &str = "product_operand_domains";
 /// The absolute bound of a quotient with an approximate denominator,
 /// `(|x|·e_y + |y|·e_x) / (|y|·(|y| − e_y))`, given enforced operand domains
 /// with the denominator's bounded away from zero.
-pub const QUOTIENT_OPERAND_DOMAINS: &str = "quotient_operand_domains";
+pub(crate) const QUOTIENT_OPERAND_DOMAINS: &str = "quotient_operand_domains";
 /// `‖f‖₁` of the stream a Count-Min bound is normalized by.
 pub const STREAM_L1_NORM: &str = "stream_l1_norm";
 /// `‖f‖₂` of the stream a Count Sketch bound is normalized by.
 pub(crate) const STREAM_L2_NORM: &str = "stream_l2_norm";
 /// Rows of one source's stream a summary folds: with a constant update
 /// weight `c`, `‖f‖₁ = |c| · rows` and `‖f‖₂ ≤ ‖f‖₁`.
-pub const STREAM_ROW_COUNT: &str = "stream_row_count";
+pub(crate) const STREAM_ROW_COUNT: &str = "stream_row_count";
 
 /// Which stream norm bounds a Count-Min or Count Sketch estimate, given its
 /// summary's update weight.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamNorm {
     /// The weight is the source's raw value column: the source's norm
-    /// ([`source_norm_statistic`]).
+    /// (`source_norm_statistic`).
     Source(String),
     /// A constant weight (a count): `|weight|` times the source's row count.
     ConstantWeight { weight: f64, source: String },
@@ -41,7 +41,7 @@ pub enum StreamNorm {
 
 /// The statistic for `norm` ([`STREAM_L1_NORM`] or [`STREAM_L2_NORM`]) of
 /// one source's stream, e.g. `stream_l1_norm[m]`.
-pub fn source_norm_statistic(norm: &str, source: &str) -> String {
+pub(crate) fn source_norm_statistic(norm: &str, source: &str) -> String {
     format!("{norm}[{source}]")
 }
 
@@ -50,11 +50,11 @@ pub fn source_norm_statistic(norm: &str, source: &str) -> String {
 /// `values_non_negative[m]`: an indicator, 1 when proven. Plan selection
 /// binds it to 1 when the data workload declares `metric` a counter or
 /// non-negative, and leaves it unbound otherwise.
-pub fn raw_data_samples_sign_statistic(metric: &str) -> String {
+pub(crate) fn raw_data_samples_sign_statistic(metric: &str) -> String {
     format!("{VALUES_NON_NEGATIVE}[{metric}]")
 }
 
-/// The metric a [`raw_data_samples_sign_statistic`] names.
+/// The metric a `raw_data_samples_sign_statistic` names.
 pub fn parse_raw_data_samples_sign_statistic(statistic: &str) -> Option<&str> {
     statistic
         .strip_prefix(VALUES_NON_NEGATIVE)?
@@ -62,7 +62,7 @@ pub fn parse_raw_data_samples_sign_statistic(statistic: &str) -> Option<&str> {
         .strip_suffix(']')
 }
 
-/// The norm and source a [`source_norm_statistic`] names.
+/// The norm and source a `source_norm_statistic` names.
 pub fn parse_source_norm_statistic(statistic: &str) -> Option<(&'static str, &str)> {
     [STREAM_L1_NORM, STREAM_L2_NORM]
         .into_iter()
@@ -523,7 +523,7 @@ fn row_count(stats: &PropagationStats, provenance: &mut Vec<GuaranteeSource>) ->
 /// plan selection can bind; without one (a weight computed from the
 /// values) it is a statistic nothing binds. Any other guarantee is
 /// returned unchanged.
-pub fn additive_as_absolute(
+pub(crate) fn additive_as_absolute(
     input: AccuracyGuarantee,
     norm: Option<&StreamNorm>,
 ) -> AccuracyGuarantee {
@@ -641,7 +641,7 @@ fn composed_provenance(
 /// binds some). `Err` is the fail-closed answer: no registered rule, or a
 /// missing input guarantee. It means "no rule", not "infeasible": Pass 1
 /// keeps the candidate with `guarantee = None`.
-pub fn propagate(
+pub(crate) fn propagate(
     op: &CompositionOperator,
     inputs: &[AccuracyGuarantee],
     local: Option<&AccuracyGuarantee>,

@@ -403,7 +403,7 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
 }
 
 /// `domain` with an open requirement answered from `data`'s declared source
-/// facts ([`WeightDomain::confirmed`]): samples are proven when the metric is
+/// facts (`WeightDomain::confirmed`): samples are proven when the metric is
 /// declared a counter or non-negative, a counter derivative only when it is
 /// declared a counter; unknown otherwise. No type is inferred from a name.
 pub fn confirmed_weights(domain: &WeightDomain, data: &DataWorkload) -> WeightDomain {
@@ -649,7 +649,7 @@ pub fn unchanged_source_columns<'a>(
 ///   smallest product of the counts it declares in
 ///   `distinct_values_per_label` and `distinct_values_per_label_set` that
 ///   covers the keys
-///   ([`SourceFacts::declared_distinct_combinations`](crate::workload::SourceFacts::declared_distinct_combinations));
+///   (`SourceFacts::declared_distinct_combinations`);
 ///   otherwise (several sources, a join pairing labels of different rows,
 ///   or a relabeled key) the product of each key's
 ///   `distinct_values_per_label` count summed over the sources (a union

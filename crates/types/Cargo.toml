@@ -19,6 +19,15 @@ thiserror = "2"
 # The sketch rows of the family-capability table (`SketchFamily::capability`).
 asap_sketchlib = { workspace = true }
 
+[features]
+# Exposes the test-only helpers (e.g. `OperatorNode::expect_non_asap`,
+# `PhysicalASAPDAG::view_window`) and `test_support` to other crates' tests.
+test-support = []
+
+[dev-dependencies]
+# The crate's own integration tests use the `test-support` helpers.
+asap-types = { path = ".", features = ["test-support"] }
+
 [[test]]
 name = "types"
 path = "tests/main.rs"

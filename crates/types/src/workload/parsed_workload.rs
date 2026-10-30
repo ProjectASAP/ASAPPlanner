@@ -70,10 +70,6 @@ impl ParsedWorkload {
         })
     }
 
-    pub fn planning_workload(&self) -> &PlanningWorkload {
-        &self.workload
-    }
-
     pub fn query_workload(&self) -> &QueryWorkload {
         &self.workload.query_workload
     }

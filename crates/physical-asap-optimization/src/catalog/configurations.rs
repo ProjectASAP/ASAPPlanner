@@ -24,7 +24,7 @@ use asap_types::stages::{
 
 /// [`PhysicalCandidate::may_keep_across_evaluations_per_sole_reader_query`] for `node` configured
 /// with `materialization`: for each query in `entries`, whether
-/// [`summary_materialization_eligibility`] with that query as the only reader
+/// `summary_materialization_eligibility` with that query as the only reader
 /// allows keeping it across evaluations. Empty unless `node` is a pane chain,
 /// `materialization` is `MatAtQueryKeptAcrossEvaluations(Memory)` and the
 /// deployment keeps query-time results.

@@ -1,6 +1,6 @@
 //! Guarantee propagation: the theoretical guarantee of every node of a
 //! composed DAG, composed with the built-in analytical rules
-//! ([`crate::composition::propagate`]) through operators, and the helpers
+//! (`crate::composition::propagate`) through operators, and the helpers
 //! Pass 2 and plan selection (Stage 3) use to read, bind and recompose
 //! those guarantees and to resize the summaries they depend on.
 use std::collections::{HashMap, HashSet};
@@ -1198,7 +1198,7 @@ pub fn operand_of(
 /// `node`'s guarantee as an input to a computation over its values: a
 /// Count-Min or Count Sketch bound restated as an absolute error over the
 /// stream norm its summary's update weight allows ([`stream_norm`],
-/// [`additive_as_absolute`]).
+/// `additive_as_absolute`).
 pub fn operand_guarantee(node: &Rc<OperatorNode>) -> Option<AccuracyGuarantee> {
     let guarantee = node.guarantee.clone()?;
     Some(additive_as_absolute(guarantee, stream_norm(node).as_ref()))
@@ -1429,7 +1429,7 @@ fn arithmetic_guarantee(
 /// of two estimates, other than of two relative errors
 /// ([`PRODUCT_OPERAND_DOMAINS`]); a quotient with an approximate
 /// denominator, other than of relative or exact over relative
-/// ([`QUOTIENT_OPERAND_DOMAINS`]). `None` for any other operation (a
+/// (`QUOTIENT_OPERAND_DOMAINS`). `None` for any other operation (a
 /// product or quotient of relative errors has a closed form), or when an
 /// operand's error has no value form (a rank error). Plan selection
 /// (Stage 3) finds the operations to bind with this same rule.

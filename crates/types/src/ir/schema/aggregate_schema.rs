@@ -56,7 +56,7 @@ fn per_series_reduction_schema(
 
 /// The output schema of an `Aggregate { reduction, measures }` over `in_schema` —
 /// the **single** canonical derivation shared by
-/// [`NonASAPOp::output_schema`](crate::ir::NonASAPOp::output_schema)'s
+/// `NonASAPOp::output_schema`'s
 /// `Aggregate` arm and the HAVING-resolution path (`asap_frontend_common::resolve`),
 /// so the two can never drift (issue #41).
 ///

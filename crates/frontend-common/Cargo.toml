@@ -9,3 +9,6 @@ edition = "2021"
 asap-types = { path = "../types" }
 serde = { version = "1", features = ["derive", "rc"] }
 thiserror = "2"
+
+[dev-dependencies]
+asap-types = { path = "../types", features = ["test-support"] }

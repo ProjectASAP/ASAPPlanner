@@ -76,7 +76,7 @@ fn physical_candidates(
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
-    use asap_physical_asap_optimization::optimize_physical_asap_chosen;
+    use asap_physical_asap_optimization::test_support::optimize_physical_asap_chosen;
     use asap_types::physical::Materialization;
 
     let roots = lower_promql_query_workload(workload).expect("lowers");

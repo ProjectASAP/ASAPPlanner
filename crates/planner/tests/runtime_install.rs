@@ -1790,7 +1790,7 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
         .find(|node| node.id == root)
         .and_then(|node| node.guarantee.clone())
         .expect("the query's guarantee");
-    let sign = asap_accuracy::composition::raw_data_samples_sign_statistic("data");
+    let sign = asap_accuracy::test_support::raw_data_samples_sign_statistic("data");
     let bound = guarantee.bind(&|statistic| match statistic {
         "input_row_count" => Some(1_000.0),
         _ => (statistic == sign).then_some(1.0),

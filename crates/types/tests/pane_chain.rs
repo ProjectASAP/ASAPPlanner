@@ -6,15 +6,14 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use asap_types::ir::operator::operator_properties::{Reduction, Source, TimeShift};
-use asap_types::ir::operator::pane_chain::{
-    expand_pane_chains, merged_chain, pane, whole_window_build,
-};
+use asap_types::ir::operator::pane_chain::{expand_pane_chains, merged_chain};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::schema::{
     GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryUpdate,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, TimeRangeKind};
+use asap_types::test_support::{pane, whole_window_build};
 
 const MINUTE: u64 = 60_000;
 
@@ -436,10 +435,9 @@ fn a_rollup_of_the_newest_panes_covers_their_window() {
 /// typed budget stop, never a malformed chain or a partially successful plan.
 #[test]
 fn fine_pane_expansion_stops_at_the_planning_deadline() {
-    use asap_types::ir::operator::pane_chain::{
-        expand_pane_chains_in_workload_before, PaneChainExpansionError,
-    };
+    use asap_types::ir::operator::pane_chain::PaneChainExpansionError;
     use asap_types::ir::QueryRoot;
+    use asap_types::test_support::expand_pane_chains_in_workload_before;
     use std::time::Instant;
     let mut op = chain(scan()).operator.clone();
     let Operator::ASAP(ASAPOp::PaneChain {
@@ -466,8 +464,8 @@ fn fine_pane_expansion_stops_at_the_planning_deadline() {
 /// Supplying ample budget preserves complete expansion and shared pane identity.
 #[test]
 fn budgeted_expansion_preserves_every_pane_and_shared_reader() {
-    use asap_types::ir::operator::pane_chain::expand_pane_chains_in_workload_before;
     use asap_types::ir::QueryRoot;
+    use asap_types::test_support::expand_pane_chains_in_workload_before;
     use std::time::Instant;
     let shared = chain(scan());
     let roots = [

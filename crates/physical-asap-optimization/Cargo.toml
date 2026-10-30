@@ -19,9 +19,12 @@ serde_json = "1"
 thiserror = "2"
 
 [features]
-# Exposes `catalog::test_support`: catalog internals plan selection's unit
-# tests exercise together with its solver.
+# Exposes `test_support` (single-candidate realization, operator
+# implementation, pane coverage) and `catalog::test_support` (catalog
+# internals plan selection's unit tests exercise with its solver), for other
+# crates' tests.
 test-support = []
 
 [dev-dependencies]
+asap-types = { path = "../types", features = ["test-support"] }
 asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
