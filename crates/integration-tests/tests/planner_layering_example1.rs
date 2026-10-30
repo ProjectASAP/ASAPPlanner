@@ -65,7 +65,7 @@ fn rule_fixture(workload: &asap_types::workload::PlanningWorkload) -> Run {
                 .expect("documented heap family offered locally");
             choice[target] = option;
         }
-        let whole: Vec<_> = compose_logical_candidate(&local, &choice).unwrap();
+        let whole = unshare(&compose_logical_candidate(&local, &choice).unwrap());
         let mut windows = vec![whole.clone()];
         let panes = pane_candidates(&whole, &[Some(10_000), Some(10_000)]);
         windows.extend(
