@@ -259,12 +259,12 @@ pub struct CandidateConnectionReport {
     /// Some legal widths remain unsearched; restricted optima are not global certificates.
     #[serde(default)]
     pub pane_widths_pending: bool,
-    /// Number of distinct allocated compatible-supplier lists.
+    /// Number of distinct allocated compatible-producer lists.
     #[serde(default)]
-    pub supplier_sets: usize,
-    /// Supplier IDs physically stored across shared lists (not logical edges).
+    pub producer_sets: usize,
+    /// Producer IDs physically stored across shared lists (not logical edges).
     #[serde(default)]
-    pub stored_supplier_ids: usize,
+    pub stored_producer_ids: usize,
     /// Conservative zero bounds used to stay within the solver coefficient range.
     #[serde(default)]
     pub rounded_down_cost_bounds: usize,
@@ -325,7 +325,7 @@ pub struct CandidateConnectionReport {
     /// Restricted query-time proposals priced completely inside the MILP.
     #[serde(default)]
     pub direct_cost_solve_calls: usize,
-    /// Direct solves jointly selecting supplier-dependent pricing options.
+    /// Direct solves jointly selecting producer-dependent pricing options.
     #[serde(default)]
     pub joint_price_solve_calls: usize,
     /// Feasible direct proposals whose objective agrees with the evaluator.

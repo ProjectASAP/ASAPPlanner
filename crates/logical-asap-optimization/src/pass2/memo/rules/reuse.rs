@@ -17,7 +17,7 @@ pub(in crate::pass2::memo) fn restore_inputs(
     inputs: &[MemoGroupId],
 ) -> Rc<OperatorNode> {
     // These are the same declared logical input groups, rebound after a rule
-    // cloned the DAG. Value guarantees are recomposed from selected suppliers
+    // cloned the DAG. Value guarantees are recomposed from selected producers
     // during reconstruction; state inputs additionally require the same error
     // contract because the intermediate state's guarantee is part of its API.
     let canonical: Vec<_> = inputs

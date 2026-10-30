@@ -7,15 +7,15 @@ use std::rc::Rc;
 use asap_types::ir::OperatorNode;
 use asap_types::stages::{
     validate_selected_connections, PhysicalASAPMemoCandidates, PhysicalCandidateId,
-    ReaderConstraint, SelectedCandidateGraph, SupplierCandidates,
+    ProducerCandidates, ReaderConstraint, SelectedCandidateGraph,
 };
 
 /// One required input, distinct even when another input accepts the same
-/// suppliers.
+/// producers.
 #[derive(Debug, Clone)]
-pub(crate) struct InputSupplierCandidates {
-    /// The candidates that may supply it.
-    pub candidates: SupplierCandidates,
+pub(crate) struct InputProducerCandidates {
+    /// The candidates that may produce it.
+    pub candidates: ProducerCandidates,
 }
 
 /// One physical candidate, indexed like
@@ -25,9 +25,9 @@ pub(crate) struct InputSupplierCandidates {
 pub(crate) struct PhysicalCandidateWithCost {
     /// Local work and state only; producer costs must not appear here again.
     pub local_cost: f64,
-    /// Per input, the candidates that may supply it (as Stage 2's
-    /// `PhysicalCandidate::supplier_candidates_per_input`).
-    pub supplier_candidates_per_input: Vec<InputSupplierCandidates>,
+    /// Per input, the candidates that may produce it (as Stage 2's
+    /// `PhysicalCandidate::producer_candidates_per_input`).
+    pub producer_candidates_per_input: Vec<InputProducerCandidates>,
 }
 
 /// One output reference of the query roots.
@@ -190,7 +190,7 @@ impl DagOfPhysicalCandidatesWithCosts {
                 )));
             }
             total_cost += candidate.local_cost;
-            for (requirement, input) in candidate.supplier_candidates_per_input.iter().enumerate() {
+            for (requirement, input) in candidate.producer_candidates_per_input.iter().enumerate() {
                 validate_ids(
                     &input.candidates,
                     &format!("candidate {index}, requirement {requirement}"),
@@ -240,12 +240,12 @@ pub(crate) fn validate_selected_graph(
         graph.candidates.len(),
         |candidate| {
             graph.candidates[candidate.0]
-                .supplier_candidates_per_input
+                .producer_candidates_per_input
                 .len()
         },
         |candidate, input| {
             graph.candidates[candidate.0]
-                .supplier_candidates_per_input
+                .producer_candidates_per_input
                 .get(input)
                 .map(|requirement| &requirement.candidates)
         },
@@ -276,7 +276,7 @@ pub(crate) fn validate_selected_graph(
 }
 
 impl DagOfPhysicalCandidatesWithCosts {
-    /// `physical`'s candidates, suppliers, query outputs and reader
+    /// `physical`'s candidates, producers, query outputs and reader
     /// constraints, at zero cost and with no resource budgets.
     pub(crate) fn unpriced(physical: &PhysicalASAPMemoCandidates) -> Self {
         Self {
@@ -285,10 +285,10 @@ impl DagOfPhysicalCandidatesWithCosts {
                 .iter()
                 .map(|candidate| PhysicalCandidateWithCost {
                     local_cost: 0.0,
-                    supplier_candidates_per_input: candidate
-                        .supplier_candidates_per_input
+                    producer_candidates_per_input: candidate
+                        .producer_candidates_per_input
                         .iter()
-                        .map(|suppliers| InputSupplierCandidates {
+                        .map(|suppliers| InputProducerCandidates {
                             candidates: suppliers.clone(),
                         })
                         .collect(),
@@ -369,7 +369,7 @@ impl PhysicalCandidatesWithCosts {
                     operator_node: asap_types::stages::OperatorNodeOfCandidateForMemoGroupId(id),
                     timing: *timing,
                     materialization: *materialization,
-                    supplier_candidates_per_input: Vec::new(),
+                    producer_candidates_per_input: Vec::new(),
                     may_produce_query_output: false,
                     may_keep_across_evaluations_per_sole_reader_query: Vec::new(),
                 },
@@ -411,7 +411,7 @@ impl PhysicalCandidatesWithCosts {
         timing: asap_types::ir::properties::ExecutionTiming,
         materialization: asap_types::physical::Materialization,
         local_cost: f64,
-        inputs: Vec<InputSupplierCandidates>,
+        inputs: Vec<InputProducerCandidates>,
     ) -> PhysicalCandidateId {
         let id = PhysicalCandidateId(self.physical.candidates.len());
         let operator_node = asap_types::stages::OperatorNodeOfCandidateForMemoGroupId(
@@ -435,20 +435,20 @@ impl PhysicalCandidatesWithCosts {
                 operator_node,
                 timing,
                 materialization,
-                supplier_candidates_per_input: Vec::new(),
+                producer_candidates_per_input: Vec::new(),
                 may_produce_query_output: false,
                 may_keep_across_evaluations_per_sole_reader_query: Vec::new(),
             });
         self.dag.candidates.push(PhysicalCandidateWithCost {
             local_cost,
-            supplier_candidates_per_input: inputs,
+            producer_candidates_per_input: inputs,
         });
         self.sync_physical_for_tests();
         id
     }
 
     /// Makes `physical` agree with a DAG a test built or edited directly:
-    /// suppliers and reader constraints are the DAG's, and the candidates
+    /// producers and reader constraints are the DAG's, and the candidates
     /// each distinct DAG query-root list names become the implementation
     /// roots, with `may_produce_query_output`, of one group (1, 2, … in
     /// order of first appearance) that output references; other candidates'
@@ -485,8 +485,8 @@ impl PhysicalCandidatesWithCosts {
             }
         }
         for (id, candidate) in self.physical.candidates.iter_mut().enumerate() {
-            candidate.supplier_candidates_per_input = self.dag.candidates[id]
-                .supplier_candidates_per_input
+            candidate.producer_candidates_per_input = self.dag.candidates[id]
+                .producer_candidates_per_input
                 .iter()
                 .map(|input| input.candidates.clone())
                 .collect();
@@ -590,7 +590,7 @@ impl PhysicalCandidatesWithCosts {
         &mut self,
         node: Rc<OperatorNode>,
         like: PhysicalCandidateId,
-        inputs: Vec<InputSupplierCandidates>,
+        inputs: Vec<InputProducerCandidates>,
     ) -> PhysicalCandidateId {
         let id = PhysicalCandidateId(self.physical.candidates.len());
         let mut operator_nodes = self
@@ -605,7 +605,7 @@ impl PhysicalCandidatesWithCosts {
         let mut candidate = candidates[like.0].clone();
         candidate.operator_node =
             asap_types::stages::OperatorNodeOfCandidateForMemoGroupId(operator_nodes.len() - 1);
-        candidate.supplier_candidates_per_input = inputs
+        candidate.producer_candidates_per_input = inputs
             .iter()
             .map(|input| input.candidates.clone())
             .collect();
@@ -618,7 +618,7 @@ impl PhysicalCandidatesWithCosts {
         );
         self.dag.candidates.push(PhysicalCandidateWithCost {
             local_cost: self.dag.candidates[like.0].local_cost,
-            supplier_candidates_per_input: inputs,
+            producer_candidates_per_input: inputs,
         });
         id
     }

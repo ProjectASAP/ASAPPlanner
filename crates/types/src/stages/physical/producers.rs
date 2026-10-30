@@ -1,4 +1,4 @@
-//! Shared storage for ordered compatible suppliers. Sharing this storage never
+//! Shared storage for ordered compatible producers. Sharing this storage never
 //! ties together the independent selections of different consumer input slots.
 use super::graph::PhysicalCandidateId;
 use std::collections::HashSet;
@@ -6,34 +6,34 @@ use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub struct SupplierCandidates(Rc<Vec<PhysicalCandidateId>>);
+pub struct ProducerCandidates(Rc<Vec<PhysicalCandidateId>>);
 
-impl From<Vec<PhysicalCandidateId>> for SupplierCandidates {
+impl From<Vec<PhysicalCandidateId>> for ProducerCandidates {
     fn from(values: Vec<PhysicalCandidateId>) -> Self {
         Self(Rc::new(values))
     }
 }
 
-impl FromIterator<PhysicalCandidateId> for SupplierCandidates {
+impl FromIterator<PhysicalCandidateId> for ProducerCandidates {
     fn from_iter<T: IntoIterator<Item = PhysicalCandidateId>>(values: T) -> Self {
         Self::from(values.into_iter().collect::<Vec<_>>())
     }
 }
 
-impl Deref for SupplierCandidates {
+impl Deref for ProducerCandidates {
     type Target = Vec<PhysicalCandidateId>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl DerefMut for SupplierCandidates {
+impl DerefMut for ProducerCandidates {
     fn deref_mut(&mut self) -> &mut Self::Target {
         Rc::make_mut(&mut self.0)
     }
 }
 
-impl<'a> IntoIterator for &'a SupplierCandidates {
+impl<'a> IntoIterator for &'a ProducerCandidates {
     type Item = &'a PhysicalCandidateId;
     type IntoIter = std::slice::Iter<'a, PhysicalCandidateId>;
     fn into_iter(self) -> Self::IntoIter {
@@ -41,7 +41,7 @@ impl<'a> IntoIterator for &'a SupplierCandidates {
     }
 }
 
-impl<'a> IntoIterator for &'a mut SupplierCandidates {
+impl<'a> IntoIterator for &'a mut ProducerCandidates {
     type Item = &'a mut PhysicalCandidateId;
     type IntoIter = std::slice::IterMut<'a, PhysicalCandidateId>;
     fn into_iter(self) -> Self::IntoIter {
@@ -49,7 +49,7 @@ impl<'a> IntoIterator for &'a mut SupplierCandidates {
     }
 }
 
-impl IntoIterator for SupplierCandidates {
+impl IntoIterator for ProducerCandidates {
     type Item = PhysicalCandidateId;
     type IntoIter = std::vec::IntoIter<PhysicalCandidateId>;
     fn into_iter(self) -> Self::IntoIter {
@@ -60,12 +60,12 @@ impl IntoIterator for SupplierCandidates {
 /// Exact ordered-content interning. No sorting, deduplication, or compatibility
 /// inference occurs here; malformed input remains visible to graph validation.
 #[derive(Default)]
-pub struct SupplierSetInterner {
-    sets: HashSet<SupplierCandidates>,
+pub struct ProducerSetInterner {
+    sets: HashSet<ProducerCandidates>,
 }
 
-impl SupplierSetInterner {
-    pub fn intern(&mut self, values: impl Into<SupplierCandidates>) -> SupplierCandidates {
+impl ProducerSetInterner {
+    pub fn intern(&mut self, values: impl Into<ProducerCandidates>) -> ProducerCandidates {
         let values = values.into();
         if let Some(existing) = self.sets.get(&values) {
             return existing.clone();
@@ -75,29 +75,29 @@ impl SupplierSetInterner {
     }
 }
 
-/// Count physical supplier-list storage separately from logical connections.
+/// Count physical producer-list storage separately from logical connections.
 /// Distinct input positions remain distinct even when their storage is shared.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct SupplierStorageMetrics {
+pub struct ProducerStorageMetrics {
     pub logical_connections: usize,
-    pub unique_supplier_sets: usize,
-    pub stored_supplier_ids: usize,
+    pub unique_producer_sets: usize,
+    pub stored_producer_ids: usize,
 }
 
-pub fn supplier_storage_metrics(
+pub fn producer_storage_metrics(
     physical: &super::PhysicalASAPMemoCandidates,
-) -> SupplierStorageMetrics {
+) -> ProducerStorageMetrics {
     let mut allocations = HashSet::new();
-    let mut metrics = SupplierStorageMetrics::default();
-    for suppliers in physical
+    let mut metrics = ProducerStorageMetrics::default();
+    for producer_candidates in physical
         .candidates
         .iter()
-        .flat_map(|candidate| &candidate.supplier_candidates_per_input)
+        .flat_map(|candidate| &candidate.producer_candidates_per_input)
     {
-        metrics.logical_connections += suppliers.len();
-        if allocations.insert(Rc::as_ptr(&suppliers.0)) {
-            metrics.unique_supplier_sets += 1;
-            metrics.stored_supplier_ids += suppliers.len();
+        metrics.logical_connections += producer_candidates.len();
+        if allocations.insert(Rc::as_ptr(&producer_candidates.0)) {
+            metrics.unique_producer_sets += 1;
+            metrics.stored_producer_ids += producer_candidates.len();
         }
     }
     metrics
@@ -110,7 +110,7 @@ mod tests {
     // Two slots can choose different producers even when their compatible lists
     // share one allocation; storage compression adds no selection equality.
     #[test]
-    fn shared_supplier_storage_keeps_input_choices_independent() {
+    fn shared_producer_storage_keeps_input_choices_independent() {
         use super::super::graph::{
             validate_selected_connections, ProducerConsumerConnection, QueryRootAssignment,
             SelectedCandidateGraph,
@@ -123,7 +123,7 @@ mod tests {
         use crate::ir::QueryRoot;
         use crate::physical::Materialization;
         use crate::stages::MemoGroupId;
-        let mut interner = SupplierSetInterner::default();
+        let mut interner = ProducerSetInterner::default();
         let choices = interner.intern(vec![PhysicalCandidateId(0), PhysicalCandidateId(1)]);
         use crate::ir::scalar::expr_ir::ScalarValue;
         use crate::ir::schema::{DataType, Field, Schema};
@@ -149,7 +149,7 @@ mod tests {
                     operator_node: OperatorNodeOfCandidateForMemoGroupId(id),
                     timing: ExecutionTiming::QueryTime,
                     materialization: Materialization::NotMaterialized,
-                    supplier_candidates_per_input: if id == 2 {
+                    producer_candidates_per_input: if id == 2 {
                         vec![choices.clone(), choices.clone()]
                     } else {
                         vec![]
@@ -182,10 +182,10 @@ mod tests {
         };
         validate_selected_connections(
             3,
-            |c| physical.candidates[c.0].supplier_candidates_per_input.len(),
+            |c| physical.candidates[c.0].producer_candidates_per_input.len(),
             |c, input| {
                 physical.candidates[c.0]
-                    .supplier_candidates_per_input
+                    .producer_candidates_per_input
                     .get(input)
             },
             &[&physical.query_output_candidates(0).collect::<Vec<_>>()],
@@ -194,11 +194,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            supplier_storage_metrics(&physical),
-            SupplierStorageMetrics {
+            producer_storage_metrics(&physical),
+            ProducerStorageMetrics {
                 logical_connections: 4,
-                unique_supplier_sets: 1,
-                stored_supplier_ids: 2
+                unique_producer_sets: 1,
+                stored_producer_ids: 2
             }
         );
     }
@@ -207,7 +207,7 @@ mod tests {
     // it and cannot silently change another input or an interner key.
     #[test]
     fn interned_inputs_detach_on_mutation() {
-        let mut interner = SupplierSetInterner::default();
+        let mut interner = ProducerSetInterner::default();
         let original = interner.intern(vec![PhysicalCandidateId(2), PhysicalCandidateId(1)]);
         let mut changed = interner.intern(vec![PhysicalCandidateId(2), PhysicalCandidateId(1)]);
         assert!(Rc::ptr_eq(&original.0, &changed.0));

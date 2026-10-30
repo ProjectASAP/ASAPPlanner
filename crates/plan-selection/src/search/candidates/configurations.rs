@@ -94,7 +94,7 @@ pub(in crate::search) fn inventory_for_tests(
         .unzip();
     CandidateInventory {
         operator_nodes_of_candidates_for_memo_groups: operator_nodes,
-        supplier_nodes_per_input: suppliers,
+        producer_nodes_per_input: suppliers,
         query_output_nodes,
         implementation_roots_of_group,
     }
@@ -250,9 +250,9 @@ mod tests {
     }
 
     // Indexed compatibility must reproduce every original ordered edge while
-    // storing repeated supplier lists once, including query/ingestion modes.
+    // storing repeated producer lists once, including query/ingestion modes.
     #[test]
-    fn supplier_index_preserves_all_edges_and_shares_storage() {
+    fn producer_index_preserves_all_edges_and_shares_storage() {
         let (source, entries, data) = fixture();
         let expanded = enumerate_candidate_configurations(
             &source,
@@ -266,13 +266,13 @@ mod tests {
             let original = &source.graph.candidates[configuration.operator_node.0];
             let generated = &expanded.dag.candidates[consumer];
             assert_eq!(
-                generated.supplier_candidates_per_input.len(),
-                original.supplier_candidates_per_input.len()
+                generated.producer_candidates_per_input.len(),
+                original.producer_candidates_per_input.len()
             );
             for (original, generated) in original
-                .supplier_candidates_per_input
+                .producer_candidates_per_input
                 .iter()
-                .zip(&generated.supplier_candidates_per_input)
+                .zip(&generated.producer_candidates_per_input)
             {
                 let expected: Vec<_> = original
                     .candidates
@@ -295,16 +295,16 @@ mod tests {
                 assert_eq!(generated.candidates.as_slice(), expected.as_slice());
             }
         }
-        let metrics = asap_types::stages::supplier_storage_metrics(&expanded.physical);
+        let metrics = asap_types::stages::producer_storage_metrics(&expanded.physical);
         let requirements = expanded
             .dag
             .candidates
             .iter()
-            .map(|candidate| candidate.supplier_candidates_per_input.len())
+            .map(|candidate| candidate.producer_candidates_per_input.len())
             .sum::<usize>();
-        assert!(metrics.unique_supplier_sets < requirements, "{metrics:?}");
+        assert!(metrics.unique_producer_sets < requirements, "{metrics:?}");
         assert!(
-            metrics.stored_supplier_ids < metrics.logical_connections,
+            metrics.stored_producer_ids < metrics.logical_connections,
             "{metrics:?}"
         );
     }
@@ -326,7 +326,7 @@ mod tests {
                 .graph
                 .candidates
                 .iter()
-                .map(|candidate| candidate.supplier_candidates_per_input.len())
+                .map(|candidate| candidate.producer_candidates_per_input.len())
                 .sum::<usize>();
         assert!(
             expanded.physical.candidates.len()
@@ -368,7 +368,7 @@ mod tests {
         }
         for (consumer, candidate) in expanded.dag.candidates.iter().enumerate() {
             for producer in candidate
-                .supplier_candidates_per_input
+                .producer_candidates_per_input
                 .iter()
                 .flat_map(|input| &input.candidates)
             {
@@ -481,7 +481,7 @@ mod tests {
                 .dag
                 .candidates
                 .iter()
-                .flat_map(|candidate| &candidate.supplier_candidates_per_input)
+                .flat_map(|candidate| &candidate.producer_candidates_per_input)
                 .map(|input| input.candidates.len())
                 .sum();
             counts.push((expanded.physical.candidates.len(), edges));
@@ -583,7 +583,7 @@ mod tests {
             .enumerate()
             .filter(|(_, candidate)| {
                 candidate
-                    .supplier_candidates_per_input
+                    .producer_candidates_per_input
                     .iter()
                     .any(|input| input.candidates.contains(shared_build))
             })
@@ -594,7 +594,7 @@ mod tests {
             if reader_sources.contains(&configuration.operator_node.0)
                 && configuration.timing == ExecutionTiming::QueryTime
             {
-                for input in &mut expanded.dag.candidates[id].supplier_candidates_per_input {
+                for input in &mut expanded.dag.candidates[id].producer_candidates_per_input {
                     if input.candidates.iter().any(|producer| {
                         expanded.physical.candidates[producer.0].operator_node.0 == shared_build.0
                     }) {

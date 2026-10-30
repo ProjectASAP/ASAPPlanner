@@ -1781,7 +1781,7 @@ mod tests {
     }
 
     /// Joining two unique grouped states preserves either side's grouping key;
-    /// a non-unique supplier must not acquire the same no-fanout certificate.
+    /// a non-unique producer must not acquire the same no-fanout certificate.
     #[test]
     fn grouped_state_join_preserves_only_proven_unique_keys() {
         let left = node(scan(

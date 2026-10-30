@@ -6,7 +6,7 @@
 //! Stage 2 validation still checks operator legality and upstream timing.
 //! Potential shared non-summary nodes also receive query materialization; Stage 2
 //! checks highest-shared eligibility on the selected graph, not all possible consumers.
-use asap_types::stages::{SupplierCandidates, SupplierSetInterner};
+use asap_types::stages::{ProducerCandidates, ProducerSetInterner};
 use std::collections::HashMap;
 
 use crate::summary_materialization_eligibility;
@@ -113,7 +113,7 @@ pub fn enumerate_candidate_configurations_before(
             if !potential[candidate.0][query] {
                 potential[candidate.0][query] = true;
                 pending.extend(
-                    source.supplier_nodes_per_input[candidate.0]
+                    source.producer_nodes_per_input[candidate.0]
                         .iter()
                         .flat_map(|input| input.iter().copied()),
                 );
@@ -214,7 +214,7 @@ pub fn enumerate_candidate_configurations_before(
                 operator_node: OperatorNodeOfCandidateForMemoGroupId(source_id),
                 timing,
                 materialization,
-                supplier_candidates_per_input: Vec::new(),
+                producer_candidates_per_input: Vec::new(),
                 may_produce_query_output: may_produce_query_output[source_id]
                     && timing == ExecutionTiming::QueryTime,
                 may_keep_across_evaluations_per_sole_reader_query:
@@ -292,14 +292,14 @@ pub fn enumerate_candidate_configurations_before(
             }
         }
     }
-    let mut supplier_sets = SupplierSetInterner::default();
+    let mut producer_sets = ProducerSetInterner::default();
     // Compatibility depends on consumer timing and producer mode/timing only.
     // Evaluate each source configuration once per timing, then reuse this exact
     // index; reader eligibility remains expressed by separate graph constraints.
     let mut timing_index = Vec::with_capacity(source_configurations.len());
     for configurations in &source_configurations {
         super::check_deadline(deadline)?;
-        let mut by_timing = [SupplierCandidates::default(), SupplierCandidates::default()];
+        let mut by_timing = [ProducerCandidates::default(), ProducerCandidates::default()];
         for (timing_index, timing) in [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime]
             .into_iter()
             .enumerate()
@@ -311,19 +311,19 @@ pub fn enumerate_candidate_configurations_before(
                     compatible.push(producer);
                 }
             }
-            by_timing[timing_index] = supplier_sets.intern(compatible);
+            by_timing[timing_index] = producer_sets.intern(compatible);
         }
         timing_index.push(by_timing);
     }
-    let mut input_cache: HashMap<(SupplierCandidates, ExecutionTiming), SupplierCandidates> =
+    let mut input_cache: HashMap<(ProducerCandidates, ExecutionTiming), ProducerCandidates> =
         HashMap::new();
     for candidate in &mut candidates {
         super::check_deadline(deadline)?;
         let mut requirements = Vec::new();
-        for input in &source.supplier_nodes_per_input[candidate.operator_node.0] {
+        for input in &source.producer_nodes_per_input[candidate.operator_node.0] {
             let key = (input.clone(), candidate.timing);
-            let compatible_producers = if let Some(suppliers) = input_cache.get(&key) {
-                suppliers.clone()
+            let compatible_producers = if let Some(producer_candidates) = input_cache.get(&key) {
+                producer_candidates.clone()
             } else {
                 let timing = match candidate.timing {
                     ExecutionTiming::QueryTime => 0,
@@ -334,13 +334,13 @@ pub fn enumerate_candidate_configurations_before(
                     super::check_deadline(deadline)?;
                     compatible.extend(timing_index[producer.0][timing].iter().copied());
                 }
-                let suppliers = supplier_sets.intern(compatible);
-                input_cache.insert(key, suppliers.clone());
-                suppliers
+                let producer_candidates = producer_sets.intern(compatible);
+                input_cache.insert(key, producer_candidates.clone());
+                producer_candidates
             };
             requirements.push(compatible_producers);
         }
-        candidate.supplier_candidates_per_input = requirements;
+        candidate.producer_candidates_per_input = requirements;
     }
     let result = PhysicalASAPMemoCandidates::new(
         source.operator_nodes_of_candidates_for_memo_groups.clone(),
@@ -355,14 +355,14 @@ pub fn enumerate_candidate_configurations_before(
     let mut context_ids = std::collections::HashMap::new();
     let mut output_contexts = Vec::new();
     for (output, root) in source.query_output_nodes.iter().enumerate() {
-        let suppliers: Vec<_> = root.iter().map(|id| id.0).collect();
-        let key = serde_json::to_string(&(&entries[output_queries[output]], suppliers))
+        let producer_candidates: Vec<_> = root.iter().map(|id| id.0).collect();
+        let key = serde_json::to_string(&(&entries[output_queries[output]], producer_candidates))
             .map_err(|error| invalid(&error.to_string()))?;
         let next = context_ids.len();
         output_contexts.push(*context_ids.entry(key).or_insert(next));
     }
     let mut uses = vec![std::collections::HashSet::new(); source_count];
-    for (consumer, inputs) in source.supplier_nodes_per_input.iter().enumerate() {
+    for (consumer, inputs) in source.producer_nodes_per_input.iter().enumerate() {
         super::check_deadline(deadline)?;
         let group = source.operator_nodes_of_candidates_for_memo_groups[consumer].group();
         for (position, input) in inputs.iter().enumerate() {

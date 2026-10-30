@@ -179,7 +179,7 @@ pub(in crate::search) fn optimize_configured_candidates(
             for (id, candidate) in graph.candidates.iter_mut().enumerate() {
                 candidate.local_cost = weights[id];
                 if profile.candidates[id].is_empty() {
-                    candidate.supplier_candidates_per_input.clear();
+                    candidate.producer_candidates_per_input.clear();
                     graph
                         .reader_constraints
                         .push(ReaderConstraint::AllowedOutputs {
@@ -187,7 +187,7 @@ pub(in crate::search) fn optimize_configured_candidates(
                             outputs: Vec::new(),
                         });
                 } else {
-                    for input in &mut candidate.supplier_candidates_per_input {
+                    for input in &mut candidate.producer_candidates_per_input {
                         input
                             .candidates
                             .retain(|producer| !profile.candidates[producer.0].is_empty());
@@ -475,7 +475,7 @@ fn joint_cost_seed(
         Err(error) => return Err(error.to_string()),
     };
     // As with the fixed-price seed, avoid permutations of interchangeable
-    // execution copies in this bounded proposal. Every supplier price option
+    // execution copies in this bounded proposal. Every producer price option
     // remains available on the first copy; the full search retains all copies.
     for constraint in &configured.dag.reader_constraints {
         if let asap_types::stages::ReaderConstraint::ActivationRequires { candidate, .. } =
@@ -502,7 +502,7 @@ fn joint_cost_seed(
 }
 
 /// Restrict only the direct-price proposal. Unsupported configurations and
-/// supplier interfaces remain available in the full evaluator-refined search.
+/// producer interfaces remain available in the full evaluator-refined search.
 fn direct_cost_seed(
     configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
@@ -560,7 +560,7 @@ fn direct_cost_seed(
         if !supported[id] {
             extracted.profile.nodes[id] = Default::default();
             candidate.local_cost = 0.0;
-            candidate.supplier_candidates_per_input.clear();
+            candidate.producer_candidates_per_input.clear();
             graph
                 .reader_constraints
                 .push(ReaderConstraint::AllowedOutputs {
@@ -568,7 +568,7 @@ fn direct_cost_seed(
                     outputs: Vec::new(),
                 });
         } else {
-            for input in &mut candidate.supplier_candidates_per_input {
+            for input in &mut candidate.producer_candidates_per_input {
                 input.candidates.retain(|supplier| {
                     supported[supplier.0] && extracted.suppliers[id].contains(supplier)
                 });
@@ -663,7 +663,7 @@ fn seed_dds_budgets(
             budgets[id.0] = budget;
             pending.extend(
                 graph.candidates[id.0]
-                    .supplier_candidates_per_input
+                    .producer_candidates_per_input
                     .iter()
                     .flat_map(|input| input.candidates.iter().copied())
                     .map(|producer| (producer, budget)),
@@ -724,7 +724,7 @@ fn accuracy_baseline(
             rank_requested[candidate.0] = true;
             pending.extend(
                 graph.candidates[candidate.0]
-                    .supplier_candidates_per_input
+                    .producer_candidates_per_input
                     .iter()
                     .flat_map(|input| input.candidates.iter().copied()),
             );
@@ -816,7 +816,7 @@ fn accuracy_baseline(
             };
             // A strict feasibility seed must not spend its limited attempts on
             // estimators whose error still needs unavailable workload facts.
-            // This is seed-only: another supplier may repair the contract, so
+            // This is seed-only: another producer may repair the contract, so
             // the complete graph retains these candidates and validates them.
             let unresolved_estimator_error =
                 matches!(node.asap(), Some(ASAPOp::SummaryEstimate { .. }))
@@ -906,7 +906,7 @@ fn raw_scan_with_shifts(node: &asap_types::ir::OperatorNode) -> bool {
 }
 
 // A heuristic memory charge, never a lower bound or an evaluator replacement.
-// Group/cardinality and supplier choices remain authoritative after selection.
+// Group/cardinality and producer choices remain authoritative after selection.
 fn retained_pane_priority_cost(
     node: &std::rc::Rc<asap_types::ir::OperatorNode>,
     configuration: &asap_types::stages::PhysicalCandidate,
@@ -1296,9 +1296,9 @@ mod tests {
     }
 
     /// Restricting a seed removes all query-time scan paths and repairs every
-    /// supplier option reference without changing the original profile.
+    /// producer option reference without changing the original profile.
     #[test]
-    fn maintained_seed_prunes_and_remaps_supplier_options() {
+    fn maintained_seed_prunes_and_remaps_producer_options() {
         use crate::search::costing::direct_profile::extract_price_options;
         let (configured, roots, entries, data) = fixture();
         let context = CandidatePlanningContext {
@@ -1448,7 +1448,7 @@ mod tests {
             })
             .collect();
         for candidate in &mut configured.dag.candidates {
-            for input in &mut candidate.supplier_candidates_per_input {
+            for input in &mut candidate.producer_candidates_per_input {
                 input.candidates.retain(|id| allowed[id.0]);
             }
         }
@@ -1714,11 +1714,11 @@ mod tests {
         assert_ne!(result.search.status, CandidateSearchStatus::Optimal);
     }
 
-    // A projected raw-source supplier would put Project below TimeRange at
+    // A projected raw-source producer would put Project below TimeRange at
     // installation. Projection above a range remains a legal seed candidate.
     #[test]
     fn feasibility_seed_distinguishes_raw_source_and_range_projections() {
-        use crate::search::candidates::dag::InputSupplierCandidates;
+        use crate::search::candidates::dag::InputProducerCandidates;
         use asap_types::ir::{NonASAPOp, Operator, ProjectItem, ScalarExpr};
         use asap_types::stages::PhysicalCandidateId;
         let (mut configured, roots, entries, data) = fixture();
@@ -1767,7 +1767,7 @@ mod tests {
             let id = configured.push_root_like_for_tests(
                 template,
                 supplier,
-                vec![InputSupplierCandidates {
+                vec![InputProducerCandidates {
                     candidates: vec![supplier].into(),
                 }],
             );

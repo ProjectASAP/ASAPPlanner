@@ -98,7 +98,7 @@ pub(crate) fn prune_query_candidates<Id: Clone>(
             count.checked_mul(inventory.targets[digit].choice_count())
         });
         // This pass bounds local combinations as well as total evaluations.
-        // A repeated target can choose different suppliers at each use in the
+        // A repeated target can choose different producers at each use in the
         // connection model; legacy uniform-choice enumeration is incomplete.
         if !digits
             .iter()

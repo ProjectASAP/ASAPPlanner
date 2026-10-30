@@ -1,11 +1,11 @@
 //! Stage 2's output: every operator node of every implementation candidate,
 //! each with the timings and materializations Stage 2 allows, and which
-//! candidates may supply each input. Stage 3 selects among them; Stage 2
+//! candidates may produce each input. Stage 3 selects among them; Stage 2
 //! prices nothing.
 use std::rc::Rc;
 
 use super::graph::{PhysicalCandidateId, ReaderConstraint};
-use super::suppliers::SupplierCandidates;
+use super::producers::ProducerCandidates;
 use crate::ir::properties::ExecutionTiming;
 use crate::ir::{OperatorNode, QueryRoot};
 use crate::physical::Materialization;
@@ -30,14 +30,14 @@ pub struct OperatorNodeOfCandidateForMemoGroupId(pub usize);
 pub struct OperatorNodeOfCandidateForMemoGroup {
     /// Every candidate of the group this node can implement, ascending:
     /// identical terminal readers of different candidates are factored into
-    /// one node, and the selected suppliers decide which one it implements.
+    /// one node, and the selected producers decide which one it implements.
     /// A private node belongs to the one candidate it was lowered from.
     pub candidates_for_memo_group: Vec<CandidateForMemoGroupId>,
     /// Whether it is its candidates' root; false for an implementation's
     /// private nodes.
     pub is_implementation_root: bool,
     /// The operator node, with Stage 2's physical implementation; its
-    /// children are the expected inputs, which the selected suppliers replace.
+    /// children are the expected inputs, which the selected producers replace.
     pub physical_node: Rc<OperatorNode>,
 }
 
@@ -67,8 +67,8 @@ pub struct PhysicalCandidate {
     /// Whether and where its result is kept.
     pub materialization: Materialization,
     /// Per input of its operator node (in `map_children` order), the
-    /// candidates that may supply it. Depends on its timing and scope copy.
-    pub supplier_candidates_per_input: Vec<SupplierCandidates>,
+    /// candidates that may produce it. Depends on its timing and scope copy.
+    pub producer_candidates_per_input: Vec<ProducerCandidates>,
     /// Whether it may produce a query's output: an implementation root at
     /// query time whose output matches its group's logical node, in a group
     /// some query's root reads.
@@ -86,7 +86,7 @@ pub struct PhysicalCandidate {
 pub struct PruningMetrics {
     /// Candidates removed.
     pub removed_candidates: usize,
-    /// Supplier connections (a candidate that may supply one input) removed.
+    /// Producer connections (a candidate that may produce one input) removed.
     pub removed_connections: usize,
 }
 
@@ -105,7 +105,7 @@ pub struct PhysicalASAPMemoCandidates {
     pub query_roots: Vec<QueryRoot<MemoGroupId>>,
     /// Legality that depends on which readers are selected.
     pub reader_constraints: Vec<ReaderConstraint>,
-    /// How many candidates and supplier connections Stage 2's structural
+    /// How many candidates and producer connections Stage 2's structural
     /// pruning removed; zero when built by [`Self::new`]. (P6 replaces it with
     /// the pruned candidates themselves.)
     pub pruning_metrics: PruningMetrics,

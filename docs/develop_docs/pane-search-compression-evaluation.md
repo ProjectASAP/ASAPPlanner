@@ -1,6 +1,6 @@
 # Pane-search compression evaluation
 
-This report is for planner developers. It separates three changes: storing repeated supplier lists once, factoring equivalent candidate connections, and spending a bounded search budget across progressively larger pane-width domains. Storage compression alone does not reduce the number of MILP variables. Searching fewer widths before a timeout does not prove equivalence to the complete domain.
+This report is for planner developers. It separates three changes: storing repeated producer lists once, factoring equivalent candidate connections, and spending a bounded search budget across progressively larger pane-width domains. Storage compression alone does not reduce the number of MILP variables. Searching fewer widths before a timeout does not prove equivalence to the complete domain.
 
 ## Reproduction
 
@@ -43,15 +43,15 @@ The existing four-case run is complete. Its frozen executable is `/mydata/asap-f
 | rangeheavy t8/t5, 1h | 3/3 | 33.67 | 447128 | 17252 | 1705248 | 44034 | 8.33239804e-5 |
 | rangeheavy t5, 15m/1h | 2/2 | 33.26 | 949392 | 3505 | 212790 | 390981 | 1.00719775e-5 |
 
-All four report `time_limit`, with `full_catalog_completed=true`. That flag means configuration generation completed, not that every assignment was evaluated or a global optimum was proved. Peak MILP size can be smaller than the reported final compatibility graph when the deadline prevents constructing a model for that graph. The baseline does not report unique supplier sets or physically stored supplier IDs.
+All four report `time_limit`, with `full_catalog_completed=true`. That flag means configuration generation completed, not that every assignment was evaluated or a global optimum was proved. Peak MILP size can be smaller than the reported final compatibility graph when the deadline prevents constructing a model for that graph. The baseline does not report unique producer sets or physically stored producer IDs.
 
 ## Acceptance criteria
 
-Record candidate counts, logical compatibility connections, unique supplier sets, stored supplier IDs, peak MILP variables/constraints, generation/inventory/model/solve/validation times, whole-process RSS, selected cost, and accuracy. Also record attempted width domains, pending widths, catalog completion, solver status, and gap. Report before/after values together; do not infer a complete-domain model reduction from a smaller intermediate round.
+Record candidate counts, logical compatibility connections, unique producer sets, stored producer IDs, peak MILP variables/constraints, generation/inventory/model/solve/validation times, whole-process RSS, selected cost, and accuracy. Also record attempted width domains, pending widths, catalog completion, solver status, and gap. Report before/after values together; do not infer a complete-domain model reduction from a smaller intermediate round.
 
 Independent correctness checks should cover:
 
-- Supplier-list sharing preserves membership, order, and duplicate input positions. Mutating one shared list must not mutate another list. Cached compatibility includes every semantic/configuration field used by the uncached check.
+- Producer-list sharing preserves membership, order, and duplicate input positions. Mutating one shared list must not mutate another list. Cached compatibility includes every semantic/configuration field used by the uncached check.
 - Tiny complete-domain problems retain the same feasible assignments and minimum evaluated cost before and after factoring. Include multiple readers, different materializations, duplicate input positions, optional dependencies, and shared upstream producers. Reconstruction must restore every factored operation and preserve costs, accuracy, and query coverage.
 - Terminal unary factoring must not absorb a node with additional consumers, observable materialization/state, unsupported error propagation, or different execution demand. Shared producer work remains charged once; reader-specific work remains per use.
 - Progressive pane-width domains are nested; each round adds `Panes` candidates to the candidate memo only for newly admitted pane widths. Each round rebuilds its physical inventory and MILP, so previously considered assignments may be revisited. The domains eventually include the complete legal finite domain when the budget permits. A restricted-domain optimum never becomes a global certificate; timeout preserves the best validated incumbent.
@@ -72,18 +72,18 @@ All four workloads passed with the **same selected modeled cost** as their respe
 | rangeheavy t8/t5 | 33.67 → 30.10 | 447128 → 353472 | 44034 → 111171 | 59826 → 332191 |
 | rangeheavy 15m/1h | 33.26 → 30.42 | 949392 → 459012 | 390981 → 198129 | 1108599 → 558375 |
 
-The two-window rangeheavy case used **51.7% less peak RSS** and **49.3% fewer peak MILP variables** in this run. Conversely, the t8/t5 case solved a larger intermediate model: peak variables increased from 44,034 to 111,171 while RSS fell 20.9%. Its baseline generated a dense catalog but did not solve that entire model within the budget. These are same-budget observations, not same-domain compression ratios. This combined-change experiment does not isolate how much of the memory difference comes from supplier storage, factoring, or the progressive domain policy.
+The two-window rangeheavy case used **51.7% less peak RSS** and **49.3% fewer peak MILP variables** in this run. Conversely, the t8/t5 case solved a larger intermediate model: peak variables increased from 44,034 to 111,171 while RSS fell 20.9%. Its baseline generated a dense catalog but did not solve that entire model within the budget. These are same-budget observations, not same-domain compression ratios. This combined-change experiment does not isolate how much of the memory difference comes from producer storage, factoring, or the progressive domain policy.
 
 All after-plans report pending widths, no global bound/gap, and no global optimum or exhaustion certificate. The attempted rounds were SeedGrids, then Expanding with maximum parts 4, 8, 16, 32, and 64. The following counters belong to the most recent reported inventory, identified explicitly; a later interrupted preparation round does not overwrite them with zero.
 
-| Workload | Inventory domain | Physical configurations | Logical compatible connections | Unique supplier lists | Stored supplier IDs |
+| Workload | Inventory domain | Physical configurations | Logical compatible connections | Unique producer lists | Stored producer IDs |
 |---|---|---:|---:|---:|---:|
 | mixed 01 | Expanding { max_parts: 16 } | 3324 | 69018 | 2124 | 3159 |
 | long mixed 01 | Expanding { max_parts: 16 } | 3324 | 69018 | 2124 | 3159 |
 | rangeheavy t8/t5 | Expanding { max_parts: 16 } | 8164 | 395168 | 1265 | 8163 |
 | rangeheavy 15m/1h | Expanding { max_parts: 64 } | 2809 | 137982 | 1356 | 2323 |
 
-Within these after-inventories, stored supplier IDs are 95.4%–98.3% fewer than the logical connection count. This measures list-content storage sharing only; it excludes allocator metadata and does not imply that equivalent MILP connection variables disappeared. The baseline lacks this storage instrumentation. Baseline candidate/connection counts describe complete width catalogs; the after counts above describe intermediate catalogs, so their differences combine factoring and restricted enumeration.
+Within these after-inventories, stored producer IDs are 95.4%–98.3% fewer than the logical connection count. This measures list-content storage sharing only; it excludes allocator metadata and does not imply that equivalent MILP connection variables disappeared. The baseline lacks this storage instrumentation. Baseline candidate/connection counts describe complete width catalogs; the after counts above describe intermediate catalogs, so their differences combine factoring and restricted enumeration.
 
 Reported cumulative phase times, in seconds (before → after):
 

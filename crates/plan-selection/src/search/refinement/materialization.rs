@@ -75,7 +75,7 @@ pub(super) fn restrict(
             return None;
         }
         if !active[id] {
-            candidate.supplier_candidates_per_input.clear();
+            candidate.producer_candidates_per_input.clear();
             restricted
                 .reader_constraints
                 .push(ReaderConstraint::AllowedOutputs {
@@ -85,7 +85,7 @@ pub(super) fn restrict(
             continue;
         }
         for (position, requirement) in candidate
-            .supplier_candidates_per_input
+            .producer_candidates_per_input
             .iter_mut()
             .enumerate()
         {
@@ -111,7 +111,7 @@ pub(super) fn restrict(
 mod tests {
     use super::*;
     use crate::search::candidates::dag::{
-        InputSupplierCandidates, PhysicalCandidateWithCost, QueryOutputCandidates,
+        InputProducerCandidates, PhysicalCandidateWithCost, QueryOutputCandidates,
     };
     use crate::search::refinement::search::{
         search_candidates_with_restricted_feedback, CandidateEvaluation, CandidateSearchLimits,
@@ -125,13 +125,13 @@ mod tests {
         for _ in 0..2 {
             graph.candidates.push(PhysicalCandidateWithCost {
                 local_cost: 0.0,
-                supplier_candidates_per_input: vec![],
+                producer_candidates_per_input: vec![],
             });
         }
         for query in 0..readers {
             graph.candidates.push(PhysicalCandidateWithCost {
                 local_cost: 0.0,
-                supplier_candidates_per_input: vec![InputSupplierCandidates {
+                producer_candidates_per_input: vec![InputProducerCandidates {
                     candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
                 }],
             });

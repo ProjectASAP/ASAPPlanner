@@ -1,5 +1,5 @@
 //! Lower the logical candidate memo into typed immediate operator nodes and
-//! the nodes that may supply each of their inputs.
+//! the nodes that may produce each of their inputs.
 //!
 //! Consumer-dependent demand, composed accuracy, and physical materialization
 //! are handled by later configuration and evaluation stages. Private exact
@@ -17,7 +17,7 @@ use asap_types::stages::MemoGroupId;
 use super::factoring::{MemoGroupOutputKey, MemoGroupOutputToCompatibleProducersCache};
 use asap_types::stages::{
     CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup, PhysicalCandidateId,
-    SupplierCandidates,
+    ProducerCandidates,
 };
 
 /// The memo's implementation candidates lowered to operator nodes, before
@@ -31,8 +31,8 @@ pub struct CandidateInventory {
     /// nodes below it.
     pub operator_nodes_of_candidates_for_memo_groups: Vec<OperatorNodeOfCandidateForMemoGroup>,
     /// Per node, per input (in `map_children` order): the nodes that may
-    /// supply it (a private child, or the input group's compatible roots).
-    pub supplier_nodes_per_input: Vec<Vec<SupplierCandidates>>,
+    /// produce it (a private child, or the input group's compatible roots).
+    pub producer_nodes_per_input: Vec<Vec<ProducerCandidates>>,
     /// Per output reference: the roots of its group whose output matches the
     /// group's logical node.
     pub query_output_nodes: Vec<Vec<PhysicalCandidateId>>,
@@ -42,16 +42,16 @@ pub struct CandidateInventory {
 }
 
 impl CandidateInventory {
-    /// Every supplier and query output names an existing node, once per list.
+    /// Every producer and query output names an existing node, once per list.
     pub fn validate(&self) -> Result<(), String> {
         let count = self.operator_nodes_of_candidates_for_memo_groups.len();
-        if self.supplier_nodes_per_input.len() != count {
-            return Err("supplier lists are not indexed by node".into());
+        if self.producer_nodes_per_input.len() != count {
+            return Err("producer lists are not indexed by node".into());
         }
-        for (node, inputs) in self.supplier_nodes_per_input.iter().enumerate() {
-            for (input, suppliers) in inputs.iter().enumerate() {
+        for (node, inputs) in self.producer_nodes_per_input.iter().enumerate() {
+            for (input, producer_candidates) in inputs.iter().enumerate() {
                 super::validate_ids(
-                    suppliers,
+                    producer_candidates,
                     count,
                     &format!("candidate {node}, requirement {input}"),
                 )?;
@@ -122,7 +122,7 @@ pub fn build_with_compatible_producers_cache(
     }
     let mut inventory = CandidateInventory {
         operator_nodes_of_candidates_for_memo_groups: Vec::new(),
-        supplier_nodes_per_input: Vec::new(),
+        producer_nodes_per_input: Vec::new(),
         query_output_nodes: Vec::new(),
         implementation_roots_of_group: vec![Vec::new(); memo.groups.len()],
     };
@@ -149,7 +149,7 @@ pub fn build_with_compatible_producers_cache(
             }
             // Only the owner group is this candidate's output contract. Its fused
             // groups describe absorbed computations inside its private subtree,
-            // not additional results it can supply. Private-node decomposition
+            // not additional results it can produce. Private-node decomposition
             // charges that work; independent consumers of an absorbed group
             // still select one of that group's own candidates. Reverse support
             // leaves unused absorbed groups inactive without exclusion rules.
@@ -195,7 +195,7 @@ pub fn build_with_compatible_producers_cache(
                     physical_node: implemented,
                 },
             );
-            inventory.supplier_nodes_per_input.push(Vec::new());
+            inventory.producer_nodes_per_input.push(Vec::new());
         }
     }
     for (group, candidates) in memo.candidates.iter().enumerate() {
@@ -329,7 +329,7 @@ impl ImmediateCandidateBuilder<'_> {
             requirements.push(producers);
         }
         let id = if let Some(id) = reserved {
-            self.inventory.supplier_nodes_per_input[id.0] = requirements;
+            self.inventory.producer_nodes_per_input[id.0] = requirements;
             id
         } else {
             let id = PhysicalCandidateId(
@@ -337,7 +337,7 @@ impl ImmediateCandidateBuilder<'_> {
                     .operator_nodes_of_candidates_for_memo_groups
                     .len(),
             );
-            self.inventory.supplier_nodes_per_input.push(requirements);
+            self.inventory.producer_nodes_per_input.push(requirements);
             self.inventory
                 .operator_nodes_of_candidates_for_memo_groups
                 .push(OperatorNodeOfCandidateForMemoGroup {

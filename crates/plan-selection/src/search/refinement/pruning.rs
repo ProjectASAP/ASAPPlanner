@@ -13,15 +13,15 @@ mod tests {
     use asap_types::physical::Materialization;
 
     use crate::search::candidates::dag::{
-        InputSupplierCandidates, PhysicalCandidateWithCost, QueryOutputCandidates, ResourceBudget,
+        InputProducerCandidates, PhysicalCandidateWithCost, QueryOutputCandidates, ResourceBudget,
     };
 
     fn candidate(cost: f64, inputs: &[&[usize]]) -> PhysicalCandidateWithCost {
         PhysicalCandidateWithCost {
             local_cost: cost,
-            supplier_candidates_per_input: inputs
+            producer_candidates_per_input: inputs
                 .iter()
-                .map(|ids| InputSupplierCandidates {
+                .map(|ids| InputProducerCandidates {
                     candidates: ids.iter().map(|id| PhysicalCandidateId(*id)).collect(),
                 })
                 .collect(),
@@ -45,10 +45,10 @@ mod tests {
         usable_candidates(&configured(graph.clone()).physical)
     }
 
-    // Removing an unrelated candidate remaps IDs once per shared supplier
+    // Removing an unrelated candidate remaps IDs once per shared producer
     // list; the subsequent solve still sees independent consumer requirements.
     #[test]
-    fn pruning_retains_shared_supplier_storage_after_remapping() {
+    fn pruning_retains_shared_producer_storage_after_remapping() {
         let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![
                 candidate(9.0, &[]),
@@ -71,17 +71,17 @@ mod tests {
         assert_eq!(inventory.prune_for_tests().removed_candidates, 1);
         let graph = &inventory.dag;
         assert_eq!(
-            graph.candidates[1].supplier_candidates_per_input[0]
+            graph.candidates[1].producer_candidates_per_input[0]
                 .candidates
                 .as_slice(),
             &[PhysicalCandidateId(0)]
         );
         assert_eq!(
-            asap_types::stages::supplier_storage_metrics(&inventory.physical),
-            asap_types::stages::SupplierStorageMetrics {
+            asap_types::stages::producer_storage_metrics(&inventory.physical),
+            asap_types::stages::ProducerStorageMetrics {
                 logical_connections: 2,
-                unique_supplier_sets: 1,
-                stored_supplier_ids: 1
+                unique_producer_sets: 1,
+                stored_producer_ids: 1
             }
         );
         assert_eq!(

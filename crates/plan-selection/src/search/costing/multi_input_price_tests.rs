@@ -30,7 +30,7 @@ fn append(
         0.0,
         inputs
             .into_iter()
-            .map(|producer| InputSupplierCandidates {
+            .map(|producer| InputProducerCandidates {
                 candidates: vec![producer].into(),
             })
             .collect(),
@@ -51,7 +51,7 @@ fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
             .dag
             .candidates
             .iter()
-            .any(|candidate| candidate.supplier_candidates_per_input.len() == 2));
+            .any(|candidate| candidate.producer_candidates_per_input.len() == 2));
         let roots = vec![QueryRoot::Operator(logical)];
         let entries = vec![QueryWorkloadEntry {
             query: Query(query.into()),
@@ -123,7 +123,7 @@ fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
                 .candidates
                 .iter()
                 .enumerate()
-                .find(|(_, candidate)| candidate.supplier_candidates_per_input.len() == 2)
+                .find(|(_, candidate)| candidate.producer_candidates_per_input.len() == 2)
                 .unwrap()
                 .0;
             let edges: Vec<_> = proposal

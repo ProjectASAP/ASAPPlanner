@@ -1,6 +1,6 @@
 //! Selections over Stage 2's physical candidates, and their structural
 //! validation.
-use super::suppliers::SupplierCandidates;
+use super::producers::ProducerCandidates;
 use std::collections::HashSet;
 
 /// Index into [`PhysicalASAPMemoCandidates::candidates`](super::PhysicalASAPMemoCandidates::candidates).
@@ -45,7 +45,7 @@ pub enum ReaderConstraint {
 pub struct ProducerConsumerConnection {
     pub producer: PhysicalCandidateId,
     pub consumer: PhysicalCandidateId,
-    /// Index in the consumer's inputs (`supplier_candidates_per_input`).
+    /// Index in the consumer's inputs (`producer_candidates_per_input`).
     pub requirement: usize,
 }
 
@@ -67,18 +67,18 @@ pub struct SelectedCandidateGraph {
 /// Check a decoded selection's structure against the connections it may use,
 /// instead of trusting rounded solver values: every selected candidate exists
 /// once, each output reference has one allowed root, each selected input has
-/// exactly one allowed selected supplier, the selection is acyclic, reaches
+/// exactly one allowed selected producer, the selection is acyclic, reaches
 /// only what the roots read, and keeps every reader constraint. Costs and
 /// resource budgets are the caller's (Stage 3's) to check.
 ///
 /// `candidate_count` candidates; `input_count(c)` inputs of candidate `c`;
-/// `suppliers_of_input(c, i)` the candidates that may supply its input `i`
+/// `producers_of_input(c, i)` the candidates that may produce its input `i`
 /// (`None` past its last input); `query_output_candidates[r]` the candidates
 /// that may produce output reference `r`.
 pub fn validate_selected_connections<'a>(
     candidate_count: usize,
     input_count: impl Fn(PhysicalCandidateId) -> usize,
-    suppliers_of_input: impl Fn(PhysicalCandidateId, usize) -> Option<&'a SupplierCandidates>,
+    producers_of_input: impl Fn(PhysicalCandidateId, usize) -> Option<&'a ProducerCandidates>,
     query_output_candidates: &[&[PhysicalCandidateId]],
     reader_constraints: &[ReaderConstraint],
     selected: &SelectedCandidateGraph,
@@ -112,12 +112,13 @@ pub fn validate_selected_connections<'a>(
         if !active.contains(&connection.producer) || !active.contains(&connection.consumer) {
             return Err(invalid());
         }
-        let Some(suppliers) = suppliers_of_input(connection.consumer, connection.requirement)
+        let Some(producer_candidates) =
+            producers_of_input(connection.consumer, connection.requirement)
         else {
             return Err(invalid());
         };
         let target = &mut producers[connection.consumer.0][connection.requirement];
-        if target.is_some() || !suppliers.contains(&connection.producer) {
+        if target.is_some() || !producer_candidates.contains(&connection.producer) {
             return Err(invalid());
         }
         *target = Some(connection.producer);

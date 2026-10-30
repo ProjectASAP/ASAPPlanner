@@ -24,7 +24,7 @@ use asap_types::stages::{
     PhysicalASAPMemoCandidates, PhysicalCandidateId, ProducerConsumerConnection,
     QueryRootAssignment, ReaderConstraint, SelectedCandidateGraph,
 };
-use asap_types::stages::{SupplierCandidates, SupplierSetInterner};
+use asap_types::stages::{ProducerCandidates, ProducerSetInterner};
 
 #[derive(Debug)]
 struct Component {
@@ -118,7 +118,7 @@ fn components(
             }
             pending.extend(
                 graph.candidates[id.0]
-                    .supplier_candidates_per_input
+                    .producer_candidates_per_input
                     .iter()
                     .flat_map(|input| input.candidates.iter().copied()),
             );
@@ -178,7 +178,7 @@ fn closed(graph: &DagOfPhysicalCandidatesWithCosts, component: &Component) -> bo
     let inside: HashSet<_> = component.candidates.iter().copied().collect();
     component.candidates.iter().all(|&id| {
         graph.candidates[id]
-            .supplier_candidates_per_input
+            .producer_candidates_per_input
             .iter()
             .flat_map(|input| input.candidates.iter())
             .all(|producer| inside.contains(&producer.0))
@@ -216,19 +216,19 @@ fn project(
         .map(|(local, &global)| (global, local))
         .collect();
     let graph = &configured.dag;
-    let mut supplier_sets = SupplierSetInterner::default();
-    let mut remapped: HashMap<SupplierCandidates, SupplierCandidates> = HashMap::new();
+    let mut producer_sets = ProducerSetInterner::default();
+    let mut remapped: HashMap<ProducerCandidates, ProducerCandidates> = HashMap::new();
     let mut projected = DagOfPhysicalCandidatesWithCosts {
         candidates: component
             .candidates
             .iter()
             .map(|&id| {
                 let mut candidate = graph.candidates[id].clone();
-                for input in &mut candidate.supplier_candidates_per_input {
+                for input in &mut candidate.producer_candidates_per_input {
                     input.candidates = remapped
                         .entry(input.candidates.clone())
                         .or_insert_with(|| {
-                            supplier_sets.intern(
+                            producer_sets.intern(
                                 input
                                     .candidates
                                     .iter()
@@ -363,8 +363,8 @@ fn project(
                         operator_nodes.len() - 1,
                     )
                 });
-            candidate.supplier_candidates_per_input = projected
-                .supplier_candidates_per_input
+            candidate.producer_candidates_per_input = projected
+                .producer_candidates_per_input
                 .iter()
                 .map(|input| input.candidates.clone())
                 .collect();
@@ -467,7 +467,7 @@ pub(in crate::search) fn separate_plans_combined(
             if reach[query].insert(id.0) {
                 pending.extend(
                     graph.candidates[id.0]
-                        .supplier_candidates_per_input
+                        .producer_candidates_per_input
                         .iter()
                         .flat_map(|input| input.candidates.iter().copied()),
                 );

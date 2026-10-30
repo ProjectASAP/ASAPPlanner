@@ -113627,10 +113627,10 @@
         "solve_calls": 34,
         "solver_ms": 23735.097109,
         "status": "time_or_evaluation_limit_with_validated_incumbent",
-        "stored_supplier_ids": 6172,
+        "stored_producer_ids": 6172,
         "structurally_removed_candidates": 3785,
         "structurally_removed_connections": 5862,
-        "supplier_sets": 3782,
+        "producer_sets": 3782,
         "time_limit_ms": 30000,
         "validation_ms": 53.249354,
         "validation_rejection_counts": {

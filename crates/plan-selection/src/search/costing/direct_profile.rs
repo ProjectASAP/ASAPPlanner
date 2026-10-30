@@ -1,7 +1,7 @@
-//! Local cost certification shared by fixed and supplier-dependent profiles.
+//! Local cost certification shared by fixed and producer-dependent profiles.
 //!
-//! Price each operation from its actual supplier output and state configuration.
-//! The fixed-profile adapter admits one interface; supplier_price_options keeps
+//! Price each operation from its actual producer output and state configuration.
+//! The fixed-profile adapter admits one interface; producer_price_options keeps
 //! compatible interfaces as joint MILP choices. Ingestion worker counts require
 //! certified unary upstream work, never statistics from a template child.
 use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
@@ -32,7 +32,7 @@ pub(in crate::search) enum DirectProfileError {
 pub(in crate::search) struct DirectProfileExtraction {
     pub profile: DirectCostProfile,
     pub supported: Vec<bool>,
-    /// The sole input's certified suppliers; empty for scans/unsupported nodes.
+    /// The sole input's certified producers; empty for scans/unsupported nodes.
     pub suppliers: Vec<Vec<PhysicalCandidateId>>,
 }
 
@@ -275,7 +275,7 @@ fn prepare_profile(
                 continue;
             }
             if candidate
-                .supplier_candidates_per_input
+                .producer_candidates_per_input
                 .iter()
                 .any(|input| input.candidates.contains(&PhysicalCandidateId(id)))
             {
@@ -366,7 +366,7 @@ fn extract_scan_class(
     let mut nodes = nodes;
     for (id, node) in nodes.iter_mut().enumerate() {
         if configured.dag.candidates[id]
-            .supplier_candidates_per_input
+            .producer_candidates_per_input
             .len()
             > 1
         {
@@ -523,7 +523,7 @@ fn price<'a>(
         return Ok(());
     };
     visiting[id] = true;
-    let requirements = &configured.dag.candidates[id].supplier_candidates_per_input;
+    let requirements = &configured.dag.candidates[id].producer_candidates_per_input;
     let options: Vec<Vec<PhysicalCandidateId>> = input_override.map_or_else(
         || {
             requirements.first().map_or_else(
@@ -715,7 +715,7 @@ fn price<'a>(
                 continue;
             };
             // Same local price does not imply the same upstream worker count.
-            // Restrict this producer to one proven bucket of supplier bindings.
+            // Restrict this producer to one proven bucket of producer bindings.
             if worker_counts[id].is_some_and(|prior| prior != workers) {
                 continue;
             }
@@ -1078,7 +1078,7 @@ mod tests {
     use asap_types::ir::{Operator, OperatorNode, ProjectItem, ScalarExpr};
 
     use crate::search::candidates::dag::{
-        DagOfPhysicalCandidatesWithCosts, InputSupplierCandidates, PhysicalCandidateWithCost,
+        DagOfPhysicalCandidatesWithCosts, InputProducerCandidates, PhysicalCandidateWithCost,
         QueryOutputCandidates,
     };
 
@@ -1120,7 +1120,7 @@ mod tests {
     // Equal-priced plain-output consumers retain both exact and sketch paths.
     // The sketch-count bound controls later resizing, not the price interface.
     #[test]
-    fn plain_reader_keeps_exact_and_kmv_supplier_interfaces() {
+    fn plain_reader_keeps_exact_and_kmv_producer_interfaces() {
         use asap_types::ir::schema::{SketchAlgorithm, SketchKind, SketchStatistic};
         use std::rc::Rc;
         let target = AccuracyTarget::max_error(0.05)
@@ -1187,7 +1187,7 @@ mod tests {
                 0.0,
                 inputs
                     .into_iter()
-                    .map(|supplier| InputSupplierCandidates {
+                    .map(|supplier| InputProducerCandidates {
                         candidates: vec![supplier].into(),
                     })
                     .collect(),
@@ -1197,7 +1197,7 @@ mod tests {
         let exact_id = append(exact, &mut configured);
         let estimate_id = append(estimate, &mut configured);
         let project_id = append(project.clone(), &mut configured);
-        configured.dag.candidates[project_id.0].supplier_candidates_per_input[0].candidates =
+        configured.dag.candidates[project_id.0].producer_candidates_per_input[0].candidates =
             vec![exact_id, estimate_id].into();
         configured.sync_physical_for_tests();
         configured.dag.query_roots.push(QueryOutputCandidates {
@@ -1261,7 +1261,7 @@ mod tests {
                 0.0,
                 inputs
                     .into_iter()
-                    .map(|supplier| InputSupplierCandidates {
+                    .map(|supplier| InputProducerCandidates {
                         candidates: vec![supplier].into(),
                     })
                     .collect(),
@@ -1477,7 +1477,7 @@ mod tests {
                 0.0,
                 inputs
                     .into_iter()
-                    .map(|supplier| InputSupplierCandidates {
+                    .map(|supplier| InputProducerCandidates {
                         candidates: vec![supplier].into(),
                     })
                     .collect(),
@@ -1794,11 +1794,11 @@ mod tests {
                             ExecutionTiming::QueryTime,
                             Materialization::MatAtQuery(Medium::Memory),
                             chain_candidate.local_cost,
-                            chain_candidate.supplier_candidates_per_input,
+                            chain_candidate.producer_candidates_per_input,
                         );
                         assert_eq!(pushed, normal_chain);
                         for candidate in &mut configured.dag.candidates {
-                            for input in &mut candidate.supplier_candidates_per_input {
+                            for input in &mut candidate.producer_candidates_per_input {
                                 if input.candidates.contains(&PhysicalCandidateId(chain)) {
                                     input.candidates.push(normal_chain);
                                 }
@@ -1962,7 +1962,7 @@ mod tests {
                 0.0,
                 children
                     .into_iter()
-                    .map(|id| InputSupplierCandidates {
+                    .map(|id| InputProducerCandidates {
                         candidates: vec![id].into(),
                     })
                     .collect(),
@@ -2111,11 +2111,11 @@ mod tests {
         }
     }
 
-    // A template child is not evidence that every supplier has the same rows.
+    // A template child is not evidence that every producer has the same rows.
     // Two deliberately different source alternatives exercise cost-interface
     // filtering independently of the logical compatibility check upstream.
     #[test]
-    fn different_supplier_statistics_are_not_priced_as_the_template_child() {
+    fn different_producer_statistics_are_not_priced_as_the_template_child() {
         let scan = |metric| {
             OperatorNode::reachable(&lower_promql(metric, AccuracyTarget::exact()))
                 .into_iter()
@@ -2144,8 +2144,8 @@ mod tests {
                 candidates: (0..3)
                     .map(|id| PhysicalCandidateWithCost {
                         local_cost: 0.0,
-                        supplier_candidates_per_input: if id == 2 {
-                            vec![InputSupplierCandidates {
+                        producer_candidates_per_input: if id == 2 {
+                            vec![InputProducerCandidates {
                                 candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)]
                                     .into(),
                             }]
@@ -2198,7 +2198,7 @@ mod tests {
             extracted.profile.nodes[1].execution_cost > extracted.profile.nodes[0].execution_cost
         );
         assert_eq!(
-            configured.dag.candidates[2].supplier_candidates_per_input[0]
+            configured.dag.candidates[2].producer_candidates_per_input[0]
                 .candidates
                 .len(),
             2,
@@ -2215,9 +2215,9 @@ mod tests {
     }
 }
 
-#[path = "supplier_price_options.rs"]
-mod supplier_price_options;
-pub(in crate::search) use supplier_price_options::extract_price_options;
+#[path = "producer_price_options.rs"]
+mod producer_price_options;
+pub(in crate::search) use producer_price_options::extract_price_options;
 
 #[cfg(test)]
 #[path = "direct_price_options_tests.rs"]

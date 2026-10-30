@@ -285,9 +285,9 @@ fn search_with_solver(
             }
             for (id, candidate) in heuristic.candidates.iter_mut().enumerate() {
                 if disabled[id] {
-                    candidate.supplier_candidates_per_input.clear();
+                    candidate.producer_candidates_per_input.clear();
                 } else {
-                    for input in &mut candidate.supplier_candidates_per_input {
+                    for input in &mut candidate.producer_candidates_per_input {
                         input.candidates.retain(|producer| !disabled[producer.0]);
                     }
                 }
@@ -753,7 +753,7 @@ fn same_assignment(left: &SelectedCandidateGraph, right: &SelectedCandidateGraph
 mod tests {
     use super::*;
     use crate::search::candidates::dag::{
-        InputSupplierCandidates, PhysicalCandidateWithCost, QueryOutputCandidates,
+        InputProducerCandidates, PhysicalCandidateWithCost, QueryOutputCandidates,
     };
 
     use asap_types::stages::PhysicalCandidateId;
@@ -764,7 +764,7 @@ mod tests {
                 .iter()
                 .map(|&local_cost| PhysicalCandidateWithCost {
                     local_cost,
-                    supplier_candidates_per_input: vec![],
+                    producer_candidates_per_input: vec![],
                 })
                 .collect(),
             query_roots: vec![QueryOutputCandidates {
@@ -1273,8 +1273,8 @@ mod tests {
     fn observed_cost_cut_includes_absent_candidate_decisions() {
         let mut graph = choices(&[1.0, 1.0]);
         graph.candidates[1]
-            .supplier_candidates_per_input
-            .push(InputSupplierCandidates {
+            .producer_candidates_per_input
+            .push(InputProducerCandidates {
                 candidates: vec![PhysicalCandidateId(0)].into(),
             });
         let result = search_candidates(&graph, limits(10), |selected| {
@@ -1331,8 +1331,8 @@ mod tests {
     fn observed_context_distinguishes_connections_and_output_assignments() {
         let mut graph = choices(&[0.0; 3]);
         graph.candidates[2]
-            .supplier_candidates_per_input
-            .push(InputSupplierCandidates {
+            .producer_candidates_per_input
+            .push(InputProducerCandidates {
                 candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
             });
         graph.query_roots = (0..3)

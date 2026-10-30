@@ -13,7 +13,7 @@ use asap_types::physical::Materialization;
 use asap_types::stages::{CandidateMemo, MemoGroupId, PhysicalCandidateId};
 
 use crate::search::candidates::dag::{
-    DagOfPhysicalCandidatesWithCosts, InputSupplierCandidates, PhysicalCandidateWithCost,
+    DagOfPhysicalCandidatesWithCosts, InputProducerCandidates, PhysicalCandidateWithCost,
     QueryOutputCandidates,
 };
 
@@ -23,7 +23,7 @@ use crate::search::candidates::dag::{
 pub(in crate::search) struct InventoryForTests {
     pub inventory: CandidateInventory,
     /// Node `i` as candidate `i`, priced by the test's node cost, reading the
-    /// inventory's suppliers; query roots are its output references.
+    /// inventory's producers; query roots are its output references.
     pub graph: DagOfPhysicalCandidatesWithCosts,
     /// Node `i`'s operator node.
     pub templates: Vec<Rc<OperatorNode>>,
@@ -45,12 +45,12 @@ impl InventoryForTests {
         let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: templates
                 .iter()
-                .zip(&inventory.supplier_nodes_per_input)
+                .zip(&inventory.producer_nodes_per_input)
                 .map(|(node, inputs)| PhysicalCandidateWithCost {
                     local_cost: node_local_cost(node).unwrap(),
-                    supplier_candidates_per_input: inputs
+                    producer_candidates_per_input: inputs
                         .iter()
-                        .map(|suppliers| InputSupplierCandidates {
+                        .map(|suppliers| InputProducerCandidates {
                             candidates: suppliers.clone(),
                         })
                         .collect(),
