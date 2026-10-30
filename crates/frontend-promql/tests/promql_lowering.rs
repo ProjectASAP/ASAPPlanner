@@ -433,7 +433,7 @@ fn sum_by_over_rate_groups_the_outer_sum() {
 
 #[test]
 fn count_over_rate_keeps_both_levels() {
-    // The `Outer::Count` sibling of the `sum(rate(...))` bug.
+    // The `count` sibling of the `sum(rate(...))` bug.
     let qe = lower("count(rate(http_requests_total[5m]))");
     let NonASAPOp::Aggregate {
         measures, child, ..
