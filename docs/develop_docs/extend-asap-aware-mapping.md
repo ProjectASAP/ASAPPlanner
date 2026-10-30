@@ -54,13 +54,14 @@ estimator; an execution test in `crates/integration-tests/tests/` such as
 A new way for computations of one Pass 1 candidate to share, split or reuse
 work.
 
-1. In `crates/logical-asap-optimization/src/pass2/asap_aware_cse.rs`, add the part it can choose as a `*Candidate` type
-   with a finder (for example `rollup_candidates(roots)`), and the function
-   that applies a set of them and returns `*Pass2Candidate`s (for example
-   `rollup_pass2_candidates`). Read summary families only through
-   `FamilyCapability`.
-2. In `crates/logical-asap-optimization/src/pass2/workload_candidates.rs`, call it
-   from Stage 1 enumeration after the
+1. Add a memo rule under `crates/logical-asap-optimization/src/pass2/memo/rules/`
+   (for example `rollup.rs` or `topk.rs`): it adds candidates (and, when it
+   needs them, groups) to the memo groups it implements, keeping every
+   existing candidate. Read summary families only through
+   `FamilyCapability`. Shared rewrite helpers live in
+   `pass2/asap_aware_cse.rs`.
+2. Declare it in `pass2/memo/rules.rs` and call it from `apply_sharing_rules`
+   (`pass2/logical_memo_candidates.rs`), after the
    existing rules.
 3. Add its row to the Pass 2 rule table of the
    [design](../design_docs/proposals/planner-layering.md).
@@ -68,7 +69,7 @@ work.
 A rule must keep every Pass 1 candidate, must not add a family or a readout,
 and must keep the composed DAG's meaning. Stage 3 decides whether it pays off.
 
-Tests: unit tests beside the rule in `pass2/asap_aware_cse.rs` for when it applies
+Tests: unit tests beside the rule in `pass2/memo/rules/` for when it applies
 and when it must not; an end-to-end test like
 `crates/integration-tests/tests/reuse_rules.rs` that the planned workload
 contains the candidate and that Stage 3 prices it.

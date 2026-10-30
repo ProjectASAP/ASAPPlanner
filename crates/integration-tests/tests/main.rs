@@ -20,7 +20,6 @@ mod joint_search_equivalence;
 mod kll_pane_execution;
 mod materialization_e2e;
 mod materialized_views;
-mod memo_covers_whole_workload_pass2;
 mod memo_enumeration;
 mod nested;
 mod operator_design_examples;

@@ -51,7 +51,7 @@ pub enum PerComputationLogicalMemoCandidatesError {
 
 /// Pass 1's candidates on the memo groups of `dag_of_logical_memo_groups`:
 /// each group's candidates from `per_computation`, the Pass 1 inventory of
-/// the same roots less what the deployment and early query pruning removed
+/// the same roots less what the deployment does not support
 /// ([`try_populate_pass1`]), each with its summaries sized for its readers'
 /// failure probabilities ([`size_for_failure_probability`]): one sized
 /// candidate per accuracy-budget split. `entries[i]` is query `i`'s

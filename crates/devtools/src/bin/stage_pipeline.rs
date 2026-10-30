@@ -31,16 +31,13 @@
 // guarantees unless `--enforce-accuracy-guarantees` is given (below);
 // `accuracy_guarantees` is `"ignored"` or `"enforced"`.
 //   - stage0_query_language_frontends: the frontends' workload DAG, one root per query;
-//   - stage1_logical_asap_optimization: Pass 1 whole-workload candidates, one per
-//     choice of a per-computation candidate for every target (the Cartesian
-//     product; under the default search, the choices it composes), each
-//     followed by its Pass 2 candidates (the
-//     identical-expression rule's, one per subset of its sharing candidates,
-//     then the summary-capability rule's, one per choice of shared summary
-//     builds), in enumeration order. Every candidate is optimized and
-//     priced; the document shows the Stage 1 candidates of the physical
+//   - stage1_logical_asap_optimization: the logical DAGs of the plans the
+//     memo search evaluated, each one memo candidate per needed group
+//     rebuilt as a DAG (under the default search, only the selected one;
+//     the memo itself, after each step, is under `memo`). The document
+//     shows the Stage 1 candidates of the physical
 //     candidates it shows (below), and those among the first
-//     `--max-displayed` that have none, with `combinations` (how many were enumerated),
+//     `--max-displayed` that have none, with `combinations` (how many were evaluated),
 //     `capped` (whether some are not shown), `pass1_pruned` (the
 //     candidates Pass 1 pruned per target, with reasons) and
 //     `pruned_candidates` (the same, each on its memo `group`:
