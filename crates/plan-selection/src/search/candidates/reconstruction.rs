@@ -245,8 +245,8 @@ mod tests {
         PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
     };
     use crate::search::milp::model::select_candidates;
-    use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
     use asap_logical_asap_optimization::test_support::lower_promql;
+    use asap_types::stages::MemoGroupId;
 
     // Physical identity is reflexive for NaN, without equating different
     // non-finite quantile parameters that JSON would serialize as null.

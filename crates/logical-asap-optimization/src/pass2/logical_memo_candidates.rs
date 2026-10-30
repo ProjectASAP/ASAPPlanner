@@ -1,11 +1,11 @@
 //! Stage 1, Pass 2's entry and output: the Pass 1 memo extended with the
 //! candidates and groups that share work across computations
-//! ([`LogicalASAPMemoCandidates`]), which Stage 2 implements.
+//! ([`asap_types::stages::LogicalASAPMemoCandidates`]), which Stage 2 implements.
 
 use std::time::Instant;
 
 use crate::pass1::logical_memo_candidates::PerComputationLogicalMemoCandidates;
-use crate::pass2::memo::candidates::CandidateMemo;
+use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::rules::{
     finer_aggregate, rollup, scan_labels, shared_configuration_readers, summary_inputs,
     summary_results, topk,
@@ -15,19 +15,9 @@ use crate::pass2::memo::state_groups::{
     add_shared_summary_state_groups, check_unexpanded_memo, StateGroupExpansionError,
 };
 use crate::pass2::memo::window_candidates::extend_local_window_composition;
-use crate::pass2::memo::{check_generation_deadline, CandidateGenerationTimeout};
+use asap_types::stages::CandidateMemo;
+use asap_types::stages::{CandidateGenerationTimeout, LogicalASAPMemoCandidates};
 use asap_types::workload::QueryWorkloadEntry;
-
-/// Stage 1, Pass 2's output: the Pass 1 groups plus the groups Pass 2 adds
-/// (shared producers, shared summary states), each with its Pass 1
-/// candidates plus every Pass 2 rule's (by `origin`), including the
-/// candidates reading a shared summary state.
-#[derive(Debug, Clone)]
-pub struct LogicalASAPMemoCandidates {
-    /// The expanded memo: groups, query roots (passed through from Pass 1)
-    /// and each group's candidates.
-    pub memo: CandidateMemo,
-}
 
 /// What Pass 2 keeps between pane-width rounds: the memo after local
 /// window composition and before the other rules, and the pane widths it

@@ -8,11 +8,9 @@ use std::time::Instant;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot};
 
-use crate::pass2::memo::candidates::{
-    CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup,
-};
 use crate::pass2::memo::state_groups::{boundary_groups, simple_build, StateGroupExpansionError};
-use crate::pass2::memo::{MemoGroup, MemoGroupId};
+use asap_types::stages::{CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{MemoGroup, MemoGroupId};
 
 /// Preserve local implementations and append readers over union-label inputs.
 /// Parent/query reachability is rebuilt by the enclosing state-group expansion.

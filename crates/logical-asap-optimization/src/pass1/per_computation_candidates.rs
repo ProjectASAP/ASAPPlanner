@@ -661,7 +661,7 @@ pub fn generate_per_computation_candidates_with_memo<Id: std::fmt::Debug>(
 }
 
 type MemoGroupMeasureToComputationChoicesCache =
-    HashMap<(crate::pass2::memo::MemoGroupId, usize), ComputationChoices>;
+    HashMap<(asap_types::stages::MemoGroupId, usize), ComputationChoices>;
 
 fn generate_with_computation_choices_cache<Id: std::fmt::Debug>(
     roots: Vec<(Id, QueryRoot)>,

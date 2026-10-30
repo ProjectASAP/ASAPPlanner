@@ -34,7 +34,7 @@ pub(crate) fn pane_width_domain_before(
     grids: impl IntoIterator<Item = u64>,
     domain: PaneWidthDomain,
     deadline: Option<std::time::Instant>,
-) -> Result<Vec<u64>, super::CandidateGenerationTimeout> {
+) -> Result<Vec<u64>, asap_types::stages::CandidateGenerationTimeout> {
     super::check_generation_deadline(deadline)?;
     let mut widths = BTreeSet::new();
     for width in grids {
@@ -99,7 +99,7 @@ impl PaneWidthFrontier {
     pub fn new(
         grids: impl IntoIterator<Item = u64>,
         deadline: Option<std::time::Instant>,
-    ) -> Result<Self, super::CandidateGenerationTimeout> {
+    ) -> Result<Self, asap_types::stages::CandidateGenerationTimeout> {
         let grids: Vec<_> = grids
             .into_iter()
             .filter(|grid| *grid > 0)
@@ -125,7 +125,7 @@ impl PaneWidthFrontier {
     pub fn next_domain(
         &mut self,
         deadline: Option<std::time::Instant>,
-    ) -> Result<Option<PaneWidthDomain>, super::CandidateGenerationTimeout> {
+    ) -> Result<Option<PaneWidthDomain>, asap_types::stages::CandidateGenerationTimeout> {
         while !self.finished {
             super::check_generation_deadline(deadline)?;
             let current: Vec<Vec<u64>> = self
@@ -190,7 +190,7 @@ pub fn pane_width_divisors(grid_ms: u64) -> Vec<u64> {
 fn pane_width_divisors_before(
     grid_ms: u64,
     deadline: Option<std::time::Instant>,
-) -> Result<Vec<u64>, super::CandidateGenerationTimeout> {
+) -> Result<Vec<u64>, asap_types::stages::CandidateGenerationTimeout> {
     super::check_generation_deadline(deadline)?;
     let mut widths = BTreeSet::new();
     let mut divisor = 1;
@@ -227,7 +227,7 @@ pub(crate) fn pane_configurations_before(
     readers: &[PaneRequirement],
     domain: PaneWidthDomain,
     deadline: Option<std::time::Instant>,
-) -> Result<Vec<PaneConfiguration>, super::CandidateGenerationTimeout> {
+) -> Result<Vec<PaneConfiguration>, asap_types::stages::CandidateGenerationTimeout> {
     super::check_generation_deadline(deadline)?;
     if readers
         .iter()
@@ -313,7 +313,7 @@ pub(crate) fn pane_configurations_before(
 pub(crate) fn state_size_configurations(
     requirements: Vec<Option<SketchParams>>,
     deadline: Option<std::time::Instant>,
-) -> Result<Vec<Option<SketchParams>>, super::CandidateGenerationTimeout> {
+) -> Result<Vec<Option<SketchParams>>, asap_types::stages::CandidateGenerationTimeout> {
     super::check_generation_deadline(deadline)?;
     if requirements.iter().any(Option::is_none) {
         return Ok(vec![None]);

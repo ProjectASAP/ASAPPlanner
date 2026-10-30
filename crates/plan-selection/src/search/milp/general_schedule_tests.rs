@@ -29,7 +29,7 @@ fn fixed(interval: u32, evaluations: u64) -> QueryWorkloadEntry {
 }
 fn node(id: usize, input: Option<usize>) -> PhysicalCandidate {
     PhysicalCandidate {
-        group: asap_logical_asap_optimization::pass2::memo::MemoGroupId(id as u32),
+        group: asap_types::stages::MemoGroupId(id as u32),
         local_cost: 0.0,
         producer_requirements: input
             .into_iter()

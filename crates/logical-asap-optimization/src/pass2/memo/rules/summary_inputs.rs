@@ -2,10 +2,10 @@
 //! This preserves their full expressions and schema, including opaque series
 //! identity, rather than assuming that a projection is an identity operation.
 use super::reuse::{append_producer, append_reader, eligible, replace};
-use crate::pass2::memo::candidates::{CandidateMemo, OriginOfCandidateForMemoGroup};
 use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::state_groups::StateGroupExpansionError;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
+use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;

@@ -3,11 +3,11 @@
 //! rows, then merge them into the query's groups with each measure's rollup.
 use super::reuse::append_reader;
 use crate::pass2::finer_aggregate::match_finer;
-use crate::pass2::memo::candidates::{CandidateMemo, OriginOfCandidateForMemoGroup};
 use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::state_groups::StateGroupExpansionError;
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::{NonASAPOp, Operator, OperatorNode, OperatorResultKind};
+use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;

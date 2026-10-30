@@ -206,10 +206,10 @@ mod tests {
         PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
     };
     use crate::search::milp::model::select_candidates;
-    use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
     use asap_logical_asap_optimization::test_support::entry_with;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::physical::Medium;
+    use asap_types::stages::MemoGroupId;
     use asap_types::workload::{
         QueryRecurrence, RangeEvaluation, RepeatedDemand, RepetitionInterval,
     };

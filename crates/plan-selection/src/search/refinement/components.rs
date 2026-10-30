@@ -791,11 +791,11 @@ mod tests {
     use crate::search::milp::model::{solve_candidate_proposal, ObservedAssignment};
     use crate::PlanningModels;
     use asap_cost::{CalibrationFit, CostInputs, ResourceUnitCost};
-    use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::scalar::{ScalarExpr, ScalarValue};
     use asap_types::ir::{Operator, OperatorNode};
+    use asap_types::stages::MemoGroupId;
     use asap_types::workload::*;
     use std::rc::Rc;
     use std::time::Duration;

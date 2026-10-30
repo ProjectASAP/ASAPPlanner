@@ -13,12 +13,12 @@ use super::shared_producer::{
     add_shared_producer_candidates, spans_groups, Reader, SharedProducer,
 };
 use crate::pass2::asap_aware_cse::{with_pane_chain, with_resized_build};
-use crate::pass2::memo::candidates::CandidateMemo;
 use crate::pass2::memo::shared_configurations::{
     pane_configurations_before, shared_size, state_size_configurations, PaneConfiguration,
     PaneRequirement, PaneWidthDomain,
 };
 use crate::pass2::memo::state_groups::{same_range_input, simple_build, StateGroupExpansionError};
+use asap_types::stages::CandidateMemo;
 
 /// `resized` (a rewrite of `original` with the same shape) with each node
 /// that is a child group's node in `original` put back, and the nodes above

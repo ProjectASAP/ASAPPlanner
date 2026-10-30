@@ -307,7 +307,7 @@ pub mod planning {
     pub fn expanded_memo(
         roots: Vec<(usize, QueryRoot)>,
         entries: &[asap_types::workload::QueryWorkloadEntry],
-    ) -> asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo {
+    ) -> asap_types::stages::CandidateMemo {
         use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
         use asap_logical_asap_optimization::pass2::memo::{
             candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
@@ -328,13 +328,12 @@ pub mod planning {
     /// each query's first root group's DAG, every group `choice` does not
     /// name implemented by its first candidate.
     pub fn compose_memo_plan(
-        memo: &asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo,
+        memo: &asap_types::stages::CandidateMemo,
         queries: usize,
         choice: &std::collections::BTreeMap<usize, usize>,
     ) -> Vec<Rc<OperatorNode>> {
-        use asap_logical_asap_optimization::pass2::memo::{
-            enumeration::build_logical_asap_dags_from_chosen_candidates, MemoGroupId,
-        };
+        use asap_logical_asap_optimization::pass2::memo::enumeration::build_logical_asap_dags_from_chosen_candidates;
+        use asap_types::stages::MemoGroupId;
         let choice = choice
             .iter()
             .map(|(&group, &index)| (MemoGroupId(group as u32), index))
@@ -402,11 +401,9 @@ pub mod planning {
     /// alone) candidates `keep` accepts; those of the topmost group (the
     /// fewest child edges below `q`'s root) first.
     pub fn own_choices(
-        memo: &asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo,
+        memo: &asap_types::stages::CandidateMemo,
         q: usize,
-        keep: impl Fn(
-            &asap_logical_asap_optimization::pass2::memo::candidates::CandidateForMemoGroup,
-        ) -> bool,
+        keep: impl Fn(&asap_types::stages::CandidateForMemoGroup) -> bool,
     ) -> Vec<(usize, usize)> {
         let mut found: Vec<_> = memo
             .candidates
@@ -430,9 +427,9 @@ pub mod planning {
             .iter()
             .enumerate()
             .filter(|(group, _)| {
-                memo.query_roots[q].operator_refs().contains(
-                    &&asap_logical_asap_optimization::pass2::memo::MemoGroupId(*group as u32),
-                )
+                memo.query_roots[q]
+                    .operator_refs()
+                    .contains(&&asap_types::stages::MemoGroupId(*group as u32))
             })
             .map(|(group, _)| (group, 0))
             .collect();
@@ -460,7 +457,7 @@ pub mod planning {
     /// - `shared{g}`: every query reads the summary state group `g`, its own
     ///   estimate or a regrouping merge of it, when every query can.
     pub fn select_rollup(
-        memo: &asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo,
+        memo: &asap_types::stages::CandidateMemo,
         queries: usize,
         entries: &[asap_types::workload::QueryWorkloadEntry],
         data: &DataWorkload,
@@ -469,8 +466,7 @@ pub mod planning {
         let own_builds: Vec<Vec<(usize, usize)>> = (0..queries)
             .map(|q| {
                 let found = own_choices(memo, q, |c| {
-                    c.origin
-                        == asap_logical_asap_optimization::pass2::memo::candidates::OriginOfCandidateForMemoGroup::Pass1
+                    c.origin == asap_types::stages::OriginOfCandidateForMemoGroup::Pass1
                         && builds(&c.root_node)
                 });
                 let top = found

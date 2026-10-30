@@ -1,11 +1,9 @@
 //! Shared boundary handling for producer-level reuse rules. Rule outputs retain
 //! canonical input identities after guarantee recomposition rebuilds their DAGs.
-use crate::pass2::memo::candidates::{
-    CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup,
-};
 use crate::pass2::memo::state_groups::{boundary_groups, StateGroupExpansionError};
-use crate::pass2::memo::{MemoGroup, MemoGroupId};
 use asap_types::ir::OperatorNode;
+use asap_types::stages::{CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{MemoGroup, MemoGroupId};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -102,7 +100,7 @@ pub(in crate::pass2::memo) fn append_producer(
 ) -> Result<MemoGroupId, StateGroupExpansionError> {
     // Reuse only dedicated producer groups. A logical result group can contain
     // other implementations and cannot enforce this producer's exact contract.
-    let root_groups = crate::pass2::memo::root_groups(&memo.query_roots);
+    let root_groups = asap_types::stages::root_groups(&memo.query_roots);
     if let Some((index, _)) = memo.groups.iter().enumerate().find(|(index, group)| {
         !root_groups.contains(&MemoGroupId(*index as u32))
             && memo.candidates[*index].len() == 1

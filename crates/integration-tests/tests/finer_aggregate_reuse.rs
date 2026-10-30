@@ -6,14 +6,12 @@ use asap_executor::values::Value;
 use asap_logical_asap_optimization::{
     pass1::per_computation_candidates::generate_per_computation_candidates,
     pass2::memo::{
-        candidates::{
-            try_populate_pass1, CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup,
-        },
-        shared_configurations::PaneWidthDomain,
+        candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
         DagOfLogicalMemoGroups,
     },
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
+use asap_types::stages::{CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup};
 use serde_json::json;
 use std::path::Path;
 

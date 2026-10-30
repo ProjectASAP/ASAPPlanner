@@ -119,7 +119,7 @@ mod tests {
             ProducerConsumerConnection, ProducerRequirement, QueryRootAssignment,
             QueryRootCandidates, SelectedCandidateGraph,
         };
-        use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
+        use asap_types::stages::MemoGroupId;
         let mut interner = SupplierSetInterner::default();
         let choices = interner.intern(vec![PhysicalCandidateId(0), PhysicalCandidateId(1)]);
         let graph = CandidateDependencyGraph {

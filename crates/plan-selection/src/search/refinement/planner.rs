@@ -764,9 +764,7 @@ fn accuracy_baseline(
                         .as_ref()
                         .is_some_and(|node| raw_scan_with_shifts(node))
                 })
-                .then_some(asap_logical_asap_optimization::pass2::memo::MemoGroupId(
-                    group as u32,
-                ))
+                .then_some(asap_types::stages::MemoGroupId(group as u32))
         })
         .collect();
     // Bound the numerical range; these tiers are intentionally heuristic.
@@ -1214,9 +1212,7 @@ mod tests {
     use crate::search::candidates::inventory::build_candidate_inventory;
     use crate::search::refinement::search::CandidateSearchStatus;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use asap_logical_asap_optimization::pass2::memo::candidates::{
-        try_populate_pass1, OriginOfCandidateForMemoGroup,
-    };
+    use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
     use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
     use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
     use asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups;
@@ -1225,6 +1221,7 @@ mod tests {
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::{ASAPOp, OperatorNode};
     use asap_types::physical::Materialization;
+    use asap_types::stages::OriginOfCandidateForMemoGroup;
     use asap_types::workload::{
         DataArrival, Predictability, QueryRecurrence, RepeatedDemand, RepetitionInterval,
         SourceFacts,

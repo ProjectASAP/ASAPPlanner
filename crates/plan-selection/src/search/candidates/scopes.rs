@@ -280,9 +280,9 @@ mod tests {
     use crate::search::candidates::configurations::CandidateConfiguration;
     use crate::search::candidates::graph::PhysicalCandidate;
     use crate::search::milp::model::select_candidates;
-    use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
     use asap_types::ir::properties::ExecutionTiming;
     use asap_types::physical::Materialization;
+    use asap_types::stages::MemoGroupId;
 
     fn terminal_reader_inventory(separate_suppliers: bool) -> CandidateConfigurationInventory {
         use asap_logical_asap_optimization::test_support::{cms_summary, estimate_over};

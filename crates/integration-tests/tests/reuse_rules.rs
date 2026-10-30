@@ -17,10 +17,6 @@ use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::{
     cheapest_of, compose_memo_plan, expanded_memo, select_among,
 };
-use asap_logical_asap_optimization::pass2::memo::candidates::{
-    CandidateMemo, OriginOfCandidateForMemoGroup,
-};
-use asap_logical_asap_optimization::pass2::memo::{root_groups, MemoGroupId};
 use asap_types::ir::physical_export::compile_physical_asap_dag;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{
@@ -28,6 +24,8 @@ use asap_types::ir::{
     NonASAPOp, OperatorNode, QueryRoot,
 };
 use asap_types::physical::Materialization;
+use asap_types::stages::{root_groups, MemoGroupId};
+use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup};
 use asap_types::workload::{
     DataArrival, DataWorkload, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
     RepetitionInterval,

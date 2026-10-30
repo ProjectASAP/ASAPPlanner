@@ -12,13 +12,13 @@ use std::time::Instant;
 
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 
-use super::candidates::{CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup};
-use super::{MemoGroup, MemoGroupId};
+use asap_types::stages::{CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{MemoGroup, MemoGroupId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateGroupExpansionError {
     #[error(transparent)]
-    DeadlineExceeded(#[from] super::CandidateGenerationTimeout),
+    DeadlineExceeded(#[from] asap_types::stages::CandidateGenerationTimeout),
     #[error("memo group and candidate vectors have different lengths")]
     MismatchedGroups,
     #[error("memo contains an out-of-range group reference")]
@@ -610,7 +610,7 @@ mod tests {
                 )));
             }
             assert_eq!(group.parents.len(), 2);
-            assert!(!crate::pass2::memo::root_groups(&expanded.memo.query_roots).contains(state));
+            assert!(!asap_types::stages::root_groups(&expanded.memo.query_roots).contains(state));
             for &parent in &group.parents {
                 assert!(
                     order.iter().position(|id| id == state).unwrap()

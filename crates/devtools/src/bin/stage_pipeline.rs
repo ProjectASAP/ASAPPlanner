@@ -278,13 +278,9 @@ use asap_frontend_promql::{counter_function_over_gauge_warnings, promql_metric_n
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     HowToComputeAggregateMeasure, PerComputationCandidates, PruneReason,
 };
-use asap_logical_asap_optimization::pass2::memo::candidates::{
-    CandidateMemo, OriginOfCandidateForMemoGroup,
-};
 use asap_logical_asap_optimization::pass2::memo::enumeration::{
     build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
 };
-use asap_logical_asap_optimization::pass2::memo::{queries_rooted_at, MemoGroupId};
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
     large_peak_memory_warning, PlanningModels, Rejection, Selection, SelectionError,
@@ -295,6 +291,8 @@ use asap_types::ir::flat::{flatten, FlatDag, FlatNode, NodeId};
 use asap_types::ir::operator::node::OperatorNode;
 use asap_types::ir::properties::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
 use asap_types::ir::QueryRoot;
+use asap_types::stages::{queries_rooted_at, MemoGroupId};
+use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
     QueryRecurrence, QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand,

@@ -11,9 +11,9 @@ pub(crate) mod suppliers;
 /// Discard partially built catalogs on timeout; they cannot certify coverage.
 fn check_deadline(
     deadline: Option<std::time::Instant>,
-) -> Result<(), asap_logical_asap_optimization::pass2::memo::CandidateGenerationTimeout> {
+) -> Result<(), asap_types::stages::CandidateGenerationTimeout> {
     if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-        Err(asap_logical_asap_optimization::pass2::memo::CandidateGenerationTimeout)
+        Err(asap_types::stages::CandidateGenerationTimeout)
     } else {
         Ok(())
     }

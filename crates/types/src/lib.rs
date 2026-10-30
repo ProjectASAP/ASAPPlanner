@@ -14,9 +14,13 @@
 //!   ([`workload::parsed_workload`]).
 //! - [`physical`] — Stage 2 decision data: the materialization of a
 //!   sub-DAG ([`physical::Materialization`]).
+//! - [`stages`] — the types one planning stage hands the next: the Stage 1
+//!   → Stage 2 memo of groups and implementation candidates
+//!   ([`stages::LogicalASAPMemoCandidates`]).
 //!
 //! No execution logic lives in this crate (issue #190).
 pub mod ir;
 pub mod physical;
 pub mod serde_f64;
+pub mod stages;
 pub mod workload;

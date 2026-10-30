@@ -200,11 +200,11 @@ fn exact_rollup_catalog_crosses_identical_per_series_average() {
     use asap_logical_asap_optimization::{
         pass1::per_computation_candidates::generate_per_computation_candidates,
         pass2::memo::{
-            candidates::{try_populate_pass1, OriginOfCandidateForMemoGroup},
-            shared_configurations::PaneWidthDomain,
+            candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
             DagOfLogicalMemoGroups,
         },
     };
+    use asap_types::stages::OriginOfCandidateForMemoGroup;
     let roots: Vec<_> = Planner::new(FuzzSettings::default())
         .lower(&workload(923))
         .unwrap()
@@ -239,12 +239,12 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
     use asap_logical_asap_optimization::{
         pass1::per_computation_candidates::generate_per_computation_candidates,
         pass2::memo::{
-            candidates::{try_populate_pass1, OriginOfCandidateForMemoGroup},
-            shared_configurations::PaneWidthDomain,
+            candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
             DagOfLogicalMemoGroups,
         },
     };
     use asap_types::ir::{operator::AggIntent, NonASAPOp};
+    use asap_types::stages::OriginOfCandidateForMemoGroup;
     let roots: Vec<_> = Planner::new(FuzzSettings::default())
         .lower(&workload(902))
         .unwrap()
@@ -400,12 +400,12 @@ fn sql_count_rollup_executes_with_integer_results() {
     use asap_logical_asap_optimization::{
         pass1::per_computation_candidates::generate_per_computation_candidates,
         pass2::memo::{
-            candidates::{try_populate_pass1, OriginOfCandidateForMemoGroup},
-            shared_configurations::PaneWidthDomain,
+            candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
             DagOfLogicalMemoGroups,
         },
     };
     use asap_types::ir::ASAPOp;
+    use asap_types::stages::OriginOfCandidateForMemoGroup;
     let mut w = workload(902);
     w.queries.truncate(2);
     w.queries[0].entry.query.0 =
@@ -529,11 +529,11 @@ fn sketch_rollup_crosses_inner_range_function() {
     use asap_logical_asap_optimization::{
         pass1::per_computation_candidates::generate_per_computation_candidates,
         pass2::memo::{
-            candidates::{try_populate_pass1, OriginOfCandidateForMemoGroup},
-            shared_configurations::PaneWidthDomain,
+            candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
             DagOfLogicalMemoGroups,
         },
     };
+    use asap_types::stages::OriginOfCandidateForMemoGroup;
     let mut w = workload(923);
     for (query, keys) in w.queries.iter_mut().zip(["job, region", "job"]) {
         query.entry.query.0 = format!("quantile by ({keys}) (0.95, sum_over_time(m_gauge[5m]))");

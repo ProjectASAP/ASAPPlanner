@@ -17,10 +17,10 @@ use asap_types::workload::{
 /// Production runs these through
 /// [`generate_logical_asap_memo_candidates`](crate::pass2::logical_memo_candidates::generate_logical_asap_memo_candidates).
 pub fn sharing_rules_and_shared_state_groups(
-    mut memo: crate::pass2::memo::candidates::CandidateMemo,
+    mut memo: asap_types::stages::CandidateMemo,
     domain: crate::pass2::memo::shared_configurations::PaneWidthDomain,
 ) -> Result<
-    crate::pass2::memo::candidates::CandidateMemo,
+    asap_types::stages::CandidateMemo,
     crate::pass2::memo::state_groups::StateGroupExpansionError,
 > {
     crate::pass2::logical_memo_candidates::apply_sharing_rules(&mut memo, domain, None)?;
@@ -33,8 +33,8 @@ pub fn sharing_rules_and_shared_state_groups(
 /// shared build (origin `SharedBuild`); no other group's candidates are
 /// only that.
 pub fn shared_summary_state_groups(
-    memo: &crate::pass2::memo::candidates::CandidateMemo,
-) -> Vec<crate::pass2::memo::MemoGroupId> {
+    memo: &asap_types::stages::CandidateMemo,
+) -> Vec<asap_types::stages::MemoGroupId> {
     memo.candidates
         .iter()
         .enumerate()
@@ -42,10 +42,10 @@ pub fn shared_summary_state_groups(
             matches!(
                 candidates.as_slice(),
                 [only] if only.origin
-                    == crate::pass2::memo::candidates::OriginOfCandidateForMemoGroup::SharedBuild
+                    == asap_types::stages::OriginOfCandidateForMemoGroup::SharedBuild
             )
         })
-        .map(|(group, _)| crate::pass2::memo::MemoGroupId(group as u32))
+        .map(|(group, _)| asap_types::stages::MemoGroupId(group as u32))
         .collect()
 }
 
