@@ -208,13 +208,27 @@ pub fn run_planning(
     // Stage 0: the memo of logical groups.
     let initial = DagOfLogicalMemoGroups::from_roots(&with_ids);
     // Pass 1: the per-computation candidates the deployment can run.
-    let per_computation = generate_per_computation_candidates(&initial)?
+    let mut per_computation = generate_per_computation_candidates(&initial)?
         .without_unsupported_summaries(
             models
                 .deployment_capabilities
                 .supported_summaries
                 .as_deref(),
         );
+    // ... and some query can use: unless Stage 3 may accept an output
+    // without its guarantee, a summary with which no query reading it has
+    // an error bound that can meet its target is pruned.
+    let accuracy = models.accuracy_check_inputs();
+    if !accuracy.model.may_accept_regardless_of_guarantee()
+        && !accuracy.evidence.may_provide_evidence()
+    {
+        let targets: Vec<_> = entries
+            .iter()
+            .map(|entry| entry.requirements.accuracy.clone())
+            .collect();
+        per_computation =
+            per_computation.without_summaries_no_query_can_use(&targets, data, accuracy.model);
+    }
     let mut report = PlanningReport {
         time_limit_ms,
         ..PlanningReport::default()

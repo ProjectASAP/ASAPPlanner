@@ -59,9 +59,11 @@ pub fn select_plan(
     let models = SelectionModels::new(accuracy_checks, cost_inputs);
     let calibration_policy =
         CandidateCalibration::for_models(models).map_err(ErrorSelectingPlan::Solver)?;
-    let query_roots = query_roots_of(physical).ok_or_else(|| {
-        ErrorSelectingPlan::Solver("a query's root group has no implementation candidate".into())
-    })?;
+    // A query's root group with no implementation candidate left: Pass 1 or
+    // Stage 2 pruned every one (their pruned candidates say why), so no
+    // candidate is valid.
+    let query_roots =
+        query_roots_of(physical).ok_or(ErrorSelectingPlan::NoValidCandidate(Vec::new()))?;
     if query_roots.len() != entries.len() {
         return Err(ErrorSelectingPlan::EntryCount {
             candidate: "the physical memo".into(),

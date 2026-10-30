@@ -1268,10 +1268,11 @@ fn plan_selection_settings_flag_loads_the_settings_from_json() {
 }
 
 /// stage_pipeline ignores accuracy guarantees by default: every sketch
-/// candidate of an average of p99s, which the built-in model rejects as
-/// having no guarantee under `--enforce-accuracy-guarantees`, is valid with
-/// no flag, accepted regardless of its guarantee, and records why the
-/// guarantee check would have rejected it. The document says which mode it
+/// candidate of an average of p99s, which has no guarantee and which Pass 1
+/// prunes under `--enforce-accuracy-guarantees`
+/// (`NoErrorBoundForQueryTarget`), is valid with no flag, accepted
+/// regardless of its guarantee, and records why the guarantee check would
+/// have rejected it. The document says which mode it
 /// planned under; there is no `--ignore-accuracy-guarantees`.
 #[test]
 fn accuracy_guarantees_are_ignored_by_default_and_enforced_on_request() {
@@ -1290,14 +1291,22 @@ fn accuracy_guarantees_are_ignored_by_default_and_enforced_on_request() {
     enforcing.push("--enforce-accuracy-guarantees");
     let enforced = document_of(&enforcing);
     assert_eq!(enforced["accuracy_guarantees"], "enforced");
-    let unguaranteed: Vec<String> = enforced["reference_pricing"]["rejected"]
+    let no_bound: Vec<&str> = enforced["stage1_logical_asap_optimization"]["pruned_candidates"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|r| r["cause"] == "no_accuracy_guarantee")
-        .map(|r| r["id"].as_str().unwrap().to_string())
+        .filter(|pruned| pruned["reason"] == "NoErrorBoundForQueryTarget")
+        .map(|pruned| pruned["candidate"].as_str().unwrap())
         .collect();
-    assert!(!unguaranteed.is_empty(), "{enforced}");
+    assert!(!no_bound.is_empty(), "{enforced}");
+    assert!(
+        !enforced["reference_pricing"]["rejected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["cause"] == "no_accuracy_guarantee"),
+        "{enforced}"
+    );
     let document = document_of(&args);
     assert_eq!(document["accuracy_guarantees"], "ignored");
     let accepted = &document["reference_pricing"]["accepted"];
