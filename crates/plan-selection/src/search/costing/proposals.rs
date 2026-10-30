@@ -13,7 +13,7 @@ use asap_types::physical::Materialization;
 
 use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
 use crate::search::refinement::planner::CandidatePlanningContext;
-use crate::{price_node, PricedNode, ProducerOutput};
+use asap_cost::{node_usage, NodeUsage, ProducerOutput};
 
 /// Partial heuristic estimates are harmless: unknown or interrupted entries
 /// remain zero, and the surrounding search still enforces its shared deadline.
@@ -53,7 +53,7 @@ pub(in crate::search) fn estimate_costs(
         })
         .reduce(f64::min)
         .unwrap_or(0.0);
-    let mut prices: Vec<Option<PricedNode<'_>>> = Vec::with_capacity(templates.nodes.len());
+    let mut prices: Vec<Option<NodeUsage<'_>>> = Vec::with_capacity(templates.nodes.len());
     for (id, node) in templates.nodes.iter().enumerate() {
         if expired(context.deadline) {
             break;
@@ -73,11 +73,11 @@ pub(in crate::search) fn estimate_costs(
             })
             .collect();
         prices.push(producers.and_then(|producers| {
-            price_node(
+            node_usage(
                 node,
                 &producers,
                 (1, rate),
-                crate::trailing_window(templates.lookbacks[id]),
+                asap_cost::trailing_window(templates.lookbacks[id]),
                 1,
                 None,
                 context.data,
@@ -126,7 +126,7 @@ impl TemplateCatalog {
         };
         let lookback = match node.asap() {
             // Query-time construction reads all panes' source rows. Reuse the
-            // compact PaneChain formula in price_node without expanding panes.
+            // compact PaneChain formula in asap_cost::node_usage without expanding panes.
             Some(ASAPOp::PaneChain {
                 pane_width_ms,
                 pane_count,

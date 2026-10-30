@@ -11,7 +11,10 @@
 //! - Cost models: [`ResourceUsage`], [`ResourceUnitCost`],
 //!   [`ResourceSpeed`], [`CostModel`] ([`ClusterLimits`],
 //!   [`ClusterObjective`]) and the deployment's [`CostInputs`], with the
-//!   per-node and per-candidate costs ([`NodeCost`], [`CandidateCost`]).
+//!   per-node and per-plan costs ([`NodeCost`], [`PlanCost`]).
+//! - Costing a physical plan DAG: [`node_usage`] gives one node's
+//!   [`NodeUsage`]; [`plan_cost`] the whole plan's [`PlanCost`]. Stage 3
+//!   computes no cost of its own.
 //!
 //! Plan selection (Stage 3, `asap-plan-selection`) documents how it prices
 //! a candidate with these.
@@ -26,22 +29,27 @@ mod measured;
 pub mod operator_statistics;
 mod resources;
 pub mod state_bytes;
+mod usage;
 
 use analytical::AnalyticalCostError;
 pub use measured::{
     aggregate_lookup, lookup, CostTableProvenance, MeasuredOperationCost, MeasuredOperationCosts,
     NodePriceSource, OperatorCost, OperatorKind, StateFamily, SummaryOperation,
 };
+pub use usage::{
+    family_name, kept_pane_chains, node_map, node_usage, pane_retention_ms, panes_of, plan_cost,
+    query_reach, trailing_window, NodeMap, NodeUsage, ProducerOutput,
+};
 
 /// Cost per second of wall time; one unit is one CPU-millisecond under
 /// [`ResourceUnitCost::illustrative`].
 pub const COST_UNIT: &str = "cost_per_second";
-/// [`CandidateCost::source`] when every node is priced from the formulas.
+/// [`PlanCost::source`] when every node is priced from the formulas.
 pub const COST_SOURCE: &str = "analytical-cost-v2 (illustrative statistics)";
-/// [`CandidateCost::source`] when every node is priced from the measured
+/// [`PlanCost::source`] when every node is priced from the measured
 /// table.
 pub const MEASURED_COST_SOURCE: &str = "measured operation costs (illustrative statistics)";
-/// [`CandidateCost::source`] when some nodes are priced from the measured
+/// [`PlanCost::source`] when some nodes are priced from the measured
 /// table and the others from the formulas.
 pub const MIXED_COST_SOURCE: &str =
     "measured operation costs and analytical-cost-v2 (illustrative statistics)";
@@ -359,7 +367,7 @@ impl CostInputs {
 /// One node's price per second of wall time, with how it was measured. A
 /// node is one operator node of the candidate's physical plan DAG
 /// (`PhysicalASAPDAG`), keyed by its [`PhysicalASAPNodeId`] in
-/// [`CandidateCost::per_node`]; not a machine.
+/// [`PlanCost::per_node`]; not a machine.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeCost {
     /// Its operator, as the measured table names it.
@@ -391,7 +399,7 @@ pub struct NodeCost {
 /// the whole candidate's, `per_node` one price per operator node of its
 /// physical plan DAG.
 #[derive(Debug, Clone, PartialEq)]
-pub struct CandidateCost {
+pub struct PlanCost {
     pub usage: ResourceUsage,
     /// Its price per second under cost model 1 or 2 (under cost model 1, the
     /// sum of its nodes' charges plus request overhead for queries without

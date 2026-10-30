@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use asap_cost::{CandidateCost, QueryLatency};
+use asap_cost::{family_name, PlanCost, QueryLatency};
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_types::ir::operator::{agg_has_exact_per_entity_kernel, Reduction};
 use asap_types::ir::physical_export::{
@@ -12,12 +12,11 @@ use asap_types::ir::physical_export::{
 use asap_types::ir::properties::{
     AccuracyGuarantee, AccuracyMetric, AccuracyScope, AccuracyTarget, ExecutionTiming,
 };
-use asap_types::ir::schema::{FieldDataType, GroupingStrategy, SketchAlgorithm, WeightDomain};
+use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, WeightDomain};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::accuracy_binding::{bound_root_guarantee, root_operators};
-use crate::pricing::query_time_lookback_ms;
 use crate::report::{AcceptedAccuracy, RejectionCause};
 use crate::PlanningModels;
 use asap_types::workload::bounds::{
@@ -30,7 +29,7 @@ use asap_types::workload::bounds::{
 /// than `I` falls further behind with every evaluation), as a rejection
 /// cause and reason.
 pub(crate) fn latency_violation(
-    cost: &CandidateCost,
+    cost: &PlanCost,
     entries: &[QueryWorkloadEntry],
 ) -> Option<(RejectionCause, String)> {
     let per_query = || cost.usage.latency_per_query.iter().zip(entries).enumerate();
@@ -312,23 +311,11 @@ pub(crate) fn guarantee_check(
     })
 }
 
-pub(crate) fn family_name(family: &FieldDataType) -> String {
-    match family {
-        // A shared (Hydra) structure is named by its Hydra kind, e.g. `HydraCms`.
-        FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
-            format!("{kind:?}")
-        }
-        FieldDataType::Sketch(kind, _) => format!("{:?}", kind.algorithm()),
-        FieldDataType::ExactAggregate(kind, _) => format!("exact {kind:?} accumulator"),
-        other => format!("{other:?}"),
-    }
-}
-
 /// For a deployment that does not retain raw data, every query-time scan
 /// of `dag` with the window it would read, as a rejection reason (`None`
 /// without one). Raw data samples are then not kept after they arrive, so no
 /// window of them is there to scan at query time: only ingestion-time work
-/// reads raw rows. `kept_chains` are `dag`'s ([`kept_pane_chains`](crate::pricing::kept_pane_chains)).
+/// reads raw rows. `kept_chains` are `dag`'s ([`kept_pane_chains`](asap_cost::kept_pane_chains)).
 pub(crate) fn raw_data_violation(
     dag: &PhysicalASAPDAG,
     kept_chains: &HashSet<PhysicalASAPNodeId>,
@@ -340,7 +327,7 @@ pub(crate) fn raw_data_violation(
             Payload::NonASAP(NonASAPOp::Scan { source, .. })
                 if node.output_state.timing != ExecutionTiming::IngestionTime =>
             {
-                Some(match query_time_lookback_ms(dag, node.id, kept_chains) {
+                Some(match dag.scan_window(node.id, kept_chains).lookback_ms() {
                     Some(lookback) => format!("{lookback} ms of raw {}", source_name(source)),
                     None => format!("all raw {}", source_name(source)),
                 })

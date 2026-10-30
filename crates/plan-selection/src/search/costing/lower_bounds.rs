@@ -10,8 +10,9 @@ use asap_types::physical::Materialization;
 
 use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
 use crate::search::refinement::planner::CandidatePlanningContext;
-use crate::{price_node, PricedNode, ProducerOutput, StateFamily};
+use crate::StateFamily;
 use asap_cost::CostModel;
+use asap_cost::{node_usage, NodeUsage, ProducerOutput};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(in crate::search) struct LowerBoundMetrics {
@@ -417,8 +418,8 @@ impl ConcreteRows {
     fn price<'a>(
         &'a self,
         context: &'a CandidatePlanningContext<'a>,
-    ) -> Vec<Option<PricedNode<'a>>> {
-        let mut result: Vec<Option<PricedNode<'a>>> = Vec::with_capacity(self.nodes.len());
+    ) -> Vec<Option<NodeUsage<'a>>> {
+        let mut result: Vec<Option<NodeUsage<'a>>> = Vec::with_capacity(self.nodes.len());
         for (id, node) in self.nodes.iter().enumerate() {
             let views: Option<Vec<_>> = self.children[id]
                 .iter()
@@ -435,7 +436,7 @@ impl ConcreteRows {
                 })
                 .collect();
             result.push(views.and_then(|views| {
-                price_node(
+                node_usage(
                     node,
                     &views,
                     (1, 1.0),
@@ -455,7 +456,7 @@ impl ConcreteRows {
     fn certify(
         &self,
         configured: &PhysicalCandidatesWithCosts,
-        prices: &[Option<PricedNode<'_>>],
+        prices: &[Option<NodeUsage<'_>>],
     ) -> Result<Vec<bool>, String> {
         let interfaces: Vec<_> = self
             .nodes
@@ -524,10 +525,10 @@ fn certified_price<'a>(
     common_reader_window_ms: &[Option<u64>],
     context: &'a CandidatePlanningContext<'a>,
     query_rate_floor: f64,
-    cache: &mut [Option<PricedNode<'a>>],
+    cache: &mut [Option<NodeUsage<'a>>],
     visiting: &mut [bool],
     complete: &mut [bool],
-) -> Result<Option<PricedNode<'a>>, String> {
+) -> Result<Option<NodeUsage<'a>>, String> {
     if complete[id] {
         return Ok(cache[id].clone());
     }
@@ -539,7 +540,7 @@ fn certified_price<'a>(
         return Ok(None);
     };
     visiting[id] = true;
-    let result: Result<Option<PricedNode<'a>>, String> = (|| {
+    let result: Result<Option<NodeUsage<'a>>, String> = (|| {
         let mut views = Vec::new();
         for requirement in &configured.dag.candidates[id].producer_candidates_per_input {
             let mut representative = None;
@@ -646,7 +647,7 @@ fn certified_price<'a>(
         // priced at its template's size, its final size
         // ([`template_price_is_a_floor`]). Retention above its own pane count
         // and all whole-plan charges are deliberately omitted.
-        Ok(price_node(
+        Ok(node_usage(
             node,
             &views,
             (
@@ -659,7 +660,7 @@ fn certified_price<'a>(
             ),
             // Stage 3 scans the width of the union of the readers' windows,
             // at least their common width, whatever their offsets.
-            crate::trailing_window(common_reader_window_ms[id]),
+            asap_cost::trailing_window(common_reader_window_ms[id]),
             retained,
             maintained_window,
             context.data,

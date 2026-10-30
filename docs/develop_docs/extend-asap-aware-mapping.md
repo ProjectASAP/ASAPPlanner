@@ -82,7 +82,7 @@ contains the candidate and that Stage 3 prices it.
    `MaterializationCandidate` options), after the existing options so default
    candidate ids stay the same, and gate it on the deployment input that
    allows it.
-3. Price it in `crates/plan-selection/src/pricing.rs`: what it keeps in memory or on
+3. Price it in `crates/cost/src/usage.rs` (`asap_cost::node_usage`): what it keeps in memory or on
    disk, and what each evaluation rebuilds.
 
 Tests: Stage 2 unit tests for when the option is offered;
