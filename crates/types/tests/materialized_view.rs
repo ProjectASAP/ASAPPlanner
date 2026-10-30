@@ -120,14 +120,14 @@ fn retention_propagates_from_a_view_refreshed_on_first_read_to_its_inputs() {
     let views = dag.materialized_views().unwrap();
     let (merge, panes) = views.split_last().unwrap();
     assert_eq!(merge.node_id, merge_id);
-    assert_eq!(merge.refresh, MaterializedViewRefresh::OnFirstRead);
-    assert_eq!(merge.retention_ms, 120_000 + 3_600_000);
+    assert_eq!(merge.refresh(), MaterializedViewRefresh::OnFirstRead);
+    assert_eq!(merge.retention_ms(), 120_000 + 3_600_000);
     assert_eq!(panes.len(), 2);
     for pane in panes {
-        assert_eq!(pane.refresh, MaterializedViewRefresh::AtIngestion);
-        assert_eq!(pane.retention_ms, merge.retention_ms);
+        assert_eq!(pane.refresh(), MaterializedViewRefresh::AtIngestion);
+        assert_eq!(pane.retention_ms(), merge.retention_ms());
         let node = dag.nodes.iter().find(|n| n.id == pane.node_id).unwrap();
-        assert_eq!(node.retention_ms, Some(pane.retention_ms));
+        assert_eq!(node.retention_ms, Some(pane.retention_ms()));
     }
     assert_eq!(dag.raw_data_retention().unwrap(), []);
 }
@@ -142,7 +142,13 @@ fn a_view_kept_shorter_than_its_reach_is_refused() {
         .unwrap();
     let older = views
         .iter()
-        .find(|v| v.inputs.raw_data_windows.first().map(|w| w.end_offset_ms) == Some(60_000))
+        .find(|v| {
+            v.inputs
+                .raw_data_windows()
+                .first()
+                .map(|w| w.end_offset_ms())
+                == Some(60_000)
+        })
         .unwrap()
         .node_id;
     dag.nodes

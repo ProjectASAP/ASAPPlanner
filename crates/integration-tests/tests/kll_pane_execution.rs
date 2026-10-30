@@ -468,7 +468,10 @@ impl asap_executor::sources::DataStore for DefinitionStore {
         request: &asap_executor::sources::MaterializedViewRequest,
         _: RunContext,
     ) -> Result<OutputStream<'_, Batch>, Error> {
-        let key = (view.coverage.definition_id.clone(), request.time_range_ms);
+        let key = (
+            view.coverage().definition_id().to_owned(),
+            request.time_range_ms,
+        );
         self.requested.lock().unwrap().push(key.clone());
         let state = self
             .states
@@ -489,11 +492,11 @@ fn a_store_keyed_by_definition_and_time_range_answers_the_panes() {
     let maintenance = compile(&fixture.dag, &[], &[fixture.panes[0]]).unwrap();
     // The state of the pane of minute `m`, `(m, m + 1]` minutes.
     let panes: Vec<Batch> = (0..5).map(|m| pane_state(&maintenance, m)).collect();
-    let definition = fixture.views[0].coverage.definition_id.clone();
+    let definition = fixture.views[0].coverage().definition_id().to_owned();
     assert!(fixture
         .views
         .iter()
-        .all(|view| view.coverage.definition_id == definition));
+        .all(|view| view.coverage().definition_id() == definition));
     let states = (0..5)
         .map(|m| {
             (

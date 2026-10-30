@@ -5,11 +5,18 @@
 use std::rc::Rc;
 use std::time::Instant;
 
+use crate::ir::materialized_view::RawDataWindow;
+use crate::ir::operator::maintained_population::CurrentSeriesInput;
+use crate::ir::operator::node::Operator;
 use crate::ir::operator::pane_chain::{PaneChainExpansion, PaneChainExpansionError};
 use crate::ir::physical_export::{PhysicalASAPCompilationError, PhysicalASAPDAGCompilation};
 use crate::ir::properties::summary_coverage::SummaryCoverage;
+use crate::ir::properties::timing::NodeToTimedNodeCache;
 use crate::ir::properties::ExecutionDataStateError;
+use crate::ir::schema::Schema;
+use crate::ir::{ASAPOp, NonASAPOp};
 use crate::ir::{OperatorNode, QueryRoot, SchemaDerivationError};
+use crate::physical::Materialization;
 
 /// `SummaryCoverage::definition_id`.
 pub fn definition_id(coverage: &SummaryCoverage) -> String {
@@ -47,4 +54,42 @@ pub fn compile_physical_asap_workload_with_node_ids_before(
     deadline: Option<Instant>,
 ) -> Result<PhysicalASAPDAGCompilation, PhysicalASAPCompilationError> {
     crate::ir::physical_export::compile_physical_asap_workload_with_node_ids_before(roots, deadline)
+}
+
+/// `Operator::output_schema`.
+pub fn output_schema(operator: &Operator) -> Result<Schema, SchemaDerivationError> {
+    operator.output_schema()
+}
+
+/// `NonASAPOp::validate_inputs`.
+pub fn validate_non_asap_inputs(op: &NonASAPOp) -> Result<(), SchemaDerivationError> {
+    op.validate_inputs()
+}
+
+/// `ASAPOp::validate_inputs`.
+pub fn validate_asap_inputs(op: &ASAPOp) -> Result<(), SchemaDerivationError> {
+    op.validate_inputs()
+}
+
+/// `CurrentSeriesInput::matches_node`.
+pub fn matches_node(input: &CurrentSeriesInput, node: &OperatorNode) -> bool {
+    input.matches_node(node)
+}
+
+/// `NodeToTimedNodeCache::timed`.
+pub fn timed<'a>(
+    cache: &'a NodeToTimedNodeCache,
+    input: &Rc<OperatorNode>,
+) -> Option<&'a Rc<OperatorNode>> {
+    cache.timed(input)
+}
+
+/// `RawDataWindow::lookback_ms`.
+pub fn lookback_ms(window: &RawDataWindow) -> u64 {
+    window.lookback_ms()
+}
+
+/// `Materialization::is_materialized_view`.
+pub fn is_materialized_view(materialization: Materialization) -> bool {
+    materialization.is_materialized_view()
 }

@@ -69,16 +69,35 @@ pub struct MaterializedView {
     /// The node whose output is kept.
     pub node_id: PhysicalASAPNodeId,
     /// Which run refreshes it.
-    pub refresh: MaterializedViewRefresh,
+    pub(crate) refresh: MaterializedViewRefresh,
     /// What the stored state is: the node's summary coverage.
-    pub coverage: ViewCoverage,
+    pub(crate) coverage: ViewCoverage,
     /// What its refresh reads.
     pub inputs: MaterializedViewInputs,
     /// The node's `retention_ms`: how far back from the newest evaluation
     /// time its output must stay available once refreshed. At least how
     /// far back the data it summarizes reaches (its raw-data windows', and
     /// the views it reads, `end_offset_ms + width_ms`).
-    pub retention_ms: u64,
+    pub(crate) retention_ms: u64,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl MaterializedView {
+    /// Which run refreshes it.
+    pub fn refresh(&self) -> MaterializedViewRefresh {
+        self.refresh
+    }
+
+    /// How far back from the newest evaluation time its output stays
+    /// available.
+    pub fn retention_ms(&self) -> u64 {
+        self.retention_ms
+    }
+
+    /// What the stored state is.
+    pub fn coverage(&self) -> &ViewCoverage {
+        &self.coverage
+    }
 }
 
 /// A view's summary coverage
@@ -91,11 +110,24 @@ pub struct ViewCoverage {
     /// process that computes the same thing, whatever its selection; a
     /// rollup to a coarser grouping computes something else and has its
     /// own.
-    pub definition_id: String,
+    pub(crate) definition_id: String,
     /// The rows that went in: a union of boxes of value sets, value ranges
     /// and time relative to the evaluation time. A merge's is the union of
     /// its inputs'.
-    pub selection: Vec<SelectionBox>,
+    pub(crate) selection: Vec<SelectionBox>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ViewCoverage {
+    /// `SummaryCoverage::definition_id`.
+    pub fn definition_id(&self) -> &str {
+        &self.definition_id
+    }
+
+    /// The rows that went in.
+    pub fn selection(&self) -> &[SelectionBox] {
+        &self.selection
+    }
 }
 
 /// What a view's refresh reads, each bound as a source of the refresh.
@@ -104,10 +136,18 @@ pub struct ViewCoverage {
 pub struct MaterializedViewInputs {
     /// The windows of raw data it scans directly, one per `TimeRange` it
     /// reaches, in node order.
-    pub raw_data_windows: Vec<RawDataWindow>,
+    pub(crate) raw_data_windows: Vec<RawDataWindow>,
     /// The views it reads, by node id, in node order; each is listed before
     /// it in [`PhysicalASAPDAG::materialized_views`].
     pub materialized_views: Vec<PhysicalASAPNodeId>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl MaterializedViewInputs {
+    /// The windows of raw data it scans directly.
+    pub fn raw_data_windows(&self) -> &[RawDataWindow] {
+        &self.raw_data_windows
+    }
 }
 
 /// A window of a raw-data source a view's refresh scans: at evaluation time
@@ -120,18 +160,46 @@ pub struct MaterializedViewInputs {
 #[serde(deny_unknown_fields)]
 pub struct RawDataWindow {
     /// The source the `Scan` reads.
-    pub source: Source,
+    pub(crate) source: Source,
     /// How long before the evaluation time the window ends: the sum of the
     /// offset `TimeShift`s between the `TimeRange` and the `Scan`.
-    pub end_offset_ms: i64,
+    pub(crate) end_offset_ms: i64,
     /// Width of the window, from the `TimeRange`.
-    pub width_ms: i64,
+    pub(crate) width_ms: i64,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl RawDataWindow {
+    /// The source the `Scan` reads.
+    pub fn source(&self) -> &Source {
+        &self.source
+    }
+
+    /// How long before the evaluation time the window ends.
+    pub fn end_offset_ms(&self) -> i64 {
+        self.end_offset_ms
+    }
+
+    /// Width of the window.
+    pub fn width_ms(&self) -> i64 {
+        self.width_ms
+    }
+
+    /// The window of `source` ending `end_offset_ms` before the evaluation
+    /// time, `width_ms` wide.
+    pub fn new(source: Source, end_offset_ms: i64, width_ms: i64) -> Self {
+        Self {
+            source,
+            end_offset_ms,
+            width_ms,
+        }
+    }
 }
 
 impl RawDataWindow {
     /// How far back from the evaluation time the window reaches:
     /// `end_offset_ms + width_ms`.
-    pub fn lookback_ms(&self) -> u64 {
+    pub(crate) fn lookback_ms(&self) -> u64 {
         u64::try_from(self.end_offset_ms.saturating_add(self.width_ms)).unwrap_or(0)
     }
 
@@ -166,10 +234,31 @@ pub enum MaterializedViewRefresh {
 #[serde(deny_unknown_fields)]
 pub struct RawDataRetention {
     /// The source.
-    pub source: Source,
+    pub(crate) source: Source,
     /// The longest `retention_ms` of a query-time `Scan` of it; `None` when
     /// one reads it unbounded (every row the source holds).
-    pub lookback_ms: Option<u64>,
+    pub(crate) lookback_ms: Option<u64>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl RawDataRetention {
+    pub fn new(source: Source, lookback_ms: Option<u64>) -> Self {
+        Self {
+            source,
+            lookback_ms,
+        }
+    }
+
+    /// The source.
+    pub fn source(&self) -> &Source {
+        &self.source
+    }
+
+    /// The longest `retention_ms` of a query-time `Scan` of it; `None` when
+    /// one reads it unbounded.
+    pub fn lookback_ms(&self) -> Option<u64> {
+        self.lookback_ms
+    }
 }
 
 /// Why a runtime cannot install a DAG: a materialized view or a raw-data

@@ -1,7 +1,8 @@
 //! The SQL frontend names the frequency L2 idiom as a `FrequencyL2` intent
 //! (#509 Example 2's Q3, in its Float64 form).
 use asap_frontend_common::resolve_root;
-use asap_frontend_sql::{lower_sql, lower_sql_batch, SqlCatalog, SqlLowerer};
+use asap_frontend_sql::test_support::lower_unresolved;
+use asap_frontend_sql::{lower_sql, lower_sql_batch, SqlCatalog};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
@@ -33,8 +34,7 @@ fn has_l2(node: &OperatorNode) -> bool {
 /// The relational DAG the frontend lowers before frequency recognition.
 async fn relational(sql: &str, catalog: &SqlCatalog) -> Rc<OperatorNode> {
     resolve_root(
-        &SqlLowerer::new(catalog)
-            .lower(sql, &AccuracyTarget::exact())
+        &lower_unresolved(sql, catalog, &AccuracyTarget::exact())
             .await
             .unwrap(),
     )

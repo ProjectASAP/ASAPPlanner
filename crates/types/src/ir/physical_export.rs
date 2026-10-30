@@ -97,10 +97,59 @@ pub struct PhysicalASAPDAGEdge {
     pub producer: PhysicalASAPNodeId,
     pub consumer: PhysicalASAPNodeId,
     pub role: EdgeRole,
-    pub intermediate_schema: Schema,
-    pub data_state: ExecutionDataState,
-    pub grouping: GroupingEdgeCompatibility,
-    pub window: WindowEdgeCompatibility,
+    pub(crate) intermediate_schema: Schema,
+    pub(crate) data_state: ExecutionDataState,
+    pub(crate) grouping: GroupingEdgeCompatibility,
+    pub(crate) window: WindowEdgeCompatibility,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl PhysicalASAPDAGEdge {
+    pub fn new(
+        producer: PhysicalASAPNodeId,
+        consumer: PhysicalASAPNodeId,
+        role: EdgeRole,
+        intermediate_schema: Schema,
+        data_state: ExecutionDataState,
+        grouping: GroupingEdgeCompatibility,
+        window: WindowEdgeCompatibility,
+    ) -> Self {
+        Self {
+            producer,
+            consumer,
+            role,
+            intermediate_schema,
+            data_state,
+            grouping,
+            window,
+        }
+    }
+
+    pub fn intermediate_schema(&self) -> &Schema {
+        &self.intermediate_schema
+    }
+
+    /// For tests that change a compiled DAG's edge schema.
+    pub fn intermediate_schema_mut(&mut self) -> &mut Schema {
+        &mut self.intermediate_schema
+    }
+
+    pub fn data_state(&self) -> ExecutionDataState {
+        self.data_state
+    }
+
+    /// For tests that retime a compiled DAG's edges.
+    pub fn data_state_mut(&mut self) -> &mut ExecutionDataState {
+        &mut self.data_state
+    }
+
+    pub fn grouping(&self) -> GroupingEdgeCompatibility {
+        self.grouping
+    }
+
+    pub fn window(&self) -> WindowEdgeCompatibility {
+        self.window
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -732,6 +781,7 @@ pub struct PhysicalASAPDAGCompilation {
     pub node_ids: PhysicalASAPNodeIdentityMap,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub fn compile_physical_asap_dag(
     root: &Rc<OperatorNode>,
 ) -> Result<PhysicalASAPDAG, ExecutionDataStateError> {
@@ -741,6 +791,7 @@ pub fn compile_physical_asap_dag(
 /// Export the timed DAG below `root`. Every reachable node must carry a
 /// timing (see [`crate::ir::properties::timing::apply_materialization_timings`]); the data-state
 /// rules were checked by that pass and are not re-run here.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn compile_physical_asap_dag_with_node_ids(
     root: &Rc<OperatorNode>,
 ) -> Result<PhysicalASAPDAGCompilation, ExecutionDataStateError> {

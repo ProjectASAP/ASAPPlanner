@@ -1489,7 +1489,7 @@ fn vector_vector_comparison_with_bool_sets_return_bool() {
     assert_eq!(operator.kind, BinaryOpKind::Compare(CompareOpKind::Gt));
     assert!(matches!(lhs.expect_non_asap(), NonASAPOp::TimeRange { .. }));
     assert!(matches!(rhs.expect_non_asap(), NonASAPOp::TimeRange { .. }));
-    assert!(!lower("a > b").expect_non_asap().children().is_empty());
+    assert!(!lower("a > b").children().is_empty());
     assert_ne!(qe, lower("a > b"));
 }
 

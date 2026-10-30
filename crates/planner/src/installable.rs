@@ -878,12 +878,12 @@ mod tests {
         assert!(plan.materialized_views().unwrap().is_empty());
         assert_eq!(
             plan.raw_data_retention().unwrap(),
-            [RawDataRetention {
-                source: Source::TimeSeries {
+            [RawDataRetention::new(
+                Source::TimeSeries {
                     metric: "latency_ms".into()
                 },
-                lookback_ms: Some(300_000),
-            }]
+                Some(300_000)
+            )]
         );
     }
 

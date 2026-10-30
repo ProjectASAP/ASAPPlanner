@@ -7,18 +7,17 @@
 //! reference to a positional `ColumnId` and returns the
 //! [`OperatorNode`](asap_types::ir::OperatorNode) DAG.
 //!
-//! - [`unresolved`] — [`UnresolvedOp`] / [`UnresolvedScalar`]: the tree.
-//! - [`schema_resolver`] — [`SchemaResolver`]: builds the binding schema of a
+//! - `unresolved` — [`UnresolvedOp`] / [`UnresolvedScalar`]: the tree.
+//! - `schema_resolver` — `SchemaResolver`: builds the binding schema of a
 //!   schemaless (PromQL) leaf from the names the query references.
-//! - [`resolve`] — [`resolve_root`]: the bottom-up binding walk.
+//! - `resolve` — [`resolve_root`]: the bottom-up binding walk.
 
 pub(crate) mod canonicalize;
-pub mod resolve;
-pub mod schema_resolver;
-pub mod unresolved;
+mod resolve;
+mod schema_resolver;
+mod unresolved;
 
-pub use resolve::{resolve_expr, resolve_root, resolve_scalar_root, ResolveDAGError};
-pub use schema_resolver::{SchemaCatalog, SchemaResolver, UsageDerivedCatalog};
+pub use resolve::{resolve_root, resolve_scalar_root, ResolveDAGError};
 pub use unresolved::{
     UnresolvedOp, UnresolvedPredicate, UnresolvedProjectItem, UnresolvedScalar, UnresolvedSortKey,
 };

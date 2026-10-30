@@ -374,14 +374,16 @@ fn merge_over_a_stored_pane(
     ];
     let edges = [(2, 3), (3, 0), (0, 1)]
         .into_iter()
-        .map(|(producer, consumer): (usize, usize)| PhysicalASAPDAGEdge {
-            producer,
-            consumer,
-            role: EdgeRole::Input,
-            intermediate_schema: nodes[producer].output_schema.clone(),
-            data_state: nodes[producer].output_state,
-            grouping: GroupingEdgeCompatibility::NotApplicable,
-            window: WindowEdgeCompatibility::NotApplicable,
+        .map(|(producer, consumer): (usize, usize)| {
+            PhysicalASAPDAGEdge::new(
+                producer,
+                consumer,
+                EdgeRole::Input,
+                nodes[producer].output_schema.clone(),
+                nodes[producer].output_state,
+                GroupingEdgeCompatibility::NotApplicable,
+                WindowEdgeCompatibility::NotApplicable,
+            )
         })
         .collect();
     PhysicalASAPDAG {

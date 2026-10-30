@@ -22,7 +22,7 @@ use crate::error::SqlError as LoweringError;
 /// usage-derive it.
 #[derive(Debug, Clone, Default)]
 pub struct SqlCatalog {
-    pub tables: HashMap<String, Schema>,
+    pub(crate) tables: HashMap<String, Schema>,
 }
 
 impl SqlCatalog {

@@ -356,6 +356,7 @@ name = "asap-frontend-metricsql"
 version = "0.1.0"
 dependencies = [
  "asap-frontend-common",
+ "asap-frontend-metricsql",
  "asap-types",
  "metricsql_parser",
  "thiserror 2.0.18",
@@ -378,6 +379,7 @@ name = "asap-frontend-sql"
 version = "0.1.0"
 dependencies = [
  "asap-frontend-common",
+ "asap-frontend-sql",
  "asap-logical-asap-optimization",
  "asap-plan-selection",
  "asap-sql-function-catalog",

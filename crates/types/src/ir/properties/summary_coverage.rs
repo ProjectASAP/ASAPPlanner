@@ -31,9 +31,22 @@ use crate::ir::schema::{ColumnId, Schema};
 #[derive(Debug, Clone, PartialEq)]
 pub struct SummaryCoverage {
     /// The `SummaryAgg` with the selection removed from its sub-DAG.
-    pub definition: Rc<OperatorNode>,
+    pub(crate) definition: Rc<OperatorNode>,
     /// Union of boxes over the output rows of the definition's child.
-    pub selection: Vec<SelectionBox>,
+    pub(crate) selection: Vec<SelectionBox>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl SummaryCoverage {
+    /// The `SummaryAgg` with the selection removed from its sub-DAG.
+    pub fn definition(&self) -> &Rc<OperatorNode> {
+        &self.definition
+    }
+
+    /// Union of boxes over the output rows of the definition's child.
+    pub fn selection(&self) -> &[SelectionBox] {
+        &self.selection
+    }
 }
 
 /// A conjunction of per-column constraints and an optional time window.
@@ -44,13 +57,13 @@ pub struct SummaryCoverage {
 #[serde(deny_unknown_fields)]
 pub struct SelectionBox {
     #[serde(with = "columns_as_list")]
-    pub columns: BTreeMap<ColumnIdentity, Constraint>,
+    pub(crate) columns: BTreeMap<ColumnIdentity, Constraint>,
     /// Offsets from the evaluation time in milliseconds: a PromQL range
     /// `TimeRange(w)` over `TimeShift(s)` is `(-(s + w), -s]`. Absolute
     /// time will be an ordinary interval on the timestamp column once the IR
     /// has timestamp literals.
     #[serde(with = "relative_time_bounds")]
-    pub relative_time: Option<(Bound<i64>, Bound<i64>)>,
+    pub(crate) relative_time: Option<(Bound<i64>, Bound<i64>)>,
 }
 
 /// `SelectionBox::columns` as a list of `{column, constraint}`.
@@ -153,8 +166,18 @@ mod relative_time_bounds {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ColumnIdentity {
-    pub table: Option<String>,
-    pub name: String,
+    pub(crate) table: Option<String>,
+    pub(crate) name: String,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ColumnIdentity {
+    pub fn new(table: Option<String>, name: impl Into<String>) -> Self {
+        Self {
+            table,
+            name: name.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1074,6 +1097,29 @@ impl Constraint {
             ) => intervals_disjoint((al, au), (bl, bu), compare),
             (NotIn(_), _) | (_, NotIn(_)) => false,
         }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl SelectionBox {
+    pub fn new(
+        columns: BTreeMap<ColumnIdentity, Constraint>,
+        relative_time: Option<(Bound<i64>, Bound<i64>)>,
+    ) -> Self {
+        Self {
+            columns,
+            relative_time,
+        }
+    }
+
+    /// The per-column constraints.
+    pub fn columns(&self) -> &BTreeMap<ColumnIdentity, Constraint> {
+        &self.columns
+    }
+
+    /// The time window, as offsets from the evaluation time in milliseconds.
+    pub fn relative_time(&self) -> Option<(Bound<i64>, Bound<i64>)> {
+        self.relative_time
     }
 }
 

@@ -56,9 +56,13 @@ async fn per_sample_updates_build_the_materialized_pane_the_plan_refreshes() {
     let views = plan.materialized_views().unwrap();
     let output = views
         .iter()
-        .max_by_key(|output| output.inputs.raw_data_windows[0].bounds_ms(EVALUATION_MS).1)
+        .max_by_key(|output| {
+            output.inputs.raw_data_windows()[0]
+                .bounds_ms(EVALUATION_MS)
+                .1
+        })
         .unwrap();
-    let (start_ms, end_ms) = output.inputs.raw_data_windows[0].bounds_ms(EVALUATION_MS);
+    let (start_ms, end_ms) = output.inputs.raw_data_windows()[0].bounds_ms(EVALUATION_MS);
     // Five one-minute panes, the newest (59 min, 60 min].
     assert_eq!(views.len(), 5);
     assert_eq!((start_ms, end_ms), (3_540_000, 3_600_000));
@@ -302,7 +306,7 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
     let mut panes = BTreeMap::new();
     for output in &plan.materialized_views().unwrap() {
         // The pane's window, `(start_ms, end_ms]`, at this evaluation.
-        let (start_ms, end_ms) = output.inputs.raw_data_windows[0].bounds_ms(EVALUATION_MS);
+        let (start_ms, end_ms) = output.inputs.raw_data_windows()[0].bounds_ms(EVALUATION_MS);
         // The view node's family and output schema, from the plan.
         let node = dag.nodes.iter().find(|n| n.id == output.node_id).unwrap();
         let mut id = output.node_id;

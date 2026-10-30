@@ -78,7 +78,7 @@ fn first_summary_agg(node: &Rc<OperatorNode>) -> &Rc<OperatorNode> {
 /// of a `FinalizeExactAccumulator`; `None` for anything else.
 fn unary_child(node: &OperatorNode) -> Option<&Rc<OperatorNode>> {
     match &node.operator {
-        Operator::NonASAP(op) => match op.children().as_slice() {
+        Operator::NonASAP(_) => match node.children().as_slice() {
             [child] => Some(*child),
             _ => None,
         },

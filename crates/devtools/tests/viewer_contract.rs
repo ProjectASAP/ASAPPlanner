@@ -277,8 +277,8 @@ fn viewer_categorizes_exactly_the_exported_node_kinds() {
     let asap = asap_samples();
     let expected: BTreeSet<&str> = non_asap
         .iter()
-        .map(NonASAPOp::kind_name)
-        .chain(asap.iter().map(ASAPOp::kind_name))
+        .map(|op| Operator::NonASAP(op.clone()).kind_name())
+        .chain(asap.iter().map(|op| Operator::ASAP(op.clone()).kind_name()))
         .collect();
     assert_eq!(
         expected.len(),

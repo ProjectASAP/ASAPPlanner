@@ -56,7 +56,7 @@ pub struct MaintainedPopulation<N = crate::ir::OperatorNode> {
 
 impl CurrentSeriesInput {
     /// Verify the named contract against the canonical maintenance input.
-    pub fn matches_node(&self, input: &crate::ir::OperatorNode) -> bool {
+    pub(crate) fn matches_node(&self, input: &crate::ir::OperatorNode) -> bool {
         use crate::ir::operator::Source;
         use crate::ir::scalar::{CompareOpKind, ScalarValue};
         use crate::ir::schema::DataType;

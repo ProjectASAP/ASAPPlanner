@@ -197,7 +197,7 @@ pub enum NonASAPOp<C = Rc<OperatorNode>> {
 impl<C> NonASAPOp<C> {
     /// The direct operator inputs, in field order, followed by the operator
     /// nodes referenced from this operator's scalar expressions.
-    pub fn children(&self) -> Vec<&C> {
+    pub(crate) fn children(&self) -> Vec<&C> {
         use NonASAPOp::*;
         let mut out: Vec<&C> = match self {
             Scan { .. } | Values { .. } | PromqlVectorFromScalar(_) => vec![],
@@ -264,7 +264,7 @@ impl<C> NonASAPOp<C> {
     /// operator nodes referenced from scalar expressions. Every other field
     /// is cloned. `f` may change the reference type, e.g. from
     /// `Rc<OperatorNode>` to a node id.
-    pub fn map_children<D>(&self, mut f: impl FnMut(&C) -> D) -> NonASAPOp<D> {
+    pub(crate) fn map_children<D>(&self, mut f: impl FnMut(&C) -> D) -> NonASAPOp<D> {
         use NonASAPOp::*;
         fn map_pred<C, D>(p: &Predicate<C>, f: &mut impl FnMut(&C) -> D) -> Predicate<D> {
             Predicate(p.0.map_operator_refs(f))
@@ -473,7 +473,7 @@ impl<C> NonASAPOp<C> {
     }
 
     /// The variant name, for diagnostics and export.
-    pub fn kind_name(&self) -> &'static str {
+    pub(crate) fn kind_name(&self) -> &'static str {
         use NonASAPOp::*;
         match self {
             Scan { .. } => "Scan",
@@ -975,7 +975,7 @@ impl NonASAPOp {
 
     /// Local producer/consumer contract checks that need only this operator
     /// and its children's output categories.
-    pub fn validate_inputs(&self) -> Result<(), SchemaDerivationError> {
+    pub(crate) fn validate_inputs(&self) -> Result<(), SchemaDerivationError> {
         use NonASAPOp::*;
         let no_state = |node: &OperatorNode, what: &str| {
             if node.result_kind == OperatorResultKind::State {

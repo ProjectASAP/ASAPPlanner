@@ -62,10 +62,7 @@ fn promql_state(query: &str) -> Rc<OperatorNode> {
 }
 
 fn column(table: Option<&str>, name: &str) -> ColumnIdentity {
-    ColumnIdentity {
-        table: table.map(str::to_string),
-        name: name.to_string(),
-    }
+    ColumnIdentity::new(table.map(str::to_string), name.to_string())
 }
 
 fn utf8(value: &str) -> ScalarValue {
@@ -74,12 +71,13 @@ fn utf8(value: &str) -> ScalarValue {
 
 /// The child of the definition's `SummaryAgg`.
 fn definition_child(state: &OperatorNode) -> Rc<OperatorNode> {
-    state.coverage().unwrap().definition.children()[0].clone()
+    state.coverage().unwrap().definition().children()[0].clone()
 }
 
 /// The definition's `SummaryAgg` carries no filter of its own.
 fn assert_definition_unfiltered(state: &OperatorNode) {
-    let definition = state.coverage().unwrap().definition;
+    let coverage = state.coverage().unwrap();
+    let definition = coverage.definition();
     assert!(
         matches!(
             definition.asap(),
@@ -93,7 +91,7 @@ fn assert_definition_unfiltered(state: &OperatorNode) {
 /// into the selection, which is the one unrestricted box.
 fn assert_nothing_selected(state: &OperatorNode) {
     assert_eq!(
-        state.coverage().unwrap().selection,
+        state.coverage().unwrap().selection(),
         vec![SelectionBox::default()]
     );
     assert!(Rc::ptr_eq(&definition_child(state), state.children()[0]));
@@ -105,15 +103,15 @@ async fn sql_where_value_set_moves_to_selection() {
         sql_state("SELECT approx_percentile_cont(latency, 0.99) FROM t WHERE region = 'us'").await;
     let coverage = state.coverage().unwrap();
     assert_eq!(
-        coverage.selection,
-        vec![SelectionBox {
-            columns: [(
+        coverage.selection(),
+        vec![SelectionBox::new(
+            [(
                 column(Some("t"), "region"),
                 Constraint::In(vec![utf8("us")])
             )]
             .into(),
-            relative_time: None,
-        }]
+            None
+        )]
     );
     assert_definition_unfiltered(&state);
     let child = definition_child(&state);
@@ -127,9 +125,9 @@ async fn sql_where_range_moves_to_selection() {
     let state =
         sql_state("SELECT approx_percentile_cont(latency, 0.99) FROM t WHERE latency < 100").await;
     assert_eq!(
-        state.coverage().unwrap().selection,
-        vec![SelectionBox {
-            columns: [(
+        state.coverage().unwrap().selection(),
+        vec![SelectionBox::new(
+            [(
                 column(Some("t"), "latency"),
                 Constraint::Interval {
                     lower: Bound::Unbounded,
@@ -137,8 +135,8 @@ async fn sql_where_range_moves_to_selection() {
                 }
             )]
             .into(),
-            relative_time: None,
-        }]
+            None
+        )]
     );
     assert_definition_unfiltered(&state);
     let child = definition_child(&state);
@@ -160,11 +158,11 @@ async fn sql_renamed_column_moves_and_expression_stays() {
     )
     .await;
     assert_eq!(
-        state.coverage().unwrap().selection,
-        vec![SelectionBox {
-            columns: [(column(None, "r"), Constraint::In(vec![utf8("us")]))].into(),
-            relative_time: None,
-        }]
+        state.coverage().unwrap().selection(),
+        vec![SelectionBox::new(
+            [(column(None, "r"), Constraint::In(vec![utf8("us")]))].into(),
+            None
+        )]
     );
     assert_definition_unfiltered(&state);
     let project = definition_child(&state);
@@ -188,11 +186,11 @@ async fn sql_renamed_column_moves_and_expression_stays() {
 fn promql_offset_window_is_relative_time() {
     let state = promql_state("quantile_over_time(0.99, m[1m] offset 2m)");
     assert_eq!(
-        state.coverage().unwrap().selection,
-        vec![SelectionBox {
-            columns: Default::default(),
-            relative_time: Some((Bound::Excluded(-180_000), Bound::Included(-120_000))),
-        }]
+        state.coverage().unwrap().selection(),
+        vec![SelectionBox::new(
+            Default::default(),
+            Some((Bound::Excluded(-180_000), Bound::Included(-120_000)))
+        )]
     );
     assert!(matches!(
         definition_child(&state).non_asap(),
@@ -225,9 +223,9 @@ fn promql_comparison_above_rate_moves_to_selection() {
     assert!(matches!(filter.non_asap(), Some(NonASAPOp::Filter { .. })));
     assert!(Rc::ptr_eq(&definition_child(&state), filter.children()[0]));
     assert_eq!(
-        state.coverage().unwrap().selection,
-        vec![SelectionBox {
-            columns: [(
+        state.coverage().unwrap().selection(),
+        vec![SelectionBox::new(
+            [(
                 column(None, "value"),
                 Constraint::Interval {
                     lower: Bound::Excluded(ScalarValue::Float64(0.0)),
@@ -235,8 +233,8 @@ fn promql_comparison_above_rate_moves_to_selection() {
                 },
             )]
             .into(),
-            relative_time: None,
-        }]
+            None
+        )]
     );
 }
 

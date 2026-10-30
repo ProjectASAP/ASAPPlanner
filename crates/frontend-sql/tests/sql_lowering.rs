@@ -11,9 +11,7 @@ use asap_types::ir::Predicate;
 use std::rc::Rc;
 
 use asap_frontend_common::{UnresolvedOp, UnresolvedScalar};
-use asap_frontend_sql::{
-    lower_sql, lower_sql_dialect, SqlCatalog, SqlError as LoweringError, SqlLowerer,
-};
+use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog, SqlError as LoweringError};
 use asap_types::ir::operator::{
     AggIntent, GroupKeys, JoinKind, Reduction, Source, WindowFrameBound, WindowFrameOffset,
     WindowFrameUnits, WindowFuncKind,
@@ -1178,11 +1176,10 @@ async fn a_correlated_in_subquery_is_rejected() {
 
 // ── Subquery-valued expressions at the `UnresolvedOp` level ─────────────────
 
-/// `SqlLowerer::lower` output, before `resolve_root`.
+/// The name-based tree, before `resolve_root`.
 async fn lower_unresolved(sql: &str) -> UnresolvedOp {
     let catalog = catalog();
-    SqlLowerer::new(&catalog)
-        .lower(sql, &AccuracyTarget::exact())
+    asap_frontend_sql::test_support::lower_unresolved(sql, &catalog, &AccuracyTarget::exact())
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
 }

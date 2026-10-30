@@ -1810,7 +1810,8 @@ pub mod test_support {
             .nodes
             .iter()
             .filter(|node| {
-                nodes.contains(&(node.id as NodeId)) && !node.materialization.is_materialized_view()
+                nodes.contains(&(node.id as NodeId))
+                    && !planner_types::test_support::is_materialized_view(node.materialization)
             })
             .map(|node| node.id as NodeId)
             .collect();
@@ -1832,7 +1833,7 @@ pub mod test_support {
         }
         for edge in &mut dag.edges {
             if at_ingestion.contains(&(edge.producer as NodeId)) {
-                edge.data_state.timing = ExecutionTiming::IngestionTime;
+                edge.data_state_mut().timing = ExecutionTiming::IngestionTime;
             }
         }
         let views = dag

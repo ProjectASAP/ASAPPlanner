@@ -63,7 +63,7 @@ impl<C> Operator<C> {
 }
 
 impl Operator {
-    pub fn output_schema(&self) -> Result<Schema, SchemaDerivationError> {
+    pub(crate) fn output_schema(&self) -> Result<Schema, SchemaDerivationError> {
         match self {
             Operator::NonASAP(op) => op.output_schema(),
             Operator::ASAP(op) => op.output_schema(),

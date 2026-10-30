@@ -2,15 +2,14 @@
 //! [`UnresolvedOp`](asap_frontend_common::UnresolvedOp) tree, built directly
 //! in canonical shape (issue #179) → [`resolve_root`].
 //!
-//! `resolve_root` runs the
-//! [`SchemaResolver`](asap_frontend_common::SchemaResolver) for positional
+//! `resolve_root` runs the frontend-common `SchemaResolver` for positional
 //! name resolution and returns the unified
 //! [`OperatorNode`](asap_types::ir::OperatorNode) DAG. Depends on the PromQL
 //! parser only — never on the SQL / DataFusion stack.
 
-pub mod error;
-pub mod histogram;
-pub mod promql;
+mod error;
+mod histogram;
+mod promql;
 
 use std::collections::BTreeSet;
 use std::rc::Rc;

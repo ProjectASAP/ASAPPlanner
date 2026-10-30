@@ -48,7 +48,7 @@ impl Materialization {
 
     /// Whether a node of this materialization is a materialized view: its
     /// output is kept across evaluations.
-    pub fn is_materialized_view(self) -> bool {
+    pub(crate) fn is_materialized_view(self) -> bool {
         matches!(
             self,
             Self::MatAtIngestion(_) | Self::MatAtQueryKeptAcrossEvaluations(_)

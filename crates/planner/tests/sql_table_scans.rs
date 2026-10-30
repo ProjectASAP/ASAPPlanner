@@ -480,7 +480,7 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
     for view in &views {
         let span = view
             .inputs
-            .raw_data_windows
+            .raw_data_windows()
             .iter()
             .map(|window| window.bounds_ms(EVALUATION_MS))
             .chain(
@@ -495,7 +495,7 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
         for id in &view.inputs.materialized_views {
             sources.insert(*id as u64, built[&(*id as u64)].0.clone());
         }
-        let scope = match view.refresh {
+        let scope = match view.refresh() {
             MaterializedViewRefresh::AtIngestion => Scope::Ingestion {
                 window_start_ms: span.0,
                 window_end_ms: span.1,
@@ -552,16 +552,16 @@ async fn ingestion_time_panes_built_from_table_rows_answer_exactly() {
     assert!(
         views
             .iter()
-            .any(|v| v.refresh == MaterializedViewRefresh::AtIngestion
-                && !v.inputs.raw_data_windows.is_empty()),
+            .any(|v| v.refresh() == MaterializedViewRefresh::AtIngestion
+                && !v.inputs.raw_data_windows().is_empty()),
         "panes built at ingestion time from table rows: {:?}",
         views
     );
     // Older panes read windows that end before the evaluation.
     assert!(views
         .iter()
-        .flat_map(|v| &v.inputs.raw_data_windows)
-        .any(|w| w.end_offset_ms > 0));
+        .flat_map(|v| v.inputs.raw_data_windows())
+        .any(|w| w.end_offset_ms() > 0));
     let answers = run_data_plane(&plan);
     assert_eq!(by_key(answers[0].clone()), expected_distinct_users());
     let expected: BTreeMap<String, String> = (0..3)
@@ -609,8 +609,8 @@ async fn a_window_equal_to_its_interval_is_built_at_ingestion_time_from_table_ro
     assert!(
         views
             .iter()
-            .any(|v| v.refresh == MaterializedViewRefresh::AtIngestion
-                && !v.inputs.raw_data_windows.is_empty()),
+            .any(|v| v.refresh() == MaterializedViewRefresh::AtIngestion
+                && !v.inputs.raw_data_windows().is_empty()),
         "built at ingestion time from table rows: {:?}",
         views
     );

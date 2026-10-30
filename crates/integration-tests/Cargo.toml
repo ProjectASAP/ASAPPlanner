@@ -5,7 +5,8 @@ edition = "2021"
 autotests = false
 
 [dependencies]
-asap-types = { path = "../types" }
+# The shared fixtures (`src/`) export physical DAGs with test-only helpers.
+asap-types = { path = "../types", features = ["test-support"] }
 asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-sql = { path = "../frontend-sql" }
 asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }

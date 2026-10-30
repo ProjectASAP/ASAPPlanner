@@ -526,7 +526,7 @@ fn grouped_raw_summary(family: FieldDataType, input: SummaryUpdate) -> (Physical
     *update = input;
     let schema = node.output_schema.clone();
     for edge in dag.edges.iter_mut().filter(|e| e.producer as u64 == root) {
-        edge.intermediate_schema = schema.clone();
+        *edge.intermediate_schema_mut() = schema.clone();
     }
     (dag, source, root)
 }
