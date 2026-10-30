@@ -9,6 +9,7 @@ mod candidates;
 mod logical_memo_candidates;
 mod memo;
 mod physical;
+mod realizer;
 
 pub use candidates::{CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup};
 pub use logical_memo_candidates::LogicalASAPMemoCandidates;
@@ -23,3 +24,4 @@ pub use physical::{
     ReaderConstraint, SelectedCandidateGraph, SupplierCandidates, SupplierSetInterner,
     SupplierStorageMetrics,
 };
+pub use realizer::{AssignmentRealizer, PhysicalCandidateError, SelectedPhysicalCandidate};

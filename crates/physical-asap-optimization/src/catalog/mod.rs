@@ -13,11 +13,10 @@ mod realize;
 mod reconstruction;
 mod scopes;
 
+pub use asap_types::stages::{PhysicalCandidateError, SelectedPhysicalCandidate};
 pub use configurations::ConfigurationError;
 pub use inventory::CandidateInventoryError;
-pub use realize::{
-    materialize_selected_candidates, PhysicalCandidateError, SelectedPhysicalCandidate,
-};
+pub use realize::{materialize_selected_candidates, Stage2AssignmentRealizer};
 pub use reconstruction::{reconstruct_selected_candidates, ReconstructedCandidates};
 
 use asap_types::stages::{
