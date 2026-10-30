@@ -127,13 +127,15 @@ impl Lowerer<'_> {
             Expr::NumberLiteral(_) => {
                 Err(unsupported("scalar root requires lower_metricsql_query"))
             }
-            // Vector negation is `x * -1` (as in the PromQL front end).
-            Expr::UnaryOperator(e) => Ok(U::PromqlScalarOp {
+            // Vector negation negates each sample and drops the metric name,
+            // lowered exactly as the PromQL front end does.
+            Expr::UnaryOperator(e) => Ok(U::PromqlMap {
                 child: Rc::new(self.lower(&e.expr)?),
-                scalar: UnresolvedScalar::Literal(ScalarValue::Float64(-1.0)),
-                op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
-                scalar_left: false,
-                return_bool: false,
+                sample: UnresolvedScalar::Negative {
+                    expr: Box::new(UnresolvedScalar::Column(ColumnRef::SampleValue)),
+                    semantics: ExprSemantics::Promql,
+                },
+                drop_metric_name: true,
             }),
             Expr::BinaryOperator(e) => self.binary(e),
             Expr::Parens(e) if e.expressions.len() == 1 => self.lower(&e.expressions[0]),
