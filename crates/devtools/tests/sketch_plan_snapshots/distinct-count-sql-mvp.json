@@ -1,0 +1,1106 @@
+{
+  "accuracy_guarantees": "enforced",
+  "materialized_views": [
+    {
+      "coverage": {
+        "definition_id": "e8cbdfb95766f8250f66c10ec99e9a33",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -60000
+              },
+              {
+                "included": 0
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 0,
+            "source": {
+              "Table": {
+                "table_ref": "http"
+              }
+            },
+            "width_ms": 60000
+          }
+        ]
+      },
+      "installed_count": 5,
+      "installed_position": 0,
+      "node_id": 2,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "e8cbdfb95766f8250f66c10ec99e9a33",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -120000
+              },
+              {
+                "included": -60000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 60000,
+            "source": {
+              "Table": {
+                "table_ref": "http"
+              }
+            },
+            "width_ms": 60000
+          }
+        ]
+      },
+      "installed_count": 5,
+      "installed_position": 1,
+      "node_id": 5,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "e8cbdfb95766f8250f66c10ec99e9a33",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -180000
+              },
+              {
+                "included": -120000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 120000,
+            "source": {
+              "Table": {
+                "table_ref": "http"
+              }
+            },
+            "width_ms": 60000
+          }
+        ]
+      },
+      "installed_count": 5,
+      "installed_position": 2,
+      "node_id": 8,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "e8cbdfb95766f8250f66c10ec99e9a33",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -240000
+              },
+              {
+                "included": -180000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 180000,
+            "source": {
+              "Table": {
+                "table_ref": "http"
+              }
+            },
+            "width_ms": 60000
+          }
+        ]
+      },
+      "installed_count": 5,
+      "installed_position": 3,
+      "node_id": 11,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "e8cbdfb95766f8250f66c10ec99e9a33",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -300000
+              },
+              {
+                "included": -240000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 240000,
+            "source": {
+              "Table": {
+                "table_ref": "http"
+              }
+            },
+            "width_ms": 60000
+          }
+        ]
+      },
+      "installed_count": 5,
+      "installed_position": 4,
+      "node_id": 14,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    }
+  ],
+  "pane_retention_ms": {
+    "1": 300000
+  },
+  "proven_optimal": false,
+  "queries": [
+    "SELECT service, COUNT(DISTINCT user_id) AS value FROM http WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service"
+  ],
+  "search_status": "numerical_stall",
+  "selected": {
+    "accepted": [
+      {
+        "accepted_metric": "relative",
+        "accepted_regardless_of_guarantee": false,
+        "guarantee_check_rejection": null,
+        "sketches": [
+          "Kmv"
+        ],
+        "summary": "metric relative; accepted relative (Kmv)",
+        "target_metric": "relative"
+      }
+    ],
+    "cost": {
+      "cost_per_second": 2.52948687431e-6,
+      "cost_unit": "cost_per_second",
+      "cpu_core_seconds_per_second": 0.0236013333333,
+      "per_node": {
+        "0": {
+          "cost_per_second": 2.203824e-7,
+          "cpu_core_seconds_per_second": 0.0196,
+          "detail": "scan 2000000 samples; x 1.0000/s",
+          "multiplier": 1,
+          "operator": "Scan",
+          "price_source": "analytical",
+          "timing": "ingestion_time"
+        },
+        "1": {
+          "cost_per_second": 2.30908897917e-6,
+          "cpu_core_seconds_per_second": 0.004,
+          "detail": "build Kmv in 5 panes of 60000 ms for 10000 groups: 2000000 rows x (1 + depth 1); x 1.0000/s; keeps 1968480000 bytes",
+          "multiplier": 1,
+          "operator": "PaneChain",
+          "price_source": "analytical",
+          "timing": "ingestion_time"
+        },
+        "2": {
+          "cost_per_second": 9.87313621759e-12,
+          "cpu_core_seconds_per_second": 8.33333333333e-7,
+          "detail": "merge 50000 states into 10000; x 0.0167/s; holds 328080000 bytes for 0.1 ms",
+          "multiplier": 1,
+          "operator": "SummaryMerge",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "3": {
+          "cost_per_second": 1.874e-12,
+          "cpu_core_seconds_per_second": 1.66666666667e-7,
+          "detail": "estimate 10000 groups x 1; x 0.0167/s",
+          "multiplier": 1,
+          "operator": "SummaryEstimate",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "4": {
+          "cost_per_second": 1.87400003681e-12,
+          "cpu_core_seconds_per_second": 1.66666666667e-7,
+          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 24 bytes for 0.1 ms",
+          "multiplier": 1,
+          "operator": "Project",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "5": {
+          "cost_per_second": 1.87400003681e-12,
+          "cpu_core_seconds_per_second": 1.66666666667e-7,
+          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 24 bytes for 0.1 ms",
+          "multiplier": 1,
+          "operator": "Project",
+          "price_source": "analytical",
+          "timing": "query_time"
+        }
+      },
+      "source": "analytical-cost-v2 (illustrative statistics)",
+      "usage": {
+        "average_memory_bytes": 1968480437.44,
+        "cpu_ops_per_second": 6001333.33333,
+        "disk_bytes": 0,
+        "latency_per_query": [
+          {
+            "compaction_ms": 0.0,
+            "query_ms": 0.08
+          }
+        ],
+        "peak_cpu_cores": 2,
+        "peak_memory_bytes": 2296560136,
+        "scanned_bytes_per_second": 176000000.0
+      }
+    },
+    "dag": {
+      "edges": [
+        {
+          "consumer": 1,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "ingestion_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "endpoint",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "status",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "user_id",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "latency",
+                "nullable": false,
+                "table": "http"
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "producer": 0,
+          "role": "Input",
+          "window": "RequiresAlignedPanePhaseOrExactBoundaryResidual"
+        },
+        {
+          "consumer": 2,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "ingestion_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "Kmv",
+                      "params": {
+                        "Kmv": {
+                          "k": 3001,
+                          "relative_error": 0.05
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 1,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 3,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "Kmv",
+                      "params": {
+                        "Kmv": {
+                          "k": 3001,
+                          "relative_error": 0.05
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 2,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 4,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "cardinality",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 3,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 5,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "count(DISTINCT http.user_id)",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 4,
+          "role": "Input",
+          "window": "NotApplicable"
+        }
+      ],
+      "nodes": [
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 0,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "endpoint",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "status",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "user_id",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "latency",
+                "nullable": false,
+                "table": "http"
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "ingestion_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": true,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "region",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "service",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "endpoint",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "status",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "user_id",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "latency",
+                      "nullable": false,
+                      "table": "http"
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "source": {
+                  "Table": {
+                    "table_ref": "http"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 1,
+          "materialization": {
+            "MatAtIngestion": "Memory"
+          },
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "Kmv",
+                      "params": {
+                        "Kmv": {
+                          "k": 3001,
+                          "relative_error": 0.05
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "ingestion_time"
+          },
+          "payload": {
+            "ASAP": {
+              "PaneChain": {
+                "child": 0,
+                "family": {
+                  "Sketch": [
+                    {
+                      "algorithm": "Kmv",
+                      "params": {
+                        "Kmv": {
+                          "k": 3001,
+                          "relative_error": 0.05
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "filter": null,
+                "grouping": "PerSubpopulationInstance",
+                "input": {
+                  "item": null,
+                  "weight": {
+                    "Column": {
+                      "Qualified": {
+                        "name": "user_id",
+                        "table": "http"
+                      }
+                    }
+                  },
+                  "weight_domain": {
+                    "kind": "unknown_or_signed"
+                  }
+                },
+                "pane_count": 5,
+                "pane_width_ms": 60000,
+                "reduction": {
+                  "Reduce": [
+                    2
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 2,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "Kmv",
+                      "params": {
+                        "Kmv": {
+                          "k": 3001,
+                          "relative_error": 0.05
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryMerge": {
+                "children": [
+                  1
+                ]
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "algorithm": "Kmv",
+                "contract": "kmv_exact_below_k_chernoff_v1",
+                "kind": "sketch_evaluation",
+                "params": {
+                  "Kmv": {
+                    "k": 3001,
+                    "relative_error": 0.05
+                  }
+                },
+                "query": "Cardinality"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "relative",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "constant",
+                "value": 0.05
+              },
+              "failure_probability": {
+                "op": "constant",
+                "value": 0.0499800317461
+              }
+            }
+          },
+          "id": 3,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "cardinality",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryEstimate": {
+                "query": "Cardinality",
+                "summary_input": 2
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "algorithm": "Kmv",
+                "contract": "kmv_exact_below_k_chernoff_v1",
+                "kind": "sketch_evaluation",
+                "params": {
+                  "Kmv": {
+                    "k": 3001,
+                    "relative_error": 0.05
+                  }
+                },
+                "query": "Cardinality"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "relative",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "constant",
+                "value": 0.05
+              },
+              "failure_probability": {
+                "op": "constant",
+                "value": 0.0499800317461
+              }
+            }
+          },
+          "id": 4,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "count(DISTINCT http.user_id)",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Project": {
+                "child": 3,
+                "cols": [
+                  {
+                    "alias": "service",
+                    "expr": {
+                      "Column": 0
+                    }
+                  },
+                  {
+                    "alias": "count(DISTINCT http.user_id)",
+                    "expr": {
+                      "Column": 1
+                    }
+                  }
+                ],
+                "qualifier": null
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "algorithm": "Kmv",
+                "contract": "kmv_exact_below_k_chernoff_v1",
+                "kind": "sketch_evaluation",
+                "params": {
+                  "Kmv": {
+                    "k": 3001,
+                    "relative_error": 0.05
+                  }
+                },
+                "query": "Cardinality"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "relative",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "constant",
+                "value": 0.05
+              },
+              "failure_probability": {
+                "op": "constant",
+                "value": 0.0499800317461
+              }
+            }
+          },
+          "id": 5,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Project": {
+                "child": 4,
+                "cols": [
+                  {
+                    "alias": null,
+                    "expr": {
+                      "Column": 0
+                    }
+                  },
+                  {
+                    "alias": "value",
+                    "expr": {
+                      "Column": 1
+                    }
+                  }
+                ],
+                "qualifier": null
+              }
+            }
+          }
+        }
+      ],
+      "roots": [
+        5
+      ],
+      "scalar_roots": []
+    },
+    "display_name": "Q1 Kmv ×5 panes · ingestion time: Kmv for Q1, 5 × 1m panes"
+  }
+}

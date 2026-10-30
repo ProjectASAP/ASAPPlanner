@@ -1,0 +1,56 @@
+{
+  "query_workload": {
+    "language": "promql",
+    "repeating_queries": [
+      {
+        "query": "quantile_over_time(0.99, data[5m])",
+        "demand": {
+          "fixed_interval": 10000
+        },
+        "requirements": {
+          "accuracy": {
+            "max_error": 0.05,
+            "failure_probability": 0.3,
+            "accuracy_scope": "whole_result"
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        }
+      }
+    ]
+  },
+  "data_workload": {
+    "arrival": {
+      "ingesting": {
+        "rows_per_second": 200000.0
+      }
+    },
+    "sources": {
+      "data": {
+        "series_count": 10000,
+        "metric_type": "gauge",
+        "values_non_negative": true,
+        "sample_interval": 100,
+        "stream_norms": null,
+        "max_distinct_per_evaluation": null
+      },
+      "data_total": {
+        "series_count": 10000,
+        "metric_type": "counter",
+        "sample_interval": 100,
+        "stream_norms": null,
+        "max_distinct_per_evaluation": null
+      },
+      "events": {
+        "series_count": 10000,
+        "metric_type": null,
+        "sample_interval": null,
+        "stream_norms": null,
+        "max_distinct_per_evaluation": 10000
+      }
+    }
+  }
+}

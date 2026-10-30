@@ -1,0 +1,4842 @@
+{
+  "accuracy_guarantees": "enforced",
+  "materialized_views": [
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -1000
+              },
+              {
+                "included": 0
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 0,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 0,
+      "node_id": 2,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -2000
+              },
+              {
+                "included": -1000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 1000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 1,
+      "node_id": 5,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -3000
+              },
+              {
+                "included": -2000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 2000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 2,
+      "node_id": 8,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -4000
+              },
+              {
+                "included": -3000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 3000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 3,
+      "node_id": 11,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -5000
+              },
+              {
+                "included": -4000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 4000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 4,
+      "node_id": 14,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -6000
+              },
+              {
+                "included": -5000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 5000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 5,
+      "node_id": 17,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -7000
+              },
+              {
+                "included": -6000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 6000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 6,
+      "node_id": 20,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -8000
+              },
+              {
+                "included": -7000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 7000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 7,
+      "node_id": 23,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -9000
+              },
+              {
+                "included": -8000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 8000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 8,
+      "node_id": 26,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -10000
+              },
+              {
+                "included": -9000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 9000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 9,
+      "node_id": 29,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -11000
+              },
+              {
+                "included": -10000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 10000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 10,
+      "node_id": 32,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -12000
+              },
+              {
+                "included": -11000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 11000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 11,
+      "node_id": 35,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -13000
+              },
+              {
+                "included": -12000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 12000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 12,
+      "node_id": 38,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -14000
+              },
+              {
+                "included": -13000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 13000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 13,
+      "node_id": 41,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -15000
+              },
+              {
+                "included": -14000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 14000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 14,
+      "node_id": 44,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -16000
+              },
+              {
+                "included": -15000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 15000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 15,
+      "node_id": 47,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -17000
+              },
+              {
+                "included": -16000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 16000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 16,
+      "node_id": 50,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -18000
+              },
+              {
+                "included": -17000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 17000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 17,
+      "node_id": 53,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -19000
+              },
+              {
+                "included": -18000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 18000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 18,
+      "node_id": 56,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -20000
+              },
+              {
+                "included": -19000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 19000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 19,
+      "node_id": 59,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -21000
+              },
+              {
+                "included": -20000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 20000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 20,
+      "node_id": 62,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -22000
+              },
+              {
+                "included": -21000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 21000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 21,
+      "node_id": 65,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -23000
+              },
+              {
+                "included": -22000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 22000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 22,
+      "node_id": 68,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -24000
+              },
+              {
+                "included": -23000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 23000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 23,
+      "node_id": 71,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -25000
+              },
+              {
+                "included": -24000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 24000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 24,
+      "node_id": 74,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -26000
+              },
+              {
+                "included": -25000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 25000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 25,
+      "node_id": 77,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -27000
+              },
+              {
+                "included": -26000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 26000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 26,
+      "node_id": 80,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -28000
+              },
+              {
+                "included": -27000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 27000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 27,
+      "node_id": 83,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -29000
+              },
+              {
+                "included": -28000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 28000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 28,
+      "node_id": 86,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -30000
+              },
+              {
+                "included": -29000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 29000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 29,
+      "node_id": 89,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -31000
+              },
+              {
+                "included": -30000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 30000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 30,
+      "node_id": 92,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -32000
+              },
+              {
+                "included": -31000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 31000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 31,
+      "node_id": 95,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -33000
+              },
+              {
+                "included": -32000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 32000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 32,
+      "node_id": 98,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -34000
+              },
+              {
+                "included": -33000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 33000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 33,
+      "node_id": 101,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -35000
+              },
+              {
+                "included": -34000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 34000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 34,
+      "node_id": 104,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -36000
+              },
+              {
+                "included": -35000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 35000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 35,
+      "node_id": 107,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -37000
+              },
+              {
+                "included": -36000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 36000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 36,
+      "node_id": 110,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -38000
+              },
+              {
+                "included": -37000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 37000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 37,
+      "node_id": 113,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -39000
+              },
+              {
+                "included": -38000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 38000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 38,
+      "node_id": 116,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -40000
+              },
+              {
+                "included": -39000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 39000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 39,
+      "node_id": 119,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -41000
+              },
+              {
+                "included": -40000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 40000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 40,
+      "node_id": 122,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -42000
+              },
+              {
+                "included": -41000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 41000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 41,
+      "node_id": 125,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -43000
+              },
+              {
+                "included": -42000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 42000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 42,
+      "node_id": 128,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -44000
+              },
+              {
+                "included": -43000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 43000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 43,
+      "node_id": 131,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -45000
+              },
+              {
+                "included": -44000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 44000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 44,
+      "node_id": 134,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -46000
+              },
+              {
+                "included": -45000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 45000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 45,
+      "node_id": 137,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -47000
+              },
+              {
+                "included": -46000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 46000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 46,
+      "node_id": 140,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -48000
+              },
+              {
+                "included": -47000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 47000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 47,
+      "node_id": 143,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -49000
+              },
+              {
+                "included": -48000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 48000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 48,
+      "node_id": 146,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -50000
+              },
+              {
+                "included": -49000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 49000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 49,
+      "node_id": 149,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -51000
+              },
+              {
+                "included": -50000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 50000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 50,
+      "node_id": 152,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -52000
+              },
+              {
+                "included": -51000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 51000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 51,
+      "node_id": 155,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -53000
+              },
+              {
+                "included": -52000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 52000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 52,
+      "node_id": 158,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -54000
+              },
+              {
+                "included": -53000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 53000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 53,
+      "node_id": 161,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -55000
+              },
+              {
+                "included": -54000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 54000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 54,
+      "node_id": 164,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -56000
+              },
+              {
+                "included": -55000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 55000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 55,
+      "node_id": 167,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -57000
+              },
+              {
+                "included": -56000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 56000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 56,
+      "node_id": 170,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -58000
+              },
+              {
+                "included": -57000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 57000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 57,
+      "node_id": 173,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -59000
+              },
+              {
+                "included": -58000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 58000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 58,
+      "node_id": 176,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "4113deabc8c1606e3a43c2f2e962389c",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -60000
+              },
+              {
+                "included": -59000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 59000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 1000
+          }
+        ]
+      },
+      "installed_count": 60,
+      "installed_position": 59,
+      "node_id": 179,
+      "refresh": "at_ingestion",
+      "retention_ms": 60000,
+      "stage2_node_id": 1
+    }
+  ],
+  "pane_retention_ms": {
+    "1": 60000
+  },
+  "proven_optimal": false,
+  "queries": [
+    "topk by (region) (4, sum_over_time(data[1m])) or avg by (region) (quantile_over_time(0.9, data[100s]))"
+  ],
+  "search_status": "time_or_evaluation_limit_with_validated_incumbent",
+  "selected": {
+    "accepted": [
+      {
+        "accepted_metric": null,
+        "accepted_regardless_of_guarantee": false,
+        "guarantee_check_rejection": null,
+        "sketches": [],
+        "summary": "metric not set; accepted exact",
+        "target_metric": null
+      }
+    ],
+    "cost": {
+      "cost_per_second": 1.05399593108e-6,
+      "cost_unit": "cost_per_second",
+      "cpu_core_seconds_per_second": 0.0895,
+      "per_node": {
+        "0": {
+          "cost_per_second": 6.52152e-9,
+          "cpu_core_seconds_per_second": 0.00058,
+          "detail": "scan 100000 samples; x 1.0000/s",
+          "multiplier": 1,
+          "operator": "Scan",
+          "price_source": "analytical",
+          "timing": "ingestion_time"
+        },
+        "1": {
+          "cost_per_second": 4.15390642488e-8,
+          "cpu_core_seconds_per_second": 0.0002,
+          "detail": "build exact Sum accumulator in 60 panes of 1000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 34160000 bytes",
+          "multiplier": 1,
+          "operator": "PaneChain",
+          "price_source": "analytical",
+          "timing": "ingestion_time"
+        },
+        "10": {
+          "cost_per_second": 1.69584790888e-10,
+          "cpu_core_seconds_per_second": 0.00001,
+          "detail": "build exact Sum accumulator into 10000 states: 10000 rows x depth 1; x 1.0000/s; holds 560000 bytes for 88.7 ms",
+          "multiplier": 1,
+          "operator": "SummaryAgg",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "11": {
+          "cost_per_second": 1.1244e-10,
+          "cpu_core_seconds_per_second": 0.00001,
+          "detail": "finalize 10000 accumulators; x 1.0000/s",
+          "multiplier": 1,
+          "operator": "FinalizeExactAccumulator",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "12": {
+          "cost_per_second": 1.69584790888e-10,
+          "cpu_core_seconds_per_second": 0.00001,
+          "detail": "build exact Count accumulator into 10000 states: 10000 rows x depth 1; x 1.0000/s; holds 560000 bytes for 88.7 ms",
+          "multiplier": 1,
+          "operator": "SummaryAgg",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "13": {
+          "cost_per_second": 1.1244e-10,
+          "cpu_core_seconds_per_second": 0.00001,
+          "detail": "finalize 10000 accumulators; x 1.0000/s",
+          "multiplier": 1,
+          "operator": "FinalizeExactAccumulator",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "14": {
+          "cost_per_second": 1.12442449062e-10,
+          "cpu_core_seconds_per_second": 0.00001,
+          "detail": "operator: pass 10000 rows; x 1.0000/s; holds 24 bytes for 88.7 ms",
+          "multiplier": 1,
+          "operator": "Project",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "15": {
+          "cost_per_second": 1.12442449062e-10,
+          "cpu_core_seconds_per_second": 0.00001,
+          "detail": "operator: pass 10000 rows; x 1.0000/s; holds 24 bytes for 88.7 ms",
+          "multiplier": 1,
+          "operator": "BinaryOp",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "16": {
+          "cost_per_second": 1.12442449062e-10,
+          "cpu_core_seconds_per_second": 0.00001,
+          "detail": "operator: pass 10000 rows; x 1.0000/s; holds 24 bytes for 88.7 ms",
+          "multiplier": 1,
+          "operator": "Project",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "17": {
+          "cost_per_second": 1.12444898125e-10,
+          "cpu_core_seconds_per_second": 0.00001,
+          "detail": "operator: pass 10000 rows; x 1.0000/s; holds 48 bytes for 88.7 ms",
+          "multiplier": 1,
+          "operator": "BinaryOp",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "2": {
+          "cost_per_second": 6.80354479089e-9,
+          "cpu_core_seconds_per_second": 0.0006,
+          "detail": "merge 600000 states into 10000; x 1.0000/s; holds 560000 bytes for 88.7 ms",
+          "multiplier": 1,
+          "operator": "SummaryMerge",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "3": {
+          "cost_per_second": 1.1244e-10,
+          "cpu_core_seconds_per_second": 0.00001,
+          "detail": "finalize 10000 accumulators; x 1.0000/s",
+          "multiplier": 1,
+          "operator": "FinalizeExactAccumulator",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "4": {
+          "cost_per_second": 1.12444898125e-10,
+          "cpu_core_seconds_per_second": 0.00001,
+          "detail": "sort 10000 rows in 10000 partitions; x 1.0000/s; holds 48 bytes for 88.7 ms",
+          "multiplier": 1,
+          "operator": "Sort",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "5": {
+          "cost_per_second": 1.12444898125e-10,
+          "cpu_core_seconds_per_second": 0.00001,
+          "detail": "limit to 10000 rows; x 1.0000/s; holds 48 bytes for 88.7 ms",
+          "multiplier": 1,
+          "operator": "Limit",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "6": {
+          "cost_per_second": 1.12444898125e-10,
+          "cpu_core_seconds_per_second": 0.00001,
+          "detail": "operator: pass 10000 rows; x 1.0000/s; holds 48 bytes for 88.7 ms",
+          "multiplier": 1,
+          "operator": "Project",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "7": {
+          "cost_per_second": 6.52152004898e-7,
+          "cpu_core_seconds_per_second": 0.058,
+          "detail": "scan 10000000 samples; x 1.0000/s; keeps 480000000 bytes of raw data on disk; holds 48 bytes for 88.7 ms",
+          "multiplier": 1,
+          "operator": "Scan",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "8": {
+          "cost_per_second": 1.12440004898e-7,
+          "cpu_core_seconds_per_second": 0.01,
+          "detail": "time range 100s: keep 10000000 of 10000000 rows; x 1.0000/s; holds 48 bytes for 88.7 ms",
+          "multiplier": 1,
+          "operator": "TimeRange",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "9": {
+          "cost_per_second": 2.33076195722e-7,
+          "cpu_core_seconds_per_second": 0.02,
+          "detail": "hash aggregate 10000000 rows into 10000 groups; x 1.0000/s; holds 80320000 bytes for 88.7 ms",
+          "multiplier": 1,
+          "operator": "Aggregate",
+          "price_source": "analytical",
+          "timing": "query_time"
+        }
+      },
+      "source": "analytical-cost-v2 (illustrative statistics)",
+      "usage": {
+        "average_memory_bytes": 41435071.9392,
+        "cpu_ops_per_second": 41020000.0,
+        "disk_bytes": 480000000,
+        "latency_per_query": [
+          {
+            "compaction_ms": 0.0,
+            "query_ms": 88.72
+          }
+        ],
+        "peak_cpu_cores": 2,
+        "peak_memory_bytes": 116160408,
+        "scanned_bytes_per_second": 484800000.0
+      }
+    },
+    "dag": {
+      "edges": [
+        {
+          "consumer": 1,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "ingestion_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 0,
+          "role": "Input",
+          "window": "RequiresAlignedPanePhaseOrExactBoundaryResidual"
+        },
+        {
+          "consumer": 2,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "ingestion_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "ExactAggregate": [
+                    "Sum",
+                    "Sum"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 1,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 3,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "ExactAggregate": [
+                    "Sum",
+                    "Sum"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 2,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 4,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 3,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 5,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 4,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 6,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 5,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 8,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 7,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 9,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 8,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 10,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 9,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 11,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "ExactAggregate": [
+                    "Sum",
+                    "Sum"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 10,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 12,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 9,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 13,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "ExactAggregate": [
+                    "Count",
+                    "Count"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 12,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 14,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "count",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 13,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 15,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "sum",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 11,
+          "role": "Left",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 15,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "col_1",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 14,
+          "role": "Right",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 16,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "sum",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 15,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 17,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "topk_4",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": []
+          },
+          "producer": 6,
+          "role": "Left",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 17,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "avg",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 16,
+          "role": "Right",
+          "window": "NotApplicable"
+        }
+      ],
+      "nodes": [
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 0,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "ingestion_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": true,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "region",
+                      "nullable": true,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "$promql_series_identity",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": [
+                    [
+                      3,
+                      0
+                    ]
+                  ]
+                },
+                "source": {
+                  "TimeSeries": {
+                    "metric": "data"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 1,
+          "materialization": {
+            "MatAtIngestion": "Memory"
+          },
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "ExactAggregate": [
+                    "Sum",
+                    "Sum"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "ingestion_time"
+          },
+          "payload": {
+            "ASAP": {
+              "PaneChain": {
+                "child": 0,
+                "family": {
+                  "ExactAggregate": [
+                    "Sum",
+                    "Sum"
+                  ]
+                },
+                "filter": null,
+                "grouping": "PerSubpopulationInstance",
+                "input": {
+                  "item": null,
+                  "weight": {
+                    "Column": "SampleValue"
+                  },
+                  "weight_domain": {
+                    "kind": "unknown_or_signed"
+                  }
+                },
+                "pane_count": 60,
+                "pane_width_ms": 1000,
+                "reduction": "PerEntity"
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 2,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "ExactAggregate": [
+                    "Sum",
+                    "Sum"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryMerge": {
+                "children": [
+                  1
+                ]
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact accumulator over exact input"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 3,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "FinalizeExactAccumulator": {
+                "child": 2
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 4,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Sort": {
+                "child": 3,
+                "keys": [
+                  {
+                    "ascending": false,
+                    "expr": {
+                      "Column": 1
+                    },
+                    "nulls_first": false
+                  }
+                ],
+                "partition_by": [
+                  2
+                ]
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 5,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Limit": {
+                "child": 4,
+                "n": 4,
+                "offset": 0,
+                "partition_by": [
+                  2
+                ]
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 6,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "topk_4",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": []
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Project": {
+                "child": 5,
+                "cols": [
+                  {
+                    "alias": "region",
+                    "expr": {
+                      "Column": 2
+                    }
+                  },
+                  {
+                    "alias": "topk_4",
+                    "expr": {
+                      "Column": 1
+                    }
+                  },
+                  {
+                    "alias": "$promql_series_identity",
+                    "expr": {
+                      "Column": 3
+                    }
+                  }
+                ],
+                "qualifier": null
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 7,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": true,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "region",
+                      "nullable": true,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "$promql_series_identity",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": [
+                    [
+                      3,
+                      0
+                    ]
+                  ]
+                },
+                "source": {
+                  "TimeSeries": {
+                    "metric": "data"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 8,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "TimeRange": {
+                "child": 7,
+                "kind": "range",
+                "range": {
+                  "nanos": 0,
+                  "secs": 100
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 9,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Aggregate": {
+                "child": 8,
+                "filters": [],
+                "having": null,
+                "measures": [
+                  {
+                    "accuracy": {
+                      "accuracy_scope": "whole_result",
+                      "failure_probability": 0.3,
+                      "max_error": 0.05
+                    },
+                    "col": null,
+                    "kind": "quantile",
+                    "q": 0.9
+                  }
+                ],
+                "output_names": [
+                  ""
+                ],
+                "reduction": "PerEntity"
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 10,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "ExactAggregate": [
+                    "Sum",
+                    "Sum"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryAgg": {
+                "child": 9,
+                "family": {
+                  "ExactAggregate": [
+                    "Sum",
+                    "Sum"
+                  ]
+                },
+                "filter": null,
+                "grouping": "PerSubpopulationInstance",
+                "input": {
+                  "item": null,
+                  "weight": {
+                    "Column": "SampleValue"
+                  },
+                  "weight_domain": {
+                    "kind": "unknown_or_signed"
+                  }
+                },
+                "reduction": {
+                  "Reduce": [
+                    2
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact accumulator over exact input"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 11,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "sum",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "FinalizeExactAccumulator": {
+                "child": 10
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 12,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "ExactAggregate": [
+                    "Count",
+                    "Count"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryAgg": {
+                "child": 9,
+                "family": {
+                  "ExactAggregate": [
+                    "Count",
+                    "Count"
+                  ]
+                },
+                "filter": null,
+                "grouping": "PerSubpopulationInstance",
+                "input": {
+                  "item": null,
+                  "weight": {
+                    "Column": "SampleValue"
+                  },
+                  "weight_domain": {
+                    "kind": "unknown_or_signed"
+                  }
+                },
+                "reduction": {
+                  "Reduce": [
+                    2
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact accumulator over exact input"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 13,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "count",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "FinalizeExactAccumulator": {
+                "child": 12
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 14,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "col_1",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Project": {
+                "child": 13,
+                "cols": [
+                  {
+                    "alias": null,
+                    "expr": {
+                      "Column": 0
+                    }
+                  },
+                  {
+                    "alias": null,
+                    "expr": {
+                      "Cast": {
+                        "expr": {
+                          "Column": 1
+                        },
+                        "to": "float64",
+                        "try_cast": false
+                      }
+                    }
+                  }
+                ],
+                "qualifier": null
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 15,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "sum",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "BinaryOp": {
+                "lhs": 11,
+                "operator": {
+                  "checked_finite_division": false,
+                  "checked_relative_division": false,
+                  "kind": {
+                    "Arithmetic": "Div"
+                  },
+                  "vector_match": null
+                },
+                "return_bool": false,
+                "rhs": 14
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 16,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "avg",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Project": {
+                "child": 15,
+                "cols": [
+                  {
+                    "alias": "region",
+                    "expr": {
+                      "Column": 0
+                    }
+                  },
+                  {
+                    "alias": "avg",
+                    "expr": {
+                      "Column": 1
+                    }
+                  }
+                ],
+                "qualifier": null
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 17,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "topk_4",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": []
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "BinaryOp": {
+                "lhs": 6,
+                "operator": {
+                  "checked_finite_division": false,
+                  "checked_relative_division": false,
+                  "kind": {
+                    "Set": "Or"
+                  },
+                  "vector_match": {
+                    "grouping": null,
+                    "kind": "Ignoring",
+                    "labels": []
+                  }
+                },
+                "return_bool": false,
+                "rhs": 16
+              }
+            }
+          }
+        }
+      ],
+      "roots": [
+        17
+      ],
+      "scalar_roots": []
+    },
+    "display_name": "Q1 Sum acc ×60 panes + Sum acc + Count acc · ingestion time: Sum acc for Q1, 60 × 1s panes"
+  }
+}

@@ -1,0 +1,769 @@
+{
+  "accuracy_guarantees": "enforced",
+  "materialized_views": [],
+  "pane_retention_ms": {},
+  "proven_optimal": false,
+  "queries": [
+    "quantile_over_time(0.99, data[5m])"
+  ],
+  "search_status": "time_or_evaluation_limit_with_validated_incumbent",
+  "selected": {
+    "accepted": [
+      {
+        "accepted_metric": "relative",
+        "accepted_regardless_of_guarantee": false,
+        "guarantee_check_rejection": null,
+        "sketches": [
+          "DDSketch"
+        ],
+        "summary": "metric not set; accepted relative (DDSketch)",
+        "target_metric": null
+      }
+    ],
+    "cost": {
+      "cost_per_second": 18.7296099432,
+      "cost_unit": "cost_per_second",
+      "cpu_core_seconds_per_second": 0.018602,
+      "per_node": {
+        "0": {
+          "cost_per_second": 12.6000000744,
+          "cpu_core_seconds_per_second": 0.0126,
+          "detail": "scan 30000000 samples; x 0.1000/s; keeps 960000000 bytes of raw data on disk; holds 32 bytes for 186.0 ms",
+          "multiplier": 1,
+          "operator": "Scan",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "1": {
+          "cost_per_second": 3.00000007441,
+          "cpu_core_seconds_per_second": 0.003,
+          "detail": "time range 300s: keep 30000000 of 30000000 rows; x 0.1000/s; holds 32 bytes for 186.0 ms",
+          "multiplier": 1,
+          "operator": "TimeRange",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "2": {
+          "cost_per_second": 3.12760972,
+          "cpu_core_seconds_per_second": 0.003,
+          "detail": "build DDSketch into 10000 states: 30000000 rows x depth 1; x 0.1000/s; holds 54880000 bytes for 186.0 ms",
+          "multiplier": 1,
+          "operator": "SummaryAgg",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "3": {
+          "cost_per_second": 0.001,
+          "cpu_core_seconds_per_second": 1e-6,
+          "detail": "estimate 10000 groups x 1; x 0.1000/s",
+          "multiplier": 1,
+          "operator": "SummaryEstimate",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "4": {
+          "cost_per_second": 0.001000074408,
+          "cpu_core_seconds_per_second": 1e-6,
+          "detail": "operator: pass 10000 rows; x 0.1000/s; holds 32 bytes for 186.0 ms",
+          "multiplier": 1,
+          "operator": "Project",
+          "price_source": "analytical",
+          "timing": "query_time"
+        }
+      },
+      "source": "analytical-cost-v2 (illustrative statistics)",
+      "usage": {
+        "average_memory_bytes": 1020879.54579,
+        "cpu_ops_per_second": 9002000.0,
+        "disk_bytes": 960000000,
+        "latency_per_query": [
+          {
+            "compaction_ms": 0.0,
+            "query_ms": 186.02
+          }
+        ],
+        "peak_cpu_cores": 1,
+        "peak_memory_bytes": 54880096,
+        "scanned_bytes_per_second": 96000000.0
+      }
+    },
+    "dag": {
+      "edges": [
+        {
+          "consumer": 1,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "producer": 0,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 2,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "producer": 1,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 3,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "DDSketch",
+                      "params": {
+                        "DDSketch": {
+                          "alpha": 0.05
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "producer": 2,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 4,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "quantile",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "producer": 3,
+          "role": "Input",
+          "window": "NotApplicable"
+        }
+      ],
+      "nodes": [
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 0,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": true,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "$promql_series_identity",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": [
+                    [
+                      2,
+                      0
+                    ]
+                  ]
+                },
+                "source": {
+                  "TimeSeries": {
+                    "metric": "data"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 1,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "TimeRange": {
+                "child": 0,
+                "kind": "range",
+                "range": {
+                  "nanos": 0,
+                  "secs": 300
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 2,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "DDSketch",
+                      "params": {
+                        "DDSketch": {
+                          "alpha": 0.05
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryAgg": {
+                "child": 1,
+                "family": {
+                  "Sketch": [
+                    {
+                      "algorithm": "DDSketch",
+                      "params": {
+                        "DDSketch": {
+                          "alpha": 0.05
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "filter": null,
+                "grouping": "PerSubpopulationInstance",
+                "input": {
+                  "item": null,
+                  "weight": {
+                    "Column": "SampleValue"
+                  },
+                  "weight_domain": {
+                    "kind": "unknown_or_signed"
+                  }
+                },
+                "reduction": "PerEntity"
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "algorithm": "DDSketch",
+                "contract": "ddsketch_relative_error_alpha_v1",
+                "kind": "sketch_evaluation",
+                "params": {
+                  "DDSketch": {
+                    "alpha": 0.05
+                  }
+                },
+                "query": "Quantile { q: 0.99 }"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "relative",
+              "accuracy_scope": "per_value",
+              "error": {
+                "factors": [
+                  {
+                    "op": "constant",
+                    "value": 0.05
+                  },
+                  {
+                    "op": "unknown",
+                    "statistic": "values_non_negative[data]"
+                  }
+                ],
+                "op": "product"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 3,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "quantile",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryEstimate": {
+                "query": {
+                  "Quantile": {
+                    "q": 0.99
+                  }
+                },
+                "summary_input": 2
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "algorithm": "DDSketch",
+                "contract": "ddsketch_relative_error_alpha_v1",
+                "kind": "sketch_evaluation",
+                "params": {
+                  "DDSketch": {
+                    "alpha": 0.05
+                  }
+                },
+                "query": "Quantile { q: 0.99 }"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "relative",
+              "accuracy_scope": "per_value",
+              "error": {
+                "factors": [
+                  {
+                    "op": "constant",
+                    "value": 0.05
+                  },
+                  {
+                    "op": "unknown",
+                    "statistic": "values_non_negative[data]"
+                  }
+                ],
+                "op": "product"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 4,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Project": {
+                "child": 3,
+                "cols": [
+                  {
+                    "alias": "ts",
+                    "expr": {
+                      "Column": 0
+                    }
+                  },
+                  {
+                    "alias": "value",
+                    "expr": {
+                      "Column": 1
+                    }
+                  },
+                  {
+                    "alias": "$promql_series_identity",
+                    "expr": {
+                      "Column": 2
+                    }
+                  }
+                ],
+                "qualifier": null
+              }
+            }
+          }
+        }
+      ],
+      "roots": [
+        4
+      ],
+      "scalar_roots": []
+    },
+    "display_name": "Q1 DDSketch"
+  }
+}

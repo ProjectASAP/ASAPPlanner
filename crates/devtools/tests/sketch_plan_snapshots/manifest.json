@@ -1,0 +1,124 @@
+{
+  "deployments": {
+    "default": [],
+    "raw_retained": [
+      "--deployment-capabilities",
+      "{\"raw_data_retained\":true,\"query_time_results_retained\":false}",
+      "--cost-model",
+      "aws-fargate-us-east-1"
+    ],
+    "mvp": [
+      "--deployment-capabilities",
+      "{\"raw_data_retained\":false,\"query_time_results_retained\":false}",
+      "--cost-model",
+      "aws-fargate-us-east-1"
+    ]
+  },
+  "workloads": [
+    {
+      "id": "shared-quantiles-1h-mvp",
+      "covers": "two queries share one DDSketch pane chain (q0.5 and q0.9 over 1 h)",
+      "workload": "tools/dag-viewer/memo-examples/promql/rangeheavy-t5-q05-q09-1h.json",
+      "deployment": "mvp"
+    },
+    {
+      "id": "nested-windows-15m-1h-mvp",
+      "covers": "15 min and 1 h windows share one DDSketch pane chain",
+      "workload": "tools/dag-viewer/memo-examples/promql/rangeheavy-t5-q09-15m-1h.json",
+      "deployment": "mvp"
+    },
+    {
+      "id": "ratio-of-quantiles-1h-mvp",
+      "covers": "binary composition of two DDSketch results (q0.9 / q0.5 over 1 h)",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/ratio-of-quantiles-1h.json",
+      "deployment": "mvp"
+    },
+    {
+      "id": "quantile-single-mvp",
+      "covers": "single quantile with an accuracy target selects a KLL pane chain",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/quantile-single.json",
+      "deployment": "mvp"
+    },
+    {
+      "id": "quantile-single-raw-retained",
+      "covers": "single quantile with an accuracy target selects DDSketch",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/quantile-single.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "quantile-single-default",
+      "covers": "single quantile with an accuracy target selects DDSketch",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/quantile-single.json",
+      "deployment": "default"
+    },
+    {
+      "id": "quantile-grouped-mvp",
+      "covers": "grouped quantile (avg by region) selects a DDSketch pane chain",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/quantile-grouped.json",
+      "deployment": "mvp"
+    },
+    {
+      "id": "distinct-count-sql-default",
+      "covers": "SQL COUNT(DISTINCT) with a relative target selects KMV",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/distinct-single.json",
+      "tables": "tools/dag-viewer/memo-examples/sql/tables.json",
+      "deployment": "default"
+    },
+    {
+      "id": "distinct-count-sql-mvp",
+      "covers": "SQL COUNT(DISTINCT) selects a KMV pane chain",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/distinct-single.json",
+      "tables": "tools/dag-viewer/memo-examples/sql/tables.json",
+      "deployment": "mvp"
+    },
+    {
+      "id": "topk-rate-guarantees-ignored-mvp",
+      "covers": "topk of a rate with guarantees ignored selects a CMS heap",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/topk-rate.json",
+      "deployment": "mvp",
+      "accuracy_guarantees": "ignored"
+    },
+    {
+      "id": "planner-layering-3a-default",
+      "covers": "five-query historical p99 batch selects KLL",
+      "example": "planner-layering-3a",
+      "deployment": "default"
+    },
+    {
+      "id": "planner-layering-3b-default",
+      "covers": "live p99 panel within 200 ms selects KLL",
+      "example": "planner-layering-3b",
+      "deployment": "default"
+    },
+    {
+      "id": "fuzz-issue903-raw-retained",
+      "covers": "planner_fuzz seed 903: two queries, KLL",
+      "workload": "crates/devtools/tests/planner_fuzz_seeds/issue903.workload.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "or-topk-quantile-raw-retained",
+      "covers": "`or` of a topk and a quantile (the only `or` workload that plans; its plan is exact)",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/or-topk-quantile.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "random-mixed-seed-862-w02-q2-q7-mvp",
+      "covers": "random-mixed seed-862 workload-02, queries 2 and 7: DDSketch quantile next to a topk increase",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/random-mixed-seed-862-w02-q2-q7.json",
+      "deployment": "mvp"
+    },
+    {
+      "id": "random-mixed-seed-862-w01-q3-q8-mvp",
+      "covers": "random-mixed seed-862 workload-01, queries 3 and 8: DDSketch quantile next to a topk rate",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/random-mixed-seed-862-w01-q3-q8.json",
+      "deployment": "mvp"
+    },
+    {
+      "id": "random-mixed-seed-862-long-w01-q3-mvp",
+      "covers": "random-mixed seed-862-long workload-01, query 3: DDSketch pane chain",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/random-mixed-seed-862-long-w01-q3.json",
+      "deployment": "mvp"
+    }
+  ]
+}

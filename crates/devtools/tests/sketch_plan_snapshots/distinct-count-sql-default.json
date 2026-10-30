@@ -1,0 +1,979 @@
+{
+  "accuracy_guarantees": "enforced",
+  "materialized_views": [],
+  "pane_retention_ms": {},
+  "proven_optimal": false,
+  "queries": [
+    "SELECT service, COUNT(DISTINCT user_id) AS value FROM http WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service"
+  ],
+  "search_status": "time_or_evaluation_limit_with_validated_incumbent",
+  "selected": {
+    "accepted": [
+      {
+        "accepted_metric": "relative",
+        "accepted_regardless_of_guarantee": false,
+        "guarantee_check_rejection": null,
+        "sketches": [
+          "Kmv"
+        ],
+        "summary": "metric relative; accepted relative (Kmv)",
+        "target_metric": "relative"
+      }
+    ],
+    "cost": {
+      "cost_per_second": 122.839703809,
+      "cost_unit": "cost_per_second",
+      "cpu_core_seconds_per_second": 0.1180005,
+      "per_node": {
+        "0": {
+          "cost_per_second": 98.000001298,
+          "cpu_core_seconds_per_second": 0.098,
+          "detail": "scan 600000000 samples; x 0.0167/s; keeps 52800000000 bytes of raw data on disk; holds 88 bytes for 7080.0 ms",
+          "multiplier": 1,
+          "operator": "Scan",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "1": {
+          "cost_per_second": 10.000001298,
+          "cpu_core_seconds_per_second": 0.01,
+          "detail": "time range 300s: keep 600000000 of 600000000 rows; x 0.0167/s; holds 88 bytes for 7080.0 ms",
+          "multiplier": 1,
+          "operator": "TimeRange",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "2": {
+          "cost_per_second": 14.839200505,
+          "cpu_core_seconds_per_second": 0.01,
+          "detail": "build Kmv into 10000 states: 600000000 rows x depth 1; x 0.0167/s; holds 328080000 bytes for 7080.0 ms",
+          "multiplier": 1,
+          "operator": "SummaryAgg",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "3": {
+          "cost_per_second": 0.000166666666667,
+          "cpu_core_seconds_per_second": 1.66666666667e-7,
+          "detail": "estimate 10000 groups x 1; x 0.0167/s",
+          "multiplier": 1,
+          "operator": "SummaryEstimate",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "4": {
+          "cost_per_second": 0.000167020668167,
+          "cpu_core_seconds_per_second": 1.66666666667e-7,
+          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 24 bytes for 7080.0 ms",
+          "multiplier": 1,
+          "operator": "Project",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "5": {
+          "cost_per_second": 0.000167020668167,
+          "cpu_core_seconds_per_second": 1.66666666667e-7,
+          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 24 bytes for 7080.0 ms",
+          "multiplier": 1,
+          "operator": "Project",
+          "price_source": "analytical",
+          "timing": "query_time"
+        }
+      },
+      "source": "analytical-cost-v2 (illustrative statistics)",
+      "usage": {
+        "average_memory_bytes": 38713630.4721,
+        "cpu_ops_per_second": 30000500.0,
+        "disk_bytes": 52800000000,
+        "latency_per_query": [
+          {
+            "compaction_ms": 0.0,
+            "query_ms": 7080.03
+          }
+        ],
+        "peak_cpu_cores": 1,
+        "peak_memory_bytes": 328080224,
+        "scanned_bytes_per_second": 880000000.0
+      }
+    },
+    "dag": {
+      "edges": [
+        {
+          "consumer": 1,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "endpoint",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "status",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "user_id",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "latency",
+                "nullable": false,
+                "table": "http"
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "producer": 0,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 2,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "endpoint",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "status",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "user_id",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "latency",
+                "nullable": false,
+                "table": "http"
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "producer": 1,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 3,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "Kmv",
+                      "params": {
+                        "Kmv": {
+                          "k": 3001,
+                          "relative_error": 0.05
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 2,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 4,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "cardinality",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 3,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 5,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "count(DISTINCT http.user_id)",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 4,
+          "role": "Input",
+          "window": "NotApplicable"
+        }
+      ],
+      "nodes": [
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 0,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "endpoint",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "status",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "user_id",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "latency",
+                "nullable": false,
+                "table": "http"
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": true,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "region",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "service",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "endpoint",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "status",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "user_id",
+                      "nullable": false,
+                      "table": "http"
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "latency",
+                      "nullable": false,
+                      "table": "http"
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "source": {
+                  "Table": {
+                    "table_ref": "http"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 1,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "endpoint",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "status",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "user_id",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "latency",
+                "nullable": false,
+                "table": "http"
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "TimeRange": {
+                "child": 0,
+                "kind": "range",
+                "range": {
+                  "nanos": 0,
+                  "secs": 300
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 2,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "Kmv",
+                      "params": {
+                        "Kmv": {
+                          "k": 3001,
+                          "relative_error": 0.05
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryAgg": {
+                "child": 1,
+                "family": {
+                  "Sketch": [
+                    {
+                      "algorithm": "Kmv",
+                      "params": {
+                        "Kmv": {
+                          "k": 3001,
+                          "relative_error": 0.05
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "filter": null,
+                "grouping": "PerSubpopulationInstance",
+                "input": {
+                  "item": null,
+                  "weight": {
+                    "Column": {
+                      "Qualified": {
+                        "name": "user_id",
+                        "table": "http"
+                      }
+                    }
+                  },
+                  "weight_domain": {
+                    "kind": "unknown_or_signed"
+                  }
+                },
+                "reduction": {
+                  "Reduce": [
+                    2
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "algorithm": "Kmv",
+                "contract": "kmv_exact_below_k_chernoff_v1",
+                "kind": "sketch_evaluation",
+                "params": {
+                  "Kmv": {
+                    "k": 3001,
+                    "relative_error": 0.05
+                  }
+                },
+                "query": "Cardinality"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "relative",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "constant",
+                "value": 0.05
+              },
+              "failure_probability": {
+                "op": "constant",
+                "value": 0.0499800317461
+              }
+            }
+          },
+          "id": 3,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "cardinality",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryEstimate": {
+                "query": "Cardinality",
+                "summary_input": 2
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "algorithm": "Kmv",
+                "contract": "kmv_exact_below_k_chernoff_v1",
+                "kind": "sketch_evaluation",
+                "params": {
+                  "Kmv": {
+                    "k": 3001,
+                    "relative_error": 0.05
+                  }
+                },
+                "query": "Cardinality"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "relative",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "constant",
+                "value": 0.05
+              },
+              "failure_probability": {
+                "op": "constant",
+                "value": 0.0499800317461
+              }
+            }
+          },
+          "id": 4,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": "http"
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "count(DISTINCT http.user_id)",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Project": {
+                "child": 3,
+                "cols": [
+                  {
+                    "alias": "service",
+                    "expr": {
+                      "Column": 0
+                    }
+                  },
+                  {
+                    "alias": "count(DISTINCT http.user_id)",
+                    "expr": {
+                      "Column": 1
+                    }
+                  }
+                ],
+                "qualifier": null
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "algorithm": "Kmv",
+                "contract": "kmv_exact_below_k_chernoff_v1",
+                "kind": "sketch_evaluation",
+                "params": {
+                  "Kmv": {
+                    "k": 3001,
+                    "relative_error": 0.05
+                  }
+                },
+                "query": "Cardinality"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "relative",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "constant",
+                "value": 0.05
+              },
+              "failure_probability": {
+                "op": "constant",
+                "value": 0.0499800317461
+              }
+            }
+          },
+          "id": 5,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "service",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "int64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Project": {
+                "child": 4,
+                "cols": [
+                  {
+                    "alias": null,
+                    "expr": {
+                      "Column": 0
+                    }
+                  },
+                  {
+                    "alias": "value",
+                    "expr": {
+                      "Column": 1
+                    }
+                  }
+                ],
+                "qualifier": null
+              }
+            }
+          }
+        }
+      ],
+      "roots": [
+        5
+      ],
+      "scalar_roots": []
+    },
+    "display_name": "Q1 Kmv"
+  }
+}

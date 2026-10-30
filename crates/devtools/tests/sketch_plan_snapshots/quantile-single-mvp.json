@@ -1,0 +1,1900 @@
+{
+  "accuracy_guarantees": "enforced",
+  "materialized_views": [
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -10000
+              },
+              {
+                "included": 0
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 0,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 0,
+      "node_id": 2,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -20000
+              },
+              {
+                "included": -10000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 10000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 1,
+      "node_id": 5,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -30000
+              },
+              {
+                "included": -20000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 20000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 2,
+      "node_id": 8,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -40000
+              },
+              {
+                "included": -30000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 30000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 3,
+      "node_id": 11,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -50000
+              },
+              {
+                "included": -40000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 40000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 4,
+      "node_id": 14,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -60000
+              },
+              {
+                "included": -50000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 50000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 5,
+      "node_id": 17,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -70000
+              },
+              {
+                "included": -60000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 60000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 6,
+      "node_id": 20,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -80000
+              },
+              {
+                "included": -70000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 70000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 7,
+      "node_id": 23,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -90000
+              },
+              {
+                "included": -80000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 80000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 8,
+      "node_id": 26,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -100000
+              },
+              {
+                "included": -90000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 90000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 9,
+      "node_id": 29,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -110000
+              },
+              {
+                "included": -100000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 100000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 10,
+      "node_id": 32,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -120000
+              },
+              {
+                "included": -110000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 110000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 11,
+      "node_id": 35,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -130000
+              },
+              {
+                "included": -120000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 120000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 12,
+      "node_id": 38,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -140000
+              },
+              {
+                "included": -130000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 130000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 13,
+      "node_id": 41,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -150000
+              },
+              {
+                "included": -140000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 140000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 14,
+      "node_id": 44,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -160000
+              },
+              {
+                "included": -150000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 150000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 15,
+      "node_id": 47,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -170000
+              },
+              {
+                "included": -160000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 160000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 16,
+      "node_id": 50,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -180000
+              },
+              {
+                "included": -170000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 170000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 17,
+      "node_id": 53,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -190000
+              },
+              {
+                "included": -180000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 180000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 18,
+      "node_id": 56,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -200000
+              },
+              {
+                "included": -190000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 190000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 19,
+      "node_id": 59,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -210000
+              },
+              {
+                "included": -200000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 200000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 20,
+      "node_id": 62,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -220000
+              },
+              {
+                "included": -210000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 210000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 21,
+      "node_id": 65,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -230000
+              },
+              {
+                "included": -220000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 220000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 22,
+      "node_id": 68,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -240000
+              },
+              {
+                "included": -230000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 230000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 23,
+      "node_id": 71,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -250000
+              },
+              {
+                "included": -240000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 240000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 24,
+      "node_id": 74,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -260000
+              },
+              {
+                "included": -250000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 250000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 25,
+      "node_id": 77,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -270000
+              },
+              {
+                "included": -260000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 260000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 26,
+      "node_id": 80,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -280000
+              },
+              {
+                "included": -270000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 270000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 27,
+      "node_id": 83,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -290000
+              },
+              {
+                "included": -280000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 280000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 28,
+      "node_id": 86,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    },
+    {
+      "coverage": {
+        "definition_id": "c71f714cc266c54fc993b110840fdf3d",
+        "selection": [
+          {
+            "columns": [],
+            "relative_time": [
+              {
+                "excluded": -300000
+              },
+              {
+                "included": -290000
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [],
+        "raw_data_windows": [
+          {
+            "end_offset_ms": 290000,
+            "source": {
+              "TimeSeries": {
+                "metric": "data"
+              }
+            },
+            "width_ms": 10000
+          }
+        ]
+      },
+      "installed_count": 30,
+      "installed_position": 29,
+      "node_id": 89,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000,
+      "stage2_node_id": 1
+    }
+  ],
+  "pane_retention_ms": {
+    "1": 300000
+  },
+  "proven_optimal": true,
+  "queries": [
+    "quantile_over_time(0.99, data[5m])"
+  ],
+  "search_status": "optimal",
+  "selected": {
+    "accepted": [
+      {
+        "accepted_metric": "rank",
+        "accepted_regardless_of_guarantee": false,
+        "guarantee_check_rejection": null,
+        "sketches": [
+          "Kll"
+        ],
+        "summary": "metric not set; accepted rank (Kll)",
+        "target_metric": null
+      }
+    ],
+    "cost": {
+      "cost_per_second": 6.37724245448e-7,
+      "cost_unit": "cost_per_second",
+      "cpu_core_seconds_per_second": 0.000652,
+      "per_node": {
+        "0": {
+          "cost_per_second": 4.72248e-9,
+          "cpu_core_seconds_per_second": 0.00042,
+          "detail": "scan 100000 samples; x 1.0000/s",
+          "multiplier": 1,
+          "operator": "Scan",
+          "price_source": "analytical",
+          "timing": "ingestion_time"
+        },
+        "1": {
+          "cost_per_second": 6.32641306719e-7,
+          "cpu_core_seconds_per_second": 0.0002,
+          "detail": "build Kll in 30 panes of 10000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 548080000 bytes",
+          "multiplier": 1,
+          "operator": "PaneChain",
+          "price_source": "analytical",
+          "timing": "ingestion_time"
+        },
+        "2": {
+          "cost_per_second": 3.37970727749e-10,
+          "cpu_core_seconds_per_second": 0.00003,
+          "detail": "merge 300000 states into 10000; x 0.1000/s; holds 17680000 bytes for 0.3 ms",
+          "multiplier": 1,
+          "operator": "SummaryMerge",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "3": {
+          "cost_per_second": 1.1244e-11,
+          "cpu_core_seconds_per_second": 1e-6,
+          "detail": "estimate 10000 groups x 1; x 0.1000/s",
+          "multiplier": 1,
+          "operator": "SummaryEstimate",
+          "price_source": "analytical",
+          "timing": "query_time"
+        },
+        "4": {
+          "cost_per_second": 1.12440011778e-11,
+          "cpu_core_seconds_per_second": 1e-6,
+          "detail": "operator: pass 10000 rows; x 0.1000/s; holds 32 bytes for 0.3 ms",
+          "multiplier": 1,
+          "operator": "Project",
+          "price_source": "analytical",
+          "timing": "query_time"
+        }
+      },
+      "source": "analytical-cost-v2 (illustrative statistics)",
+      "usage": {
+        "average_memory_bytes": 548080565.761,
+        "cpu_ops_per_second": 332000.0,
+        "disk_bytes": 0,
+        "latency_per_query": [
+          {
+            "compaction_ms": 0.0,
+            "query_ms": 0.32
+          }
+        ],
+        "peak_cpu_cores": 2,
+        "peak_memory_bytes": 565760064,
+        "scanned_bytes_per_second": 3200000.0
+      }
+    },
+    "dag": {
+      "edges": [
+        {
+          "consumer": 1,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "ingestion_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "producer": 0,
+          "role": "Input",
+          "window": "RequiresAlignedPanePhaseOrExactBoundaryResidual"
+        },
+        {
+          "consumer": 2,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "ingestion_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "Kll",
+                      "params": {
+                        "Kll": {
+                          "k": 52
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "producer": 1,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 3,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "Kll",
+                      "params": {
+                        "Kll": {
+                          "k": 52
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "producer": 2,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 4,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "quantile",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "producer": 3,
+          "role": "Input",
+          "window": "NotApplicable"
+        }
+      ],
+      "nodes": [
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "kind": "exact",
+                "reason": "exact over exact inputs"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "absolute",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "zero"
+              },
+              "failure_probability": {
+                "op": "zero"
+              }
+            }
+          },
+          "id": 0,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "ingestion_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": true,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "$promql_series_identity",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": [
+                    [
+                      2,
+                      0
+                    ]
+                  ]
+                },
+                "source": {
+                  "TimeSeries": {
+                    "metric": "data"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 1,
+          "materialization": {
+            "MatAtIngestion": "Memory"
+          },
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "Kll",
+                      "params": {
+                        "Kll": {
+                          "k": 52
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "ingestion_time"
+          },
+          "payload": {
+            "ASAP": {
+              "PaneChain": {
+                "child": 0,
+                "family": {
+                  "Sketch": [
+                    {
+                      "algorithm": "Kll",
+                      "params": {
+                        "Kll": {
+                          "k": 52
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "filter": null,
+                "grouping": "PerSubpopulationInstance",
+                "input": {
+                  "item": null,
+                  "weight": {
+                    "Column": "SampleValue"
+                  },
+                  "weight_domain": {
+                    "kind": "unknown_or_signed"
+                  }
+                },
+                "pane_count": 30,
+                "pane_width_ms": 10000,
+                "reduction": "PerEntity"
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 2,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Sketch": [
+                    {
+                      "algorithm": "Kll",
+                      "params": {
+                        "Kll": {
+                          "k": 52
+                        }
+                      }
+                    },
+                    "PerSubpopulationInstance"
+                  ]
+                },
+                "name": "state",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryMerge": {
+                "children": [
+                  1
+                ]
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "algorithm": "Kll",
+                "contract": "apache_datasketches_kll_empirical_99_a9b42755072b",
+                "kind": "sketch_evaluation",
+                "params": {
+                  "Kll": {
+                    "k": 52
+                  }
+                },
+                "query": "Quantile { q: 0.99 }"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "rank",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "constant",
+                "value": 0.0492608422138
+              },
+              "failure_probability": {
+                "op": "constant",
+                "value": 0.01
+              }
+            }
+          },
+          "id": 3,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "quantile",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryEstimate": {
+                "query": {
+                  "Quantile": {
+                    "q": 0.99
+                  }
+                },
+                "summary_input": 2
+              }
+            }
+          }
+        },
+        {
+          "guarantee": {
+            "provenance": [
+              {
+                "algorithm": "Kll",
+                "contract": "apache_datasketches_kll_empirical_99_a9b42755072b",
+                "kind": "sketch_evaluation",
+                "params": {
+                  "Kll": {
+                    "k": 52
+                  }
+                },
+                "query": "Quantile { q: 0.99 }"
+              }
+            ],
+            "spec": {
+              "accuracy_metric": "rank",
+              "accuracy_scope": "per_value",
+              "error": {
+                "op": "constant",
+                "value": 0.0492608422138
+              },
+              "failure_probability": {
+                "op": "constant",
+                "value": 0.01
+              }
+            }
+          },
+          "id": 4,
+          "materialization": "NotMaterialized",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false,
+                "table": null
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false,
+                "table": null
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Project": {
+                "child": 3,
+                "cols": [
+                  {
+                    "alias": "ts",
+                    "expr": {
+                      "Column": 0
+                    }
+                  },
+                  {
+                    "alias": "value",
+                    "expr": {
+                      "Column": 1
+                    }
+                  },
+                  {
+                    "alias": "$promql_series_identity",
+                    "expr": {
+                      "Column": 2
+                    }
+                  }
+                ],
+                "qualifier": null
+              }
+            }
+          }
+        }
+      ],
+      "roots": [
+        4
+      ],
+      "scalar_roots": []
+    },
+    "display_name": "Q1 Kll ×30 panes · ingestion time: Kll for Q1, 30 × 10s panes"
+  }
+}

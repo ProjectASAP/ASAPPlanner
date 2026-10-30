@@ -20,11 +20,17 @@
 //! to 12 significant digits. A run that the time limit stopped fails instead
 //! of being recorded, and a query with a `skip_reason` in the manifest is
 //! skipped.
+//!
+//! The same binary holds the sketch plan snapshots (`sketch_plan_snapshots.rs`),
+//! which reuse these helpers on multi-query workloads with accuracy targets.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{json, Map, Value};
+
+#[path = "sketch_plan_snapshots.rs"]
+mod sketch_plan_snapshots;
 
 /// Per query. The slowest kept queries take about 60 s on one core, so this
 /// leaves room for a slower CI runner while still failing a runaway search.
@@ -51,12 +57,19 @@ fn workload(corpus: &Value, query: &str) -> Value {
 /// (a planner crash) on failure.
 fn plan(workload: &Value, args: &[String], scratch: &Path) -> Value {
     let input = scratch.join("workload.json");
-    let output = scratch.join("document.json");
     std::fs::write(&input, workload.to_string()).unwrap();
+    let mut input_args = vec!["--workload".to_owned(), input.display().to_string()];
+    input_args.extend_from_slice(args);
+    stage_pipeline(&input_args, scratch)
+}
+
+/// Runs `stage_pipeline` (without the memo section, under the
+/// [`TIME_LIMIT_S`] budget) with `args`, which name its input; panics (a
+/// planner crash) on failure.
+fn stage_pipeline(args: &[String], scratch: &Path) -> Value {
+    let output = scratch.join("document.json");
     let mut command = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"));
     command
-        .arg("--workload")
-        .arg(&input)
         .args(["--milp-time-limit-s", TIME_LIMIT_S, "--no-memo"])
         .args(args)
         .arg("--out")
@@ -102,15 +115,22 @@ fn rounded(value: &Value) -> Value {
     }
 }
 
-/// The stable part of a `stage_pipeline` document: the selected plan and
-/// its cost, or why there is none. See the module docs.
+/// The stable part of a one-query `stage_pipeline` document: the query, the
+/// selected plan and its cost, or why there is none. See the module docs.
 fn snapshot_of(document: &Value) -> Value {
-    let stage3 = &document["stage3_plan_selection"];
-    let mut snapshot = Map::new();
+    let mut snapshot = plan_snapshot(document);
     snapshot.insert(
         "query".into(),
         document["workload"]["queries"][0]["text"].clone(),
     );
+    rounded(&Value::Object(snapshot))
+}
+
+/// The selected plan and its cost, or why there is none, unrounded: the
+/// part of a snapshot the sketch plan snapshots share.
+fn plan_snapshot(document: &Value) -> Map<String, Value> {
+    let stage3 = &document["stage3_plan_selection"];
+    let mut snapshot = Map::new();
     snapshot.insert(
         "accuracy_guarantees".into(),
         document["accuracy_guarantees"].clone(),
@@ -167,7 +187,7 @@ fn snapshot_of(document: &Value) -> Value {
             snapshot.insert("search_rejected".into(), causes("search_rejected"));
         }
     }
-    rounded(&Value::Object(snapshot))
+    snapshot
 }
 
 /// The first line where `expected` and `actual` differ, for the failure message.
@@ -190,6 +210,34 @@ fn first_difference(expected: &str, actual: &str) -> String {
     String::new()
 }
 
+/// The first JSON path where `expected` and `actual` differ, with both
+/// values (shortened), for the failure message; `None` when they are equal.
+fn first_differing_path(expected: &Value, actual: &Value) -> Option<String> {
+    fn short(value: Option<&Value>) -> String {
+        let text = value.map_or("<absent>".to_owned(), Value::to_string);
+        match text.char_indices().nth(200) {
+            Some((end, _)) => format!("{}...", &text[..end]),
+            None => text,
+        }
+    }
+    fn walk(path: String, expected: Option<&Value>, actual: Option<&Value>) -> Option<String> {
+        match (expected, actual) {
+            (Some(Value::Object(e)), Some(Value::Object(a))) => {
+                let mut keys: Vec<&String> = e.keys().chain(a.keys()).collect();
+                keys.sort();
+                keys.dedup();
+                keys.into_iter()
+                    .find_map(|key| walk(format!("{path}.{key}"), e.get(key), a.get(key)))
+            }
+            (Some(Value::Array(e)), Some(Value::Array(a))) => (0..e.len().max(a.len()))
+                .find_map(|i| walk(format!("{path}[{i}]"), e.get(i), a.get(i))),
+            (e, a) if e == a => None,
+            (e, a) => Some(format!("{path}:\n  - {}\n  + {}", short(e), short(a))),
+        }
+    }
+    walk(String::new(), Some(expected), Some(actual))
+}
+
 /// Every corpus query's plan matches its committed snapshot.
 #[test]
 #[ignore = "runs the release planner over the corpora: see the module docs"]
@@ -197,8 +245,9 @@ fn corpus_plans_match_snapshots() {
     let update = std::env::var_os("UPDATE_SNAPSHOTS").is_some();
     // Regenerated snapshots of failing queries, with their full
     // `stage_pipeline` documents for the DAG viewer, for CI to upload.
+    // Each corpus clears only its own directory: the sketch plan test writes
+    // beside them.
     let regenerated = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("corpus_snapshots");
-    let _ = std::fs::remove_dir_all(&regenerated);
     let scratch = std::env::temp_dir().join(format!("corpus_snapshots_{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
     let mut failures = Vec::new();
@@ -210,6 +259,7 @@ fn corpus_plans_match_snapshots() {
     corpora.sort();
     for dir in corpora {
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let _ = std::fs::remove_dir_all(regenerated.join(&name));
         let corpus: Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("corpus.json")).unwrap())
                 .unwrap();
@@ -366,6 +416,21 @@ fn time_limit_detection() {
     assert!(!hit_time_limit(
         &json!({"stage3_plan_selection": {"error": "x"}})
     ));
+}
+
+/// The failure message names the first differing JSON path.
+#[test]
+fn first_differing_path_names_the_path() {
+    let expected = json!({"a": {"b": [1, 2]}, "c": 1});
+    assert_eq!(first_differing_path(&expected, &expected), None);
+    assert_eq!(
+        first_differing_path(&expected, &json!({"a": {"b": [1, 3]}, "c": 2})).unwrap(),
+        ".a.b[1]:\n  - 2\n  + 3"
+    );
+    assert_eq!(
+        first_differing_path(&expected, &json!({"a": {"b": [1]}, "c": 1})).unwrap(),
+        ".a.b[1]:\n  - 2\n  + <absent>"
+    );
 }
 
 /// The failure message names the first differing line.
