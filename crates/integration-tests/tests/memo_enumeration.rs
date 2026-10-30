@@ -412,7 +412,7 @@ fn choices_whose_candidates_read_each_other_are_left_out() {
         .expect("a pair of groups whose candidates read each other");
     assert!(matches!(
         build_logical_asap_dags_from_chosen_candidates(memo, &mutual.into()),
-        Err(asap_logical_asap_optimization::pass2::memo::enumeration::ErrorBuildingLogicalAsapDagsFromChosenCandidates::Cycle { .. })
+        Err(asap_logical_asap_optimization::pass2::memo::enumeration::ErrorBuildingLogicalASAPDagsFromChosenCandidates::Cycle { .. })
     ));
     let enumeration = enumerate(memo, 2_000);
     assert!(!enumeration.all_chosen_candidates.is_empty());
