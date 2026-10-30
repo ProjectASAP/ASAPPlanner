@@ -19,3 +19,24 @@ The [documentation map](docs/README.md) gives each audience a complete reading p
     cargo test --workspace
 
 No external setup is required for the standard build and test suite.
+
+### Optional: share dependency builds across worktrees
+
+Each Git worktree has its own `target/`, so a new worktree rebuilds every
+dependency (DataFusion, Arrow, HiGHS, ...). [kache](https://github.com/kunobi-ninja/kache)
+caches compiler outputs on your machine and restores them in other worktrees:
+
+    cargo install kache --locked
+    kache init
+
+`kache init` makes kache Cargo's compiler wrapper and starts its background
+daemon. Its other offers (shell shims, a login service) are optional. To use
+kache without `kache init`, set `rustc-wrapper = "kache"` under `[build]` in
+`~/.cargo/config.toml`.
+
+- `kache stats --last-build` shows the hit rate; `kache explain <crate>` says why
+  a crate missed.
+- `KACHE_DISABLED=1 cargo build` bypasses the cache for one build.
+- The HiGHS C++ build (`highs-sys`) still reruns in each new worktree, because
+  its output records its absolute build path.
+- The cache needs about 14 GiB per toolchain and profile.
