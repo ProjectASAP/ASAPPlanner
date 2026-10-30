@@ -253,7 +253,7 @@ pub(crate) fn solve_joint_price_proposal_with_metrics(
             projection.origins.push(PhysicalCandidateId(id));
             nodes.push(option.profile.clone());
             expanded.candidates.push(PhysicalCandidateWithCost {
-                producer_requirements: Vec::new(),
+                supplier_candidates_per_input: Vec::new(),
                 ..graph.candidates[id].clone()
             });
         }
@@ -265,7 +265,7 @@ pub(crate) fn solve_joint_price_proposal_with_metrics(
                 "time budget exhausted expanding price options".into(),
             ));
         }
-        let required = &graph.candidates[id].producer_requirements;
+        let required = &graph.candidates[id].supplier_candidates_per_input;
         for (index, option) in options.iter().enumerate() {
             let consumer = projection.options[id][index];
             if let Some(span) = option.required_range_span_ms {
@@ -281,10 +281,7 @@ pub(crate) fn solve_joint_price_proposal_with_metrics(
                 }
                 let mut mapped = Vec::new();
                 for (position, binding) in tuple.iter().enumerate() {
-                    if !required[position]
-                        .compatible_producers
-                        .contains(&binding.producer)
-                    {
+                    if !required[position].candidates.contains(&binding.producer) {
                         return Err(invalid("price tuple references incompatible supplier"));
                     }
                     mapped.push(
@@ -309,18 +306,18 @@ pub(crate) fn solve_joint_price_proposal_with_metrics(
                     }
                 }
                 expanded.candidates[consumer.0]
-                    .producer_requirements
-                    .push(ProducerRequirement {
-                        compatible_producers: suppliers.into(),
+                    .supplier_candidates_per_input
+                    .push(InputSupplierCandidates {
+                        candidates: suppliers.into(),
                     });
             }
             // Unary choices and single tuples are already exact under the
             // existing one-producer-per-input constraints; no extra binaries.
             let cartesian_size = expanded.candidates[consumer.0]
-                .producer_requirements
+                .supplier_candidates_per_input
                 .iter()
                 .try_fold(1usize, |size, input| {
-                    size.checked_mul(input.compatible_producers.len())
+                    size.checked_mul(input.candidates.len())
                 });
             if required.len() > 1 && tuples.len() > 1 && cartesian_size != Some(tuples.len()) {
                 projection.input_tuples.push((consumer, tuples));
@@ -328,9 +325,9 @@ pub(crate) fn solve_joint_price_proposal_with_metrics(
         }
     }
     for root in &graph.query_roots {
-        expanded.query_roots.push(QueryRootCandidates {
-            compatible_candidates: root
-                .compatible_candidates
+        expanded.query_roots.push(QueryOutputCandidates {
+            candidates: root
+                .candidates
                 .iter()
                 .flat_map(|id| projection.options[id.0].iter().copied())
                 .collect(),
@@ -339,7 +336,7 @@ pub(crate) fn solve_joint_price_proposal_with_metrics(
     if expanded
         .query_roots
         .iter()
-        .any(|root| root.compatible_candidates.is_empty())
+        .any(|root| root.candidates.is_empty())
     {
         return Ok(None);
     }
@@ -471,11 +468,11 @@ mod tests {
     fn candidate(inputs: &[usize]) -> PhysicalCandidateWithCost {
         PhysicalCandidateWithCost {
             local_cost: 0.0,
-            producer_requirements: if inputs.is_empty() {
+            supplier_candidates_per_input: if inputs.is_empty() {
                 vec![]
             } else {
-                vec![ProducerRequirement {
-                    compatible_producers: inputs
+                vec![InputSupplierCandidates {
+                    candidates: inputs
                         .iter()
                         .map(|id| PhysicalCandidateId(*id))
                         .collect::<Vec<_>>()
@@ -517,11 +514,11 @@ mod tests {
                 candidate(&[2]),
             ],
             query_roots: vec![
-                QueryRootCandidates {
-                    compatible_candidates: vec![PhysicalCandidateId(3)],
+                QueryOutputCandidates {
+                    candidates: vec![PhysicalCandidateId(3)],
                 },
-                QueryRootCandidates {
-                    compatible_candidates: vec![PhysicalCandidateId(4)],
+                QueryOutputCandidates {
+                    candidates: vec![PhysicalCandidateId(4)],
                 },
             ],
             ..Default::default()
@@ -651,12 +648,12 @@ mod tests {
     fn correlated_inputs_cannot_form_an_unpriced_cartesian_combination() {
         let mut consumer = candidate(&[0, 1]);
         consumer
-            .producer_requirements
-            .push(consumer.producer_requirements[0].clone());
+            .supplier_candidates_per_input
+            .push(consumer.supplier_candidates_per_input[0].clone());
         let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![candidate(&[]), candidate(&[]), consumer],
-            query_roots: vec![QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(2)],
+            query_roots: vec![QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(2)],
             }],
             ..Default::default()
         };

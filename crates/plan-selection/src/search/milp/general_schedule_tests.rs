@@ -30,10 +30,10 @@ fn fixed(interval: u32, evaluations: u64) -> QueryWorkloadEntry {
 fn node(input: Option<usize>) -> PhysicalCandidateWithCost {
     PhysicalCandidateWithCost {
         local_cost: 0.0,
-        producer_requirements: input
+        supplier_candidates_per_input: input
             .into_iter()
-            .map(|input| ProducerRequirement {
-                compatible_producers: vec![PhysicalCandidateId(input)].into(),
+            .map(|input| InputSupplierCandidates {
+                candidates: vec![PhysicalCandidateId(input)].into(),
             })
             .collect(),
     }
@@ -54,8 +54,8 @@ fn check_cost(
     let graph = DagOfPhysicalCandidatesWithCosts {
         candidates,
         query_roots: (0..entries.len())
-            .map(|q| QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(q + 2)],
+            .map(|q| QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(q + 2)],
             })
             .collect(),
         ..Default::default()
@@ -182,11 +182,11 @@ fn zero_rate_readers_preserve_materialized_and_unmaterialized_lifetimes() {
         let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![node(None), node(Some(0)), node(Some(1)), node(Some(1))],
             query_roots: vec![
-                QueryRootCandidates {
-                    compatible_candidates: vec![PhysicalCandidateId(2)],
+                QueryOutputCandidates {
+                    candidates: vec![PhysicalCandidateId(2)],
                 },
-                QueryRootCandidates {
-                    compatible_candidates: vec![PhysicalCandidateId(3)],
+                QueryOutputCandidates {
+                    candidates: vec![PhysicalCandidateId(3)],
                 },
             ],
             ..Default::default()

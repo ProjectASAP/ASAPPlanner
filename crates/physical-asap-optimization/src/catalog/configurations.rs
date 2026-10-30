@@ -18,8 +18,8 @@ use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 use super::inventory::CandidateInventory;
 use asap_types::ir::QueryRoot;
 use asap_types::stages::{
-    MemoGroupId, OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates,
-    PhysicalCandidate, PhysicalCandidateId, ReaderConstraint,
+    output_references, MemoGroupId, OperatorNodeOfCandidateForMemoGroupId,
+    PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, ReaderConstraint,
 };
 
 /// [`PhysicalCandidate::may_keep_across_evaluations_per_sole_reader_query`] for `node` configured
@@ -28,7 +28,7 @@ use asap_types::stages::{
 /// allows keeping it across evaluations. Empty unless `node` is a pane chain,
 /// `materialization` is `MatAtQueryKeptAcrossEvaluations(Memory)` and the
 /// deployment keeps query-time results.
-pub fn may_keep_with_sole_reader(
+pub fn may_keep_across_evaluations_per_sole_reader_query(
     node: &OperatorNode,
     materialization: Materialization,
     entries: &[QueryWorkloadEntry],
@@ -65,22 +65,6 @@ pub enum ConfigurationError {
     AssignedExecution { candidate: usize },
 }
 
-/// The output reference queries of `query_roots`: for each group
-/// reference, in order (a scalar query's in `map_operator_refs` order), the
-/// query whose root it is.
-pub fn output_reference_queries(query_roots: &[QueryRoot<MemoGroupId>]) -> Vec<usize> {
-    let mut queries = Vec::new();
-    for (query, root) in query_roots.iter().enumerate() {
-        match root {
-            QueryRoot::Operator(_) => queries.push(query),
-            QueryRoot::Scalar(expression) => {
-                expression.map_operator_refs(&mut |_| queries.push(query));
-            }
-        }
-    }
-    queries
-}
-
 /// Each operator node of `source` with every timing and materialization
 /// Stage 2 allows, and its execution-scope copies. `query_roots` are the
 /// memo's; their group references are `source`'s output references.
@@ -96,7 +80,10 @@ pub fn enumerate_candidate_configurations_before(
     super::check_deadline(deadline)?;
     let invalid = |message: &str| ConfigurationError::InvalidInventory(message.into());
     source.validate().map_err(|error| invalid(&error))?;
-    let output_queries = output_reference_queries(query_roots);
+    let output_queries: Vec<usize> = output_references(query_roots)
+        .into_iter()
+        .map(|(query, _)| query)
+        .collect();
     let source_count = source.operator_nodes_of_candidates_for_memo_groups.len();
     if output_queries.len() != source.query_output_nodes.len()
         || output_queries.iter().any(|&query| query >= entries.len())
@@ -230,13 +217,14 @@ pub fn enumerate_candidate_configurations_before(
                 supplier_candidates_per_input: Vec::new(),
                 may_produce_query_output: may_produce_query_output[source_id]
                     && timing == ExecutionTiming::QueryTime,
-                may_keep_across_evaluations_per_sole_reader_query: may_keep_with_sole_reader(
-                    node,
-                    materialization,
-                    entries,
-                    data,
-                    query_time_results_retained,
-                ),
+                may_keep_across_evaluations_per_sole_reader_query:
+                    may_keep_across_evaluations_per_sole_reader_query(
+                        node,
+                        materialization,
+                        entries,
+                        data,
+                        query_time_results_retained,
+                    ),
             });
             if materialization == Materialization::MatAtQuery(Medium::Memory) {
                 if !summary {

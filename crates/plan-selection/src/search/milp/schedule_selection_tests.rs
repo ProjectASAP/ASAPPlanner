@@ -45,17 +45,17 @@ pub(super) fn rate_schedule(rates: &[f64]) -> QueryScheduleRates {
 fn node(input: Option<usize>) -> PhysicalCandidateWithCost {
     PhysicalCandidateWithCost {
         local_cost: 0.0,
-        producer_requirements: input
+        supplier_candidates_per_input: input
             .into_iter()
-            .map(|id| ProducerRequirement {
-                compatible_producers: vec![PhysicalCandidateId(id)].into(),
+            .map(|id| InputSupplierCandidates {
+                candidates: vec![PhysicalCandidateId(id)].into(),
             })
             .collect(),
     }
 }
-fn root(id: usize) -> QueryRootCandidates {
-    QueryRootCandidates {
-        compatible_candidates: vec![PhysicalCandidateId(id)],
+fn root(id: usize) -> QueryOutputCandidates {
+    QueryOutputCandidates {
+        candidates: vec![PhysicalCandidateId(id)],
     }
 }
 
@@ -200,7 +200,7 @@ fn heterogeneous_selection_matches_exhaustive_reader_assignments() {
         ..Default::default()
     };
     for id in [2, 3] {
-        graph.candidates[id].producer_requirements[0].compatible_producers =
+        graph.candidates[id].supplier_candidates_per_input[0].candidates =
             vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
     }
     let profile = DirectCostProfile {

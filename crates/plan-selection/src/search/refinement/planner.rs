@@ -179,7 +179,7 @@ pub(in crate::search) fn optimize_configured_candidates(
             for (id, candidate) in graph.candidates.iter_mut().enumerate() {
                 candidate.local_cost = weights[id];
                 if profile.candidates[id].is_empty() {
-                    candidate.producer_requirements.clear();
+                    candidate.supplier_candidates_per_input.clear();
                     graph
                         .reader_constraints
                         .push(ReaderConstraint::AllowedOutputs {
@@ -187,15 +187,15 @@ pub(in crate::search) fn optimize_configured_candidates(
                             outputs: Vec::new(),
                         });
                 } else {
-                    for input in &mut candidate.producer_requirements {
+                    for input in &mut candidate.supplier_candidates_per_input {
                         input
-                            .compatible_producers
+                            .candidates
                             .retain(|producer| !profile.candidates[producer.0].is_empty());
                     }
                 }
             }
             for root in &mut graph.query_roots {
-                root.compatible_candidates
+                root.candidates
                     .retain(|id| !profile.candidates[id.0].is_empty());
             }
             graph
@@ -204,7 +204,7 @@ pub(in crate::search) fn optimize_configured_candidates(
             graph
                 .query_roots
                 .iter()
-                .all(|root| !root.compatible_candidates.is_empty())
+                .all(|root| !root.candidates.is_empty())
         });
     let mut direct_refs: Vec<_> = direct
         .iter()
@@ -560,7 +560,7 @@ fn direct_cost_seed(
         if !supported[id] {
             extracted.profile.nodes[id] = Default::default();
             candidate.local_cost = 0.0;
-            candidate.producer_requirements.clear();
+            candidate.supplier_candidates_per_input.clear();
             graph
                 .reader_constraints
                 .push(ReaderConstraint::AllowedOutputs {
@@ -568,17 +568,16 @@ fn direct_cost_seed(
                     outputs: Vec::new(),
                 });
         } else {
-            for input in &mut candidate.producer_requirements {
-                input.compatible_producers.retain(|supplier| {
+            for input in &mut candidate.supplier_candidates_per_input {
+                input.candidates.retain(|supplier| {
                     supported[supplier.0] && extracted.suppliers[id].contains(supplier)
                 });
             }
         }
     }
     for root in &mut graph.query_roots {
-        root.compatible_candidates
-            .retain(|candidate| supported[candidate.0]);
-        if root.compatible_candidates.is_empty() {
+        root.candidates.retain(|candidate| supported[candidate.0]);
+        if root.candidates.is_empty() {
             return Ok(None);
         }
     }
@@ -650,12 +649,7 @@ fn seed_dds_budgets(
     let mut pending = Vec::new();
     for (root, &query) in graph.query_roots.iter().zip(output_queries) {
         if let Some(budget) = query_budgets[query] {
-            pending.extend(
-                root.compatible_candidates
-                    .iter()
-                    .copied()
-                    .map(|id| (id, budget)),
-            );
+            pending.extend(root.candidates.iter().copied().map(|id| (id, budget)));
         }
     }
     while let Some((id, budget)) = pending.pop() {
@@ -669,9 +663,9 @@ fn seed_dds_budgets(
             budgets[id.0] = budget;
             pending.extend(
                 graph.candidates[id.0]
-                    .producer_requirements
+                    .supplier_candidates_per_input
                     .iter()
-                    .flat_map(|input| input.compatible_producers.iter().copied())
+                    .flat_map(|input| input.candidates.iter().copied())
                     .map(|producer| (producer, budget)),
             );
         }
@@ -723,16 +717,16 @@ fn accuracy_baseline(
                 .accuracy_metric
                 == Some(AccuracyMetric::Rank)
         })
-        .flat_map(|(root, _)| root.compatible_candidates.iter().copied())
+        .flat_map(|(root, _)| root.candidates.iter().copied())
         .collect();
     while let Some(candidate) = pending.pop() {
         if !rank_requested[candidate.0] {
             rank_requested[candidate.0] = true;
             pending.extend(
                 graph.candidates[candidate.0]
-                    .producer_requirements
+                    .supplier_candidates_per_input
                     .iter()
-                    .flat_map(|input| input.compatible_producers.iter().copied()),
+                    .flat_map(|input| input.candidates.iter().copied()),
             );
         }
     }
@@ -750,7 +744,7 @@ fn accuracy_baseline(
                 .is_implementation_root
                 && raw_scan_with_shifts(configured.physical.physical_node(id))
         })
-        .map(|id| configured.physical.group(id))
+        .map(|id| configured.physical.memo_group_of(id))
         .collect();
     // Bound the numerical range; these tiers are intentionally heuristic.
     let preference = (graph.candidates.len() as f64 + 1.0).min(1000.0);
@@ -859,7 +853,7 @@ fn accuracy_baseline(
                         Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
                     );
             let projected_raw_source = raw_source_groups
-                .contains(&configured.physical.group(asap_types::stages::PhysicalCandidateId(id)))
+                .contains(&configured.physical.memo_group_of(asap_types::stages::PhysicalCandidateId(id)))
                 && matches!(
                     node.non_asap(),
                     Some(asap_types::ir::NonASAPOp::Project { .. })
@@ -1440,14 +1434,12 @@ mod tests {
             })
             .collect();
         configured.dag.query_roots[0]
-            .compatible_candidates
+            .candidates
             .retain(|id| has_panes[id.0]);
         configured.dag.query_roots[1]
-            .compatible_candidates
+            .candidates
             .retain(|id| !has_panes[id.0]);
-        assert!(!configured.dag.query_roots[0]
-            .compatible_candidates
-            .is_empty());
+        assert!(!configured.dag.query_roots[0].candidates.is_empty());
         let allowed: Vec<_> = configured
             .nodes_for_tests()
             .iter()
@@ -1458,8 +1450,8 @@ mod tests {
             })
             .collect();
         for candidate in &mut configured.dag.candidates {
-            for input in &mut candidate.producer_requirements {
-                input.compatible_producers.retain(|id| allowed[id.0]);
+            for input in &mut candidate.supplier_candidates_per_input {
+                input.candidates.retain(|id| allowed[id.0]);
             }
         }
         let selected = select_candidates(&configured.dag)
@@ -1485,8 +1477,7 @@ mod tests {
         )
         .unwrap();
         assert!(evaluated.is_some());
-        configured.dag.query_roots[1].compatible_candidates =
-            configured.dag.query_roots[0].compatible_candidates.clone();
+        configured.dag.query_roots[1].candidates = configured.dag.query_roots[0].candidates.clone();
         assert!(
             select_candidates(&configured.dag).unwrap().is_none(),
             "unpredictable reader cannot bind to ingestion-only panes"
@@ -1729,7 +1720,7 @@ mod tests {
     // installation. Projection above a range remains a legal seed candidate.
     #[test]
     fn feasibility_seed_distinguishes_raw_source_and_range_projections() {
-        use crate::search::candidates::dag::ProducerRequirement;
+        use crate::search::candidates::dag::InputSupplierCandidates;
         use asap_types::ir::{NonASAPOp, Operator, ProjectItem, ScalarExpr};
         use asap_types::stages::PhysicalCandidateId;
         let (mut configured, roots, entries, data) = fixture();
@@ -1778,8 +1769,8 @@ mod tests {
             let id = configured.push_root_like_for_tests(
                 template,
                 supplier,
-                vec![ProducerRequirement {
-                    compatible_producers: vec![supplier].into(),
+                vec![InputSupplierCandidates {
+                    candidates: vec![supplier].into(),
                 }],
             );
             projected.push(id);
@@ -1817,7 +1808,7 @@ mod tests {
         assert_eq!(
             configured
                 .physical
-                .implementation_roots(configured.physical.group(source))
+                .implementation_roots(configured.physical.memo_group_of(source))
                 .last(),
             Some(&projected[0]),
             "seed policy does not remove the projected candidate from the inventory"
@@ -2044,11 +2035,11 @@ mod tests {
             .iter()
             .enumerate()
             .filter(|(id, _)| {
-                configured.dag.query_roots.iter().any(|root| {
-                    root.compatible_candidates
-                        .iter()
-                        .any(|candidate| candidate.0 == *id)
-                })
+                configured
+                    .dag
+                    .query_roots
+                    .iter()
+                    .any(|root| root.candidates.iter().any(|candidate| candidate.0 == *id))
             })
             .filter_map(|(id, node)| {
                 node.guarantee

@@ -42,22 +42,22 @@ fn required_reader_reach(
     let mut consumers = vec![Vec::new(); count];
     for (consumer, candidate) in graph.candidates.iter().enumerate() {
         check_deadline()?;
-        for input in &candidate.producer_requirements {
-            for producer in &input.compatible_producers {
+        for input in &candidate.supplier_candidates_per_input {
+            for producer in &input.candidates {
                 consumers[producer.0].push(consumer);
             }
         }
     }
     for (output, root) in graph.query_roots.iter().enumerate() {
-        let mut pending = root.compatible_candidates.clone();
+        let mut pending = root.candidates.clone();
         while let Some(candidate) = pending.pop() {
             check_deadline()?;
             if !std::mem::replace(&mut potential[output][candidate.0], true) {
                 pending.extend(
                     graph.candidates[candidate.0]
-                        .producer_requirements
+                        .supplier_candidates_per_input
                         .iter()
-                        .flat_map(|input| input.compatible_producers.iter().copied()),
+                        .flat_map(|input| input.candidates.iter().copied()),
                 );
             }
         }
@@ -310,7 +310,7 @@ pub(super) fn solve_with_objective(
     if graph
         .query_roots
         .iter()
-        .any(|root| root.compatible_candidates.is_empty())
+        .any(|root| root.candidates.is_empty())
     {
         return Ok(None);
     }
@@ -350,9 +350,9 @@ pub(super) fn solve_with_objective(
 
     for (consumer, candidate) in graph.candidates.iter().enumerate() {
         check_deadline()?;
-        for (requirement, input) in candidate.producer_requirements.iter().enumerate() {
+        for (requirement, input) in candidate.supplier_candidates_per_input.iter().enumerate() {
             let mut producers_selected = Expression::from(0.0);
-            for &producer in &input.compatible_producers {
+            for &producer in &input.candidates {
                 check_deadline()?;
                 let connection_selected = variables.add(initialized(
                     variable().binary(),
@@ -391,7 +391,7 @@ pub(super) fn solve_with_objective(
     }
     for (query_root, root) in graph.query_roots.iter().enumerate() {
         let mut root_selected = Expression::from(0.0);
-        for &candidate in &root.compatible_candidates {
+        for &candidate in &root.candidates {
             let assignment_selected = variables.add(initialized(
                 variable().binary(),
                 warm_start.as_ref().map(|start| {
@@ -1211,7 +1211,7 @@ mod tests {
             .any(|edge| edge.producer == PhysicalCandidateId(1)));
         // Even forcing another unrelated output cannot make the bad input legal.
         let mut changed = graph.clone();
-        changed.query_roots[1].compatible_candidates = vec![PhysicalCandidateId(4)];
+        changed.query_roots[1].candidates = vec![PhysicalCandidateId(4)];
         // Keep observations structurally valid by changing that unrelated binding.
         let mut observation = observations[0].clone();
         observation
@@ -1463,9 +1463,9 @@ mod tests {
                 query_outputs: vec![vec![0], vec![1]],
             });
         assert_eq!(compare_with_oracle(&graph).unwrap().modeled_cost, 6.0);
-        graph.query_roots[1].compatible_candidates = vec![PhysicalCandidateId(3)];
+        graph.query_roots[1].candidates = vec![PhysicalCandidateId(3)];
         assert_eq!(compare_with_oracle(&graph).unwrap().modeled_cost, 3.0);
-        graph.query_roots[0].compatible_candidates = vec![PhysicalCandidateId(0)];
+        graph.query_roots[0].candidates = vec![PhysicalCandidateId(0)];
         let selected = compare_with_oracle(&graph).unwrap();
         assert_eq!(selected.modeled_cost, 2.0);
         let observation = ObservedAssignment {
@@ -1481,14 +1481,10 @@ mod tests {
     fn candidate(cost: f64, inputs: &[&[usize]]) -> PhysicalCandidateWithCost {
         PhysicalCandidateWithCost {
             local_cost: cost,
-            producer_requirements: inputs
+            supplier_candidates_per_input: inputs
                 .iter()
-                .map(|sources| ProducerRequirement {
-                    compatible_producers: sources
-                        .iter()
-                        .copied()
-                        .map(PhysicalCandidateId)
-                        .collect(),
+                .map(|sources| InputSupplierCandidates {
+                    candidates: sources.iter().copied().map(PhysicalCandidateId).collect(),
                 })
                 .collect(),
         }
@@ -1504,12 +1500,8 @@ mod tests {
             reader_constraints: Vec::new(),
             query_roots: roots
                 .iter()
-                .map(|choices| QueryRootCandidates {
-                    compatible_candidates: choices
-                        .iter()
-                        .copied()
-                        .map(PhysicalCandidateId)
-                        .collect(),
+                .map(|choices| QueryOutputCandidates {
+                    candidates: choices.iter().copied().map(PhysicalCandidateId).collect(),
                 })
                 .collect(),
         }
@@ -1523,22 +1515,21 @@ mod tests {
             .iter()
             .enumerate()
             .flat_map(|(consumer, c)| {
-                c.producer_requirements
-                    .iter()
-                    .enumerate()
-                    .flat_map(move |(requirement, input)| {
+                c.supplier_candidates_per_input.iter().enumerate().flat_map(
+                    move |(requirement, input)| {
                         input
-                            .compatible_producers
+                            .candidates
                             .iter()
                             .map(move |producer| (consumer, requirement, producer.0))
-                    })
+                    },
+                )
             })
             .collect();
         let roots: Vec<_> = graph
             .query_roots
             .iter()
             .enumerate()
-            .flat_map(|(q, root)| root.compatible_candidates.iter().map(move |c| (q, c.0)))
+            .flat_map(|(q, root)| root.candidates.iter().map(move |c| (q, c.0)))
             .collect();
         let bits = edges.len() + roots.len();
         assert!(
@@ -1578,7 +1569,10 @@ mod tests {
                     return true;
                 }
                 marks[candidate] = 1;
-                for requirement in 0..graph.candidates[candidate].producer_requirements.len() {
+                for requirement in 0..graph.candidates[candidate]
+                    .supplier_candidates_per_input
+                    .len()
+                {
                     let producers: Vec<_> = dependencies[candidate]
                         .iter()
                         .filter(|(r, _)| *r == requirement)

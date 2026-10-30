@@ -47,7 +47,7 @@ pub(in crate::search) fn reconstruct_candidate_outputs(
 mod tests {
     use super::*;
     use crate::search::candidates::dag::{
-        PhysicalCandidateWithCost, ProducerRequirement, QueryRootCandidates,
+        InputSupplierCandidates, PhysicalCandidateWithCost, QueryOutputCandidates,
     };
     use crate::search::milp::model::select_candidates;
     use asap_logical_asap_optimization::test_support::lower_promql;
@@ -99,25 +99,25 @@ mod tests {
             if let Some(id) = templates.iter().position(|t| Rc::ptr_eq(t, node)) {
                 return PhysicalCandidateId(id);
             }
-            let producer_requirements = ordered_inputs(node)
+            let supplier_candidates_per_input = ordered_inputs(node)
                 .iter()
-                .map(|child| ProducerRequirement {
-                    compatible_producers: vec![add(child, graph, templates)].into(),
+                .map(|child| InputSupplierCandidates {
+                    candidates: vec![add(child, graph, templates)].into(),
                 })
                 .collect();
             let id = templates.len();
             templates.push(Rc::clone(node));
             graph.candidates.push(PhysicalCandidateWithCost {
                 local_cost: 1.0,
-                producer_requirements,
+                supplier_candidates_per_input,
             });
             PhysicalCandidateId(id)
         }
         let mut graph = DagOfPhysicalCandidatesWithCosts::default();
         let mut templates = Vec::new();
         let root = add(&root, &mut graph, &mut templates);
-        graph.query_roots.push(QueryRootCandidates {
-            compatible_candidates: vec![root],
+        graph.query_roots.push(QueryOutputCandidates {
+            candidates: vec![root],
         });
         (graph, templates)
     }
@@ -130,12 +130,15 @@ mod tests {
             asap_types::ir::properties::AccuracyTarget::exact(),
         ));
         let root = templates.len() - 1;
-        assert_eq!(graph.candidates[root].producer_requirements.len(), 1);
+        assert_eq!(
+            graph.candidates[root].supplier_candidates_per_input.len(),
+            1
+        );
         // Same group and same template, deliberately distinct physical candidates.
         graph.candidates.push(graph.candidates[root].clone());
         templates.push(templates[root].clone());
-        graph.query_roots.push(QueryRootCandidates {
-            compatible_candidates: vec![PhysicalCandidateId(root + 1)],
+        graph.query_roots.push(QueryOutputCandidates {
+            candidates: vec![PhysicalCandidateId(root + 1)],
         });
         let selected = select_candidates(&graph).unwrap().unwrap();
         let outputs = reconstruct_candidate_outputs(&graph, &selected, &templates).unwrap();
@@ -156,8 +159,11 @@ mod tests {
         );
         let (mut graph, mut templates) = catalog(root);
         let root = templates.len() - 1;
-        assert_eq!(graph.candidates[root].producer_requirements.len(), 2);
-        let first = graph.candidates[root].producer_requirements[0].compatible_producers[0];
+        assert_eq!(
+            graph.candidates[root].supplier_candidates_per_input.len(),
+            2
+        );
+        let first = graph.candidates[root].supplier_candidates_per_input[0].candidates[0];
         let duplicate = PhysicalCandidateId(templates.len());
         graph.candidates.push(graph.candidates[first.0].clone());
         templates.push(templates[first.0].clone());
@@ -168,9 +174,8 @@ mod tests {
             template.operator.map_children(|_| Rc::clone(&child)),
             template.schema.clone(),
         ));
-        graph.candidates[root].producer_requirements[0].compatible_producers = vec![first].into();
-        graph.candidates[root].producer_requirements[1].compatible_producers =
-            vec![duplicate].into();
+        graph.candidates[root].supplier_candidates_per_input[0].candidates = vec![first].into();
+        graph.candidates[root].supplier_candidates_per_input[1].candidates = vec![duplicate].into();
         let selected = select_candidates(&graph).unwrap().unwrap();
         let outputs = reconstruct_candidate_outputs(&graph, &selected, &templates).unwrap();
         let children = outputs[0].children();
@@ -242,11 +247,11 @@ mod tests {
                     .unwrap(),
             )
         };
-        graph.query_roots.push(QueryRootCandidates {
-            compatible_candidates: vec![find(&direct)],
+        graph.query_roots.push(QueryOutputCandidates {
+            candidates: vec![find(&direct)],
         });
-        graph.query_roots.push(QueryRootCandidates {
-            compatible_candidates: vec![find(&scalar)],
+        graph.query_roots.push(QueryOutputCandidates {
+            candidates: vec![find(&scalar)],
         });
         let selected = select_candidates(&graph).unwrap().unwrap();
         let outputs = reconstruct_candidate_outputs(&graph, &selected, &templates).unwrap();

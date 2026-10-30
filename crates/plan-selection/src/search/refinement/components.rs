@@ -33,20 +33,13 @@ struct Component {
     outputs: Vec<usize>,
 }
 
+/// The query of each output reference of `roots`
+/// ([`asap_types::stages::output_references`]).
 fn output_queries(roots: &[QueryRoot]) -> Vec<usize> {
-    let mut outputs = Vec::new();
-    for (query, root) in roots.iter().enumerate() {
-        match root {
-            QueryRoot::Operator(_) => outputs.push(query),
-            QueryRoot::Scalar(expression) => {
-                expression.map_operator_refs(&mut |node| {
-                    outputs.push(query);
-                    node.clone()
-                });
-            }
-        }
-    }
-    outputs
+    asap_types::stages::output_references(roots)
+        .into_iter()
+        .map(|(query, _)| query)
+        .collect()
 }
 
 fn components(
@@ -102,7 +95,7 @@ fn components(
     let raw_retention_priced = context.models.deployment_capabilities.raw_data_retained
         && prices.cost_per_disk_byte_second > 0.0;
     for (output, &query) in outputs.iter().enumerate() {
-        let mut pending = graph.query_roots[output].compatible_candidates.clone();
+        let mut pending = graph.query_roots[output].candidates.clone();
         while let Some(id) = pending.pop() {
             if !reach[query].insert(id.0) {
                 continue;
@@ -125,9 +118,9 @@ fn components(
             }
             pending.extend(
                 graph.candidates[id.0]
-                    .producer_requirements
+                    .supplier_candidates_per_input
                     .iter()
-                    .flat_map(|input| input.compatible_producers.iter().copied()),
+                    .flat_map(|input| input.candidates.iter().copied()),
             );
         }
     }
@@ -185,13 +178,13 @@ fn closed(graph: &DagOfPhysicalCandidatesWithCosts, component: &Component) -> bo
     let inside: HashSet<_> = component.candidates.iter().copied().collect();
     component.candidates.iter().all(|&id| {
         graph.candidates[id]
-            .producer_requirements
+            .supplier_candidates_per_input
             .iter()
-            .flat_map(|input| input.compatible_producers.iter())
+            .flat_map(|input| input.candidates.iter())
             .all(|producer| inside.contains(&producer.0))
     }) && component.outputs.iter().all(|&output| {
         graph.query_roots[output]
-            .compatible_candidates
+            .candidates
             .iter()
             .all(|id| inside.contains(&id.0))
     }) && graph
@@ -231,13 +224,13 @@ fn project(
             .iter()
             .map(|&id| {
                 let mut candidate = graph.candidates[id].clone();
-                for input in &mut candidate.producer_requirements {
-                    input.compatible_producers = remapped
-                        .entry(input.compatible_producers.clone())
+                for input in &mut candidate.supplier_candidates_per_input {
+                    input.candidates = remapped
+                        .entry(input.candidates.clone())
                         .or_insert_with(|| {
                             supplier_sets.intern(
                                 input
-                                    .compatible_producers
+                                    .candidates
                                     .iter()
                                     .filter_map(|id| candidates.get(&id.0))
                                     .map(|&local| PhysicalCandidateId(local))
@@ -254,8 +247,8 @@ fn project(
             .iter()
             .map(|&id| {
                 let mut root = graph.query_roots[id].clone();
-                root.compatible_candidates = root
-                    .compatible_candidates
+                root.candidates = root
+                    .candidates
                     .iter()
                     .filter_map(|id| candidates.get(&id.0))
                     .map(|&local| PhysicalCandidateId(local))
@@ -344,6 +337,10 @@ fn project(
         };
         projected.reader_constraints.push(mapped);
     }
+    // The component keeps only the operator nodes its candidates run,
+    // renumbered in first-use order.
+    let mut operator_nodes = Vec::new();
+    let mut operator_node_of = HashMap::new();
     // The component is planned over its own queries only, so per-query
     // facts are re-indexed to `component.queries`.
     let physical_candidates = component
@@ -352,10 +349,24 @@ fn project(
         .zip(&projected.candidates)
         .map(|(&id, projected)| {
             let mut candidate = configured.physical.candidates[id].clone();
+            candidate.operator_node = *operator_node_of
+                .entry(candidate.operator_node)
+                .or_insert_with(|| {
+                    operator_nodes.push(
+                        configured
+                            .physical
+                            .operator_nodes_of_candidates_for_memo_groups
+                            [candidate.operator_node.0]
+                            .clone(),
+                    );
+                    asap_types::stages::OperatorNodeOfCandidateForMemoGroupId(
+                        operator_nodes.len() - 1,
+                    )
+                });
             candidate.supplier_candidates_per_input = projected
-                .producer_requirements
+                .supplier_candidates_per_input
                 .iter()
-                .map(|input| input.compatible_producers.clone())
+                .map(|input| input.candidates.clone())
                 .collect();
             if !candidate
                 .may_keep_across_evaluations_per_sole_reader_query
@@ -374,10 +385,7 @@ fn project(
         })
         .collect();
     let physical = PhysicalASAPMemoCandidates::new(
-        configured
-            .physical
-            .operator_nodes_of_candidates_for_memo_groups
-            .clone(),
+        operator_nodes,
         physical_candidates,
         component
             .queries
@@ -454,14 +462,14 @@ pub(in crate::search) fn separate_plans_combined(
     };
     let mut reach = vec![HashSet::new(); count];
     for (output, &query) in outputs.iter().enumerate() {
-        let mut pending = graph.query_roots[output].compatible_candidates.clone();
+        let mut pending = graph.query_roots[output].candidates.clone();
         while let Some(id) = pending.pop() {
             if reach[query].insert(id.0) {
                 pending.extend(
                     graph.candidates[id.0]
-                        .producer_requirements
+                        .supplier_candidates_per_input
                         .iter()
-                        .flat_map(|input| input.compatible_producers.iter().copied()),
+                        .flat_map(|input| input.candidates.iter().copied()),
                 );
             }
         }
@@ -959,12 +967,10 @@ mod tests {
             calibration: CalibrationFit::default(),
         };
         assert_eq!(components(&configured, &context).unwrap().len(), 2);
-        let first = configured.dag.query_roots[0].compatible_candidates[0];
-        configured.dag.query_roots[2]
-            .compatible_candidates
-            .push(first);
+        let first = configured.dag.query_roots[0].candidates[0];
+        configured.dag.query_roots[2].candidates.push(first);
         assert_eq!(components(&configured, &context).unwrap().len(), 1);
-        configured.dag.query_roots[2].compatible_candidates.pop();
+        configured.dag.query_roots[2].candidates.pop();
         for (id, node) in configured.nodes_for_tests().into_iter().enumerate() {
             let mut changed = (*node).clone();
             let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = &mut changed.operator else {

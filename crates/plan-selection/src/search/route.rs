@@ -784,16 +784,7 @@ fn search_domain<Id: Clone>(
         .iter()
         .map(|(_, root)| root.clone())
         .collect::<Vec<_>>();
-    let mut output_groups = Vec::new();
-    for root in &initial.query_roots {
-        let mut reference = |&group: &MemoGroupId| output_groups.push(group);
-        match root {
-            QueryRoot::Operator(group) => reference(group),
-            QueryRoot::Scalar(expression) => {
-                expression.map_operator_refs(&mut reference);
-            }
-        }
-    }
+    let output_references = asap_types::stages::output_references(&initial.query_roots).len();
     let started = Instant::now();
     let pruned = if progress.pass2_round.is_none() {
         Some(
@@ -1096,8 +1087,8 @@ fn search_domain<Id: Clone>(
         catalog_scope: "Pass 1, local panes, shared summary/pane states, exact and sketch rollups, compatible TopK ranking reuse, and scan widening; finite capacity, pane-width, horizon, materialization and execution-scope configurations".into(),
         status, groups, logical_candidates, immediate_candidates,
         physical_configurations: configured.physical.candidates.len(),
-        compatible_connections: configured.dag.candidates.iter().flat_map(|candidate| &candidate.producer_requirements).map(|input| input.compatible_producers.len()).sum(),
-        output_references: output_groups.len(), refinements: result.refinements,
+        compatible_connections: configured.dag.candidates.iter().flat_map(|candidate| &candidate.supplier_candidates_per_input).map(|input| input.candidates.len()).sum(),
+        output_references, refinements: result.refinements,
         max_refinements: search.max_evaluations.unwrap_or(128), time_limit_ms: search.milp_time_limit_ms.unwrap_or(30_000),
         lower_bound: result.lower_bound, relative_gap: result.relative_gap,
         objective: match &models.plan_selection.cost_model {
@@ -1170,7 +1161,7 @@ fn selected_chosen_candidates(
         producer_groups
             .entry(connection.consumer)
             .or_default()
-            .push(physical.group(connection.producer));
+            .push(physical.memo_group_of(connection.producer));
     }
     let mut chosen_candidates = ChosenCandidatePerMemoGroup::new();
     for &id in &selected.selected_candidates {

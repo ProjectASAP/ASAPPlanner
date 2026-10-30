@@ -8,7 +8,7 @@ use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::ir::OperatorNode;
 
-use crate::search::candidates::dag::{ProducerRequirement, QueryRootCandidates};
+use crate::search::candidates::dag::{InputSupplierCandidates, QueryOutputCandidates};
 use asap_types::workload::{
     DataWorkload, Predictability, Query, QueryRequirements, QueryWorkloadEntry, RangeEvaluation,
     RepetitionInterval,
@@ -46,8 +46,8 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             0.0,
             inputs
                 .into_iter()
-                .map(|supplier| ProducerRequirement {
-                    compatible_producers: vec![supplier].into(),
+                .map(|supplier| InputSupplierCandidates {
+                    candidates: vec![supplier].into(),
                 })
                 .collect(),
         );
@@ -107,8 +107,8 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
         };
         let root_id = append(root.clone(), &mut configured, false, mode);
         configured.dag.query_roots = vec![
-            QueryRootCandidates {
-                compatible_candidates: vec![root_id]
+            QueryOutputCandidates {
+                candidates: vec![root_id]
             };
             2
         ];
@@ -147,7 +147,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             query_time_results_retained: true,
             ..Default::default()
         };
-        crate::search::candidates::configurations::fill_may_keep_with_sole_reader(
+        crate::search::candidates::configurations::fill_may_keep_across_evaluations_per_sole_reader_query(
             &mut configured,
             &entries,
             &data,

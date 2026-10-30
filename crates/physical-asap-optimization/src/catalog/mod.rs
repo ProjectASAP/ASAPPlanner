@@ -64,15 +64,10 @@ pub fn generate_physical_asap_memo_candidates(
     deadline: Option<std::time::Instant>,
 ) -> Result<PhysicalASAPMemoCandidates, ErrorGeneratingPhysicalASAPMemoCandidates> {
     let memo = &logical.memo;
-    let mut output_groups = Vec::new();
-    for root in &memo.query_roots {
-        match root {
-            asap_types::ir::QueryRoot::Operator(group) => output_groups.push(*group),
-            asap_types::ir::QueryRoot::Scalar(expression) => {
-                expression.map_operator_refs(&mut |&group| output_groups.push(group));
-            }
-        }
-    }
+    let output_groups: Vec<_> = asap_types::stages::output_references(&memo.query_roots)
+        .into_iter()
+        .map(|(_, group)| group)
+        .collect();
     let inventory = inventory::build_candidate_inventory_before(memo, &output_groups, deadline)?;
     let configured = configurations::enumerate_candidate_configurations_before(
         &inventory,
@@ -113,7 +108,7 @@ fn validate_ids(ids: &[PhysicalCandidateId], count: usize, context: &str) -> Res
 fn validate_candidates(physical: &PhysicalASAPMemoCandidates) -> Result<(), String> {
     let count = physical.candidates.len();
     let outputs_count = physical.output_reference_count();
-    let invalid = |message: &str| format!("invalid candidate dependency graph: {message}");
+    let invalid = |message: &str| format!("invalid physical ASAP memo candidates: {message}");
     for constraint in &physical.reader_constraints {
         let (candidate, outputs) = match constraint {
             ReaderConstraint::ActivationRequires {
@@ -223,8 +218,8 @@ fn validate_selected_graph(
 #[cfg(feature = "test-support")]
 pub mod test_support {
     pub use super::configurations::{
-        compatible_timing, enumerate_candidate_configurations_before, may_keep_with_sole_reader,
-        output_reference_queries,
+        compatible_timing, enumerate_candidate_configurations_before,
+        may_keep_across_evaluations_per_sole_reader_query,
     };
     pub use super::factoring::{
         factor_terminal_readers, MemoGroupOutputKey, MemoGroupOutputToCompatibleProducersCache,

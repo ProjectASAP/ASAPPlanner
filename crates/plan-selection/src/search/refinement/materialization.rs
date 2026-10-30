@@ -75,7 +75,7 @@ pub(super) fn restrict(
             return None;
         }
         if !active[id] {
-            candidate.producer_requirements.clear();
+            candidate.supplier_candidates_per_input.clear();
             restricted
                 .reader_constraints
                 .push(ReaderConstraint::AllowedOutputs {
@@ -84,17 +84,21 @@ pub(super) fn restrict(
                 });
             continue;
         }
-        for (position, requirement) in candidate.producer_requirements.iter_mut().enumerate() {
+        for (position, requirement) in candidate
+            .supplier_candidates_per_input
+            .iter_mut()
+            .enumerate()
+        {
             let producer = *bindings.get(&(PhysicalCandidateId(id), position))?;
-            if !requirement.compatible_producers.contains(&producer) {
+            if !requirement.candidates.contains(&producer) {
                 return None;
             }
-            requirement.compatible_producers = vec![producer].into();
+            requirement.candidates = vec![producer].into();
         }
     }
     for root in &selected.query_roots {
         let candidate = replace(root.candidate);
-        let suppliers = &mut restricted.query_roots[root.query_root].compatible_candidates;
+        let suppliers = &mut restricted.query_roots[root.query_root].candidates;
         if !suppliers.contains(&candidate) {
             return None;
         }
@@ -107,7 +111,7 @@ pub(super) fn restrict(
 mod tests {
     use super::*;
     use crate::search::candidates::dag::{
-        PhysicalCandidateWithCost, ProducerRequirement, QueryRootCandidates,
+        InputSupplierCandidates, PhysicalCandidateWithCost, QueryOutputCandidates,
     };
     use crate::search::refinement::search::{
         search_candidates_with_restricted_feedback, CandidateEvaluation, CandidateSearchLimits,
@@ -121,19 +125,18 @@ mod tests {
         for _ in 0..2 {
             graph.candidates.push(PhysicalCandidateWithCost {
                 local_cost: 0.0,
-                producer_requirements: vec![],
+                supplier_candidates_per_input: vec![],
             });
         }
         for query in 0..readers {
             graph.candidates.push(PhysicalCandidateWithCost {
                 local_cost: 0.0,
-                producer_requirements: vec![ProducerRequirement {
-                    compatible_producers: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)]
-                        .into(),
+                supplier_candidates_per_input: vec![InputSupplierCandidates {
+                    candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
                 }],
             });
-            graph.query_roots.push(QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(query + 2)],
+            graph.query_roots.push(QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(query + 2)],
             });
         }
         graph

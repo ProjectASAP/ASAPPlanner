@@ -13,8 +13,8 @@ use asap_types::physical::Materialization;
 use asap_types::stages::{CandidateMemo, MemoGroupId, PhysicalCandidateId};
 
 use crate::search::candidates::dag::{
-    DagOfPhysicalCandidatesWithCosts, PhysicalCandidateWithCost, ProducerRequirement,
-    QueryRootCandidates,
+    DagOfPhysicalCandidatesWithCosts, InputSupplierCandidates, PhysicalCandidateWithCost,
+    QueryOutputCandidates,
 };
 
 /// A Stage 2 inventory, and its operator nodes as a DAG with test-chosen
@@ -48,10 +48,10 @@ impl InventoryForTests {
                 .zip(&inventory.supplier_nodes_per_input)
                 .map(|(node, inputs)| PhysicalCandidateWithCost {
                     local_cost: node_local_cost(node).unwrap(),
-                    producer_requirements: inputs
+                    supplier_candidates_per_input: inputs
                         .iter()
-                        .map(|suppliers| ProducerRequirement {
-                            compatible_producers: suppliers.clone(),
+                        .map(|suppliers| InputSupplierCandidates {
+                            candidates: suppliers.clone(),
                         })
                         .collect(),
                 })
@@ -59,8 +59,8 @@ impl InventoryForTests {
             query_roots: inventory
                 .query_output_nodes
                 .iter()
-                .map(|nodes| QueryRootCandidates {
-                    compatible_candidates: nodes.clone(),
+                .map(|nodes| QueryOutputCandidates {
+                    candidates: nodes.clone(),
                 })
                 .collect(),
             ..Default::default()
@@ -590,11 +590,8 @@ mod tests {
             .unwrap();
             if matches!(kind, "ranking" | "sketch") {
                 for (output, group) in inventory.graph.query_roots.iter_mut().zip(&outputs) {
-                    output.compatible_candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| memo.candidates[group.0 as usize][index].origin == if kind == "ranking" { asap_types::stages::OriginOfCandidateForMemoGroup::TopKReuse } else { asap_types::stages::OriginOfCandidateForMemoGroup::SharedBuild }));
-                    assert!(
-                        !output.compatible_candidates.is_empty(),
-                        "{kind} reader generated"
-                    );
+                    output.candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| memo.candidates[group.0 as usize][index].origin == if kind == "ranking" { asap_types::stages::OriginOfCandidateForMemoGroup::TopKReuse } else { asap_types::stages::OriginOfCandidateForMemoGroup::SharedBuild }));
+                    assert!(!output.candidates.is_empty(), "{kind} reader generated");
                 }
             }
             let selected = select_candidates(&inventory.graph).unwrap().expect(kind);
@@ -761,14 +758,14 @@ mod tests {
                 .zip(&outputs)
                 .enumerate()
             {
-                output.compatible_candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| {
+                output.candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| {
                     let candidate = &memo.candidates[group.0 as usize][index];
                     if query == 0 { candidate.origin == OriginOfCandidateForMemoGroup::SummaryResult } else {
                         candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild && OperatorNode::reachable(&candidate.root_node).iter().any(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg {family: FieldDataType::Sketch(kind, _), ..}) if kind.algorithm() == &SketchAlgorithm::DDSketch))
                     }
                 }));
                 assert!(
-                    !output.compatible_candidates.is_empty(),
+                    !output.candidates.is_empty(),
                     "factored/shared output {query}"
                 );
             }
@@ -1002,12 +999,10 @@ mod tests {
         let fused = inventory.group_candidates[owner][fused_index];
         assert!(!inventory.group_candidates[absorbed.0 as usize].contains(&fused));
         assert!(
-            inventory.graph.query_roots[0]
-                .compatible_candidates
-                .contains(&fused),
+            inventory.graph.query_roots[0].candidates.contains(&fused),
             "fused output satisfies its owning group's contract"
         );
-        inventory.graph.query_roots[0].compatible_candidates = vec![fused];
+        inventory.graph.query_roots[0].candidates = vec![fused];
         let selected = select_candidates(&inventory.graph).unwrap().unwrap();
         assert!(inventory.group_candidates[absorbed.0 as usize]
             .iter()
@@ -1049,10 +1044,8 @@ mod tests {
             |_| Ok(1.0),
         );
         let fused = inventory.group_candidates[owner][fused_index];
-        inventory.graph.query_roots[0].compatible_candidates = vec![fused];
-        assert!(!inventory.graph.query_roots[1]
-            .compatible_candidates
-            .contains(&fused));
+        inventory.graph.query_roots[0].candidates = vec![fused];
+        assert!(!inventory.graph.query_roots[1].candidates.contains(&fused));
         let selected = select_candidates(&inventory.graph).unwrap().unwrap();
         assert!(inventory.group_candidates[inner.0 as usize]
             .iter()

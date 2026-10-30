@@ -43,8 +43,15 @@ pub struct OperatorNodeOfCandidateForMemoGroup {
 
 impl OperatorNodeOfCandidateForMemoGroup {
     /// The memo group whose candidates this node implements.
+    /// `candidates_for_memo_group` is never empty, and all its entries are
+    /// candidates of this one group.
     pub fn group(&self) -> MemoGroupId {
-        self.candidates_for_memo_group[0].group
+        let group = self.candidates_for_memo_group[0].group;
+        debug_assert!(self
+            .candidates_for_memo_group
+            .iter()
+            .all(|candidate| candidate.group == group));
+        group
     }
 }
 
@@ -105,6 +112,27 @@ pub struct PhysicalASAPMemoCandidates {
     /// By group index: the candidates whose operator node is an
     /// implementation root of that group, ascending.
     implementation_roots_of_group: Vec<Vec<PhysicalCandidateId>>,
+    /// Each output reference's group: [`output_references`] of
+    /// `query_roots`, built once.
+    output_reference_groups: Vec<MemoGroupId>,
+}
+
+/// The output references of `query_roots`: each operator reference, in
+/// order (a scalar root's in `map_operator_refs` order), with the index of
+/// the query whose root it is.
+pub fn output_references<C: Clone>(query_roots: &[QueryRoot<C>]) -> Vec<(usize, C)> {
+    let mut references = Vec::new();
+    for (query, root) in query_roots.iter().enumerate() {
+        match root {
+            QueryRoot::Operator(reference) => references.push((query, reference.clone())),
+            QueryRoot::Scalar(expression) => {
+                expression.map_operator_refs(&mut |reference| {
+                    references.push((query, reference.clone()))
+                });
+            }
+        }
+    }
+    references
 }
 
 impl PhysicalASAPMemoCandidates {
@@ -127,6 +155,10 @@ impl PhysicalASAPMemoCandidates {
                 implementation_roots_of_group[group].push(PhysicalCandidateId(id));
             }
         }
+        let output_reference_groups = output_references(&query_roots)
+            .into_iter()
+            .map(|(_, group)| group)
+            .collect();
         Self {
             operator_nodes_of_candidates_for_memo_groups,
             candidates,
@@ -134,11 +166,11 @@ impl PhysicalASAPMemoCandidates {
             reader_constraints,
             pruning_metrics: PruningMetrics::default(),
             implementation_roots_of_group,
+            output_reference_groups,
         }
     }
 
-    /// The implementation roots of `group`, ascending. (today:
-    /// `CandidateInventory::group_candidates`)
+    /// The implementation roots of `group`, ascending.
     pub fn implementation_roots(&self, group: MemoGroupId) -> &[PhysicalCandidateId] {
         self.implementation_roots_of_group
             .get(group.0 as usize)
@@ -153,7 +185,7 @@ impl PhysicalASAPMemoCandidates {
         output_reference: usize,
     ) -> impl Iterator<Item = PhysicalCandidateId> + '_ {
         let roots = self
-            .output_reference_groups()
+            .output_reference_groups
             .get(output_reference)
             .map_or(&[][..], |&group| self.implementation_roots(group));
         roots
@@ -164,7 +196,7 @@ impl PhysicalASAPMemoCandidates {
 
     /// The number of output references: group references of `query_roots`.
     pub fn output_reference_count(&self) -> usize {
-        self.output_reference_groups().len()
+        self.output_reference_groups.len()
     }
 
     /// The operator node candidate `candidate` runs.
@@ -175,24 +207,9 @@ impl PhysicalASAPMemoCandidates {
     }
 
     /// The memo group whose candidates candidate `candidate` implements.
-    pub fn group(&self, candidate: PhysicalCandidateId) -> MemoGroupId {
+    pub fn memo_group_of(&self, candidate: PhysicalCandidateId) -> MemoGroupId {
         self.operator_nodes_of_candidates_for_memo_groups
             [self.candidates[candidate.0].operator_node.0]
             .group()
-    }
-
-    /// Each output reference's group: the group references of `query_roots`
-    /// in order (a scalar query's in `map_operator_refs` order).
-    fn output_reference_groups(&self) -> Vec<MemoGroupId> {
-        let mut groups = Vec::new();
-        for root in &self.query_roots {
-            match root {
-                QueryRoot::Operator(group) => groups.push(*group),
-                QueryRoot::Scalar(expression) => {
-                    expression.map_operator_refs(&mut |&group| groups.push(group));
-                }
-            }
-        }
-        groups
     }
 }

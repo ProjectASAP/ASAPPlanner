@@ -181,10 +181,11 @@ fn prepare_profile(
                 supported_node(node)
                     && !(configuration.timing == ExecutionTiming::IngestionTime
                         && configuration.materialization == Materialization::NotMaterialized
-                        && configured.dag.query_roots.iter().any(|root| {
-                            root.compatible_candidates
-                                .contains(&PhysicalCandidateId(id))
-                        }))
+                        && configured
+                            .dag
+                            .query_roots
+                            .iter()
+                            .any(|root| root.candidates.contains(&PhysicalCandidateId(id))))
                     && (requires_source_sizing(node) || stable_size(node, delta))
                     && match configuration.timing {
                         ExecutionTiming::QueryTime => {
@@ -273,11 +274,11 @@ fn prepare_profile(
             if node.output_state.timing != ExecutionTiming::QueryTime {
                 continue;
             }
-            if candidate.producer_requirements.iter().any(|input| {
-                input
-                    .compatible_producers
-                    .contains(&PhysicalCandidateId(id))
-            }) {
+            if candidate
+                .supplier_candidates_per_input
+                .iter()
+                .any(|input| input.candidates.contains(&PhysicalCandidateId(id)))
+            {
                 if node.materialization
                     == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
                 {
@@ -287,10 +288,11 @@ fn prepare_profile(
                 }
             }
         }
-        let raw_output = configured.dag.query_roots.iter().any(|root| {
-            root.compatible_candidates
-                .contains(&PhysicalCandidateId(id))
-        });
+        let raw_output = configured
+            .dag
+            .query_roots
+            .iter()
+            .any(|root| root.candidates.contains(&PhysicalCandidateId(id)));
         if !raw_output {
             all_lookbacks[id] = ordinary.union(&kept).copied().collect();
             all_lookbacks[id].sort();
@@ -363,7 +365,11 @@ fn extract_scan_class(
     } = prepared;
     let mut nodes = nodes;
     for (id, node) in nodes.iter_mut().enumerate() {
-        if configured.dag.candidates[id].producer_requirements.len() > 1 {
+        if configured.dag.candidates[id]
+            .supplier_candidates_per_input
+            .len()
+            > 1
+        {
             *node = None;
         }
     }
@@ -517,18 +523,12 @@ fn price<'a>(
         return Ok(());
     };
     visiting[id] = true;
-    let requirements = &configured.dag.candidates[id].producer_requirements;
+    let requirements = &configured.dag.candidates[id].supplier_candidates_per_input;
     let options: Vec<Vec<PhysicalCandidateId>> = input_override.map_or_else(
         || {
             requirements.first().map_or_else(
                 || vec![vec![]],
-                |input| {
-                    input
-                        .compatible_producers
-                        .iter()
-                        .map(|id| vec![*id])
-                        .collect()
-                },
+                |input| input.candidates.iter().map(|id| vec![*id]).collect(),
             )
         },
         |inputs| vec![inputs.suppliers.clone()],
@@ -1078,8 +1078,8 @@ mod tests {
     use asap_types::ir::{Operator, OperatorNode, ProjectItem, ScalarExpr};
 
     use crate::search::candidates::dag::{
-        DagOfPhysicalCandidatesWithCosts, PhysicalCandidateWithCost, ProducerRequirement,
-        QueryRootCandidates,
+        DagOfPhysicalCandidatesWithCosts, InputSupplierCandidates, PhysicalCandidateWithCost,
+        QueryOutputCandidates,
     };
 
     use asap_types::workload::{
@@ -1187,8 +1187,8 @@ mod tests {
                 0.0,
                 inputs
                     .into_iter()
-                    .map(|supplier| ProducerRequirement {
-                        compatible_producers: vec![supplier].into(),
+                    .map(|supplier| InputSupplierCandidates {
+                        candidates: vec![supplier].into(),
                     })
                     .collect(),
             );
@@ -1197,11 +1197,11 @@ mod tests {
         let exact_id = append(exact, &mut configured);
         let estimate_id = append(estimate, &mut configured);
         let project_id = append(project.clone(), &mut configured);
-        configured.dag.candidates[project_id.0].producer_requirements[0].compatible_producers =
+        configured.dag.candidates[project_id.0].supplier_candidates_per_input[0].candidates =
             vec![exact_id, estimate_id].into();
         configured.sync_physical_for_tests();
-        configured.dag.query_roots.push(QueryRootCandidates {
-            compatible_candidates: vec![project_id],
+        configured.dag.query_roots.push(QueryOutputCandidates {
+            candidates: vec![project_id],
         });
         configured.sync_physical_for_tests();
         let roots = vec![QueryRoot::Operator(project)];
@@ -1261,8 +1261,8 @@ mod tests {
                 0.0,
                 inputs
                     .into_iter()
-                    .map(|supplier| ProducerRequirement {
-                        compatible_producers: vec![supplier].into(),
+                    .map(|supplier| InputSupplierCandidates {
+                        candidates: vec![supplier].into(),
                     })
                     .collect(),
             );
@@ -1315,8 +1315,8 @@ mod tests {
                     panic!("operator")
                 };
                 let id = append(root.clone(), &mut configured);
-                configured.dag.query_roots.push(QueryRootCandidates {
-                    compatible_candidates: vec![id],
+                configured.dag.query_roots.push(QueryOutputCandidates {
+                    candidates: vec![id],
                 });
                 configured.sync_physical_for_tests();
                 let originals = vec![QueryRoot::Operator(original)];
@@ -1482,8 +1482,8 @@ mod tests {
                 0.0,
                 inputs
                     .into_iter()
-                    .map(|supplier| ProducerRequirement {
-                        compatible_producers: vec![supplier].into(),
+                    .map(|supplier| InputSupplierCandidates {
+                        candidates: vec![supplier].into(),
                     })
                     .collect(),
             );
@@ -1550,8 +1550,8 @@ mod tests {
                         panic!("operator")
                     };
                     let id = append(root.clone(), &mut configured, false, mode);
-                    configured.dag.query_roots.push(QueryRootCandidates {
-                        compatible_candidates: vec![id],
+                    configured.dag.query_roots.push(QueryOutputCandidates {
+                        candidates: vec![id],
                     });
                     configured.sync_physical_for_tests();
                     configured
@@ -1586,7 +1586,7 @@ mod tests {
                         query_time_results_retained: true,
                         ..Default::default()
                     };
-                    crate::search::candidates::configurations::fill_may_keep_with_sole_reader(
+                    crate::search::candidates::configurations::fill_may_keep_across_evaluations_per_sole_reader_query(
                         &mut configured,
                         &entries,
                         &data,
@@ -1804,16 +1804,13 @@ mod tests {
                             ExecutionTiming::QueryTime,
                             Materialization::MatAtQuery(Medium::Memory),
                             chain_candidate.local_cost,
-                            chain_candidate.producer_requirements,
+                            chain_candidate.supplier_candidates_per_input,
                         );
                         assert_eq!(pushed, normal_chain);
                         for candidate in &mut configured.dag.candidates {
-                            for input in &mut candidate.producer_requirements {
-                                if input
-                                    .compatible_producers
-                                    .contains(&PhysicalCandidateId(chain))
-                                {
-                                    input.compatible_producers.push(normal_chain);
+                            for input in &mut candidate.supplier_candidates_per_input {
+                                if input.candidates.contains(&PhysicalCandidateId(chain)) {
+                                    input.candidates.push(normal_chain);
                                 }
                             }
                         }
@@ -1975,8 +1972,8 @@ mod tests {
                 0.0,
                 children
                     .into_iter()
-                    .map(|id| ProducerRequirement {
-                        compatible_producers: vec![id].into(),
+                    .map(|id| InputSupplierCandidates {
+                        candidates: vec![id].into(),
                     })
                     .collect(),
             )
@@ -2028,8 +2025,8 @@ mod tests {
                         panic!("operator")
                     };
                     let id = append(root, &mut configured);
-                    configured.dag.query_roots.push(QueryRootCandidates {
-                        compatible_candidates: vec![id],
+                    configured.dag.query_roots.push(QueryOutputCandidates {
+                        candidates: vec![id],
                     });
                     configured.sync_physical_for_tests();
                 }
@@ -2157,21 +2154,18 @@ mod tests {
                 candidates: (0..3)
                     .map(|id| PhysicalCandidateWithCost {
                         local_cost: 0.0,
-                        producer_requirements: if id == 2 {
-                            vec![ProducerRequirement {
-                                compatible_producers: vec![
-                                    PhysicalCandidateId(0),
-                                    PhysicalCandidateId(1),
-                                ]
-                                .into(),
+                        supplier_candidates_per_input: if id == 2 {
+                            vec![InputSupplierCandidates {
+                                candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)]
+                                    .into(),
                             }]
                         } else {
                             vec![]
                         },
                     })
                     .collect(),
-                query_roots: vec![QueryRootCandidates {
-                    compatible_candidates: vec![PhysicalCandidateId(2)],
+                query_roots: vec![QueryOutputCandidates {
+                    candidates: vec![PhysicalCandidateId(2)],
                 }],
                 ..Default::default()
             },
@@ -2214,8 +2208,8 @@ mod tests {
             extracted.profile.nodes[1].execution_cost > extracted.profile.nodes[0].execution_cost
         );
         assert_eq!(
-            configured.dag.candidates[2].producer_requirements[0]
-                .compatible_producers
+            configured.dag.candidates[2].supplier_candidates_per_input[0]
+                .candidates
                 .len(),
             2,
             "full catalog remains unchanged"

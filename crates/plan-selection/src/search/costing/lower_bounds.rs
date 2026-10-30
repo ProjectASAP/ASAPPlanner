@@ -86,9 +86,9 @@ pub(in crate::search) fn apply(
             }
             pending.extend(
                 configured.dag.candidates[id]
-                    .producer_requirements
+                    .supplier_candidates_per_input
                     .iter()
-                    .flat_map(|input| input.compatible_producers.iter().map(|producer| producer.0)),
+                    .flat_map(|input| input.candidates.iter().map(|producer| producer.0)),
             );
         }
         let common_reader_window_ms = common_reader_windows(configured);
@@ -190,7 +190,11 @@ pub(in crate::search) fn apply(
                     position += 1;
                     id
                 });
-                if position != configured.dag.candidates[id].producer_requirements.len() {
+                if position
+                    != configured.dag.candidates[id]
+                        .supplier_candidates_per_input
+                        .len()
+                {
                     return None;
                 }
                 Some(PhysicalASAPDAGNode {
@@ -279,8 +283,8 @@ fn common_reader_windows(configured: &PhysicalCandidatesWithCosts) -> Vec<Option
     let graph = &configured.dag;
     let mut readers = vec![Vec::new(); graph.candidates.len()];
     for (reader, candidate) in graph.candidates.iter().enumerate() {
-        for requirement in &candidate.producer_requirements {
-            for producer in requirement.compatible_producers.iter() {
+        for requirement in &candidate.supplier_candidates_per_input {
+            for producer in requirement.candidates.iter() {
                 readers[producer.0].push(reader);
             }
         }
@@ -519,14 +523,14 @@ impl ConcreteRows {
                     continue;
                 }
                 let root = self.roots[id].unwrap();
-                let inputs = &configured.dag.candidates[id].producer_requirements;
+                let inputs = &configured.dag.candidates[id].supplier_candidates_per_input;
                 let agrees = inputs.len() == self.children[root].len()
                     && inputs
                         .iter()
                         .zip(&self.children[root])
                         .all(|(input, &child)| {
-                            !input.compatible_producers.is_empty()
-                                && input.compatible_producers.iter().all(|supplier| {
+                            !input.candidates.is_empty()
+                                && input.candidates.iter().all(|supplier| {
                                     valid[supplier.0]
                                         && interfaces[self.roots[supplier.0].unwrap()]
                                             == interfaces[child]
@@ -569,10 +573,10 @@ fn certified_price<'a>(
     visiting[id] = true;
     let result: Result<Option<PricedNode<'a>>, String> = (|| {
         let mut views = Vec::new();
-        for requirement in &configured.dag.candidates[id].producer_requirements {
+        for requirement in &configured.dag.candidates[id].supplier_candidates_per_input {
             let mut representative = None;
             let mut signature = None;
-            for supplier in &requirement.compatible_producers {
+            for supplier in &requirement.candidates {
                 let Some(priced) = certified_price(
                     supplier.0,
                     configured,
@@ -735,7 +739,7 @@ mod tests {
     use asap_types::ir::{OperatorNode, QueryRoot};
     use asap_types::physical::Medium;
 
-    use crate::search::candidates::dag::{ProducerRequirement, QueryRootCandidates};
+    use crate::search::candidates::dag::{InputSupplierCandidates, QueryOutputCandidates};
 
     use asap_types::stages::PhysicalCandidateId;
     use asap_types::workload::*;
@@ -841,8 +845,8 @@ mod tests {
                 0.0,
                 inputs
                     .into_iter()
-                    .map(|input| ProducerRequirement {
-                        compatible_producers: vec![PhysicalCandidateId(input)].into(),
+                    .map(|input| InputSupplierCandidates {
+                        candidates: vec![PhysicalCandidateId(input)].into(),
                     })
                     .collect(),
             );
@@ -854,8 +858,8 @@ mod tests {
                 unreachable!()
             };
             let id = intern(node, &mut configured, &mut ids);
-            configured.dag.query_roots.push(QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(id)],
+            configured.dag.query_roots.push(QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(id)],
             });
             configured.sync_physical_for_tests();
         }
@@ -869,9 +873,9 @@ mod tests {
             })
             .collect();
         for candidate in &mut configured.dag.candidates {
-            for input in &mut candidate.producer_requirements {
-                if chains.contains(&input.compatible_producers[0]) {
-                    input.compatible_producers = chains.clone().into();
+            for input in &mut candidate.supplier_candidates_per_input {
+                if chains.contains(&input.candidates[0]) {
+                    input.candidates = chains.clone().into();
                 }
             }
         }
@@ -920,7 +924,7 @@ mod tests {
         let mut projects = Vec::new();
         for (index, &chain) in chains.iter().enumerate() {
             let scan =
-                configured.dag.candidates[chain].producer_requirements[0].compatible_producers[0];
+                configured.dag.candidates[chain].supplier_candidates_per_input[0].candidates[0];
             configured.sync_physical_for_tests();
             let input = configured.node(scan.0).clone();
             let range =
@@ -954,8 +958,8 @@ mod tests {
                     ExecutionTiming::IngestionTime,
                     Materialization::NotMaterialized,
                     0.0,
-                    vec![ProducerRequirement {
-                        compatible_producers: vec![producer].into(),
+                    vec![InputSupplierCandidates {
+                        candidates: vec![producer].into(),
                     }],
                 );
                 producer = id;
@@ -963,7 +967,7 @@ mod tests {
             projects.push(producer);
         }
         for chain in chains {
-            configured.dag.candidates[chain].producer_requirements[0].compatible_producers =
+            configured.dag.candidates[chain].supplier_candidates_per_input[0].candidates =
                 projects.clone().into();
             configured.sync_physical_for_tests();
             let child = configured.nodes_for_tests()[projects[0].0].clone();
@@ -1015,20 +1019,20 @@ mod tests {
                 ExecutionTiming::IngestionTime,
                 Materialization::NotMaterialized,
                 0.0,
-                vec![ProducerRequirement {
-                    compatible_producers: vec![*scan].into(),
+                vec![InputSupplierCandidates {
+                    candidates: vec![*scan].into(),
                 }],
             );
             projects.push(id);
         }
         for (id, template) in configured.nodes_for_tests().iter().enumerate() {
             if matches!(template.asap(), Some(ASAPOp::PaneChain { .. })) {
-                let input = &mut configured.dag.candidates[id].producer_requirements[0];
+                let input = &mut configured.dag.candidates[id].supplier_candidates_per_input[0];
                 // Put larger signed-domain Project pricing last to expose the
                 // former arbitrary representative selection.
                 let mut suppliers = scans.clone();
                 suppliers.extend(projects.iter().copied());
-                input.compatible_producers = suppliers.into();
+                input.candidates = suppliers.into();
             }
         }
         configured.sync_physical_for_tests();
@@ -1148,8 +1152,8 @@ mod tests {
                         })
                         .collect();
                     for project in &projects {
-                        configured.dag.candidates[project.0].producer_requirements[0]
-                            .compatible_producers
+                        configured.dag.candidates[project.0].supplier_candidates_per_input[0]
+                            .candidates
                             .extend(projects.iter().copied());
                         configured.sync_physical_for_tests();
                     }
@@ -1271,7 +1275,7 @@ mod tests {
     fn retained_consumer_context_keeps_query_work_unpriced() {
         let (mut configured, roots, entries, data) = fixture();
         for root in &configured.dag.query_roots {
-            for candidate in &root.compatible_candidates {
+            for candidate in &root.candidates {
                 configured.physical.candidates[candidate.0].materialization =
                     Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory);
             }
@@ -1330,7 +1334,7 @@ mod tests {
         let nodes = configured.nodes_for_tests();
         for (candidate, node) in configured.dag.candidates.iter_mut().zip(&nodes) {
             if matches!(node.asap(), Some(ASAPOp::PaneChain { .. })) {
-                candidate.producer_requirements[0].compatible_producers = scans.clone().into();
+                candidate.supplier_candidates_per_input[0].candidates = scans.clone().into();
             }
         }
         configured.sync_physical_for_tests();
@@ -1411,8 +1415,8 @@ mod tests {
                 0.0,
                 inputs
                     .into_iter()
-                    .map(|input| ProducerRequirement {
-                        compatible_producers: vec![PhysicalCandidateId(input)].into(),
+                    .map(|input| InputSupplierCandidates {
+                        candidates: vec![PhysicalCandidateId(input)].into(),
                     })
                     .collect(),
             );
@@ -1420,8 +1424,8 @@ mod tests {
         }
         for candidate in &picked {
             let root = intern(&candidate.root_node, &mut configured);
-            configured.dag.query_roots.push(QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(root)],
+            configured.dag.query_roots.push(QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(root)],
             });
             configured.sync_physical_for_tests();
         }

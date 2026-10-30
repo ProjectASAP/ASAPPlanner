@@ -95,9 +95,9 @@ impl DirectCostProfile {
         }
         for (consumer, candidate) in graph.candidates.iter().enumerate() {
             for producer in candidate
-                .producer_requirements
+                .supplier_candidates_per_input
                 .iter()
-                .flat_map(|input| input.compatible_producers.iter())
+                .flat_map(|input| input.candidates.iter())
             {
                 let source = &self.nodes[producer.0];
                 // Query latency stops at the first maintained ingestion state.
@@ -115,7 +115,7 @@ impl DirectCostProfile {
         if graph
             .query_roots
             .iter()
-            .flat_map(|root| &root.compatible_candidates)
+            .flat_map(|root| &root.candidates)
             .any(|id| self.nodes[id.0].ingestion && !self.nodes[id.0].materialized)
         {
             return Err(CandidateSelectionError::InvalidGraph(
@@ -323,9 +323,9 @@ impl DirectCostProfile {
                 continue;
             }
             for supplier in candidate
-                .producer_requirements
+                .supplier_candidates_per_input
                 .iter()
-                .flat_map(|input| input.compatible_producers.iter())
+                .flat_map(|input| input.candidates.iter())
             {
                 pending[id] += 1;
                 parents[supplier.0].push(id);
@@ -339,11 +339,11 @@ impl DirectCostProfile {
             if !self.nodes[id].ingestion {
                 bounds[id] = self.nodes[id].query_work_seconds()
                     + graph.candidates[id]
-                        .producer_requirements
+                        .supplier_candidates_per_input
                         .iter()
                         .map(|input| {
                             input
-                                .compatible_producers
+                                .candidates
                                 .iter()
                                 .map(|supplier| bounds[supplier.0])
                                 .fold(0.0, f64::max)
@@ -361,7 +361,7 @@ impl DirectCostProfile {
             graph
                 .query_roots
                 .iter()
-                .flat_map(|root| &root.compatible_candidates)
+                .flat_map(|root| &root.candidates)
                 .map(|id| bounds[id.0])
                 .fold(0.0, f64::max)
         } else {
@@ -452,12 +452,12 @@ fn boundary_flows(
         }
         let mut possible = vec![false; count];
         let mut pending = if boundary < queries {
-            graph.query_roots[boundary].compatible_candidates.clone()
+            graph.query_roots[boundary].candidates.clone()
         } else {
             graph.candidates[boundary - queries]
-                .producer_requirements
+                .supplier_candidates_per_input
                 .iter()
-                .flat_map(|input| input.compatible_producers.iter().copied())
+                .flat_map(|input| input.candidates.iter().copied())
                 .collect()
         };
         while let Some(id) = pending.pop() {
@@ -467,9 +467,9 @@ fn boundary_flows(
             }
             pending.extend(
                 graph.candidates[id.0]
-                    .producer_requirements
+                    .supplier_candidates_per_input
                     .iter()
-                    .flat_map(|input| input.compatible_producers.iter().copied()),
+                    .flat_map(|input| input.candidates.iter().copied()),
             );
         }
         let used: Vec<_> = possible
@@ -757,17 +757,17 @@ mod tests {
     fn node(input: Option<usize>) -> PhysicalCandidateWithCost {
         PhysicalCandidateWithCost {
             local_cost: 0.0,
-            producer_requirements: input
+            supplier_candidates_per_input: input
                 .into_iter()
-                .map(|id| ProducerRequirement {
-                    compatible_producers: vec![PhysicalCandidateId(id)].into(),
+                .map(|id| InputSupplierCandidates {
+                    candidates: vec![PhysicalCandidateId(id)].into(),
                 })
                 .collect(),
         }
     }
-    fn root(id: usize) -> QueryRootCandidates {
-        QueryRootCandidates {
-            compatible_candidates: vec![PhysicalCandidateId(id)],
+    fn root(id: usize) -> QueryOutputCandidates {
+        QueryOutputCandidates {
+            candidates: vec![PhysicalCandidateId(id)],
         }
     }
     fn solve(graph: &DagOfPhysicalCandidatesWithCosts, profile: &DirectCostProfile) -> f64 {
@@ -898,7 +898,7 @@ mod tests {
             ..Default::default()
         };
         for reader in [2, 3] {
-            graph.candidates[reader].producer_requirements[0].compatible_producers =
+            graph.candidates[reader].supplier_candidates_per_input[0].candidates =
                 vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
         }
         for materialized_build_cost in [1.0, 10.0, 100.0] {
@@ -981,8 +981,8 @@ mod tests {
     fn direct_currency_range_preserves_tiny_meaningful_costs() {
         let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![node(None), node(None)],
-            query_roots: vec![QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
+            query_roots: vec![QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
             }],
             ..Default::default()
         };
@@ -1128,16 +1128,14 @@ mod tests {
                 node(Some(0)),
                 PhysicalCandidateWithCost {
                     local_cost: 0.0,
-                    producer_requirements: vec![ProducerRequirement {
-                        compatible_producers: vec![PhysicalCandidateId(1), PhysicalCandidateId(2)]
-                            .into(),
+                    supplier_candidates_per_input: vec![InputSupplierCandidates {
+                        candidates: vec![PhysicalCandidateId(1), PhysicalCandidateId(2)].into(),
                     }],
                 },
                 PhysicalCandidateWithCost {
                     local_cost: 0.0,
-                    producer_requirements: vec![ProducerRequirement {
-                        compatible_producers: vec![PhysicalCandidateId(1), PhysicalCandidateId(3)]
-                            .into(),
+                    supplier_candidates_per_input: vec![InputSupplierCandidates {
+                        candidates: vec![PhysicalCandidateId(1), PhysicalCandidateId(3)].into(),
                     }],
                 },
             ],
@@ -1355,11 +1353,11 @@ mod tests {
     #[test]
     fn compaction_selection_matches_exhaustive_reader_bindings() {
         let mut reader = node(Some(0));
-        reader.producer_requirements[0].compatible_producers =
+        reader.supplier_candidates_per_input[0].candidates =
             vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
         reader
-            .producer_requirements
-            .push(node(Some(2)).producer_requirements.remove(0));
+            .supplier_candidates_per_input
+            .push(node(Some(2)).supplier_candidates_per_input.remove(0));
         let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![node(None), node(None), node(None), reader.clone(), reader],
             query_roots: vec![root(3), root(4)],
@@ -1455,7 +1453,7 @@ mod tests {
             query_roots: vec![root(2)],
             ..Default::default()
         };
-        graph.candidates[2].producer_requirements[0].compatible_producers =
+        graph.candidates[2].supplier_candidates_per_input[0].candidates =
             vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
         for tiny_compaction in [false, true] {
             let profile = DirectCostProfile {
@@ -1519,7 +1517,7 @@ mod tests {
             query_roots: vec![root(2)],
             ..Default::default()
         };
-        graph.candidates[2].producer_requirements[0].compatible_producers =
+        graph.candidates[2].supplier_candidates_per_input[0].candidates =
             vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
         let profile = DirectCostProfile {
             nodes: [1.0, 3.0, 2.0]
@@ -1536,10 +1534,11 @@ mod tests {
         };
         assert_eq!(profile.maximum_latency(&graph), 5.0);
         graph.candidates[2]
-            .producer_requirements
-            .push(node(Some(0)).producer_requirements.remove(0));
+            .supplier_candidates_per_input
+            .push(node(Some(0)).supplier_candidates_per_input.remove(0));
         assert_eq!(profile.maximum_latency(&graph), 6.0);
-        graph.candidates[0].producer_requirements = node(Some(2)).producer_requirements;
+        graph.candidates[0].supplier_candidates_per_input =
+            node(Some(2)).supplier_candidates_per_input;
         assert_eq!(profile.maximum_latency(&graph), 6.0);
     }
 }

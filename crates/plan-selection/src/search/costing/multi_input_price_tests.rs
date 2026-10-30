@@ -30,8 +30,8 @@ fn append(
         0.0,
         inputs
             .into_iter()
-            .map(|producer| ProducerRequirement {
-                compatible_producers: vec![producer].into(),
+            .map(|producer| InputSupplierCandidates {
+                candidates: vec![producer].into(),
             })
             .collect(),
     )
@@ -43,15 +43,15 @@ fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
         let logical = lower_promql(query, AccuracyTarget::exact());
         let mut configured = PhysicalCandidatesWithCosts::empty_for_tests();
         let root = append(&logical, &mut configured);
-        configured.dag.query_roots.push(QueryRootCandidates {
-            compatible_candidates: vec![root],
+        configured.dag.query_roots.push(QueryOutputCandidates {
+            candidates: vec![root],
         });
         configured.sync_physical_for_tests();
         assert!(configured
             .dag
             .candidates
             .iter()
-            .any(|candidate| candidate.producer_requirements.len() == 2));
+            .any(|candidate| candidate.supplier_candidates_per_input.len() == 2));
         let roots = vec![QueryRoot::Operator(logical)];
         let entries = vec![QueryWorkloadEntry {
             query: Query(query.into()),
@@ -123,7 +123,7 @@ fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
                 .candidates
                 .iter()
                 .enumerate()
-                .find(|(_, candidate)| candidate.producer_requirements.len() == 2)
+                .find(|(_, candidate)| candidate.supplier_candidates_per_input.len() == 2)
                 .unwrap()
                 .0;
             let edges: Vec<_> = proposal
@@ -197,8 +197,8 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
     };
     let mut configured = PhysicalCandidatesWithCosts::empty_for_tests();
     let id = append(root, &mut configured);
-    configured.dag.query_roots.push(QueryRootCandidates {
-        compatible_candidates: vec![id],
+    configured.dag.query_roots.push(QueryOutputCandidates {
+        candidates: vec![id],
     });
     configured.sync_physical_for_tests();
     let original = vec![QueryRoot::Operator(original)];

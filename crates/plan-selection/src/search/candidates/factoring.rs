@@ -41,8 +41,8 @@ mod tests {
         inventory: CandidateInventory,
     ) -> crate::search::candidates::dag::PhysicalCandidatesWithCosts {
         use crate::search::candidates::dag::{
-            DagOfPhysicalCandidatesWithCosts, PhysicalCandidateWithCost,
-            PhysicalCandidatesWithCosts, ProducerRequirement, QueryRootCandidates,
+            DagOfPhysicalCandidatesWithCosts, InputSupplierCandidates, PhysicalCandidateWithCost,
+            PhysicalCandidatesWithCosts, QueryOutputCandidates,
         };
         use asap_types::ir::properties::ExecutionTiming;
         use asap_types::physical::{Materialization, Medium};
@@ -51,10 +51,10 @@ mod tests {
             candidates: (0..count)
                 .map(|id| PhysicalCandidateWithCost {
                     local_cost: NODE_COSTS[id],
-                    producer_requirements: inventory.supplier_nodes_per_input[id]
+                    supplier_candidates_per_input: inventory.supplier_nodes_per_input[id]
                         .iter()
-                        .map(|suppliers| ProducerRequirement {
-                            compatible_producers: suppliers.clone(),
+                        .map(|suppliers| InputSupplierCandidates {
+                            candidates: suppliers.clone(),
                         })
                         .collect(),
                 })
@@ -62,8 +62,8 @@ mod tests {
             query_roots: inventory
                 .query_output_nodes
                 .iter()
-                .map(|nodes| QueryRootCandidates {
-                    compatible_candidates: nodes.clone(),
+                .map(|nodes| QueryOutputCandidates {
+                    candidates: nodes.clone(),
                 })
                 .collect(),
             ..Default::default()
@@ -158,8 +158,8 @@ mod tests {
                 graph
                     .candidates
                     .iter()
-                    .flat_map(|candidate| &candidate.producer_requirements)
-                    .map(|input| input.compatible_producers.len())
+                    .flat_map(|candidate| &candidate.supplier_candidates_per_input)
+                    .map(|input| input.candidates.len())
                     .sum::<usize>(),
             )
         };

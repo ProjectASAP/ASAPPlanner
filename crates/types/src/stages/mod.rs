@@ -16,9 +16,10 @@ pub use memo::{
     queries_rooted_at, root_groups, CandidateGenerationTimeout, MemoGroup, MemoGroupId,
 };
 pub use physical::{
-    supplier_storage_metrics, validate_selected_connections, CandidateForMemoGroupId,
-    OperatorNodeOfCandidateForMemoGroup, OperatorNodeOfCandidateForMemoGroupId,
-    PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, ProducerConsumerConnection,
-    PruningMetrics, QueryRootAssignment, ReaderConstraint, SelectedCandidateGraph,
-    SupplierCandidates, SupplierSetInterner, SupplierStorageMetrics,
+    output_references, supplier_storage_metrics, validate_selected_connections,
+    CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
+    OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate,
+    PhysicalCandidateId, ProducerConsumerConnection, PruningMetrics, QueryRootAssignment,
+    ReaderConstraint, SelectedCandidateGraph, SupplierCandidates, SupplierSetInterner,
+    SupplierStorageMetrics,
 };

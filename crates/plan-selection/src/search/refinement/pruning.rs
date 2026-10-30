@@ -13,16 +13,16 @@ mod tests {
     use asap_types::physical::Materialization;
 
     use crate::search::candidates::dag::{
-        PhysicalCandidateWithCost, ProducerRequirement, QueryRootCandidates, ResourceBudget,
+        InputSupplierCandidates, PhysicalCandidateWithCost, QueryOutputCandidates, ResourceBudget,
     };
 
     fn candidate(cost: f64, inputs: &[&[usize]]) -> PhysicalCandidateWithCost {
         PhysicalCandidateWithCost {
             local_cost: cost,
-            producer_requirements: inputs
+            supplier_candidates_per_input: inputs
                 .iter()
-                .map(|ids| ProducerRequirement {
-                    compatible_producers: ids.iter().map(|id| PhysicalCandidateId(*id)).collect(),
+                .map(|ids| InputSupplierCandidates {
+                    candidates: ids.iter().map(|id| PhysicalCandidateId(*id)).collect(),
                 })
                 .collect(),
         }
@@ -57,11 +57,11 @@ mod tests {
                 candidate(1.0, &[&[1]]),
             ],
             query_roots: vec![
-                QueryRootCandidates {
-                    compatible_candidates: vec![PhysicalCandidateId(2)],
+                QueryOutputCandidates {
+                    candidates: vec![PhysicalCandidateId(2)],
                 },
-                QueryRootCandidates {
-                    compatible_candidates: vec![PhysicalCandidateId(3)],
+                QueryOutputCandidates {
+                    candidates: vec![PhysicalCandidateId(3)],
                 },
             ],
             ..Default::default()
@@ -71,8 +71,8 @@ mod tests {
         assert_eq!(inventory.prune_for_tests().removed_candidates, 1);
         let graph = &inventory.dag;
         assert_eq!(
-            graph.candidates[1].producer_requirements[0]
-                .compatible_producers
+            graph.candidates[1].supplier_candidates_per_input[0]
+                .candidates
                 .as_slice(),
             &[PhysicalCandidateId(0)]
         );
@@ -103,8 +103,8 @@ mod tests {
                 candidate(1.0, &[&[3]]),
                 candidate(1.0, &[]),
             ],
-            query_roots: vec![QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(3)],
+            query_roots: vec![QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(3)],
             }],
             resource_budgets: vec![ResourceBudget {
                 name: "state".into(),
@@ -137,8 +137,8 @@ mod tests {
                 candidate(1.0, &[&[0]]),
             ],
             query_roots: vec![
-                QueryRootCandidates {
-                    compatible_candidates: vec![PhysicalCandidateId(1), PhysicalCandidateId(2)]
+                QueryOutputCandidates {
+                    candidates: vec![PhysicalCandidateId(1), PhysicalCandidateId(2)]
                 };
                 2
             ],
@@ -170,8 +170,8 @@ mod tests {
     fn impossible_root_is_not_silently_removed() {
         let mut inventory = configured(DagOfPhysicalCandidatesWithCosts {
             candidates: vec![candidate(1.0, &[&[]])],
-            query_roots: vec![QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(0)],
+            query_roots: vec![QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(0)],
             }],
             ..Default::default()
         });
@@ -187,11 +187,11 @@ mod tests {
         let mut graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![candidate(1.0, &[]), candidate(2.0, &[])],
             query_roots: vec![
-                QueryRootCandidates {
-                    compatible_candidates: vec![PhysicalCandidateId(0)],
+                QueryOutputCandidates {
+                    candidates: vec![PhysicalCandidateId(0)],
                 },
-                QueryRootCandidates {
-                    compatible_candidates: vec![PhysicalCandidateId(1)],
+                QueryOutputCandidates {
+                    candidates: vec![PhysicalCandidateId(1)],
                 },
             ],
             reader_constraints: vec![

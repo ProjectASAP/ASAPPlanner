@@ -10,7 +10,7 @@ pub use graph::{
     QueryRootAssignment, ReaderConstraint, SelectedCandidateGraph,
 };
 pub use memo_candidates::{
-    CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
+    output_references, CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
     OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate,
     PruningMetrics,
 };

@@ -6,8 +6,8 @@ use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{Operator, OperatorNode, ProjectItem, ScalarExpr};
 
 use crate::search::candidates::dag::{
-    DagOfPhysicalCandidatesWithCosts, PhysicalCandidateWithCost, ProducerRequirement,
-    QueryRootCandidates,
+    DagOfPhysicalCandidatesWithCosts, InputSupplierCandidates, PhysicalCandidateWithCost,
+    QueryOutputCandidates,
 };
 use asap_types::workload::{
     DataWorkload, Predictability, Query, QueryRequirements, QueryWorkloadEntry, RepetitionInterval,
@@ -43,21 +43,17 @@ fn differing_supplier_statistics_keep_both_price_interfaces() {
             candidates: (0..3)
                 .map(|id| PhysicalCandidateWithCost {
                     local_cost: 0.0,
-                    producer_requirements: if id == 2 {
-                        vec![ProducerRequirement {
-                            compatible_producers: vec![
-                                PhysicalCandidateId(0),
-                                PhysicalCandidateId(1),
-                            ]
-                            .into(),
+                    supplier_candidates_per_input: if id == 2 {
+                        vec![InputSupplierCandidates {
+                            candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
                         }]
                     } else {
                         vec![]
                     },
                 })
                 .collect(),
-            query_roots: vec![QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(2)],
+            query_roots: vec![QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(2)],
             }],
             ..Default::default()
         },
@@ -132,8 +128,8 @@ fn differing_supplier_statistics_keep_both_price_interfaces() {
         "projection work must follow selected input rows, not template rows"
     );
     assert_eq!(
-        configured.dag.candidates[2].producer_requirements[0]
-            .compatible_producers
+        configured.dag.candidates[2].supplier_candidates_per_input[0]
+            .candidates
             .len(),
         2
     );
@@ -224,21 +220,17 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
             candidates: (0..3)
                 .map(|id| PhysicalCandidateWithCost {
                     local_cost: 0.0,
-                    producer_requirements: if id == 2 {
-                        vec![ProducerRequirement {
-                            compatible_producers: vec![
-                                PhysicalCandidateId(0),
-                                PhysicalCandidateId(1),
-                            ]
-                            .into(),
+                    supplier_candidates_per_input: if id == 2 {
+                        vec![InputSupplierCandidates {
+                            candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
                         }]
                     } else {
                         vec![]
                     },
                 })
                 .collect(),
-            query_roots: vec![QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(2)],
+            query_roots: vec![QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(2)],
             }],
             ..Default::default()
         },
@@ -267,11 +259,11 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
         ExecutionTiming::QueryTime,
         Materialization::NotMaterialized,
         0.0,
-        vec![ProducerRequirement {
-            compatible_producers: vec![PhysicalCandidateId(2)].into(),
+        vec![InputSupplierCandidates {
+            candidates: vec![PhysicalCandidateId(2)].into(),
         }],
     );
-    configured.dag.query_roots[0].compatible_candidates = vec![PhysicalCandidateId(3)];
+    configured.dag.query_roots[0].candidates = vec![PhysicalCandidateId(3)];
     configured.sync_physical_for_tests();
     let roots = vec![QueryRoot::Operator(downstream)];
     let entries = [QueryWorkloadEntry {
@@ -340,7 +332,7 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
             .unwrap()
         };
     let baseline = solve(&configured, &extracted);
-    configured.dag.candidates[2].producer_requirements[0].compatible_producers = vec![
+    configured.dag.candidates[2].supplier_candidates_per_input[0].candidates = vec![
         PhysicalCandidateId(0),
         PhysicalCandidateId(1),
         PhysicalCandidateId(2),
@@ -405,8 +397,8 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
             0.0,
             inputs
                 .into_iter()
-                .map(|supplier| ProducerRequirement {
-                    compatible_producers: vec![supplier].into(),
+                .map(|supplier| InputSupplierCandidates {
+                    candidates: vec![supplier].into(),
                 })
                 .collect(),
         );
@@ -467,8 +459,8 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         false,
         Materialization::MatAtIngestion(Medium::Memory),
     );
-    configured.dag.query_roots.push(QueryRootCandidates {
-        compatible_candidates: vec![root_id],
+    configured.dag.query_roots.push(QueryOutputCandidates {
+        candidates: vec![root_id],
     });
     configured.sync_physical_for_tests();
     let chain = configured
@@ -477,7 +469,7 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         .position(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
         .unwrap();
     let raw_supplier =
-        configured.dag.candidates[chain].producer_requirements[0].compatible_producers[0];
+        configured.dag.candidates[chain].supplier_candidates_per_input[0].candidates[0];
     configured.sync_physical_for_tests();
     assert!(matches!(
         configured.node(raw_supplier.0).non_asap(),
@@ -507,8 +499,8 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         ExecutionTiming::IngestionTime,
         Materialization::NotMaterialized,
         0.0,
-        vec![ProducerRequirement {
-            compatible_producers: vec![raw_supplier].into(),
+        vec![InputSupplierCandidates {
+            candidates: vec![raw_supplier].into(),
         }],
     );
     let originals = vec![QueryRoot::Operator(original)];
@@ -563,7 +555,7 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         },
         ..context
     };
-    configured.dag.candidates[chain].producer_requirements[0].compatible_producers =
+    configured.dag.candidates[chain].supplier_candidates_per_input[0].candidates =
         vec![raw_supplier, projected_supplier].into();
     configured.sync_physical_for_tests();
     let old = extract(&configured, &context).unwrap().unwrap();
@@ -677,21 +669,17 @@ fn mixed_schedule_joint_prices_match_the_real_evaluator() {
             candidates: (0..3)
                 .map(|id| PhysicalCandidateWithCost {
                     local_cost: 0.0,
-                    producer_requirements: if id == 2 {
-                        vec![ProducerRequirement {
-                            compatible_producers: vec![
-                                PhysicalCandidateId(0),
-                                PhysicalCandidateId(1),
-                            ]
-                            .into(),
+                    supplier_candidates_per_input: if id == 2 {
+                        vec![InputSupplierCandidates {
+                            candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
                         }]
                     } else {
                         vec![]
                     },
                 })
                 .collect(),
-            query_roots: vec![QueryRootCandidates {
-                compatible_candidates: vec![PhysicalCandidateId(2)],
+            query_roots: vec![QueryOutputCandidates {
+                candidates: vec![PhysicalCandidateId(2)],
             }],
             ..Default::default()
         },
@@ -742,7 +730,7 @@ fn mixed_schedule_joint_prices_match_the_real_evaluator() {
     configured.sync_physical_for_tests();
     // All roots use the original source; this parity check has no synthetic
     // equivalence between different source names.
-    configured.dag.candidates[2].producer_requirements[0].compatible_producers =
+    configured.dag.candidates[2].supplier_candidates_per_input[0].candidates =
         vec![PhysicalCandidateId(0)].into();
     configured.sync_physical_for_tests();
     let context = CandidatePlanningContext {

@@ -107,9 +107,9 @@ pub(in crate::search) fn extract_price_options(
             continue;
         }
         for supplier in configured.dag.candidates[id]
-            .producer_requirements
+            .supplier_candidates_per_input
             .iter()
-            .flat_map(|input| input.compatible_producers.iter())
+            .flat_map(|input| input.candidates.iter())
         {
             if supplier.0 != id && nodes[supplier.0].is_some() {
                 pending[id] += 1;
@@ -164,9 +164,9 @@ pub(in crate::search) fn extract_price_options(
                 continue;
             }
             let mut inputs = Vec::new();
-            for input in &configured.dag.candidates[id].producer_requirements {
+            for input in &configured.dag.candidates[id].supplier_candidates_per_input {
                 let mut choices = Vec::new();
-                for producer in &input.compatible_producers {
+                for producer in &input.candidates {
                     check_deadline(context.deadline)?;
                     if producer.0 == id {
                         continue;

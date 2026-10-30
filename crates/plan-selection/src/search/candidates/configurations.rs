@@ -4,8 +4,8 @@ use std::rc::Rc;
 
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
 use asap_physical_asap_optimization::catalog::test_support::{
-    compatible_timing, enumerate_candidate_configurations_before, may_keep_with_sole_reader,
-    CandidateInventory,
+    compatible_timing, enumerate_candidate_configurations_before,
+    may_keep_across_evaluations_per_sole_reader_query, CandidateInventory,
 };
 use asap_physical_asap_optimization::catalog::ConfigurationError;
 use asap_types::ir::properties::ExecutionTiming;
@@ -139,7 +139,7 @@ pub(in crate::search) fn query_roots_for_tests(
 /// `may_keep_across_evaluations_per_sole_reader_query` from its operator
 /// node as [`enumerate_candidate_configurations_before`] does.
 #[cfg(test)]
-pub(in crate::search) fn fill_may_keep_with_sole_reader(
+pub(in crate::search) fn fill_may_keep_across_evaluations_per_sole_reader_query(
     configured: &mut PhysicalCandidatesWithCosts,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
@@ -147,13 +147,14 @@ pub(in crate::search) fn fill_may_keep_with_sole_reader(
 ) {
     let nodes = configured.nodes_for_tests();
     for (candidate, node) in configured.physical.candidates.iter_mut().zip(&nodes) {
-        candidate.may_keep_across_evaluations_per_sole_reader_query = may_keep_with_sole_reader(
-            node,
-            candidate.materialization,
-            entries,
-            data,
-            query_time_results_retained,
-        );
+        candidate.may_keep_across_evaluations_per_sole_reader_query =
+            may_keep_across_evaluations_per_sole_reader_query(
+                node,
+                candidate.materialization,
+                entries,
+                data,
+                query_time_results_retained,
+            );
     }
 }
 
@@ -265,16 +266,16 @@ mod tests {
             let original = &source.graph.candidates[configuration.operator_node.0];
             let generated = &expanded.dag.candidates[consumer];
             assert_eq!(
-                generated.producer_requirements.len(),
-                original.producer_requirements.len()
+                generated.supplier_candidates_per_input.len(),
+                original.supplier_candidates_per_input.len()
             );
             for (original, generated) in original
-                .producer_requirements
+                .supplier_candidates_per_input
                 .iter()
-                .zip(&generated.producer_requirements)
+                .zip(&generated.supplier_candidates_per_input)
             {
                 let expected: Vec<_> = original
-                    .compatible_producers
+                    .candidates
                     .iter()
                     .flat_map(|source| {
                         expanded.physical.candidates.iter().enumerate().filter_map(
@@ -291,10 +292,7 @@ mod tests {
                         )
                     })
                     .collect();
-                assert_eq!(
-                    generated.compatible_producers.as_slice(),
-                    expected.as_slice()
-                );
+                assert_eq!(generated.candidates.as_slice(), expected.as_slice());
             }
         }
         let metrics = asap_types::stages::supplier_storage_metrics(&expanded.physical);
@@ -302,7 +300,7 @@ mod tests {
             .dag
             .candidates
             .iter()
-            .map(|candidate| candidate.producer_requirements.len())
+            .map(|candidate| candidate.supplier_candidates_per_input.len())
             .sum::<usize>();
         assert!(metrics.unique_supplier_sets < requirements, "{metrics:?}");
         assert!(
@@ -328,7 +326,7 @@ mod tests {
                 .graph
                 .candidates
                 .iter()
-                .map(|candidate| candidate.producer_requirements.len())
+                .map(|candidate| candidate.supplier_candidates_per_input.len())
                 .sum::<usize>();
         assert!(
             expanded.physical.candidates.len()
@@ -370,9 +368,9 @@ mod tests {
         }
         for (consumer, candidate) in expanded.dag.candidates.iter().enumerate() {
             for producer in candidate
-                .producer_requirements
+                .supplier_candidates_per_input
                 .iter()
-                .flat_map(|input| &input.compatible_producers)
+                .flat_map(|input| &input.candidates)
             {
                 assert!(compatible_timing(
                     expanded.physical.candidates[consumer].timing,
@@ -384,7 +382,7 @@ mod tests {
             .dag
             .query_roots
             .iter()
-            .flat_map(|root| &root.compatible_candidates)
+            .flat_map(|root| &root.candidates)
             .all(|id| expanded.physical.candidates[id.0].timing == ExecutionTiming::QueryTime));
     }
 
@@ -394,7 +392,7 @@ mod tests {
     fn identical_quantiles_with_distinct_phases_have_separate_execution_scopes() {
         let (catalog, mut entries, data) = fixture();
         let root = catalog.graph.query_roots[0]
-            .compatible_candidates
+            .candidates
             .iter()
             .map(|id| &catalog.templates[id.0])
             .find(|node| OperatorNode::reachable(node).iter().any(|child| kll(child)))
@@ -483,8 +481,8 @@ mod tests {
                 .dag
                 .candidates
                 .iter()
-                .flat_map(|candidate| &candidate.producer_requirements)
-                .map(|input| input.compatible_producers.len())
+                .flat_map(|candidate| &candidate.supplier_candidates_per_input)
+                .map(|input| input.candidates.len())
                 .sum();
             counts.push((expanded.physical.candidates.len(), edges));
         }
@@ -585,9 +583,9 @@ mod tests {
             .enumerate()
             .filter(|(_, candidate)| {
                 candidate
-                    .producer_requirements
+                    .supplier_candidates_per_input
                     .iter()
-                    .any(|input| input.compatible_producers.contains(shared_build))
+                    .any(|input| input.candidates.contains(shared_build))
             })
             .map(|(id, _)| id)
             .collect::<Vec<_>>();
@@ -596,8 +594,8 @@ mod tests {
             if reader_sources.contains(&configuration.operator_node.0)
                 && configuration.timing == ExecutionTiming::QueryTime
             {
-                for input in &mut expanded.dag.candidates[id].producer_requirements {
-                    if input.compatible_producers.iter().any(|producer| {
+                for input in &mut expanded.dag.candidates[id].supplier_candidates_per_input {
+                    if input.candidates.iter().any(|producer| {
                         expanded.physical.candidates[producer.0].operator_node.0 == shared_build.0
                     }) {
                         // Query-specific readers have their original logical owner.
@@ -606,10 +604,10 @@ mod tests {
                         };
                         let source_group = group(configuration.operator_node.0);
                         let is_first = source.graph.query_roots[0]
-                            .compatible_candidates
+                            .candidates
                             .iter()
                             .any(|root| group(root.0) == source_group);
-                        input.compatible_producers.retain(|producer| {
+                        input.candidates.retain(|producer| {
                             if is_first {
                                 producer.0 == ingestion
                             } else {

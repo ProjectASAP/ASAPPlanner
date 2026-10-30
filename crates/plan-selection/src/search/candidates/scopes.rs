@@ -38,8 +38,8 @@ mod tests {
     use asap_types::physical::Materialization;
 
     use crate::search::candidates::dag::{
-        DagOfPhysicalCandidatesWithCosts, PhysicalCandidateWithCost, ProducerRequirement,
-        QueryRootCandidates,
+        DagOfPhysicalCandidatesWithCosts, InputSupplierCandidates, PhysicalCandidateWithCost,
+        QueryOutputCandidates,
     };
     use asap_types::stages::{PhysicalCandidateId, ReaderConstraint};
 
@@ -53,23 +53,22 @@ mod tests {
             candidates: vec![
                 PhysicalCandidateWithCost {
                     local_cost: 2.0,
-                    producer_requirements: vec![],
+                    supplier_candidates_per_input: vec![],
                 },
                 PhysicalCandidateWithCost {
                     local_cost: 3.0,
-                    producer_requirements: vec![],
+                    supplier_candidates_per_input: vec![],
                 },
                 PhysicalCandidateWithCost {
                     local_cost: 1.0,
-                    producer_requirements: vec![ProducerRequirement {
-                        compatible_producers: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)]
-                            .into(),
+                    supplier_candidates_per_input: vec![InputSupplierCandidates {
+                        candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
                     }],
                 },
             ],
             query_roots: vec![
-                QueryRootCandidates {
-                    compatible_candidates: vec![PhysicalCandidateId(2)]
+                QueryOutputCandidates {
+                    candidates: vec![PhysicalCandidateId(2)]
                 };
                 2
             ],
@@ -109,8 +108,8 @@ mod tests {
         for output_count in [2, 4, 8] {
             let mut source = terminal_reader_inventory(false);
             source.dag.query_roots = vec![
-                QueryRootCandidates {
-                    compatible_candidates: vec![PhysicalCandidateId(2)]
+                QueryOutputCandidates {
+                    candidates: vec![PhysicalCandidateId(2)]
                 };
                 output_count
             ];
@@ -132,8 +131,8 @@ mod tests {
             let producer_connections: usize = graph
                 .candidates
                 .iter()
-                .flat_map(|candidate| &candidate.producer_requirements)
-                .map(|input| input.compatible_producers.len())
+                .flat_map(|candidate| &candidate.supplier_candidates_per_input)
+                .map(|input| input.candidates.len())
                 .sum();
             assert_eq!(producer_count, 2);
             assert_eq!(terminal_count, output_count);
@@ -143,7 +142,7 @@ mod tests {
                 graph
                     .query_roots
                     .iter()
-                    .map(|output| output.compatible_candidates.len())
+                    .map(|output| output.candidates.len())
                     .sum::<usize>(),
                 output_count * output_count
             );
@@ -208,12 +207,12 @@ mod tests {
             ExecutionTiming::QueryTime,
             Materialization::NotMaterialized,
             1.0,
-            vec![ProducerRequirement {
-                compatible_producers: vec![PhysicalCandidateId(2)].into(),
+            vec![InputSupplierCandidates {
+                candidates: vec![PhysicalCandidateId(2)].into(),
             }],
         );
         for output in &mut source.dag.query_roots {
-            output.compatible_candidates = vec![PhysicalCandidateId(3)];
+            output.candidates = vec![PhysicalCandidateId(3)];
         }
         let expanded = expand_execution_scopes(source, &[1; 4], &[0, 0]).unwrap();
         assert_eq!(
@@ -236,15 +235,15 @@ mod tests {
         for (index, cost) in [3.0, 5.0, 1.0, 1.0].into_iter().enumerate() {
             graph.candidates.push(PhysicalCandidateWithCost {
                 local_cost: cost,
-                producer_requirements: if index < 2 {
+                supplier_candidates_per_input: if index < 2 {
                     Vec::new()
                 } else {
                     vec![
-                        ProducerRequirement {
-                            compatible_producers: vec![id(0)].into(),
+                        InputSupplierCandidates {
+                            candidates: vec![id(0)].into(),
                         },
-                        ProducerRequirement {
-                            compatible_producers: vec![id(1)].into(),
+                        InputSupplierCandidates {
+                            candidates: vec![id(1)].into(),
                         },
                     ]
                 },
@@ -252,8 +251,8 @@ mod tests {
         }
         graph.query_roots = [2, 3, 2, 3]
             .into_iter()
-            .map(|candidate| QueryRootCandidates {
-                compatible_candidates: vec![id(candidate)],
+            .map(|candidate| QueryOutputCandidates {
+                candidates: vec![id(candidate)],
             })
             .collect();
         graph
@@ -283,16 +282,16 @@ mod tests {
             let original = &original_graph.candidates[configuration.operator_node.0];
             let copied = &expanded.dag.candidates[id];
             assert_eq!(
-                original.producer_requirements.len(),
-                copied.producer_requirements.len()
+                original.supplier_candidates_per_input.len(),
+                copied.supplier_candidates_per_input.len()
             );
             for (input, copied_input) in original
-                .producer_requirements
+                .supplier_candidates_per_input
                 .iter()
-                .zip(&copied.producer_requirements)
+                .zip(&copied.supplier_candidates_per_input)
             {
                 let expected: Vec<_> = input
-                    .compatible_producers
+                    .candidates
                     .iter()
                     .flat_map(|producer| {
                         expanded.physical.candidates.iter().enumerate().filter_map(
@@ -303,10 +302,7 @@ mod tests {
                         )
                     })
                     .collect();
-                assert_eq!(
-                    copied_input.compatible_producers.as_slice(),
-                    expected.as_slice()
-                );
+                assert_eq!(copied_input.candidates.as_slice(), expected.as_slice());
             }
         }
         let metrics = asap_types::stages::supplier_storage_metrics(&expanded.physical);
