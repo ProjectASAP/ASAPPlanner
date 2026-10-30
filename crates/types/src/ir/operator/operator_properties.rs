@@ -168,7 +168,7 @@ impl<'de, C: Deserialize<'de>> Deserialize<'de> for GroupKeys<C> {
 }
 
 /// The leaf data source of a `Scan`. The schema itself rides on the
-/// `Scan.schema` field (SchemaResolver-built); `Source` carries only the leaf's
+/// `Scan.schema` field (built by the schema resolver); `Source` carries only the leaf's
 /// identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Source {

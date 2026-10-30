@@ -1,7 +1,7 @@
 //! `NonASAPOp::Scan` — label matcher / predicate tests.
 //!
 //! The Scan schema is always [ts(0), value(1), label_a(2), label_b(3), …]
-//! where labels are appended alphabetically after dedup by the SchemaResolver.
+//! where labels are appended alphabetically after dedup by the schema resolver.
 //! Filter-only labels (not group keys) still land in the schema because the
 //! predicate expression references them positionally.
 //! Predicates are canonicalized alphabetically by label name at lowering time.

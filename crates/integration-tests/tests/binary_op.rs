@@ -1,9 +1,9 @@
 //! `NonASAPOp::BinaryOp` — arithmetic, comparison, and vector-match tests.
 //!
-//! Each side of a `BinaryOp` is bound independently by the SchemaResolver, so each
+//! Each side of a `BinaryOp` is bound independently by the schema resolver, so each
 //! gets its own scan schema derived from the labels it references.
 //! `VectorMatch` labels (e.g. `on(job)`) are carried as strings on the
-//! operator and are NOT resolved to column ids — the SchemaResolver does not
+//! operator and are NOT resolved to column ids — the schema resolver does not
 //! see them.
 
 use std::rc::Rc;

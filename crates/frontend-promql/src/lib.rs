@@ -3,7 +3,7 @@
 //! in canonical shape (issue #179) →
 //! [`resolve_root`](asap_frontend_common::resolve_root).
 //!
-//! `resolve_root` runs the frontend-common `SchemaResolver` for positional
+//! `resolve_root` runs the frontend-common schema resolver for positional
 //! name resolution and returns the unified
 //! [`OperatorNode`] DAG. Depends on the PromQL
 //! parser only — never on the SQL / DataFusion stack.

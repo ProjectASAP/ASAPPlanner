@@ -1963,7 +1963,7 @@ fn filtered_source(metric: String, matchers: Vec<Scalar>, shift: TimeShift) -> U
     let scan = Unresolved::Scan {
         source: Source::TimeSeries { metric },
         predicates: matchers.into_iter().map(UnresolvedPredicate).collect(),
-        // Usage-derived (PromQL is schemaless) — the SchemaResolver fills this in.
+        // Usage-derived (PromQL is schemaless) — the schema resolver fills this in.
         schema: None,
     };
     if shift.is_identity() {
