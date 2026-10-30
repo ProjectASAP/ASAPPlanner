@@ -2,10 +2,8 @@
 //! Production search organizes local candidates in the memo rather than enumerating
 //! Cartesian products of workload choices.
 
-use std::rc::Rc;
-
 use asap_types::ir::flat::flatten;
-use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
+use asap_types::ir::{NonASAPOp, QueryRoot};
 use asap_types::workload::QueryWorkloadEntry;
 
 use crate::pass1::per_computation_candidates::{
@@ -15,150 +13,35 @@ use crate::pass2::asap_aware_cse::{
     capability_sharing_candidates, identical_expression_pass2_candidates, pane_candidates,
     rollup_candidates, rollup_choices, rollup_pass2_candidates, sharing_candidates,
     summary_capability_pass2_candidates, topk_reuse_candidates, topk_reuse_pass2_candidates,
-    window_composition_pass2_candidates, with_union_scan_labels, PaneCandidate, RollupCandidate,
-    SharedPaneChain, SharingCandidate, TopKReuseCandidate, MAX_REUSE_CANDIDATES,
+    window_composition_pass2_candidates, with_union_scan_labels, MAX_REUSE_CANDIDATES,
 };
 
-/// What a Pass 2 candidate changed of the Pass 1 candidate it derives
-/// from: each set of summary builds in `shared_builds` made one build sized
-/// for all its readers (the summary-capability rule), then the build of
-/// each of `pane_candidates` built as tumbling panes (the
-/// window-composition rule), or each of `rollup_candidates` and
-/// `topk_reuse_candidates` answered from another computation (the rollup
-/// and exact top-k reuse rules), then the nodes of each of
-/// `sharing_candidates` made one node (the identical-expression rule). It
-/// has its Pass 1 candidate's `choice`; display labels are the devtools'.
-#[derive(Debug, Clone)]
-pub struct Pass2Candidate {
-    /// The position, in Stage 1 enumeration order from 0, of the Pass 1
-    /// candidate it derives from: `L<from_pass1_position + 1>`.
-    pub from_pass1_position: usize,
-    /// Summary-capability rule: each set of the Pass 1 candidate's summary
-    /// builds made one build.
-    pub shared_builds: Vec<Vec<Rc<OperatorNode>>>,
-    /// Window-composition rule: the builds built as tumbling panes.
-    pub pane_candidates: Vec<PaneCandidate>,
-    /// Window-composition rule: the chains each shared by several of
-    /// `pane_candidates`, each member merging its newest panes.
-    pub shared_pane_chains: Vec<SharedPaneChain>,
-    /// Rollup rule: the Pass 1 candidate's coarse builds answered from
-    /// finer ones.
-    pub rollup_candidates: Vec<RollupCandidate>,
-    /// Exact top-k reuse rule: the top-k computations that read one ranking.
-    pub topk_reuse_candidates: Vec<TopKReuseCandidate>,
-    /// Identical-expression rule: the identical nodes made one node.
-    pub sharing_candidates: Vec<SharingCandidate>,
-}
-
-/// One Stage 1 candidate in enumeration order, before Stage 2 numbers it.
-#[derive(Debug)]
-pub struct Stage1Candidate {
-    /// The Pass 1 choice (`targets[t].computation_for(choice[t])`: target
-    /// `t`'s candidate, or its fused computation's); a Pass 2 candidate has
-    /// its Pass 1 candidate's.
-    pub choice: Vec<usize>,
-    pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
-    /// For a Pass 2 candidate: what it changed of its Pass 1 candidate.
-    pub pass2: Option<Pass2Candidate>,
-}
-
-/// Apply sharing and window rules to one explicit Pass 1 assignment.
-/// `entries[q]` supplies query `q`'s evaluation grid. Returned Pass 2
-/// candidates record position zero as their source assignment.
+/// Apply sharing and window rules to one explicit Pass 1 assignment: the
+/// composed candidate's roots (unless not viable), then each of its Pass 2
+/// candidates'. `entries[q]` supplies query `q`'s evaluation grid.
 pub fn stage1_candidates_of_choice<Id: Clone>(
     per_computation: &PerComputationCandidates<Id>,
     entries: &[QueryWorkloadEntry],
     choice: &[usize],
     viable: &dyn Fn(&[QueryRoot]) -> bool,
-) -> Vec<Stage1Candidate> {
+) -> Vec<Result<Vec<QueryRoot>, PerComputationCandidateError>> {
     let evaluation_grid_ms: Vec<Option<u64>> = entries
         .iter()
         .map(QueryWorkloadEntry::evaluation_grid_ms)
         .collect();
-    choice_candidates(per_computation, choice, &evaluation_grid_ms, 0, viable)
-}
-
-/// [`stage1_candidates_of_choice`] with each query's evaluation grid, its
-/// Pass 2 candidates recording `from` as their Pass 1 candidate's position.
-fn choice_candidates<Id: Clone>(
-    per_computation: &PerComputationCandidates<Id>,
-    choice: &[usize],
-    evaluation_grid_ms: &[Option<u64>],
-    from: usize,
-    viable: &dyn Fn(&[QueryRoot]) -> bool,
-) -> Vec<Stage1Candidate> {
     let roots = compose_logical_candidate(per_computation, choice)
         .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>());
-    let (pass2, composed_viable) = match &roots {
-        Ok(roots) => {
-            let composed_viable = viable(roots);
-            (
-                pass2_candidates(roots, evaluation_grid_ms, composed_viable, viable),
-                composed_viable,
-            )
-        }
-        Err(_) => (Vec::new(), true),
+    let Ok(composed) = &roots else {
+        return vec![roots];
     };
+    let composed_viable = viable(composed);
+    let pass2 = pass2_candidates(composed, &evaluation_grid_ms, composed_viable, viable);
     let mut candidates = Vec::new();
     if composed_viable {
-        candidates.push(Stage1Candidate {
-            choice: choice.to_vec(),
-            roots,
-            pass2: None,
-        });
+        candidates.push(roots);
     }
-    for Pass2 {
-        rules,
-        sharing_candidates,
-        roots,
-    } in pass2
-    {
-        candidates.push(Stage1Candidate {
-            choice: choice.to_vec(),
-            roots,
-            pass2: Some(Pass2Candidate {
-                from_pass1_position: from,
-                shared_builds: rules.shared_builds,
-                pane_candidates: rules.pane_candidates,
-                shared_pane_chains: rules.shared_pane_chains,
-                rollup_candidates: rules.rollup_candidates,
-                topk_reuse_candidates: rules.topk_reuse_candidates,
-                sharing_candidates,
-            }),
-        });
-    }
+    candidates.extend(pass2);
     candidates
-}
-
-/// A Pass 2 candidate: what the rules other than the identical-expression
-/// rule changed, the identical nodes it shares, and its roots.
-struct Pass2 {
-    rules: Rules,
-    sharing_candidates: Vec<SharingCandidate>,
-    roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
-}
-
-/// What the rules other than the identical-expression rule changed: the
-/// summary builds shared (summary-capability rule), the builds built as
-/// tumbling panes (window-composition rule) and the computations answered
-/// from another (rollup and exact top-k reuse rules).
-#[derive(Debug, Clone, Default)]
-struct Rules {
-    shared_builds: Vec<Vec<Rc<OperatorNode>>>,
-    pane_candidates: Vec<PaneCandidate>,
-    shared_pane_chains: Vec<SharedPaneChain>,
-    rollup_candidates: Vec<RollupCandidate>,
-    topk_reuse_candidates: Vec<TopKReuseCandidate>,
-}
-
-impl Pass2 {
-    fn failed(rules: &Rules, error: PerComputationCandidateError) -> Self {
-        Self {
-            rules: rules.clone(),
-            sharing_candidates: Vec::new(),
-            roots: Err(error),
-        }
-    }
 }
 
 /// The Pass 2 candidates of the composed candidate with roots `roots`, in
@@ -170,44 +53,39 @@ fn pass2_candidates(
     evaluation_grid_ms: &[Option<u64>],
     composed_viable: bool,
     viable: &dyn Fn(&[QueryRoot]) -> bool,
-) -> Vec<Pass2> {
+) -> Vec<Result<Vec<QueryRoot>, PerComputationCandidateError>> {
     let mut found = Pass2List {
         seen: vec![flatten(roots).0],
         out: Vec::new(),
         widened: Vec::new(),
         viable,
     };
-    let none = Rules::default();
     if composed_viable {
-        found.identical_expression(&none, roots);
+        found.identical_expression(roots);
     }
-    found.window_composition(&none, roots, evaluation_grid_ms);
-    found.reuse(&none, roots, evaluation_grid_ms);
+    found.window_composition(roots, evaluation_grid_ms);
+    found.reuse(roots, evaluation_grid_ms);
     let candidates = capability_sharing_candidates(roots);
     let pass2_candidates = match summary_capability_pass2_candidates(roots, &candidates) {
         Ok(pass2_candidates) => pass2_candidates,
         Err(error) => {
-            found.out.push(Pass2::failed(&none, error));
+            found.out.push(Err(error));
             found.out.append(&mut found.widened);
             return found.out;
         }
     };
     for pass2_candidate in pass2_candidates {
-        let rules = Rules {
-            shared_builds: pass2_candidate.shared_builds,
-            ..Rules::default()
-        };
         match pass2_candidate.roots {
             Ok(roots) => {
-                if found.push(&rules, Vec::new(), &roots) {
-                    found.identical_expression(&rules, &roots);
+                if found.push(&roots) {
+                    found.identical_expression(&roots);
                 }
-                found.window_composition(&rules, &roots, evaluation_grid_ms);
-                found.reuse(&rules, &roots, evaluation_grid_ms);
+                found.window_composition(&roots, evaluation_grid_ms);
+                found.reuse(&roots, evaluation_grid_ms);
             }
             // Listed as a candidate that cannot be composed; the other
             // Pass 2 candidates go on.
-            Err(error) => found.out.push(Pass2::failed(&rules, error)),
+            Err(error) => found.out.push(Err(error)),
         }
     }
     found.out.append(&mut found.widened);
@@ -218,12 +96,12 @@ fn pass2_candidates(
 /// listed (the Pass 1 candidate's included), so each is listed once.
 struct Pass2List<'v> {
     seen: Vec<asap_types::ir::flat::FlatDag>,
-    out: Vec<Pass2>,
+    out: Vec<Result<Vec<QueryRoot>, PerComputationCandidateError>>,
     /// The identical-expression candidates over widened scans
     /// ([`with_union_scan_labels`]), listed after `out`: a plan both lists
     /// reach the same way (e.g. one per-series build shared by either rule)
     /// ties, and plan selection keeps the earlier one.
-    widened: Vec<Pass2>,
+    widened: Vec<Result<Vec<QueryRoot>, PerComputationCandidateError>>,
     /// Whether a candidate, or any of its identical-expression candidates,
     /// can have a valid implementation; always `true` for the exhaustive
     /// search.
@@ -237,12 +115,7 @@ impl Pass2List<'_> {
     /// skips them. Sharing identical nodes never makes a build eligible
     /// for a materialization it was not eligible for, since the shared
     /// node is read by every reader of the nodes it replaces.
-    fn push(
-        &mut self,
-        rules: &Rules,
-        sharing_candidates: Vec<SharingCandidate>,
-        roots: &[QueryRoot],
-    ) -> bool {
+    fn push(&mut self, roots: &[QueryRoot]) -> bool {
         if !(self.viable)(roots) {
             return false;
         }
@@ -251,35 +124,26 @@ impl Pass2List<'_> {
             return true;
         }
         self.seen.push(flat);
-        self.out.push(Pass2 {
-            rules: rules.clone(),
-            sharing_candidates,
-            roots: Ok(roots.to_vec()),
-        });
+        self.out.push(Ok(roots.to_vec()));
         true
     }
 
-    /// The identical-expression Pass 2 candidates of `roots`, which the
-    /// other rules changed as `rules` says.
+    /// The identical-expression Pass 2 candidates of `roots`.
     /// When a metric's scans project different labels, also those of
     /// `roots` with the scans widened to every label
     /// ([`with_union_scan_labels`]) that share a scan: the others only read
     /// wider scans than their counterparts over `roots`. They are listed
     /// last (`widened`).
-    fn identical_expression(&mut self, rules: &Rules, roots: &[QueryRoot]) {
+    fn identical_expression(&mut self, roots: &[QueryRoot]) {
         let candidates = sharing_candidates(roots);
         for pass2_candidate in identical_expression_pass2_candidates(roots, &candidates) {
-            self.push(
-                rules,
-                pass2_candidate.sharing_candidates,
-                &pass2_candidate.roots,
-            );
+            self.push(&pass2_candidate.roots);
         }
         let widened = match with_union_scan_labels(roots) {
             Ok(Some(widened)) => widened,
             Ok(None) => return,
             Err(error) => {
-                self.out.push(Pass2::failed(rules, error));
+                self.out.push(Err(error));
                 return;
             }
         };
@@ -291,47 +155,32 @@ impl Pass2List<'_> {
                 .iter()
                 .any(|c| matches!(c.nodes[0].non_asap(), Some(NonASAPOp::Scan { .. })));
             if shares_a_scan {
-                self.push(
-                    rules,
-                    pass2_candidate.sharing_candidates,
-                    &pass2_candidate.roots,
-                );
+                self.push(&pass2_candidate.roots);
             }
         }
         let widened = self.out.split_off(start);
         self.widened.extend(widened);
     }
 
-    /// The window-composition Pass 2 candidates of `roots`, which the other
-    /// rules changed as `rules` says, each followed by its
-    /// identical-expression Pass 2 candidates.
-    fn window_composition(
-        &mut self,
-        rules: &Rules,
-        roots: &[QueryRoot],
-        evaluation_grid_ms: &[Option<u64>],
-    ) {
+    /// The window-composition Pass 2 candidates of `roots`, each followed
+    /// by its identical-expression Pass 2 candidates.
+    fn window_composition(&mut self, roots: &[QueryRoot], evaluation_grid_ms: &[Option<u64>]) {
         let candidates = pane_candidates(roots, evaluation_grid_ms);
         let pass2_candidates = match window_composition_pass2_candidates(roots, &candidates) {
             Ok(pass2_candidates) => pass2_candidates,
             Err(error) => {
-                self.out.push(Pass2::failed(rules, error));
+                self.out.push(Err(error));
                 return;
             }
         };
         for pass2_candidate in pass2_candidates {
-            let rules = Rules {
-                pane_candidates: pass2_candidate.pane_candidates,
-                shared_pane_chains: pass2_candidate.shared_chains,
-                ..rules.clone()
-            };
             match pass2_candidate.roots {
                 Ok(roots) => {
-                    if self.push(&rules, Vec::new(), &roots) {
-                        self.identical_expression(&rules, &roots);
+                    if self.push(&roots) {
+                        self.identical_expression(&roots);
                     }
                 }
-                Err(error) => self.out.push(Pass2::failed(&rules, error)),
+                Err(error) => self.out.push(Err(error)),
             }
         }
     }
@@ -345,71 +194,61 @@ impl Pass2List<'_> {
     /// like every Pass 2 rule's: more than [`MAX_REUSE_CANDIDATES`] rollup
     /// choices ([`rollup_choices`]) and top-k reuse candidates together list
     /// one error.
-    fn reuse(&mut self, rules: &Rules, roots: &[QueryRoot], evaluation_grid_ms: &[Option<u64>]) {
+    fn reuse(&mut self, roots: &[QueryRoot], evaluation_grid_ms: &[Option<u64>]) {
         let candidates = rollup_candidates(roots);
         // Every rollup subset is combined with every top-k subset: cap the
         // product, not each factor.
         let found = rollup_choices(&candidates).len() + topk_reuse_candidates(roots).len();
         if found > MAX_REUSE_CANDIDATES {
-            self.out.push(Pass2::failed(
-                rules,
-                PerComputationCandidateError::TooManyCandidates {
+            self.out
+                .push(Err(PerComputationCandidateError::TooManyCandidates {
                     counted: "rollup choices and top-k reuse candidates together",
                     found,
                     max: MAX_REUSE_CANDIDATES,
-                },
-            ));
+                }));
             return;
         }
-        self.topk_reuse(rules, roots);
+        self.topk_reuse(roots);
         let pass2_candidates = match rollup_pass2_candidates(roots, &candidates) {
             Ok(pass2_candidates) => pass2_candidates,
             Err(error) => {
-                self.out.push(Pass2::failed(rules, error));
+                self.out.push(Err(error));
                 return;
             }
         };
         for pass2_candidate in pass2_candidates {
-            let mut rules = rules.clone();
-            rules
-                .rollup_candidates
-                .extend(pass2_candidate.rollup_candidates);
             match pass2_candidate.roots {
                 Ok(roots) => {
-                    if self.push(&rules, Vec::new(), &roots) {
-                        self.identical_expression(&rules, &roots);
+                    if self.push(&roots) {
+                        self.identical_expression(&roots);
                     }
-                    self.topk_reuse(&rules, &roots);
-                    self.window_composition(&rules, &roots, evaluation_grid_ms);
+                    self.topk_reuse(&roots);
+                    self.window_composition(&roots, evaluation_grid_ms);
                 }
-                Err(error) => self.out.push(Pass2::failed(&rules, error)),
+                Err(error) => self.out.push(Err(error)),
             }
         }
     }
 
     /// The exact top-k reuse Pass 2 candidates of `roots`, each followed by
     /// its identical-expression Pass 2 candidates.
-    fn topk_reuse(&mut self, rules: &Rules, roots: &[QueryRoot]) {
+    fn topk_reuse(&mut self, roots: &[QueryRoot]) {
         let candidates = topk_reuse_candidates(roots);
         let pass2_candidates = match topk_reuse_pass2_candidates(roots, &candidates) {
             Ok(pass2_candidates) => pass2_candidates,
             Err(error) => {
-                self.out.push(Pass2::failed(rules, error));
+                self.out.push(Err(error));
                 return;
             }
         };
         for pass2_candidate in pass2_candidates {
-            let mut rules = rules.clone();
-            rules
-                .topk_reuse_candidates
-                .extend(pass2_candidate.topk_reuse_candidates);
             match pass2_candidate.roots {
                 Ok(roots) => {
-                    if self.push(&rules, Vec::new(), &roots) {
-                        self.identical_expression(&rules, &roots);
+                    if self.push(&roots) {
+                        self.identical_expression(&roots);
                     }
                 }
-                Err(error) => self.out.push(Pass2::failed(&rules, error)),
+                Err(error) => self.out.push(Err(error)),
             }
         }
     }
@@ -421,6 +260,8 @@ mod tests {
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use crate::test_support::lower_promql;
     use asap_types::ir::schema::schema_support::with_promql_series_identity;
+    use asap_types::ir::{ASAPOp, OperatorNode};
+    use std::rc::Rc;
 
     /// The composed candidate of `queries`, every target at its first
     /// (exact) candidate.
@@ -499,15 +340,39 @@ mod tests {
                 }
             }
         }
+        // Rolled up and in panes: the fine sum's one build is a pane chain,
+        // and the coarse sum reads that same node (rolling up its values).
+        // Without the rollup the coarse sum reads only its own build;
+        // without panes the fine build is a `SummaryAgg`.
+        let rolled_in_panes = |roots: &[QueryRoot]| {
+            let builds = |root: &QueryRoot| -> Vec<Rc<OperatorNode>> {
+                let QueryRoot::Operator(node) = root else {
+                    return Vec::new();
+                };
+                OperatorNode::reachable(node)
+                    .into_iter()
+                    .filter(|n| {
+                        matches!(
+                            n.asap(),
+                            Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+                        )
+                    })
+                    .collect()
+            };
+            let [fine, coarse] = roots else { return false };
+            match builds(fine).as_slice() {
+                [chain] => {
+                    matches!(chain.asap(), Some(ASAPOp::PaneChain { .. }))
+                        && builds(coarse).iter().any(|b| Rc::ptr_eq(b, chain))
+                }
+                _ => false,
+            }
+        };
         assert!(
             stage1_candidates_of_choice(&inventory, &entries, &choice, &|_| true)
                 .into_iter()
-                .any(|candidate| {
-                    candidate.roots.is_ok()
-                        && candidate.pass2.as_ref().is_some_and(|pass2| {
-                            !pass2.rollup_candidates.is_empty() && !pass2.pane_candidates.is_empty()
-                        })
-                })
+                .filter_map(Result::ok)
+                .any(|roots| rolled_in_panes(&roots))
         );
     }
 
@@ -534,20 +399,18 @@ mod tests {
             widened: Vec::new(),
             viable: &|_| true,
         };
-        found.reuse(&Rules::default(), &roots, &[]);
+        found.reuse(&roots, &[]);
         let [failed] = found.out.as_slice() else {
             panic!("one error, {} candidates", found.out.len())
         };
         assert!(matches!(
-            failed.roots,
+            failed,
             Err(PerComputationCandidateError::TooManyCandidates {
                 max: MAX_REUSE_CANDIDATES,
                 ..
             })
         ));
-        let Err(error) = &failed.roots else {
-            unreachable!()
-        };
+        let Err(error) = failed else { unreachable!() };
         assert_eq!(
             error.to_string(),
             format!("found 21 rollup choices and top-k reuse candidates together, more than {MAX_REUSE_CANDIDATES}")

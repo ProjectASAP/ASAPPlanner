@@ -996,9 +996,7 @@ fn search_domain<Id: Clone>(
                 .logical
                 .push(crate::search::pipeline::LogicalCandidate {
                     id: physical.from_logical.clone(),
-                    choice: Vec::new(),
                     roots: Ok(logical),
-                    pass2: None,
                 });
             archive.physical.push(physical);
         }
@@ -1009,9 +1007,7 @@ fn search_domain<Id: Clone>(
                 .logical
                 .push(crate::search::pipeline::LogicalCandidate {
                     id: rejected.from_logical.clone(),
-                    choice: Vec::new(),
                     roots: Ok(logical),
-                    pass2: None,
                 });
             archive
                 .pruned

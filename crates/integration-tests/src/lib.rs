@@ -593,14 +593,10 @@ pub mod planning {
         let mut logical = Vec::new();
         let mut physical = Vec::new();
         for assignment in assignments {
-            let source_position = logical.len();
-            for mut candidate in
+            for candidate in
                 stage1_candidates_of_choice(&inventory, entries, &assignment, &|_| true)
             {
-                if let Some(pass2) = &mut candidate.pass2 {
-                    pass2.from_pass1_position = source_position;
-                }
-                let roots = recompose_guarantees(&candidate.roots.unwrap()).unwrap();
+                let roots = recompose_guarantees(&candidate.unwrap()).unwrap();
                 let id = format!("L{}", logical.len() + 1);
                 physical.extend(
                     asap_physical_asap_optimization::optimize_physical_asap(
@@ -616,9 +612,7 @@ pub mod planning {
                 );
                 logical.push(LogicalCandidate {
                     id,
-                    choice: candidate.choice,
                     roots: Ok(roots),
-                    pass2: candidate.pass2,
                 });
             }
         }
@@ -639,9 +633,7 @@ pub mod planning {
             .unwrap();
         let selected_logical = LogicalCandidate {
             id: source.id.clone(),
-            choice: source.choice.clone(),
             roots: Ok(source.roots.as_ref().unwrap().clone()),
-            pass2: source.pass2.clone(),
         };
         Stage1ToStage3Run {
             combinations: inventory.combinations(),

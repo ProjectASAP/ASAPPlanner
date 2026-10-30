@@ -1978,12 +1978,10 @@ pub struct RollupCandidate {
 }
 
 /// A Pass 2 candidate of the rollup rule: the candidate's roots with the
-/// coarse build of each of `rollup_candidates` answered from its finer
+/// coarse build of each chosen rollup candidate answered from its finer
 /// build, and every guarantee composed again; the error when that fails.
 #[derive(Debug)]
 pub struct RollupPass2Candidate {
-    /// The coarse builds rolled up, in [`rollup_candidates`] order.
-    pub rollup_candidates: Vec<RollupCandidate>,
     /// The candidate's roots with those builds rolled up and every guarantee
     /// composed again; `Err` when the rebuilt DAG does not derive or
     /// compose, which drops only this candidate.
@@ -2635,9 +2633,9 @@ pub fn rollup_pass2_candidates(
     Ok(subsets(&rollup_choices(candidates), "rollup")?
         .into_iter()
         .map(|choices| {
-            let chosen: Vec<RollupCandidate> = choices.iter().flatten().cloned().collect();
-            let values: HashMap<*const OperatorNode, &RollupCandidate> = chosen
+            let values: HashMap<*const OperatorNode, &RollupCandidate> = choices
                 .iter()
+                .flatten()
                 .filter(|candidate| !is_sketch_build(&candidate.finer))
                 .map(|candidate| (Rc::as_ptr(&candidate.coarse), candidate))
                 .collect();
@@ -2659,10 +2657,7 @@ pub fn rollup_pass2_candidates(
                 replaced.extend(sketches);
                 replace_all(roots, &replaced)
             });
-            RollupPass2Candidate {
-                roots,
-                rollup_candidates: chosen,
-            }
+            RollupPass2Candidate { roots }
         })
         .collect())
 }
@@ -2823,13 +2818,10 @@ pub struct TopKReuseCandidate {
 }
 
 /// A Pass 2 candidate of the exact top-k reuse rule: the candidate's roots
-/// with every member of each of `topk_reuse_candidates` reading its
+/// with every member of each chosen top-k reuse candidate reading its
 /// ranking, and every guarantee composed again; the error when that fails.
 #[derive(Debug)]
 pub struct TopKReusePass2Candidate {
-    /// The top-k reuse candidates applied, in [`topk_reuse_candidates`]
-    /// order.
-    pub topk_reuse_candidates: Vec<TopKReuseCandidate>,
     /// The candidate's roots with every member of those candidates reading
     /// its ranking and every guarantee composed again; `Err` when the
     /// rebuilt DAG does not derive or compose, which drops only this
@@ -2939,7 +2931,8 @@ pub fn topk_reuse_pass2_candidates(
     roots: &[QueryRoot],
     candidates: &[TopKReuseCandidate],
 ) -> Result<Vec<TopKReusePass2Candidate>, PerComputationCandidateError> {
-    Ok(subsets(candidates, "top-k reuse")?
+    let candidates: Vec<&TopKReuseCandidate> = candidates.iter().collect();
+    Ok(subsets(&candidates, "top-k reuse")?
         .into_iter()
         .map(|chosen| {
             let mut replaced = HashMap::new();
@@ -2959,7 +2952,6 @@ pub fn topk_reuse_pass2_candidates(
                     Some(error) => Err(error),
                     None => replace_all(roots, &replaced),
                 },
-                topk_reuse_candidates: chosen,
             }
         })
         .collect())
