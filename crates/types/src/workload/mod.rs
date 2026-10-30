@@ -213,7 +213,7 @@ impl QueryRecurrence {
 
 /// The most evaluation steps one range request may have, as Prometheus
 /// allows for `/api/v1/query_range` (it rejects a request with more).
-pub const MAX_RANGE_EVALUATION_STEPS: u64 = 11_000;
+pub(crate) const MAX_RANGE_EVALUATION_STEPS: u64 = 11_000;
 
 /// How one request of a query is answered as a range request, as
 /// Prometheus' `/api/v1/query_range` does: it evaluates the query at
@@ -584,7 +584,7 @@ pub struct SourceFacts {
     /// "distinct_values": 625}]` when each of 625 endpoints is in one of 25
     /// services. Plan selection prices a grouping at the smallest product
     /// of declared counts whose labels cover its keys
-    /// ([`SourceFacts::declared_distinct_combinations`]), so
+    /// (`SourceFacts::declared_distinct_combinations`), so
     /// `by (service, endpoint)` is 625 groups rather than 25 x 625, and
     /// `by (region, service, endpoint)` is at most 4 x 625. Nothing is
     /// inferred from the per-label counts. Each set names two or more
@@ -629,7 +629,7 @@ impl SourceFacts {
     /// count. Only labels some declared set names are searched over (every
     /// other label contributes its own count); with more than 16 of them,
     /// only the per-label product is used.
-    pub fn declared_distinct_combinations(&self, labels: &[&str]) -> Option<u64> {
+    pub(crate) fn declared_distinct_combinations(&self, labels: &[&str]) -> Option<u64> {
         let mut keys = labels.to_vec();
         keys.sort_unstable();
         keys.dedup();
@@ -743,7 +743,7 @@ impl QueryWorkload {
             )
     }
 
-    pub fn validate(&self) -> Result<(), WorkloadError> {
+    pub(crate) fn validate(&self) -> Result<(), WorkloadError> {
         for entry in self.entries() {
             validate_entry(&entry)?;
         }
@@ -774,6 +774,7 @@ impl DataWorkload {
 
     /// This data workload with every source it declares holding
     /// `series_count` series (or groups of rows).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_series_count(mut self, series_count: u64) -> Self {
         for facts in self.sources.values_mut() {
             facts.series_count = Some(series_count);
@@ -956,7 +957,7 @@ pub enum WorkloadError {
         step_ms: u64,
     },
     /// Bad input: a range evaluation with more steps per request than
-    /// [`MAX_RANGE_EVALUATION_STEPS`], which Prometheus would reject.
+    /// `MAX_RANGE_EVALUATION_STEPS`, which Prometheus would reject.
     #[error(
         "a range evaluation has {steps} steps per request, more than {}",
         MAX_RANGE_EVALUATION_STEPS

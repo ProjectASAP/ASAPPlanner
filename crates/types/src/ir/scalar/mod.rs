@@ -134,6 +134,7 @@ impl ScalarExpr {
         ScalarExpr::Literal(ScalarValue::Float64(v))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn column(id: ColumnId) -> Self {
         ScalarExpr::Column(id)
     }

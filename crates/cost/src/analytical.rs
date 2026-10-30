@@ -4,7 +4,7 @@
 //! separate. Plan selection (Stage 3) turns them into one objective with
 //! [`crate::ResourceUnitCost`].
 
-pub use crate::resources::ModeledCpu;
+use crate::resources::ModeledCpu;
 use asap_types::ir::schema::{SketchAlgorithm, SketchParams};
 use serde::{Deserialize, Serialize};
 
@@ -75,7 +75,8 @@ impl ResourceEstimate {
             .expect("analytical scan bytes are required by construction")
     }
 
-    pub fn resources(&self) -> &crate::resources::PhysicalResources<ModeledCpu, u64> {
+    #[cfg(test)]
+    pub(crate) fn resources(&self) -> &crate::resources::PhysicalResources<ModeledCpu, u64> {
         &self.resources
     }
 }

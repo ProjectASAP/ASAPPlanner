@@ -3,10 +3,10 @@
 //! `asap-types`, so any stage can price with it.
 //!
 //! - Resource-usage estimation: [`analytical`] and [`operator_statistics`]
-//!   (the analytical per-operator resource model), [`measured`] (measured
+//!   (the analytical per-operator resource model), `measured` (measured
 //!   operation costs and their lookup), [`execution_demand`] (how often
 //!   each node of a physical DAG is computed), [`state_bytes`] (the bytes a
-//!   summary or exact state holds) and [`resources`] (resource dimensions
+//!   summary or exact state holds) and `resources` (resource dimensions
 //!   with explicit CPU units).
 //! - Cost models: [`ResourceUsage`], [`ResourceUnitCost`],
 //!   [`ResourceSpeed`], [`CostModel`] ([`ClusterLimits`],
@@ -22,15 +22,15 @@ use asap_types::ir::properties::ExecutionTiming;
 
 pub mod analytical;
 pub mod execution_demand;
-pub mod measured;
+mod measured;
 pub mod operator_statistics;
-pub mod resources;
+mod resources;
 pub mod state_bytes;
 
 use analytical::AnalyticalCostError;
 pub use measured::{
-    CostTableProvenance, MeasuredOperationCost, MeasuredOperationCosts, NodePriceSource,
-    OperatorCost, OperatorKind, SummaryOperation,
+    aggregate_lookup, lookup, CostTableProvenance, MeasuredOperationCost, MeasuredOperationCosts,
+    NodePriceSource, OperatorCost, OperatorKind, StateFamily, SummaryOperation,
 };
 
 /// Cost per second of wall time; one unit is one CPU-millisecond under
@@ -48,7 +48,7 @@ pub const MIXED_COST_SOURCE: &str =
 
 /// Seconds over which non-repeating queries (one-off, scheduled and
 /// unknown) are spread by default: one hour.
-pub const DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS: f64 = 3_600.0;
+pub(crate) const DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS: f64 = 3_600.0;
 
 /// What one candidate uses, per second of wall time unless the name says
 /// otherwise, without prices: its nodes' CPU, scans, kept memory and disk
@@ -124,7 +124,7 @@ impl ResourceUnitCost {
     ///
     /// `speed` is the deployment's [`CostInputs::resource_speed`],
     /// the speed Stage 3 uses for latency, so the CPU prices charge the core
-    /// time latency counts. At [`ResourceSpeed::illustrative`] (1e-6 ms per
+    /// time latency counts. At `ResourceSpeed::illustrative` (1e-6 ms per
     /// CPU operation, i.e. 1e9 operations per core-second; 1e-7 ms per
     /// scanned byte):
     ///
@@ -183,7 +183,7 @@ impl ResourceSpeed {
     /// 1 ns per operation and 0.1 ns per scanned byte, the times
     /// [`ResourceUnitCost::illustrative`] prices: one cost unit is one
     /// millisecond of one core.
-    pub fn illustrative() -> Self {
+    pub(crate) fn illustrative() -> Self {
         Self {
             ms_per_cpu_op: 1e-6,
             ms_per_scanned_byte: 1e-7,
@@ -250,7 +250,7 @@ pub struct CostInputs {
     /// [`ResourceUnitCost::illustrative`].
     pub cost_model: CostModel,
     /// Time per operation and per scanned byte, for latency and cores;
-    /// default [`ResourceSpeed::illustrative`].
+    /// default `ResourceSpeed::illustrative`.
     pub resource_speed: ResourceSpeed,
     /// Seconds one-off, scheduled and unknown queries are spread over
     /// (`invocations / horizon` per second); default 3,600.

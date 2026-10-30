@@ -52,7 +52,7 @@ pub fn output_contract_satisfied(
 pub struct ReconstructedCandidates {
     pub outputs: Vec<Rc<OperatorNode>>,
     /// Recomputed guarantees and the same globally unique candidate identity.
-    pub nodes_by_candidate: Vec<Option<Rc<OperatorNode>>>,
+    pub(crate) nodes_by_candidate: Vec<Option<Rc<OperatorNode>>>,
 }
 
 /// The selected candidates of `physical` rebuilt over their selected

@@ -2434,8 +2434,11 @@ fn composed_selected_choice_is_the_selected_stage1_dag() {
                     .find(|(group, _)| memo.query_roots[query].operator_refs().contains(&group))
                     .unwrap();
                 QueryRoot::Operator(
-                    asap_physical_asap_optimization::implement_candidate_operators(node, &[])
-                        .unwrap(),
+                    asap_physical_asap_optimization::test_support::implement_candidate_operators(
+                        node,
+                        &[],
+                    )
+                    .unwrap(),
                 )
             })
             .collect::<Vec<_>>();

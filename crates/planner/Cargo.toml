@@ -29,14 +29,15 @@ thiserror = "2"
 
 [features]
 # `test_support::query_time_reference`, for a runtime's correctness tests.
-test-support = []
+# It reads `asap-types`' test-only DAG helpers.
+test-support = ["asap-types/test-support"]
 
 [dev-dependencies]
 # The tests compare installed plans with `test_support::query_time_reference`.
 asap-planner = { path = ".", features = ["test-support"] }
-asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
+asap-physical-asap-optimization = { path = "../physical-asap-optimization", features = ["test-support"] }
 # The deployment accuracy model tests implement `AccuracyModel`.
-asap-accuracy = { path = "../accuracy" }
+asap-accuracy = { path = "../accuracy", features = ["test-support"] }
 # The SQL frontend plans through DataFusion, which is async; `e2e_plan` is
 # therefore async and its tests need a runtime.
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

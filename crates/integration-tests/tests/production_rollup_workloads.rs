@@ -280,7 +280,7 @@ fn independent_kll_cost(
         settings.resource_speed,
     ));
     let models = PlanningModels::builtin().with_plan_selection(&settings);
-    let plan = asap_physical_asap_optimization::optimize_physical_asap_chosen(
+    let plan = asap_physical_asap_optimization::test_support::optimize_physical_asap_chosen(
         "independent",
         &roots,
         entries,

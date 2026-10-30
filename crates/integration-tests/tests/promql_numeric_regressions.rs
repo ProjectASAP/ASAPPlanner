@@ -128,8 +128,8 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
         "direct quantile ratio should remain an available candidate"
     );
     assert!(node.guarantee.is_none(), "{:?}", node.guarantee);
-    use asap_accuracy::composition::raw_data_samples_sign_statistic;
     use asap_accuracy::propagation::bind_guarantees;
+    use asap_accuracy::test_support::raw_data_samples_sign_statistic;
     let root = asap_types::ir::QueryRoot::Operator(node.clone());
     assert!(bind_guarantees(&root, &Clone::clone).is_none());
     let proven = bind_guarantees(&root, &|guarantee| {
@@ -180,8 +180,8 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
 /// interpolate, and a computed value must not inherit its source's sign.
 #[test]
 fn ddsketch_interpolation_requires_a_nonnegative_domain() {
-    use asap_accuracy::composition::raw_data_samples_sign_statistic;
     use asap_accuracy::propagation::bind_guarantees;
+    use asap_accuracy::test_support::raw_data_samples_sign_statistic;
     use asap_types::ir::{schema::SketchAlgorithm, QueryRoot};
     for (query, endpoint, raw_samples) in [
         ("quantile_over_time(0, data[5m])", true, true),

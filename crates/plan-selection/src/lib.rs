@@ -268,7 +268,7 @@ pub use search::{
     Stage1ToStage3Search,
 };
 
-use asap_cost::measured::{lookup, StateFamily};
+use asap_cost::{lookup, StateFamily};
 
 #[cfg(test)]
 mod tests {
@@ -750,7 +750,7 @@ mod tests {
     /// reading as a perfect bound. Other statistics pass through.
     #[test]
     fn the_sign_gate_opens_only_at_one() {
-        use asap_accuracy::composition::raw_data_samples_sign_statistic;
+        use asap_accuracy::test_support::raw_data_samples_sign_statistic;
         let gated = AccuracyGuarantee::new(
             AccuracyMetric::Relative,
             BoundExpr::Product {
@@ -797,7 +797,7 @@ mod tests {
     /// name.
     #[test]
     fn sign_of_counter_raw_data_samples_is_bound_from_the_declared_type() {
-        use asap_accuracy::composition::raw_data_samples_sign_statistic;
+        use asap_accuracy::test_support::raw_data_samples_sign_statistic;
         let gated = AccuracyGuarantee::new(
             AccuracyMetric::Relative,
             BoundExpr::Product {

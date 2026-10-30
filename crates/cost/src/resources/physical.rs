@@ -4,18 +4,18 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PhysicalResources<Cpu, Bytes> {
-    pub cpu: Cpu,
+pub(crate) struct PhysicalResources<Cpu, Bytes> {
+    pub(crate) cpu: Cpu,
     /// Maximum simultaneously live memory within the reported scope.
-    pub peak_memory_bytes: Option<Bytes>,
+    pub(crate) peak_memory_bytes: Option<Bytes>,
     /// Memory still retained at the end of the reported scope.
-    pub retained_memory_bytes: Option<Bytes>,
+    pub(crate) retained_memory_bytes: Option<Bytes>,
     /// Bytes read by scan operations, not storage occupancy.
-    pub scan_bytes: Option<Bytes>,
+    pub(crate) scan_bytes: Option<Bytes>,
     /// Logical encoded snapshot size, not in-memory state size.
-    pub serialized_bytes: Option<Bytes>,
+    pub(crate) serialized_bytes: Option<Bytes>,
     /// Allocated filesystem space, not bytes read or written over time.
-    pub disk_bytes: Option<Bytes>,
+    pub(crate) disk_bytes: Option<Bytes>,
 }
 
 impl<Cpu: Default, Bytes> Default for PhysicalResources<Cpu, Bytes> {

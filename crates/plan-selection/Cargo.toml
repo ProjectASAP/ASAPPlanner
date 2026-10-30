@@ -23,6 +23,8 @@ good_lp = { version = "=1.15.3", default-features = false, features = ["highs"] 
 highs = "=2.4.0"
 
 [dev-dependencies]
+asap-types = { path = "../types", features = ["test-support"] }
+asap-accuracy = { path = "../accuracy", features = ["test-support"] }
 asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
 asap-physical-asap-optimization = { path = "../physical-asap-optimization", features = ["test-support"] }
 asap-frontend-promql = { path = "../frontend-promql" }

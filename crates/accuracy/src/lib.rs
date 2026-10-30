@@ -16,11 +16,11 @@
 //! It depends only on `asap-types`, never on a stage crate, so every stage
 //! can use it.
 
-pub mod budget;
+mod budget;
 pub mod composition;
 pub mod estimators;
 mod evidence;
-pub mod function_rules;
+mod function_rules;
 mod model;
 pub mod propagation;
 pub mod sizing;
@@ -28,16 +28,19 @@ pub mod sizing;
 pub mod test_support;
 
 pub use budget::per_input_target;
-pub use evidence::{OperandDomain, PropagationStats};
+pub use evidence::OperandDomain;
+pub(crate) use evidence::PropagationStats;
 pub use model::{
     AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, NoAccuracyEvidence,
 };
 
+#[cfg(test)]
+use asap_types::ir::properties::AccuracyScope;
+use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::properties::{
     AccuracyError, AccuracyGuarantee, AccuracyMetric, BoundExpr, CompositionOperator,
     GuaranteeSource, ProbabilityExpr,
 };
-use asap_types::ir::properties::{AccuracyScope, AccuracyTarget};
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
 
 /// Small relative tolerance for comparing an evaluated bound against a
@@ -54,7 +57,7 @@ const SATISFACTION_TOLERANCE: f64 = 1e-9;
 /// bound in any metric does, each compared in its own metric. Unknown
 /// required dimensions fail. Plan selection's default accuracy model
 /// ([`BuiltinAccuracyModel`]) delegates to it.
-pub fn satisfies(guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
+pub(crate) fn satisfies(guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
     let within = |value: Option<f64>, limit: f64| {
         value.is_some_and(|v| v <= limit * (1.0 + SATISFACTION_TOLERANCE) + f64::EPSILON)
     };
@@ -87,7 +90,7 @@ fn metric_meets(guarantee: AccuracyMetric, target: AccuracyMetric) -> bool {
 }
 
 /// Whether `guarantee`'s failure probability covers the values `target`'s
-/// does ([`AccuracyScope::covers`]). A whole-result guarantee covers every
+/// does ([`AccuracyScope::covers`](asap_types::ir::properties::AccuracyScope::covers)). A whole-result guarantee covers every
 /// target, and one over the groups holding at least a share of the records
 /// covers a target over a larger share (not a per-value one, whose value may
 /// be a smaller group). A per-value one covers only a per-value target: it must first be stated over the
@@ -105,7 +108,11 @@ fn scope_meets(guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
 /// own native terms (#690 §4) and for each value it answers; an aggregate
 /// intent's metric and scope are not checked: only a query root's are, by
 /// plan selection.
-pub fn native_target(target: &AccuracyTarget, guarantee: &AccuracyGuarantee) -> AccuracyTarget {
+#[cfg(test)]
+pub(crate) fn native_target(
+    target: &AccuracyTarget,
+    guarantee: &AccuracyGuarantee,
+) -> AccuracyTarget {
     target
         .clone()
         .accuracy_metric(guarantee.spec.accuracy_metric)

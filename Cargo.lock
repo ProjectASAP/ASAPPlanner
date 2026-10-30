@@ -487,6 +487,7 @@ version = "0.1.0"
 name = "asap-types"
 version = "0.1.0"
 dependencies = [
+ "asap-types",
  "asap_sketchlib",
  "serde",
  "serde_json",

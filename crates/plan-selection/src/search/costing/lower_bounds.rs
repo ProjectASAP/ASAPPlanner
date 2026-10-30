@@ -355,10 +355,7 @@ fn template_price_is_a_floor(build: &ASAPOp, context: &CandidatePlanningContext<
 /// sizes, which need not rise with size, so a resized sketch can be priced
 /// below its Pass 1 size: neither its build nor the estimates and merges
 /// above it get a size-based bound.
-fn measured_family(
-    params: &SketchParams,
-    table: &asap_cost::measured::MeasuredOperationCosts,
-) -> bool {
+fn measured_family(params: &SketchParams, table: &asap_cost::MeasuredOperationCosts) -> bool {
     table.operators.iter().any(|entry| {
         entry.sketch.as_ref().is_some_and(|measured| {
             std::mem::discriminant(measured) == std::mem::discriminant(params)

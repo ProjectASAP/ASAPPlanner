@@ -590,7 +590,7 @@ impl NonASAPOp {
 
     /// Output schema derived from this operator's parameters and its
     /// children's (already derived) schemas.
-    pub fn output_schema(&self) -> Result<Schema, SchemaDerivationError> {
+    pub(crate) fn output_schema(&self) -> Result<Schema, SchemaDerivationError> {
         use NonASAPOp::*;
         Ok(match self {
             Scan { schema, .. } | Values { schema, .. } => schema.clone(),

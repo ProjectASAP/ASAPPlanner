@@ -41,7 +41,7 @@ pub enum DataPrimitive {
 }
 
 impl DataPrimitive {
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Raw => "raw",
             Self::SummaryState => "summary_state",

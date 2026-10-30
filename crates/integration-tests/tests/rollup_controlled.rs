@@ -113,23 +113,24 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
                 .filter(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
                 .map(Rc::as_ptr)
                 .collect();
-            let mut plan = asap_physical_asap_optimization::optimize_physical_asap_chosen(
-                &id,
-                &roots,
-                &entries,
-                data,
-                models.deployment_capabilities.query_time_results_retained,
-                &mut |node, _, options| {
-                    let mat = Materialization::MatAtQuery(Medium::Memory);
-                    if builds.contains(&node) && options.contains(&mat) {
-                        mat
-                    } else {
-                        Materialization::NotMaterialized
-                    }
-                },
-            )
-            .unwrap()
-            .expect("fixed query-time implementation");
+            let mut plan =
+                asap_physical_asap_optimization::test_support::optimize_physical_asap_chosen(
+                    &id,
+                    &roots,
+                    &entries,
+                    data,
+                    models.deployment_capabilities.query_time_results_retained,
+                    &mut |node, _, options| {
+                        let mat = Materialization::MatAtQuery(Medium::Memory);
+                        if builds.contains(&node) && options.contains(&mat) {
+                            mat
+                        } else {
+                            Materialization::NotMaterialized
+                        }
+                    },
+                )
+                .unwrap()
+                .expect("fixed query-time implementation");
             plan.id = id.clone();
             let result = asap_plan_selection::select_plan(&[plan.clone()], &entries, data, models);
             match result {

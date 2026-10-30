@@ -87,7 +87,7 @@ pub struct MaterializedView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewCoverage {
-    /// [`SummaryCoverage::definition_id`]: equal on every node, plan and
+    /// `SummaryCoverage::definition_id`: equal on every node, plan and
     /// process that computes the same thing, whatever its selection; a
     /// rollup to a coarser grouping computes something else and has its
     /// own.
@@ -136,6 +136,7 @@ impl RawDataWindow {
     }
 
     /// `(start, end]` of the window at evaluation time `evaluation_time_ms`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn bounds_ms(&self, evaluation_time_ms: i64) -> (i64, i64) {
         let end = evaluation_time_ms - self.end_offset_ms;
         (end - self.width_ms, end)

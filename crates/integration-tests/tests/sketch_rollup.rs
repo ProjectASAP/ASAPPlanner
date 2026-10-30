@@ -243,8 +243,8 @@ async fn direct_and_rolled_up(
         };
         let merge = rolled_up(&build);
         assert_eq!(
-            merge.coverage().expect("a valid rollup").definition_id(),
-            build.coverage().unwrap().definition_id(),
+            asap_types::test_support::definition_id(&merge.coverage().expect("a valid rollup")),
+            asap_types::test_support::definition_id(&build.coverage().unwrap()),
             "{kind:?}: the rolled-up states cover what the direct build does"
         );
         let rolled = replace(&candidate, &build, &merge);

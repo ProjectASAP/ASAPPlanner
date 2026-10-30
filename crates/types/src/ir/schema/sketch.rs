@@ -601,7 +601,7 @@ impl WeightDomain {
     /// when it is a counter
     /// ([`NonNegativeWeightProof::ResetAwareCounterDerivative`]). Otherwise
     /// unknown. Any other domain is returned unchanged.
-    pub fn confirmed(
+    pub(crate) fn confirmed(
         &self,
         is_counter: impl Fn(&str) -> bool,
         is_declared_non_negative: impl Fn(&str) -> bool,

@@ -27,11 +27,11 @@ pub type NodeId = usize;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlatNode {
     pub operator: Operator<NodeId>,
-    pub result_kind: OperatorResultKind,
-    pub schema: Schema,
-    pub guarantee: Option<AccuracyGuarantee>,
-    pub timing: Option<ExecutionTiming>,
-    pub materialization: Materialization,
+    pub(crate) result_kind: OperatorResultKind,
+    pub(crate) schema: Schema,
+    pub(crate) guarantee: Option<AccuracyGuarantee>,
+    pub(crate) timing: Option<ExecutionTiming>,
+    pub(crate) materialization: Materialization,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -51,7 +51,7 @@ pub fn flatten(roots: &[QueryRoot]) -> (FlatDag, Vec<Rc<OperatorNode>>) {
 
 #[derive(Debug, thiserror::Error)]
 #[error("planning deadline exceeded flattening the physical DAG")]
-pub struct FlattenDeadlineExceeded;
+pub(crate) struct FlattenDeadlineExceeded;
 
 /// The same pointer-preserving export, cooperatively bounded while visiting
 /// nodes. A timeout returns no partially flattened DAG.

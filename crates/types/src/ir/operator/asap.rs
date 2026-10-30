@@ -83,10 +83,10 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
     /// the `SummaryAgg` schema, one state per group and pane; a
     /// `SummaryMerge` over the chain gives the state of one build over the
     /// whole `pane_count · pane_width_ms` window
-    /// ([`whole_window_build`](crate::ir::operator::pane_chain::whole_window_build)).
+    /// (`whole_window_build`).
     /// One compact node whatever the pane count: costs and guarantees come
     /// from formulas, and the executor expands the panes
-    /// ([`expand_pane_chains`](crate::ir::operator::pane_chain::expand_pane_chains)).
+    /// (`expand_pane_chains`).
     PaneChain {
         child: C,
         family: FieldDataType,
@@ -120,7 +120,7 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
 }
 
 impl<C> ASAPOp<C> {
-    pub fn children(&self) -> Vec<&C> {
+    pub(crate) fn children(&self) -> Vec<&C> {
         use ASAPOp::*;
         match self {
             SummaryAgg { child, filter, .. } | PaneChain { child, filter, .. } => {
@@ -145,7 +145,7 @@ impl<C> ASAPOp<C> {
 
     /// `f` may change the reference type, e.g. from `Rc<OperatorNode>` to a
     /// node id.
-    pub fn map_children<D>(&self, mut f: impl FnMut(&C) -> D) -> ASAPOp<D> {
+    pub(crate) fn map_children<D>(&self, mut f: impl FnMut(&C) -> D) -> ASAPOp<D> {
         use ASAPOp::*;
         match self {
             SummaryAgg {
@@ -282,7 +282,7 @@ impl ASAPOp {
     /// planning may retain a more specific schema (evaluation column naming)
     /// through [`OperatorNode::with_schema`]; all structural metadata must
     /// still agree with this derivation.
-    pub fn output_schema(&self) -> Result<Schema, SchemaDerivationError> {
+    pub(crate) fn output_schema(&self) -> Result<Schema, SchemaDerivationError> {
         use ASAPOp::*;
         Ok(match self {
             SummaryAgg {

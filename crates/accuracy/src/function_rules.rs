@@ -7,7 +7,7 @@ use asap_types::ir::properties::CompositionOperator;
 /// The composition operator that propagates an approximate input's guarantee
 /// through `intent`; `None` for a function with no registered rule over
 /// approximate input, whose callers must fail closed.
-pub fn approximate_input_composition(intent: &AggIntent) -> Option<CompositionOperator> {
+pub(crate) fn approximate_input_composition(intent: &AggIntent) -> Option<CompositionOperator> {
     Some(match intent {
         AggIntent::Sum { .. } => CompositionOperator::ExactSum,
         AggIntent::Min { .. } | AggIntent::Max { .. } => CompositionOperator::ExactExtremum,

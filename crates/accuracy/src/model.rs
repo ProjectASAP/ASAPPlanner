@@ -22,7 +22,7 @@ use asap_types::ir::{OperatorNode, QueryRoot};
 /// implements this trait and passes it in
 /// `asap_plan_selection::PlanningModels::accuracy`.
 /// Guarantees are composed with the built-in rules only
-/// ([`propagate`](crate::composition::propagate)).
+/// (`propagate`).
 pub trait AccuracyModel {
     /// Whether `guarantee` meets `target`: a bound within its ε, and within
     /// its δ when it states one, over the values the target's scope covers
@@ -70,7 +70,7 @@ pub trait AccuracyModel {
 }
 
 /// The planner's built-in analytical rules as an [`AccuracyModel`]: the
-/// conservative target check [`satisfies`](crate::satisfies) makes, and no
+/// conservative target check `satisfies` makes, and no
 /// output accepted regardless of its guarantee.
 /// The default in `asap_plan_selection::PlanningModels::builtin`.
 #[derive(Debug, Default, Clone, Copy)]

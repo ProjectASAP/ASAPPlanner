@@ -356,10 +356,9 @@ fn an_empty_batch_is_an_error() {
 /// them, and the document round-trips and rejects unknown fields and versions.
 #[test]
 fn exports_summary_over_summary_as_typed_precompute_edges() {
-    use asap_types::ir::physical_export::{
-        compile_physical_asap_dag_with_node_ids, GroupingEdgeCompatibility, WindowEdgeCompatibility,
-    };
+    use asap_types::ir::physical_export::{GroupingEdgeCompatibility, WindowEdgeCompatibility};
     use asap_types::ir::properties::ExecutionDataState;
+    use asap_types::test_support::compile_physical_asap_dag_with_node_ids;
     let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
         source: Source::TimeSeries { metric: "m".into() },
         predicates: vec![],
@@ -763,9 +762,8 @@ fn high_fan_in_edges_preserve_multiplicity_without_order_dependence() {
 
 #[test]
 fn physical_export_deadline_is_typed_and_preserves_unbounded_behavior() {
-    use asap_types::ir::physical_export::{
-        compile_physical_asap_workload_with_node_ids_before, PhysicalASAPCompilationError,
-    };
+    use asap_types::ir::physical_export::PhysicalASAPCompilationError;
+    use asap_types::test_support::compile_physical_asap_workload_with_node_ids_before;
     use std::time::Instant;
     let timed = timed_at_ingestion();
     let roots = [QueryRoot::Operator(Rc::clone(&timed))];

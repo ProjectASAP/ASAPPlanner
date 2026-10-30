@@ -22,6 +22,7 @@ use asap_types::ir::{
     ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, OperatorResultKind, Predicate,
     ProjectItem, ScalarExpr, SchemaDerivationError, TimeRangeKind,
 };
+use asap_types::test_support::definition_id;
 
 const JOB: usize = 0;
 const REGION: usize = 1;
@@ -802,7 +803,7 @@ fn coverage_of(
 /// another sketch) gets another id.
 #[test]
 fn equal_definitions_get_equal_ids() {
-    let id = |node: &OperatorNode| coverage_of(node).definition_id();
+    let id = |node: &OperatorNode| definition_id(&coverage_of(node));
     let us = latency_where(eq(REGION, "us"));
     let eu = latency_where(eq(REGION, "eu"));
     assert_eq!(id(&us), id(&eu));
@@ -826,7 +827,7 @@ fn panes_of_an_hour_share_one_definition_with_distinct_times() {
     let coverages: Vec<_> = panes.iter().map(|pane| coverage_of(pane)).collect();
     for (i, coverage) in coverages.iter().enumerate() {
         let i = i as i64;
-        assert_eq!(coverage.definition_id(), coverages[0].definition_id());
+        assert_eq!(definition_id(coverage), definition_id(&coverages[0]));
         assert_eq!(
             coverage.selection,
             [SelectionBox {
@@ -836,7 +837,7 @@ fn panes_of_an_hour_share_one_definition_with_distinct_times() {
         );
     }
     let hour = coverage_of(&merge(panes).unwrap());
-    assert_eq!(hour.definition_id(), coverages[0].definition_id());
+    assert_eq!(definition_id(&hour), definition_id(&coverages[0]));
     assert_eq!(
         hour.selection,
         [SelectionBox {
@@ -941,7 +942,7 @@ fn a_rollup_covers_the_coarser_build() {
     let rolled = rollup(finer, vec![1]).unwrap();
     assert_eq!(rolled.schema, coarse.schema);
     let (rolled, coarse) = (rolled.coverage().unwrap(), coarse.coverage().unwrap());
-    assert_eq!(rolled.definition_id(), coarse.definition_id());
+    assert_eq!(definition_id(&rolled), definition_id(&coarse));
     assert_eq!(rolled.selection, coarse.selection);
     assert_eq!(
         rolled.selection[0].columns[&column("region")],
@@ -960,8 +961,8 @@ fn a_rollup_of_per_series_states_covers_the_build_by_its_labels() {
     let rolled = rollup(per_series, vec![state_job]).unwrap();
     let by_job = grouped(rows, kll_family(), Reduction::by(vec![job]));
     assert_eq!(
-        rolled.coverage().unwrap().definition_id(),
-        by_job.coverage().unwrap().definition_id()
+        definition_id(&rolled.coverage().unwrap()),
+        definition_id(&by_job.coverage().unwrap())
     );
 }
 
@@ -1009,8 +1010,8 @@ fn a_rollup_to_no_keys_of_a_relation_covers_the_global_build() {
     let rolled = rollup(by_job, vec![]).unwrap();
     assert_eq!(rolled.schema, global.schema);
     assert_eq!(
-        rolled.coverage().unwrap().definition_id(),
-        global.coverage().unwrap().definition_id()
+        definition_id(&rolled.coverage().unwrap()),
+        definition_id(&global.coverage().unwrap())
     );
 }
 
@@ -1077,8 +1078,8 @@ fn a_key_filter_over_states_selects_states() {
     );
     assert_eq!(rolled.schema, direct.schema);
     assert_eq!(
-        rolled.coverage().unwrap().definition_id(),
-        direct.coverage().unwrap().definition_id()
+        definition_id(&rolled.coverage().unwrap()),
+        definition_id(&direct.coverage().unwrap())
     );
     let on_state = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Filter {
         pred: Predicate(ScalarExpr::IsNull(Box::new(ScalarExpr::Column(2)))),

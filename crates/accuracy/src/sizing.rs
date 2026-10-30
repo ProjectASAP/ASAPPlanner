@@ -14,7 +14,7 @@ use crate::per_input_target;
 /// Confidence δ assumed when the target carries only an ε
 /// (`AccuracyTarget::epsilon`): the (ε, δ)-parameterised sketches (CMS) need
 /// one. `ln(1/0.01) → depth 5`, matching the conventional CMS sizing.
-pub const DEFAULT_DELTA: f64 = 0.01;
+pub(crate) const DEFAULT_DELTA: f64 = 0.01;
 
 /// The statistic a summary is read for to answer `intent`, or `None` when
 /// no sketch statistic serves the intent.
@@ -69,7 +69,7 @@ fn target_in(target: &AccuracyTarget, metric: AccuracyMetric) -> AccuracyTarget 
 }
 
 /// Resolve an [`AccuracyTarget`] into the `(eps, delta)` budget
-/// [`default_size_params`] needs — one place this resolution happens, so
+/// `default_size_params` needs — one place this resolution happens, so
 /// nothing can drift apart on it.
 ///
 /// An exact target degrades to the tightest parameters for a caller that
@@ -91,7 +91,7 @@ pub fn accuracy_budget(accuracy: &AccuracyTarget) -> (f64, f64) {
 /// smallest parameter satisfying the target, clamped to the family's sane
 /// range. A non-positive ε saturates to the clamp maximum (tightest
 /// allowed).
-pub fn default_size_params(
+pub(crate) fn default_size_params(
     kind: SketchAlgorithm,
     intent: &AggIntent,
     eps: f64,

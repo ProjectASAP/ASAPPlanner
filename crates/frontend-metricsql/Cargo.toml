@@ -13,3 +13,6 @@ thiserror = "2"
 [[test]]
 name = "metricsql"
 path = "tests/main.rs"
+
+[dev-dependencies]
+asap-types = { path = "../types", features = ["test-support"] }

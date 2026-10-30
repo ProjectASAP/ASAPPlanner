@@ -19,33 +19,33 @@ pub struct OperandDomain {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PropagationStats {
     /// Provenance for supplied evidence (source, observation identity, etc.).
-    pub evidence_provenance: Vec<GuaranteeSource>,
+    pub(crate) evidence_provenance: Vec<GuaranteeSource>,
     /// Whether every input value is known to be non-negative — required by
     /// the multiplicative relative-error rule, which is unsound across a
     /// sign change.
-    pub values_non_negative: Option<bool>,
+    pub(crate) values_non_negative: Option<bool>,
     /// The statistic an unknown sign is named by when the folded values are
     /// one metric's raw data samples or plain sums of them
     /// ([`raw_data_samples_sign_statistic`](crate::composition::raw_data_samples_sign_statistic)):
     /// the relative bound is then gated on it, and plan selection binds it
     /// to 1 when the metric is declared a counter. `None`: the bare
     /// `values_non_negative`, which nothing binds.
-    pub sign_statistic: Option<String>,
+    pub(crate) sign_statistic: Option<String>,
     /// Number of input rows an exact aggregation consumes (e.g. the number
     /// of groups a function folds), for exact aggregate union bounds
     /// bound over per-input failures.
-    pub input_row_count: Option<u64>,
+    pub(crate) input_row_count: Option<u64>,
     /// The statistic an unknown row count is named by (default
     /// `input_row_count`), so a fold whose rows the data workload's input
     /// cardinality does not bound can leave a statistic nothing binds.
-    pub row_count_statistic: Option<&'static str>,
+    pub(crate) row_count_statistic: Option<&'static str>,
     /// Lower confidence bound of the kth selected TopK item, after widening
     /// the interval by the sketch's own estimation error.
-    pub topk_selected_lower_bound: Option<f64>,
+    pub(crate) topk_selected_lower_bound: Option<f64>,
     /// Greatest upper confidence bound among excluded TopK items, after
     /// widening the interval by the sketch's own estimation error.
-    pub topk_excluded_upper_bound: Option<f64>,
+    pub(crate) topk_excluded_upper_bound: Option<f64>,
     /// Union-bound failure probability of all intervals used by the margin
     /// certificate.
-    pub topk_interval_failure_probability: Option<f64>,
+    pub(crate) topk_interval_failure_probability: Option<f64>,
 }
