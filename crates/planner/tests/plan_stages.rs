@@ -9,7 +9,7 @@ use asap_types::workload::{
     QueryRequirements, QueryWorkload,
 };
 
-fn promql_stages(query: &str, epsilon: f64) -> Stage1ToStage3Run<usize> {
+fn promql_stages(query: &str, epsilon: f64) -> Stage1ToStage3Run {
     let target = AccuracyTarget::max_error(epsilon);
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {

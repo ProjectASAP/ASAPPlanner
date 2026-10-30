@@ -583,7 +583,10 @@ mod tests {
             })
             .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let inventory = generate_per_computation_candidates(
+            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        )
+        .unwrap();
         try_populate_pass1(initial, &inventory).unwrap()
     }
 
@@ -1225,7 +1228,10 @@ mod tests {
             ),
         ];
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let generated = generate_per_computation_candidates(roots).unwrap();
+        let generated = generate_per_computation_candidates(
+            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        )
+        .unwrap();
         let memo = with_local_panes(
             try_populate_pass1(initial, &generated).unwrap(),
             &[10_000, 10_000],

@@ -762,7 +762,7 @@ mod tests {
             let roots_with_ids = vec![(0usize, root)];
             let memo = try_populate_pass1(
                 DagOfLogicalMemoGroups::from_roots(&roots_with_ids),
-                &generate_per_computation_candidates(roots_with_ids).unwrap(),
+                &generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots_with_ids)).unwrap(),
             )
             .unwrap();
             let root_group = memo.query_roots[0].as_operator().unwrap().0 as usize;
@@ -1365,7 +1365,12 @@ mod tests {
         };
         let memo = generate_per_computation_logical_memo_candidates(
             DagOfLogicalMemoGroups::from_roots(&roots_with_ids),
-            generate_per_computation_candidates(roots_with_ids).unwrap(),
+            generate_per_computation_candidates(
+                &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                    &roots_with_ids,
+                ),
+            )
+            .unwrap(),
             &entries,
             &data,
             None,

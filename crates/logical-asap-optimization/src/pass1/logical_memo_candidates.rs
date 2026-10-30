@@ -17,7 +17,7 @@ use crate::pass1::per_computation_candidates::{
 };
 use crate::pass2::memo::candidates::{try_populate_pass1, CandidatePopulationError};
 use crate::pass2::memo::{check_generation_deadline, DagOfLogicalMemoGroups};
-use asap_types::stages::{CandidateGenerationTimeout, CandidateMemo, MemoGroupId, PrunedCandidate};
+use asap_types::stages::{CandidateGenerationTimeout, CandidateMemo, PrunedCandidate};
 
 /// Stage 1, Pass 1's output: the workload's memo groups, each with its
 /// Pass 1 candidates, and the computation targets they were built from.
@@ -58,31 +58,20 @@ pub enum PerComputationLogicalMemoCandidatesError {
 /// workload entry. Stops with
 /// [`PerComputationLogicalMemoCandidatesError::Timeout`] once `deadline`
 /// passes.
-pub fn generate_per_computation_logical_memo_candidates<Id: Clone>(
+pub fn generate_per_computation_logical_memo_candidates(
     dag_of_logical_memo_groups: DagOfLogicalMemoGroups,
-    per_computation: PerComputationCandidates<Id>,
+    per_computation: PerComputationCandidates,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     deadline: Option<Instant>,
 ) -> Result<PerComputationLogicalMemoCandidates, PerComputationLogicalMemoCandidatesError> {
-    let aggregate_groups: Vec<Option<MemoGroupId>> = per_computation
-        .targets
-        .iter()
-        .map(|target| dag_of_logical_memo_groups.group_for_node(&target.aggregate))
-        .collect();
     let mut memo = try_populate_pass1(dag_of_logical_memo_groups, &per_computation)?;
-    let roots: Vec<QueryRoot> = per_computation
-        .roots
-        .iter()
-        .map(|(_, root)| root.clone())
-        .collect();
-    size_for_failure_probability(&mut memo, &roots, entries, data, deadline)?;
+    size_for_failure_probability(&mut memo, &per_computation.roots, entries, data, deadline)?;
     let pruned_candidates = per_computation
         .pruned_ways_to_compute
         .into_iter()
         .map(|pruned| PrunedCandidate {
-            group: aggregate_groups[pruned.target]
-                .expect("population checked every target's aggregate group"),
+            group: per_computation.targets[pruned.target].aggregate_group,
             candidate: pruned.way_to_compute,
             reason: pruned.reason,
         })
@@ -212,7 +201,10 @@ mod tests {
             .collect();
         generate_per_computation_logical_memo_candidates(
             DagOfLogicalMemoGroups::from_roots(&roots),
-            generate_per_computation_candidates(roots).unwrap(),
+            generate_per_computation_candidates(
+                &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+            )
+            .unwrap(),
             &entries,
             data,
             None,

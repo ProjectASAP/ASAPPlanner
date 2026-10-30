@@ -20,7 +20,7 @@ use crate::search::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutp
 use crate::PlanningModels;
 use crate::{Selection, SelectionError};
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    generate_per_computation_candidates_with_memo, HowToComputeAggregateMeasure,
+    generate_per_computation_candidates, HowToComputeAggregateMeasure,
     PerComputationCandidateError, PerComputationCandidates,
 };
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
@@ -79,10 +79,10 @@ pub struct PrunedCandidate {
 /// ([`run_stage1_to_stage3`]). The candidate lists are filled only when the
 /// search keeps every candidate ([`Stage1ToStage3Search::keep_every_candidate`]).
 #[derive(Debug)]
-pub struct Stage1ToStage3Run<Id> {
+pub struct Stage1ToStage3Run {
     /// Stage 1, Pass 1: the per-computation candidates, with the roots they
     /// read.
-    pub stage1_pass1_per_computation: PerComputationCandidates<Id>,
+    pub stage1_pass1_per_computation: PerComputationCandidates,
     /// Diagnostic Pass 1 Cartesian-product size, saturating at `usize::MAX`.
     /// Joint search does not enumerate this product; it selects connected nodes.
     pub combinations: usize,
@@ -112,7 +112,7 @@ pub struct Stage1ToStage3Run<Id> {
     pub memo_steps: Option<MemoSteps>,
 }
 
-impl<Id> Stage1ToStage3Run<Id> {
+impl Stage1ToStage3Run {
     /// The selected physical candidate, if selection succeeded.
     pub fn selected(&self) -> Option<&PhysicalWorkloadPlan> {
         self.stage3_selected.as_ref()
@@ -168,7 +168,7 @@ pub fn run_stage1_to_stage3<Id: Clone + std::fmt::Debug>(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
-) -> Result<Stage1ToStage3Run<Id>, PerComputationCandidateError> {
+) -> Result<Stage1ToStage3Run, PerComputationCandidateError> {
     run_stage1_to_stage3_with(
         roots,
         entries,
@@ -187,13 +187,13 @@ pub fn run_stage1_to_stage3_with<Id: Clone + std::fmt::Debug>(
     data: &DataWorkload,
     models: PlanningModels<'_>,
     search: Stage1ToStage3Search,
-) -> Result<Stage1ToStage3Run<Id>, PerComputationCandidateError> {
+) -> Result<Stage1ToStage3Run, PerComputationCandidateError> {
     let generation_started = std::time::Instant::now();
     for (_, root) in &roots {
         root.validate_structure()?;
     }
     let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-    let per_computation = generate_per_computation_candidates_with_memo(roots, &initial)?;
+    let per_computation = generate_per_computation_candidates(&initial)?;
     Ok(run_with_initial_memo(
         per_computation,
         entries,
@@ -205,15 +205,15 @@ pub fn run_stage1_to_stage3_with<Id: Clone + std::fmt::Debug>(
     ))
 }
 
-fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
-    per_computation: PerComputationCandidates<Id>,
+fn run_with_initial_memo(
+    per_computation: PerComputationCandidates,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
     search: Stage1ToStage3Search,
     initial: DagOfLogicalMemoGroups,
     local_candidate_generation_ms: Option<f64>,
-) -> Stage1ToStage3Run<Id> {
+) -> Stage1ToStage3Run {
     let pruned = per_computation.without_unsupported_summaries(
         models
             .deployment_capabilities
@@ -244,11 +244,11 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
 /// The run of a memo search over `per_computation`, pruned
 /// for the deployment, that `found` the selection, its physical candidate
 /// and its logical roots, or why none is valid.
-fn memo_run<Id: Clone + std::fmt::Debug>(
-    per_computation: PerComputationCandidates<Id>,
+fn memo_run(
+    per_computation: PerComputationCandidates,
     found: crate::search::pipeline::PlanSearchResult,
     data: &DataWorkload,
-) -> Stage1ToStage3Run<Id> {
+) -> Stage1ToStage3Run {
     let combinations = per_computation.combinations();
     let (selection, selected, logical) = match found {
         Ok((selection, selected, logical)) => (Ok(selection), Some(selected), Some(logical)),

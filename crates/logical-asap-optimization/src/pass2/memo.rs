@@ -1,14 +1,14 @@
 //! Logical group identity established before implementation candidate generation.
 //!
 //! This module depends only on logical IR. It preserves the existing CSE
-//! legality rules and owns the original roots so pointer-based lookup remains
-//! valid while later stages populate implementation candidates.
+//! legality rules; Pass 1 walks its groups.
 
 /// Logical implementation candidates populated after initial identity construction.
 pub mod candidates;
 /// The candidate DAGs a memo stands for: choices and their composition.
 pub mod enumeration;
 mod groups;
+pub(crate) use groups::NodeToStructuralIdCache;
 pub(crate) mod rules;
 /// Shared finite state configuration enumeration.
 pub mod shared_configurations;
@@ -43,7 +43,6 @@ pub struct DagOfLogicalMemoGroups {
     /// operator's group, or its scalar expression with every operator
     /// reference replaced by that operator's group.
     pub query_roots: Vec<QueryRoot<MemoGroupId>>,
-    original_roots: Vec<QueryRoot>,
     group_of: GroupOf,
 }
 
@@ -63,7 +62,6 @@ impl DagOfLogicalMemoGroups {
         Self {
             groups,
             query_roots,
-            original_roots: roots.iter().map(|(_, root)| root.clone()).collect(),
             group_of,
         }
     }
@@ -73,27 +71,19 @@ impl DagOfLogicalMemoGroups {
         self.group_of.get(&Rc::as_ptr(node)).copied()
     }
 
-    /// Check root kind and ordered operator dependencies, not scalar values.
-    /// Changing scalar-only output expressions does not change logical groups.
-    /// Never compare operator DAGs recursively: shared diamonds and NaN literals
-    /// make structural equality inappropriate for pointer-indexed identities.
-    pub fn matches_root_dependencies<Id>(&self, roots: &[(Id, QueryRoot)]) -> bool {
-        self.original_roots.len() == roots.len()
-            && self
-                .original_roots
-                .iter()
-                .zip(roots)
-                .all(|(original, (_, root))| {
-                    std::mem::discriminant(original) == std::mem::discriminant(root) && {
-                        let original_nodes = operator_roots(original);
-                        let nodes = operator_roots(root);
-                        original_nodes.len() == nodes.len()
-                            && original_nodes
-                                .iter()
-                                .zip(&nodes)
-                                .all(|(a, b)| Rc::ptr_eq(a, b))
-                    }
-                })
+    /// Each query's root over the groups' logical nodes, in workload order:
+    /// a group several queries read is one node.
+    pub fn roots_over_groups(&self) -> Vec<QueryRoot> {
+        let node = |g: &MemoGroupId| Rc::clone(&self.groups[g.0 as usize].logical_node);
+        self.query_roots
+            .iter()
+            .map(|root| match root {
+                QueryRoot::Operator(g) => QueryRoot::Operator(node(g)),
+                QueryRoot::Scalar(expr) => {
+                    QueryRoot::Scalar(expr.map_operator_refs(&mut |g| node(g)))
+                }
+            })
+            .collect()
     }
 }
 
@@ -293,65 +283,8 @@ mod tests {
         let id = memo.group_for_node(&node).unwrap();
         assert_eq!(queries_rooted_at(&memo.query_roots, id), vec![1, 2]);
         assert_eq!(memo.groups[id.0 as usize].reached_by_queries(), [1, 2]);
-        assert!(memo.matches_root_dependencies(&roots));
-        let mut reordered = roots.clone();
-        reordered.swap(0, 1);
-        assert!(!memo.matches_root_dependencies(&reordered));
         assert!(DagOfLogicalMemoGroups::from_roots(&roots[..1])
             .groups
             .is_empty());
-    }
-
-    /// Non-reflexive floating literals must not invalidate unchanged dependencies.
-    #[test]
-    fn unchanged_nan_root_matches_by_dependency_identity() {
-        let roots = vec![(0, QueryRoot::Scalar(ScalarExpr::literal_f64(f64::NAN)))];
-        let memo = DagOfLogicalMemoGroups::from_roots(&roots);
-        assert!(memo.matches_root_dependencies(&roots));
-    }
-
-    /// Dependency checks must not unfold shared operator DAGs once per path.
-    #[test]
-    fn checking_shared_diamond_uses_root_identity() {
-        use asap_types::ir::operator::operator_properties::BinaryOpKind;
-        use asap_types::ir::scalar::CompareOpKind;
-        use asap_types::ir::{BinaryOperator, NonASAPOp, Operator};
-        let QueryRoot::Operator(mut node) = query("m") else {
-            unreachable!()
-        };
-        for _ in 0..24 {
-            node = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::BinaryOp {
-                operator: BinaryOperator {
-                    checked_relative_division: false,
-                    checked_finite_division: false,
-                    kind: BinaryOpKind::Compare(CompareOpKind::Eq),
-                    vector_match: None,
-                },
-                return_bool: false,
-                lhs: node.clone(),
-                rhs: node,
-            }))
-            .unwrap();
-        }
-        // Construct the identity guard directly so this regression isolates
-        // root matching from the independently tested CSE/interner.
-        let roots = vec![(0, QueryRoot::Operator(node))];
-        let memo = DagOfLogicalMemoGroups {
-            groups: Vec::new(),
-            query_roots: Vec::new(),
-            original_roots: roots.iter().map(|(_, r)| r.clone()).collect(),
-            group_of: GroupOf::new(),
-        };
-        assert!(memo.matches_root_dependencies(&roots));
-    }
-
-    /// Structural equality alone cannot validate pointer-indexed target lookups.
-    #[test]
-    fn rebuilt_equal_roots_do_not_match_the_original_workload() {
-        let roots = vec![(0, query("sum by (job) (m)"))];
-        let memo = DagOfLogicalMemoGroups::from_roots(&roots);
-        let rebuilt = vec![(0, query("sum by (job) (m)"))];
-        assert!(!memo.matches_root_dependencies(&rebuilt));
-        assert!(memo.matches_root_dependencies(&roots.clone()));
     }
 }

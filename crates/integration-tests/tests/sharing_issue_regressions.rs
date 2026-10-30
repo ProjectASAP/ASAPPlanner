@@ -121,8 +121,12 @@ fn sql_count_topk_has_a_fused_raw_row_heap() {
     let roots = Planner::new(FuzzSettings::default())
         .lower(&workload(886))
         .unwrap();
-    let inventory =
-        generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &roots.into_iter().enumerate().collect::<Vec<_>>(),
+        ),
+    )
+    .unwrap();
     let (index, target) = inventory
         .targets
         .iter()
@@ -137,7 +141,7 @@ fn sql_count_topk_has_a_fused_raw_row_heap() {
                 &inventory, &selected,
             )
             .unwrap();
-        let roots: Vec<_> = composed.into_iter().map(|(_, root)| root).collect();
+        let roots: Vec<_> = composed;
         let root = roots[0].as_operator().unwrap();
         for node in asap_types::ir::OperatorNode::reachable(root) {
             if let Some(asap_types::ir::ASAPOp::SummaryAgg {
@@ -212,7 +216,10 @@ fn exact_rollup_catalog_crosses_identical_per_series_average() {
         .enumerate()
         .collect();
     let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-    let inventory = generate_per_computation_candidates(roots).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+    )
+    .unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
     let expanded =
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
@@ -252,7 +259,10 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
         .enumerate()
         .collect();
     let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-    let inventory = generate_per_computation_candidates(roots).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+    )
+    .unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
     let expanded =
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
@@ -274,9 +284,13 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
     use std::rc::Rc;
     let filter = candidate.root_node.children()[0];
     let grouped = filter.children()[0];
-    let inv =
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(Rc::clone(grouped)))])
-            .unwrap();
+    let inv = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+            0,
+            QueryRoot::Operator(Rc::clone(grouped)),
+        )]),
+    )
+    .unwrap();
     let choices: Vec<_> = inv
         .targets
         .iter()
@@ -293,10 +307,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
                 .unwrap_or(0)
         })
         .collect();
-    let approximate = compose_logical_candidate(&inv, &choices)
-        .unwrap()
-        .remove(0)
-        .1;
+    let approximate = compose_logical_candidate(&inv, &choices).unwrap().remove(0);
     let approximate = approximate.as_operator().unwrap();
     let filtered = Rc::new(
         filter
@@ -422,7 +433,12 @@ fn sql_count_rollup_executes_with_integer_results() {
             .enumerate()
             .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let inventory = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                &roots,
+            ),
+        )
+        .unwrap();
         let memo = try_populate_pass1(initial, &inventory).unwrap();
         let expanded =
             asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
@@ -547,7 +563,10 @@ fn sketch_rollup_crosses_inner_range_function() {
         .enumerate()
         .collect();
     let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-    let inventory = generate_per_computation_candidates(roots).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+    )
+    .unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
     let expanded =
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
@@ -572,9 +591,13 @@ fn sql_grouped_count_sketches_are_not_offered() {
     use asap_types::stages::PruneReason;
     let w = workload(886);
     let roots = Planner::new(FuzzSettings::default()).lower(&w).unwrap();
-    let inventory =
-        generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
-    let (index, target) = inventory.targets.iter().enumerate().find(|(_, target)| matches!(target.aggregate.non_asap(), Some(NonASAPOp::Aggregate { measures, .. }) if matches!(measures.as_slice(), [AggIntent::Count { .. }]))).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &roots.into_iter().enumerate().collect::<Vec<_>>(),
+        ),
+    )
+    .unwrap();
+    let (index, target) = inventory.targets.iter().enumerate().find(|(_, target)| matches!(inventory.aggregate(target).non_asap(), Some(NonASAPOp::Aggregate { measures, .. }) if matches!(measures.as_slice(), [AggIntent::Count { .. }]))).unwrap();
     assert!(target
         .ways_to_compute
         .iter()

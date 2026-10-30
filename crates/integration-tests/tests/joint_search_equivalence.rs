@@ -77,7 +77,7 @@ fn run(
     models: PlanningModels<'_>,
     exhaustive: bool,
     budget_ms: u64,
-) -> Stage1ToStage3Run<usize> {
+) -> Stage1ToStage3Run {
     run_stage1_to_stage3_with(
         roots.iter().cloned().enumerate().collect(),
         entries,
@@ -93,7 +93,7 @@ fn run(
     .unwrap()
 }
 
-fn assert_valid(run: &Stage1ToStage3Run<usize>, queries: usize) {
+fn assert_valid(run: &Stage1ToStage3Run, queries: usize) {
     let selection = run
         .stage3_plan_selection
         .as_ref()
@@ -136,7 +136,7 @@ fn run_workload(
     workload: &PlanningWorkload,
     settings: &CostInputs,
     deployment: &DeploymentCapabilities,
-) -> Stage1ToStage3Run<usize> {
+) -> Stage1ToStage3Run {
     let roots = lower_promql_roots(workload).unwrap();
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.as_ref().unwrap();
@@ -178,7 +178,7 @@ fn settings_for_every_objective() -> Vec<CostInputs> {
     .collect()
 }
 
-fn objective(run: &Stage1ToStage3Run<usize>, model: &CostModel) -> Vec<Vec<f64>> {
+fn objective(run: &Stage1ToStage3Run, model: &CostModel) -> Vec<Vec<f64>> {
     let selection = run.stage3_plan_selection.as_ref().unwrap();
     let ids = if matches!(
         model,

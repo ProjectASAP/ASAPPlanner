@@ -41,8 +41,13 @@ pub fn computation_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
-    let inventory = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))])
-        .expect("Pass 1 accepts the query");
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+            0,
+            QueryRoot::Operator(root),
+        )]),
+    )
+    .expect("Pass 1 accepts the query");
     let mut choices = vec![vec![0; inventory.targets.len()]];
     for (index, target) in inventory.targets.iter().enumerate() {
         for choice in 1..target.choice_count() {
@@ -56,7 +61,7 @@ pub fn computation_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
         .map(|choice| {
             let mut roots = compose_logical_candidate(&inventory, &choice)
                 .expect("a generated computation candidate composes");
-            match roots.remove(0).1 {
+            match roots.remove(0) {
                 QueryRoot::Operator(root) => root,
                 QueryRoot::Scalar(_) => panic!("one operator root"),
             }
@@ -86,7 +91,7 @@ pub fn require_composed_operator_candidates(
 fn run_stage1_to_stage3(
     root: Rc<OperatorNode>,
     accuracy: planner_types::ir::properties::AccuracyTarget,
-) -> asap_plan_selection::Stage1ToStage3Run<usize> {
+) -> asap_plan_selection::Stage1ToStage3Run {
     use planner_types::workload::{DataArrival, DataWorkload};
     let data = DataWorkload {
         arrival: DataArrival::Ingesting {

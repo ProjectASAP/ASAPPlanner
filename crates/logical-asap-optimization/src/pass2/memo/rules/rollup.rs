@@ -352,7 +352,10 @@ mod tests {
             })
             .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let inventory = generate_per_computation_candidates(
+            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        )
+        .unwrap();
         let memo = sharing_rules_and_shared_state_groups(
             try_populate_pass1(initial, &inventory).unwrap(),
             PaneWidthDomain::Complete,

@@ -62,9 +62,13 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             .failure_probability(0.01)
             .accuracy_scope(AccuracyScope::PerValue);
         let original = lower_promql("quantile_over_time(0.95, latency[5m])", target.clone());
-        let generated =
-            generate_per_computation_candidates(vec![(0, QueryRoot::Operator(original.clone()))])
-                .unwrap();
+        let generated = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+                0,
+                QueryRoot::Operator(original.clone()),
+            )]),
+        )
+        .unwrap();
         let choice = generated.targets[0]
             .ways_to_compute
             .iter()
@@ -75,11 +79,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
                 )
             })
             .unwrap();
-        let roots: Vec<_> = compose_logical_candidate(&generated, &[choice])
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let roots: Vec<_> = compose_logical_candidate(&generated, &[choice]).unwrap();
         let rules = asap_logical_asap_optimization::pass2::asap_aware_cse::pane_candidates(
             &roots,
             &[Some(10_000)],

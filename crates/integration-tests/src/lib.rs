@@ -186,7 +186,7 @@ pub mod planning {
     pub fn run_stage1_to_stage3(
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
-    ) -> asap_plan_selection::Stage1ToStage3Run<usize> {
+    ) -> asap_plan_selection::Stage1ToStage3Run {
         let data = declared_data(&root);
         asap_plan_selection::run_stage1_to_stage3_with(
             vec![(0, QueryRoot::Operator(root))],
@@ -222,8 +222,13 @@ pub mod planning {
         use asap_logical_asap_optimization::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates,
         };
-        let local =
-            generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+        let local = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+                0,
+                QueryRoot::Operator(root),
+            )]),
+        )
+        .unwrap();
         let mut choices = std::collections::BTreeSet::from([vec![0; local.targets.len()]]);
         for (target, options) in local.targets.iter().enumerate() {
             for choice in 1..options.choice_count() {
@@ -238,7 +243,6 @@ pub mod planning {
                 match compose_logical_candidate(&local, &choice)
                     .expect("explicit local rule composes")
                     .remove(0)
-                    .1
                 {
                     QueryRoot::Operator(node) => node,
                     QueryRoot::Scalar(_) => panic!("operator fixture"),
@@ -257,14 +261,18 @@ pub mod planning {
             compose_logical_candidate, generate_per_computation_candidates,
             HowToComputeAggregateMeasure,
         };
-        let local =
-            generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+        let local = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+                0,
+                QueryRoot::Operator(root),
+            )]),
+        )
+        .unwrap();
         let choices = local.targets.iter().map(|target| target.ways_to_compute.iter()
             .position(|candidate| matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == family)).unwrap_or(0)).collect::<Vec<_>>();
         match compose_logical_candidate(&local, &choices)
             .expect("explicit family choices compose")
             .remove(0)
-            .1
         {
             QueryRoot::Operator(node) => node,
             QueryRoot::Scalar(_) => panic!("operator fixture"),
@@ -314,7 +322,12 @@ pub mod planning {
             window_candidates::add_local_window_composition, DagOfLogicalMemoGroups,
         };
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let inventory = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                &roots,
+            ),
+        )
+        .unwrap();
         let mut memo = try_populate_pass1(initial, &inventory).unwrap();
         add_local_window_composition(&mut memo, entries);
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(

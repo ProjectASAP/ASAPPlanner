@@ -98,7 +98,12 @@ fn output_columns(root: &QueryRoot) -> Vec<(String, String, bool)> {
 /// Compose every candidate of `root`; returns how many there were.
 fn compose_all(label: &str, root: QueryRoot) -> usize {
     let expected = output_columns(&root);
-    let inventory = generate_per_computation_candidates(vec![(0, root)]).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+            0, root,
+        )]),
+    )
+    .unwrap();
     let radix: Vec<_> = inventory
         .targets
         .iter()
@@ -109,7 +114,7 @@ fn compose_all(label: &str, root: QueryRoot) -> usize {
     for _ in 0..total {
         let composed = compose_logical_candidate(&inventory, &choice)
             .unwrap_or_else(|e| panic!("{label} {choice:?}: {e}"));
-        let root = &composed[0].1;
+        let root = &composed[0];
         root.validate_structure()
             .unwrap_or_else(|e| panic!("{label} {choice:?}: {e}"));
         let columns = output_columns(root);
@@ -174,7 +179,12 @@ fn promql_candidates_compose() {
 /// The summary estimates of `root`'s candidates that vary one target's
 /// choice, every other target taking its first.
 fn composed_estimates(root: QueryRoot) -> Vec<Rc<OperatorNode>> {
-    let inventory = generate_per_computation_candidates(vec![(0, root)]).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+            0, root,
+        )]),
+    )
+    .unwrap();
     let targets = inventory.targets.len();
     let choices: Vec<_> = inventory
         .targets
@@ -192,7 +202,7 @@ fn composed_estimates(root: QueryRoot) -> Vec<Rc<OperatorNode>> {
         .into_iter()
         .flat_map(|choice| {
             let composed = compose_logical_candidate(&inventory, &choice).unwrap();
-            let QueryRoot::Operator(node) = &composed[0].1 else {
+            let QueryRoot::Operator(node) = &composed[0] else {
                 panic!("operator root expected")
             };
             OperatorNode::reachable(node)
@@ -261,14 +271,20 @@ fn topk_over_an_aggregate_ranks_its_labels() {
 async fn subquery_in_a_measure_filter_is_substituted() {
     let query = "SELECT src, count(*) FILTER (WHERE bytes > (SELECT approx_percentile_cont(bytes, 0.5) FROM flows)) \
                  FROM flows GROUP BY src";
-    let inventory = generate_per_computation_candidates(vec![(0, sql(query).await)]).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+            0,
+            sql(query).await,
+        )]),
+    )
+    .unwrap();
     assert_eq!(inventory.targets.len(), 2);
     let inner = inventory
         .targets
         .iter()
         .position(|target| {
-            target
-                .aggregate
+            inventory
+                .aggregate(target)
                 .non_asap()
                 .and_then(|op| match op {
                     NonASAPOp::Aggregate { reduction, .. } => reduction.group_keys(),
@@ -284,7 +300,7 @@ async fn subquery_in_a_measure_filter_is_substituted() {
         let mut choice = vec![0; 2];
         choice[inner] = index;
         let composed = compose_logical_candidate(&inventory, &choice).unwrap();
-        let QueryRoot::Operator(root) = &composed[0].1 else {
+        let QueryRoot::Operator(root) = &composed[0] else {
             panic!("operator root expected")
         };
         let shown = format!("{root:?}");
@@ -392,8 +408,13 @@ async fn avg_as_sum_and_count(
     query: &str,
 ) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
     let exact = lower_sql(query, catalog, accuracy()).await.unwrap();
-    let inventory =
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(exact.clone()))]).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+            0,
+            QueryRoot::Operator(exact.clone()),
+        )]),
+    )
+    .unwrap();
     let choice: Vec<_> = inventory
         .targets
         .iter()
@@ -412,7 +433,7 @@ async fn avg_as_sum_and_count(
         .collect();
     let composed =
         compose_logical_candidate(&inventory, &choice).unwrap_or_else(|e| panic!("{query}: {e}"));
-    let QueryRoot::Operator(root) = &composed[0].1 else {
+    let QueryRoot::Operator(root) = &composed[0] else {
         panic!("operator root expected")
     };
     assert!(
@@ -524,14 +545,19 @@ async fn filtered_sql_avg_is_null_without_matching_rows() {
 /// PromQL `avg` divides its `sum` and `count` vectors with a `BinaryOp`.
 #[test]
 fn promql_avg_divides_sum_and_count_vectors() {
-    let inventory =
-        generate_per_computation_candidates(vec![(0, promql("avg by (job) (m)"))]).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+            0,
+            promql("avg by (job) (m)"),
+        )]),
+    )
+    .unwrap();
     assert_eq!(
         inventory.targets[0].ways_to_compute[0],
         HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum, ExactKind::Count])
     );
     let composed = compose_logical_candidate(&inventory, &[0]).unwrap();
-    let QueryRoot::Operator(root) = &composed[0].1 else {
+    let QueryRoot::Operator(root) = &composed[0] else {
         panic!("operator root expected")
     };
     let kinds: Vec<_> = OperatorNode::reachable(root)
@@ -562,13 +588,18 @@ async fn every_candidate(
 ) -> Vec<(
     HowToComputeAggregateMeasure,
     Result<
-        Vec<(i32, QueryRoot)>,
+        Vec<QueryRoot>,
         asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidateError,
     >,
 )>{
     let root = lower_sql(query, catalog, accuracy()).await.unwrap();
-    let inventory =
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+            0,
+            QueryRoot::Operator(root),
+        )]),
+    )
+    .unwrap();
     assert_eq!(inventory.targets.len(), 1, "{query}");
     inventory.targets[0]
         .ways_to_compute
@@ -684,20 +715,23 @@ async fn sql_count_star_counts_a_non_null_column() {
     let query = "SELECT k, count(*) FROM t GROUP BY k";
     for (candidate, composed) in every_candidate(&catalog, query).await {
         let composed = composed.unwrap_or_else(|e| panic!("{candidate:?}: {e}"));
-        composed[0].1.validate_structure().unwrap();
-        let updates = count_updates(&composed[0].1);
+        composed[0].validate_structure().unwrap();
+        let updates = count_updates(&composed[0]);
         assert_eq!(updates.len(), 1, "{candidate:?}");
         assert!(reads_only(&updates[0], "n"), "{candidate:?}: {updates:?}");
     }
     let (exact, root) = {
         let exact = lower_sql(query, &catalog, accuracy()).await.unwrap();
-        let inventory =
-            generate_per_computation_candidates(vec![(0, QueryRoot::Operator(exact.clone()))])
-                .unwrap();
+        let inventory = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+                0,
+                QueryRoot::Operator(exact.clone()),
+            )]),
+        )
+        .unwrap();
         let QueryRoot::Operator(root) = compose_logical_candidate(&inventory, &[0])
             .unwrap()
             .remove(0)
-            .1
         else {
             panic!("operator root expected")
         };
@@ -742,8 +776,8 @@ async fn sql_count_of_a_nullable_column_counts_its_values() {
         every_candidate(&catalog, "SELECT k, count(v) FROM t GROUP BY k").await
     {
         let composed = composed.unwrap_or_else(|e| panic!("{candidate:?}: {e}"));
-        composed[0].1.validate_structure().unwrap();
-        let updates = count_updates(&composed[0].1);
+        composed[0].validate_structure().unwrap();
+        let updates = count_updates(&composed[0]);
         assert_eq!(updates.len(), 1, "{candidate:?}");
         assert!(reads_only(&updates[0], "v"), "{candidate:?}: {updates:?}");
     }

@@ -36,8 +36,12 @@ fn rule_fixture(workload: &asap_types::workload::PlanningWorkload) -> Run {
         pane_candidates, window_composition_pass2_candidates,
     };
     let roots = lower_promql(workload);
-    let local =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &roots.iter().cloned().enumerate().collect::<Vec<_>>(),
+        ),
+    )
+    .unwrap();
     let mut computations = Vec::new();
     for family in [
         None,
@@ -61,11 +65,7 @@ fn rule_fixture(workload: &asap_types::workload::PlanningWorkload) -> Run {
                 .expect("documented heap family offered locally");
             choice[target] = option;
         }
-        let whole: Vec<_> = compose_logical_candidate(&local, &choice)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let whole: Vec<_> = compose_logical_candidate(&local, &choice).unwrap();
         let mut windows = vec![whole.clone()];
         let panes = pane_candidates(&whole, &[Some(10_000), Some(10_000)]);
         windows.extend(
@@ -822,13 +822,13 @@ fn materialized_case() -> Run {
         compose_logical_candidate, generate_per_computation_candidates,
     };
     let roots = lower_promql(&workload);
-    let local =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
-    let exact = compose_logical_candidate(&local, &vec![0; local.targets.len()])
-        .unwrap()
-        .into_iter()
-        .map(|(_, root)| root)
-        .collect();
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &roots.iter().cloned().enumerate().collect::<Vec<_>>(),
+        ),
+    )
+    .unwrap();
+    let exact = compose_logical_candidate(&local, &vec![0; local.targets.len()]).unwrap();
     let run = run_explicit_candidates(&workload, roots, vec![exact], PlanningModels::builtin());
     let mut p = run.physical[0].clone();
     p.candidate.roots = vec![p.candidate.roots[0].clone(); 2];

@@ -145,7 +145,7 @@ pub fn declared_data(root: &Rc<OperatorNode>) -> DataWorkload {
 pub fn run_stage1_to_stage3(
     root: Rc<OperatorNode>,
     accuracy: AccuracyTarget,
-) -> asap_plan_selection::Stage1ToStage3Run<usize> {
+) -> asap_plan_selection::Stage1ToStage3Run {
     let data = declared_data(&root);
     asap_plan_selection::run_stage1_to_stage3_with(
         vec![(0, asap_types::ir::QueryRoot::Operator(root))],
@@ -189,8 +189,13 @@ fn local_computation_candidates(root: Rc<OperatorNode>) -> Result<Vec<Rc<Operato
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_types::ir::QueryRoot;
-    let inventory = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))])
-        .map_err(|error| error.to_string())?;
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+            0,
+            QueryRoot::Operator(root),
+        )]),
+    )
+    .map_err(|error| error.to_string())?;
     let mut choices = vec![vec![0; inventory.targets.len()]];
     for (index, target) in inventory.targets.iter().enumerate() {
         for choice in 1..target.choice_count() {
@@ -204,7 +209,7 @@ fn local_computation_candidates(root: Rc<OperatorNode>) -> Result<Vec<Rc<Operato
         .map(|choice| {
             let mut roots = compose_logical_candidate(&inventory, &choice)
                 .map_err(|error| error.to_string())?;
-            match roots.remove(0).1 {
+            match roots.remove(0) {
                 QueryRoot::Operator(root) => Ok(root),
                 QueryRoot::Scalar(_) => Err("expected an operator root".into()),
             }

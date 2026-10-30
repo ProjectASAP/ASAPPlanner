@@ -80,8 +80,12 @@ fn physical_candidates(
     use asap_types::physical::Materialization;
 
     let roots = lower_promql_query_workload(workload).expect("lowers");
-    let inventory =
-        generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &roots.into_iter().enumerate().collect::<Vec<_>>(),
+        ),
+    )
+    .unwrap();
     let mut choices = BTreeSet::from([vec![0; inventory.targets.len()]]);
     for (index, target) in inventory.targets.iter().enumerate() {
         for implementation in 1..target.choice_count() {
@@ -94,11 +98,7 @@ fn physical_candidates(
         .into_iter()
         .enumerate()
         .map(|(index, choice)| {
-            let roots: Vec<_> = compose_logical_candidate(&inventory, &choice)
-                .unwrap()
-                .into_iter()
-                .map(|(_, root)| root)
-                .collect();
+            let roots: Vec<_> = compose_logical_candidate(&inventory, &choice).unwrap();
             let mut candidate = optimize_physical_asap_chosen(
                 &format!("fixture-{index}"),
                 &roots,

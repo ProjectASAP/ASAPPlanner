@@ -70,17 +70,15 @@ fn run_group_choices(workload: &PlanningWorkload) -> Run {
         compose_logical_candidate, generate_per_computation_candidates,
     };
     let roots = lower_sql_roots(workload, &http_catalog()).expect("lowers");
-    let local =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &roots.iter().cloned().enumerate().collect::<Vec<_>>(),
+        ),
+    )
+    .unwrap();
     assert_eq!(local.targets.len(), 1, "one grouped statistic per fixture");
     let candidates = (0..local.targets[0].ways_to_compute.len())
-        .map(|choice| {
-            compose_logical_candidate(&local, &[choice])
-                .unwrap()
-                .into_iter()
-                .map(|(_, root)| root)
-                .collect()
-        })
+        .map(|choice| compose_logical_candidate(&local, &[choice]).unwrap())
         .collect();
     run_explicit_candidates(
         workload,

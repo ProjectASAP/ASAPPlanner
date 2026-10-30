@@ -268,8 +268,13 @@ mod tests {
         ));
         let roots = vec![root.clone()];
         let initial = DagOfLogicalMemoGroups::from_roots(&[(0, root)]);
-        let per_computation =
-            generate_per_computation_candidates(vec![(0, roots[0].clone())]).unwrap();
+        let per_computation = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+                0,
+                roots[0].clone(),
+            )]),
+        )
+        .unwrap();
         let memo = try_populate_pass1(initial, &per_computation).unwrap();
         let logical = LogicalASAPMemoCandidates {
             memo: sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap(),

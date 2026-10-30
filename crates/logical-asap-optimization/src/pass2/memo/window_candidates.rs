@@ -415,7 +415,10 @@ mod tests {
             .map(|(id, _)| (id, QueryRoot::Operator(Rc::clone(&root))))
             .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let generated = generate_per_computation_candidates(roots).unwrap();
+        let generated = generate_per_computation_candidates(
+            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        )
+        .unwrap();
         let memo = try_populate_pass1(initial, &generated).unwrap();
         let entries = recurrences
             .iter()

@@ -1175,18 +1175,16 @@ fn workload_file_with_a_range_evaluation_is_planned() {
         let entries: Vec<_> = parsed.query_workload.entries().collect();
         let data = parsed.data_workload.clone().unwrap();
         let inventory = generate_per_computation_candidates(
-            lower_promql_roots(&parsed)
-                .unwrap()
-                .into_iter()
-                .enumerate()
-                .collect(),
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                &lower_promql_roots(&parsed)
+                    .unwrap()
+                    .into_iter()
+                    .enumerate()
+                    .collect::<Vec<_>>(),
+            ),
         )
         .unwrap();
-        let exact: Vec<_> = compose_logical_candidate(&inventory, &[0])
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let exact: Vec<_> = compose_logical_candidate(&inventory, &[0]).unwrap();
         let grids: Vec<_> = entries.iter().map(|e| e.evaluation_grid_ms()).collect();
         let panes = pane_candidates(&exact, &grids);
         let paned = window_composition_pass2_candidates(&exact, &panes)

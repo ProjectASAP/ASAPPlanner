@@ -1473,9 +1473,9 @@ mod tests {
             "topk by (job) (10, sum_over_time(m[1m]))",
             AccuracyTarget::max_error(0.01).failure_probability(0.001),
         );
-        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(
-            vec![(0, QueryRoot::Operator(root))],
-        )
+        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&
+            [(0, QueryRoot::Operator(root))],
+        ))
         .unwrap();
         // A summary (the last candidate) for every target.
         let choice: Vec<_> = inventory
@@ -1489,7 +1489,6 @@ mod tests {
             )
             .unwrap()
             .into_iter()
-            .map(|(_, root)| root)
             .collect();
         let candidate = first_candidate(&roots);
         assert!(candidate
@@ -1519,9 +1518,9 @@ mod tests {
                 .failure_probability(0.001)
                 .accuracy_metric(asap_types::ir::properties::AccuracyMetric::Rank),
         );
-        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(
-            vec![(0, QueryRoot::Operator(root))],
-        )
+        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&
+            [(0, QueryRoot::Operator(root))],
+        ))
         .unwrap();
         let choice: Vec<_> = inventory
             .targets
@@ -1533,7 +1532,6 @@ mod tests {
         )
         .unwrap()
         .remove(0)
-        .1
     }
 
     /// `root` with its summary build in 1-min tumbling panes.
