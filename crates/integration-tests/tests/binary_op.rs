@@ -268,11 +268,10 @@ fn q21_div_two_sum_by_job() {
     );
 }
 
-// #36 — unary negation lowers as `expr * -1`: a Mul BinaryOp of the vector
-//   against a `ScalarExpr(-1)` leaf, no vector match. The vector side keeps
-//   its schema.
+// #36 — unary negation lowers as a projection whose value is
+//   `ScalarExpr::Negative`, no vector match. The vector side keeps its schema.
 #[test]
-fn q36_unary_negation_is_multiply_by_minus_one() {
+fn q36_unary_negation_is_a_negative_projection() {
     let root = lower("-some_metric");
     let NonASAPOp::Project { cols, child, .. } = root.expect_non_asap() else {
         panic!()
@@ -282,7 +281,7 @@ fn q36_unary_negation_is_multiply_by_minus_one() {
 }
 
 // #36 — negation nested inside an aggregate argument (issue #27 nesting):
-//   `sum(-m)` → Aggregate{Sum} over the `m * -1` BinaryOp.
+//   `sum(-m)` → Aggregate{Sum} over the negating projection.
 #[test]
 fn q36_sum_of_negation_nests() {
     let root = lower("sum(-node_cpu_seconds_total)");

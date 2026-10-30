@@ -148,3 +148,16 @@ fn workload_lowering_uses_the_declared_sample_interval() {
     });
     lower_metricsql_query_workload(&at_rest).unwrap();
 }
+
+/// Vector negation lowers to the same IR as PromQL's: a sample-value
+/// `Negative` that drops the metric name, not a multiplication by -1.
+#[test]
+fn vector_negation_lowers_as_in_promql() {
+    let query = "-rate(up[5m])";
+    let metricsql =
+        lower_metricsql_query_workload(&workload(QueryLanguage::MetricsQL, query)).unwrap();
+    let promql =
+        asap_frontend_promql::lower_promql_query_workload(&workload(QueryLanguage::PromQL, query))
+            .unwrap();
+    assert_eq!(metricsql, promql);
+}
