@@ -241,6 +241,9 @@ use asap_cost::state_bytes::{sketch_shape, summary_shape, StateInputRows};
 mod accuracy;
 mod accuracy_binding;
 mod checks;
+// #1095 Steps 1–2; the region DP and class-level MILP (later PRs) read it.
+#[cfg_attr(not(test), allow(dead_code))]
+mod classes;
 mod report;
 mod selector;
 pub(crate) use accuracy_binding::bound_root_guarantee;
