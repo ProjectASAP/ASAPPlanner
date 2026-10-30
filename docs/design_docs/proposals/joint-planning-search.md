@@ -70,9 +70,7 @@ G_KLL
     C_large: large-capacity KLL ← consumers C, D
 ```
 
-Selecting both candidates permits two sharing subsets. Selecting only one is appropriate when its configuration and cost suit all consumers. This representation uses no additional physical-instance index: a candidate is the selectable unit of execution.
-
-That simplification places a requirement on generation. If computations must coexist with separate execution scopes or incompatible input bindings, they need distinct generated candidates, even when their algorithms and capacities match. One selected candidate has one set of input bindings. Removing instance indices therefore does not establish that every duplicate computation can safely be shared, or that an arbitrary candidate inventory is complete.
+Selecting both candidates permits two sharing subsets. Selecting only one is appropriate when its configuration and cost suit all consumers. A candidate is one `(operator node, timing, materialization)`; how many times it runs is the selection's choice. Stage 2 generates no execution-scope copies. The selection, a `DagOfSelectedCandidates`, has one node per run: a stateless candidate recomputed by two readers, or a shared candidate run as two instances over different input bindings, is two nodes, each with its own input bindings. Today's Stage 3 engine, whose MILP runs each candidate at most once, makes the copies it needs before solving and decodes each selected copy into a node.
 
 The workflow follows [planner layering](planner-layering.md). Local group candidates represent components of the workload DAGs described there.
 

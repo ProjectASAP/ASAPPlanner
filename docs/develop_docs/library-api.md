@@ -202,7 +202,7 @@ asap_plan_selection::select_plan(
 | `CostModel::ProvisionedCapacity(ResourceUnitCost)` | Cost model 2: unit cost × peak memory, peak CPU cores and disk; the cheapest valid candidate wins |
 | `CostModel::ClusterCapacity(ClusterLimits)` | Cost model 3: memory, disk and optional CPU cores are hard limits; `ClusterObjective::{LowestLatency, LeastMemory}` chooses among the candidates that fit |
 | `PlanOutput.plans` | One `QueryPlan { entry_index, root }` per query, in `QueryWorkload::entries()` order |
-| `PlanOutput.selection` | `Some` with Stage 3's `Selection` under the default pass: `selected_candidates`, `candidates_with_proven_non_negative_weights`, `cost` (the selected plan's `PlanCost` with its `ResourceUsage` and `cost_per_second`, `None` under cost model 3), `accepted_accuracy_per_query`, `pruned_candidates` and `search_report` |
+| `PlanOutput.selection` | `Some` with Stage 3's `Selection` under the default pass: `selected_dag`, `nodes_with_proven_non_negative_weights`, `cost` (the selected plan's `PlanCost` with its `ResourceUsage` and `cost_per_second`, `None` under cost model 3), `accepted_accuracy_per_query`, `pruned_candidates` and `search_report` |
 | `PlanOutput.pane_retention_ms` | For each pane chain the selected plan keeps beyond one evaluation, by node id, how long its panes are kept (`RealizedPlan::pane_retention_ms`) |
 | `PlanningRun` | `per_computation_candidates`, the selected round's `logical_asap_candidates` and `physical_asap_candidates`, `selection`, `selected_physical_plan` (`RealizedPlan`), `selected_plan` (the roots to run), `memo_steps` and `report` (per round: counts and Pass 2, Stage 2 and Stage 3 times) |
 | `PlanOutput::physical_asap_dag()` | The planned queries as one `PhysicalASAPDAG`, timed with the default `MaterializationAssignment` (see [Export](#export)) |
@@ -263,8 +263,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = e2e_plan(input).await?;
     let selection = output.selection.as_ref().expect("Stage 3 selected a plan");
     println!(
-        "selected {} candidates at {:?} per second ({:?})",
-        selection.selected_candidates.candidates.len(),
+        "selected {} candidate runs at {:?} per second ({:?})",
+        selection.selected_dag.candidate_of_node.len(),
         selection.cost.cost_per_second,
         selection.search_report.status,
     );

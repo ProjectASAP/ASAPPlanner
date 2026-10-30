@@ -97,7 +97,8 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
   query-time scan of raw data (`RawDataNotRetained`) are not generated; a
   candidate no buildable input, query output or reader count can use is
   removed (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`,
-  `TooFewQueryReaders`, `PreviousScopeCopyPruned`).
+  `TooFewQueryReaders`). Stage 2 emits one candidate per operator node,
+  timing and materialization; it makes no execution-scope copies.
 
 ## 5. Stage 3
 

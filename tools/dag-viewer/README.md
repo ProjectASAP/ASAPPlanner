@@ -233,13 +233,13 @@ are ignored, `stage_pipeline`'s default.
     "candidates": [{ "id": "P1", "from_logical": "L1", "display_name": "...", "dag": "<PhysicalASAPDAG>" }],
     "pruned": [{ "from_logical": "L3", "display_name": "...", "reason": "..." }],
     "pruned_candidates": [{ "group": 1, "operator_node": 0, "operator": "Scan", "implementation_root": true,
-                            "timing": "query_time", "materialization": "NotMaterialized", "scope_copy": 0,
+                            "timing": "query_time", "materialization": "NotMaterialized",
                             "reason": "RawDataNotRetained" }]
   },
   "stage3_plan_selection": {
-    "selected_candidates": { "candidates": [3, 7], "connections": [{ "producer": 3, "consumer": 7, "requirement": 0 }],
-                             "query_output_candidates": [7] },
-    "candidates_with_proven_non_negative_weights": [],
+    "selected_dag": { "candidate_of_node": [3, 7], "edges": [{ "producer": 0, "consumer": 1, "input": 0 }],
+                      "node_of_output_reference": [1] },
+    "nodes_with_proven_non_negative_weights": [],
     "cost": { "cost_per_second": 7.9, "cpu_core_seconds_per_second": 0.0041,
               "cost_unit": "cost_per_second", "source": "...",
               "usage": { "cpu_ops_per_second": 4100210.0, "scanned_bytes_per_second": 38400000.0,
@@ -293,9 +293,11 @@ are ignored, `stage_pipeline`'s default.
   δ). An approximate target without a metric also has
   `requirements.default_metric`, the metric the query's result is naturally
   stated in (null for a quantile), for display only.
-- `stage3_plan_selection` is Stage 3's `Selection`: the selected
-  candidates of the selected round's Stage 2 output, the candidates whose
-  count-min weights it proved non-negative, the selected plan's `cost`, the
+- `stage3_plan_selection` is Stage 3's `Selection`: the selected DAG
+  (`selected_dag`: `candidate_of_node`, the selected round's Stage 2
+  candidate each node runs, one node per run; `edges`, node to node, per
+  `input`; `node_of_output_reference`), the nodes whose count-min weights
+  it proved non-negative, the selected plan's `cost`, the
   accuracy it accepted per query (the metric the target set, null when not
   set, and the metric Stage 3 accepted, null for an exact output), the
   candidates it pruned and its `search_report`. The selected plan is shown
@@ -322,7 +324,7 @@ are ignored, `stage_pipeline`'s default.
   candidate with its memo `group` and `reason` (`PruneReason`): Pass 1's
   ways to compute a measure (`candidate`), and Stage 2's physical
   candidates, keyed by `operator_node` (index into Stage 2's operator
-  nodes), `timing`, `materialization` and `scope_copy`, with the node's
+  nodes), `timing` and `materialization`, with the node's
   `operator` label and whether it is an `implementation_root`. The Memo
   view's group panel lists both for the selected group;
   `deployment_capabilities` and `pass1_pruned` are not shown.

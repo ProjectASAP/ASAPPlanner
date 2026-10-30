@@ -105,10 +105,10 @@ print(json.dumps(document['stage3_plan_selection'], indent=2))
 PY
 ```
 
-The document format is `asap-stage-pipeline/v1`. Check `selected_candidates`,
+The document format is `asap-stage-pipeline/v1`. Check `selected_dag`,
 `cost`, `search_report` and any `error` in `stage3_plan_selection`, and the
 per-round counts and times in `planning_report`. A written JSON document
-alone does not mean planning succeeded: `selected_candidates` may be null.
+alone does not mean planning succeeded: `selected_dag` may be null.
 A selected plan is not necessarily a proven optimum; inspect the search
 status (`search_report.status`) and the lower bound. Costs are model predictions, not measured
 execution times or an actual cloud bill.
