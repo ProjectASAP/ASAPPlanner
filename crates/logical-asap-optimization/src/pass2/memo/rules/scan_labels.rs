@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 
+use asap_accuracy::propagation::recompose_guarantees;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot};
 
@@ -68,15 +69,24 @@ pub(crate) fn add_scan_label_candidates(
     else {
         return Ok(0);
     };
+    // Widening recomposes every root's guarantees, also those it left
+    // unchanged, so a root is unchanged when it equals its recomposed
+    // original. Compared with the stored original instead, an unchanged root
+    // (a scan that already has every label) that differs only in its
+    // guarantee annotation would pass for a widened reader, and interning
+    // would map it back to its own group: a candidate reading the group it
+    // implements.
+    let unwidened = recompose_guarantees(&roots)
+        .map_err(|error| StateGroupExpansionError::ScanLabelWidening(error.to_string()))?;
     let mut added = 0;
     let mut canonical = HashMap::new();
-    for ((group, index), root) in owners.into_iter().zip(widened) {
+    for (((group, index), root), unwidened) in owners.into_iter().zip(widened).zip(unwidened) {
         check_generation_deadline(deadline)?;
-        let QueryRoot::Operator(node) = root else {
+        let (QueryRoot::Operator(node), QueryRoot::Operator(unwidened)) = (root, unwidened) else {
             unreachable!("operator readers")
         };
         let original = memo.candidates[group][index].clone();
-        if *node == *original.root_node || !same_output_contract(&original.root_node, &node) {
+        if *node == *unwidened || !same_output_contract(&original.root_node, &node) {
             continue;
         }
         let queries = memo.groups[group].queries.clone();

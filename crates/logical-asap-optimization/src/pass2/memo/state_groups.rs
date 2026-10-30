@@ -887,6 +887,85 @@ mod tests {
         }
     }
 
+    /// The groups `group`'s candidates read, directly or through the
+    /// candidates of the groups they read.
+    fn groups_read_by(memo: &MemoCandidates, group: usize) -> HashSet<usize> {
+        let mut read = HashSet::new();
+        let mut pending = vec![group];
+        while let Some(group) = pending.pop() {
+            for input in memo.candidates[group]
+                .iter()
+                .flat_map(|candidate| &candidate.input_groups)
+            {
+                if read.insert(input.0 as usize) {
+                    pending.push(input.0 as usize);
+                }
+            }
+        }
+        read
+    }
+
+    // A scan (or time range) that already has every label of its metric is
+    // not widened: widening recomposes guarantees, and an unwidened root
+    // that differs from the original only in its guarantee annotation must
+    // not become an identity `Project` over its own group.
+    #[test]
+    fn scan_label_widening_never_reads_its_own_group() {
+        for queries in [
+            [
+                ("sum by (job, region) (m)", 0.01),
+                ("sum by (job) (m)", 0.01),
+            ],
+            [
+                ("sum by (job, region) (rate(m[5m]))", 0.01),
+                ("sum by (job) (rate(m[5m]))", 0.01),
+            ],
+        ] {
+            let mut memo = workload_with_identity(&queries, true);
+            crate::pass2::logical_memo_candidates::apply_sharing_rules(
+                &mut memo,
+                super::super::shared_configurations::PaneWidthDomain::Complete,
+                None,
+            )
+            .unwrap();
+            assert!(
+                memo.candidates.iter().flatten().any(
+                    |candidate| candidate.origin == OriginOfCandidateForMemoGroup::WidenedScans
+                ),
+                "{queries:?}: the narrower scan is widened"
+            );
+            for group in 0..memo.groups.len() {
+                assert!(
+                    !groups_read_by(&memo, group).contains(&group),
+                    "{queries:?}: group {group} reads itself: {:?}",
+                    memo.candidates[group]
+                        .iter()
+                        .map(|candidate| (&candidate.origin, &candidate.input_groups))
+                        .collect::<Vec<_>>()
+                );
+            }
+            let expanded = expand(workload_with_identity(&queries, true)).unwrap();
+            for group in 0..expanded.memo.groups.len() {
+                assert!(!groups_read_by(&expanded.memo, group).contains(&group));
+            }
+        }
+    }
+
+    // A candidate reading its own group is a cycle the memo rejects.
+    #[test]
+    fn a_group_reading_itself_is_a_cyclic_memo() {
+        let mut memo = workload(&[("sum by (job) (m)", 0.01)]);
+        assert!(check_unexpanded_memo(&memo).is_ok());
+        let mut reader = memo.candidates[0][0].clone();
+        reader.input_groups = vec![MemoGroupId(0)];
+        memo.candidates[0].push(reader);
+        assert_eq!(memo.topological_order(), None);
+        assert!(matches!(
+            check_unexpanded_memo(&memo),
+            Err(StateGroupExpansionError::CyclicDependencies)
+        ));
+    }
+
     // Label widening must not erase source predicates in order to create reuse.
     #[test]
     fn scan_label_widening_keeps_different_filters_separate() {
