@@ -8,7 +8,7 @@
 //! [`OperatorNode`](asap_types::ir::OperatorNode) DAG.
 //!
 //! - `unresolved` — [`UnresolvedOp`] / [`UnresolvedScalar`]: the tree.
-//! - `schema_resolver` — `SchemaResolver`: builds the binding schema of a
+//! - `schema_resolver` — `resolve_schema_with_inherited`: builds the binding schema of a
 //!   schemaless (PromQL) leaf from the names the query references.
 //! - `resolve` — [`resolve_root`]: the bottom-up binding walk.
 

@@ -136,7 +136,7 @@ yet — and calls `asap_frontend_common::resolve_root`, which does three things 
 
 1. **Resolution** — a bottom-up walk that binds every `ColumnRef` to a positional `ColumnId`
    against the derived schema of the already-resolved child. A schemaless (PromQL) leaf gets
-   its binding schema from `SchemaResolver`, built from the names the query references.
+   its binding schema from the schema resolver, built from the names the query references.
    `Join` / `SetOp` sides and the operators referenced from scalar positions are each bound as
    a root in their own scope; a `BinaryOp` side additionally inherits the label names its
    enclosing scope references.
@@ -508,7 +508,7 @@ the same logical data domain.
   rule 1): PromQL label matchers and pushed-down `WHERE` conjuncts.
 - `schema` — the binding schema every positional column reference in the tree resolves against.
   A catalog-backed SQL leaf carries its catalog schema; a PromQL leaf carries the usage-derived
-  schema `SchemaResolver` built from the labels the query references.
+  schema the schema resolver built from the labels the query references.
 
 ### Values
 

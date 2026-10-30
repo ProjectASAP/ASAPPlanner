@@ -81,7 +81,7 @@ pub mod fixtures {
     }
 
     /// Canonical PromQL leaf schema: `(ts: Timestamp, value: Float64)` plus
-    /// any label columns referenced in the query, in the order the SchemaResolver
+    /// any label columns referenced in the query, in the order the schema resolver
     /// appends them (alphabetical after dedup).
     pub fn metric_schema(labels: &[&str]) -> Schema {
         let mut cols = vec![ts_col(), value_col()];

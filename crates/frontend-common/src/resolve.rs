@@ -27,7 +27,7 @@ use asap_types::ir::schema::{ColumnId, Schema};
 use asap_types::ir::SchemaDerivationError;
 use asap_types::ir::{NonASAPOp, OperatorNode, Predicate, ProjectItem, ScalarExpr, SortKey};
 
-use crate::schema_resolver::{collect_referenced_columns, SchemaResolver};
+use crate::schema_resolver::{collect_referenced_columns, resolve_schema_with_inherited};
 use crate::unresolved::{UnresolvedOp, UnresolvedScalar, UnresolvedSortKey};
 
 /// Errors from resolving an [`UnresolvedOp`] tree.
@@ -45,7 +45,7 @@ pub enum ResolveDAGError {
 use crate::canonicalize::canonicalize;
 
 /// Resolve the whole tree rooted at `tree`: bind every `ColumnRef` to a
-/// `ColumnId` via the `SchemaResolver`, then canonicalize the result.
+/// `ColumnId` via the usage-derived schema resolver, then canonicalize the result.
 pub fn resolve_root(tree: &UnresolvedOp) -> Result<Rc<OperatorNode>, ResolveDAGError> {
     resolve_root_with_inherited(tree, &[])
 }
@@ -56,7 +56,7 @@ fn resolve_root_with_inherited(
     tree: &UnresolvedOp,
     inherited: &[String],
 ) -> Result<Rc<OperatorNode>, ResolveDAGError> {
-    let usage_derived_schema = SchemaResolver::new().resolve_schema_with_inherited(tree, inherited);
+    let usage_derived_schema = resolve_schema_with_inherited(tree, inherited);
     let root = resolve(tree, &usage_derived_schema)?;
     let root = canonicalize(root)?;
     root.validate_structure()?;
@@ -600,7 +600,7 @@ fn resolve_group_keys(
 ///
 /// Against an **open** schema an unresolved key is still an error: the label
 /// may exist at runtime, and PromQL leaves seed every referenced label via the
-/// SchemaResolver, so an unresolved key over an open schema indicates a resolution bug,
+/// schema resolver, so an unresolved key over an open schema indicates a resolution bug,
 /// not an absent label. (SQL is unaffected — its `GROUP BY` resolves through
 /// the strict [`resolve_column_refs`], and DataFusion has already validated
 /// the columns anyway.)
@@ -1267,7 +1267,7 @@ mod tests {
     #[test]
     fn group_keys_promql_still_errors_on_open_schema() {
         // An open schema can't prove absence — an unresolved key there is a
-        // resolution bug (the SchemaResolver seeds every referenced label), not an
+        // resolution bug (the schema resolver seeds every referenced label), not an
         // absent label. Keep the strict error.
         let open = ts_value_schema(); // closed: false
         assert!(matches!(

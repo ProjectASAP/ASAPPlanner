@@ -557,7 +557,7 @@ impl<'a> SqlLowerer<'a> {
     }
 
     /// Table leaf — carries the catalog's resolved schema directly on `Scan`
-    /// (`schema: Some(_)`), so `resolve_root`'s SchemaResolver doesn't need to
+    /// (`schema: Some(_)`), so `resolve_root`'s schema resolver doesn't need to
     /// usage-derive it (SQL is never schemaless). Projection pushdown is left
     /// to the enclosing `Project` (DataFusion's unoptimized plan sets no
     /// projection).

@@ -2,7 +2,7 @@
 //! [`UnresolvedOp`](asap_frontend_common::UnresolvedOp) tree, built directly
 //! in canonical shape (issue #179) → [`resolve_root`].
 //!
-//! `resolve_root` runs the frontend-common `SchemaResolver` for positional
+//! `resolve_root` runs the frontend-common schema resolver for positional
 //! name resolution and returns the unified
 //! [`OperatorNode`](asap_types::ir::OperatorNode) DAG. Depends on the PromQL
 //! parser only — never on the SQL / DataFusion stack.

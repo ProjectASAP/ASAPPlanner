@@ -18,9 +18,8 @@ names.
 | `ReplacementProvenance::SummaryImplementation` | `ReplacementProvenance::SummaryRealization` |
 | `implementations_for_with` (internal) | `realizations_for_intent` |
 | `pre_asap::binder` | `asap_frontend_common::schema_resolver` |
-| `Binder` | `SchemaResolver` |
-| `Binder::bind` | `SchemaResolver::resolve_schema` |
-| `Binder::bind_with_inherited` | `SchemaResolver::resolve_schema_with_inherited` |
+| `Binder` | removed; the free function below |
+| `Binder::bind`, `Binder::bind_with_inherited` | `schema_resolver::resolve_schema_with_inherited` |
 | `PanePhaseBinding` | `PaneLayout` |
 | `BoundaryCoverage` | `WindowEdgeCoverage` |
 | `ExactBoundaryResidual` | `ExactWindowEdgeResidual` |
@@ -43,7 +42,7 @@ names.
 | `HydraGroupingStrategy::with_models_and_evidence` | `HydraGroupingStrategy::new_with_planning_inputs_and_evidence` |
 
 For example, `Binder::new().bind(&dag)` becomes
-`SchemaResolver::new().resolve_schema(&dag)`. Cost-model implementations that
+`resolve_schema_with_inherited(&dag, &[])`. Cost-model implementations that
 accept or return `Implementation` now use `Realization`; variants and ranking
 contracts remain the same.
 
