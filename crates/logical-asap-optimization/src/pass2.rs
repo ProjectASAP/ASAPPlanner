@@ -10,4 +10,3 @@ pub(crate) mod finer_aggregate;
 pub mod logical_memo_candidates;
 /// Logical group identity available before Pass 1 candidate generation.
 pub mod memo;
-pub mod workload_candidates;

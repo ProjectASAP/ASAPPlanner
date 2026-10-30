@@ -26,8 +26,6 @@
 //! - [`per_computation_candidates`](pass1::per_computation_candidates) — Pass 1: per-computation candidate
 //!   generation and composition.
 //! - [`asap_aware_cse`](pass2::asap_aware_cse) — Pass 2: ASAP-aware common-subexpression elimination.
-//! - [`workload_candidates`](pass2::workload_candidates) — the whole-workload Stage 1 candidates: each
-//!   composed Pass 1 candidate followed by its Pass 2 candidates.
 //! - [`realization`](pass1::realization) — the summary families that can serve an aggregate
 //!   intent, the intent's accuracy target and `(ε, δ)` budget, and default
 //!   sketch sizing, shared by Pass 1 and Pass 2.
