@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use asap_cost::PlanRanking;
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilitiesError;
-use asap_logical_asap_optimization::pass1::logical_memo_candidates::generate_per_computation_logical_memo_candidates;
+use asap_logical_asap_optimization::pass1::logical_memo_candidates::{
+    generate_per_computation_logical_memo_candidates, PerComputationLogicalMemoCandidatesError,
+};
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     generate_per_computation_candidates, HowToComputeAggregateMeasure,
     PerComputationCandidateError, PerComputationCandidates,
@@ -248,7 +250,13 @@ pub fn run_planning(
     ) {
         Ok(pass1) => pass1,
         Err(error) => {
-            run.selection = Err(SelectionError::LogicalASAPCandidates(error.to_string()));
+            // A Pass 1 deadline is the planning budget running out.
+            run.selection = Err(match error {
+                PerComputationLogicalMemoCandidatesError::Timeout(_) => {
+                    SelectionError::DeadlineReached
+                }
+                error => SelectionError::LogicalASAPCandidates(error.to_string()),
+            });
             report.pass1_ms = elapsed_ms(started);
             run.report = report;
             return Ok(run);

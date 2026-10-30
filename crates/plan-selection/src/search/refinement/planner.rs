@@ -539,8 +539,9 @@ pub(in crate::search) fn accuracy_baseline_weights(
 }
 
 /// Conservative per-state DDS budgets for the feasibility seed. Counting
-/// quantile computations keeps ratio operands on composed-budget capacity tiers
-/// even when their sign contracts are still symbolic. This is a seed-only restriction,
+/// quantile operands ([`quantile_operands`]) keeps ratio operands on
+/// composed-budget capacity tiers even when their sign contracts are still
+/// symbolic. This is a seed-only restriction,
 /// not a proof of query accuracy; the complete catalog and final validator keep
 /// mixed exact/approximate plans and all otherwise legal capacities.
 fn seed_dds_budgets(
@@ -549,9 +550,7 @@ fn seed_dds_budgets(
     output_queries: &[usize],
 ) -> Vec<f64> {
     use asap_accuracy::per_input_target;
-    use asap_types::ir::{
-        operator::AggIntent, properties::AccuracyMetric, NonASAPOp, OperatorNode,
-    };
+    use asap_types::ir::properties::AccuracyMetric;
     let graph = &configured.dag;
     let mut budgets = vec![f64::INFINITY; graph.candidates.len()];
     if context.models.accuracy.may_accept_regardless_of_guarantee() {
@@ -562,23 +561,7 @@ fn seed_dds_budgets(
         .iter()
         .zip(context.entries)
         .map(|(root, entry)| {
-            let operators = match root {
-                QueryRoot::Operator(node) => vec![node],
-                QueryRoot::Scalar(expression) => expression.operator_refs(),
-            };
-            let mut seen = std::collections::HashSet::new();
-            let count = operators
-                .into_iter()
-                .flat_map(OperatorNode::reachable)
-                .filter(|node| seen.insert(std::rc::Rc::as_ptr(node)))
-                .map(|node| match node.non_asap() {
-                    Some(NonASAPOp::Aggregate { measures, .. }) => measures
-                        .iter()
-                        .filter(|measure| matches!(measure, AggIntent::Quantile { .. }))
-                        .count(),
-                    _ => 0,
-                })
-                .sum::<usize>();
+            let count = quantile_operands(root);
             (count > 1)
                 .then(|| {
                     per_input_target(
@@ -616,6 +599,68 @@ fn seed_dds_budgets(
         }
     }
     budgets
+}
+
+/// The quantile measures `root`'s value reads as operands: each quantile
+/// aggregate counts as often as the most operands that read it from one
+/// path (`q / q` reads `q` twice), however the nodes are shared. A diamond
+/// of different parents over one aggregate (an average's sum and count of
+/// the same values) reads it once. The count must not depend on node
+/// sharing: Pass 1 builds each query's root over the memo groups' nodes, so
+/// equal operands are one node there and two in a frontend's tree.
+fn quantile_operands(root: &QueryRoot) -> usize {
+    use asap_types::ir::{operator::AggIntent, NonASAPOp, OperatorNode};
+    use std::collections::{HashMap, HashSet};
+    use std::rc::Rc;
+    let operators = match root {
+        QueryRoot::Operator(node) => vec![node],
+        QueryRoot::Scalar(expression) => expression.operator_refs(),
+    };
+    // Parents before children: reverse post-order.
+    fn post_order<'a>(
+        node: &'a Rc<OperatorNode>,
+        seen: &mut HashSet<*const OperatorNode>,
+        order: &mut Vec<&'a Rc<OperatorNode>>,
+    ) {
+        if seen.insert(Rc::as_ptr(node)) {
+            for child in node.children() {
+                post_order(child, seen, order);
+            }
+            order.push(node);
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut order = Vec::new();
+    for node in &operators {
+        post_order(node, &mut seen, &mut order);
+    }
+    // Each node's operand count: the most times one path reads it.
+    let mut reads: HashMap<*const OperatorNode, usize> = HashMap::new();
+    for node in &operators {
+        let count = reads.entry(Rc::as_ptr(node)).or_insert(0);
+        *count = count.saturating_add(1);
+    }
+    let mut quantiles = 0usize;
+    for node in order.into_iter().rev() {
+        let count = reads.get(&Rc::as_ptr(node)).copied().unwrap_or(1);
+        if let Some(NonASAPOp::Aggregate { measures, .. }) = node.non_asap() {
+            let own = measures
+                .iter()
+                .filter(|measure| matches!(measure, AggIntent::Quantile { .. }))
+                .count();
+            quantiles = quantiles.saturating_add(own.saturating_mul(count));
+        }
+        let mut times: HashMap<*const OperatorNode, usize> = HashMap::new();
+        for child in node.children() {
+            *times.entry(Rc::as_ptr(child)).or_insert(0) += 1;
+        }
+        for (child, times) in times {
+            let through = count.saturating_mul(times);
+            let entry = reads.entry(child).or_insert(0);
+            *entry = (*entry).max(through);
+        }
+    }
+    quantiles
 }
 
 fn accuracy_baseline(
@@ -2265,5 +2310,80 @@ mod tests {
         .err()
         .unwrap()
         .contains("ClusterCapacity"));
+    }
+
+    /// `q / q + q'` reads three quantiles, also when the two `q` are one
+    /// shared node, as in Pass 1's roots over the memo groups. Counted by
+    /// node, the shared form read two, so the feasibility seed of the
+    /// ratio-of-quantiles workload admitted sketches sized for half the
+    /// budget, whose outputs have no guarantee, and missed the exact plan.
+    #[test]
+    fn quantile_operands_count_reads_not_shared_nodes() {
+        let frontend = vec![(
+            0usize,
+            QueryRoot::Operator(lower_promql(
+                "avg by (job) (quantile_over_time(0.5, data[5m]) \
+                 / quantile_over_time(0.5, data[5m]) + quantile_over_time(0.9, data[5m]))",
+                AccuracyTarget::max_error(0.01).failure_probability(0.001),
+            )),
+        )];
+        let over_groups = DagOfLogicalMemoGroups::from_roots(&frontend).roots_over_groups();
+        // The two `quantile 0.5` are one node over the groups.
+        let QueryRoot::Operator(root) = &over_groups[0] else {
+            unreachable!()
+        };
+        let mut seen = std::collections::HashSet::new();
+        let distinct_quantile_nodes = OperatorNode::reachable(root)
+            .into_iter()
+            .filter(|node| seen.insert(std::rc::Rc::as_ptr(node)))
+            .filter(|node| {
+                matches!(
+                    node.non_asap(),
+                    Some(asap_types::ir::NonASAPOp::Aggregate { measures, .. })
+                        if measures.iter().any(|m| matches!(m, asap_types::ir::operator::AggIntent::Quantile { .. }))
+                )
+            })
+            .count();
+        assert_eq!(distinct_quantile_nodes, 2);
+        assert_eq!(quantile_operands(&frontend[0].1), 3);
+        assert_eq!(quantile_operands(&over_groups[0]), 3);
+    }
+
+    /// Two different parents over one quantile (Stage 2 implements an
+    /// average as a sum and a count of the same values) read it once; one
+    /// parent reading it as both operands reads it twice.
+    #[test]
+    fn quantile_operands_count_a_diamond_once() {
+        use asap_types::ir::operator::operator_properties::BinaryOpKind;
+        use asap_types::ir::scalar::ArithmeticOpKind;
+        use asap_types::ir::{BinaryOperator, NonASAPOp, Operator};
+        let average = lower_promql(
+            "avg by (job) (quantile_over_time(0.5, data[5m]))",
+            AccuracyTarget::max_error(0.01).failure_probability(0.001),
+        );
+        let divide = |lhs: std::rc::Rc<OperatorNode>, rhs: std::rc::Rc<OperatorNode>| {
+            QueryRoot::Operator(
+                OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::BinaryOp {
+                    operator: BinaryOperator {
+                        checked_relative_division: false,
+                        checked_finite_division: false,
+                        kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
+                        vector_match: None,
+                    },
+                    return_bool: false,
+                    lhs,
+                    rhs,
+                }))
+                .unwrap(),
+            )
+        };
+        assert_eq!(quantile_operands(&QueryRoot::Operator(average.clone())), 1);
+        // Two parents (copies of the average) over the same quantile node.
+        let diamond = divide(
+            std::rc::Rc::new((*average).clone()),
+            std::rc::Rc::new((*average).clone()),
+        );
+        assert_eq!(quantile_operands(&diamond), 1);
+        assert_eq!(quantile_operands(&divide(average.clone(), average)), 2);
     }
 }
