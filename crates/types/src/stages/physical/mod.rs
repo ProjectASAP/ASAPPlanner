@@ -12,7 +12,7 @@ pub use graph::{
 pub use memo_candidates::{
     output_references, CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
     OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate,
-    PruningMetrics,
+    PhysicalCandidateKey,
 };
 pub use producers::{
     producer_storage_metrics, ProducerCandidates, ProducerSetInterner, ProducerStorageMetrics,

@@ -41,13 +41,23 @@
 //     priced; the document shows the Stage 1 candidates of the physical
 //     candidates it shows (below), and those among the first
 //     `--max-displayed` that have none, with `combinations` (how many were enumerated),
-//     `capped` (whether some are not shown) and `pass1_pruned` (the
-//     candidates Pass 1 pruned per target, with reasons). A candidate that cannot be
+//     `capped` (whether some are not shown), `pass1_pruned` (the
+//     candidates Pass 1 pruned per target, with reasons) and
+//     `pruned_candidates` (the same, each on its memo `group`:
+//     `PerComputationLogicalMemoCandidates::pruned_candidates`, with
+//     `candidate` and `reason`). A candidate that cannot be
 //     composed carries `error` instead of `dag`;
 //   - stage2_physical_asap_optimization: one physical candidate per composed logical
 //     candidate (operator implementation; every sub-DAG NotMaterialized), no
 //     cost; a composed logical candidate Stage 2 cannot implement is listed
-//     under `pruned` with the reason. The document shows at most
+//     under `pruned` with the reason. `pruned_candidates` lists the
+//     physical candidates Stage 2 pruned
+//     (`PhysicalASAPMemoCandidates::pruned_candidates`): each with its memo
+//     `group`, `operator_node`, `operator`, `implementation_root`, `timing`,
+//     `materialization`, `scope_copy` and `reason` (`PruneReason`:
+//     `PerEntityAggregateNotExecutable`, `RawDataNotRetained`,
+//     `InputHasNoBuildableProducer`, `ReachesNoQueryOutput`,
+//     `TooFewQueryReaders`, `PreviousScopeCopyPruned`). The document shows at most
 //     `--max-displayed` (default 64) physical candidates: the selected one,
 //     the other valid ones cheapest first, then the rejected ones taking
 //     each cause in turn;
@@ -63,9 +73,7 @@
 //     the sketches read and a one-line
 //     summary), and every other shown candidate under `rejected` with
 //     its `cause`: a failed check (`accuracy_target_missed`, `count_min_weights_not_proven_non_negative`,
-//     `per_entity_aggregate_not_executable`, `no_accuracy_guarantee`,
-//     `raw_data_not_retained`,
-//     `latency_bound_exceeded`, `latency_over_repeat_interval`,
+//     `no_accuracy_guarantee`, `latency_bound_exceeded`, `latency_over_repeat_interval`,
 //     `over_cluster_capacity`) or a loss under
 //     the cost model (`costlier`, `slower`, `more_memory`,
 //     `not_lowest_latency_on_pareto_front`, `dominated`,
@@ -210,8 +218,9 @@
 // summary the deployment does not support (exact computations are always
 // supported); Stage 1's `pass1_pruned` lists, per target with any, every
 // candidate Pass 1 pruned and why (e.g. `UnsupportedByDeployment`), its fused
-// computation's under `fused_pruned`. Without raw data retained, a candidate
-// that scans raw data at query time is invalid, and stored data (at rest or
+// computation's under `fused_pruned`. Without raw data retained, Stage 2
+// does not generate a query-time scan of raw data (its `pruned_candidates`
+// lists each with `RawDataNotRetained`), and stored data (at rest or
 // mixed) is refused as a contradiction; with `query_time_results_retained`,
 // a tumbling-pane chain whose readers evaluate together at its pane width is
 // also offered built at query time and kept across evaluations, beside being
@@ -275,7 +284,7 @@ use asap_devtools::planning_stages::{
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{counter_function_over_gauge_warnings, promql_metric_names};
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    HowToComputeAggregateMeasure, PerComputationCandidates, PruneReason,
+    HowToComputeAggregateMeasure, PerComputationCandidates,
 };
 use asap_logical_asap_optimization::pass2::memo::enumeration::{
     build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
@@ -291,7 +300,7 @@ use asap_types::ir::operator::node::OperatorNode;
 use asap_types::ir::properties::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
 use asap_types::ir::QueryRoot;
 use asap_types::stages::{queries_rooted_at, MemoGroupId};
-use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup, PruneReason};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
     QueryRecurrence, QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand,
@@ -360,10 +369,11 @@ fn document_of(
                 "combinations": 0,
                 "capped": false,
                 "pass1_pruned": [],
+                "pruned_candidates": [],
                 "candidates": [],
                 "error": format!("Pass 1: {error}"),
             },
-            "stage2_physical_asap_optimization": { "candidates": [], "pruned": [] },
+            "stage2_physical_asap_optimization": { "candidates": [], "pruned": [], "pruned_candidates": [] },
             "stage3_plan_selection": { "costs": {}, "selected": null, "rejected": [], "materialized_views": [] },
         })),
         Err(error @ PlanningStagesError::Validation(_)) => Err(error.to_string().into()),
@@ -1047,9 +1057,14 @@ fn stage_pipeline(
             "capped": physical.len() < run.stage2_physical_asap_optimization.len()
                 || candidates.len() < run.stage1_logical_asap_optimization.len(),
             "pass1_pruned": pass1_pruned_json(&run.stage1_pass1_per_computation),
+            "pruned_candidates": pass1_pruned_candidates_json(run.memo_steps.as_ref()),
             "candidates": candidates,
         },
-        "stage2_physical_asap_optimization": { "candidates": physical, "pruned": pruned },
+        "stage2_physical_asap_optimization": {
+            "candidates": physical,
+            "pruned": pruned,
+            "pruned_candidates": stage2_pruned_candidates_json(run.memo_steps.as_ref()),
+        },
         "stage3_plan_selection": stage3,
     })
 }
@@ -1194,6 +1209,57 @@ fn pass1_pruned_json(inventory: &PerComputationCandidates<usize>) -> Vec<Value> 
                 "pruned": pruned_json(&pruned),
                 "fused_pruned": pruned_json(&fused_pruned),
             }))
+        })
+        .collect()
+}
+
+/// The ways to compute a measure Pass 1 pruned
+/// (`PerComputationLogicalMemoCandidates::pruned_candidates`), in pruning
+/// order: each with its aggregate's memo `group`, the `candidate` and the
+/// `reason` (`PruneReason`, e.g. `UnsupportedByDeployment`). Empty without
+/// memo steps.
+fn pass1_pruned_candidates_json(steps: Option<&MemoSteps>) -> Vec<Value> {
+    steps
+        .map_or(&[][..], |steps| &steps.pass1_pruned_candidates)
+        .iter()
+        .map(|pruned| {
+            json!({
+                "group": pruned.group.0,
+                "candidate": computation_label(&pruned.candidate),
+                "reason": format!("{:?}", pruned.reason),
+            })
+        })
+        .collect()
+}
+
+/// The physical candidates Stage 2 pruned
+/// (`PhysicalASAPMemoCandidates::pruned_candidates`), in pruning order:
+/// each with its memo `group`, its `operator_node` (index into Stage 2's
+/// operator nodes), the node's `operator` label, whether it is an
+/// `implementation_root`, its `timing`, `materialization` and
+/// `scope_copy`, and the `reason` (`PruneReason`, e.g.
+/// `RawDataNotRetained`). Empty without memo steps.
+fn stage2_pruned_candidates_json(steps: Option<&MemoSteps>) -> Vec<Value> {
+    let Some(steps) = steps else {
+        return Vec::new();
+    };
+    steps
+        .stage2_pruned_candidates
+        .iter()
+        .map(|pruned| {
+            let key = &pruned.candidate;
+            let node = &steps.stage2_operator_nodes[key.operator_node.0];
+            let flat = export(&[QueryRoot::Operator(node.physical_node.clone())]);
+            json!({
+                "group": pruned.group.0,
+                "operator_node": key.operator_node.0,
+                "operator": flat.nodes.last().map(node_label).unwrap_or_default(),
+                "implementation_root": node.is_implementation_root,
+                "timing": key.timing,
+                "materialization": key.materialization,
+                "scope_copy": key.scope_copy,
+                "reason": format!("{:?}", pruned.reason),
+            })
         })
         .collect()
 }

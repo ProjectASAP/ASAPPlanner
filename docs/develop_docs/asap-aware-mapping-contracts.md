@@ -88,6 +88,16 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
   (`P<n>`, then `P<n>-m<k>`). An assignment that puts a build at ingestion
   time over one that is not is not generated. A logical candidate Stage 2
   cannot implement becomes a `PrunedCandidate` with its reason.
+- On the memo (`generate_physical_asap_memo_candidates`), every physical
+  candidate Stage 2 prunes is recorded in
+  `PhysicalASAPMemoCandidates::pruned_candidates` as
+  `PrunedCandidate<PhysicalCandidateKey>` with a `PruneReason`: an exact
+  per-entity `Aggregate` the executor cannot run
+  (`PerEntityAggregateNotExecutable`) and, without raw data retained, a
+  query-time scan of raw data (`RawDataNotRetained`) are not generated; a
+  candidate no buildable input, query output or reader count can use is
+  removed (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`,
+  `TooFewQueryReaders`, `PreviousScopeCopyPruned`).
 
 ## 5. Stage 3
 
@@ -97,8 +107,8 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 - Each candidate is then either invalid or valid, recorded as a `Rejection`
   with its `cause` (`RejectionCause`) and reason: a failed check
   (`AccuracyTargetMissed`,
-  `CountMinWeightsNotProvenNonNegative`, `PerEntityAggregateNotExecutable`,
-  `NoAccuracyGuarantee`, `RawDataNotRetained`, `LatencyBoundExceeded`, `LatencyOverRepeatInterval`
+  `CountMinWeightsNotProvenNonNegative`,
+  `NoAccuracyGuarantee`, `LatencyBoundExceeded`, `LatencyOverRepeatInterval`
   (a repeating query's latency per evaluation is over its repeat interval,
   checked with or without a latency bound), or `OverClusterCapacity` under
   cost model 3) or a loss under the cost model (`Costlier`, `Slower`,

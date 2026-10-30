@@ -68,7 +68,7 @@ mod tests {
         };
         let original = graph.clone();
         let mut inventory = configured(graph);
-        assert_eq!(inventory.prune_for_tests().removed_candidates, 1);
+        assert_eq!(inventory.prune_for_tests(), 1);
         let graph = &inventory.dag;
         assert_eq!(
             graph.candidates[1].producer_candidates_per_input[0]
@@ -115,8 +115,7 @@ mod tests {
         };
         let before = select_candidates(&graph).unwrap().unwrap();
         let mut inventory = configured(graph);
-        let metrics = inventory.prune_for_tests();
-        assert_eq!(metrics.removed_candidates, 3);
+        assert_eq!(inventory.prune_for_tests(), 3);
         assert_eq!(
             inventory.dag.resource_budgets[0].candidate_usage,
             vec![2.0, 3.0, 1.0]

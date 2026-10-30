@@ -17,6 +17,12 @@
 // maps a group id (string) of the last step to the selected plan's
 // candidate index, or is null with `selected_choice_unavailable` saying why.
 
+// Outside the section, each stage's `pruned_candidates`
+// (`stage1_logical_asap_optimization` for Pass 1,
+// `stage2_physical_asap_optimization` for Stage 2) lists what it removed,
+// each entry on its memo `group` with a `reason`; the group panel lists a
+// group's entries of both.
+
 // Memo steps in pipeline order; a step production does not run is omitted.
 const MEMO_STEPS = ['stage0', 'pass1', 'pass2', 'concrete_states'];
 
@@ -41,6 +47,18 @@ const memoIsIndexList = (ids) => Array.isArray(ids) && ids.every((id) => Number.
 
 // Whether `id` is an index into the node table `nodes`.
 const memoIsNode = (nodes, id) => Number.isInteger(id) && id >= 0 && id < nodes.length;
+
+// One line per entry of a stage's `pruned_candidates` on group `group`:
+// Pass 1's `candidate`, or Stage 2's operator with its timing,
+// materialization and scope copy; then the reason. 'none' without any.
+function memoPrunedText(entries, group) {
+  const lines = (Array.isArray(entries) ? entries : []).filter((p) => p && p.group === group).map((p) => {
+    const what = 'candidate' in p ? p.candidate
+      : `node ${p.operator_node} ${p.operator} ${p.timing} ${JSON.stringify(p.materialization)}${p.scope_copy ? ` copy ${p.scope_copy}` : ''}`;
+    return `${what}: ${p.reason}`;
+  });
+  return lines.length ? lines.join('; ') : 'none';
+}
 
 // The checks of `memo.steps` and `memo.selected_choice` against the format
 // above, as messages ([] when it holds or the document has no memo).
@@ -377,6 +395,8 @@ function memoViewController() {
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const tok = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   let memo = null;
+  // Each stage's `pruned_candidates` of the shown document.
+  let pruned = { pass1: [], stage2: [] };
   let queryIds = [];
   let stepIndex = 0;
   let cy = null;
@@ -469,6 +489,8 @@ function memoViewController() {
       ['queries reaching it', queryList(group.queries)], ['root of', queryList(group.roots_of)],
       ['candidates', `${group.candidate_count}${group.candidates_capped ? ` (${group.candidates.length} listed)` : ''}${origins ? `: ${origins}` : ''}`],
       ['selected plan', selectedText(group)],
+      ['pruned by Pass 1', memoPrunedText(pruned.pass1, group.id)],
+      ['pruned by Stage 2', memoPrunedText(pruned.stage2, group.id)],
     ])}<details><summary>Group DAG (JSON)</summary><pre>${esc(JSON.stringify(memoNodeDag(memo.nodes, [group.node]), null, 2))}</pre></details>`;
   }
 
@@ -494,6 +516,10 @@ function memoViewController() {
   function show(doc, ids) {
     if (cy) { cy.destroy(); cy = null; }
     memo = doc.memo || null;
+    pruned = {
+      pass1: (doc.stage1_logical_asap_optimization || {}).pruned_candidates || [],
+      stage2: (doc.stage2_physical_asap_optimization || {}).pruned_candidates || [],
+    };
     queryIds = ids;
     highlighted = '';
     $('memoView').hidden = !memo;

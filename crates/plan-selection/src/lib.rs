@@ -253,7 +253,7 @@ pub use report::{
     large_peak_memory_warning, AcceptedAccuracy, CandidateConnectionReport, Rejection,
     RejectionCause, SearchReport, Selection, SelectionError, LARGE_PEAK_MEMORY_BYTES,
 };
-pub(crate) use selector::{cheaper, checked_candidate, choose, Ranking};
+pub(crate) use selector::{cheaper, choose, Ranking};
 pub use selector::{select_plan, PlanSelector};
 
 /// `roots` sized as Pass 1 sizes them for `targets` over `data`
@@ -297,7 +297,7 @@ mod tests {
     };
     use asap_cost::{MeasuredOperationCosts, OperatorCost, ResourceUnitCost};
     use asap_physical_asap_optimization::PhysicalWorkloadPlan;
-    use asap_types::ir::operator::{AggIntent, Reduction};
+    use asap_types::ir::operator::AggIntent;
     use asap_types::ir::physical_export::{
         PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
     };
@@ -2327,81 +2327,6 @@ mod tests {
         assert!(reason.contains("not declared a counter"), "{reason}");
     }
 
-    /// The ids of `candidates` whose DAG reduces raw data samples per series with
-    /// an exact `Aggregate`.
-    fn with_per_entity_aggregate(candidates: &[PhysicalWorkloadPlan]) -> Vec<String> {
-        candidates
-            .iter()
-            .filter(|c| {
-                c.dag.nodes.iter().any(|node| {
-                    matches!(
-                        node.payload,
-                        Payload::NonASAP(NonASAPOp::Aggregate {
-                            reduction: Reduction::PerEntity,
-                            ..
-                        })
-                    )
-                })
-            })
-            .map(|c| c.id.clone())
-            .collect()
-    }
-
-    /// The executor has no exact per-series `stddev_over_time`: each
-    /// candidate that reduces raw data samples with one is rejected as
-    /// `PerEntityAggregateNotExecutable` and never selected (issue #770).
-    #[test]
-    fn a_per_entity_aggregate_the_executor_cannot_run_is_rejected() {
-        let target = AccuracyTarget::exact();
-        let candidates = all_candidates("stddev_over_time(x[5m])", &target);
-        let unsupported = with_per_entity_aggregate(&candidates);
-        assert!(!unsupported.is_empty());
-        let rejected = match select_plan(
-            &candidates,
-            &[entry_with(target, repeating(10_000))],
-            &data(),
-            PlanningModels::builtin(),
-        ) {
-            Ok(selection) => {
-                assert!(!unsupported.contains(&selection.selected), "{selection:?}");
-                selection.rejected
-            }
-            Err(SelectionError::NoValidCandidate(rejected)) => rejected,
-            Err(error) => panic!("{error}"),
-        };
-        for id in &unsupported {
-            let rejection = rejected.iter().find(|r| &r.id == id).unwrap();
-            assert_eq!(
-                rejection.cause,
-                RejectionCause::PerEntityAggregateNotExecutable,
-                "{}",
-                rejection.reason
-            );
-            assert!(rejection.reason.contains("StdDev"), "{}", rejection.reason);
-            assert!(rejection.cause.failed_a_check());
-        }
-    }
-
-    /// An exact per-series `quantile_over_time`, which the executor runs, is
-    /// not rejected as `PerEntityAggregateNotExecutable`.
-    #[test]
-    fn an_executable_per_entity_aggregate_is_not_rejected() {
-        let target = AccuracyTarget::exact();
-        let candidates = all_candidates("quantile_over_time(0.99, x[5m])", &target);
-        assert!(!with_per_entity_aggregate(&candidates).is_empty());
-        let selection = select_plan(
-            &candidates,
-            &[entry_with(target, repeating(10_000))],
-            &data(),
-            PlanningModels::builtin(),
-        )
-        .unwrap();
-        assert!(selection
-            .rejected
-            .iter()
-            .all(|r| r.cause != RejectionCause::PerEntityAggregateNotExecutable));
-    }
-
     /// The model's hook has priority over every guarantee. The summary
     /// candidates of a difference of quantile estimates have no theoretical
     /// guarantee: with evidence that misses the target the built-in model
@@ -4099,102 +4024,6 @@ mod tests {
             .detail
             .contains("across evaluations"));
         assert!(within_one.usage.average_memory_bytes < kept.usage.average_memory_bytes);
-    }
-
-    /// Without raw data retained, a candidate that scans raw data at query
-    /// time is invalid, with the window it would read: B2 (5 min) and B3
-    /// (one 1-min pane) are rejected, and B1, which reads raw rows only at
-    /// ingestion time, is selected. With raw data retained, all three are
-    /// valid.
-    #[test]
-    fn without_raw_data_only_ingestion_time_scans_are_valid() {
-        let candidates = pane_candidates_for(10_000.0, &keeping_query_time_results());
-        let select = |deployment: &DeploymentCapabilities| {
-            select_plan(
-                &candidates,
-                &[every_minute()],
-                &arriving(10_000.0),
-                PlanningModels::builtin().with_deployment_capabilities(deployment),
-            )
-            .unwrap()
-        };
-        let retained = select(&keeping_query_time_results());
-        assert!(
-            retained.rejected.iter().all(|r| !r.cause.failed_a_check()),
-            "{retained:?}"
-        );
-        let dropped = select(&DeploymentCapabilities {
-            raw_data_retained: false,
-            ..keeping_query_time_results()
-        });
-        assert_eq!(dropped.selected, candidates[1].id);
-        let reasons: BTreeMap<&str, (RejectionCause, &str)> = dropped
-            .rejected
-            .iter()
-            .map(|r| (r.id.as_str(), (r.cause, r.reason.as_str())))
-            .collect();
-        let unretained = "at query time, but the deployment does not retain raw data";
-        assert_eq!(
-            reasons[candidates[0].id.as_str()],
-            (
-                RejectionCause::RawDataNotRetained,
-                format!("scans 300000 ms of raw m {unretained}").as_str()
-            )
-        );
-        assert_eq!(
-            reasons[candidates[2].id.as_str()],
-            (
-                RejectionCause::RawDataNotRetained,
-                format!("scans 60000 ms of raw m {unretained}").as_str()
-            )
-        );
-    }
-
-    /// Without raw data retained, the rejection lists every query-time
-    /// scan with the window it would read, not just the first.
-    #[test]
-    fn without_raw_data_every_query_time_scan_is_listed() {
-        let roots: Vec<(usize, QueryRoot)> = ["sum_over_time(a[5m])", "sum_over_time(b[1m])"]
-            .into_iter()
-            .map(|q| QueryRoot::Operator(lower_promql(q, AccuracyTarget::exact())))
-            .enumerate()
-            .collect();
-        // The exact candidate of each query.
-        let inventory =
-            asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
-        let exact = vec![0; inventory.targets.len()];
-        let roots: Vec<QueryRoot> =
-            asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate(
-                &inventory, &exact,
-            )
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
-        let mut candidate = optimize_physical_asap("L1", &roots, &[], &data(), false)
-            .unwrap()
-            .remove(0);
-        candidate.id = "P1".into();
-        let entries = [entry(repeating(MINUTE)), entry(repeating(MINUTE))];
-        let no_raw_data = DeploymentCapabilities {
-            raw_data_retained: false,
-            ..DeploymentCapabilities::default()
-        };
-        let error = select_plan(
-            &[candidate],
-            &entries,
-            &data(),
-            PlanningModels::builtin().with_deployment_capabilities(&no_raw_data),
-        )
-        .unwrap_err();
-        let SelectionError::NoValidCandidate(rejected) = error else {
-            panic!("{error}")
-        };
-        assert_eq!(
-            rejected[0].reason,
-            "scans 300000 ms of raw a, 60000 ms of raw b at query time, \
-             but the deployment does not retain raw data"
-        );
     }
 
     /// Stored data (at rest, or mixed) with no raw data retained is a

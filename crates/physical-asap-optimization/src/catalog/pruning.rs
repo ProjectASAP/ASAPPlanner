@@ -2,18 +2,48 @@
 //! No costs or dominance assumptions are involved: finite input realizability,
 //! potential output reach and necessary reader counts are sufficient proofs.
 use asap_types::stages::{
-    PhysicalASAPMemoCandidates, PhysicalCandidateId, PruningMetrics, ReaderConstraint,
+    PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalCandidateKey, PruneReason,
+    PrunedCandidate, ReaderConstraint,
 };
 use asap_types::stages::{ProducerCandidates, ProducerSetInterner};
 use std::collections::HashMap;
 
-/// `configured` without the candidates [`usable_candidates`] rules out, its
-/// IDs renumbered densely in their order; the counts removed are recorded in
-/// its `pruning_metrics`.
+/// `configured` without the candidates [`prune_reasons`] rules out, its
+/// IDs renumbered densely in their order; each removed one is appended to
+/// its `pruned_candidates` with the reason.
 pub fn prune(configured: PhysicalASAPMemoCandidates) -> Result<PhysicalASAPMemoCandidates, String> {
     super::validate_candidates(&configured)?;
     let count = configured.candidates.len();
-    let keep = usable_candidates(&configured);
+    let reasons = prune_reasons(&configured);
+    let keep: Vec<bool> = reasons.iter().map(Option::is_none).collect();
+    // Scope copies of one (operator node, timing, materialization) are
+    // contiguous and in copy order.
+    let mut copies_seen = HashMap::new();
+    let mut pruned_candidates = configured.pruned_candidates.clone();
+    for (candidate, reason) in configured.candidates.iter().zip(&reasons) {
+        let copy = copies_seen
+            .entry((
+                candidate.operator_node,
+                candidate.timing,
+                candidate.materialization,
+            ))
+            .or_insert(0usize);
+        if let Some(reason) = *reason {
+            pruned_candidates.push(PrunedCandidate {
+                group: configured.operator_nodes_of_candidates_for_memo_groups
+                    [candidate.operator_node.0]
+                    .group(),
+                candidate: PhysicalCandidateKey {
+                    operator_node: candidate.operator_node,
+                    timing: candidate.timing,
+                    materialization: candidate.materialization,
+                    scope_copy: *copy,
+                },
+                reason,
+            });
+        }
+        *copy += 1;
+    }
     let mut mapping = vec![None; count];
     let mut next = 0;
     for (id, retained) in keep.iter().enumerate() {
@@ -22,15 +52,6 @@ pub fn prune(configured: PhysicalASAPMemoCandidates) -> Result<PhysicalASAPMemoC
             next += 1;
         }
     }
-    let connections = |physical: &PhysicalASAPMemoCandidates| -> usize {
-        physical
-            .candidates
-            .iter()
-            .flat_map(|c| &c.producer_candidates_per_input)
-            .map(|input| input.len())
-            .sum()
-    };
-    let connections_before = connections(&configured);
     let mut producer_sets = ProducerSetInterner::default();
     let mut remapped: HashMap<ProducerCandidates, ProducerCandidates> = HashMap::new();
     let candidates = configured
@@ -85,19 +106,30 @@ pub fn prune(configured: PhysicalASAPMemoCandidates) -> Result<PhysicalASAPMemoC
         configured.query_roots,
         reader_constraints,
     );
+    pruned.pruned_candidates = pruned_candidates;
     super::validate_candidates(&pruned)?;
-    pruned.pruning_metrics = PruningMetrics {
-        removed_candidates: count - next,
-        removed_connections: connections_before - connections(&pruned),
-    };
     Ok(pruned)
 }
 
+/// Which candidates of `physical` [`prune`] keeps.
+#[cfg(feature = "test-support")]
 pub fn usable_candidates(physical: &PhysicalASAPMemoCandidates) -> Vec<bool> {
+    prune_reasons(physical)
+        .iter()
+        .map(Option::is_none)
+        .collect()
+}
+
+/// Why each candidate of `physical` cannot be used, `None` for a usable
+/// one: the reason of the first round that ruled it out, and within a
+/// round the first of: an input with no buildable producer, no query output
+/// reached, the previous scope copy pruned, too few query readers.
+fn prune_reasons(physical: &PhysicalASAPMemoCandidates) -> Vec<Option<PruneReason>> {
     let count = physical.candidates.len();
     let query_output_candidates = super::query_output_candidates(physical);
-    let mut enabled = vec![true; count];
+    let mut reasons: Vec<Option<PruneReason>> = vec![None; count];
     loop {
+        let enabled: Vec<bool> = reasons.iter().map(Option::is_none).collect();
         // Least fixed point: a cycle without a finite implementation is not a
         // producer. A cycle with an independent escape candidate remains usable.
         let mut realizable = vec![false; count];
@@ -143,10 +175,19 @@ pub fn usable_candidates(physical: &PhysicalASAPMemoCandidates) -> Vec<bool> {
                 }
             }
         }
-        let mut retained: Vec<_> = realizable
+        let mut round: Vec<Option<PruneReason>> = realizable
             .iter()
             .zip(&reached)
-            .map(|(realizable, outputs)| *realizable && outputs.iter().any(|value| *value))
+            .zip(&enabled)
+            .map(|((realizable, outputs), enabled)| {
+                if !enabled || *realizable && outputs.iter().any(|value| *value) {
+                    None
+                } else if !realizable {
+                    Some(PruneReason::InputHasNoBuildableProducer)
+                } else {
+                    Some(PruneReason::ReachesNoQueryOutput)
+                }
+            })
             .collect();
         for constraint in &physical.reader_constraints {
             if let ReaderConstraint::ActivationRequires {
@@ -156,7 +197,9 @@ pub fn usable_candidates(physical: &PhysicalASAPMemoCandidates) -> Vec<bool> {
             {
                 // This is a selection implication, not an execution input.
                 // Do not reject legal mutually dependent activation decisions.
-                retained[candidate.0] &= enabled[required_candidate.0];
+                if !enabled[required_candidate.0] {
+                    round[candidate.0].get_or_insert(PruneReason::PreviousScopeCopyPruned);
+                }
             }
             if let ReaderConstraint::MinimumQueryReaders {
                 candidate,
@@ -168,12 +211,20 @@ pub fn usable_candidates(physical: &PhysicalASAPMemoCandidates) -> Vec<bool> {
                     .iter()
                     .filter(|outputs| outputs.iter().any(|output| reached[candidate.0][*output]))
                     .count();
-                retained[candidate.0] &= queries >= *minimum;
+                if queries < *minimum {
+                    round[candidate.0].get_or_insert(PruneReason::TooFewQueryReaders);
+                }
             }
         }
-        if retained == enabled {
-            return retained;
+        let mut changed = false;
+        for (reason, round) in reasons.iter_mut().zip(round) {
+            if reason.is_none() && round.is_some() {
+                *reason = round;
+                changed = true;
+            }
         }
-        enabled = retained;
+        if !changed {
+            return reasons;
+        }
     }
 }

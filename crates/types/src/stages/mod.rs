@@ -9,6 +9,7 @@ mod candidates;
 mod logical_memo_candidates;
 mod memo;
 mod physical;
+mod pruning;
 mod realizer;
 
 pub use candidates::{CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup};
@@ -20,8 +21,9 @@ pub use physical::{
     output_references, producer_storage_metrics, validate_selected_connections,
     CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
     OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate,
-    PhysicalCandidateId, ProducerCandidates, ProducerConsumerConnection, ProducerSetInterner,
-    ProducerStorageMetrics, PruningMetrics, QueryRootAssignment, ReaderConstraint,
+    PhysicalCandidateId, PhysicalCandidateKey, ProducerCandidates, ProducerConsumerConnection,
+    ProducerSetInterner, ProducerStorageMetrics, QueryRootAssignment, ReaderConstraint,
     SelectedCandidateGraph,
 };
+pub use pruning::{PruneReason, PrunedCandidate};
 pub use realizer::{AssignmentRealizer, PhysicalCandidateError, SelectedPhysicalCandidate};

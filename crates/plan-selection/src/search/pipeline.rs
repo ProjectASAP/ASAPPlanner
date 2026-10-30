@@ -8,7 +8,9 @@ use std::rc::Rc;
 
 use asap_logical_asap_optimization::pass2::memo::enumeration::ChosenCandidatePerMemoGroup;
 use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
-use asap_types::stages::CandidateMemo;
+use asap_types::stages::{
+    CandidateMemo, OperatorNodeOfCandidateForMemoGroup, PhysicalCandidateKey,
+};
 
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};
@@ -18,8 +20,8 @@ use crate::search::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutp
 use crate::PlanningModels;
 use crate::{Selection, SelectionError};
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    generate_per_computation_candidates_with_memo, PerComputationCandidateError,
-    PerComputationCandidates,
+    generate_per_computation_candidates_with_memo, HowToComputeAggregateMeasure,
+    PerComputationCandidateError, PerComputationCandidates,
 };
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 
@@ -44,11 +46,22 @@ pub struct MemoSteps {
     pub stage0: CandidateMemo,
     /// After Pass 1 (per-computation candidates, then accuracy-scoped sizes).
     pub pass1: CandidateMemo,
+    /// The ways to compute a measure Pass 1 pruned, each on its aggregate's
+    /// group of `pass1`.
+    pub pass1_pruned_candidates:
+        Vec<asap_types::stages::PrunedCandidate<HowToComputeAggregateMeasure>>,
     /// After local window composition (pane candidates).
     pub pass2: CandidateMemo,
     /// After concrete summary-state group expansion: the memo the search
     /// selects from.
     pub concrete_states: CandidateMemo,
+    /// Stage 2's operator nodes over `concrete_states`
+    /// (`PhysicalASAPMemoCandidates::operator_nodes_of_candidates_for_memo_groups`),
+    /// which `stage2_pruned_candidates` index.
+    pub stage2_operator_nodes: Vec<OperatorNodeOfCandidateForMemoGroup>,
+    /// The physical candidates Stage 2 pruned
+    /// (`PhysicalASAPMemoCandidates::pruned_candidates`).
+    pub stage2_pruned_candidates: Vec<asap_types::stages::PrunedCandidate<PhysicalCandidateKey>>,
     /// The selected plan's candidate for each group of `concrete_states` it
     /// uses, or why there is none.
     pub selected_chosen_candidates: Result<ChosenCandidatePerMemoGroup, String>,

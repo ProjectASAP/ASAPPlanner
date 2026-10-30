@@ -9,7 +9,7 @@ use super::producers::ProducerCandidates;
 use crate::ir::properties::ExecutionTiming;
 use crate::ir::{OperatorNode, QueryRoot};
 use crate::physical::Materialization;
-use crate::stages::MemoGroupId;
+use crate::stages::{MemoGroupId, PrunedCandidate};
 
 /// One implementation candidate: index `index` in group `group`'s
 /// candidates ([`CandidateMemo::candidates`](crate::stages::CandidateMemo::candidates)).
@@ -80,14 +80,24 @@ pub struct PhysicalCandidate {
     pub may_keep_across_evaluations_per_sole_reader_query: Vec<bool>,
 }
 
-/// What Stage 2's structural pruning removed: candidates no finite input,
-/// query output or reader count can use.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PruningMetrics {
-    /// Candidates removed.
-    pub removed_candidates: usize,
-    /// Producer connections (a candidate that may produce one input) removed.
-    pub removed_connections: usize,
+/// A physical candidate Stage 2 pruned, named by what it would have been:
+/// candidates are renumbered after pruning, so a pruned one has no
+/// [`PhysicalCandidateId`]. Unique among a [`PhysicalASAPMemoCandidates`]'
+/// `pruned_candidates`: an operator node has at most one candidate per
+/// timing and materialization before its execution-scope copies are made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PhysicalCandidateKey {
+    /// Its operator node: an index into the output's
+    /// `operator_nodes_of_candidates_for_memo_groups`, which pruning keeps
+    /// whole.
+    pub operator_node: OperatorNodeOfCandidateForMemoGroupId,
+    pub timing: ExecutionTiming,
+    pub materialization: Materialization,
+    /// Which execution-scope copy of (`operator_node`, `timing`,
+    /// `materialization`) it is, from 0. A configuration pruned before the
+    /// copies are made (raw data not retained, per-entity aggregate not
+    /// executable) is copy 0 and stands for all of them.
+    pub scope_copy: usize,
 }
 
 /// Stage 2's output, which Stage 3 selects from.
@@ -105,10 +115,11 @@ pub struct PhysicalASAPMemoCandidates {
     pub query_roots: Vec<QueryRoot<MemoGroupId>>,
     /// Legality that depends on which readers are selected.
     pub reader_constraints: Vec<ReaderConstraint>,
-    /// How many candidates and producer connections Stage 2's structural
-    /// pruning removed; zero when built by [`Self::new`]. (P6 replaces it with
-    /// the pruned candidates themselves.)
-    pub pruning_metrics: PruningMetrics,
+    /// The candidates Stage 2 pruned, each on its operator node's memo
+    /// group, in pruning order: configurations it does not generate, then
+    /// candidates no buildable input, query output or reader count can use.
+    /// Empty when built by [`Self::new`].
+    pub pruned_candidates: Vec<PrunedCandidate<PhysicalCandidateKey>>,
     /// By group index: the candidates whose operator node is an
     /// implementation root of that group, ascending.
     implementation_roots_of_group: Vec<Vec<PhysicalCandidateId>>,
@@ -164,7 +175,7 @@ impl PhysicalASAPMemoCandidates {
             candidates,
             query_roots,
             reader_constraints,
-            pruning_metrics: PruningMetrics::default(),
+            pruned_candidates: Vec::new(),
             implementation_roots_of_group,
             output_reference_groups,
         }

@@ -61,10 +61,12 @@ struct DomainProgress {
     /// round and after a round whose local window composition timed out.
     pass2_round:
         Option<asap_logical_asap_optimization::pass2::logical_memo_candidates::Pass2RoundState>,
-    /// The memo after Stage 0 and after Pass 1, kept with `pass2_round`.
+    /// The memo after Stage 0 and after Pass 1, and Pass 1's pruned
+    /// candidates, kept with `pass2_round`.
     pass1_steps: Option<(
         asap_types::stages::CandidateMemo,
         asap_types::stages::CandidateMemo,
+        Vec<asap_types::stages::PrunedCandidate<asap_logical_asap_optimization::pass1::per_computation_candidates::HowToComputeAggregateMeasure>>,
     )>,
     /// This round's memo steps, with its selected plan's ID when it has one.
     memo_steps: Option<(Option<String>, crate::search::pipeline::MemoSteps)>,
@@ -617,7 +619,6 @@ fn add_phase_metrics(
         report.stored_producer_ids = phase.stored_producer_ids;
         report.output_references = phase.output_references;
         report.structurally_removed_candidates = phase.structurally_removed_candidates;
-        report.structurally_removed_connections = phase.structurally_removed_connections;
         report.rounded_down_cost_bounds = phase.rounded_down_cost_bounds;
         report.independent_components = phase.independent_components;
     }
@@ -858,7 +859,8 @@ fn search_domain<Id: Clone>(
                 Instant::now().checked_add(remaining()),
             )
             .map_err(|error| unsupported(&error.to_string()))?;
-            progress.pass1_steps = Some((stage0, pass1.memo.clone()));
+            progress.pass1_steps =
+                Some((stage0, pass1.memo.clone(), pass1.pruned_candidates.clone()));
             Pass2RoundState::new(pass1)
         }
     };
@@ -887,18 +889,24 @@ fn search_domain<Id: Clone>(
         };
     let memo = &logical_asap_candidates.memo;
     let pass2_round = progress.pass2_round.insert(pass2_round);
-    progress.memo_steps = progress.pass1_steps.as_ref().map(|(stage0, pass1)| {
-        (
-            None,
-            crate::search::pipeline::MemoSteps {
-                stage0: stage0.clone(),
-                pass1: pass1.clone(),
-                pass2: pass2_round.unexpanded_memo().clone(),
-                concrete_states: memo.clone(),
-                selected_chosen_candidates: Err("no plan was selected".into()),
-            },
-        )
-    });
+    progress.memo_steps = progress
+        .pass1_steps
+        .as_ref()
+        .map(|(stage0, pass1, pass1_pruned)| {
+            (
+                None,
+                crate::search::pipeline::MemoSteps {
+                    stage0: stage0.clone(),
+                    pass1: pass1.clone(),
+                    pass1_pruned_candidates: pass1_pruned.clone(),
+                    pass2: pass2_round.unexpanded_memo().clone(),
+                    concrete_states: memo.clone(),
+                    stage2_operator_nodes: Vec::new(),
+                    stage2_pruned_candidates: Vec::new(),
+                    selected_chosen_candidates: Err("no plan was selected".into()),
+                },
+            )
+        });
     let memo_expansion_ms = started.elapsed().as_secs_f64() * 1000.0;
     check_budget("memo rule expansion", progress)?;
     let groups = memo.groups.len();
@@ -917,7 +925,13 @@ fn search_domain<Id: Clone>(
         unsupported(&error.to_string())
     })?;
     let immediate_candidates = physical.operator_nodes_of_candidates_for_memo_groups.len();
-    let structural_pruning = physical.pruning_metrics;
+    let structurally_removed_candidates = physical.pruned_candidates.len();
+    if let Some((_, steps)) = &mut progress.memo_steps {
+        steps.stage2_operator_nodes = physical
+            .operator_nodes_of_candidates_for_memo_groups
+            .clone();
+        steps.stage2_pruned_candidates = physical.pruned_candidates.clone();
+    }
     let mut configured = crate::search::candidates::dag::PhysicalCandidatesWithCosts::new(physical);
     check_budget("physical candidate generation", progress)?;
     let context = CandidatePlanningContext {
@@ -1111,8 +1125,7 @@ fn search_domain<Id: Clone>(
         validation_rejection_counts: result.rejections.counts,
         certified_query_cuts: result.query_cuts,
         early_query_pruning_ms, early_query_pruning_counts, early_query_pruning_examples,
-        structurally_removed_candidates: structural_pruning.removed_candidates,
-        structurally_removed_connections: structural_pruning.removed_connections,
+        structurally_removed_candidates,
         validation_rejection_examples: result.rejections.examples,
     };
     progress.report = Some(report.clone());
@@ -1564,7 +1577,6 @@ mod tests {
             stored_producer_ids: 19,
             output_references: 2,
             structurally_removed_candidates: 5,
-            structurally_removed_connections: 23,
             rounded_down_cost_bounds: 2,
             independent_components: 1,
             lower_bound: Some(4.0),
@@ -1603,10 +1615,9 @@ mod tests {
         assert_eq!(
             (
                 interrupted.output_references,
-                interrupted.structurally_removed_candidates,
-                interrupted.structurally_removed_connections
+                interrupted.structurally_removed_candidates
             ),
-            (2, 5, 23)
+            (2, 5)
         );
         assert_eq!(interrupted.lower_bound, None);
         assert_eq!(interrupted.relative_gap, None);

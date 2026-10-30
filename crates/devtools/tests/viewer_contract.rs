@@ -347,9 +347,7 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
     let causes = [
         C::AccuracyTargetMissed,
         C::CountMinWeightsNotProvenNonNegative,
-        C::PerEntityAggregateNotExecutable,
         C::NoAccuracyGuarantee,
-        C::RawDataNotRetained,
         C::LatencyBoundExceeded,
         C::LatencyOverRepeatInterval,
         C::OverClusterCapacity,
@@ -364,9 +362,7 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
         match cause {
             C::AccuracyTargetMissed
             | C::CountMinWeightsNotProvenNonNegative
-            | C::PerEntityAggregateNotExecutable
             | C::NoAccuracyGuarantee
-            | C::RawDataNotRetained
             | C::LatencyBoundExceeded
             | C::LatencyOverRepeatInterval
             | C::OverClusterCapacity

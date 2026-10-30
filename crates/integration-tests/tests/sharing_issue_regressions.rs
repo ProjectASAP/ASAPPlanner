@@ -566,9 +566,10 @@ fn sketch_rollup_crosses_inner_range_function() {
 #[test]
 fn sql_grouped_count_sketches_are_not_offered() {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        generate_per_computation_candidates, HowToComputeAggregateMeasure, PruneReason,
+        generate_per_computation_candidates, HowToComputeAggregateMeasure,
     };
     use asap_types::ir::{operator::AggIntent, NonASAPOp};
+    use asap_types::stages::PruneReason;
     let w = workload(886);
     let roots = Planner::new(FuzzSettings::default()).lower(&w).unwrap();
     let inventory =

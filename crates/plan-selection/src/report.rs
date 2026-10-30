@@ -44,7 +44,7 @@ pub struct Rejection {
     pub reason: String,
 }
 
-/// Why Stage 3 did not select a candidate. The first nine mean the
+/// Why Stage 3 did not select a candidate. The first six mean the
 /// candidate failed a check and is invalid ([`Self::failed_a_check`]); the
 /// rest mean it was valid and lost under the cost model. JSON: the
 /// snake_case variant name, e.g. `"costlier"`.
@@ -59,19 +59,11 @@ pub enum RejectionCause {
     /// counter nor non-negative). The executor cannot run it, so the deployment's accuracy
     /// model cannot accept it either.
     CountMinWeightsNotProvenNonNegative,
-    /// It reduces each series' raw data samples with an exact aggregate the
-    /// executor has no kernel for (e.g. `stddev_over_time`), so the
-    /// executor cannot compile it
-    /// ([`asap_types::ir::operator::agg_has_exact_per_entity_kernel`]).
-    PerEntityAggregateNotExecutable,
     /// A query's output has no accuracy guarantee (Stage 1 has no
     /// analytical rule for it and the deployment's evidence supplies none),
     /// and the deployment's accuracy model did not accept it directly
     /// ([`AccuracyModel::accepts_output_regardless_of_guarantee`]).
     NoAccuracyGuarantee,
-    /// It scans raw data at query time in a deployment that does not
-    /// retain raw data.
-    RawDataNotRetained,
     /// A query's latency is over its `max_latency_ms` bound.
     LatencyBoundExceeded,
     /// A repeating query's latency per evaluation is over its repeat
@@ -100,17 +92,15 @@ pub enum RejectionCause {
 }
 
 impl RejectionCause {
-    /// Whether the candidate failed a check (executability, accuracy, raw
-    /// data, latency bound, repeat interval or cluster capacity) rather than losing under the
+    /// Whether the candidate failed a check (accuracy, latency bound,
+    /// repeat interval or cluster capacity) rather than losing under the
     /// cost model.
     pub fn failed_a_check(self) -> bool {
         matches!(
             self,
             Self::AccuracyTargetMissed
                 | Self::CountMinWeightsNotProvenNonNegative
-                | Self::PerEntityAggregateNotExecutable
                 | Self::NoAccuracyGuarantee
-                | Self::RawDataNotRetained
                 | Self::LatencyBoundExceeded
                 | Self::LatencyOverRepeatInterval
                 | Self::OverClusterCapacity
@@ -287,10 +277,9 @@ pub struct CandidateConnectionReport {
     pub catalog_exhausted: Option<bool>,
     #[serde(default)]
     pub evaluation_complete: Option<bool>,
+    /// The candidates Stage 2 pruned (`PhysicalASAPMemoCandidates::pruned_candidates`).
     #[serde(default)]
     pub structurally_removed_candidates: usize,
-    #[serde(default)]
-    pub structurally_removed_connections: usize,
     pub catalog_scope: String,
     pub status: String,
     pub groups: usize,

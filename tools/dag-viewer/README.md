@@ -225,12 +225,16 @@ are ignored, `stage_pipeline`'s default.
     "pass1_pruned": [{ "target": 0, "query": "Q1",
                        "pruned": [{ "candidate": "DDSketch", "reason": "UnsupportedByDeployment" }],
                        "fused_pruned": [] }],
+    "pruned_candidates": [{ "group": 3, "candidate": "DDSketch", "reason": "UnsupportedByDeployment" }],
     "candidates": [{ "id": "L1", "display_name": "...", "dag": "<flat logical DAG>" },
                    { "id": "L2", "display_name": "...", "error": "..." }]
   },
   "stage2_physical_asap_optimization": {
     "candidates": [{ "id": "P1", "from_logical": "L1", "display_name": "...", "dag": "<PhysicalASAPDAG>" }],
-    "pruned": [{ "from_logical": "L3", "display_name": "...", "reason": "..." }]
+    "pruned": [{ "from_logical": "L3", "display_name": "...", "reason": "..." }],
+    "pruned_candidates": [{ "group": 1, "operator_node": 0, "operator": "Scan", "implementation_root": true,
+                            "timing": "query_time", "materialization": "NotMaterialized", "scope_copy": 0,
+                            "reason": "RawDataNotRetained" }]
   },
   "stage3_plan_selection": {
     "costs": { "P1": { "cost_per_second": 7.9, "cpu_core_seconds_per_second": 0.0041,
@@ -248,7 +252,7 @@ are ignored, `stage_pipeline`'s default.
     "selected": "P1",
     "rejected": [{ "id": "P2", "cause": "costlier", "reason": "..." }],
     "search_rejected": [{ "id": "P5", "cause": "accuracy_target_missed", "reason": "..." }],
-    "rejected_by_cause": { "raw_data_not_retained": 533, "costlier": 12 },
+    "rejected_by_cause": { "accuracy_target_missed": 533, "costlier": 12 },
     "materialized_views": [{ "node_id": 2, "refresh": "at_ingestion",
                              "coverage": { "definition_id": "98f2b35a…", "selection": ["..."] },
                              "inputs": { "raw_data_windows": [{ "source": { "TimeSeries": { "metric": "data" } },
@@ -289,8 +293,15 @@ are ignored, `stage_pipeline`'s default.
   inputs with defaults filled in. `pass1_pruned` has, per Pass 1 target with
   a pruned candidate, the target's index, the query it is listed under, and
   each pruned candidate of the target (`pruned`) and of its fused
-  computation (`fused_pruned`) with the reason. The page does not show
-  either section yet.
+  computation (`fused_pruned`) with the reason. Each stage's
+  `pruned_candidates` lists what that stage removed, one entry per removed
+  candidate with its memo `group` and `reason` (`PruneReason`): Pass 1's
+  ways to compute a measure (`candidate`), and Stage 2's physical
+  candidates, keyed by `operator_node` (index into Stage 2's operator
+  nodes), `timing`, `materialization` and `scope_copy`, with the node's
+  `operator` label and whether it is an `implementation_root`. The Memo
+  view's group panel lists both for the selected group;
+  `deployment_capabilities` and `pass1_pruned` are not shown.
 - A node's `per_node` entry holds its `operator` (as the measured cost
   table names it), `timing` (`ingestion_time` or `query_time`), its
   predicted CPU in core-seconds per second (`cpu_core_seconds_per_second`),
@@ -302,8 +313,7 @@ are ignored, `stage_pipeline`'s default.
 - Each `stage3_plan_selection.rejected` entry has a `cause`: a failed check
   (`accuracy_target_missed`,
   `count_min_weights_not_proven_non_negative`,
-  `per_entity_aggregate_not_executable`, `no_accuracy_guarantee`,
-  `raw_data_not_retained`, `latency_bound_exceeded`,
+  `no_accuracy_guarantee`, `latency_bound_exceeded`,
   `latency_over_repeat_interval`, `over_cluster_capacity`) or a loss under
   the cost model (`costlier`, `slower`, `more_memory`,
   `not_lowest_latency_on_pareto_front`, `dominated`,

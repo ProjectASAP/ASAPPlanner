@@ -194,12 +194,13 @@ pub fn expand_execution_scopes_before(
             });
         }
     }
-    let result = PhysicalASAPMemoCandidates::new(
+    let mut result = PhysicalASAPMemoCandidates::new(
         source.operator_nodes_of_candidates_for_memo_groups,
         candidates,
         source.query_roots,
         reader_constraints,
     );
+    result.pruned_candidates = source.pruned_candidates;
     super::validate_candidates(&result).map_err(ConfigurationError::InvalidInventory)?;
     super::check_deadline(deadline)?;
     Ok(result)

@@ -1,27 +1,20 @@
-//! Validity checks on one candidate: accuracy targets, latency, raw-data
-//! retention and executor support.
-
-use std::collections::HashSet;
+//! Validity checks on one candidate: accuracy targets and latency. What
+//! the executor or deployment cannot run (per-entity aggregates without a
+//! kernel, query-time scans of raw data not retained) Stage 2 prunes.
 
 use asap_cost::{family_name, PlanCost, QueryLatency};
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
-use asap_types::ir::operator::{agg_has_exact_per_entity_kernel, Reduction};
-use asap_types::ir::physical_export::{
-    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
-};
 use asap_types::ir::properties::{
-    AccuracyGuarantee, AccuracyMetric, AccuracyScope, AccuracyTarget, ExecutionTiming,
+    AccuracyGuarantee, AccuracyMetric, AccuracyScope, AccuracyTarget,
 };
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, WeightDomain};
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
+use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::accuracy_binding::{bound_root_guarantee, root_operators};
 use crate::report::{AcceptedAccuracy, RejectionCause};
 use crate::PlanningModels;
-use asap_types::workload::bounds::{
-    confirmed_weights, series_read, source_name, values_per_result,
-};
+use asap_types::workload::bounds::{confirmed_weights, series_read, values_per_result};
 
 /// The first query whose latency per evaluation is over its
 /// `max_latency_ms` bound or, with no bound broken, over its repeat
@@ -308,68 +301,5 @@ pub(crate) fn guarantee_check(
                  evidence that it meets target {target:?}"
             ),
         },
-    })
-}
-
-/// For a deployment that does not retain raw data, every query-time scan
-/// of `dag` with the window it would read, as a rejection reason (`None`
-/// without one). Raw data samples are then not kept after they arrive, so no
-/// window of them is there to scan at query time: only ingestion-time work
-/// reads raw rows. `kept_chains` are `dag`'s ([`kept_pane_chains`](asap_cost::kept_pane_chains)).
-pub(crate) fn raw_data_violation(
-    dag: &PhysicalASAPDAG,
-    kept_chains: &HashSet<PhysicalASAPNodeId>,
-) -> Option<String> {
-    let scans: Vec<String> = dag
-        .nodes
-        .iter()
-        .filter_map(|node| match &node.payload {
-            Payload::NonASAP(NonASAPOp::Scan { source, .. })
-                if node.output_state.timing != ExecutionTiming::IngestionTime =>
-            {
-                Some(match dag.scan_window(node.id, kept_chains).lookback_ms() {
-                    Some(lookback) => format!("{lookback} ms of raw {}", source_name(source)),
-                    None => format!("all raw {}", source_name(source)),
-                })
-            }
-            _ => None,
-        })
-        .collect();
-    (!scans.is_empty()).then(|| {
-        format!(
-            "scans {} at query time, but the deployment does not retain raw data",
-            scans.join(", ")
-        )
-    })
-}
-
-/// Why the executor cannot compile `dag`, if it cannot: an exact per-entity
-/// `Aggregate` (a per-series range reduction over raw data samples) the executor
-/// does not run. It runs one with a single measure that has an exact
-/// per-entity kernel ([`agg_has_exact_per_entity_kernel`]), no measure
-/// filter and no `HAVING`.
-pub(crate) fn per_entity_aggregate_violation(dag: &PhysicalASAPDAG) -> Option<String> {
-    dag.nodes.iter().find_map(|node| match &node.payload {
-        Payload::NonASAP(NonASAPOp::Aggregate {
-            reduction: Reduction::PerEntity,
-            measures,
-            filters,
-            having,
-            ..
-        }) => {
-            let one_kernel = match measures.as_slice() {
-                [measure] => agg_has_exact_per_entity_kernel(measure),
-                _ => false,
-            };
-            let executable = one_kernel && filters.iter().all(Option::is_none) && having.is_none();
-            (!executable).then(|| {
-                format!(
-                    "node {}: the executor has no exact per-series aggregate {measures:?} \
-                     over raw samples",
-                    node.id
-                )
-            })
-        }
-        _ => None,
     })
 }

@@ -1,7 +1,8 @@
 //! Shared, size-independent per-query proof used before joint search.
 //! A proof considers every local Pass 2 and Stage 2 choice; unknown/unsupported
 //! composition and any size-dependent failure remain eligible for joint planning.
-use crate::{checked_candidate, PlanningModels, RejectionCause};
+use crate::checks::accuracy_check;
+use crate::{PlanningModels, RejectionCause};
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     HowToComputeAggregateMeasure, PerComputationCandidates,
 };
@@ -334,7 +335,7 @@ pub(crate) fn alone_violation<Id: Clone>(
         )
         .ok()?;
         for candidate in &physical {
-            match checked_candidate(candidate, targets, data, models) {
+            match accuracy_check(candidate, targets, data, models) {
                 Err(failed) if failed.size_independent => {
                     first.get_or_insert((failed.cause, failed.reason));
                 }
