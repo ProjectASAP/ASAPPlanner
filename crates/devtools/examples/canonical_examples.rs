@@ -3,46 +3,11 @@
 // One-off: pretty-print the `OperatorNode` DAG for one canonical query per variant,
 // plus custom Join/SetOp/Dedup/CTE probes, to eyeball the actual shape.
 
+use asap_devtools::corpora::{bgp_catalog, dqc_catalog};
 use asap_devtools::lower_promql_with_sample_interval;
-use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
+use asap_frontend_sql::lower_sql_dialect;
 use asap_types::ir::properties::AccuracyTarget;
-use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::workload::SqlDialect;
-
-fn col(name: &str, dtype: DataType) -> Field {
-    Field::plain(name, dtype, false)
-}
-
-fn packets_catalog() -> SqlCatalog {
-    SqlCatalog::new().with_table(
-        "packets",
-        Schema::new(vec![
-            col("srcip", DataType::Utf8),
-            col("dstip", DataType::Utf8),
-            col("srcport", DataType::Int64),
-            col("dstport", DataType::Int64),
-            col("proto", DataType::Utf8),
-            col("time", DataType::Float64),
-            col("pkt_len", DataType::Int64),
-        ]),
-    )
-}
-
-fn bgp_catalog() -> SqlCatalog {
-    let updates = Schema::new(vec![
-        col("timestamp", DataType::Timestamp),
-        col("peer_asn", DataType::Int64),
-        col("prefix", DataType::Utf8),
-    ]);
-    let rib = Schema::new(vec![
-        col("snapshot_ts", DataType::Timestamp),
-        col("collector", DataType::Utf8),
-        col("prefix", DataType::Utf8),
-    ]);
-    SqlCatalog::new()
-        .with_table("bgp_updates", updates)
-        .with_table("bgp_rib_state", rib)
-}
 
 #[tokio::main]
 async fn main() {
@@ -77,7 +42,7 @@ async fn main() {
         println!();
     }
 
-    let packets = packets_catalog();
+    let packets = dqc_catalog();
     let bgp = bgp_catalog();
     let sql_examples: &[(&str, &str, &str)] = &[
         ("Filter + Scan", "packets", "SELECT * FROM packets WHERE proto = 'tcp'"),

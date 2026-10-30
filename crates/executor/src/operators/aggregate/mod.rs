@@ -301,8 +301,6 @@ pub(super) fn execute<'a>(
 }
 
 mod columnar;
-#[cfg(test)]
-mod row_reference;
 pub(super) mod temporal;
 // Matches Prometheus `quantile`: NaN for no values or a NaN q, ±Inf outside
 // [0, 1], and NaN samples ordered first.

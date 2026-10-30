@@ -4,10 +4,12 @@
 // Corpus mode dumps all four PromQL corpora as JSONL and writes a heuristic
 // anomaly report. The default mode remains the ad-hoc SQL/PromQL inspector.
 
+use asap_devtools::corpora::{
+    bgp_catalog, dqc_catalog, netflow_catalog, promql_lines, sql_statements,
+};
 use asap_devtools::{lower_promql_with_sample_interval, SqlCatalog};
 use asap_frontend_sql::lower_sql_dialect;
 use asap_types::ir::properties::AccuracyTarget;
-use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::workload::SqlDialect;
 use serde::Serialize;
 use serde_json::Value;
@@ -29,82 +31,6 @@ const NETFLOW: &str = include_str!("../../../frontend-sql/tests/netflow/data/net
 const BGP: &str = include_str!("../../../frontend-sql/tests/bgp_analytics/data/bgp_analytics.sql");
 const BGP_WORKLOAD: &str = include_str!("../../../frontend-sql/tests/bgp_jan2024_workload/data/bgp_jan2024_rrc00_200_query_workload.yaml");
 
-fn col(name: &str, dtype: DataType) -> Field {
-    Field::plain(name, dtype, false)
-}
-
-fn dqc_catalog() -> SqlCatalog {
-    SqlCatalog::new().with_table(
-        "packets",
-        Schema::new(vec![
-            col("srcip", DataType::Utf8),
-            col("dstip", DataType::Utf8),
-            col("srcport", DataType::Int64),
-            col("dstport", DataType::Int64),
-            col("proto", DataType::Utf8),
-            col("time", DataType::Float64),
-            col("pkt_len", DataType::Int64),
-        ]),
-    )
-}
-
-fn netflow_catalog() -> SqlCatalog {
-    SqlCatalog::new().with_table(
-        "netflow_table",
-        Schema::with_time_index(
-            vec![
-                col("time", DataType::Timestamp),
-                col("srcip", DataType::Utf8),
-                col("dstip", DataType::Utf8),
-                col("srcport", DataType::Int64),
-                col("dstport", DataType::Int64),
-                col("proto", DataType::Utf8),
-                col("pkt_len", DataType::Int64),
-            ],
-            0,
-            vec![],
-        ),
-    )
-}
-
-fn bgp_catalog() -> SqlCatalog {
-    let updates = Schema::new(vec![
-        col("timestamp", DataType::Timestamp),
-        col("collector", DataType::Utf8),
-        col("peer_ip", DataType::Utf8),
-        col("peer_asn", DataType::Int64),
-        col("prefix", DataType::Utf8),
-        col("operation", DataType::Utf8),
-        col("as_path", DataType::Utf8),
-        col("origin", DataType::Utf8),
-        col("next_hop", DataType::Utf8),
-        col("local_pref", DataType::Utf8),
-        col("med", DataType::Utf8),
-        col("communities", DataType::Utf8),
-        col("atomic", DataType::Utf8),
-        col("aggr_asn", DataType::Utf8),
-        col("aggr_ip", DataType::Utf8),
-        col("source_file", DataType::Utf8),
-    ]);
-    SqlCatalog::new()
-        .with_table("bgp_updates", updates.clone())
-        .with_table("bgp.bgp_updates", updates)
-}
-
-fn sql_statements(source: &str) -> Vec<String> {
-    source
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with("--"))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .split(';')
-        .map(str::trim)
-        .filter(|query| !query.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
 #[derive(serde::Deserialize)]
 struct Workload {
     queries: Vec<WorkloadQuery>,
@@ -113,14 +39,6 @@ struct Workload {
 #[derive(serde::Deserialize)]
 struct WorkloadQuery {
     sql: String,
-}
-
-fn corpus_lines(corpus: &str) -> Vec<&str> {
-    corpus
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .collect()
 }
 
 #[derive(Serialize)]
@@ -203,7 +121,7 @@ fn structural_shape(expression: &str) -> String {
 
 fn run_corpus(name: &str, source: &str, interval_ms: u64) -> CorpusResult {
     let mut result = CorpusResult::default();
-    for (index, expression) in corpus_lines(source).into_iter().enumerate() {
+    for (index, expression) in promql_lines(source).enumerate() {
         let normalized_expression = normalize(expression);
         let structural_shape = structural_shape(expression);
         match lower_promql_with_sample_interval(expression, AccuracyTarget::exact(), interval_ms) {

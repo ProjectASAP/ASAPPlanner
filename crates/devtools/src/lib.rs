@@ -15,12 +15,14 @@
 //! [`planning_stages`] and [`planner_layering_examples`] hold the one
 //! pipeline and the #509 example workloads that `stage_pipeline` and the
 //! planner-layering acceptance tests share; [`candidate_labels`] names the
-//! candidates for the viewer document. [`rqe_atomic_costs`] converts
+//! candidates for the viewer document. [`corpora`] splits the checked-in
+//! query corpora and holds their SQL catalogs. [`rqe_atomic_costs`] converts
 //! sketch-bench's measured per-operation costs into plan selection's
 //! measured table. [`planner_fuzz`] is the metamorphic fuzz tester for
 //! missed reuse and sharing behind the `planner_fuzz` bin.
 
 pub mod candidate_labels;
+pub mod corpora;
 pub mod memo_pricing;
 pub mod planner_fuzz;
 pub mod planner_layering_examples;
