@@ -40,6 +40,7 @@ use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::logical_expr::expr::AggregateFunction;
 use datafusion::logical_expr::expr_rewriter::FunctionRewrite;
 use datafusion::logical_expr::function::{PartitionEvaluatorArgs, WindowUDFFieldArgs};
+use datafusion::logical_expr::utils::{conjunction, split_conjunction};
 use datafusion::logical_expr::{
     self, lit, AggregateUDF, Case, ColumnarValue, Distinct, Expr, ExprSchemable, JoinType,
     LogicalPlan, PartitionEvaluator, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
@@ -441,10 +442,9 @@ impl<'a> SqlLowerer<'a> {
     /// predicate can bind (a subquery referenced from a scalar position is
     /// resolved as a root in its own scope).
     fn lower_filter(&self, filter: &logical_expr::Filter) -> Result<Unresolved, LoweringError> {
-        let mut conjuncts = Vec::new();
-        split_conjunction(&filter.predicate, &mut conjuncts);
-        let (subqueries, mut residual): (Vec<_>, Vec<_>) =
-            conjuncts.into_iter().partition(|e| reads_subquery(e));
+        let (subqueries, mut residual): (Vec<_>, Vec<_>) = split_conjunction(&filter.predicate)
+            .into_iter()
+            .partition(|e| reads_subquery(e));
 
         let input = self.lower_plan(&filter.input)?;
         // A trailing window on the table's time column is the query's
@@ -465,7 +465,7 @@ impl<'a> SqlLowerer<'a> {
                 residual.remove(index);
                 Duration::from_millis(width_ms)
             });
-        let mut node = match rebuild_conjunction(&residual) {
+        let mut node = match conjunction(residual.into_iter().cloned()) {
             Some(pred) => filter_or_fold(self.lower_expr(&pred)?, input),
             None => input,
         };
@@ -2092,17 +2092,6 @@ fn without_casts(mut expr: &Expr) -> &Expr {
     }
 }
 
-/// Flatten a top-level `AND` chain into its conjuncts.
-fn split_conjunction<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
-    match expr {
-        Expr::BinaryExpr(b) if b.op == logical_expr::Operator::And => {
-            split_conjunction(&b.left, out);
-            split_conjunction(&b.right, out);
-        }
-        other => out.push(other),
-    }
-}
-
 /// Whether `expr` reads another operator anywhere inside it (`EXISTS`,
 /// `IN (…)`, a scalar subquery).
 fn reads_subquery(expr: &Expr) -> bool {
@@ -2113,14 +2102,6 @@ fn reads_subquery(expr: &Expr) -> bool {
         ))
     })
     .expect("the predicate never fails")
-}
-
-/// Re-`AND` the conjuncts, or `None` when there are none left.
-fn rebuild_conjunction(conjuncts: &[&Expr]) -> Option<Expr> {
-    conjuncts
-        .iter()
-        .map(|e| (*e).clone())
-        .reduce(|acc, e| acc.and(e))
 }
 
 /// Split a correlated subquery's plan into `(uncorrelated plan, correlation)`.
@@ -2143,10 +2124,9 @@ fn split_correlation(plan: &LogicalPlan) -> Result<(LogicalPlan, Option<Expr>), 
         };
     };
 
-    let mut conjuncts = Vec::new();
-    split_conjunction(&filter.predicate, &mut conjuncts);
-    let (correlated, inner): (Vec<_>, Vec<_>) =
-        conjuncts.into_iter().partition(|e| expr_has_outer_ref(e));
+    let (correlated, inner): (Vec<_>, Vec<_>) = split_conjunction(&filter.predicate)
+        .into_iter()
+        .partition(|e| expr_has_outer_ref(e));
 
     let input = filter.input.as_ref();
     if plan_has_outer_ref(input) {
@@ -2155,10 +2135,10 @@ fn split_correlation(plan: &LogicalPlan) -> Result<(LogicalPlan, Option<Expr>), 
         ));
     }
 
-    let correlation = rebuild_conjunction(&correlated)
+    let correlation = conjunction(correlated.into_iter().cloned())
         .map(|e| strip_outer_refs(&e))
         .transpose()?;
-    let plan = match rebuild_conjunction(&inner) {
+    let plan = match conjunction(inner.into_iter().cloned()) {
         Some(pred) => LogicalPlan::Filter(
             logical_expr::Filter::try_new(pred, filter.input.clone())
                 .map_err(LoweringError::DataFusion)?,
