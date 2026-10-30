@@ -241,13 +241,11 @@ use asap_cost::state_bytes::{sketch_shape, summary_shape, StateInputRows};
 mod accuracy;
 mod accuracy_binding;
 mod checks;
-mod pricing;
 mod report;
 mod selector;
 pub(crate) use accuracy_binding::bound_root_guarantee;
 pub use asap_types::workload::bounds::with_confirmed_weights;
 pub(crate) use checks::{accuracy_targets, guarantee_check};
-pub(crate) use pricing::{panes_of, price_node, trailing_window, PricedNode, ProducerOutput};
 pub use report::{
     large_peak_memory_warning, AcceptedAccuracy, CandidateConnectionReport, Rejection,
     RejectionCause, SearchReport, Selection, SelectionError, LARGE_PEAK_MEMORY_BYTES,
@@ -284,14 +282,14 @@ mod tests {
     use super::*;
     use crate::accuracy_binding::{bind_statistics, root_operators, workload_statistic};
     use crate::checks::{accuracy_check, CheckFailure};
-    use crate::pricing::{kept_pane_chains, node_map, price_at_scale};
     use asap_accuracy::composition::INPUT_ROW_COUNT;
     use asap_accuracy::estimators::hll;
     use asap_accuracy::propagation::root_guarantee;
     use asap_cost::execution_demand::evaluation_rate;
+    use asap_cost::{kept_pane_chains, node_map, plan_cost, NodeMap};
     use asap_cost::{
-        CalibrationFit, CandidateCost, ClusterLimits, ClusterObjective, CostInputs, CostModel,
-        NodePriceSource, OperatorKind, ResourceUsage, COST_SOURCE, MEASURED_COST_SOURCE,
+        CalibrationFit, ClusterLimits, ClusterObjective, CostInputs, CostModel, NodePriceSource,
+        OperatorKind, PlanCost, ResourceUsage, COST_SOURCE, MEASURED_COST_SOURCE,
         MIXED_COST_SOURCE,
     };
     use asap_cost::{MeasuredOperationCosts, OperatorCost, ResourceUnitCost};
@@ -315,14 +313,41 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::rc::Rc;
 
-    /// [`crate::pricing::price`] with `dag`'s node map and kept pane chains.
+    /// [`plan_cost`] of one candidate alone, its calibration factor fitted
+    /// over its own measured nodes (as [`select_plan`] fits it over all).
+    fn self_calibrated_cost(
+        dag: &PhysicalASAPDAG,
+        nodes: &NodeMap<'_>,
+        kept_chains: &std::collections::HashSet<PhysicalASAPNodeId>,
+        recurrence: &[QueryRecurrence],
+        range_evaluations: &[Option<RangeEvaluation>],
+        data: &DataWorkload,
+        settings: &CostInputs,
+    ) -> Result<PlanCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
+        let at = |formula_scale| {
+            plan_cost(
+                dag,
+                nodes,
+                kept_chains,
+                recurrence,
+                range_evaluations,
+                data,
+                settings,
+                formula_scale,
+            )
+        };
+        let (_, fit) = at(1.0)?;
+        Ok(at(fit.factor())?.0)
+    }
+
+    /// [`self_calibrated_cost`] with `dag`'s node map and kept pane chains.
     fn price(
         dag: &PhysicalASAPDAG,
         recurrence: &[QueryRecurrence],
         data: &DataWorkload,
         settings: &CostInputs,
-    ) -> Result<CandidateCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
-        crate::pricing::price(
+    ) -> Result<PlanCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
+        self_calibrated_cost(
             dag,
             &node_map(dag),
             &kept_pane_chains(dag),
@@ -1547,7 +1572,7 @@ mod tests {
 
     /// A node's operator, timing, work and price, to compare nodes across
     /// DAGs whose ids differ.
-    fn node_prices(cost: &CandidateCost) -> Vec<(OperatorKind, ExecutionTiming, String, f64)> {
+    fn node_prices(cost: &PlanCost) -> Vec<(OperatorKind, ExecutionTiming, String, f64)> {
         cost.per_node
             .values()
             .map(|node| {
@@ -3464,7 +3489,7 @@ mod tests {
             priced(&plain, &every_minute),
             priced(&shifted, &every_minute),
         );
-        let cost_of = |dag: &PhysicalASAPDAG, cost: &CandidateCost, pick: fn(&Payload) -> bool| {
+        let cost_of = |dag: &PhysicalASAPDAG, cost: &PlanCost, pick: fn(&Payload) -> bool| {
             cost.per_node[&node_of(dag, pick)].cost_per_second.unwrap()
         };
         let is_shift = |p: &Payload| matches!(p, Payload::NonASAP(NonASAPOp::TimeShift { .. }));
@@ -3499,7 +3524,7 @@ mod tests {
         matches!(payload, Payload::ASAP(ASAPOp::SummaryAgg { .. }))
     }
 
-    fn priced(dag: &PhysicalASAPDAG, recurrence: &[QueryRecurrence]) -> CandidateCost {
+    fn priced(dag: &PhysicalASAPDAG, recurrence: &[QueryRecurrence]) -> PlanCost {
         price(dag, recurrence, &data(), &CostInputs::default()).unwrap()
     }
 
@@ -3975,7 +4000,7 @@ mod tests {
 
     /// The raw data samples the scan `scan` reads per computation, from its
     /// priced detail (`scan <n> samples; ...`).
-    fn scanned_samples(cost: &CandidateCost, scan: PhysicalASAPNodeId) -> u64 {
+    fn scanned_samples(cost: &PlanCost, scan: PhysicalASAPNodeId) -> u64 {
         let detail = &cost.per_node[&scan].detail;
         detail
             .strip_prefix("scan ")
@@ -5426,7 +5451,7 @@ mod tests {
     /// formulas' price (no calibration), as Stage 3 priced before.
     fn cheapest_uncalibrated(candidates: &[PhysicalWorkloadPlan], settings: &CostInputs) -> String {
         let cost = |candidate: &PhysicalWorkloadPlan| {
-            price_at_scale(
+            plan_cost(
                 &candidate.dag,
                 &node_map(&candidate.dag),
                 &kept_pane_chains(&candidate.dag),
@@ -5613,7 +5638,7 @@ mod tests {
             after.usage.latency_per_query[0].query_ms - before.usage.latency_per_query[0].query_ms,
             1.0
         ));
-        let core_seconds = |cost: &CandidateCost| {
+        let core_seconds = |cost: &PlanCost| {
             cost.per_node
                 .values()
                 .map(|n| n.cpu_core_seconds_per_second)
@@ -5656,7 +5681,7 @@ mod tests {
                 span_ms: 3000,
             }),
         ] {
-            let cost = crate::pricing::price(
+            let cost = self_calibrated_cost(
                 &candidate.dag,
                 &node_map(&candidate.dag),
                 &kept_pane_chains(&candidate.dag),

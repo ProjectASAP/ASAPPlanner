@@ -189,7 +189,7 @@ asap_plan_selection::run_stage1_to_stage3<Id>(
 | `CostModel::ProvisionedCapacity(ResourceUnitCost)` | Cost model 2: unit cost × peak memory, peak CPU cores and disk; the cheapest valid candidate wins |
 | `CostModel::ClusterCapacity(ClusterLimits)` | Cost model 3: memory, disk and optional CPU cores are hard limits; `ClusterObjective::{LowestLatency, LeastMemory, ParetoFront}` chooses among the candidates that fit |
 | `PlanOutput.plans` | One `QueryPlan { entry_index, root }` per query, in `QueryWorkload::entries()` order |
-| `PlanOutput.selection` | `Some` with Stage 3's `Selection` under the default pass: `selected`, `costs` (each candidate's `CandidateCost` with its `ResourceUsage` and `cost_per_second`, `None` under cost model 3), `accepted`, `rejected` (with reasons) and `front` |
+| `PlanOutput.selection` | `Some` with Stage 3's `Selection` under the default pass: `selected`, `costs` (each candidate's `PlanCost` with its `ResourceUsage` and `cost_per_second`, `None` under cost model 3), `accepted`, `rejected` (with reasons) and `front` |
 | `PlanOutput::physical_asap_dag()` | The planned queries as one `PhysicalASAPDAG`, timed with the default `MaterializationAssignment` (see [Export](#export)) |
 
 Each candidate's `ResourceUsage` holds its usage without prices:

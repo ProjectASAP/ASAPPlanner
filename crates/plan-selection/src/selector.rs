@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use asap_cost::{
-    CalibrationFit, CandidateCost, ClusterLimits, ClusterObjective, CostModel, QueryLatency,
+    CalibrationFit, ClusterLimits, ClusterObjective, CostModel, PlanCost, QueryLatency,
     ResourceUsage, COST_UNIT,
 };
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
@@ -15,11 +15,11 @@ use crate::checks::{
     accuracy_check, accuracy_targets, latency_violation, per_entity_aggregate_violation,
     raw_data_violation, CheckFailure,
 };
-use crate::pricing::{kept_pane_chains, node_map, pane_retention_ms, price_at_scale, query_reach};
 use crate::report::{
     AcceptedAccuracy, Rejection, RejectionCause, SearchReport, Selection, SelectionError,
 };
 use crate::PlanningModels;
+use asap_cost::{kept_pane_chains, node_map, pane_retention_ms, plan_cost, query_reach};
 use asap_types::workload::bounds::with_confirmed_weights;
 
 /// A cost per second for a rejection reason: three decimals, or three
@@ -79,7 +79,7 @@ pub struct PlanSelector<'a> {
     ranking: Ranking,
     keep_every_candidate: bool,
     candidates_checked: u64,
-    costs: BTreeMap<String, CandidateCost>,
+    costs: BTreeMap<String, PlanCost>,
     accepted: BTreeMap<String, Vec<AcceptedAccuracy>>,
     rejected: Vec<Rejection>,
     /// The valid candidates kept, in candidate order: every one, the best
@@ -183,7 +183,7 @@ impl<'a> PlanSelector<'a> {
         {
             return Ok(CalibrationFit::default());
         }
-        let (_, fit) = price_at_scale(
+        let (_, fit) = plan_cost(
             &candidate.dag,
             &nodes,
             &kept_chains,
@@ -257,7 +257,7 @@ impl<'a> PlanSelector<'a> {
             }
         }
         let settings = self.models.plan_selection;
-        let (cost, _) = price_at_scale(
+        let (cost, _) = plan_cost(
             &candidate.dag,
             &nodes,
             &kept_chains,
@@ -348,7 +348,7 @@ impl<'a> PlanSelector<'a> {
     /// with the weight requirements Stage 3 confirmed made proofs).
     pub fn finish(mut self) -> Result<(Selection, PhysicalWorkloadPlan), SelectionError> {
         let ranking = self.ranking;
-        let valid_costs: Vec<&CandidateCost> =
+        let valid_costs: Vec<&PlanCost> =
             self.kept.iter().map(|kept| &self.costs[&kept.id]).collect();
         let Some((best, front)) = choose(ranking, &valid_costs) else {
             return Err(SelectionError::NoValidCandidate(self.rejected));
@@ -395,7 +395,7 @@ impl<'a> PlanSelector<'a> {
 
     /// Under a price ranking, fold the price of valid candidate `cost`
     /// into the cheapest price and the runner-up ([`ROUNDING`]).
-    fn track_runner_up(&mut self, cost: &CandidateCost) {
+    fn track_runner_up(&mut self, cost: &PlanCost) {
         let (Ranking::Price, Some(price)) = (self.ranking, cost.cost_per_second) else {
             return;
         };
@@ -455,7 +455,7 @@ pub(crate) fn checked_candidate(
 /// The index of the candidate `ranking` selects among `costs` (the first on
 /// ties) and, under [`Ranking::Front`], the indices of the Pareto front in
 /// order; `None` without candidates.
-pub(crate) fn choose(ranking: Ranking, costs: &[&CandidateCost]) -> Option<(usize, Vec<usize>)> {
+pub(crate) fn choose(ranking: Ranking, costs: &[&PlanCost]) -> Option<(usize, Vec<usize>)> {
     let front: Vec<usize> = match ranking {
         Ranking::Front => {
             // Each candidate's worst latency once, not once per comparison.
@@ -572,7 +572,7 @@ impl Ranking {
     /// Whether `cost` ranks strictly before `best`. Prices and latencies tie
     /// within rounding ([`cheaper`]); peak memory and disk are whole bytes,
     /// compared exactly, as [`dominates`] compares them.
-    pub(crate) fn better(self, cost: &CandidateCost, best: &CandidateCost) -> bool {
+    pub(crate) fn better(self, cost: &PlanCost, best: &PlanCost) -> bool {
         use std::cmp::Ordering;
         let rounded = |a: f64, b: f64| match (cheaper(a, b), cheaper(b, a)) {
             (true, _) => Ordering::Less,
@@ -600,7 +600,7 @@ impl Ranking {
         self,
         id: &str,
         selected: &str,
-        costs: &BTreeMap<String, CandidateCost>,
+        costs: &BTreeMap<String, PlanCost>,
         front: &[String],
     ) -> (RejectionCause, String) {
         let (cost, best) = (&costs[id], &costs[selected]);
@@ -718,8 +718,8 @@ mod tests {
 
     /// A candidate with the given latency, peak memory and disk under cost
     /// model 3.
-    fn cluster_cost(latency_ms: f64, peak_memory_bytes: u64, disk_bytes: u64) -> CandidateCost {
-        CandidateCost {
+    fn cluster_cost(latency_ms: f64, peak_memory_bytes: u64, disk_bytes: u64) -> PlanCost {
+        PlanCost {
             usage: ResourceUsage {
                 peak_memory_bytes,
                 disk_bytes,

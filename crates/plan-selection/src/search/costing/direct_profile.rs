@@ -7,8 +7,8 @@
 use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
 use crate::search::milp::direct_cost::{DirectCostProfile, NodeCostProfile, QueryScheduleRates};
 use crate::search::refinement::planner::CandidatePlanningContext;
-use crate::{PricedNode, ProducerOutput};
 use asap_cost::CostModel;
+use asap_cost::{NodeUsage, ProducerOutput};
 use asap_types::ir::physical_export::PhysicalASAPDAGNode;
 use asap_types::ir::properties::execution_data_state::{DataPrimitive, ExecutionDataState};
 use asap_types::ir::properties::{AccuracyScope, ExecutionTiming};
@@ -452,7 +452,7 @@ fn extract_scan_class(
 }
 
 fn profile_for_priced(
-    priced: &PricedNode<'_>,
+    priced: &NodeUsage<'_>,
     node: &PhysicalASAPDAGNode,
     compaction_seconds: f64,
     context: &CandidatePlanningContext<'_>,
@@ -478,7 +478,7 @@ fn profile_for_priced(
         ingestion: node.output_state.timing == ExecutionTiming::IngestionTime,
         standing_cost_per_second: priced.average_memory_bytes * prices.cost_per_memory_byte_second
             + priced.disk_bytes as f64 * prices.cost_per_disk_byte_second,
-        work_seconds: priced.work_ms / 1000.0,
+        work_seconds: priced.work_ms_per_execution / 1000.0,
         compaction_seconds,
         held_memory_cost_per_second: priced.held.map_or(0.0, |(bytes, _, _)| {
             bytes as f64 * prices.cost_per_memory_byte_second
@@ -502,7 +502,7 @@ fn price<'a>(
     context: &'a CandidatePlanningContext<'_>,
     nodes: &'a [Option<PhysicalASAPDAGNode>],
     lookbacks: &[Option<u64>],
-    cache: &mut [Option<PricedNode<'a>>],
+    cache: &mut [Option<NodeUsage<'a>>],
     visited: &mut [bool],
     visiting: &mut [bool],
     suppliers: &mut [Vec<PhysicalCandidateId>],
@@ -680,11 +680,11 @@ fn price<'a>(
             }
             _ => (1, None),
         };
-        let Ok(priced) = crate::price_node(
+        let Ok(priced) = asap_cost::node_usage(
             node,
             &views,
             (1, 1.0),
-            crate::trailing_window(lookbacks[id]),
+            asap_cost::trailing_window(lookbacks[id]),
             retained_panes,
             ingestion_window,
             context.data,
@@ -702,8 +702,10 @@ fn price<'a>(
             |inputs| inputs.upstream_work,
         );
         let closure_work = WorkBounds {
-            minimum: (prior.minimum + priced.work_ms).next_down().max(0.0),
-            maximum: (prior.maximum + priced.work_ms).next_up(),
+            minimum: (prior.minimum + priced.work_ms_per_execution)
+                .next_down()
+                .max(0.0),
+            maximum: (prior.maximum + priced.work_ms_per_execution).next_up(),
         };
         if !closure_work.maximum.is_finite() {
             continue;
@@ -983,7 +985,7 @@ fn certified_workers(work: WorkBounds, node_count: usize) -> Option<u64> {
 
 fn state_compaction_seconds(
     node: &PhysicalASAPDAGNode,
-    priced: &PricedNode<'_>,
+    priced: &NodeUsage<'_>,
     workers: u64,
     context: &CandidatePlanningContext<'_>,
 ) -> f64 {
@@ -999,7 +1001,7 @@ fn state_compaction_seconds(
         settings.resource_speed.ms_per_cpu_op * context.calibration.factor(),
         |unit| (unit.ns_per_unit + unit.ns_per_invocation) * 1e-6,
     );
-    let states = priced.output.rows / crate::panes_of(node);
+    let states = priced.output.rows / asap_cost::panes_of(node);
     (workers - 1) as f64 * states as f64 * merge_ms / 1000.0
 }
 
@@ -1011,7 +1013,7 @@ fn check_deadline(deadline: Option<std::time::Instant>) -> Result<(), DirectProf
     }
 }
 
-fn same_price(a: &PricedNode<'_>, b: &PricedNode<'_>) -> bool {
+fn same_price(a: &NodeUsage<'_>, b: &NodeUsage<'_>) -> bool {
     let family = match (a.family, b.family) {
         (crate::StateFamily::None, crate::StateFamily::None) => true,
         (crate::StateFamily::Exact(a), crate::StateFamily::Exact(b)) => a == b,
@@ -1024,15 +1026,15 @@ fn same_price(a: &PricedNode<'_>, b: &PricedNode<'_>) -> bool {
         }
         _ => false,
     };
-    let bits = |p: &PricedNode<'_>| {
+    let bits = |p: &NodeUsage<'_>| {
         [
-            p.work_ms.to_bits(),
+            p.work_ms_per_execution.to_bits(),
             p.cpu_ops_per_second.to_bits(),
             p.scanned_bytes_per_second.to_bits(),
             p.average_memory_bytes.to_bits(),
         ]
     };
-    let held = |p: &PricedNode<'_>| {
+    let held = |p: &NodeUsage<'_>| {
         p.held
             .map(|(bytes, rate, per_reader)| (bytes, rate.to_bits(), per_reader))
     };

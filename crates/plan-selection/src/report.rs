@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use asap_cost::analytical::AnalyticalCostError;
-use asap_cost::{CandidateCost, CostModel};
+use asap_cost::{CostModel, PlanCost};
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilitiesError;
 use asap_types::ir::physical_export::PhysicalASAPNodeId;
 use asap_types::ir::properties::AccuracyMetric;
@@ -200,7 +200,7 @@ pub struct Selection {
     /// Stage 3 confirmed made a proof ([`with_confirmed_weights`](crate::with_confirmed_weights)): the plan
     /// to run. The Stage 2 candidate keeps the open requirement.
     pub plan: Vec<QueryRoot>,
-    pub costs: BTreeMap<String, CandidateCost>,
+    pub costs: BTreeMap<String, PlanCost>,
     /// For each valid candidate, per query, the accuracy Stage 3 accepted.
     pub accepted: BTreeMap<String, Vec<AcceptedAccuracy>>,
     pub rejected: Vec<Rejection>,

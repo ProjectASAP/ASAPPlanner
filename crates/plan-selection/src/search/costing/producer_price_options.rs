@@ -10,7 +10,7 @@ const MAXIMUM_PRICE_OPTIONS: usize = 50_000;
 
 #[derive(Clone)]
 struct PriceClass<'a> {
-    priced: PricedNode<'a>,
+    priced: NodeUsage<'a>,
     lookback: Option<u64>,
     sketches: usize,
     raw_source: Option<String>,
@@ -377,7 +377,7 @@ pub(in crate::search) fn extract_price_options(
                             sketch_ids.insert(id);
                         }
                         if node.output_state.timing == ExecutionTiming::IngestionTime {
-                            ancestor_work.insert(id, priced.work_ms.to_bits());
+                            ancestor_work.insert(id, priced.work_ms_per_execution.to_bits());
                         } else {
                             ancestor_work.clear();
                         }
