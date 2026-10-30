@@ -718,6 +718,7 @@ impl PhysicalCandidatesWithCosts {
                         index: id,
                     }],
                     is_implementation_root: false,
+                    accuracy_budget_parts: 1,
                     physical_node: node,
                 },
             )
@@ -760,6 +761,7 @@ impl PhysicalCandidatesWithCosts {
                     index: operator_node.0,
                 }],
                 is_implementation_root: false,
+                accuracy_budget_parts: 1,
                 physical_node: node,
             });
         self.physical

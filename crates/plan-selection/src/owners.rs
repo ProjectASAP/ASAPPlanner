@@ -160,11 +160,9 @@ pub(crate) struct ClassData {
     /// Whether it outputs approximate values: a sketch `SummaryAgg` or
     /// `PaneChain`, each an approximate input of the queries reading it.
     pub(crate) approximate: bool,
-    /// `parts(k)`: the `accuracy_budget_parts` of the memo candidate its
-    /// operator node implements; for a node factored over several
-    /// candidates, the smallest. A factored node is an identical terminal
-    /// reader shared by those candidates, and its producers decide which one
-    /// it implements; the smallest share is the one every choice meets.
+    /// `parts(k)`: its operator node's `accuracy_budget_parts` (Stage 2's
+    /// `OperatorNodeOfCandidateForMemoGroup`: for a factored node, the
+    /// largest among its candidates).
     pub(crate) accuracy_budget_parts: usize,
     /// Its usage under the first context, or why `asap-cost` could not cost
     /// it.
@@ -403,12 +401,10 @@ fn reader_constraint_ids_per_candidate(physical: &PhysicalASAPMemoCandidates) ->
     per_candidate
 }
 
-/// [`MilpInputs`] for `physical`'s candidates.
-/// `parts_per_memo_candidate[g][i]` is memo group `g`'s candidate `i`'s
-/// `accuracy_budget_parts`; `entries[q]` is query `q`'s workload entry.
+/// [`MilpInputs`] for `physical`'s candidates; `entries[q]` is query `q`'s
+/// workload entry.
 pub(crate) fn prepare_milp_inputs(
     physical: &PhysicalASAPMemoCandidates,
-    parts_per_memo_candidate: &[Vec<usize>],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     cost_inputs: &CostInputs,
@@ -419,15 +415,7 @@ pub(crate) fn prepare_milp_inputs(
     let unpruned_links = producer_classes_left(links, &all_alive);
     let unpruned_outputs = output_classes(physical, &all_alive);
     let unpruned_reach = queries_reaching(physical, &unpruned_links, &unpruned_outputs);
-    let class_data = class_data(
-        physical,
-        links,
-        parts_per_memo_candidate,
-        entries,
-        &unpruned_reach,
-        data,
-        cost_inputs,
-    );
+    let class_data = class_data(physical, links, entries, &unpruned_reach, data, cost_inputs);
     let pruned_classes = prune_dominated_classes(
         &dominance_profiles(physical, links, &unpruned_outputs),
         &class_data,
@@ -862,7 +850,6 @@ fn readers_of(
 fn class_data(
     physical: &PhysicalASAPMemoCandidates,
     links: &CandidateLinks,
-    parts_per_memo_candidate: &[Vec<usize>],
     entries: &[QueryWorkloadEntry],
     reaching: &[Vec<usize>],
     data: &DataWorkload,
@@ -907,16 +894,7 @@ fn class_data(
             let operator_node = physical.candidates[class].operator_node;
             let accuracy_budget_parts = physical.operator_nodes_of_candidates_for_memo_groups
                 [operator_node.0]
-                .candidates_for_memo_group
-                .iter()
-                .filter_map(|id| {
-                    parts_per_memo_candidate
-                        .get(id.group.0 as usize)?
-                        .get(id.index)
-                        .copied()
-                })
-                .min()
-                .unwrap_or(1);
+                .accuracy_budget_parts;
             ClassData {
                 approximate: outputs_approximate_values(node),
                 accuracy_budget_parts,

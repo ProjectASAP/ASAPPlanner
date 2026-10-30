@@ -36,6 +36,10 @@ pub struct OperatorNodeOfCandidateForMemoGroup {
     /// Whether it is its candidates' root; false for an implementation's
     /// private nodes.
     pub is_implementation_root: bool,
+    /// How many equal shares of a query's accuracy budget this node's sketch sizes meet
+    /// (`CandidateForMemoGroup::accuracy_budget_parts`). For a factored node, the largest among its
+    /// candidates: equal nodes have equal sizes. 1 for an exact node.
+    pub accuracy_budget_parts: usize,
     /// The operator node, with Stage 2's physical implementation; its
     /// children are the expected inputs, which the selected producers replace.
     pub physical_node: Rc<OperatorNode>,

@@ -87,6 +87,7 @@ fn catalog(
                         index: *index - 1,
                     }],
                     is_implementation_root: true,
+                    accuracy_budget_parts: 1,
                     physical_node,
                 }
             })
@@ -124,10 +125,8 @@ fn root(group: u32) -> QueryRoot<MemoGroupId> {
 }
 
 fn prepared(physical: &PhysicalASAPMemoCandidates) -> MilpInputs {
-    let parts: Vec<Vec<usize>> = vec![vec![1; 4]; 8];
     prepare_milp_inputs(
         physical,
-        &parts,
         &[],
         &DataWorkload::default(),
         &CostInputs::default(),
@@ -575,8 +574,6 @@ fn owners_and_regions_on_a_hand_built_catalog() {
 /// Stage 2's output for `queries` and what Stage 3 also reads.
 struct ThroughStages1And2 {
     physical: PhysicalASAPMemoCandidates,
-    /// Per memo group, each candidate's `accuracy_budget_parts`.
-    parts_per_memo_candidate: Vec<Vec<usize>>,
     entries: Vec<QueryWorkloadEntry>,
     data: DataWorkload,
 }
@@ -642,19 +639,18 @@ fn through_stages_1_and_2(queries: &[&str]) -> ThroughStages1And2 {
             &logical, &entries, &data, true, true, None,
         )
         .unwrap();
+    // Stage 2 copies each node's `accuracy_budget_parts` from its memo
+    // candidates, the largest for a factored node.
+    for node in &physical.operator_nodes_of_candidates_for_memo_groups {
+        let largest = node
+            .candidates_for_memo_group
+            .iter()
+            .map(|id| logical.memo.candidates[id.group.0 as usize][id.index].accuracy_budget_parts)
+            .max();
+        assert_eq!(Some(node.accuracy_budget_parts), largest);
+    }
     ThroughStages1And2 {
         physical,
-        parts_per_memo_candidate: logical
-            .memo
-            .candidates
-            .iter()
-            .map(|candidates| {
-                candidates
-                    .iter()
-                    .map(|candidate| candidate.accuracy_budget_parts)
-                    .collect()
-            })
-            .collect(),
         entries,
         data,
     }
@@ -676,7 +672,6 @@ fn two_queries_share_a_pane_chain_through_the_real_pipeline() {
     let links = CandidateLinks::new(physical);
     let inputs = prepare_milp_inputs(
         physical,
-        &stages.parts_per_memo_candidate,
         &stages.entries,
         &stages.data,
         &CostInputs::default(),

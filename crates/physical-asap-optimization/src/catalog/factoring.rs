@@ -83,7 +83,8 @@ impl MemoGroupOutputToCompatibleProducersCache {
 /// producers, never from the representative template's child witness.
 ///
 /// A kept node's `candidates_for_memo_group` becomes the union, ascending,
-/// of the candidates of the nodes factored into it.
+/// of the candidates of the nodes factored into it, and its
+/// `accuracy_budget_parts` the largest of theirs.
 pub fn factor_terminal_readers(
     inventory: &mut super::inventory::CandidateInventory,
     deadline: Option<std::time::Instant>,
@@ -168,6 +169,7 @@ pub fn factor_terminal_readers(
     let mut unions = HashMap::<usize, Vec<PhysicalCandidateId>>::new();
     let mut known = HashMap::<usize, std::collections::HashSet<PhysicalCandidateId>>::new();
     let mut candidates_for_memo_group = HashMap::<usize, Vec<CandidateForMemoGroupId>>::new();
+    let mut accuracy_budget_parts = HashMap::<usize, usize>::new();
     for (id, &rep) in representative.iter().enumerate() {
         super::check_deadline(deadline)?;
         if eligible[id] {
@@ -180,10 +182,13 @@ pub fn factor_terminal_readers(
             }
         }
         if id != rep {
-            candidates_for_memo_group.entry(rep).or_default().extend(
-                &inventory.operator_nodes_of_candidates_for_memo_groups[id]
-                    .candidates_for_memo_group,
-            );
+            let factored = &inventory.operator_nodes_of_candidates_for_memo_groups[id];
+            candidates_for_memo_group
+                .entry(rep)
+                .or_default()
+                .extend(&factored.candidates_for_memo_group);
+            let parts = accuracy_budget_parts.entry(rep).or_insert(0);
+            *parts = (*parts).max(factored.accuracy_budget_parts);
         }
     }
     let mut new_ids = vec![PhysicalCandidateId(0); count];
@@ -214,6 +219,9 @@ pub fn factor_terminal_readers(
             node.candidates_for_memo_group.extend(factored);
             node.candidates_for_memo_group.sort_unstable();
             node.candidates_for_memo_group.dedup();
+        }
+        if let Some(parts) = accuracy_budget_parts.remove(&id) {
+            node.accuracy_budget_parts = node.accuracy_budget_parts.max(parts);
         }
         let mut inputs = inventory.producer_nodes_per_input[id].clone();
         if let Some(producer_candidates) = unions.remove(&id) {
