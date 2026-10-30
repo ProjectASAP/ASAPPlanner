@@ -16,7 +16,6 @@ pub(crate) mod candidates;
 pub(crate) mod costing;
 pub(crate) mod milp;
 pub(crate) mod pipeline;
-pub(crate) mod query_pruning;
 pub(crate) mod refinement;
 pub(crate) mod route;
 

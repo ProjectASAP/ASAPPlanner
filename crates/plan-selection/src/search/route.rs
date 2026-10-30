@@ -628,20 +628,6 @@ fn add_phase_metrics(
     report.model_construction_ms += phase.model_construction_ms;
     report.solver_ms += phase.solver_ms;
     report.validation_ms += phase.validation_ms;
-    report.early_query_pruning_ms += phase.early_query_pruning_ms;
-    for (kind, count) in &phase.early_query_pruning_counts {
-        *report
-            .early_query_pruning_counts
-            .entry(kind.clone())
-            .or_default() += count;
-    }
-    for example in &phase.early_query_pruning_examples {
-        if report.early_query_pruning_examples.len() < 8
-            && !report.early_query_pruning_examples.contains(example)
-        {
-            report.early_query_pruning_examples.push(example.clone());
-        }
-    }
     report.solve_calls += phase.solve_calls;
     report.direct_cost_solve_calls += phase.direct_cost_solve_calls;
     report.joint_price_solve_calls += phase.joint_price_solve_calls;
@@ -787,59 +773,6 @@ fn search_domain<Id: Clone>(
         .collect::<Vec<_>>();
     let output_references = asap_types::stages::output_references(&initial.query_roots).len();
     let started = Instant::now();
-    let pruned = if progress.pass2_round.is_none() {
-        Some(
-            crate::search::query_pruning::prune_query_candidates(
-                inventory,
-                entries,
-                data,
-                models,
-                if search.exhaustive { 0 } else { 64 },
-            )
-            .map_err(|error| unsupported(&error))?,
-        )
-    } else {
-        None
-    };
-    let early_query_pruning_ms = started.elapsed().as_secs_f64() * 1000.0;
-    check_budget("early query pruning", progress)?;
-    let pruning = pruned.as_ref().map(|pruned| &pruned.report);
-    let empty_pruning = crate::search::query_pruning::QueryCandidatePruningReport::default();
-    let pruning = pruning.unwrap_or(&empty_pruning);
-    let early_query_pruning_counts = [
-        ("choices_checked".into(), pruning.choices_checked),
-        ("choices_removed".into(), pruning.removed.len()),
-        ("queries_skipped".into(), pruning.queries_skipped),
-        (
-            "final_choices_retained".into(),
-            pruning.final_choices_retained,
-        ),
-        (
-            "shared_producer_choices_retained".into(),
-            pruning.shared_producer_choices_retained,
-        ),
-        (
-            "non_summary_choices_retained".into(),
-            pruning.non_summary_choices_retained,
-        ),
-    ]
-    .into_iter()
-    .collect();
-    let early_query_pruning_examples = pruning
-        .removed
-        .iter()
-        .take(8)
-        .map(|choice| {
-            format!(
-                "target {} choice {}: {:?}: {}",
-                choice.target,
-                choice.choice,
-                choice.cause,
-                choice.reason.chars().take(512).collect::<String>()
-            )
-        })
-        .collect();
-    let started = Instant::now();
     let mut pass2_round = match progress.pass2_round.take() {
         Some(pass2_round) => pass2_round,
         None => {
@@ -853,7 +786,7 @@ fn search_domain<Id: Clone>(
             // instant is already past and generation stops at its first check.
             let pass1 = generate_per_computation_logical_memo_candidates(
                 initial,
-                pruned.expect("first round pruned").inventory,
+                inventory.clone(),
                 entries,
                 data,
                 Instant::now().checked_add(remaining()),
@@ -1124,7 +1057,6 @@ fn search_domain<Id: Clone>(
         peak_milp_constraints: result.metrics.peak_constraints,
         validation_rejection_counts: result.rejections.counts,
         certified_query_cuts: result.query_cuts,
-        early_query_pruning_ms, early_query_pruning_counts, early_query_pruning_examples,
         structurally_removed_candidates,
         validation_rejection_examples: result.rejections.examples,
     };
