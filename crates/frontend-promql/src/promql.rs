@@ -97,13 +97,8 @@ pub(crate) struct PromqlLowerer;
 #[derive(Debug, Clone)]
 enum Outer {
     None,
-    Plain(OuterIntent),
-    Count,
-    /// `count_values("l", v)` — group by value + count, emitting the value as a
-    /// new label `l` (issue #49).
-    CountValues {
-        label: String,
-    },
+    /// A reducing aggregation (`sum`/`count`/`quantile`/`count_values`/…).
+    Reduce(AggIntent<ColumnRef>),
     TopK {
         k: u64,
         descending: bool,
@@ -114,65 +109,11 @@ enum Outer {
     },
 }
 
-#[derive(Debug, Clone)]
-enum OuterIntent {
-    Sum,
-    Avg,
-    Min,
-    Max,
-    StdDev,
-    Variance,
-    Quantile(f64),
-    /// `group(v)` — constant 1 per group (issue #49).
-    Group,
-}
-
-#[derive(Debug, Clone)]
-enum InnerFunc {
-    FrequencyL2,
-    FrequencyEntropy,
-    Cardinality,
-    Quantile(f64),
-    Avg,
-    Min,
-    Max,
-    Sum,
-    StdDev,
-    Variance,
-    Count,
-    // `Rate`/`Increase` carry no window of their own — unlike the old Unresolved
-    // `AggFunc::Rate{window}`, canonical `AggIntent::Rate`/`Increase` have no
-    // window field either; `windowed_aggregate` reads `Inner.window`
-    // uniformly for every intent, so it would be a redundant duplicate here.
-    Rate,
-    IRate,
-    Increase,
-    // Counter-derivative range functions (issue #44). The window rides on the
-    // enclosing `TimeRange` node (like `*_over_time`), so these carry only
-    // their non-window scalar params.
-    Changes,
-    Delta,
-    IDelta,
-    Deriv,
-    Resets,
-    PredictLinear(f64),
-    DoubleExp { smoothing: f64, trend: f64 },
-    // Additional range-vector reducers (issue #51). Per-series over the window
-    // (like `*_over_time`); the window rides on the enclosing Unresolved `Window`.
-    LastOverTime,
-    FirstOverTime,
-    MadOverTime,
-    TsOfMinOverTime,
-    TsOfMaxOverTime,
-    TsOfFirstOverTime,
-    TsOfLastOverTime,
-}
-
 struct Inner {
     metric: String,
     matchers: Vec<Scalar>,
     window: Option<Duration>,
-    func: Option<InnerFunc>,
+    func: Option<AggIntent<ColumnRef>>,
     /// `offset` / `@` on the selector, carried to the `Source` (issue #40).
     shift: TimeShift,
 }
@@ -239,32 +180,15 @@ pub(crate) fn counter_function_metrics(
     query: &str,
 ) -> Result<std::collections::BTreeSet<(&'static str, String)>> {
     fn collect(expr: &Expr, out: &mut std::collections::BTreeSet<(&'static str, String)>) {
-        match expr {
-            Expr::Paren(p) => collect(&p.expr, out),
-            Expr::Unary(u) => collect(&u.expr, out),
-            Expr::Subquery(s) => collect(&s.expr, out),
-            Expr::Aggregate(a) => collect(&a.expr, out),
-            Expr::Binary(b) => {
-                collect(&b.lhs, out);
-                collect(&b.rhs, out);
+        if let Expr::Call(c) = expr {
+            if let function @ ("rate" | "increase" | "irate") = c.func.name {
+                let mut metrics = Vec::new();
+                collect_metric_names(expr, &mut metrics);
+                out.extend(metrics.into_iter().map(|m| (function, m)));
             }
-            Expr::Call(c) => {
-                let function = match c.func.name {
-                    "rate" => Some("rate"),
-                    "increase" => Some("increase"),
-                    "irate" => Some("irate"),
-                    _ => None,
-                };
-                for arg in &c.args.args {
-                    if let Some(function) = function {
-                        let mut metrics = Vec::new();
-                        collect_metric_names(arg, &mut metrics);
-                        out.extend(metrics.into_iter().map(|m| (function, m)));
-                    }
-                    collect(arg, out);
-                }
-            }
-            _ => {}
+        }
+        for child in children(expr) {
+            collect(child, out);
         }
     }
     let ast = parser::parse(query).map_err(LoweringError::Parse)?;
@@ -339,32 +263,33 @@ fn check_depth(expr: &Expr, budget: usize) -> Result<()> {
             "query nesting exceeds the {MAX_DEPTH}-level limit"
         )));
     };
+    for child in children(expr) {
+        check_depth(child, budget)?;
+    }
+    if let Expr::Aggregate(a) = expr {
+        if let Some(p) = &a.param {
+            check_depth(p, budget)?;
+        }
+    }
+    Ok(())
+}
+
+/// The sub-expressions of `expr`, in source order. An aggregate's parameter
+/// (`k`, `φ`, a label) is not included: callers that need it read it directly.
+fn children(expr: &Expr) -> Vec<&Expr> {
     match expr {
-        Expr::Aggregate(a) => {
-            check_depth(&a.expr, budget)?;
-            if let Some(p) = &a.param {
-                check_depth(p, budget)?;
-            }
-        }
-        Expr::Unary(u) => check_depth(&u.expr, budget)?,
-        Expr::Binary(b) => {
-            check_depth(&b.lhs, budget)?;
-            check_depth(&b.rhs, budget)?;
-        }
-        Expr::Paren(p) => check_depth(&p.expr, budget)?,
-        Expr::Subquery(s) => check_depth(&s.expr, budget)?,
-        Expr::Call(c) => {
-            for arg in &c.args.args {
-                check_depth(arg, budget)?;
-            }
-        }
+        Expr::Aggregate(a) => vec![&a.expr],
+        Expr::Unary(u) => vec![&u.expr],
+        Expr::Paren(p) => vec![&p.expr],
+        Expr::Subquery(s) => vec![&s.expr],
+        Expr::Binary(b) => vec![&b.lhs, &b.rhs],
+        Expr::Call(c) => c.args.args.iter().map(|a| a.as_ref()).collect(),
         Expr::MatrixSelector(_)
         | Expr::VectorSelector(_)
         | Expr::NumberLiteral(_)
         | Expr::StringLiteral(_)
-        | Expr::Extension(_) => {}
+        | Expr::Extension(_) => vec![],
     }
-    Ok(())
 }
 
 fn walk(expr: &Expr) -> Result<Unresolved> {
@@ -377,15 +302,31 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
     }
     match expr {
         Expr::Aggregate(agg) => walk_aggregate(agg),
-        Expr::Call(call) if call.func.name.starts_with("histogram_") => walk_histogram(call),
-        Expr::Call(call) if is_math_fn(call.func.name) => walk_math(call),
-        Expr::Call(call) if is_presence_fn(call.func.name) => walk_presence(call),
-        Expr::Call(call) if is_time_fn(call.func.name) => walk_time(call),
-        Expr::Call(call) if is_typeconv_fn(call.func.name) => walk_typeconv(call),
-        Expr::Call(call) if is_label_fn(call.func.name) => walk_label(call),
-        Expr::Call(call) if is_sort_fn(call.func.name) => walk_sort(call),
-        Expr::Call(call) if call.func.name == "info" => walk_info(call),
-        Expr::Call(call) => walk_call(call),
+        Expr::Call(call) => match call.func.name {
+            name if name.starts_with("histogram_") => walk_histogram(call),
+            // Element-wise math / trig (issue #45).
+            "abs" | "ceil" | "floor" | "exp" | "ln" | "log2" | "log10" | "sqrt" | "sgn" | "sin"
+            | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "asinh"
+            | "acosh" | "atanh" | "deg" | "rad" | "round" | "clamp" | "clamp_min" | "clamp_max" => {
+                walk_math(call)
+            }
+            // Presence (issue #47).
+            "absent" | "absent_over_time" | "present_over_time" => walk_presence(call),
+            // Calendar functions (issue #46); `time()` is scalar-typed and
+            // lowers in `lower_scalar`.
+            "timestamp" | "minute" | "hour" | "day_of_week" | "day_of_month" | "day_of_year"
+            | "month" | "year" | "days_in_month" => walk_time(call),
+            // Scalar→vector conversion (issue #48); `scalar(v)` is
+            // scalar-typed and lowers in `lower_scalar`.
+            "vector" => walk_typeconv(call),
+            // Label rewrites (issue #50).
+            "label_replace" | "label_join" => walk_label(call),
+            // Instant-vector reordering (issue #51).
+            "sort" | "sort_desc" | "sort_by_label" | "sort_by_label_desc" => walk_sort(call),
+            // A label-enrichment join, not a type conversion (#84).
+            "info" => walk_info(call),
+            _ => walk_call(call),
+        },
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
         // `UnaryExpr` is built only by negation (`Neg`); unary `+` is folded to
@@ -562,72 +503,89 @@ fn walk_call(call: &Call) -> Result<Unresolved> {
 /// function or its argument isn't a sub-query, so the flat matrix-selector
 /// template still handles `f(m[w])` (issues #42, #55).
 fn range_fn_over_subquery(call: &Call) -> Result<Option<Unresolved>> {
-    // `rate`/`increase`/`irate` carry their window in the `AggFunc`; over a
-    // sub-query that window is the sub-query's own range.
-    if let "rate" | "irate" | "increase" = call.func.name {
-        let arg_expr = arg(call, 0)?;
-        if subquery_range(arg_expr).is_none() {
-            return Ok(None);
-        }
-        let inner = match call.func.name {
-            "rate" => InnerFunc::Rate,
-            "irate" => InnerFunc::IRate,
-            "increase" => InnerFunc::Increase,
-            _ => unreachable!(),
-        };
-        return Ok(Some(per_series_aggregate(
-            vec![],
-            inner_intent(&inner),
-            walk(arg_expr)?,
-        )));
-    }
-
-    // `*_over_time` reducers + counter-derivatives: the func-kind, and the index
-    // of the matrix/sub-query argument (`quantile_over_time` reads φ from arg 0,
-    // so its matrix is arg 1; the rest take arg 0 + trailing scalar params).
-    let (inner, matrix_idx): (InnerFunc, usize) = match call.func.name {
-        "avg_over_time" => (InnerFunc::Avg, 0),
-        "min_over_time" => (InnerFunc::Min, 0),
-        "max_over_time" => (InnerFunc::Max, 0),
-        "sum_over_time" => (InnerFunc::Sum, 0),
-        "stddev_over_time" => (InnerFunc::StdDev, 0),
-        "stdvar_over_time" => (InnerFunc::Variance, 0),
-        "count_over_time" => (InnerFunc::Count, 0),
-        "distinct_over_time" => (InnerFunc::Cardinality, 0),
-        "entropy_over_time" => (InnerFunc::FrequencyEntropy, 0),
-        "l2_over_time" => (InnerFunc::FrequencyL2, 0),
-        "quantile_over_time" => (InnerFunc::Quantile(quantile_param(num_arg(call, 0)?)?), 1),
-        "changes" => (InnerFunc::Changes, 0),
-        "delta" => (InnerFunc::Delta, 0),
-        "idelta" => (InnerFunc::IDelta, 0),
-        "deriv" => (InnerFunc::Deriv, 0),
-        "resets" => (InnerFunc::Resets, 0),
-        "last_over_time" => (InnerFunc::LastOverTime, 0),
-        "first_over_time" => (InnerFunc::FirstOverTime, 0),
-        "mad_over_time" => (InnerFunc::MadOverTime, 0),
-        "ts_of_min_over_time" => (InnerFunc::TsOfMinOverTime, 0),
-        "ts_of_max_over_time" => (InnerFunc::TsOfMaxOverTime, 0),
-        "ts_of_first_over_time" => (InnerFunc::TsOfFirstOverTime, 0),
-        "ts_of_last_over_time" => (InnerFunc::TsOfLastOverTime, 0),
-        "predict_linear" => (InnerFunc::PredictLinear(num_arg(call, 1)?), 0),
-        "double_exponential_smoothing" => (
-            InnerFunc::DoubleExp {
-                smoothing: num_arg(call, 1)?,
-                trend: num_arg(call, 2)?,
-            },
-            0,
-        ),
-        _ => return Ok(None),
+    let Some((intent, matrix_idx)) = range_fn(call)? else {
+        return Ok(None);
     };
     let arg_expr = arg(call, matrix_idx)?;
     if !is_subquery(arg_expr) {
         return Ok(None);
     }
-    Ok(Some(per_series_aggregate(
-        vec![],
-        inner_intent(&inner),
-        walk(arg_expr)?,
-    )))
+    Ok(Some(per_series_aggregate(vec![], intent, walk(arg_expr)?)))
+}
+
+/// A range-vector function's per-series intent and the index of its matrix /
+/// sub-query argument, or `None` when `call` is not one. `quantile_over_time`
+/// reads φ from arg 0, so its matrix is arg 1; the rest take arg 0 plus
+/// trailing scalar params. The window is never part of the intent: it rides on
+/// the enclosing `TimeRange` (or is the sub-query's own range).
+fn range_fn(call: &Call) -> Result<Option<(AggIntent<ColumnRef>, usize)>> {
+    let at0 = |intent| Ok(Some((intent, 0)));
+    match call.func.name {
+        "rate" => at0(AggIntent::Rate),
+        "irate" => at0(AggIntent::IRate),
+        "increase" => at0(AggIntent::Increase),
+        "quantile_over_time" => Ok(Some((
+            AggIntent::Quantile {
+                col: None,
+                q: quantile_param(num_arg(call, 0)?)?,
+                accuracy: current_accuracy(),
+            },
+            1,
+        ))),
+        "avg_over_time" => at0(AggIntent::Avg { col: None }),
+        "min_over_time" => at0(AggIntent::Min { col: None }),
+        "max_over_time" => at0(AggIntent::Max { col: None }),
+        "sum_over_time" => at0(AggIntent::Sum { col: None }),
+        "stddev_over_time" => at0(AggIntent::StdDev {
+            col: None,
+            population: true,
+        }),
+        "stdvar_over_time" => at0(AggIntent::Variance {
+            col: None,
+            population: true,
+        }),
+        "count_over_time" => at0(AggIntent::Count {
+            accuracy: current_accuracy(),
+        }),
+        "distinct_over_time" => at0(AggIntent::Cardinality {
+            cols: vec![],
+            accuracy: current_accuracy(),
+        }),
+        "entropy_over_time" => at0(AggIntent::FrequencyEntropy {
+            col: None,
+            accuracy: current_accuracy(),
+        }),
+        "l2_over_time" => at0(AggIntent::FrequencyL2 {
+            col: None,
+            accuracy: current_accuracy(),
+        }),
+        // Counter-derivative range functions (issue #44). Each has its own
+        // intent — `changes` (value-change count) and `resets` (counter-reset
+        // count) are NOT sample counts, so they are not aliased to
+        // `count_over_time`.
+        "changes" => at0(AggIntent::Changes),
+        "delta" => at0(AggIntent::Delta),
+        "idelta" => at0(AggIntent::IDelta),
+        "deriv" => at0(AggIntent::Deriv),
+        "resets" => at0(AggIntent::Resets),
+        "predict_linear" => at0(AggIntent::PredictLinear {
+            seconds: num_arg(call, 1)?,
+        }),
+        "double_exponential_smoothing" => at0(AggIntent::DoubleExpSmoothing {
+            smoothing: num_arg(call, 1)?,
+            trend: num_arg(call, 2)?,
+        }),
+        // Additional range-vector reducers (issue #51) — same windowed
+        // per-series shape as the `*_over_time` family above.
+        "last_over_time" => at0(AggIntent::LastOverTime),
+        "first_over_time" => at0(AggIntent::FirstOverTime),
+        "mad_over_time" => at0(AggIntent::MadOverTime),
+        "ts_of_min_over_time" => at0(AggIntent::TsOfMinOverTime),
+        "ts_of_max_over_time" => at0(AggIntent::TsOfMaxOverTime),
+        "ts_of_first_over_time" => at0(AggIntent::TsOfFirstOverTime),
+        "ts_of_last_over_time" => at0(AggIntent::TsOfLastOverTime),
+        _ => Ok(None),
+    }
 }
 
 /// A (parenthesised) PromQL sub-query — `<inst>[range:res]`.
@@ -717,19 +675,22 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
             descending: false,
         }
     } else if op == token::T_COUNT {
-        Outer::Count
+        // Counts vector elements regardless of their sample values.
+        Outer::Reduce(AggIntent::Count {
+            accuracy: current_accuracy(),
+        })
     } else if op == token::T_SUM {
-        Outer::Plain(OuterIntent::Sum)
+        Outer::Reduce(AggIntent::Sum { col: None })
     } else if op == token::T_GROUP {
         // `group(v)` yields a constant 1 per group (presence), not a sum of
         // values — a distinct intent, never folded onto `Sum` (issue #49).
-        Outer::Plain(OuterIntent::Group)
+        Outer::Reduce(AggIntent::Group)
     } else if op == token::T_COUNT_VALUES {
         // `count_values("l", v)` groups by sample value and counts, emitting the
         // value as a new label `l` (the string parameter) — issue #49.
-        Outer::CountValues {
+        Outer::Reduce(AggIntent::CountValues {
             label: str_param(agg)?,
-        }
+        })
     } else if op == token::T_LIMITK {
         // `limitk(k, v)` — up to k series per group (issue #86).
         Outer::Sample {
@@ -741,17 +702,27 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
             kind: SampleKind::LimitRatio(ratio_param(agg)?),
         }
     } else if op == token::T_AVG {
-        Outer::Plain(OuterIntent::Avg)
+        Outer::Reduce(AggIntent::Avg { col: None })
     } else if op == token::T_MIN {
-        Outer::Plain(OuterIntent::Min)
+        Outer::Reduce(AggIntent::Min { col: None })
     } else if op == token::T_MAX {
-        Outer::Plain(OuterIntent::Max)
+        Outer::Reduce(AggIntent::Max { col: None })
     } else if op == token::T_STDDEV {
-        Outer::Plain(OuterIntent::StdDev)
+        Outer::Reduce(AggIntent::StdDev {
+            col: None,
+            population: true,
+        })
     } else if op == token::T_STDVAR {
-        Outer::Plain(OuterIntent::Variance)
+        Outer::Reduce(AggIntent::Variance {
+            col: None,
+            population: true,
+        })
     } else if op == token::T_QUANTILE {
-        Outer::Plain(OuterIntent::Quantile(quantile_param(num_param(agg)?)?))
+        Outer::Reduce(AggIntent::Quantile {
+            col: None,
+            q: quantile_param(num_param(agg)?)?,
+            accuracy: current_accuracy(),
+        })
     } else {
         return Err(LoweringError::UnsupportedAggregateOp(format!(
             "aggregate token {op}"
@@ -822,11 +793,7 @@ fn build_over_sub_dag(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
     Ok(match outer {
         // `walk_aggregate` always passes a real aggregator; `None` can't occur.
         Outer::None => child,
-        Outer::Plain(intent) => outer_aggregate(keys, outer_intent(&intent), child),
-        Outer::Count => outer_aggregate(keys, count(), child),
-        Outer::CountValues { label } => {
-            outer_aggregate(keys, AggIntent::CountValues { label }, child)
-        }
+        Outer::Reduce(intent) => outer_aggregate(keys, intent, child),
         Outer::Sample { kind } => Unresolved::PromqlSeriesSample {
             by: keys.into(),
             kind,
@@ -1071,23 +1038,6 @@ fn open_metrics_float(v: f64) -> String {
     }
 }
 
-/// The calendar functions (issue #46); `time()` is scalar-typed and lowers in
-/// `lower_scalar`.
-fn is_time_fn(name: &str) -> bool {
-    matches!(
-        name,
-        "timestamp"
-            | "minute"
-            | "hour"
-            | "day_of_week"
-            | "day_of_month"
-            | "day_of_year"
-            | "month"
-            | "year"
-            | "days_in_month"
-    )
-}
-
 /// `timestamp(<selector>)` → `Aggregate{[TimeFn(Timestamp)]}`; `timestamp` of
 /// any other expression → `PromqlMap{EvalTimestamp}`. The calendar accessors →
 /// `PromqlMap` over the argument vector, or over
@@ -1128,11 +1078,6 @@ fn walk_time(call: &Call) -> Result<Unresolved> {
         },
         drop_metric_name: true,
     })
-}
-
-/// The presence functions (issue #47).
-fn is_presence_fn(name: &str) -> bool {
-    matches!(name, "absent" | "absent_over_time" | "present_over_time")
 }
 
 /// `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` — lowered
@@ -1179,27 +1124,12 @@ fn absent_labels(v: &Expr) -> BTreeMap<String, String> {
     labels
 }
 
-/// The scalar→vector conversion (issue #48); `scalar(v)` is scalar-typed and
-/// lowers in `lower_scalar`. `info` is *not* here: it is a label-enrichment
-/// join, not a type conversion (#84).
-fn is_typeconv_fn(name: &str) -> bool {
-    name == "vector"
-}
-
 /// `vector(s)` — promote a scalar to a label-less instant vector carrying the
 /// scalar expression `s` (issue #48).
 fn walk_typeconv(call: &Call) -> Result<Unresolved> {
     Ok(Unresolved::PromqlVectorFromScalar(lower_scalar(arg(
         call, 0,
     )?)?))
-}
-
-/// The instant-vector reordering functions (issue #51).
-fn is_sort_fn(name: &str) -> bool {
-    matches!(
-        name,
-        "sort" | "sort_desc" | "sort_by_label" | "sort_by_label_desc"
-    )
 }
 
 /// `sort`/`sort_desc(v)` reorder an instant vector by sample value;
@@ -1269,12 +1199,7 @@ fn info_selector(expr: &Expr) -> Result<Vec<InfoMatcher>> {
             .iter()
             .map(|m| InfoMatcher {
                 label: m.name.clone(),
-                op: match &m.op {
-                    MatchOp::Equal => CompareOpKind::Eq,
-                    MatchOp::NotEqual => CompareOpKind::Ne,
-                    MatchOp::Re(_) => CompareOpKind::Regex,
-                    MatchOp::NotRe(_) => CompareOpKind::NotRegex,
-                },
+                op: compare_op(&m.op),
                 value: m.value.clone(),
             })
             .collect()),
@@ -1283,11 +1208,6 @@ fn info_selector(expr: &Expr) -> Result<Vec<InfoMatcher>> {
             "`info` data-label selector must be a label-matcher set, got `{other}`"
         ))),
     }
-}
-
-/// The label-rewrite functions (issue #50).
-fn is_label_fn(name: &str) -> bool {
-    matches!(name, "label_replace" | "label_join")
 }
 
 /// `label_replace(v, dst, replacement, src, regex)` /
@@ -1332,40 +1252,6 @@ fn walk_label(call: &Call) -> Result<Unresolved> {
         }
         other => Err(LoweringError::UnsupportedFunction(other.to_string())),
     }
-}
-
-/// The element-wise math / trig functions (issue #45).
-fn is_math_fn(name: &str) -> bool {
-    matches!(
-        name,
-        "abs"
-            | "ceil"
-            | "floor"
-            | "exp"
-            | "ln"
-            | "log2"
-            | "log10"
-            | "sqrt"
-            | "sgn"
-            | "sin"
-            | "cos"
-            | "tan"
-            | "asin"
-            | "acos"
-            | "atan"
-            | "sinh"
-            | "cosh"
-            | "tanh"
-            | "asinh"
-            | "acosh"
-            | "atanh"
-            | "deg"
-            | "rad"
-            | "round"
-            | "clamp"
-            | "clamp_min"
-            | "clamp_max"
-    )
 }
 
 /// A math / trig function — a per-series element-wise value transform, lowered
@@ -1482,39 +1368,25 @@ fn collect_metric_names(expr: &Expr, out: &mut Vec<String>) {
                 out.push(metric);
             }
         }
-        Expr::Paren(p) => collect_metric_names(&p.expr, out),
-        Expr::Unary(u) => collect_metric_names(&u.expr, out),
-        Expr::Subquery(s) => collect_metric_names(&s.expr, out),
-        Expr::Aggregate(a) => collect_metric_names(&a.expr, out),
-        Expr::Binary(b) => {
-            collect_metric_names(&b.lhs, out);
-            collect_metric_names(&b.rhs, out);
-        }
-        Expr::Call(c) => c
-            .args
-            .args
-            .iter()
-            .for_each(|a| collect_metric_names(a, out)),
-        _ => {}
+        _ => children(expr)
+            .into_iter()
+            .for_each(|child| collect_metric_names(child, out)),
     }
 }
 
 fn is_classic_bucket_arg(expr: &Expr) -> bool {
     match expr {
-        Expr::Paren(p) => is_classic_bucket_arg(&p.expr),
-        Expr::Unary(u) => is_classic_bucket_arg(&u.expr),
-        Expr::Subquery(s) => is_classic_bucket_arg(&s.expr),
-        Expr::Aggregate(agg) => {
-            matches!(
+        Expr::Aggregate(agg)
+            if matches!(
                 &agg.modifier,
                 Some(LabelModifier::Include(ls)) if ls.labels.iter().any(|l| l == "le")
-            ) || is_classic_bucket_arg(&agg.expr)
+            ) =>
+        {
+            true
         }
-        Expr::Binary(b) => is_classic_bucket_arg(&b.lhs) || is_classic_bucket_arg(&b.rhs),
-        Expr::Call(c) => c.args.args.iter().any(|a| is_classic_bucket_arg(a)),
         Expr::VectorSelector(vs) => selector_is_bucket(vs),
         Expr::MatrixSelector(ms) => selector_is_bucket(&ms.vs),
-        _ => false,
+        _ => children(expr).into_iter().any(is_classic_bucket_arg),
     }
 }
 
@@ -1628,146 +1500,40 @@ fn lower_inner(expr: &Expr) -> Result<Inner> {
 }
 
 fn lower_inner_call(call: &Call) -> Result<Inner> {
-    let name = call.func.name;
-    let at0 = |func: InnerFunc| -> Result<Inner> {
-        let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
-        Ok(Inner {
-            metric,
-            matchers,
-            window: Some(window),
-            func: Some(func),
-            shift,
-        })
+    let Some((intent, matrix_idx)) = range_fn(call)? else {
+        return Err(LoweringError::UnsupportedFunction(
+            call.func.name.to_string(),
+        ));
     };
-    match name {
-        "rate" | "irate" => {
-            let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
-            Ok(Inner {
-                metric,
-                matchers,
-                window: Some(window),
-                func: Some(if name == "irate" {
-                    InnerFunc::IRate
-                } else {
-                    InnerFunc::Rate
-                }),
-                shift,
-            })
-        }
-        "increase" => {
-            let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
-            Ok(Inner {
-                metric,
-                matchers,
-                window: Some(window),
-                func: Some(InnerFunc::Increase),
-                shift,
-            })
-        }
-        "quantile_over_time" => {
-            let phi = quantile_param(num_arg(call, 0)?)?;
-            let (metric, matchers, window, shift) = extract_matrix(arg(call, 1)?)?;
-            Ok(Inner {
-                metric,
-                matchers,
-                window: Some(window),
-                func: Some(InnerFunc::Quantile(phi)),
-                shift,
-            })
-        }
-        "avg_over_time" => at0(InnerFunc::Avg),
-        "min_over_time" => at0(InnerFunc::Min),
-        "max_over_time" => at0(InnerFunc::Max),
-        "sum_over_time" => at0(InnerFunc::Sum),
-        "stddev_over_time" => at0(InnerFunc::StdDev),
-        "stdvar_over_time" => at0(InnerFunc::Variance),
-        "count_over_time" => at0(InnerFunc::Count),
-        "distinct_over_time" => at0(InnerFunc::Cardinality),
-        "entropy_over_time" => at0(InnerFunc::FrequencyEntropy),
-        "l2_over_time" => at0(InnerFunc::FrequencyL2),
-        // Counter-derivative range functions (issue #44). Each has its own
-        // intent — `changes` (value-change count) and `resets` (counter-reset
-        // count) are NOT sample counts, so they are not aliased to
-        // `count_over_time`. The window is arg 0's matrix; scalar params follow.
-        "changes" => at0(InnerFunc::Changes),
-        "delta" => at0(InnerFunc::Delta),
-        "idelta" => at0(InnerFunc::IDelta),
-        "deriv" => at0(InnerFunc::Deriv),
-        "resets" => at0(InnerFunc::Resets),
-        // Additional range-vector reducers (issue #51) — same windowed
-        // per-series shape as the `*_over_time` family above.
-        "last_over_time" => at0(InnerFunc::LastOverTime),
-        "first_over_time" => at0(InnerFunc::FirstOverTime),
-        "mad_over_time" => at0(InnerFunc::MadOverTime),
-        "ts_of_min_over_time" => at0(InnerFunc::TsOfMinOverTime),
-        "ts_of_max_over_time" => at0(InnerFunc::TsOfMaxOverTime),
-        "ts_of_first_over_time" => at0(InnerFunc::TsOfFirstOverTime),
-        "ts_of_last_over_time" => at0(InnerFunc::TsOfLastOverTime),
-        "predict_linear" => {
-            let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
-            let seconds = num_arg(call, 1)?;
-            Ok(Inner {
-                metric,
-                matchers,
-                window: Some(window),
-                func: Some(InnerFunc::PredictLinear(seconds)),
-                shift,
-            })
-        }
-        "double_exponential_smoothing" => {
-            let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
-            let smoothing = num_arg(call, 1)?;
-            let trend = num_arg(call, 2)?;
-            Ok(Inner {
-                metric,
-                matchers,
-                window: Some(window),
-                func: Some(InnerFunc::DoubleExp { smoothing, trend }),
-                shift,
-            })
-        }
-        other => Err(LoweringError::UnsupportedFunction(other.to_string())),
-    }
+    let (metric, matchers, window, shift) = extract_matrix(arg(call, matrix_idx)?)?;
+    Ok(Inner {
+        metric,
+        matchers,
+        window: Some(window),
+        func: Some(intent),
+        shift,
+    })
 }
 
 /// Assemble the Layer-2 DAG from a lowered inner vector, the resolved group
 /// keys, and the enclosing aggregator shape.
-fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved> {
+fn build(mut inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved> {
+    let func = inner.func.take();
     match outer {
-        Outer::None => match &inner.func {
+        Outer::None => match func {
             None => instant_source(inner.metric, inner.matchers, inner.shift),
-            Some(f) => {
-                let intent = inner_intent(f);
-                windowed_aggregate(inner, keys, intent)
-            }
+            Some(intent) => windowed_aggregate(inner, keys, intent),
         },
         // An OUTER aggregation operator (`sum`/`avg`/…/`count`) over an inner
         // range-vector function (`rate`/`increase`/`*_over_time`) is a
         // two-level reduction: the inner func runs per series, the outer op
         // then aggregates across series. Collapsing them into one aggregate
         // silently drops a level — e.g. `sum(rate(m[w]))` must keep the `sum`.
-        Outer::Plain(intent) => Ok(match &inner.func {
-            None => windowed_aggregate(inner, keys, outer_intent(&intent))?,
-            Some(f) => {
-                let inner_i = inner_intent(f);
+        Outer::Reduce(intent) => Ok(match func {
+            None => windowed_aggregate(inner, keys, intent)?,
+            Some(inner_i) => {
                 let inner_agg = windowed_aggregate(inner, vec![], inner_i)?;
-                outer_aggregate(keys, outer_intent(&intent), inner_agg)
-            }
-        }),
-        Outer::Count => Ok(match &inner.func {
-            None => windowed_aggregate(inner, keys, count())?,
-            Some(f) => {
-                let inner_i = inner_intent(f);
-                let inner_agg = windowed_aggregate(inner, vec![], inner_i)?;
-                outer_aggregate(keys, count(), inner_agg)
-            }
-        }),
-        Outer::CountValues { label } => Ok(match &inner.func {
-            None => windowed_aggregate(inner, keys, AggIntent::CountValues { label })?,
-            Some(f) => {
-                let inner_i = inner_intent(f);
-                let inner_agg = windowed_aggregate(inner, vec![], inner_i)?;
-                outer_aggregate(keys, AggIntent::CountValues { label }, inner_agg)
+                outer_aggregate(keys, intent, inner_agg)
             }
         }),
         Outer::Sample { kind } => {
@@ -1775,7 +1541,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
             // `topk`, a range-vector argument reduces per series first (label-
             // preserving), a bare selector is sampled directly; neither is
             // wrapped in a reducing aggregate (issue #86).
-            let base = match inner.func.as_ref().map(inner_intent) {
+            let base = match func {
                 Some(intent) => windowed_aggregate(inner, vec![], intent)?,
                 None => instant_source(inner.metric, inner.matchers, inner.shift)?,
             };
@@ -1789,26 +1555,11 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
             // Preserve the counter-value ranking intent. Physical candidates
             // may rebuild a heap over finalized rates or use exact Sort/Limit;
             // neither is allowed to sum raw counter samples as ranking weights.
-            if descending
+            let counter_ranking = descending
                 && matches!(
-                    inner.func,
-                    Some(InnerFunc::Rate | InnerFunc::Increase | InnerFunc::IRate)
-                )
-            {
-                let intent = inner_intent(inner.func.as_ref().expect("counter function"));
-                let ranked = windowed_aggregate(inner, vec![], intent)?;
-                return Ok(Unresolved::Aggregate {
-                    reduction: Reduction::Reduce(keys.into()),
-                    measures: vec![AggIntent::TopK {
-                        k: k as usize,
-                        accuracy: current_accuracy(),
-                    }],
-                    output_names: vec![],
-                    filters: vec![],
-                    having: None,
-                    child: Rc::new(ranked),
-                });
-            }
+                    func,
+                    Some(AggIntent::Rate | AggIntent::Increase | AggIntent::IRate)
+                );
             // Heavy-hitter only when ranking by an additive measure (`count`
             // or `sum`): that is a
             // first-class aggregate intent → `TopK`. Any other ranking (topk
@@ -1816,28 +1567,34 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
             // is a generic order-by-value + limit and stays as the `Sort + Limit`
             // operator pair. The descending-plus-measure rule is shared with the
             // canonicalize-pass promotion so the two cannot drift (issue #38).
-            let measure = match inner.func {
-                Some(InnerFunc::Count) => topk::Ranking::Frequency,
-                Some(InnerFunc::Sum) => topk::Ranking::WeightedSum,
+            let measure = match func {
+                Some(AggIntent::Count { .. }) => topk::Ranking::Frequency,
+                Some(AggIntent::Sum { .. }) => topk::Ranking::WeightedSum,
                 _ => topk::Ranking::NonAdditive,
             };
-            let additive_ranking = measure.is_supported(descending);
-            if additive_ranking {
+            // The base over which we rank. A range-vector-function argument
+            // (`topk(k, rate(m[5m]))`) reduces *per series* first — that is
+            // label-preserving, so the `by (host)` partition labels survive.
+            // A **bare instant selector** (`topk(k, m)`) ranks its own
+            // samples directly: it must NOT be wrapped in a reducing
+            // aggregate. Defaulting it to `Sum` was both semantically wrong
+            // (PromQL `topk` ranks the raw data samples, it does not sum them) and
+            // destructive — the cross-series `Sum` collapses every label,
+            // including the `by (…)` partition keys, so they no longer
+            // resolve (issue #30). Keep the selector label-preserving so
+            // `Sort.partition_by` can rank within each group (issue #12).
+            let base = match func {
+                Some(intent) => windowed_aggregate(inner, vec![], intent)?,
+                None => instant_source(inner.metric, inner.matchers, inner.shift)?,
+            };
+            if counter_ranking || measure.is_supported(descending) {
                 // Preserve the ranked aggregate intent in the canonical DAG so the
                 // intent algebra is explicit about what is being computed.
                 // Post-ASAP binding may fuse the Count and TopK into a
                 // single-pass heavy-hitter sketch (SpaceSaving /
                 // CMS-with-heap), but that is a cost-model decision, not a
                 // canonical-IR concern.
-                let ranked = match measure {
-                    topk::Ranking::Frequency => InnerFunc::Count,
-                    topk::Ranking::WeightedSum => InnerFunc::Sum,
-                    topk::Ranking::NonAdditive => {
-                        unreachable!("heavy-hitter gate rejected non-additive ranking")
-                    }
-                };
-                let ranked_agg = windowed_aggregate(inner, vec![], inner_intent(&ranked))?;
-                Ok(Unresolved::Aggregate {
+                return Ok(Unresolved::Aggregate {
                     // A ranking always reduces (a `by`-empty TopK ranks the
                     // whole input into one ordering, never per-entity).
                     reduction: Reduction::Reduce(keys.into()),
@@ -1848,26 +1605,10 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                     output_names: vec![],
                     filters: vec![],
                     having: None,
-                    child: Rc::new(ranked_agg),
-                })
-            } else {
-                // The base over which we rank. A range-vector-function argument
-                // (`topk(k, rate(m[5m]))`) reduces *per series* first — that is
-                // label-preserving, so the `by (host)` partition labels survive.
-                // A **bare instant selector** (`topk(k, m)`) ranks its own
-                // samples directly: it must NOT be wrapped in a reducing
-                // aggregate. Defaulting it to `Sum` was both semantically wrong
-                // (PromQL `topk` ranks the raw data samples, it does not sum them) and
-                // destructive — the cross-series `Sum` collapses every label,
-                // including the `by (…)` partition keys, so they no longer
-                // resolve (issue #30). Keep the selector label-preserving so
-                // `Sort.partition_by` can rank within each group (issue #12).
-                let base = match inner.func.as_ref().map(inner_intent) {
-                    Some(intent) => windowed_aggregate(inner, vec![], intent)?,
-                    None => instant_source(inner.metric, inner.matchers, inner.shift)?,
-                };
-                Ok(ranked_by_value(keys, k, descending, base))
+                    child: Rc::new(base),
+                });
             }
+            Ok(ranked_by_value(keys, k, descending, base))
         }
     }
 }
@@ -1985,93 +1726,6 @@ fn instant_source(metric: String, matchers: Vec<Scalar>, shift: TimeShift) -> Re
         kind: TimeRangeKind::Instant,
         child: Rc::new(filtered_source(metric, matchers, shift)),
     })
-}
-
-/// Count vector elements regardless of their sample values.
-fn count() -> AggIntent<ColumnRef> {
-    AggIntent::Count {
-        accuracy: current_accuracy(),
-    }
-}
-
-fn inner_intent(f: &InnerFunc) -> AggIntent<ColumnRef> {
-    match f {
-        InnerFunc::FrequencyL2 => AggIntent::FrequencyL2 {
-            col: None,
-            accuracy: current_accuracy(),
-        },
-        InnerFunc::FrequencyEntropy => AggIntent::FrequencyEntropy {
-            col: None,
-            accuracy: current_accuracy(),
-        },
-        InnerFunc::Cardinality => AggIntent::Cardinality {
-            cols: vec![],
-            accuracy: current_accuracy(),
-        },
-        InnerFunc::Quantile(q) => AggIntent::Quantile {
-            col: None,
-            q: *q,
-            accuracy: current_accuracy(),
-        },
-        InnerFunc::Avg => AggIntent::Avg { col: None },
-        InnerFunc::Min => AggIntent::Min { col: None },
-        InnerFunc::Max => AggIntent::Max { col: None },
-        InnerFunc::Sum => AggIntent::Sum { col: None },
-        InnerFunc::StdDev => AggIntent::StdDev {
-            col: None,
-            population: true,
-        },
-        InnerFunc::Variance => AggIntent::Variance {
-            col: None,
-            population: true,
-        },
-        InnerFunc::Count => AggIntent::Count {
-            accuracy: current_accuracy(),
-        },
-        InnerFunc::Rate => AggIntent::Rate,
-        InnerFunc::IRate => AggIntent::IRate,
-        InnerFunc::Increase => AggIntent::Increase,
-        InnerFunc::Changes => AggIntent::Changes,
-        InnerFunc::Delta => AggIntent::Delta,
-        InnerFunc::IDelta => AggIntent::IDelta,
-        InnerFunc::Deriv => AggIntent::Deriv,
-        InnerFunc::Resets => AggIntent::Resets,
-        InnerFunc::PredictLinear(s) => AggIntent::PredictLinear { seconds: *s },
-        InnerFunc::DoubleExp { smoothing, trend } => AggIntent::DoubleExpSmoothing {
-            smoothing: *smoothing,
-            trend: *trend,
-        },
-        InnerFunc::LastOverTime => AggIntent::LastOverTime,
-        InnerFunc::FirstOverTime => AggIntent::FirstOverTime,
-        InnerFunc::MadOverTime => AggIntent::MadOverTime,
-        InnerFunc::TsOfMinOverTime => AggIntent::TsOfMinOverTime,
-        InnerFunc::TsOfMaxOverTime => AggIntent::TsOfMaxOverTime,
-        InnerFunc::TsOfFirstOverTime => AggIntent::TsOfFirstOverTime,
-        InnerFunc::TsOfLastOverTime => AggIntent::TsOfLastOverTime,
-    }
-}
-
-fn outer_intent(o: &OuterIntent) -> AggIntent<ColumnRef> {
-    match o {
-        OuterIntent::Sum => AggIntent::Sum { col: None },
-        OuterIntent::Avg => AggIntent::Avg { col: None },
-        OuterIntent::Min => AggIntent::Min { col: None },
-        OuterIntent::Max => AggIntent::Max { col: None },
-        OuterIntent::StdDev => AggIntent::StdDev {
-            col: None,
-            population: true,
-        },
-        OuterIntent::Variance => AggIntent::Variance {
-            col: None,
-            population: true,
-        },
-        OuterIntent::Quantile(q) => AggIntent::Quantile {
-            col: None,
-            q: *q,
-            accuracy: current_accuracy(),
-        },
-        OuterIntent::Group => AggIntent::Group,
-    }
 }
 
 /// Unwrap a (possibly parenthesised) string literal — `count_values` labels and
@@ -2215,16 +1869,19 @@ fn system_time_ms(t: SystemTime) -> Result<i64> {
     })
 }
 
-fn matcher_to_compare(m: &Matcher) -> Scalar {
-    let op = match &m.op {
+fn compare_op(op: &MatchOp) -> CompareOpKind {
+    match op {
         MatchOp::Equal => CompareOpKind::Eq,
         MatchOp::NotEqual => CompareOpKind::Ne,
         MatchOp::Re(_) => CompareOpKind::Regex,
         MatchOp::NotRe(_) => CompareOpKind::NotRegex,
-    };
+    }
+}
+
+fn matcher_to_compare(m: &Matcher) -> Scalar {
     Scalar::Compare {
         left: Box::new(Scalar::Column(ColumnRef::Named(m.name.clone()))),
-        op,
+        op: compare_op(&m.op),
         right: Box::new(Scalar::Literal(ScalarValue::Utf8(m.value.clone()))),
         semantics: PROMQL,
     }
