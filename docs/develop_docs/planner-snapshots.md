@@ -37,6 +37,23 @@ candidate lists, and the memo (`stage_pipeline` runs with `--no-memo`). These
 vary from run to run because the search's pane-width rounds have wall-clock
 budgets, so a different round can find the same plan.
 
+## Sketch plan snapshots
+
+The corpus queries carry no accuracy target, so their plans are exact.
+`crates/devtools/tests/sketch_plan_snapshots/` pins the plans of workloads
+that select sketches: `manifest.json` lists each workload (a workload file or
+built-in example, its deployment, and whether accuracy guarantees are
+enforced), and `<id>.json` is its snapshot, holding the same fields as a
+corpus snapshot plus every query's text and the `search_status`. The test,
+`sketch_plans_match_snapshots`, is in the same `corpus_snapshots` binary and
+runs nightly with it; the two tests never run at once. Every workload must end
+with status `optimal`: a search stopped by any budget may select another plan
+on a slower machine, so any other status fails. Regenerate with:
+
+```sh
+UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored sketch_plans_match_snapshots
+```
+
 ## When the check fails
 
 The test names each changed query and its first differing line. CI uploads

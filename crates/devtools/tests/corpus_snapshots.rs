@@ -36,6 +36,11 @@ mod sketch_plan_snapshots;
 /// leaves room for a slower CI runner while still failing a runaway search.
 const TIME_LIMIT_S: &str = "240";
 
+/// Held for the whole of each planner snapshot test, so the corpus and
+/// sketch plan tests do not run at once (`--include-ignored` would otherwise
+/// run them in parallel) and slow each other's searches.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn corpora_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus_snapshots")
 }
@@ -242,6 +247,9 @@ fn first_differing_path(expected: &Value, actual: &Value) -> Option<String> {
 #[test]
 #[ignore = "runs the release planner over the corpora: see the module docs"]
 fn corpus_plans_match_snapshots() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let update = std::env::var_os("UPDATE_SNAPSHOTS").is_some();
     // Regenerated snapshots of failing queries, with their full
     // `stage_pipeline` documents for the DAG viewer, for CI to upload.

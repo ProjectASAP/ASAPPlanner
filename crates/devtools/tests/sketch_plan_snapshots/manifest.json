@@ -1,6 +1,5 @@
 {
   "deployments": {
-    "default": [],
     "raw_retained": [
       "--deployment-capabilities",
       "{\"raw_data_retained\":true,\"query_time_results_retained\":false}",
@@ -29,7 +28,7 @@
     },
     {
       "id": "ratio-of-quantiles-1h-mvp",
-      "covers": "binary composition of two DDSketch results (q0.9 / q0.5 over 1 h)",
+      "covers": "binary composition q0.9 / q0.5 over 1 h: one DDSketch pane chain, sized for the ratio, answers both quantiles",
       "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/ratio-of-quantiles-1h.json",
       "deployment": "mvp"
     },
@@ -40,35 +39,9 @@
       "deployment": "mvp"
     },
     {
-      "id": "quantile-single-raw-retained",
-      "covers": "single quantile with an accuracy target selects DDSketch",
-      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/quantile-single.json",
-      "deployment": "raw_retained"
-    },
-    {
-      "id": "quantile-single-default",
-      "covers": "single quantile with an accuracy target selects DDSketch",
-      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/quantile-single.json",
-      "deployment": "default"
-    },
-    {
       "id": "quantile-grouped-mvp",
       "covers": "grouped quantile (avg by region) selects a DDSketch pane chain",
       "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/quantile-grouped.json",
-      "deployment": "mvp"
-    },
-    {
-      "id": "distinct-count-sql-default",
-      "covers": "SQL COUNT(DISTINCT) with a relative target selects KMV",
-      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/distinct-single.json",
-      "tables": "tools/dag-viewer/memo-examples/sql/tables.json",
-      "deployment": "default"
-    },
-    {
-      "id": "distinct-count-sql-mvp",
-      "covers": "SQL COUNT(DISTINCT) selects a KMV pane chain",
-      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/distinct-single.json",
-      "tables": "tools/dag-viewer/memo-examples/sql/tables.json",
       "deployment": "mvp"
     },
     {
@@ -79,27 +52,9 @@
       "accuracy_guarantees": "ignored"
     },
     {
-      "id": "planner-layering-3a-default",
-      "covers": "five-query historical p99 batch selects KLL",
-      "example": "planner-layering-3a",
-      "deployment": "default"
-    },
-    {
-      "id": "planner-layering-3b-default",
-      "covers": "live p99 panel within 200 ms selects KLL",
-      "example": "planner-layering-3b",
-      "deployment": "default"
-    },
-    {
       "id": "fuzz-issue903-raw-retained",
       "covers": "planner_fuzz seed 903: two queries, KLL",
       "workload": "crates/devtools/tests/planner_fuzz_seeds/issue903.workload.json",
-      "deployment": "raw_retained"
-    },
-    {
-      "id": "or-topk-quantile-raw-retained",
-      "covers": "`or` of a topk and a quantile (the only `or` workload that plans; its plan is exact)",
-      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/or-topk-quantile.json",
       "deployment": "raw_retained"
     },
     {

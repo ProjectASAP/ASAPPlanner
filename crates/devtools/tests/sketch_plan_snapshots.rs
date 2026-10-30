@@ -2,11 +2,12 @@
 //!
 //! The corpus snapshots are single queries without an accuracy target, so
 //! their plans are exact. These workloads carry accuracy targets and select
-//! sketches (KLL, DDSketch, KMV, a CMS heap), share sketches and pane chains
-//! between queries, compose two sketch results, and materialize panes, under
-//! each deployment the DAG viewer examples use (default, raw data retained, and the
-//! MVP's raw data not retained). A change to sketch kinds, parameters, sizes,
-//! sharing, timing, materialization or cost shows up as a snapshot diff.
+//! sketches (KLL, DDSketch, a CMS heap), share a sketch pane chain between
+//! queries or nested windows, answer a ratio of two quantiles from one pane
+//! chain, and materialize panes, under the MVP deployment (raw data not
+//! retained) and raw data retained. A change to sketch kinds, parameters,
+//! sizes, sharing, timing, materialization or cost shows up as a snapshot
+//! diff.
 //!
 //! `tests/sketch_plan_snapshots/manifest.json` lists each workload by id:
 //! its `workload` file (or built-in `example`) relative to the repository
@@ -17,12 +18,16 @@
 //! Regenerate with
 //! `UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored sketch_plans_match_snapshots`.
 //!
-//! Each kept workload's search is proven optimal or stopped by an
-//! evaluation count (or a numerical stall), never by the wall clock, and
-//! gave the same plan in three runs. Workloads whose search used the whole
-//! time limit (the raw-retained memo examples, full random-mixed workloads,
-//! three or more quantile queries over 10,000 series) were left out; a run
-//! that the time limit stops fails rather than being recorded.
+//! The search's seed and pane-width rounds have wall-clock budgets (5 s
+//! each), so a search that stops at a budget, of time or of evaluations, can
+//! select a different plan on a slower machine. Only a search that proves its
+//! plan optimal is independent of speed, so every workload must end with
+//! status `optimal`; any other status fails instead of being recorded. Each
+//! kept workload gave the same plan in three runs and on one core.
+//! Workloads whose search stops at a budget (the raw-retained memo examples,
+//! full random-mixed workloads, three or more quantile queries over 10,000
+//! series, the `or` and `COUNT(DISTINCT)` workloads, single quantiles under
+//! the default and raw-retained deployments) are left out.
 
 use std::path::PathBuf;
 
@@ -96,6 +101,9 @@ fn snapshot_of(document: &Value) -> Value {
 #[test]
 #[ignore = "runs the release planner over the sketch workloads: see the module docs"]
 fn sketch_plans_match_snapshots() {
+    let _serial = super::SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let update = std::env::var_os("UPDATE_SNAPSHOTS").is_some();
     // Beside the corpus snapshots' regenerated files, which CI uploads.
     let regenerated = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
@@ -130,6 +138,16 @@ fn sketch_plans_match_snapshots() {
                 "{id}: the {} s time limit ended the search, so its plan depends on \
                  machine speed",
                 super::TIME_LIMIT_S
+            ));
+            continue;
+        }
+        let status =
+            &document["stage3_plan_selection"]["search"]["candidate_connections"]["status"];
+        if status != "optimal" {
+            failures.push(format!(
+                "{id}: the search ended with status {status}, not optimal, so a \
+                 round's wall-clock budget may have chosen its plan; drop the \
+                 workload or make it smaller"
             ));
             continue;
         }
