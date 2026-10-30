@@ -104,11 +104,13 @@ fn production_run(workload: &PlanningWorkload, search: PlanSearchSettings) -> Pl
     run_planning(roots, &entries, &data, PlanningModels::builtin(), search).unwrap()
 }
 
-/// One round over the complete pane-width domain, without a time limit that
-/// a slow machine could reach.
+/// Rounds up to the complete pane-width domain, with a time limit a slow
+/// machine's Pass 2 does not reach. Stage 3 may use the whole budget: on the
+/// ratio of quantiles with guarantees enforced it validates no plan, so it
+/// searches until the deadline; the memo steps are recorded either way.
 fn complete_domain_round() -> PlanSearchSettings {
     PlanSearchSettings {
-        time_limit_ms: Some(3_600_000),
+        time_limit_ms: Some(90_000),
     }
 }
 
@@ -269,7 +271,7 @@ fn assert_pass1_memo_and_whole_workload_plans(run: &PlanningRun) -> (usize, usiz
 }
 
 /// The example's memo after each production step, and the `accuracy_budget_parts`
-/// of the state-configuration rule's rewrites (one test: one 11 s run).
+/// of the state-configuration rule's rewrites (one test: one planning run).
 #[test]
 fn ratio_of_quantiles_production_memo() {
     let run = production_run(&ratio_of_quantiles(), complete_domain_round());
@@ -283,12 +285,12 @@ fn ratio_of_quantiles_production_memo() {
     assert_eq!(steps.pass1.groups.len(), 7);
     assert_eq!(candidate_count(&steps.pass1), 15);
     // 5 × 5 choices, 3 × 3 of them for the whole budget. The inventory has
-    // 3 × 3 × 3 assignments (a target per `quantile 0.5`, 3 choices each):
-    // the 2 × 2 that give both `quantile 0.5` the same choice and take no
+    // 3 × 3 assignments (one target per quantile group and measure, so the
+    // two `quantile 0.5` share one, 3 choices each): the 2 × 2 that take no
     // KLL are memo DAGs.
     assert_eq!(
         assert_pass1_memo_and_whole_workload_plans(&run),
-        (25, 9, 27, 4)
+        (25, 9, 9, 4)
     );
     // The last step, over the complete pane-width domain.
     let last = &steps.concrete_states;

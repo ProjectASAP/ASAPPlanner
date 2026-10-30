@@ -302,8 +302,10 @@ fn stages_js_strings(declaration: &str) -> BTreeSet<String> {
         .split_once(declaration)
         .unwrap_or_else(|| panic!("stages.js must declare {declaration}"))
         .1
-        .split_once("];")
-        .expect("the array must end with `];`")
+        // The array's own `]`: its strings hold none, and a `concat([...])`
+        // ends with `]);`, not `];`.
+        .split_once(']')
+        .expect("the array must end with `]`")
         .0;
     body.split('\'')
         .skip(1)

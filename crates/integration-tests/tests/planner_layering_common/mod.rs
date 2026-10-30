@@ -81,6 +81,39 @@ pub fn share_identical(roots: &[QueryRoot]) -> Vec<QueryRoot> {
     .collect()
 }
 
+/// `roots` with no node shared between queries: each query reads its own
+/// copy of every node it reaches (sharing within one query is kept). Pass 1
+/// composes a candidate from memo groups, so queries that read an identical
+/// sub-DAG share its group's node; this is the fixtures' independent
+/// variant of such a candidate.
+#[allow(dead_code)]
+pub fn unshare(roots: &[QueryRoot]) -> Vec<QueryRoot> {
+    use asap_types::ir::OperatorNode;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+    fn copy(
+        node: &Rc<OperatorNode>,
+        copies: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    ) -> Rc<OperatorNode> {
+        if let Some(copied) = copies.get(&Rc::as_ptr(node)) {
+            return Rc::clone(copied);
+        }
+        let copied = Rc::new(OperatorNode {
+            operator: node.operator.map_children(|child| copy(child, copies)),
+            ..(**node).clone()
+        });
+        copies.insert(Rc::as_ptr(node), Rc::clone(&copied));
+        copied
+    }
+    roots
+        .iter()
+        .map(|root| match root {
+            QueryRoot::Operator(node) => QueryRoot::Operator(copy(node, &mut HashMap::new())),
+            QueryRoot::Scalar(scalar) => QueryRoot::Scalar(scalar.clone()),
+        })
+        .collect()
+}
+
 /// The number of distinct nodes (by identity) `roots` reach: smaller after
 /// [`share_identical`] exactly when some sub-DAG was shared.
 #[allow(dead_code)]
@@ -348,7 +381,11 @@ pub fn run_explicit_candidates(
             });
         }
     }
-    let plans: Vec<_> = physical.iter().map(|plan| plan.candidate.clone()).collect();
+    // Stage 2's deployment rules (raw data retention) prune the plans the
+    // deployment cannot run before Stage 3 prices the rest.
+    let mut plans: Vec<_> = physical.iter().map(|plan| plan.candidate.clone()).collect();
+    asap_devtools::memo_pricing::retain_deployable(&mut plans, models);
+    physical.retain(|p| plans.iter().any(|plan| plan.id == p.id));
     let selection = asap_devtools::memo_pricing::reference_select(&plans, &entries, &data, models)
         .expect("explicit fixture contains a valid physical configuration");
     Run {

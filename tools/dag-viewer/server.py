@@ -283,7 +283,9 @@ def run_stage_pipeline(make_args) -> dict:
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or "stage_pipeline failed")
         document = json.loads(Path(out).read_text(encoding="utf-8"))
-    print(f"[planner] Stage 3 selected {document['stage3_plan_selection']['selected']}", flush=True)
+    # Stage 3's `Selection`: its plan is P1, with a cost; else `error`.
+    selected = "P1" if document["stage3_plan_selection"].get("cost") else "no plan"
+    print(f"[planner] Stage 3 selected {selected}", flush=True)
     return document
 
 

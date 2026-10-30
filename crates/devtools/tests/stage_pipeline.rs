@@ -61,6 +61,17 @@ fn generate_bounded_example(example: &str, extra: &[&str]) -> Value {
     document
 }
 
+/// Stage 3 selected a plan: `stage3_plan_selection` is its `Selection`,
+/// whose plan is the physical candidate [`SELECTED`] with its `cost` and
+/// `accepted_accuracy_per_query`.
+fn selects_a_plan(selection: &Value) -> bool {
+    selection["selected_candidates"].is_object() && selection["cost"].is_object()
+}
+
+/// The id of the selected plan among the physical candidates: the facade's
+/// selection is always shown as `P1`.
+const SELECTED: &str = "P1";
+
 fn validated_dag(value: &Value, queries: usize) {
     let dag: FlatDag = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(dag.roots.len(), queries);
@@ -82,13 +93,14 @@ fn validated_dag(value: &Value, queries: usize) {
 /// Every logical DAG is a well-formed flat DAG and every physical DAG validates;
 /// each has one root per query; ids are unique; Stage 2 implements or prunes
 /// (with a reason) each composed logical candidate, with no cost; Stage 3
-/// accounts for every Stage 2 candidate once and costs exactly the valid ones;
-/// the committed fixture is current.
+/// selects `P1`, and the reference pricer accounts for every enumerated
+/// Stage 2 candidate once and costs exactly the valid ones; the committed
+/// fixture's workload is current.
 #[test]
 fn example1_document_preserves_workload_and_validates_archived_plans() {
     // Example 1's story is about which plans miss their accuracy target;
     // archive enough evaluated plans to check the cross-stage linkage.
-    let document = generate(&["--enforce-accuracy-guarantees", "--max-displayed", "100"]);
+    let document = generate(&["--enforce-accuracy-guarantees", "--max-displayed", "100000"]);
     let committed: Value = serde_json::from_str(
         &std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(COMMITTED))
             .unwrap(),
@@ -138,11 +150,14 @@ fn example1_document_preserves_workload_and_validates_archived_plans() {
         dag.validate().unwrap();
     }
 
-    let selection = &document["stage3_plan_selection"];
-    let costs = selection["costs"].as_object().unwrap();
-    let selected = selection["selected"].as_str().unwrap();
-    let mut accounted = HashSet::from([selected]);
-    for rejection in selection["rejected"].as_array().unwrap() {
+    // The facade's selection is `P1`; the reference pricer selects among
+    // the enumerated plans and rejects every other one.
+    assert!(selects_a_plan(&document["stage3_plan_selection"]));
+    let reference = &document["reference_pricing"];
+    let costs = reference["costs"].as_object().unwrap();
+    let selected = reference["selected"].as_str().unwrap();
+    let mut accounted = HashSet::from([SELECTED, selected]);
+    for rejection in reference["rejected"].as_array().unwrap() {
         let id = rejection["id"].as_str().unwrap();
         assert!(accounted.insert(id), "{id} accounted for once");
         assert!(!rejection["reason"].as_str().unwrap().is_empty());
@@ -176,34 +191,36 @@ fn display_cap_is_recorded_and_keeps_the_selection() {
     ]);
     let logical = &document["stage1_logical_asap_optimization"];
     assert_eq!(logical["capped"], true);
-    // Logical parents of displayed physical plans are always retained; the
-    // cap additionally allows one unimplemented logical candidate.
-    assert!(logical["candidates"].as_array().unwrap().len() <= 2);
+    // Logical parents of displayed physical plans are always retained: the
+    // selected plan's (`L1`) and the reference pricer's pick's; the cap
+    // additionally allows one unimplemented logical candidate.
+    assert!(logical["candidates"].as_array().unwrap().len() <= 3);
     assert!(logical["combinations"].as_u64().unwrap() > 1);
-    let selected = document["stage3_plan_selection"]["selected"]
-        .as_str()
-        .unwrap_or_else(|| {
-            panic!(
-                "selection survives display cap: {}",
-                document["stage3_plan_selection"]
-            )
-        });
+    assert!(
+        selects_a_plan(&document["stage3_plan_selection"]),
+        "selection survives display cap: {}",
+        document["stage3_plan_selection"]
+    );
+    let reference = &document["reference_pricing"];
+    let reference_selected = reference["selected"].as_str().unwrap();
+    assert!(reference["costs"].get(reference_selected).is_some());
+    // One enumerated plan shown, the reference pricer's pick, beside the
+    // selected plan.
     let physical = document["stage2_physical_asap_optimization"]["candidates"]
         .as_array()
         .unwrap();
-    assert_eq!(physical.len(), 1);
-    assert_eq!(physical[0]["id"], selected);
-    assert!(logical["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|candidate| { candidate["id"] == physical[0]["from_logical"] }));
-    assert!(document["stage3_plan_selection"]["costs"]
-        .get(selected)
-        .is_some());
-    let dag: PhysicalASAPDAG = serde_json::from_value(physical[0]["dag"].clone()).unwrap();
-    dag.validate().unwrap();
-    assert_eq!(dag.roots.len(), 2);
+    let ids: Vec<&str> = physical.iter().map(|p| p["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, [SELECTED, reference_selected]);
+    for candidate in physical {
+        assert!(logical["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|logical| logical["id"] == candidate["from_logical"]));
+        let dag: PhysicalASAPDAG = serde_json::from_value(candidate["dag"].clone()).unwrap();
+        dag.validate().unwrap();
+        assert_eq!(dag.roots.len(), 2);
+    }
 }
 
 /// A top-k partitioned by every label of its input has no item, so a heap
@@ -248,16 +265,19 @@ fn example3a_archive_and_viewer_select_consistently() {
     // Candidate IDs are local to one time-bounded search. Validate the viewer
     // references within its own archive instead of comparing independent runs.
     let document = generate_example("planner-layering-3a", &[]);
-    let selection = &document["stage3_plan_selection"];
-    let selected = selection["selected"].as_str().unwrap();
-    assert!(selection["costs"].get(selected).is_some());
+    assert!(selects_a_plan(&document["stage3_plan_selection"]));
+    let reference = &document["reference_pricing"];
+    let reference_selected = reference["selected"].as_str().unwrap();
+    assert!(reference["costs"].get(reference_selected).is_some());
     let physical = document["stage2_physical_asap_optimization"]["candidates"]
         .as_array()
         .unwrap();
-    let candidate = physical.iter().find(|p| p["id"] == selected).unwrap();
-    let dag: PhysicalASAPDAG = serde_json::from_value(candidate["dag"].clone()).unwrap();
-    dag.validate().unwrap();
-    assert_eq!(dag.roots.len(), 5);
+    for selected in [SELECTED, reference_selected] {
+        let candidate = physical.iter().find(|p| p["id"] == selected).unwrap();
+        let dag: PhysicalASAPDAG = serde_json::from_value(candidate["dag"].clone()).unwrap();
+        dag.validate().unwrap();
+        assert_eq!(dag.roots.len(), 5);
+    }
 }
 
 /// Example 2 plans its three SQL queries with the default search and
@@ -273,7 +293,7 @@ fn example2_plans_the_sql_workload() {
     assert_eq!(queries.len(), 3);
     assert!(queries.iter().all(|q| q["language"] == "sql"));
     validated_dag(&document["stage0_query_language_frontends"]["dag"], 3);
-    assert!(document["stage3_plan_selection"]["selected"].is_string());
+    assert!(selects_a_plan(&document["stage3_plan_selection"]));
 }
 
 /// SQL queries over tables declared with `--table` are planned through the
@@ -307,7 +327,7 @@ fn sql_queries_over_declared_tables_are_planned() {
     assert_eq!(queries.len(), 2);
     assert!(queries.iter().all(|q| q["language"] == "sql"));
     validated_dag(&document["stage0_query_language_frontends"]["dag"], 2);
-    assert!(document["stage3_plan_selection"]["selected"].is_string());
+    assert!(selects_a_plan(&document["stage3_plan_selection"]));
 }
 
 /// One run mixes SQL (over declared tables) and PromQL queries, in the
@@ -348,7 +368,7 @@ fn mixed_sql_and_promql_queries_are_planned_with_their_names() {
         .collect();
     assert_eq!(described, [("count_by_service", "sql"), ("q2", "promql")]);
     validated_dag(&document["stage0_query_language_frontends"]["dag"], 2);
-    assert!(document["stage3_plan_selection"]["selected"].is_string());
+    assert!(selects_a_plan(&document["stage3_plan_selection"]));
 }
 
 /// Runs `stage_pipeline` with `args` (and a throwaway `--out`), expecting it
@@ -376,16 +396,20 @@ fn failure(args: &[&str]) -> (Option<i32>, String) {
 #[test]
 fn workload_above_the_candidate_limit_reports_partial_search() {
     let document = generate(&["--max-combinations", "3", "--max-displayed", "100"]);
-    let report = &document["stage3_plan_selection"]["search"]["candidate_connections"];
-    assert_eq!(report["max_refinements"], 3);
-    assert!(report["refinements"].as_u64().unwrap() <= 3);
-    assert_ne!(report["status"], "optimal");
-    if document["stage3_plan_selection"]["selected"].is_null() {
-        assert!(document["stage3_plan_selection"]["error"]
-            .as_str()
-            .unwrap()
-            .contains("Search report:"));
-    }
+    // The memo has more than three choices: the reference enumeration
+    // stops at three and says it is partial.
+    let logical = &document["stage1_logical_asap_optimization"];
+    assert_eq!(logical["capped"], true);
+    let enumerated = logical["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["id"].as_str().unwrap().starts_with('E'))
+        .count();
+    assert!(enumerated <= 3, "{enumerated}");
+    // The bound is the reference enumeration's only: the facade still
+    // selects its plan.
+    assert!(selects_a_plan(&document["stage3_plan_selection"]));
 }
 
 /// Nine approximate quantile queries over nine metrics, three candidates
@@ -403,9 +427,9 @@ fn nine_quantile_queries() -> Vec<String> {
 }
 
 /// Without `--exhaustive`, the same nine queries plan with the default
-/// search, `plan_installable`'s: each query, reading its own metric, is an
-/// independent component searched on its own, so no limit is reached. The
-/// document holds the selected plan and the search's report.
+/// search, `plan_installable`'s, which searches Stage 2's catalog without
+/// enumerating the combinations. The document holds the selected plan and
+/// the search's report.
 #[test]
 fn default_search_plans_nine_queries_without_cartesian_enumeration() {
     let args = nine_quantile_queries();
@@ -413,18 +437,13 @@ fn default_search_plans_nine_queries_without_cartesian_enumeration() {
     let document = document_of(&args);
     assert_eq!(document["search"], "candidate-connections");
     let selection = &document["stage3_plan_selection"];
-    let selected = selection["selected"].as_str().unwrap();
+    assert!(selects_a_plan(selection), "{selection}");
     let physical = document["stage2_physical_asap_optimization"]["candidates"]
         .as_array()
         .unwrap();
     assert_eq!(physical.len(), 1);
-    assert_eq!(physical[0]["id"], selected);
-    assert!(
-        selection["search"]["candidate_connections"]["independent_components"]
-            .as_u64()
-            .unwrap()
-            >= 1
-    );
+    assert_eq!(physical[0]["id"], SELECTED);
+    assert!(selection["search_report"].is_object(), "{selection}");
 }
 
 /// `--max-combinations` limits only the exhaustive search.
@@ -461,15 +480,20 @@ fn default_search_and_installation_validate_the_nine_query_workload() {
     assert_eq!(queries, 9);
     validated_dag(&document["stage0_query_language_frontends"]["dag"], queries);
     let selection = &document["stage3_plan_selection"];
-    let selected = selection["selected"].as_str().unwrap();
+    assert!(selects_a_plan(selection), "{selection}");
     let physical = document["stage2_physical_asap_optimization"]["candidates"]
         .as_array()
         .unwrap();
     assert_eq!(physical.len(), 1);
-    assert_eq!(physical[0]["id"], selected);
+    assert_eq!(physical[0]["id"], SELECTED);
     let dag: PhysicalASAPDAG = serde_json::from_value(physical[0]["dag"].clone()).unwrap();
     assert_eq!(dag.roots.len(), queries);
-    assert!(selection["search"]["candidates_checked"].as_u64().unwrap() > 0);
+    assert!(
+        selection["search_report"]["milp_variables"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
 
     let text = std::fs::read_to_string(&path).unwrap();
     let workload: asap_types::workload::PlanningWorkload = serde_json::from_str(&text).unwrap();
@@ -498,7 +522,10 @@ fn default_search_and_installation_validate_the_nine_query_workload() {
     plan.validate().unwrap();
     assert_eq!(plan.query_texts.len(), queries);
     assert_eq!(
-        selection["accepted"][selected].as_array().unwrap().len(),
+        selection["accepted_accuracy_per_query"]
+            .as_array()
+            .unwrap()
+            .len(),
         queries
     );
     let report = report.unwrap();
@@ -600,8 +627,8 @@ fn document_of(args: &[&str]) -> Value {
 fn cli_accounts_for_pass1_generation_in_the_planning_budget() {
     let document = document_of(&["--promql", "sum(data)"]);
     let selection = &document["stage3_plan_selection"];
-    assert!(selection["selected"].is_string(), "{selection}");
-    let generation = selection["search"]["candidate_connections"]["local_candidate_generation_ms"]
+    assert!(selects_a_plan(selection), "{selection}");
+    let generation = document["planning_report"]["pass1_ms"]
         .as_f64()
         .expect("local generation is timed by the production entry point");
     assert!(generation.is_finite() && generation >= 0.0);
@@ -632,9 +659,9 @@ fn pass1_failure_still_writes_stage0_and_the_error() {
     assert_eq!(logical["candidates"], serde_json::json!([]));
     assert_eq!(
         document["stage2_physical_asap_optimization"],
-        serde_json::json!({ "candidates": [], "pruned": [] })
+        serde_json::json!({ "candidates": [], "pruned": [], "pruned_candidates": [] })
     );
-    assert!(document["stage3_plan_selection"]["selected"].is_null());
+    assert!(!selects_a_plan(&document["stage3_plan_selection"]));
 }
 
 /// Standalone scalar queries first, in the middle and last, which the
@@ -656,14 +683,12 @@ const SCALAR_QUERIES_ARGS: &[&str] = &[
 #[test]
 fn scalar_queries_keep_their_positions_in_scalar_roots() {
     let document = document_of(SCALAR_QUERIES_ARGS);
-    let selected = document["stage3_plan_selection"]["selected"]
-        .as_str()
-        .unwrap();
+    assert!(selects_a_plan(&document["stage3_plan_selection"]));
     let physical = document["stage2_physical_asap_optimization"]["candidates"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|c| c["id"] == selected)
+        .find(|c| c["id"] == SELECTED)
         .unwrap();
     let positions: Vec<_> = physical["dag"]["scalar_roots"]
         .as_array()
@@ -749,8 +774,9 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
     };
     let accepted = |document: &Value| -> Vec<String> {
         let selection = &document["stage3_plan_selection"];
-        assert!(selection["selected"].is_string(), "{selection}");
-        selection["accepted"]
+        assert!(selects_a_plan(selection), "{selection}");
+        // Every valid enumerated plan, as the reference pricer accepted it.
+        document["reference_pricing"]["accepted"]
             .as_object()
             .unwrap()
             .values()
@@ -779,8 +805,10 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
             "{wanted}: {summaries:?}"
         );
     }
-    let selected = unset["stage3_plan_selection"]["selected"].as_str().unwrap();
-    assert!(unset["stage3_plan_selection"]["accepted"][selected][0]["accepted_metric"].is_string());
+    assert!(
+        unset["stage3_plan_selection"]["accepted_accuracy_per_query"][0]["accepted_metric"]
+            .is_string()
+    );
 
     let rank = query(Some("rank"));
     let summaries = accepted(&rank);
@@ -793,12 +821,11 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
 }
 
 /// `--cost-model` chooses how plan selection compares Example 4's
-/// candidates: cost model 1 (the default) selects the whole-window KLL (P2),
-/// cost model 2 the exact plan (P1), and cost model 3 with a 256 GB cluster
-/// the panes maintained at ingestion time (P3-m1), with no prices and, for
-/// `pareto-front`, the front. Each candidate reports its usage. Cost model 3
-/// is run with guarantees enforced: ignoring them, a candidate without a
-/// guarantee fits the cluster better.
+/// candidates: each of cost models 1 (the default) and 2 selects a priced
+/// plan, and cost model 3 with a 256 GB cluster (lowest latency) selects a
+/// plan that fits the cluster, with no price. The selected plan reports its
+/// usage. Cost model 3 is run with guarantees enforced: ignoring them, a
+/// candidate without a guarantee fits the cluster better.
 #[test]
 fn cost_model_flag_chooses_how_candidates_are_compared() {
     let selected = |extra: &[&str]| {
@@ -807,8 +834,7 @@ fn cost_model_flag_chooses_how_candidates_are_compared() {
     };
     for options in [&[][..], &["--cost-model", "provisioned-capacity"][..]] {
         let selection = selected(options);
-        let id = selection["selected"].as_str().unwrap();
-        assert!(selection["costs"][id].is_object());
+        assert!(selects_a_plan(&selection), "{selection}");
     }
     let cluster = selected(&[
         "--enforce-accuracy-guarantees",
@@ -819,16 +845,12 @@ fn cost_model_flag_chooses_how_candidates_are_compared() {
         "--cluster-disk-bytes",
         "1000000000000",
         "--cluster-objective",
-        "pareto-front",
+        "lowest-latency",
     ]);
-    let selected = cluster["selected"].as_str().unwrap();
-    let front = cluster["front"].as_array().unwrap();
-    assert!(front.contains(&Value::String(selected.into())));
-    assert!(cluster["costs"][selected]["cost_per_second"].is_null());
-    for id in front {
-        let cost = &cluster["costs"][id.as_str().unwrap()];
-        assert!(cost["usage"]["peak_memory_bytes"].as_f64().unwrap() <= 256000000000.0);
-    }
+    assert!(selects_a_plan(&cluster), "{cluster}");
+    let cost = &cluster["cost"];
+    assert!(cost["cost_per_second"].is_null());
+    assert!(cost["usage"]["peak_memory_bytes"].as_f64().unwrap() <= 256000000000.0);
 }
 
 /// `--cost-model aws-fargate-us-east-1` prices Example 4 under cost model 1
@@ -849,9 +871,7 @@ fn aws_fargate_preset_prices_example_4_in_dollars() {
         "planner-layering-3b",
         &["--cost-model", "aws-fargate-us-east-1"],
     );
-    let selection = &document["stage3_plan_selection"];
-    let selected = selection["selected"].as_str().unwrap();
-    let cost = selection["costs"][selected]["cost_per_second"]
+    let cost = document["stage3_plan_selection"]["cost"]["cost_per_second"]
         .as_f64()
         .unwrap();
     assert!(cost.is_finite() && cost > 0.0);
@@ -917,9 +937,7 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
         default["stage1_logical_asap_optimization"]["pass1_pruned"],
         serde_json::json!([])
     );
-    let selection = &kll_kept["stage3_plan_selection"];
-    let selected = selection["selected"].as_str().unwrap();
-    assert!(selection["costs"][selected].is_object());
+    assert!(selects_a_plan(&kll_kept["stage3_plan_selection"]));
     assert!(kll_kept["stage2_physical_asap_optimization"]["candidates"]
         .as_array()
         .unwrap()
@@ -935,8 +953,7 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
         ],
     );
     let selection = &no_raw["stage3_plan_selection"];
-    let selected = selection["selected"].as_str().unwrap();
-    assert!(selection["costs"][selected].is_object());
+    assert!(selects_a_plan(selection), "{selection}");
     assert!(!selection["materialized_views"]
         .as_array()
         .unwrap()
@@ -1063,16 +1080,14 @@ fn milp_final_bound_keeps_the_bound_an_earlier_round_proved() {
     ]);
     std::fs::remove_file(&path).unwrap();
     let selection = &document["stage3_plan_selection"];
-    let report = &selection["search"]["candidate_connections"];
-    let selected = selection["selected"].as_str().unwrap();
-    let incumbent = selection["costs"][selected]["cost_per_second"]
-        .as_f64()
-        .unwrap();
-    if let Some(lower_bound) = report["lower_bound"].as_f64() {
+    let report = &selection["search_report"];
+    let incumbent = selection["cost"]["cost_per_second"].as_f64().unwrap();
+    if let Some(lower_bound) = report["cost_lower_bound_per_second"].as_f64() {
         assert!(lower_bound <= incumbent * (1.0 + 1e-9), "{report}");
-    }
-    if report["status"] == "optimal" {
-        assert!(report["relative_gap"].as_f64().unwrap() <= 1e-4);
+        if report["status"] == "optimal" {
+            let relative_gap = (incumbent - lower_bound).max(0.0) / incumbent;
+            assert!(relative_gap <= 1e-4, "{report}");
+        }
     }
 }
 
@@ -1118,10 +1133,7 @@ fn workload_file_with_a_range_evaluation_is_planned() {
         serde_json::json!({"step_ms": 60000, "span_ms": 3600000})
     );
     let selection = &document["stage3_plan_selection"];
-    let selected = selection["selected"].as_str().unwrap();
-    let cost = selection["costs"][selected]["cost_per_second"]
-        .as_f64()
-        .unwrap();
+    let cost = selection["cost"]["cost_per_second"].as_f64().unwrap();
     // The reference: the window merged from panes kept across evaluations,
     // priced under the same models. Its absolute cost is pinned in
     // integration-tests/tests/range_evaluation.rs.
@@ -1194,7 +1206,7 @@ fn workload_file_with_a_range_evaluation_is_planned() {
     };
     assert!(
         cost <= kept_panes * (1.0 + 1e-9),
-        "selected {selected} costs {cost}, more than the kept panes' {kept_panes}"
+        "selected {SELECTED} costs {cost}, more than the kept panes' {kept_panes}"
     );
     assert!(selection["pane_retention_ms"]
         .as_object()
@@ -1237,7 +1249,7 @@ fn plan_selection_settings_flag_loads_the_settings_from_json() {
         "planner-layering-3b",
         &["--plan-selection-settings", path_arg],
     );
-    assert!(document["stage3_plan_selection"]["selected"].is_string());
+    assert!(selects_a_plan(&document["stage3_plan_selection"]));
     let (code, stderr) = failure(&[
         "--exhaustive",
         "--example",
@@ -1278,7 +1290,7 @@ fn accuracy_guarantees_are_ignored_by_default_and_enforced_on_request() {
     enforcing.push("--enforce-accuracy-guarantees");
     let enforced = document_of(&enforcing);
     assert_eq!(enforced["accuracy_guarantees"], "enforced");
-    let unguaranteed: Vec<String> = enforced["stage3_plan_selection"]["rejected"]
+    let unguaranteed: Vec<String> = enforced["reference_pricing"]["rejected"]
         .as_array()
         .unwrap()
         .iter()
@@ -1288,7 +1300,7 @@ fn accuracy_guarantees_are_ignored_by_default_and_enforced_on_request() {
     assert!(!unguaranteed.is_empty(), "{enforced}");
     let document = document_of(&args);
     assert_eq!(document["accuracy_guarantees"], "ignored");
-    let accepted = &document["stage3_plan_selection"]["accepted"];
+    let accepted = &document["reference_pricing"]["accepted"];
     assert!(accepted.as_object().unwrap().values().any(|queries| {
         queries.as_array().unwrap().iter().any(|query| {
             query["accepted_regardless_of_guarantee"] == true
@@ -1466,26 +1478,26 @@ fn check_workload_example(root: &std::path::Path, example: &Value) {
 /// Current candidates may differ from historical snapshots; validate the emitted DAG linkage.
 fn check_candidate_example(document: Value, _committed: Value, example: &Value) {
     let selection = &document["stage3_plan_selection"];
-    let selected = selection["selected"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{}: no validated selected plan: {selection}", example["id"]));
+    assert!(
+        selects_a_plan(selection),
+        "{}: no validated selected plan: {selection}",
+        example["id"]
+    );
     let candidates = document["stage2_physical_asap_optimization"]["candidates"]
         .as_array()
         .unwrap();
     let candidate = candidates
         .iter()
-        .find(|candidate| candidate["id"] == selected)
+        .find(|candidate| candidate["id"] == SELECTED)
         .expect("selected plan is present in the physical archive");
     let dag: PhysicalASAPDAG = serde_json::from_value(candidate["dag"].clone()).unwrap();
     dag.validate().unwrap();
     let queries = document["workload"]["queries"].as_array().unwrap().len();
     assert_eq!(dag.roots.len(), queries);
-    assert_eq!(
-        selection["accepted"][selected].as_array().unwrap().len(),
-        queries
-    );
+    let accepted = selection["accepted_accuracy_per_query"].as_array().unwrap();
+    assert_eq!(accepted.len(), queries);
     if document["accuracy_guarantees"] == "enforced" {
-        for query in selection["accepted"][selected].as_array().unwrap() {
+        for query in accepted {
             assert_eq!(query["accepted_regardless_of_guarantee"], false);
             assert!(query["guarantee_check_rejection"].is_null());
         }
@@ -1502,10 +1514,17 @@ fn check_candidate_example(document: Value, _committed: Value, example: &Value) 
                 < view["installed_count"].as_u64().unwrap()
         );
     }
-    let report = &selection["search"]["candidate_connections"];
-    assert!(report.is_object(), "{}: {selection}", example["id"]);
-    assert!(report["physical_configurations"].as_u64().unwrap() > 0);
-    assert!(selection["costs"][selected].is_object());
+    assert!(
+        selection["search_report"].is_object(),
+        "{}: {selection}",
+        example["id"]
+    );
+    let report = &document["planning_report"];
+    let round = &report["rounds"][report["selected_round"].as_u64().unwrap() as usize];
+    assert!(
+        round["physical_candidates"].as_u64().unwrap() > 0,
+        "{report}"
+    );
 }
 
 /// The `--promql` path's data workload is what it plans with: every metric
@@ -1540,12 +1559,14 @@ fn promql_queries_carry_their_sampled_data_workload() {
 #[test]
 fn display_cap_shows_the_selected_then_valid_cheapest_then_each_cause() {
     let document = generate_example("planner-layering-3a", &["--max-displayed", "6"]);
-    let selection = &document["stage3_plan_selection"];
+    let selection = &document["reference_pricing"];
     let physical = document["stage2_physical_asap_optimization"]["candidates"]
         .as_array()
         .unwrap();
-    assert_eq!(physical.len(), 6);
+    // Six enumerated plans and the facade's selection.
+    assert_eq!(physical.len(), 7);
     let ids: HashSet<&str> = physical.iter().map(|p| p["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(SELECTED));
     assert!(ids.contains(selection["selected"].as_str().unwrap()));
     let counts = selection["rejected_by_cause"].as_object().unwrap();
     let total: u64 = counts.values().map(|n| n.as_u64().unwrap()).sum();
@@ -1612,9 +1633,12 @@ const QUANTILE_BY_WORKLOAD: &str = r#"{"query_workload": {"language": "promql", 
  "data_workload": {"arrival": {"ingesting": {"rows_per_second": 666.67}},
   "sources": {"data": {"series_count": 10000, "metric_type": "gauge", "sample_interval": 15000}}}}"#;
 
-/// Stage 3 prices the exact baseline of an instant `quantile by (G)` next
-/// to the sketches: every evaluated plan but the selected one is rejected
-/// only for its cost, and accepted plans answer Q3 and Q4 exactly.
+/// The reference pricer prices the exact baseline of an instant
+/// `quantile by (G)` next to the sketches: every enumerated plan but its
+/// pick is rejected for its cost or, for a sketch whose guarantee misses
+/// the target (DDSketch's relative bound needs non-negative values, which
+/// the workload does not declare), for its accuracy; none fails to
+/// execute. Accepted plans answer Q3 and Q4 exactly.
 #[test]
 fn exact_grouped_quantile_plans_compile_and_are_compared() {
     let path = std::env::temp_dir().join(format!(
@@ -1627,18 +1651,26 @@ fn exact_grouped_quantile_plans_compile_and_are_compared() {
         "--workload",
         path.to_str().unwrap(),
         "--enforce-accuracy-guarantees",
+        "--exhaustive",
+        "--max-combinations",
+        "200",
+        "--no-memo",
     ]);
     std::fs::remove_file(path).unwrap();
-    let selection = &document["stage3_plan_selection"];
+    assert!(selects_a_plan(&document["stage3_plan_selection"]));
+    let selection = &document["reference_pricing"];
     assert_eq!(document["accuracy_guarantees"], "enforced");
     let by_cause = selection["rejected_by_cause"].as_object().unwrap();
-    // Every plan but the selected one is rejected only for its cost.
     assert!(
-        by_cause
-            .keys()
-            .all(|cause| ["costlier", "tied_lost_on_enumeration_order"].contains(&cause.as_str())),
+        by_cause.keys().all(|cause| [
+            "costlier",
+            "tied_lost_on_enumeration_order",
+            "accuracy_target_missed"
+        ]
+        .contains(&cause.as_str())),
         "{by_cause:?}"
     );
+    assert!(by_cause.contains_key("costlier"), "{by_cause:?}");
     // Accepted plans passed the guarantee check (the selected one among them).
     let accepted = selection["accepted"].as_object().unwrap();
     // Accepted plans include ones that answer Q3 and Q4 without a sketch.
@@ -1695,11 +1727,8 @@ fn a_scan_two_queries_share_is_offered_built_once_per_evaluation() {
         .as_array()
         .unwrap();
     let selection = &document["stage3_plan_selection"];
-    let selected = selection["selected"].as_str().unwrap();
-    assert!(physical.iter().any(|p| p["id"] == selected));
-    let cost = selection["costs"][selected]["cost_per_second"]
-        .as_f64()
-        .unwrap();
+    assert!(physical.iter().any(|p| p["id"] == SELECTED));
+    let cost = selection["cost"]["cost_per_second"].as_f64().unwrap();
     // The shared-scan feasible price as an upper bound. The KLL for both
     // queries (k = 567, sized in Pass 1 for the whole result, ≈0.1364/s) is
     // valid, but the search, pricing the KLL at that final size, now
@@ -1851,10 +1880,7 @@ fn scans_projecting_different_labels_are_shared() {
     let selection = &document["stage3_plan_selection"];
     let shared_cost = cost.cost_per_second.unwrap();
     assert!(shared_cost.is_finite() && shared_cost > 0.0);
-    let selected = selection["selected"].as_str().unwrap();
-    let selected_cost = selection["costs"][selected]["cost_per_second"]
-        .as_f64()
-        .unwrap();
+    let selected_cost = selection["cost"]["cost_per_second"].as_f64().unwrap();
     // Offering maximal sharing must not force a costlier plan, and the
     // search must find a plan no dearer than the partial-sharing one (#994).
     let reference_cost = reference.costs[&reference.selected]
@@ -1876,8 +1902,8 @@ fn scans_projecting_different_labels_are_shared() {
 fn default_search_reports_candidate_connections() {
     let document = document_of(&["--promql", "sum(m)"]);
     assert_eq!(document["search"], "candidate-connections");
-    let report = &document["stage3_plan_selection"]["search"];
-    assert!(report["candidate_connections"].is_object(), "{report}");
+    let report = &document["stage3_plan_selection"]["search_report"];
+    assert!(report.is_object(), "{report}");
     assert!(report.get("routed_to_legacy").is_none());
     assert!(report.get("algorithm").is_none(), "{report}");
 }
@@ -1898,17 +1924,22 @@ fn search_flag_is_rejected() {
 fn milp_time_limit_is_reported() {
     let document = document_of(&["--promql", "sum(m)", "--milp-time-limit-s", "0"]);
     let selection = &document["stage3_plan_selection"];
-    assert!(selection["selected"].is_null());
-    let report = &selection["search"]["candidate_connections"];
+    assert!(!selects_a_plan(selection), "{selection}");
+    // The facade's report keeps the budget and selects no round.
+    let report = &document["planning_report"];
     assert!(
         report.is_object(),
         "budget stop retains its report: {selection}"
     );
-    assert_eq!(report["status"], "time_limit");
-    assert!(selection["error"]
-        .as_str()
-        .unwrap()
-        .contains("planning budget"));
+    assert_eq!(report["time_limit_ms"], 0);
+    assert!(report["selected_round"].is_null(), "{report}");
+    assert!(
+        selection["error"]
+            .as_str()
+            .unwrap()
+            .contains("planning budget"),
+        "{selection}"
+    );
 }
 
 /// The memo search's document names its selected plan's logical candidate
@@ -1940,10 +1971,8 @@ fn the_memo_search_document_names_the_selected_logical_candidate() {
         let from = candidate["from_logical"].as_str().unwrap();
         assert!(logical.contains(from), "{from} is not in {logical:?}");
     }
-    let selected = document["stage3_plan_selection"]["selected"]
-        .as_str()
-        .unwrap();
-    assert!(physical.iter().any(|c| c["id"] == selected));
+    assert!(selects_a_plan(&document["stage3_plan_selection"]));
+    assert!(physical.iter().any(|c| c["id"] == SELECTED));
 }
 
 /// Each shown candidate's `per_node` entries carry the node's operator,
@@ -1956,16 +1985,13 @@ fn per_node_costs_show_operator_timing_and_predicted_cpu() {
     // The selected plan supplies the serialization evidence; exhaustive
     // candidate coverage is tested separately by the archive tests.
     let document = generate_bounded_example("planner-layering-1", &[]);
-    let costs = document["stage3_plan_selection"]["costs"]
-        .as_object()
-        .unwrap();
+    let selection = &document["stage3_plan_selection"];
     assert!(
-        !costs.is_empty(),
-        "missing evaluated costs: {}",
-        document["stage3_plan_selection"]
+        selects_a_plan(selection),
+        "missing evaluated costs: {selection}"
     );
     let mut timings = HashSet::new();
-    for (id, cost) in costs {
+    for (id, cost) in [(SELECTED, &selection["cost"])] {
         let per_node = cost["per_node"].as_object().unwrap();
         let mut sum = 0.0;
         for node in per_node.values() {
@@ -2033,7 +2059,7 @@ fn a_counter_function_over_a_declared_gauge_plans_with_a_warning() {
     std::fs::write(&path, workload("counter").to_string()).unwrap();
     let counter = document_of(&["--workload", path.to_str().unwrap()]);
     std::fs::remove_file(path).unwrap();
-    assert!(gauge["stage3_plan_selection"]["selected"].is_string());
+    assert!(selects_a_plan(&gauge["stage3_plan_selection"]));
     assert_eq!(
         gauge["stage3_plan_selection"]["warnings"],
         serde_json::json!([
@@ -2041,7 +2067,7 @@ fn a_counter_function_over_a_declared_gauge_plans_with_a_warning() {
              counter (a drop is a reset); planned as written"
         ])
     );
-    assert!(counter["stage3_plan_selection"]["selected"].is_string());
+    assert!(selects_a_plan(&counter["stage3_plan_selection"]));
     assert!(counter["stage3_plan_selection"].get("warnings").is_none());
 }
 
@@ -2140,7 +2166,7 @@ fn several_workload_files_in_different_languages_are_planned_together() {
         2
     );
     assert!(
-        document["stage3_plan_selection"]["selected"].is_string(),
+        selects_a_plan(&document["stage3_plan_selection"]),
         "{}",
         document["stage3_plan_selection"]
     );
@@ -2247,7 +2273,7 @@ fn a_classic_histogram_quantile_gets_a_selected_plan() {
             "--enforce-accuracy-guarantees",
         ]);
         let selection = &document["stage3_plan_selection"];
-        assert!(selection["selected"].is_string(), "{query}: {selection}");
+        assert!(selects_a_plan(selection), "{query}: {selection}");
     }
 }
 

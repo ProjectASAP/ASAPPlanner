@@ -68,6 +68,14 @@ def stage_pipeline(*args: str) -> dict:
         return json.loads(out.read_text())
 
 
+def selected_id(doc: dict) -> str:
+    """The selected physical candidate's id: `P1` in a document whose Stage 3
+    section is the `Selection` (stage_pipeline's current output), the
+    section's `selected` in an archived one."""
+    selection = doc["stage3_plan_selection"]
+    return "P1" if "selected_candidates" in selection else selection["selected"]
+
+
 def stages_js():
     js = py_mini_racer.MiniRacer()
     js.eval((HERE / "node-style.js").read_text().replace("console.warn", "(() => {})"))
@@ -402,8 +410,7 @@ class ScalarQueryTests(unittest.TestCase):
 
     def setUp(self):
         self.js = stages_js()
-        selection = self.doc["stage3_plan_selection"]
-        self.selected = next(c for c in self.doc["stage2_physical_asap_optimization"]["candidates"] if c["id"] == selection["selected"])
+        self.selected = next(c for c in self.doc["stage2_physical_asap_optimization"]["candidates"] if c["id"] == selected_id(self.doc))
         self.query_ids = [q["id"] for q in self.doc["workload"]["queries"]]
 
     def lanes(self):
@@ -462,7 +469,7 @@ class DefaultSearchTests(unittest.TestCase):
         self.assertEqual(self.doc["search"], "candidate-connections")
         self.assertEqual(self.js.call("validateStagePipeline", self.doc), [])
         physical = self.doc["stage2_physical_asap_optimization"]["candidates"]
-        self.assertEqual([p["id"] for p in physical], [self.doc["stage3_plan_selection"]["selected"]])
+        self.assertEqual([p["id"] for p in physical], [selected_id(self.doc)])
 
     def test_guarantees_are_ignored_by_default_and_the_header_says_which(self):
         self.assertEqual(self.doc["accuracy_guarantees"], "ignored")
@@ -476,34 +483,39 @@ class DefaultSearchTests(unittest.TestCase):
         self.assertEqual(self.js.call("accuracyGuaranteesText", enforced), "accuracy guarantees enforced")
         self.assertEqual(self.js.call("accuracyGuaranteesText", {}), "")
 
-    def test_header_names_the_search_and_checked_candidates(self):
+    def test_header_names_the_search_and_its_report(self):
         text = self.js.call("searchText", self.doc)
         self.assertTrue(text.startswith("candidate-connection search · "), text)
-        self.assertIn("physical candidates checked", text)
-        report = self.doc["stage3_plan_selection"]["search"]["candidate_connections"]
-        self.assertEqual(report["output_references"], 2)
-        # Render the current report without forcing the live solver to choose
-        # a particular decomposition for this workload.
-        with_components = json.loads(json.dumps(self.doc))
-        search = with_components["stage3_plan_selection"]["search"]
-        search["candidate_connections"]["independent_components"] = 2
+        report = self.doc["stage3_plan_selection"]["search_report"]
+        self.assertIn(f"search {report['status'].replace('_', ' ')}", text)
+        self.assertIn(f"MILP {report['milp_variables']} variables", text)
+        self.assertIn("pane-width round", text)
+        outputs = self.doc["stage3_plan_selection"]["selected_candidates"]["query_output_candidates"]
+        self.assertEqual(len(outputs), 2)
+        # Archived documents (before Stage 3's `Selection`) still render
+        # their search's checked candidates and component list.
+        archived = json.loads(json.dumps(self.doc))
+        search = {"candidates_checked": 3, "candidate_connections": {"independent_components": 2}}
+        archived["stage3_plan_selection"]["search"] = search
+        self.assertIn("3 physical candidates checked", self.js.call("searchText", archived))
         self.assertIn("2 independent components searched separately",
-                      self.js.call("searchText", with_components))
+                      self.js.call("searchText", archived))
         search["candidate_connections"]["independent_components"] = 1
         search["components"] = [{}, {}]
         self.assertNotIn("components searched separately",
-                         self.js.call("searchText", with_components))
-        # Old archived documents still render their component list.
+                         self.js.call("searchText", archived))
         del search["candidate_connections"]
         self.assertIn("2 independent components searched separately",
-                      self.js.call("searchText", with_components))
+                      self.js.call("searchText", archived))
         self.assertTrue(self.js.call("searchText", example1()).startswith("exhaustive search · "))
 
     def test_rejections_of_candidates_not_kept_are_rows_after_the_others(self):
-        doc = dict(self.doc)
-        doc["stage3_plan_selection"] = dict(doc["stage3_plan_selection"], search_rejected=[
-            {"id": "P7", "cause": "accuracy_target_missed", "reason": "q2: misses its target"},
-        ])
+        # The reference pricer's rejections of candidates the document does
+        # not show (`reference_pricing.search_rejected`).
+        doc = dict(self.doc, reference_pricing={
+            "costs": {}, "accepted": {}, "selected": None, "rejected": [], "rejected_by_cause": {},
+            "search_rejected": [{"id": "P7", "cause": "accuracy_target_missed", "reason": "q2: misses its target"}],
+        })
         self.assertEqual(self.js.call("validateStagePipeline", doc), [])
         rows = self.js.call("stageCandidateRows", doc)
         self.assertEqual(rows[0]["status"], "selected")
@@ -520,7 +532,7 @@ class BinaryOperatorTests(unittest.TestCase):
         doc = stage_pipeline("--promql", "sum(rate(a[1m])) / sum(rate(b[1m]))")
         js = stages_js()
         self.assertEqual(js.call("validateStagePipeline", doc), [])
-        selected = doc["stage3_plan_selection"]["selected"]
+        selected = selected_id(doc)
         lanes = [
             (doc["stage0_query_language_frontends"]["dag"], False),
             (doc["stage1_logical_asap_optimization"]["candidates"][0]["dag"], False),

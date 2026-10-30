@@ -18,7 +18,9 @@ use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_plan_selection::reference_pricer::{select_among_plans, WholePlanSelection};
 use asap_plan_selection::{ErrorSelectingPlan, Selection};
 use asap_planner::{installable_plan_of, InstallablePlanError, PlanningModels, PlanningRun};
-use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
 use asap_types::stages::CandidateMemo;
 use asap_types::stages::MemoGroupId;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
@@ -192,6 +194,7 @@ pub fn physical_plans_of(
         models.deployment_capabilities.query_time_results_retained,
     )
     .map_err(|error| error.to_string())?;
+    retain_deployable(&mut physical, models);
     if physical.is_empty() {
         return Err("no physical plan".into());
     }
@@ -200,6 +203,25 @@ pub fn physical_plans_of(
         plan.from_logical = id.clone();
     }
     Ok(physical)
+}
+
+/// Drops the plans of `physical` that Stage 2 would not offer under
+/// `models.deployment_capabilities`: without raw data retained, a plan that
+/// scans raw data at query time (Stage 2's `PruneReason::RawDataNotRetained`;
+/// `optimize_physical_asap` enumerates every assignment and leaves this
+/// rule to Stage 2's catalog, and the reference pricer no longer checks it).
+pub fn retain_deployable(physical: &mut Vec<PhysicalWorkloadPlan>, models: PlanningModels<'_>) {
+    if models.deployment_capabilities.raw_data_retained {
+        return;
+    }
+    physical.retain(|plan| {
+        plan.dag.nodes.iter().all(|node| {
+            !matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { .. })
+            ) || node.output_state.timing == ExecutionTiming::IngestionTime
+        })
+    });
 }
 
 /// The reference pricer over `physical` under `models`: every plan checked,

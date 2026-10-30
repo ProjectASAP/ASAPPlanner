@@ -59,7 +59,7 @@ fn run_a() -> Run {
                 }
             })
             .collect();
-        let whole: Vec<_> = compose_logical_candidate(&local, &choices).unwrap();
+        let whole = unshare(&compose_logical_candidate(&local, &choices).unwrap());
         computations.push(whole.clone());
         computations.push(share_identical(&whole));
     }
