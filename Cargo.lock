@@ -428,8 +428,10 @@ dependencies = [
 name = "asap-physical-asap-optimization"
 version = "0.1.0"
 dependencies = [
+ "asap-accuracy",
  "asap-logical-asap-optimization",
  "asap-types",
+ "rmp-serde",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

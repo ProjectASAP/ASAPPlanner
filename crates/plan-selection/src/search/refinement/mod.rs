@@ -3,5 +3,6 @@ pub(crate) mod components;
 mod materialization;
 pub(crate) mod objectives;
 pub(crate) mod planner;
-pub(crate) mod pruning;
+#[cfg(test)]
+mod pruning;
 pub(crate) mod search;

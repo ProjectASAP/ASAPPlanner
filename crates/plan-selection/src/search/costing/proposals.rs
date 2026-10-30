@@ -11,9 +11,9 @@ use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 use asap_types::physical::Materialization;
 
-use crate::search::candidates::configurations::CandidateConfigurationInventory;
 use crate::search::refinement::planner::CandidatePlanningContext;
 use crate::{price_node, PricedNode, ProducerOutput};
+use asap_types::stages::CandidateConfigurationInventory;
 
 /// Partial heuristic estimates are harmless: unknown or interrupted entries
 /// remain zero, and the surrounding search still enforces its shared deadline.

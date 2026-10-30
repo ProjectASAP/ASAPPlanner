@@ -1,10 +1,5 @@
 //! Whole-evaluator parity for selected consumer range-retention tiers.
 use super::*;
-use crate::search::candidates::configurations::CandidateConfiguration;
-use crate::search::candidates::graph::{
-    CandidateDependencyGraph, PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
-};
-use crate::search::candidates::inventory::CandidateInventory;
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, HowToComputeAggregateMeasure,
 };
@@ -12,7 +7,12 @@ use asap_logical_asap_optimization::test_support::lower_promql;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::ir::OperatorNode;
+use asap_types::stages::CandidateConfiguration;
+use asap_types::stages::CandidateInventory;
 use asap_types::stages::MemoGroupId;
+use asap_types::stages::{
+    CandidateDependencyGraph, PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
+};
 use asap_types::workload::{
     DataWorkload, Predictability, Query, QueryRequirements, QueryWorkloadEntry, RangeEvaluation,
     RepetitionInterval,

@@ -16,13 +16,13 @@ pub(in crate::search) enum DirectPriceModel<'a> {
 }
 use std::time::{Duration, Instant};
 
-use crate::search::candidates::graph::{
-    CandidateDependencyGraph, CandidateSelectionError, PhysicalCandidateId, RejectedQuerySubgraph,
-    SelectedCandidateGraph,
-};
+use crate::search::candidates::graph::RejectedQuerySubgraph;
 use crate::search::milp::model::{
     solve_candidate_proposal_with_metrics, solve_direct_cost_proposal_with_metrics,
     CandidateProposal, CandidateSolveMetrics, ObservedAssignment,
+};
+use asap_types::stages::{
+    CandidateDependencyGraph, CandidateSelectionError, PhysicalCandidateId, SelectedCandidateGraph,
 };
 
 #[derive(Debug, Default)]
@@ -264,7 +264,7 @@ fn search_with_solver(
             // Seed with one copy per configuration to avoid spending the warm-start
             // budget on interchangeable execution bindings. The certified search
             // retains every copy, including when this restricted seed is infeasible.
-            use crate::search::candidates::graph::ReaderConstraint;
+            use asap_types::stages::ReaderConstraint;
             let mut extra_copies: Vec<_> = heuristic
                 .reader_constraints
                 .iter()
@@ -407,11 +407,8 @@ fn search_with_solver(
             let admitted = observations
                 .iter()
                 .filter(|observation: &&ObservedAssignment| {
-                    crate::search::candidates::graph::validate_selected_graph(
-                        restricted,
-                        &observation.selected,
-                    )
-                    .is_ok()
+                    asap_types::stages::validate_selected_graph(restricted, &observation.selected)
+                        .is_ok()
                 })
                 .cloned()
                 .map(|mut observation| {
@@ -756,10 +753,10 @@ fn same_assignment(left: &SelectedCandidateGraph, right: &SelectedCandidateGraph
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::candidates::graph::{
+    use asap_types::stages::MemoGroupId;
+    use asap_types::stages::{
         PhysicalCandidate, PhysicalCandidateId, ProducerRequirement, QueryRootCandidates,
     };
-    use asap_types::stages::MemoGroupId;
 
     fn choices(costs: &[f64]) -> CandidateDependencyGraph {
         CandidateDependencyGraph {
@@ -941,7 +938,7 @@ mod tests {
     // the earlier certified bound or falsely closing the optimality gap.
     #[test]
     fn nonoptimal_proposal_preserves_bound_and_improves_incumbent() {
-        use crate::search::candidates::graph::{validate_selected_graph, QueryRootAssignment};
+        use asap_types::stages::{validate_selected_graph, QueryRootAssignment};
         let graph = choices(&[2.0, 3.0]);
         let mut round = 0;
         let result = search_with_solver(
@@ -1061,7 +1058,7 @@ mod tests {
     // certified search when two incompatible query contexts need both copies.
     #[test]
     fn baseline_scope_restriction_falls_back_to_complete_graph() {
-        use crate::search::candidates::graph::ReaderConstraint;
+        use asap_types::stages::ReaderConstraint;
         let mut graph = choices(&[1.0, 1.0]);
         graph.query_roots.push(graph.query_roots[0].clone());
         graph.reader_constraints = vec![

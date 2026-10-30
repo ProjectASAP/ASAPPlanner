@@ -6,7 +6,7 @@ use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub(crate) struct SupplierCandidates(Rc<Vec<PhysicalCandidateId>>);
+pub struct SupplierCandidates(Rc<Vec<PhysicalCandidateId>>);
 
 impl From<Vec<PhysicalCandidateId>> for SupplierCandidates {
     fn from(values: Vec<PhysicalCandidateId>) -> Self {
@@ -60,15 +60,12 @@ impl IntoIterator for SupplierCandidates {
 /// Exact ordered-content interning. No sorting, deduplication, or compatibility
 /// inference occurs here; malformed input remains visible to graph validation.
 #[derive(Default)]
-pub(in crate::search) struct SupplierSetInterner {
+pub struct SupplierSetInterner {
     sets: HashSet<SupplierCandidates>,
 }
 
 impl SupplierSetInterner {
-    pub(in crate::search) fn intern(
-        &mut self,
-        values: impl Into<SupplierCandidates>,
-    ) -> SupplierCandidates {
+    pub fn intern(&mut self, values: impl Into<SupplierCandidates>) -> SupplierCandidates {
         let values = values.into();
         if let Some(existing) = self.sets.get(&values) {
             return existing.clone();
@@ -81,13 +78,13 @@ impl SupplierSetInterner {
 /// Count physical supplier-list storage separately from logical connections.
 /// Distinct input positions remain distinct even when their storage is shared.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(in crate::search) struct SupplierStorageMetrics {
+pub struct SupplierStorageMetrics {
     pub logical_connections: usize,
     pub unique_supplier_sets: usize,
     pub stored_supplier_ids: usize,
 }
 
-pub(in crate::search) fn supplier_storage_metrics(
+pub fn supplier_storage_metrics(
     graph: &super::graph::CandidateDependencyGraph,
 ) -> SupplierStorageMetrics {
     let mut allocations = HashSet::new();
@@ -114,12 +111,12 @@ mod tests {
     // share one allocation; storage compression adds no selection equality.
     #[test]
     fn shared_supplier_storage_keeps_input_choices_independent() {
-        use crate::search::candidates::graph::{
+        use super::super::graph::{
             validate_selected_graph, CandidateDependencyGraph, PhysicalCandidate,
             ProducerConsumerConnection, ProducerRequirement, QueryRootAssignment,
             QueryRootCandidates, SelectedCandidateGraph,
         };
-        use asap_types::stages::MemoGroupId;
+        use crate::stages::MemoGroupId;
         let mut interner = SupplierSetInterner::default();
         let choices = interner.intern(vec![PhysicalCandidateId(0), PhysicalCandidateId(1)]);
         let graph = CandidateDependencyGraph {

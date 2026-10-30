@@ -4,8 +4,6 @@
 //! The fixed-profile adapter admits one interface; supplier_price_options keeps
 //! compatible interfaces as joint MILP choices. Ingestion worker counts require
 //! certified unary upstream work, never statistics from a template child.
-use crate::search::candidates::configurations::CandidateConfigurationInventory;
-use crate::search::candidates::graph::PhysicalCandidateId;
 use crate::search::milp::direct_cost::{DirectCostProfile, NodeCostProfile, QueryScheduleRates};
 use crate::search::refinement::planner::CandidatePlanningContext;
 use crate::{PricedNode, ProducerOutput};
@@ -16,6 +14,8 @@ use asap_types::ir::properties::{AccuracyScope, ExecutionTiming};
 use asap_types::ir::schema::{FieldDataType, SketchParams};
 use asap_types::ir::{ASAPOp, NonASAPOp, QueryRoot};
 use asap_types::physical::{Materialization, Medium};
+use asap_types::stages::CandidateConfigurationInventory;
+use asap_types::stages::PhysicalCandidateId;
 use asap_types::workload::{QueryRecurrence, RepeatedDemand};
 use std::collections::HashSet;
 
@@ -1077,15 +1077,15 @@ mod tests {
     }
 
     use super::*;
-    use crate::search::candidates::configurations::CandidateConfiguration;
-    use crate::search::candidates::graph::{
-        CandidateDependencyGraph, PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
-    };
-    use crate::search::candidates::inventory::CandidateInventory;
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::{Operator, OperatorNode, ProjectItem, ScalarExpr};
+    use asap_types::stages::CandidateConfiguration;
+    use asap_types::stages::CandidateInventory;
     use asap_types::stages::MemoGroupId;
+    use asap_types::stages::{
+        CandidateDependencyGraph, PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
+    };
     use asap_types::workload::{
         DataWorkload, Predictability, Query, QueryRequirements, QueryWorkloadEntry,
         RepetitionInterval,
@@ -1682,7 +1682,7 @@ mod tests {
                         );
                     let proposal = match direct_proposal {
                         Ok(Some(proposal)) => proposal,
-                        Err(crate::search::candidates::graph::CandidateSelectionError::UnsupportedDirectCost(_)) if speed_multiplier == 1.0 => {
+                        Err(asap_types::stages::CandidateSelectionError::UnsupportedDirectCost(_)) if speed_multiplier == 1.0 => {
                             // Default nanosecond work can give sub-threshold
                             // held-memory coefficients. Preserve that fallback.
                             crate::search::milp::model::solve_candidate_proposal(&configured.inventory.graph, &[], None).unwrap().unwrap()
