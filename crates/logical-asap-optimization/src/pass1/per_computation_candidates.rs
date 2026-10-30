@@ -1243,7 +1243,7 @@ fn with_raw_data_samples_requirement(
 /// unsized; several approximate inputs of one query share its budget
 /// equally ([`budget_shares`]). A measure filter becomes `SummaryAgg.filter`;
 /// `HAVING` is applied as its target records. A sub-DAG shared between roots
-/// stays shared. Every node carries the guarantee [`composed_guarantee`](asap_accuracy::propagation::composed_guarantee)
+/// stays shared. Every node carries the guarantee `asap_accuracy::propagation::composed_guarantee`
 /// gives it.
 pub fn compose_logical_candidate<Id: Clone>(
     inventory: &PerComputationCandidates<Id>,

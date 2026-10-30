@@ -26,7 +26,7 @@ A new sketch that Pass 1 can offer for an intent.
 3. **Offer and size.** Place it in `realization::FAMILY_PREFERENCE`
    (`crates/logical-asap-optimization`): `summary_candidates` offers it, in
    that order, for every intent whose statistic its capability row answers.
-   Size it in `realization::default_size_params`.
+   Size it in `asap_accuracy::sizing::default_size_params`.
 4. **Accuracy.** Add its error model under
    `crates/accuracy/src/estimators/` and return
    it from `BuiltinAccuracyModel`'s `local_guarantee`, by inverting the same

@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 # The accuracy model shared by the planning stages: per-family estimators,
-# guarantee composition, budget split, the target check and the
+# guarantee composition and propagation through a DAG, sizing, budget
+# split, the target check and the
 # deployment's accuracy model and evidence traits. Depends only on
 # `asap-types`, never on a stage crate, so every stage can use it.
 [dependencies]
