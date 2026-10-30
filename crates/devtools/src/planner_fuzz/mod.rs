@@ -399,10 +399,7 @@ impl Planner {
     }
 
     fn plan_selection_settings(&self) -> CostInputs {
-        CostInputs {
-            ignore_accuracy_guarantees: !self.settings.enforce_accuracy_guarantees,
-            ..CostInputs::default()
-        }
+        CostInputs::default()
     }
 
     /// The frontends' roots of `workload`, one per query.
@@ -438,7 +435,8 @@ impl Planner {
         let deployment = workload.deployment();
         let models = PlanningModels::builtin()
             .with_plan_selection(&plan_selection)
-            .with_deployment_capabilities(&deployment);
+            .with_deployment_capabilities(&deployment)
+            .with_ignore_accuracy_guarantees(!self.settings.enforce_accuracy_guarantees);
         let run = match self.settings.search {
             SearchKind::Exhaustive => run_planning_stages_over(
                 roots.clone(),
@@ -552,7 +550,8 @@ impl Planner {
         let deployment = workload.deployment();
         let models = PlanningModels::builtin()
             .with_plan_selection(&plan_selection)
-            .with_deployment_capabilities(&deployment);
+            .with_deployment_capabilities(&deployment)
+            .with_ignore_accuracy_guarantees(!self.settings.enforce_accuracy_guarantees);
         let mut candidates = optimize_physical_asap(
             "witness",
             &roots,

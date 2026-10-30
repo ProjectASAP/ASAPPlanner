@@ -27,7 +27,8 @@ use asap_types::workload::WorkloadError;
 
 use crate::run::{SelectionError, Stage1ToStage3Pass};
 use asap_accuracy::{
-    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, NoAccuracyEvidence,
+    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, IgnoreAccuracyGuarantees,
+    NoAccuracyEvidence,
 };
 use asap_cost::CostInputs;
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
@@ -36,6 +37,7 @@ use asap_plan_selection::{AccuracyCheckInputs, Selection};
 use asap_types::ir::physical_export::PhysicalASAPNodeId;
 
 static BUILTIN_ACCURACY_MODEL: BuiltinAccuracyModel = BuiltinAccuracyModel;
+static IGNORE_ACCURACY_GUARANTEES: IgnoreAccuracyGuarantees = IgnoreAccuracyGuarantees;
 static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
 static DEFAULT_PLAN_SELECTION: std::sync::LazyLock<CostInputs> =
     std::sync::LazyLock::new(CostInputs::default);
@@ -58,7 +60,7 @@ pub struct PlanningModels<'a> {
     /// Decides whether a candidate's accuracy guarantee meets its query's
     /// target, and whether the deployment accepts an output regardless of
     /// its guarantee; [`BuiltinAccuracyModel`] by default.
-    /// [`CostInputs::ignore_accuracy_guarantees`] overrides it.
+    /// `ignore_accuracy_guarantees` overrides it.
     pub accuracy: &'a dyn AccuracyModel,
     /// Deployment facts the guarantees need (operand domains, observed
     /// guarantees); [`NoAccuracyEvidence`] by default.
@@ -72,6 +74,14 @@ pub struct PlanningModels<'a> {
     /// whether it keeps query-time results across evaluations (Stage 2);
     /// default [`DeploymentCapabilities::default`].
     pub deployment_capabilities: &'a DeploymentCapabilities,
+    /// Accept every query output regardless of its accuracy guarantee: the
+    /// facade passes Stage 3 [`IgnoreAccuracyGuarantees`] in place of
+    /// `accuracy`. For comparing candidates on cost alone, e.g. a
+    /// benchmark of sketch plans with no analytical guarantee;
+    /// executability checks still apply, and each output accepted only
+    /// because of it is marked in the report
+    /// (`AcceptedAccuracy::guarantee_check_rejection`). Default `false`.
+    pub ignore_accuracy_guarantees: bool,
 }
 
 impl<'a> PlanningModels<'a> {
@@ -86,6 +96,7 @@ impl<'a> PlanningModels<'a> {
             evidence,
             plan_selection: &DEFAULT_PLAN_SELECTION,
             deployment_capabilities: &DEFAULT_DEPLOYMENT,
+            ignore_accuracy_guarantees: false,
         }
     }
 
@@ -96,17 +107,28 @@ impl<'a> PlanningModels<'a> {
             evidence: &NO_ACCURACY_EVIDENCE,
             plan_selection: &DEFAULT_PLAN_SELECTION,
             deployment_capabilities: &DEFAULT_DEPLOYMENT,
+            ignore_accuracy_guarantees: false,
         }
     }
 
-    /// Stage 3's accuracy check inputs: `accuracy` and `evidence`. Stage 3
-    /// accepts every output regardless of its guarantee when the cost
-    /// inputs set [`CostInputs::ignore_accuracy_guarantees`].
+    /// Stage 3's accuracy check inputs: `evidence`, and `accuracy`, or
+    /// [`IgnoreAccuracyGuarantees`] with `ignore_accuracy_guarantees`.
     pub fn accuracy_check_inputs(&self) -> AccuracyCheckInputs<'a> {
         AccuracyCheckInputs {
-            model: self.accuracy,
+            model: if self.ignore_accuracy_guarantees {
+                &IGNORE_ACCURACY_GUARANTEES
+            } else {
+                self.accuracy
+            },
             evidence: self.evidence,
         }
+    }
+
+    /// These models, accepting every query output regardless of its
+    /// accuracy guarantee when `ignore` (`ignore_accuracy_guarantees`).
+    pub fn with_ignore_accuracy_guarantees(mut self, ignore: bool) -> Self {
+        self.ignore_accuracy_guarantees = ignore;
+        self
     }
 
     pub fn with_accuracy(mut self, accuracy: &'a dyn AccuracyModel) -> Self {

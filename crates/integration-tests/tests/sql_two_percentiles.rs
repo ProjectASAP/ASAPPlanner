@@ -85,7 +85,6 @@ async fn run(queries: &[&str]) -> Run {
     // Every output accepted whatever its guarantee, as `stage_pipeline`
     // plans by default: this test checks the answers against the bound.
     let settings = CostInputs {
-        ignore_accuracy_guarantees: true,
         ..CostInputs::default()
     };
     let candidates = stage1(queries)
@@ -97,7 +96,9 @@ async fn run(queries: &[&str]) -> Run {
         &workload,
         roots,
         candidates,
-        asap_planner::PlanningModels::builtin().with_plan_selection(&settings),
+        asap_planner::PlanningModels::builtin()
+            .with_plan_selection(&settings)
+            .with_ignore_accuracy_guarantees(true),
     )
 }
 

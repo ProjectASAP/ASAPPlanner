@@ -2038,7 +2038,7 @@ fn exact_average_of_p99s(samples: &[RawDataSample]) -> BTreeMap<String, f64> {
 /// Issue #774: without raw data samples retained, every candidate of an average
 /// of p99s fails a check (the exact ones scan raw data samples at query time,
 /// the sketch ones have no guarantee), so planning fails. With
-/// `ignore_accuracy_guarantees` loaded from the settings JSON, the cheapest
+/// `PlanningModels::ignore_accuracy_guarantees`, the cheapest
 /// sketch plan is selected, the report marks its output as accepted without
 /// a guarantee, and it runs: equal to its query-time reference and within a
 /// loose tolerance of the exact answer.
@@ -2049,7 +2049,7 @@ async fn ignoring_accuracy_guarantees_selects_a_sketch_plan_that_runs() {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    let plan = |settings: CostInputs| {
+    let plan = |ignore: bool| {
         let workload = workload.clone();
         let capabilities = capabilities.clone();
         async move {
@@ -2058,13 +2058,13 @@ async fn ignoring_accuracy_guarantees_selects_a_sketch_plan_that_runs() {
                 FrontendInput::Promql { histograms: None },
                 PlanningModels::builtin()
                     .with_deployment_capabilities(&capabilities)
-                    .with_plan_selection(&settings),
+                    .with_ignore_accuracy_guarantees(ignore),
             ))
             .await
         }
     };
     // Without the setting, no candidate is valid.
-    let error = plan(CostInputs::default())
+    let error = plan(false)
         .await
         .expect_err("no candidate is valid without the setting");
     assert!(
@@ -2073,11 +2073,8 @@ async fn ignoring_accuracy_guarantees_selects_a_sketch_plan_that_runs() {
             .contains("infeasible_under_configured_model"),
         "{error}"
     );
-    // With it, loaded from JSON as a deployment passes it.
-    let settings: CostInputs =
-        serde_json::from_str(r#"{"ignore_accuracy_guarantees": true}"#).unwrap();
-    assert!(settings.ignore_accuracy_guarantees);
-    let (installed, report) = plan(settings).await.expect("a sketch plan is selected");
+    // With it.
+    let (installed, report) = plan(true).await.expect("a sketch plan is selected");
     // A per-series KLL or DDSketch plan.
     let families: Vec<String> = installed
         .dag
@@ -2146,16 +2143,14 @@ async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    let settings = CostInputs {
-        ignore_accuracy_guarantees: true,
-        ..CostInputs::default()
-    };
+    let settings = CostInputs::default();
     let (plan, report) = plan_installable(UserInput::new(
         &p99_avg_workload(false),
         FrontendInput::Promql { histograms: None },
         PlanningModels::builtin()
             .with_deployment_capabilities(&capabilities)
-            .with_plan_selection(&settings),
+            .with_plan_selection(&settings)
+            .with_ignore_accuracy_guarantees(true),
     ))
     .await
     .expect("a plan is selected");
@@ -2185,13 +2180,11 @@ async fn plan_p99(
             .then(|| only_summary_family(SketchAlgorithm::DDSketch)),
         ..DeploymentCapabilities::default()
     };
-    let settings = CostInputs {
-        ignore_accuracy_guarantees: ignore_accuracy,
-        ..CostInputs::default()
-    };
+    let settings = CostInputs::default();
     let models = PlanningModels::builtin()
         .with_deployment_capabilities(&capabilities)
-        .with_plan_selection(&settings);
+        .with_plan_selection(&settings)
+        .with_ignore_accuracy_guarantees(ignore_accuracy);
     plan_installable(UserInput::new(
         &workload,
         FrontendInput::Promql { histograms: None },
@@ -2411,17 +2404,15 @@ async fn ignoring_guarantees_counter_topk_plans_compile_and_answer_exactly() {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    let settings = CostInputs {
-        ignore_accuracy_guarantees: true,
-        ..CostInputs::default()
-    };
+    let settings = CostInputs::default();
     for (function, seconds) in [("increase", 300.0), ("rate", 1.0)] {
         let plan = plan_installable(UserInput::new(
             &counter_topk_workload(function),
             FrontendInput::Promql { histograms: None },
             PlanningModels::builtin()
                 .with_deployment_capabilities(&capabilities)
-                .with_plan_selection(&settings),
+                .with_plan_selection(&settings)
+                .with_ignore_accuracy_guarantees(true),
         ))
         .await
         .unwrap_or_else(|error| panic!("{function}: {error}"))
@@ -2712,16 +2703,14 @@ async fn plan_ignoring_guarantees(
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    // The settings' override accepts every output, so a forced heap goes
-    // through the accuracy model instead.
-    let settings = CostInputs {
-        ignore_accuracy_guarantees: heap.is_none(),
-        ..CostInputs::default()
-    };
+    // Ignoring guarantees replaces the accuracy model, so a forced heap goes
+    // through its own accuracy model instead.
+    let settings = CostInputs::default();
     let heap_only = heap.map(HeapPlansOnly);
     let models = PlanningModels::builtin()
         .with_deployment_capabilities(&capabilities)
-        .with_plan_selection(&settings);
+        .with_plan_selection(&settings)
+        .with_ignore_accuracy_guarantees(heap.is_none());
     let models = match &heap_only {
         Some(model) => models.with_accuracy(model),
         None => models,

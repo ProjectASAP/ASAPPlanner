@@ -2,15 +2,12 @@
 //! (validity) and [`CostInputs`] (the objective), and the engine's view of
 //! both, [`SelectionModels`].
 
-use crate::accuracy::IgnoreAccuracyGuarantees;
 use asap_accuracy::{AccuracyEvidenceProvider, AccuracyModel};
 use asap_cost::CostInputs;
 
-static IGNORE_ACCURACY_GUARANTEES: IgnoreAccuracyGuarantees = IgnoreAccuracyGuarantees;
-
 /// Inputs of the composed-accuracy check. `raw_data_retained` is a Stage 2
-/// input only; `ignore_accuracy_guarantees` is an accept-all `model` from
-/// the facade.
+/// input only; to ignore accuracy guarantees the facade passes an
+/// accept-all `model` ([`asap_accuracy::IgnoreAccuracyGuarantees`]).
 #[derive(Clone, Copy)]
 pub struct AccuracyCheckInputs<'a> {
     /// Decides whether a candidate's accuracy guarantee meets its query's
@@ -53,18 +50,6 @@ impl<'a> SelectionModels<'a> {
             accuracy: &asap_accuracy::BuiltinAccuracyModel,
             evidence: &asap_accuracy::NoAccuracyEvidence,
             plan_selection: &DEFAULT_COST_INPUTS,
-        }
-    }
-
-    /// The accuracy model the checks use: [`IgnoreAccuracyGuarantees`] when
-    /// the cost inputs set
-    /// [`CostInputs::ignore_accuracy_guarantees`], overriding `accuracy`;
-    /// otherwise `accuracy`.
-    pub(crate) fn effective_accuracy(&self) -> &'a dyn AccuracyModel {
-        if self.plan_selection.ignore_accuracy_guarantees {
-            &IGNORE_ACCURACY_GUARANTEES
-        } else {
-            self.accuracy
         }
     }
 

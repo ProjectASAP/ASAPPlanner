@@ -9,10 +9,10 @@
 //! candidate's output does (`AccuracyEvidenceProvider::output_guarantee`,
 //! read only here). The deployment's accuracy model may instead accept the
 //! output directly, whatever its guarantee says
-//! (`AccuracyModel::accepts_output_regardless_of_guarantee`); the settings'
-//! `ignore_accuracy_guarantees` (the one built-in way) accepts every
-//! output so, and the report records each one the
-//! guarantee check would have rejected. Before that, for
+//! (`AccuracyModel::accepts_output_regardless_of_guarantee`); the
+//! accept-all model the facade passes to ignore accuracy guarantees
+//! (`asap_accuracy::IgnoreAccuracyGuarantees`) accepts every output so, and
+//! the report records each one the guarantee check would have rejected. Before that, for
 //! a query with a target, Count-Min is admitted only over weights proven
 //! non-negative, which the executor needs to run it; a query without one
 //! constrains nothing.
@@ -236,7 +236,6 @@ use asap_types::workload::RepeatedDemand;
 use asap_cost::analytical::AnalyticalCostError;
 use asap_cost::state_bytes::{sketch_shape, summary_shape, StateInputRows};
 
-mod accuracy;
 mod accuracy_binding;
 mod checks;
 // #1095 Steps 1–2; the region DP and class-level MILP (later PRs) read it.
@@ -275,6 +274,10 @@ pub mod reference_pricer {
     /// Check, price and rank every plan of `candidates`, keeping every
     /// candidate: the selected one, each valid one's cost and accepted
     /// accuracy, and why each other one lost.
+    ///
+    /// Note: with measured operation costs and no frozen calibration factor,
+    /// the formulas are calibrated over `candidates` alone, so costs are not
+    /// on the scale of a facade run's selection (`--price-enumerated`).
     pub fn select_among_plans(
         candidates: &[PhysicalWorkloadPlan],
         entries: &[QueryWorkloadEntry],
@@ -2154,7 +2157,7 @@ mod tests {
         }
     }
 
-    /// `ignore_accuracy_guarantees` (issue #774) does not override the
+    /// `IgnoreAccuracyGuarantees` (issue #774) does not override the
     /// executor's requirement on Count-Min update weights either: over
     /// samples of a gauge, P2's CmsWithHeap is still rejected as
     /// `CountMinWeightsNotProvenNonNegative`.
@@ -2165,14 +2168,15 @@ mod tests {
             .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
         let gauge = with_metric_types(data(), &[("m", MetricType::Gauge)]);
         let settings = CostInputs {
-            ignore_accuracy_guarantees: true,
             ..CostInputs::default()
         };
         let selection = select_among_plans(
             &candidates(),
             &[entry_with(target, repeating(10_000))],
             &gauge,
-            SelectionModels::builtin().with_plan_selection(&settings),
+            SelectionModels::builtin()
+                .with_plan_selection(&settings)
+                .with_accuracy(&asap_accuracy::IgnoreAccuracyGuarantees),
         )
         .unwrap();
         let p2 = selection.rejected.iter().find(|r| r.id == "P2").unwrap();
@@ -2184,7 +2188,7 @@ mod tests {
         );
     }
 
-    /// With `ignore_accuracy_guarantees` (issue #774), each summary
+    /// With `IgnoreAccuracyGuarantees` (issue #774), each summary
     /// candidate the built-in model rejects (no guarantee, or one that
     /// misses the target) is valid, and its accepted output records the
     /// cause the guarantee check would have rejected it with; an output
@@ -2196,7 +2200,6 @@ mod tests {
             .accuracy_metric(AccuracyMetric::ABSOLUTE);
         let entries = [entry_with(target, repeating(10_000))];
         let settings = CostInputs {
-            ignore_accuracy_guarantees: true,
             ..CostInputs::default()
         };
         let builtin =
@@ -2206,7 +2209,9 @@ mod tests {
             &candidates(),
             &entries,
             &data(),
-            SelectionModels::builtin().with_plan_selection(&settings),
+            SelectionModels::builtin()
+                .with_plan_selection(&settings)
+                .with_accuracy(&asap_accuracy::IgnoreAccuracyGuarantees),
         )
         .unwrap();
         let mut marked = 0;

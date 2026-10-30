@@ -273,17 +273,6 @@ pub struct CostInputs {
     /// candidate catalog before pricing, preserving the default calibration policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frozen_calibration_factor: Option<f64>,
-    /// Accept every query output regardless of its accuracy guarantee:
-    /// planning uses an accuracy model that accepts every output in place
-    /// of `PlanningModels::accuracy` (`asap-plan-selection`). This field is the one built-in way
-    /// to ignore guarantees.
-    /// For comparing candidates on cost alone, e.g. a benchmark of sketch
-    /// plans with no analytical guarantee. Executability checks still apply.
-    /// Each output accepted only because of it, i.e. whose guarantee check
-    /// fails, is marked in the report
-    /// (`AcceptedAccuracy::guarantee_check_rejection`). JSON:
-    /// `"ignore_accuracy_guarantees": true`. Default `false`.
-    pub ignore_accuracy_guarantees: bool,
 }
 
 impl Default for CostInputs {
@@ -294,7 +283,6 @@ impl Default for CostInputs {
             non_repeating_query_horizon_seconds: DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS,
             measured_operation_costs: MeasuredOperationCosts::default(),
             frozen_calibration_factor: None,
-            ignore_accuracy_guarantees: false,
         }
     }
 }

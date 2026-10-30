@@ -1295,7 +1295,8 @@ fn accuracy_guarantees_are_ignored_by_default_and_enforced_on_request() {
                 && query["guarantee_check_rejection"] == "no_accuracy_guarantee"
         })
     }));
-    // The flag decides over a settings file's `ignore_accuracy_guarantees`.
+    // A settings file no longer carries `ignore_accuracy_guarantees`: the
+    // flag alone decides, and the file refuses the field.
     let settings = std::env::temp_dir().join(format!(
         "stage_pipeline_{}_ignoring_settings.json",
         std::process::id()
@@ -1303,7 +1304,9 @@ fn accuracy_guarantees_are_ignored_by_default_and_enforced_on_request() {
     std::fs::write(&settings, r#"{"ignore_accuracy_guarantees": true}"#).unwrap();
     let mut from_file = enforcing.clone();
     from_file.extend(["--plan-selection-settings", settings.to_str().unwrap()]);
-    assert_eq!(document_of(&from_file)["accuracy_guarantees"], "enforced");
+    let (code, stderr) = failure(&from_file);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("ignore_accuracy_guarantees"), "{stderr}");
     std::fs::remove_file(settings).unwrap();
     let mut ignoring = args.to_vec();
     ignoring.push("--ignore-accuracy-guarantees");

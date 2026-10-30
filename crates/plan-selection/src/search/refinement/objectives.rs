@@ -84,7 +84,7 @@ pub(in crate::search) fn optimize_objective_candidates(
     let mut traversal = original.clone();
     // Prefer an accuracy-safe first proposal when the contract requires one.
     // Ignored guarantees must not delay a legal cheaper implementation.
-    if !context.models.plan_selection.ignore_accuracy_guarantees {
+    if !context.models.accuracy.may_accept_regardless_of_guarantee() {
         for (candidate, weight) in traversal
             .candidates
             .iter_mut()

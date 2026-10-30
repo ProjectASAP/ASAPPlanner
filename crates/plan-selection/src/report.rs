@@ -120,7 +120,7 @@ pub struct AcceptedAccuracy {
     /// Whether the deployment's accuracy model accepted the output directly,
     /// whatever its guarantee says
     /// ([`AccuracyModel::accepts_output_regardless_of_guarantee`](asap_accuracy::AccuracyModel::accepts_output_regardless_of_guarantee)), as
-    /// every output is with `ignore_accuracy_guarantees`; `false` when its
+    /// every output is with [`IgnoreAccuracyGuarantees`](asap_accuracy::IgnoreAccuracyGuarantees); `false` when its
     /// guarantee was checked and met the target.
     pub accepted_regardless_of_guarantee: bool,
     /// When accepted regardless of its guarantee, the cause the guarantee
@@ -128,7 +128,7 @@ pub struct AcceptedAccuracy {
     /// ([`RejectionCause::NoAccuracyGuarantee`] or
     /// [`RejectionCause::AccuracyTargetMissed`]): the output was accepted
     /// only because of the accuracy model (e.g.
-    /// [`CostInputs::ignore_accuracy_guarantees`](asap_cost::CostInputs::ignore_accuracy_guarantees)). `None` when
+    /// [`IgnoreAccuracyGuarantees`](asap_accuracy::IgnoreAccuracyGuarantees)). `None` when
     /// its guarantee meets the target.
     pub guarantee_check_rejection: Option<RejectionCause>,
     /// The sketch algorithms the query's output reads, in plan order
@@ -254,6 +254,9 @@ pub enum SearchStatus {
     Optimal,
     /// The search stopped at the deadline (or at its internal limits) with
     /// a validated plan; the gap to the lower bound may be above zero.
+    /// Until #1095 replaces today's engine, this also covers the engine's
+    /// stop at its internal limit of 128 evaluations, and any other
+    /// non-optimal stop that still validated a plan.
     DeadlineReached,
 }
 

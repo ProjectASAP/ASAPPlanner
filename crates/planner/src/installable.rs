@@ -81,7 +81,7 @@ pub struct SelectedPlanReport {
     pub search_report: SearchReport,
     /// The workload queries (entry indices) whose output Stage 3 accepted
     /// only because the accuracy model accepts it regardless of its
-    /// guarantee (e.g. `CostInputs::ignore_accuracy_guarantees`):
+    /// guarantee (e.g. `PlanningModels::ignore_accuracy_guarantees`):
     /// the guarantee check would have rejected it. Empty when every
     /// output's guarantee meets its target; omitted from JSON then.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

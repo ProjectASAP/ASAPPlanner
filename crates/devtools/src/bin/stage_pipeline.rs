@@ -229,14 +229,13 @@
 // `non_repeating_query_horizon_seconds` and `measured_operation_costs`;
 // an omitted field takes its default). It replaces `--cost-model`, the
 // `--cluster-*` flags and `--measured-operation-costs`.
-// Accuracy guarantees are ignored by default: stage_pipeline sets the
-// settings' `ignore_accuracy_guarantees` (also over
-// `--plan-selection-settings`), so Stage 3 accepts every query output
-// regardless of its accuracy guarantee and candidates are compared on cost
-// alone; executability checks still apply. `--enforce-accuracy-guarantees`
-// clears it, and Stage 3 rejects an output whose guarantee does not meet
-// its query's target, as `plan_installable` does with the default
-// `CostInputs`. The document's top-level `accuracy_guarantees` is
+// Accuracy guarantees are ignored by default: stage_pipeline plans with
+// `PlanningModels::ignore_accuracy_guarantees`, so the facade passes Stage 3
+// an accuracy model that accepts every query output regardless of its
+// accuracy guarantee, and candidates are compared on cost alone;
+// executability checks still apply. `--enforce-accuracy-guarantees` clears
+// it, and Stage 3 rejects an output whose guarantee does not meet its
+// query's target, as `plan_installable` does with the default models. The document's top-level `accuracy_guarantees` is
 // `"ignored"` or `"enforced"`.
 // `--sample-interval-ms` is the sample interval declared for every metric the
 // PromQL queries read (default 15000). `--series-count <n>`,
@@ -568,7 +567,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         }
         None => MeasuredOperationCosts::default(),
     };
-    let mut plan_selection: CostInputs = match &plan_selection_settings_path {
+    let plan_selection: CostInputs = match &plan_selection_settings_path {
         Some(path) => {
             let text = std::fs::read_to_string(path)
                 .map_err(|e| format!("--plan-selection-settings {path}: {e}"))?;
@@ -581,7 +580,6 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             ..default_settings
         },
     };
-    plan_selection.ignore_accuracy_guarantees = !enforce_accuracy_guarantees;
     if memo_caps.choices_to_price > 0 {
         if !write_memo {
             return Err("--price-enumerated needs the memo (drop --no-memo)".into());
@@ -728,7 +726,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     }
     let models = PlanningModels::builtin()
         .with_plan_selection(&plan_selection)
-        .with_deployment_capabilities(&deployment_capabilities);
+        .with_deployment_capabilities(&deployment_capabilities)
+        .with_ignore_accuracy_guarantees(!enforce_accuracy_guarantees);
     let result = run_search_over(
         roots.clone(),
         &entries,

@@ -554,7 +554,7 @@ fn seed_dds_budgets(
     };
     let graph = &configured.dag;
     let mut budgets = vec![f64::INFINITY; graph.candidates.len()];
-    if context.models.plan_selection.ignore_accuracy_guarantees {
+    if context.models.accuracy.may_accept_regardless_of_guarantee() {
         return budgets;
     }
     let query_budgets: Vec<_> = context
@@ -720,7 +720,7 @@ fn accuracy_baseline(
         .enumerate()
         .filter_map(|(id, &cost)| {
             (cost > 0.0
-                && if context.models.plan_selection.ignore_accuracy_guarantees {
+                && if context.models.accuracy.may_accept_regardless_of_guarantee() {
                     configured.physical.candidates[id].timing
                         == asap_types::ir::properties::ExecutionTiming::QueryTime
                 } else {
@@ -779,7 +779,7 @@ fn accuracy_baseline(
                                     && guarantee.spec.failure_probability.evaluate().is_none())
                         })
                     };
-            let contract_risk = !context.models.plan_selection.ignore_accuracy_guarantees
+            let contract_risk = !context.models.accuracy.may_accept_regardless_of_guarantee()
                 && (unresolved_estimator_error || node.guarantee.as_ref().is_some_and(|guarantee| {
                     !guarantee.is_exact()
                         && guarantee.spec.accuracy_metric == AccuracyMetric::Rank
@@ -790,7 +790,7 @@ fn accuracy_baseline(
             // Start with explicit build/pane materialization; optional shared
             // non-summary materializations remain in the complete search.
             let contextual_materialization =
-                !context.models.plan_selection.ignore_accuracy_guarantees
+                !context.models.accuracy.may_accept_regardless_of_guarantee()
                     && configured.physical.candidates[id].materialization
                         != asap_types::physical::Materialization::NotMaterialized
                     && !matches!(
@@ -806,7 +806,7 @@ fn accuracy_baseline(
             // Unpriced pane pipelines are not free. Prefer candidates whose
             // local query work can be priced for the initial proposal; the
             // complete search retains every legal pane and its certified bound.
-            let unknown_work_priority = if context.models.plan_selection.ignore_accuracy_guarantees
+            let unknown_work_priority = if context.models.accuracy.may_accept_regardless_of_guarantee()
                 && configured.physical.candidates[id].timing
                     == asap_types::ir::properties::ExecutionTiming::QueryTime
                 && matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
@@ -1486,11 +1486,12 @@ mod tests {
         );
         assert_eq!(configured.dag.candidates.len(), original_count);
         let settings = asap_cost::CostInputs {
-            ignore_accuracy_guarantees: true,
             ..Default::default()
         };
         let ignored = CandidatePlanningContext {
-            models: models.with_plan_selection(&settings),
+            models: models
+                .with_plan_selection(&settings)
+                .with_accuracy(&asap_accuracy::IgnoreAccuracyGuarantees),
             ..context
         };
         assert!(seed_dds_budgets(&configured, &ignored, &[0])
@@ -1729,13 +1730,14 @@ mod tests {
         assert!(!excluded.contains(&projected[1]));
         assert!(!excluded.contains(&source));
         let ignored = asap_cost::CostInputs {
-            ignore_accuracy_guarantees: true,
             ..Default::default()
         };
         let (_, ignored_excluded) = accuracy_baseline(
             &configured,
             &CandidatePlanningContext {
-                models: SelectionModels::builtin().with_plan_selection(&ignored),
+                models: SelectionModels::builtin()
+                    .with_plan_selection(&ignored)
+                    .with_accuracy(&asap_accuracy::IgnoreAccuracyGuarantees),
                 ..context
             },
         )
@@ -1760,7 +1762,6 @@ mod tests {
     fn accuracy_policy_does_not_penalize_summary_candidates() {
         let (configured, roots, entries, data) = fixture();
         let settings = asap_cost::CostInputs {
-            ignore_accuracy_guarantees: true,
             ..Default::default()
         };
         let context = CandidatePlanningContext {
@@ -1770,7 +1771,9 @@ mod tests {
             realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: SelectionModels::builtin().with_plan_selection(&settings),
+            models: SelectionModels::builtin()
+                .with_plan_selection(&settings)
+                .with_accuracy(&asap_accuracy::IgnoreAccuracyGuarantees),
             calibration: CalibrationFit::default(),
         };
         let id = configured

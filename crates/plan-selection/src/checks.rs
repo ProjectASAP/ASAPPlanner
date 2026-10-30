@@ -95,7 +95,7 @@ pub(crate) fn accuracy_targets(entries: &[QueryWorkloadEntry]) -> Vec<AccuracyTa
 /// [`RejectionCause::CountMinWeightsNotProvenNonNegative`]: the executor
 /// cannot run such a plan. Then the deployment's accuracy model is asked
 /// ([`AccuracyModel::accepts_output_regardless_of_guarantee`], through
-/// [`SelectionModels::effective_accuracy`]): an output it accepts is accepted
+/// `SelectionModels::accuracy`): an output it accepts is accepted
 /// whatever its guarantee says, and the guarantee check's rejection, if any,
 /// is only recorded ([`AcceptedAccuracy::guarantee_check_rejection`]).
 /// Otherwise, an output with no guarantee from either
@@ -169,7 +169,7 @@ pub(crate) fn accuracy_check(
         // The deployment's model may accept the output directly, whatever
         // its guarantee says; the check's result is then only recorded.
         if models
-            .effective_accuracy()
+            .accuracy
             .accepts_output_regardless_of_guarantee(root, target)
         {
             accepted.push(AcceptedAccuracy {
@@ -224,7 +224,7 @@ pub(crate) fn guarantee_check(
     let values = values_per_result(root, series, data);
     let over_scope = |g: AccuracyGuarantee| g.over_scope(target.accuracy_scope, values);
     let guarantee = bound_root_guarantee(root, series, data, models).map(over_scope);
-    let meets = |g: &AccuracyGuarantee| models.effective_accuracy().satisfies(g, target);
+    let meets = |g: &AccuracyGuarantee| models.accuracy.satisfies(g, target);
     // The deployment's evidence is read only when the theoretical
     // guarantee does not meet the target.
     let evidence = || models.evidence.output_guarantee(root).map(over_scope);
@@ -240,9 +240,7 @@ pub(crate) fn guarantee_check(
     }
     // Whether the deployment's model or evidence may judge another size of
     // the plan's summaries otherwise.
-    let model_or_evidence_may_judge = models
-        .effective_accuracy()
-        .may_accept_regardless_of_guarantee()
+    let model_or_evidence_may_judge = models.accuracy.may_accept_regardless_of_guarantee()
         || models.evidence.may_provide_evidence();
     if guarantee.is_none() && evidence.is_none() {
         return Err(CheckFailure {
