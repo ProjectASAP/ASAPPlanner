@@ -5,7 +5,6 @@
 //! rows PromQL `topk by (city)` answers over the same data, and the plan
 //! Stage 3 selects under an approximate target installs (each materialized
 //! view it keeps refreshes).
-#![cfg(all(feature = "sql", feature = "promql"))]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;

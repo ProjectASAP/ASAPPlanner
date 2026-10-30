@@ -5,9 +5,8 @@ version = "0.1.0"
 edition = "2021"
 
 # The library facade (issue #429): one entry point that takes prepared input and
-# returns the selected DAG. By default it is the only crate that depends on
-# every frontend (see `[features]` below to drop some)
-# — before it, the sole facade re-exporting more than one was `asap-devtools`,
+# returns the selected DAG. It is the only crate that depends on every
+# frontend — before it, the sole facade re-exporting more than one was `asap-devtools`,
 # a developer-tools crate. Everything below the frontend boundary lives in the
 # stage crates (`asap-logical-asap-optimization`, `asap-physical-asap-optimization`,
 # `asap-plan-selection`), so a third party writing an optimization pass (issue
@@ -17,9 +16,9 @@ edition = "2021"
 asap-types = { path = "../types" }
 asap-cost = { path = "../cost" }
 asap-plan-selection = { path = "../plan-selection" }
-asap-frontend-sql = { path = "../frontend-sql", optional = true }
-asap-frontend-promql = { path = "../frontend-promql", optional = true }
-asap-frontend-metricsql = { path = "../frontend-metricsql", optional = true }
+asap-frontend-sql = { path = "../frontend-sql" }
+asap-frontend-promql = { path = "../frontend-promql" }
+asap-frontend-metricsql = { path = "../frontend-metricsql" }
 asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
 # The Planner's own executor: `plan_installable` offers only the summary
 # families it runs when the caller leaves them unrestricted.
@@ -28,16 +27,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
-# One feature per query-language frontend. A runtime that plans PromQL alone
-# builds with `default-features = false, features = ["promql"]` and links
-# neither DataFusion (the SQL frontend) nor the MetricsQL parser. A workload
-# whose language's feature is off fails validation with
-# `UserInputError::FrontendDisabled`.
 [features]
-default = ["promql", "sql", "metricsql"]
-promql = ["dep:asap-frontend-promql"]
-sql = ["dep:asap-frontend-sql"]
-metricsql = ["dep:asap-frontend-metricsql"]
 # `test_support::query_time_reference`, for a runtime's correctness tests.
 test-support = []
 

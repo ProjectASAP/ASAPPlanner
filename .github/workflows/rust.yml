@@ -108,12 +108,6 @@ jobs:
     - name: Run the DAG viewer's Node tests
       run: node --test tools/dag-viewer/stages.test.mjs tools/dag-viewer/enumeration.test.mjs tools/dag-viewer/memo.test.mjs
 
-    # A PromQL-only runtime builds asap-planner without DataFusion or MetricsQL.
-    - name: Check and test asap-planner with the PromQL frontend alone
-      run: |
-        cargo check -p asap-planner --no-default-features --features promql --locked
-        cargo test -p asap-planner --no-default-features --features promql --locked
-
     - name: Verify MetricsQL frontend as a stable external dependency
       run: bash tools/verify_metricsql_external_consumer.sh
 

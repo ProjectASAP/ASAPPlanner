@@ -6,7 +6,6 @@
 //! sketch or exactly. A plan that keeps panes at ingestion time runs as a
 //! runtime runs it: each pane built in an ingestion run over its window from
 //! the table bound at the plan's `Scan`, the queries answered from the panes.
-#![cfg(feature = "sql")]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
