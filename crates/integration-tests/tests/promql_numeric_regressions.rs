@@ -129,7 +129,7 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
     );
     assert!(node.guarantee.is_none(), "{:?}", node.guarantee);
     use asap_accuracy::composition::raw_data_samples_sign_statistic;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::bind_guarantees;
+    use asap_accuracy::propagation::bind_guarantees;
     let root = asap_types::ir::QueryRoot::Operator(node.clone());
     assert!(bind_guarantees(&root, &Clone::clone).is_none());
     let proven = bind_guarantees(&root, &|guarantee| {
@@ -181,7 +181,7 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
 #[test]
 fn ddsketch_interpolation_requires_a_nonnegative_domain() {
     use asap_accuracy::composition::raw_data_samples_sign_statistic;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::bind_guarantees;
+    use asap_accuracy::propagation::bind_guarantees;
     use asap_types::ir::{schema::SketchAlgorithm, QueryRoot};
     for (query, endpoint, raw_samples) in [
         ("quantile_over_time(0, data[5m])", true, true),

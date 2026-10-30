@@ -278,6 +278,7 @@ mod tests {
     use crate::pricing::{kept_pane_chains, node_map, price_at_scale};
     use asap_accuracy::composition::INPUT_ROW_COUNT;
     use asap_accuracy::estimators::hll;
+    use asap_accuracy::propagation::root_guarantee;
     use asap_cost::execution_demand::evaluation_rate;
     use asap_cost::{
         CalibrationFit, CandidateCost, ClusterLimits, ClusterObjective, CostInputs, CostModel,
@@ -285,7 +286,6 @@ mod tests {
         MIXED_COST_SOURCE,
     };
     use asap_cost::{MeasuredOperationCosts, OperatorCost, ResourceUnitCost};
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::root_guarantee;
     use asap_physical_asap_optimization::PhysicalWorkloadPlan;
     use asap_types::ir::operator::{AggIntent, Reduction};
     use asap_types::ir::physical_export::{

@@ -1044,7 +1044,7 @@ fn summary_agg(node: &OperatorNode) -> &ASAPOp {
 /// measure's accuracy requirement.
 #[test]
 fn composed_summary_is_sized_for_its_measure() {
-    use asap_logical_asap_optimization::pass1::realization::default_size_params;
+    use asap_accuracy::sizing::default_size_params;
     let intent = quantile();
     let [root] = <[_; 1]>::try_from(composed(vec![aggregate(intent.clone())], &[1])).unwrap();
     let ASAPOp::SummaryAgg {

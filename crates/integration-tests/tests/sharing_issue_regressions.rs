@@ -266,8 +266,9 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
         .expect("filtered group read candidate");
     // The same readout keeps a KLL's rank bound: it selects a whole group,
     // never predicates on an approximate value or combines populations.
+    use asap_accuracy::propagation::recompose_guarantees;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, recompose_guarantees, HowToComputeAggregateMeasure,
+        compose_logical_candidate, HowToComputeAggregateMeasure,
     };
     use asap_types::ir::{schema::SketchAlgorithm, QueryRoot};
     use std::rc::Rc;
