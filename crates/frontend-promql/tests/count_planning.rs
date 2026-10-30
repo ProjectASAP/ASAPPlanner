@@ -1,4 +1,5 @@
 //! Query text through summary selection: counts use observations, never value weights.
+use crate::planner_support::selected_dag;
 use crate::support;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::properties::AccuracyTarget;
@@ -8,7 +9,7 @@ use asap_types::ir::schema::{
 };
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use std::rc::Rc;
-use support::{logical_candidates, lower_promql, physical_asap_dag, selected_dag};
+use support::{logical_candidates, lower_promql, physical_asap_dag};
 
 /// Whether `node` reads a Hydra state (one sketch shared by every group).
 fn reads_hydra(node: &Rc<OperatorNode>) -> bool {
