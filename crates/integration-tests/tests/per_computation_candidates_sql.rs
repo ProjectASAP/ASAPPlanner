@@ -127,11 +127,16 @@ async fn a_filter_or_group_key_over_an_estimate_has_no_guarantee() {
         let root = lower_sql(sql, &catalog, accuracy.clone())
             .await
             .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
+        // No guarantee meets the target, so Pass 1 prunes the sketch
+        // unless every output is accepted.
         let candidates: Vec<_> =
-            asap_integration_tests::planning::logical_candidates(root, accuracy.clone())
-                .into_iter()
-                .filter(reads_quantile_sketch)
-                .collect();
+            asap_integration_tests::planning::logical_candidates_ignoring_guarantees(
+                root,
+                accuracy.clone(),
+            )
+            .into_iter()
+            .filter(reads_quantile_sketch)
+            .collect();
         assert!(!candidates.is_empty(), "{sql}");
         for candidate in candidates {
             assert_eq!(candidate.guarantee, None, "{sql}");
