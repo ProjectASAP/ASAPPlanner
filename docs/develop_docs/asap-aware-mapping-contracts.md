@@ -101,9 +101,10 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 
 ## 5. Stage 3
 
-- `select_plan` validates its inputs first: `SelectionError::InvalidSettings`,
-  `EntryCount` and `InvalidDeploymentCapabilities` are bad input and fail the
-  whole selection.
+- `select_plan` validates its inputs first: `ErrorSelectingPlan::InvalidSettings`
+  and `EntryCount` are bad input and fail the whole selection. The facade
+  validates the deployment's capabilities before any stage
+  (`asap_planner::SelectionError::InvalidDeploymentCapabilities`).
 - Each candidate is then either invalid or valid, recorded as a `Rejection`
   with its `cause` (`RejectionCause`) and reason: a failed check
   (`AccuracyTargetMissed`,
@@ -112,8 +113,7 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
   (a repeating query's latency per evaluation is over its repeat interval,
   checked with or without a latency bound), or `OverClusterCapacity` under
   cost model 3) or a loss under the cost model (`Costlier`, `Slower`,
-  `MoreMemory`, `NotLowestLatencyOnParetoFront`, `Dominated`,
-  `TiedLostOnEnumerationOrder`). Stage 3 never resizes a summary: a candidate
+  `MoreMemory`, `TiedLostOnEnumerationOrder`). Stage 3 never resizes a summary: a candidate
   whose Stage 1 sizes miss its composed accuracy target is rejected alone.
 - Usage (`ResourceUsage`) is measured without prices; the `CostModel` in
   `CostInputs` turns it into a choice. Ties keep enumeration order

@@ -73,11 +73,11 @@ fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: crate::PlanningModels::builtin(),
+            models: crate::SelectionModels::builtin(),
             calibration: asap_cost::CalibrationFit::default(),
         };
         let profile = extract_price_options(&configured, &context)
@@ -216,11 +216,11 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
     let context = CandidatePlanningContext {
         deadline: None,
         refine_materialization: false,
-        seed_separate_plans: false,
-        original_roots: &original,
+        query_roots: &original,
+        realizer: &crate::search::test_realizer(&original, &entries, &data),
         entries: &entries,
         data: &data,
-        models: crate::PlanningModels::builtin(),
+        models: crate::SelectionModels::builtin(),
         calibration: asap_cost::CalibrationFit::default(),
     };
     let profile = extract_price_options(&configured, &context)

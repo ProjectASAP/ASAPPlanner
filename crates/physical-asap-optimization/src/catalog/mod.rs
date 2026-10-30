@@ -13,7 +13,7 @@ mod realize;
 mod reconstruction;
 mod scopes;
 
-pub use asap_types::stages::{PhysicalCandidateError, SelectedPhysicalCandidate};
+pub use asap_types::stages::{PhysicalCandidateError, RealizedPlan};
 pub use configurations::ConfigurationError;
 pub use inventory::CandidateInventoryError;
 pub use realize::{materialize_selected_candidates, Stage2AssignmentRealizer};
@@ -192,7 +192,7 @@ fn check_deadline(
 /// [`validate_selected_connections`](asap_types::stages::validate_selected_connections) against `physical`'s candidates.
 fn validate_selected_graph(
     physical: &PhysicalASAPMemoCandidates,
-    selected: &asap_types::stages::SelectedCandidateGraph,
+    selected: &asap_types::stages::SelectedCandidates,
 ) -> Result<(), String> {
     let query_output_candidates: Vec<Vec<_>> = (0..physical.output_reference_count())
         .map(|output| physical.query_output_candidates(output).collect())

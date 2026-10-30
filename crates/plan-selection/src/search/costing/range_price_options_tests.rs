@@ -154,14 +154,13 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &originals,
+            query_roots: &originals,
+            realizer: &crate::search::test_realizer(&originals, &entries, &data),
             entries: &entries,
             data: &data,
-            models: crate::PlanningModels {
+            models: crate::SelectionModels {
                 plan_selection: &settings,
-                deployment_capabilities: &deployment,
-                ..crate::PlanningModels::builtin()
+                ..crate::SelectionModels::builtin()
             },
             calibration: asap_cost::CalibrationFit::default(),
         };

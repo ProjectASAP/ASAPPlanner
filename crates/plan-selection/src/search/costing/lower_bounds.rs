@@ -694,7 +694,7 @@ mod tests {
 
     use super::*;
     use crate::search::milp::model::{solve_candidate_proposal, ObservedAssignment};
-    use crate::{PlanSelector, PlanningModels};
+    use crate::{PlanSelector, SelectionModels};
     use asap_cost::CalibrationFit;
     use asap_logical_asap_optimization::pass1::logical_memo_candidates::generate_per_computation_logical_memo_candidates;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
@@ -1006,13 +1006,13 @@ mod tests {
             }
         }
         configured.sync_physical_for_tests();
-        let models = PlanningModels::builtin();
+        let models = SelectionModels::builtin();
         let calibration = CalibrationFit::default();
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
             models,
@@ -1032,17 +1032,17 @@ mod tests {
             }
             let physical = materialize_selected_candidates(
                 &configured.physical,
-                &selected,
+                &selected.to_selected_candidates(),
                 &modes,
                 &roots,
                 &entries,
                 &data,
-                models.deployment_capabilities.query_time_results_retained,
+                false,
             )
             .unwrap();
             let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
             selector.set_calibration(calibration);
-            selector.offer(&physical.physical).unwrap();
+            selector.offer(&physical.plan).unwrap();
             let (result, _) = selector.finish().unwrap();
             let cost = result.costs[&result.selected].cost_per_second.unwrap();
             assert!(
@@ -1153,13 +1153,13 @@ mod tests {
                     {"operator": "FinalizeExactAccumulator", "phase": "query_time", "exact": "Sum", "ns_per_unit": 900.0, "ns_per_invocation": 400.0}
                 ]})).unwrap();
             }
-            let models = PlanningModels::builtin().with_plan_selection(&settings);
+            let models = SelectionModels::builtin().with_plan_selection(&settings);
             let calibration = CalibrationFit::from_factor(2.0).unwrap();
             let context = CandidatePlanningContext {
                 deadline: None,
                 refine_materialization: false,
-                seed_separate_plans: false,
-                original_roots: &roots,
+                query_roots: &roots,
+                realizer: &crate::search::test_realizer(&roots, &entries, &data),
                 entries: &entries,
                 data: &data,
                 models,
@@ -1202,17 +1202,17 @@ mod tests {
                 }
                 let physical = materialize_selected_candidates(
                     &configured.physical,
-                    &selected,
+                    &selected.to_selected_candidates(),
                     &modes,
                     &roots,
                     &entries,
                     &data,
-                    models.deployment_capabilities.query_time_results_retained,
+                    false,
                 )
                 .unwrap();
                 let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
                 selector.set_calibration(calibration);
-                selector.offer(&physical.physical).unwrap();
+                selector.offer(&physical.plan).unwrap();
                 let (result, _) = selector.finish().unwrap();
                 let cost = result.costs[&result.selected].cost_per_second.unwrap();
                 assert!(selected.modeled_cost > 0.0);
@@ -1253,11 +1253,11 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: PlanningModels::builtin(),
+            models: SelectionModels::builtin(),
             calibration: CalibrationFit::default(),
         };
         let metrics = apply(&mut configured, &context).unwrap();
@@ -1311,11 +1311,11 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: PlanningModels::builtin(),
+            models: SelectionModels::builtin(),
             calibration: CalibrationFit::default(),
         };
         let metrics = apply(&mut configured, &context).unwrap();
@@ -1430,16 +1430,16 @@ mod tests {
             .iter()
             .map(|candidate| QueryRoot::Operator(Rc::clone(&candidate.root_node)))
             .collect();
-        let models = PlanningModels::builtin().with_plan_selection(settings);
+        let models = SelectionModels::builtin().with_plan_selection(settings);
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
             models,
             calibration: CalibrationFit::default(),
-            seed_separate_plans: false,
         };
         apply(&mut configured, &context).unwrap();
         let selected = solve_candidate_proposal(&configured.dag, &[], None)
@@ -1454,16 +1454,16 @@ mod tests {
             .collect();
         let physical = materialize_selected_candidates(
             &configured.physical,
-            &selected,
+            &selected.to_selected_candidates(),
             &modes,
             &roots,
             &entries,
             &data,
-            models.deployment_capabilities.query_time_results_retained,
+            false,
         )
         .unwrap();
         let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
-        selector.offer(&physical.physical).unwrap();
+        selector.offer(&physical.plan).unwrap();
         let (result, _) = selector.finish().unwrap();
         let cost = result.costs[&result.selected].cost_per_second.unwrap();
         (configured, selected.modeled_cost, cost)

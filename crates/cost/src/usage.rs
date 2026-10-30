@@ -1421,6 +1421,17 @@ fn chain_input_offset_ms(
     u64::try_from(offset_ms).unwrap_or(0)
 }
 
+/// The pane retention of every kept pane chain of `dag`
+/// ([`pane_retention_ms`] over [`query_reach`]), for a plan whose query
+/// `q` has range evaluation `range_evaluations[q]` (none when missing):
+/// what Stage 2's realizer records for a realized plan.
+pub fn pane_retention_ms_of_plan(
+    dag: &PhysicalASAPDAG,
+    range_evaluations: &[Option<RangeEvaluation>],
+) -> BTreeMap<PhysicalASAPNodeId, u64> {
+    pane_retention_ms(dag, &query_reach(dag, &node_map(dag)), range_evaluations)
+}
+
 /// The input states a `SummaryMerge` over `producers` reads: every row of
 /// each, or of the one pane chain whose newest `newest_panes` it merges,
 /// that many panes' states per group.

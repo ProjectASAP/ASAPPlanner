@@ -12,8 +12,8 @@ use asap_types::physical::Materialization;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use asap_types::stages::{
-    AssignmentRealizer, PhysicalASAPMemoCandidates, PhysicalCandidateError, SelectedCandidateGraph,
-    SelectedPhysicalCandidate,
+    AssignmentRealizer, PhysicalASAPMemoCandidates, PhysicalCandidateError, RealizedPlan,
+    SelectedCandidates,
 };
 
 use super::reconstruction::{
@@ -25,13 +25,13 @@ use super::reconstruction::{
 /// references remain separate positions; literal-only scalar roots use none.
 pub fn materialize_selected_candidates(
     physical_candidates: &PhysicalASAPMemoCandidates,
-    selected: &SelectedCandidateGraph,
+    selected: &SelectedCandidates,
     materializations: &[Option<Materialization>],
     original_roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     query_time_results_retained: bool,
-) -> Result<SelectedPhysicalCandidate, PhysicalCandidateError> {
+) -> Result<RealizedPlan, PhysicalCandidateError> {
     if entries.len() != original_roots.len() {
         return Err("workload entries and query roots differ in length".into());
     }
@@ -124,45 +124,72 @@ pub fn materialize_selected_candidates(
             .transpose()
         })
         .collect::<Result<Vec<_>, String>>()?;
-    Ok(SelectedPhysicalCandidate {
-        physical,
+    let range_evaluations: Vec<_> = entries.iter().map(|entry| entry.range_evaluation).collect();
+    let pane_retention_ms = asap_cost::pane_retention_ms_of_plan(&physical.dag, &range_evaluations);
+    Ok(RealizedPlan {
+        plan: physical,
+        pane_retention_ms,
         nodes_by_candidate,
     })
 }
 
-/// Stage 2's [`AssignmentRealizer`]: the facade passes it to Stage 3. Each
-/// method delegates to the catalog function of the same operation.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Stage2AssignmentRealizer;
+/// Stage 2's [`AssignmentRealizer`], over the planning context: the
+/// workload's original query roots (one per entry of `entries`), its data,
+/// and whether the deployment keeps query-time results across
+/// evaluations. The facade builds it, passes it to Stage 3, and builds the
+/// selected plan with it.
+#[derive(Debug, Clone, Copy)]
+pub struct Stage2AssignmentRealizer<'a> {
+    pub original_roots: &'a [QueryRoot],
+    pub entries: &'a [QueryWorkloadEntry],
+    pub data: &'a DataWorkload,
+    pub query_time_results_retained: bool,
+}
 
-impl AssignmentRealizer for Stage2AssignmentRealizer {
-    fn reconstruct_selected_outputs(
+impl AssignmentRealizer for Stage2AssignmentRealizer<'_> {
+    /// [`materialize_selected_candidates`] with each selected candidate's
+    /// own materialization; each selected candidate also keeps its own
+    /// timing.
+    fn realize(
         &self,
         physical: &PhysicalASAPMemoCandidates,
-        selected: &SelectedCandidateGraph,
-    ) -> Result<Vec<Rc<OperatorNode>>, String> {
-        Ok(reconstruct_selected_candidates(physical, selected)?.outputs)
-    }
-
-    fn realize_selected_assignment(
-        &self,
-        physical: &PhysicalASAPMemoCandidates,
-        selected: &SelectedCandidateGraph,
-        materializations: &[Option<Materialization>],
-        original_roots: &[QueryRoot],
-        entries: &[QueryWorkloadEntry],
-        data: &DataWorkload,
-        query_time_results_retained: bool,
-    ) -> Result<SelectedPhysicalCandidate, PhysicalCandidateError> {
-        materialize_selected_candidates(
+        selected: &SelectedCandidates,
+    ) -> Result<RealizedPlan, PhysicalCandidateError> {
+        let mut materializations = vec![None; physical.candidates.len()];
+        for id in &selected.candidates {
+            let candidate = physical.candidates.get(id.0).ok_or_else(|| {
+                PhysicalCandidateError::InvalidOrUnsupported(format!(
+                    "selected candidate {} does not exist",
+                    id.0
+                ))
+            })?;
+            materializations[id.0] = Some(candidate.materialization);
+        }
+        let realized = materialize_selected_candidates(
             physical,
             selected,
-            materializations,
-            original_roots,
-            entries,
-            data,
-            query_time_results_retained,
-        )
+            &materializations,
+            self.original_roots,
+            self.entries,
+            self.data,
+            self.query_time_results_retained,
+        )?;
+        for id in &selected.candidates {
+            let node = realized.nodes_by_candidate[id.0].as_ref().ok_or_else(|| {
+                PhysicalCandidateError::InvalidOrUnsupported(format!(
+                    "candidate {} has no physical node",
+                    id.0
+                ))
+            })?;
+            let timing = physical.candidates[id.0].timing;
+            if node.timing != Some(timing) {
+                return Err(PhysicalCandidateError::InvalidOrUnsupported(format!(
+                    "candidate {} requested timing {timing:?}, Stage 2 produced {:?}",
+                    id.0, node.timing
+                )));
+            }
+        }
+        Ok(realized)
     }
 }
 
@@ -223,7 +250,6 @@ mod tests {
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::stages::{
         LogicalASAPMemoCandidates, PhysicalCandidateId, ProducerConsumerConnection,
-        QueryRootAssignment,
     };
     use asap_types::workload::QueryRecurrence;
 
@@ -232,12 +258,12 @@ mod tests {
     fn select_from(
         physical: &PhysicalASAPMemoCandidates,
         candidate: PhysicalCandidateId,
-        selected: &mut SelectedCandidateGraph,
+        selected: &mut SelectedCandidates,
     ) {
-        if selected.selected_candidates.contains(&candidate) {
+        if selected.candidates.contains(&candidate) {
             return;
         }
-        selected.selected_candidates.push(candidate);
+        selected.candidates.push(candidate);
         for (requirement, producer_candidates) in physical.candidates[candidate.0]
             .producer_candidates_per_input
             .iter()
@@ -259,7 +285,8 @@ mod tests {
         }
     }
 
-    // The trait object returns exactly what the catalog functions return.
+    // The trait object returns what the catalog function returns with each
+    // candidate's own materialization.
     #[test]
     fn stage2_realizer_matches_direct_catalog_calls() {
         let root = QueryRoot::Operator(lower_promql(
@@ -288,33 +315,27 @@ mod tests {
         let selected = physical
             .query_output_candidates(0)
             .map(|candidate| {
-                let mut selected = SelectedCandidateGraph {
-                    selected_candidates: Vec::new(),
+                let mut selected = SelectedCandidates {
+                    candidates: Vec::new(),
                     connections: Vec::new(),
-                    query_roots: vec![QueryRootAssignment {
-                        query_root: 0,
-                        candidate,
-                    }],
-                    modeled_cost: 0.0,
+                    query_output_candidates: vec![candidate],
                 };
                 select_from(&physical, candidate, &mut selected);
                 selected
             })
             .find(|selected| reconstruct_selected_candidates(&physical, selected).is_ok())
             .expect("some selection reconstructs");
-        assert!(selected.selected_candidates.len() > 1);
-        let realizer: &dyn AssignmentRealizer = &Stage2AssignmentRealizer;
-
-        let direct = reconstruct_selected_candidates(&physical, &selected)
-            .unwrap()
-            .outputs;
-        let through_trait = realizer
-            .reconstruct_selected_outputs(&physical, &selected)
-            .unwrap();
-        assert_eq!(direct, through_trait);
+        assert!(selected.candidates.len() > 1);
+        let realizer = Stage2AssignmentRealizer {
+            original_roots: &roots,
+            entries: &entries,
+            data: &data,
+            query_time_results_retained: false,
+        };
+        let realizer: &dyn AssignmentRealizer = &realizer;
 
         let mut materializations = vec![None; physical.candidates.len()];
-        for id in &selected.selected_candidates {
+        for id in &selected.candidates {
             materializations[id.0] = Some(physical.candidates[id.0].materialization);
         }
         let direct = materialize_selected_candidates(
@@ -327,36 +348,12 @@ mod tests {
             false,
         )
         .unwrap();
-        let through_trait = realizer
-            .realize_selected_assignment(
-                &physical,
-                &selected,
-                &materializations,
-                &roots,
-                &entries,
-                &data,
-                false,
-            )
-            .unwrap();
+        let through_trait = realizer.realize(&physical, &selected).unwrap();
         assert_eq!(
-            format!("{:?}", direct.physical),
-            format!("{:?}", through_trait.physical)
+            format!("{:?}", direct.plan),
+            format!("{:?}", through_trait.plan)
         );
         assert_eq!(direct.nodes_by_candidate, through_trait.nodes_by_candidate);
-
-        // Errors pass through unchanged too.
-        let too_short = &materializations[..materializations.len() - 1];
-        let direct = materialize_selected_candidates(
-            &physical, &selected, too_short, &roots, &entries, &data, false,
-        )
-        .err()
-        .unwrap();
-        let through_trait = realizer
-            .realize_selected_assignment(
-                &physical, &selected, too_short, &roots, &entries, &data, false,
-            )
-            .err()
-            .unwrap();
-        assert_eq!(direct.to_string(), through_trait.to_string());
+        assert_eq!(direct.pane_retention_ms, through_trait.pane_retention_ms);
     }
 }

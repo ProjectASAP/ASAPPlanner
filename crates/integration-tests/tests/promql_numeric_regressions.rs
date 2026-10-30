@@ -335,11 +335,10 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
 #[test]
 #[should_panic(expected = "does not compose")]
 fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidateError;
     asap_integration_tests::planning::require_composed_operator_candidates(vec![
-        asap_plan_selection::search::LogicalCandidate {
+        asap_devtools::planning_stages::ShownLogicalCandidate {
             id: "invalid-composition".into(),
-            roots: Err(PerComputationCandidateError::InvalidChoice),
+            roots: Err("invalid choice".into()),
         },
     ]);
 }

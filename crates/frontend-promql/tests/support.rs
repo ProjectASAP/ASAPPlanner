@@ -145,10 +145,10 @@ pub fn declared_data(root: &Rc<OperatorNode>) -> DataWorkload {
 pub fn run_stage1_to_stage3(
     root: Rc<OperatorNode>,
     accuracy: AccuracyTarget,
-) -> asap_plan_selection::Stage1ToStage3Run {
+) -> asap_planner::PlanningRun {
     let data = declared_data(&root);
-    asap_plan_selection::run_stage1_to_stage3_with(
-        vec![(0, asap_types::ir::QueryRoot::Operator(root))],
+    asap_planner::run_planning(
+        vec![asap_types::ir::QueryRoot::Operator(root)],
         &[asap_types::workload::QueryWorkloadEntry {
             query: Default::default(),
             requirements: asap_types::workload::QueryRequirements {
@@ -160,8 +160,8 @@ pub fn run_stage1_to_stage3(
             range_evaluation: None,
         }],
         &data,
-        asap_plan_selection::PlanningModels::builtin(),
-        asap_plan_selection::Stage1ToStage3Search::default(),
+        asap_planner::PlanningModels::builtin(),
+        asap_planner::PlanSearchSettings::default(),
     )
     .expect("Pass 1 accepts the query")
 }
@@ -171,7 +171,7 @@ pub fn run_stage1_to_stage3(
 #[allow(dead_code)]
 pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let run = run_stage1_to_stage3(root, accuracy);
-    match run.selected_logical().expect("a plan is selected") {
+    match run.selected_plan.as_deref().expect("a plan is selected") {
         [asap_types::ir::QueryRoot::Operator(node)] => Rc::clone(node),
         other => panic!("one operator root: {other:?}"),
     }
@@ -217,10 +217,17 @@ fn local_computation_candidates(root: Rc<OperatorNode>) -> Result<Vec<Rc<Operato
         .collect()
 }
 
+/// A composed logical candidate, or why it does not compose.
+#[allow(dead_code)]
+pub struct LogicalCandidate {
+    pub id: String,
+    pub roots: Result<Vec<asap_types::ir::QueryRoot>, String>,
+}
+
 /// Fail on a rejected candidate rather than silently dropping it from assertions.
 #[allow(dead_code)]
 pub fn require_composed_operator_candidates(
-    candidates: Vec<asap_plan_selection::search::LogicalCandidate>,
+    candidates: Vec<LogicalCandidate>,
 ) -> Vec<Rc<OperatorNode>> {
     candidates
         .into_iter()

@@ -16,10 +16,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use asap_cost::CostInputs;
-use asap_devtools::planning_stages::{lower_promql_roots, run_default_search_over};
+use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
-use asap_plan_selection::Selection;
+use asap_plan_selection::reference_pricer::WholePlanSelection as Selection;
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
@@ -243,7 +243,7 @@ pub fn run_stages_with(
     settings: &CostInputs,
     deployment: &DeploymentCapabilities,
 ) -> Run {
-    let models = asap_plan_selection::PlanningModels::builtin()
+    let models = asap_planner::PlanningModels::builtin()
         .with_plan_selection(settings)
         .with_deployment_capabilities(deployment);
     run_stages_over(workload, roots, models)
@@ -252,21 +252,25 @@ pub fn run_stages_with(
 fn run_stages_over(
     workload: &PlanningWorkload,
     roots: Vec<QueryRoot>,
-    models: asap_plan_selection::PlanningModels<'_>,
+    models: asap_planner::PlanningModels<'_>,
 ) -> Run {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    let run = run_default_search_over(roots, &entries, &data, models).expect("planning stages run");
-    let logical_candidates = run
-        .stage1_logical_asap_optimization
+    // The facade's run, with the reference pricer over the selected round's
+    // memo choices: the whole-plan costs and rejections these tests read.
+    let run = run_planning_stages_over(roots, &entries, &data, None, models)
+        .expect("planning stages run");
+    let reference = run.reference.expect("the memo is enumerated");
+    let logical_candidates = reference
+        .choices
         .into_iter()
         .map(|c| {
             let roots = c.roots.unwrap_or_else(|e| panic!("{} composes: {e}", c.id));
             logical(c.id, roots)
         })
         .collect();
-    let physical = run
-        .stage2_physical_asap_optimization
+    let physical = reference
+        .physical
         .into_iter()
         .map(|candidate| Physical {
             id: candidate.id.clone(),
@@ -282,12 +286,8 @@ fn run_stages_over(
         ),
         logical: logical_candidates,
         physical,
-        pruned: run
-            .stage2_pruned
-            .into_iter()
-            .map(|p| (p.from_logical, p.reason))
-            .collect(),
-        selection: run.stage3_plan_selection.expect("plan selection selects"),
+        pruned: reference.stage2_failed,
+        selection: reference.selection.expect("plan selection selects"),
     }
 }
 
@@ -299,7 +299,7 @@ pub fn run_explicit_candidates(
     workload: &PlanningWorkload,
     original_roots: Vec<QueryRoot>,
     candidates: Vec<Vec<QueryRoot>>,
-    models: asap_plan_selection::PlanningModels<'_>,
+    models: asap_planner::PlanningModels<'_>,
 ) -> Run {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
@@ -349,7 +349,7 @@ pub fn run_explicit_candidates(
         }
     }
     let plans: Vec<_> = physical.iter().map(|plan| plan.candidate.clone()).collect();
-    let selection = asap_plan_selection::select_plan(&plans, &entries, &data, models)
+    let selection = asap_devtools::memo_pricing::reference_select(&plans, &entries, &data, models)
         .expect("explicit fixture contains a valid physical configuration");
     Run {
         stage0_query_language_frontends: logical_stage0(original_roots),
@@ -369,7 +369,7 @@ pub fn run_pattern_b_fixture(
         workload,
         lower_promql(workload),
         pattern_b_computations(workload),
-        asap_plan_selection::PlanningModels::builtin()
+        asap_planner::PlanningModels::builtin()
             .with_plan_selection(settings)
             .with_deployment_capabilities(deployment),
     )

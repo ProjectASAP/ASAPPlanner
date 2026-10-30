@@ -22,6 +22,9 @@ fn initialized(
 
 use crate::search::candidates::dag::*;
 use crate::search::candidates::graph::RejectedQuerySubgraph;
+pub(in crate::search) use crate::search::candidates::graph::{
+    QueryRootAssignment, SelectedCandidateGraph,
+};
 use asap_types::stages::*;
 use good_lp::solvers::highs::highs;
 use good_lp::solvers::{ResolutionError, SolutionStatus};
@@ -1292,10 +1295,12 @@ mod tests {
                     producer: PhysicalCandidateId(0),
                 }],
                 query_roots: (0..2)
-                    .map(|query_root| asap_types::stages::QueryRootAssignment {
-                        query_root,
-                        candidate: PhysicalCandidateId(1),
-                    })
+                    .map(
+                        |query_root| crate::search::candidates::graph::QueryRootAssignment {
+                            query_root,
+                            candidate: PhysicalCandidateId(1),
+                        },
+                    )
                     .collect(),
                 modeled_cost: 0.0,
             };

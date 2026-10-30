@@ -3,8 +3,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
-use asap_devtools::planner_layering_examples::example1;
-use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages};
+use asap_devtools::planning_stages::lower_promql_roots;
 use asap_plan_selection::RejectionCause;
 use asap_types::ir::flat::FlatDag;
 use asap_types::ir::physical_export::PhysicalASAPDAG;
@@ -482,7 +481,7 @@ fn default_search_and_installation_validate_the_nine_query_workload() {
         ..defaults
     };
     let capabilities: asap_planner::DeploymentCapabilities = serde_json::from_str(NO_RAW).unwrap();
-    let models = asap_plan_selection::PlanningModels::builtin()
+    let models = asap_planner::PlanningModels::builtin()
         .with_plan_selection(&settings)
         .with_deployment_capabilities(&capabilities);
     let (plan, report) = tokio::runtime::Builder::new_current_thread()
@@ -507,41 +506,7 @@ fn default_search_and_installation_validate_the_nine_query_workload() {
     assert!(report
         .cost_per_second
         .is_some_and(|cost| cost.is_finite() && cost > 0.0));
-    assert_eq!(
-        report.predicted_usage.as_ref().unwrap().per_query.len(),
-        queries
-    );
-}
-
-/// The library archives bounded same-engine evaluations and reports its budget.
-#[test]
-fn planning_stages_archive_evaluated_candidates() {
-    // Archive accounting does not require a large sketch/pane search. Use two
-    // exact source reads so every enumerated proposal has an accuracy contract.
-    let mut workload = example1();
-    let metric = workload
-        .data_workload
-        .as_ref()
-        .unwrap()
-        .sources
-        .keys()
-        .next()
-        .unwrap()
-        .clone();
-    for query in workload.query_workload.repeating_queries.as_mut().unwrap() {
-        query.query = asap_types::workload::Query(metric.clone());
-    }
-    let run =
-        run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), Some(26)).unwrap();
-    assert!(!run.stage1_logical_asap_optimization.is_empty());
-    let selection = run.stage3_plan_selection.unwrap();
-    let report = selection.search.candidate_connections.unwrap();
-    assert_eq!(report.max_refinements, 26);
-    assert!(report.refinements <= 26);
-    assert!(run
-        .stage2_physical_asap_optimization
-        .iter()
-        .any(|p| p.id == selection.selected));
+    assert_eq!(report.predicted_usage.per_query.len(), queries);
 }
 
 /// `--sample-interval-ms` is the sample interval of every metric the
@@ -1216,11 +1181,11 @@ fn workload_file_with_a_range_evaluation_is_planned() {
         })
         .expect("a plan keeps its panes across evaluations");
         let settings = asap_cost::CostInputs::default();
-        let priced = asap_plan_selection::select_plan(
+        let priced = asap_devtools::memo_pricing::reference_select(
             std::slice::from_ref(&kept),
             &entries,
             &data,
-            asap_plan_selection::PlanningModels::builtin()
+            asap_planner::PlanningModels::builtin()
                 .with_plan_selection(&settings)
                 .with_deployment_capabilities(&deployment),
         )
@@ -1330,7 +1295,8 @@ fn accuracy_guarantees_are_ignored_by_default_and_enforced_on_request() {
                 && query["guarantee_check_rejection"] == "no_accuracy_guarantee"
         })
     }));
-    // The flag decides over a settings file's `ignore_accuracy_guarantees`.
+    // A settings file no longer carries `ignore_accuracy_guarantees`: the
+    // flag alone decides, and the file refuses the field.
     let settings = std::env::temp_dir().join(format!(
         "stage_pipeline_{}_ignoring_settings.json",
         std::process::id()
@@ -1338,7 +1304,9 @@ fn accuracy_guarantees_are_ignored_by_default_and_enforced_on_request() {
     std::fs::write(&settings, r#"{"ignore_accuracy_guarantees": true}"#).unwrap();
     let mut from_file = enforcing.clone();
     from_file.extend(["--plan-selection-settings", settings.to_str().unwrap()]);
-    assert_eq!(document_of(&from_file)["accuracy_guarantees"], "enforced");
+    let (code, stderr) = failure(&from_file);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("ignore_accuracy_guarantees"), "{stderr}");
     std::fs::remove_file(settings).unwrap();
     let mut ignoring = args.to_vec();
     ignoring.push("--ignore-accuracy-guarantees");
@@ -1826,11 +1794,11 @@ fn scans_projecting_different_labels_are_shared() {
         )
         .unwrap()
         .expect("a node read by several roots can be kept for the evaluation");
-        let offered = asap_plan_selection::select_plan(
+        let offered = asap_devtools::memo_pricing::reference_select(
             std::slice::from_ref(&physical),
             &entries,
             data,
-            asap_plan_selection::PlanningModels::builtin(),
+            asap_planner::PlanningModels::builtin(),
         )
         .unwrap();
         (physical, offered)
@@ -1843,8 +1811,13 @@ fn scans_projecting_different_labels_are_shared() {
     let mut partial = roots[..2].to_vec();
     partial.extend(with_union_scan_labels(&roots[2..]).unwrap().unwrap());
     let (_, reference) = plan("partial-sharing", &partial);
-    let (installed, _) =
-        asap_planner::installable_plan_of(&physical.roots, Some(&offered), &entries).unwrap();
+    let (installed, _) = asap_planner::installable_plan_of(
+        &physical.roots,
+        None,
+        &offered.pane_retention_ms,
+        &entries,
+    )
+    .unwrap();
     installed.validate().unwrap();
     installed.check_compiles().unwrap();
     let dag = &physical.dag;
@@ -2399,64 +2372,4 @@ fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
     let document: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
     std::fs::remove_file(out).unwrap();
     assert!(document.get("memo").is_none());
-}
-
-/// Composing the selected choice over the last step's memo gives the
-/// selected plan's Stage 1 DAG, on the issue's example and #509 Example 1.
-/// Stage 1's DAG is rebuilt from the candidates' operator implementations
-/// (`implement_candidate_operators`: an exact top-k becomes
-/// `Project(Limit(Sort))`), so the composed query DAGs are compared after
-/// the same implementation.
-#[test]
-fn composed_selected_choice_is_the_selected_stage1_dag() {
-    use asap_accuracy::propagation::recompose_guarantees;
-    use asap_devtools::planning_stages::run_default_search_over;
-    use asap_logical_asap_optimization::pass2::memo::enumeration::build_logical_asap_dags_from_chosen_candidates;
-    use asap_types::ir::flat::flatten;
-    let ratio: PlanningWorkload =
-        serde_json::from_str(&std::fs::read_to_string(MEMO_RATIO_OF_QUANTILES).unwrap()).unwrap();
-    for workload in [ratio, example1()] {
-        let roots = lower_promql_roots(&workload).unwrap();
-        let entries: Vec<_> = workload.query_workload.entries().collect();
-        let data = workload.data_workload.clone().unwrap_or_default();
-        let run = run_default_search_over(
-            roots,
-            &entries,
-            &data,
-            asap_plan_selection::PlanningModels::builtin(),
-        )
-        .unwrap();
-        let steps = run.memo_steps.as_ref().unwrap();
-        let choice = steps.selected_chosen_candidates.as_ref().unwrap();
-        let memo = &steps.concrete_states;
-        let composed = build_logical_asap_dags_from_chosen_candidates(memo, choice).unwrap();
-        let composed: Vec<_> = (0..entries.len())
-            .map(|query| {
-                let (_, node) = composed
-                    .iter()
-                    .find(|(group, _)| memo.query_roots[query].operator_refs().contains(&group))
-                    .unwrap();
-                QueryRoot::Operator(
-                    asap_physical_asap_optimization::test_support::implement_candidate_operators(
-                        node,
-                        &[],
-                    )
-                    .unwrap(),
-                )
-            })
-            .collect::<Vec<_>>();
-        // As reconstruction does, over the implemented operators.
-        let composed = recompose_guarantees(&composed).unwrap();
-        let [selected] = &run.stage1_logical_asap_optimization[..] else {
-            panic!("the default search keeps the selected Stage 1 candidate")
-        };
-        let selected = selected.roots.as_ref().unwrap();
-        assert_eq!(composed.len(), selected.len());
-        for (composed, selected) in composed.into_iter().zip(selected) {
-            assert_eq!(
-                serde_json::to_value(flatten(&[composed]).0).unwrap(),
-                serde_json::to_value(flatten(std::slice::from_ref(selected)).0).unwrap()
-            );
-        }
-    }
 }

@@ -5,12 +5,13 @@ use std::rc::Rc;
 use crate::search::candidates::dag::{
     DagOfPhysicalCandidatesWithCosts, PhysicalCandidatesWithCosts,
 };
+use crate::search::candidates::graph::SelectedCandidateGraph;
 use asap_physical_asap_optimization::catalog::reconstruct_selected_candidates;
 use asap_physical_asap_optimization::catalog::test_support::{
     ordered_inputs, output_contract_satisfied, paired_node_identities,
 };
 use asap_types::ir::OperatorNode;
-use asap_types::stages::{PhysicalCandidateId, SelectedCandidateGraph};
+use asap_types::stages::PhysicalCandidateId;
 
 /// Operator output references in `graph.query_roots` order, candidate `i`
 /// running `nodes[i]`, after Stage 3 validated `selected` against `graph`. A
@@ -40,7 +41,10 @@ pub(in crate::search) fn reconstruct_candidate_outputs(
             .collect(),
     );
     configured.validate_selected(selected)?;
-    Ok(reconstruct_selected_candidates(&configured.physical, selected)?.outputs)
+    Ok(
+        reconstruct_selected_candidates(&configured.physical, &selected.to_selected_candidates())?
+            .outputs,
+    )
 }
 
 #[cfg(test)]

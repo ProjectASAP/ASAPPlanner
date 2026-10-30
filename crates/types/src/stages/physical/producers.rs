@@ -112,8 +112,7 @@ mod tests {
     #[test]
     fn shared_producer_storage_keeps_input_choices_independent() {
         use super::super::graph::{
-            validate_selected_connections, ProducerConsumerConnection, QueryRootAssignment,
-            SelectedCandidateGraph,
+            validate_selected_connections, ProducerConsumerConnection, SelectedCandidates,
         };
         use super::super::memo_candidates::{
             CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
@@ -161,8 +160,8 @@ mod tests {
             vec![QueryRoot::Operator(MemoGroupId(2))],
             Vec::new(),
         );
-        let selected = SelectedCandidateGraph {
-            selected_candidates: vec![
+        let selected = SelectedCandidates {
+            candidates: vec![
                 PhysicalCandidateId(0),
                 PhysicalCandidateId(1),
                 PhysicalCandidateId(2),
@@ -174,11 +173,7 @@ mod tests {
                     requirement,
                 })
                 .collect(),
-            query_roots: vec![QueryRootAssignment {
-                query_root: 0,
-                candidate: PhysicalCandidateId(2),
-            }],
-            modeled_cost: 0.0,
+            query_output_candidates: vec![PhysicalCandidateId(2)],
         };
         validate_selected_connections(
             3,

@@ -14,7 +14,7 @@ use asap_integration_tests::physical_export::{
 };
 use asap_integration_tests::planning::logical_candidates;
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
-use asap_plan_selection::Selection;
+use asap_plan_selection::reference_pricer::WholePlanSelection as Selection;
 use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::properties::AccuracyMetric;
@@ -739,7 +739,7 @@ fn ddsketch_ratio_selection(
     // sharing rule applies.
     use asap_accuracy::propagation::recompose_guarantees;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate;
-    let models = asap_plan_selection::PlanningModels::builtin();
+    let models = asap_planner::PlanningModels::builtin();
     let mut physical = Vec::new();
     for choice in [exact, dds] {
         let roots: Vec<_> = compose_logical_candidate(&inventory, &choice).unwrap();
@@ -758,7 +758,8 @@ fn ddsketch_ratio_selection(
     for (index, plan) in physical.iter_mut().enumerate() {
         plan.id = format!("fixture-{index}");
     }
-    let selection = asap_plan_selection::select_plan(&physical, &entries, &data, models).unwrap();
+    let selection =
+        asap_devtools::memo_pricing::reference_select(&physical, &entries, &data, models).unwrap();
     let ratios = physical
         .into_iter()
         .filter(|candidate| {

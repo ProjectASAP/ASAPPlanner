@@ -9,10 +9,10 @@
 //! candidate's output does (`AccuracyEvidenceProvider::output_guarantee`,
 //! read only here). The deployment's accuracy model may instead accept the
 //! output directly, whatever its guarantee says
-//! (`AccuracyModel::accepts_output_regardless_of_guarantee`); the settings'
-//! `ignore_accuracy_guarantees` (the one built-in way) accepts every
-//! output so, and the report records each one the
-//! guarantee check would have rejected. Before that, for
+//! (`AccuracyModel::accepts_output_regardless_of_guarantee`); the
+//! accept-all model the facade passes to ignore accuracy guarantees
+//! (`asap_accuracy::IgnoreAccuracyGuarantees`) accepts every output so, and
+//! the report records each one the guarantee check would have rejected. Before that, for
 //! a query with a target, Count-Min is admitted only over weights proven
 //! non-negative, which the executor needs to run it; a query without one
 //! constrains nothing.
@@ -77,7 +77,7 @@
 //! its bytes times each reading query's latency, at that query's rate.
 //! A `MatAtQueryKeptAcrossEvaluations` tumbling-pane chain (#509 Example
 //! 4's B3, offered by Stage 2 when the deployment keeps query-time results,
-//! [`asap_logical_asap_optimization::DeploymentCapabilities::query_time_results_retained`]) is kept across
+//! `DeploymentCapabilities::query_time_results_retained`) is kept across
 //! evaluations: each evaluation scans one pane of raw data and builds the
 //! newest pane, and the `N − 1` older panes, which complete the readers'
 //! look-back, are kept every second (in memory, all `N` at the peak). When
@@ -100,7 +100,7 @@
 //!   any of its steps reads was built by an earlier request or step;
 //! * a pane chain kept beyond one evaluation (ingestion time or kept
 //!   across evaluations) retains its input's offset plus its window plus
-//!   the longest `span_ms` among its readers ([`Selection::pane_retention_ms`]),
+//!   the longest `span_ms` among its readers (`RealizedPlan::pane_retention_ms`),
 //!   so the earliest step of the next request still finds its panes: that
 //!   many more panes are kept every second.
 //!
@@ -171,7 +171,7 @@
 //!
 //! ## Cost models
 //!
-//! [`CostInputs::cost_model`](asap_cost::CostInputs::cost_model) (in [`PlanningModels`]) chooses how
+//! [`CostInputs::cost_model`](asap_cost::CostInputs::cost_model) (the cost inputs [`select_plan`] receives) chooses how
 //! usage becomes a choice; the default is cost model 1 with
 //! [`ResourceUnitCost::illustrative`](asap_cost::ResourceUnitCost::illustrative):
 //!
@@ -188,15 +188,13 @@
 //! * [`CostModel::ClusterCapacity`](asap_cost::CostModel::ClusterCapacity) (cost model 3, own cluster): no prices.
 //!   A candidate over the cluster's memory, disk or cores is invalid, and
 //!   [`ClusterObjective`](asap_cost::ClusterObjective) chooses among the rest (lowest worst-query
-//!   latency, least peak memory, or the Pareto front of the three in
-//!   [`Selection::front`]).
+//!   latency, or least peak memory).
 //!
 //! Disk holds state materialized on `Medium::Disk` (Stage 2 places none
 //! there yet) and the raw data query-time scans read: per source, the
 //! longest window a scan reads. A deployment that does not retain raw data
-//! ([`asap_logical_asap_optimization::DeploymentCapabilities::raw_data_retained`]) keeps no raw data samples
-//! after they arrive, so a candidate with a query-time scan is invalid,
-//! with the window it would read as the reason.
+//! (`DeploymentCapabilities::raw_data_retained`) keeps no raw data samples
+//! after they arrive, so Stage 2 generates no query-time scan of raw data.
 //!
 //! ## Latency
 //!
@@ -229,7 +227,7 @@
 //!
 //! No memory limit applies outside cost model 3, where the cluster's memory
 //! is declared ([`ClusterLimits::memory_bytes`](asap_cost::ClusterLimits::memory_bytes)); without one, a selected
-//! plan whose peak memory is over [`LARGE_PEAK_MEMORY_BYTES`] gets a
+//! plan whose peak memory is over `LARGE_PEAK_MEMORY_BYTES` (10^12) gets a
 //! warning, which `stage_pipeline` reports ([`large_peak_memory_warning`]).
 
 #[cfg(test)]
@@ -238,23 +236,63 @@ use asap_types::workload::RepeatedDemand;
 use asap_cost::analytical::AnalyticalCostError;
 use asap_cost::state_bytes::{sketch_shape, summary_shape, StateInputRows};
 
-mod accuracy;
 mod accuracy_binding;
 mod checks;
 // #1095 Steps 1–2; the region DP and class-level MILP (later PRs) read it.
 #[cfg_attr(not(test), allow(dead_code))]
 mod classes;
+mod models;
 mod report;
+mod search;
 mod selector;
 pub(crate) use accuracy_binding::bound_root_guarantee;
-pub use asap_types::workload::bounds::with_confirmed_weights;
 pub(crate) use checks::{accuracy_targets, guarantee_check};
+pub use models::AccuracyCheckInputs;
+pub(crate) use models::SelectionModels;
 pub use report::{
-    large_peak_memory_warning, AcceptedAccuracy, CandidateConnectionReport, Rejection,
-    RejectionCause, SearchReport, Selection, SelectionError, LARGE_PEAK_MEMORY_BYTES,
+    large_peak_memory_warning, AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, SearchReport,
+    SearchStatus, Selection,
 };
-pub(crate) use selector::{cheaper, choose, Ranking};
-pub use selector::{select_plan, PlanSelector};
+pub(crate) use report::{Rejection, WholePlanSelection};
+pub use search::select::select_plan;
+#[cfg(test)]
+pub(crate) use selector::select_among_plans;
+pub(crate) use selector::PlanSelector;
+
+/// The whole-workload reference pricer (feature `reference-pricer`): the
+/// selector Stage 3 used before the memo search, over whole physical plans
+/// a developer tool enumerates (`stage_pipeline --exhaustive` and
+/// `--price-enumerated`, `planner_fuzz`). Not part of Stage 3's interface.
+#[cfg(feature = "reference-pricer")]
+pub mod reference_pricer {
+    pub use crate::report::{Rejection, WholePlanSelection};
+    use crate::{AccuracyCheckInputs, ErrorSelectingPlan, SelectionModels};
+    use asap_cost::CostInputs;
+    use asap_types::physical::PhysicalWorkloadPlan;
+    use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
+
+    /// Check, price and rank every plan of `candidates`, keeping every
+    /// candidate: the selected one, each valid one's cost and accepted
+    /// accuracy, and why each other one lost.
+    ///
+    /// Note: with measured operation costs and no frozen calibration factor,
+    /// the formulas are calibrated over `candidates` alone, so costs are not
+    /// on the scale of a facade run's selection (`--price-enumerated`).
+    pub fn select_among_plans(
+        candidates: &[PhysicalWorkloadPlan],
+        entries: &[QueryWorkloadEntry],
+        data: &DataWorkload,
+        accuracy_checks: &AccuracyCheckInputs<'_>,
+        cost_inputs: &CostInputs,
+    ) -> Result<WholePlanSelection, ErrorSelectingPlan> {
+        crate::selector::select_among_plans(
+            candidates,
+            entries,
+            data,
+            SelectionModels::new(accuracy_checks, cost_inputs),
+        )
+    }
+}
 
 /// `roots` sized as Pass 1 sizes them for `targets` over `data`
 /// ([`with_summaries_sized_for_targets`](asap_accuracy::sizing::with_summaries_sized_for_targets)).
@@ -267,16 +305,6 @@ pub(crate) fn sized_as_pass1(
     asap_accuracy::sizing::with_summaries_sized_for_targets(roots, targets, data)
         .expect("sized summaries rebuild")
 }
-
-/// The Stage 1 to Stage 3 driver and the optimization-pass interface.
-pub mod search;
-pub use search as pass;
-pub use search::{
-    optimize, run_stage1_to_stage3, run_stage1_to_stage3_with, MemoSteps, OptimizationInput,
-    OptimizationInputError, OptimizationPass, OptimizeError, PassNameConflict, PassRegistry,
-    PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Pass, Stage1ToStage3Run,
-    Stage1ToStage3Search,
-};
 
 use asap_cost::{lookup, StateFamily};
 
@@ -309,6 +337,7 @@ mod tests {
     };
     use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
     use asap_types::physical::{Materialization, Medium};
+    use asap_types::workload::bounds::with_confirmed_weights;
     use asap_types::workload::bounds::{declared_series, series_read, values_per_result};
     use asap_types::workload::{
         DataWorkload, QueryRecurrence, QueryWorkloadEntry, RangeEvaluation,
@@ -382,7 +411,7 @@ mod tests {
     fn bound_of(
         root: &QueryRoot,
         data: &DataWorkload,
-        models: &PlanningModels<'_>,
+        models: &SelectionModels<'_>,
     ) -> Option<AccuracyGuarantee> {
         bound_root_guarantee(root, series_read(root, data), data, models)
     }
@@ -524,11 +553,11 @@ mod tests {
             .map(|c| c.id.as_str())
             .collect();
         assert!(!summaries.is_empty());
-        let selection = select_plan(
+        let selection = select_among_plans(
             &candidates,
             &[entry_with(strict, repeating(10_000))],
             &data(),
-            PlanningModels::builtin(),
+            SelectionModels::builtin(),
         )
         .unwrap();
         assert!(!summaries.contains(&selection.selected.as_str()));
@@ -549,7 +578,7 @@ mod tests {
     #[test]
     fn count_min_over_signed_weights_is_rejected_as_invalid() {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
-        let selection = select_plan(
+        let selection = select_among_plans(
             &candidates(),
             &[entry_with(
                 target
@@ -558,7 +587,7 @@ mod tests {
                 repeating(10_000),
             )],
             &data(),
-            PlanningModels::builtin(),
+            SelectionModels::builtin(),
         )
         .unwrap();
         let p2 = selection.rejected.iter().find(|r| r.id == "P2").unwrap();
@@ -585,7 +614,7 @@ mod tests {
             (vec![], false),
         ] {
             let data = with_types(&types);
-            let selection = select_plan(
+            let selection = select_among_plans(
                 &candidates(),
                 &[entry_with(
                     target
@@ -594,7 +623,7 @@ mod tests {
                     repeating(10_000),
                 )],
                 &data,
-                PlanningModels::builtin(),
+                SelectionModels::builtin(),
             )
             .unwrap();
             let p2 = selection.rejected.iter().find(|r| r.id == "P2").unwrap();
@@ -676,14 +705,14 @@ mod tests {
             for (metric_type, admitted) in [(MetricType::Counter, true), (MetricType::Gauge, false)]
             {
                 let data = with_metric_types(data(), &[("data_total", metric_type)]);
-                let rejected = match select_plan(
+                let rejected = match select_among_plans(
                     &candidates,
                     &[entry_with(target.clone(), repeating(10_000))],
                     &data,
-                    PlanningModels::builtin(),
+                    SelectionModels::builtin(),
                 ) {
                     Ok(selection) => selection.rejected,
-                    Err(SelectionError::NoValidCandidate(rejected)) => rejected,
+                    Err(ErrorSelectingPlan::NoValidCandidate(rejected)) => rejected,
                     Err(error) => panic!("{query}: {error}"),
                 };
                 for id in &count_min {
@@ -726,14 +755,14 @@ mod tests {
                 .filter(|c| count_min_builds(c).contains(&SketchAlgorithm::CmsWithHeap))
                 .collect();
             assert!(!count_min.is_empty(), "{query}");
-            let rejected = match select_plan(
+            let rejected = match select_among_plans(
                 &candidates,
                 &[entry_with(target.clone(), repeating(10_000))],
                 &gauge,
-                PlanningModels::builtin(),
+                SelectionModels::builtin(),
             ) {
                 Ok(selection) => selection.rejected,
-                Err(SelectionError::NoValidCandidate(rejected)) => rejected,
+                Err(ErrorSelectingPlan::NoValidCandidate(rejected)) => rejected,
                 Err(error) => panic!("{query}: {error}"),
             };
             for candidate in &count_min {
@@ -848,7 +877,7 @@ mod tests {
         let root = QueryRoot::Operator(Rc::new((*node).clone().with_guarantee(Some(gated))));
         let with = |types: &[(&str, MetricType)]| with_metric_types(data(), types);
         let bound = |data: &DataWorkload| {
-            bound_of(&root, data, &PlanningModels::builtin())
+            bound_of(&root, data, &SelectionModels::builtin())
                 .unwrap()
                 .spec
                 .error
@@ -866,25 +895,16 @@ mod tests {
 
     /// Every consumer of a run sees the selected plan with its weight
     /// requirements answered: the logical plan (`selected_logical`) and the
-    /// Offered one at a time and keeping only the best so far (the Pareto
-    /// front so far under `pareto-front`), the selector selects what
-    /// `select_plan` selects over every candidate at once, at the same cost
-    /// and with the same front, under every cost model.
+    /// Offered one at a time and keeping only the best so far, the selector
+    /// selects what `select_among_plans` selects over every candidate at
+    /// once, at the same cost, under every cost model.
     #[test]
     fn streaming_selection_selects_what_select_plan_selects() {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let root = lower_promql("quantile_over_time(0.99, m[5m])", target.clone());
         let entries = [entry_with(target, repeating(60_000))];
         let data = with_series(Some(10_000));
-        let run = crate::search::run_stage1_to_stage3_with(
-            vec![(0, QueryRoot::Operator(root))],
-            &entries,
-            &data,
-            PlanningModels::builtin(),
-            crate::search::Stage1ToStage3Search::exhaustive(),
-        )
-        .unwrap();
-        let candidates = &run.stage2_physical_asap_optimization;
+        let candidates = &exhaustive_candidates(&[QueryRoot::Operator(root)], &entries, &data);
         assert!(candidates.len() > 2);
         let cluster = |objective| {
             CostModel::ClusterCapacity(ClusterLimits {
@@ -899,14 +919,13 @@ mod tests {
             CostModel::ProvisionedCapacity(ResourceUnitCost::illustrative()),
             cluster(ClusterObjective::LowestLatency),
             cluster(ClusterObjective::LeastMemory),
-            cluster(ClusterObjective::ParetoFront),
         ] {
             let settings = CostInputs {
                 cost_model,
                 ..CostInputs::default()
             };
-            let models = PlanningModels::builtin().with_plan_selection(&settings);
-            let all = select_plan(candidates, &entries, &data, models).unwrap();
+            let models = SelectionModels::builtin().with_plan_selection(&settings);
+            let all = select_among_plans(candidates, &entries, &data, models).unwrap();
             let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
             for candidate in candidates {
                 selector.offer(candidate).unwrap();
@@ -916,58 +935,10 @@ mod tests {
             assert_eq!(built.id, all.selected);
             assert_eq!(streamed.plan, all.plan);
             assert_eq!(streamed.costs[&streamed.selected], all.costs[&all.selected]);
-            assert_eq!(streamed.front, all.front);
-            assert_eq!(streamed.search.candidates_checked, candidates.len() as u64);
-            // Only the selected candidate and the front are kept.
-            assert!(streamed.costs.len() <= all.front.len().max(1));
+            assert_eq!(streamed.candidates_checked, candidates.len() as u64);
+            // Only the selected candidate is kept.
+            assert_eq!(streamed.costs.len(), 1);
         }
-    }
-
-    /// executable roots (`Selection::plan`) carry the counter proof, not the
-    /// open requirement the executor rejects.
-    #[test]
-    fn the_selected_plan_carries_confirmed_weights() {
-        use asap_types::workload::MetricType;
-        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
-        let root = lower_promql("topk by (job) (10, sum_over_time(m[1m]))", target.clone());
-        let root =
-            asap_types::ir::schema::schema_support::with_promql_series_identity(&root).unwrap();
-        let mut data =
-            with_metric_types(with_series(Some(10_000_000)), &[("m", MetricType::Counter)]);
-        // 10 jobs: one Count-Min per job is cheaper than the exact per-series sums.
-        data.sources.get_mut("m").unwrap().distinct_values_per_label =
-            [("job".to_string(), 10)].into();
-        let run = crate::search::run_stage1_to_stage3_with(
-            vec![(0, QueryRoot::Operator(root))],
-            &[entry_with(target, repeating(10_000))],
-            &data,
-            PlanningModels::builtin().with_evidence(&EveryOutputMeasuredExact),
-            crate::search::Stage1ToStage3Search::exhaustive(),
-        )
-        .unwrap();
-        let domains = |roots: &[QueryRoot]| -> Vec<WeightDomain> {
-            roots
-                .iter()
-                .flat_map(root_operators)
-                .flat_map(OperatorNode::reachable)
-                .filter_map(|n| match n.asap() {
-                    Some(ASAPOp::SummaryAgg {
-                        input,
-                        family: FieldDataType::Sketch(kind, _),
-                        ..
-                    }) if *kind.algorithm() == SketchAlgorithm::CmsWithHeap => {
-                        Some(input.weight_domain.clone())
-                    }
-                    _ => None,
-                })
-                .collect()
-        };
-        let proven = [WeightDomain::NonNegative {
-            proof: asap_types::ir::schema::NonNegativeWeightProof::CounterRawDataSamples,
-        }];
-        let selection = run.stage3_plan_selection.as_ref().unwrap();
-        assert_eq!(domains(&selection.plan), proven, "{selection:?}");
-        assert_eq!(domains(run.selected_logical().unwrap()), proven);
     }
 
     /// The selected plan's open requirement becomes a proof when confirmed
@@ -1031,7 +1002,7 @@ mod tests {
     fn per_node_costs_cover_the_dag_and_sum_to_the_total() {
         let candidates = candidates();
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
-        let selection = select_plan(
+        let selection = select_among_plans(
             &candidates,
             &[entry_with(
                 target
@@ -1040,7 +1011,7 @@ mod tests {
                 repeating(10_000),
             )],
             &data(),
-            PlanningModels::builtin().with_evidence(&EveryOutputMeasuredExact),
+            SelectionModels::builtin().with_evidence(&EveryOutputMeasuredExact),
         )
         .unwrap();
         for candidate in candidates.iter().filter(|c| c.id != "P2") {
@@ -1273,11 +1244,11 @@ mod tests {
     fn an_entry_count_mismatch_is_an_error() {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let entries = vec![entry_with(target, repeating(10_000)); 2];
-        let Err(SelectionError::EntryCount {
+        let Err(ErrorSelectingPlan::EntryCount {
             candidate,
             roots,
             entries,
-        }) = select_plan(&candidates(), &entries, &data(), PlanningModels::builtin())
+        }) = select_among_plans(&candidates(), &entries, &data(), SelectionModels::builtin())
         else {
             panic!("an entry count mismatch is an error")
         };
@@ -1307,11 +1278,11 @@ mod tests {
     fn a_whole_result_target_is_checked_not_resized() {
         let (per_value_sized, whole) = per_series_kll(AccuracyScope::WholeResult);
         let entries = [entry_with(whole.clone(), repeating(10_000))];
-        let Err(SelectionError::NoValidCandidate(rejected)) = select_plan(
+        let Err(ErrorSelectingPlan::NoValidCandidate(rejected)) = select_among_plans(
             &per_value_sized,
             &entries,
             &data(),
-            PlanningModels::builtin(),
+            SelectionModels::builtin(),
         ) else {
             panic!("a per-value size misses the whole-result target")
         };
@@ -1319,7 +1290,8 @@ mod tests {
             .iter()
             .all(|r| r.cause == RejectionCause::AccuracyTargetMissed));
         let (sized, _) = per_series_kll_sized_as_pass1(AccuracyScope::WholeResult, &data());
-        let selection = select_plan(&sized, &entries, &data(), PlanningModels::builtin()).unwrap();
+        let selection =
+            select_among_plans(&sized, &entries, &data(), SelectionModels::builtin()).unwrap();
         let (
             SketchParams::Kll { k: per_value_k, .. },
             SketchParams::Kll {
@@ -1350,11 +1322,11 @@ mod tests {
             .failure_probability(0.001)
             .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
         let counter = with_metric_types(data(), &[("m", MetricType::Counter)]);
-        let selection = select_plan(
+        let selection = select_among_plans(
             &candidates,
             &[entry_with(target, repeating(10_000))],
             &counter,
-            PlanningModels::builtin().with_evidence(&EveryOutputMeasuredExact),
+            SelectionModels::builtin().with_evidence(&EveryOutputMeasuredExact),
         )
         .unwrap();
         let p2 = candidates.iter().find(|c| c.id == "P2").unwrap();
@@ -1399,11 +1371,11 @@ mod tests {
                 AccuracyScope::GroupsWithRecordShareAtLeast(0.05),
                 &data,
             );
-            let selection = select_plan(
+            let selection = select_among_plans(
                 &candidates,
                 &[entry_with(five_percent.clone(), repeating(10_000))],
                 &data,
-                PlanningModels::builtin(),
+                SelectionModels::builtin(),
             )
             .expect("a KLL candidate meets the 5% target");
             assert_eq!(
@@ -1421,11 +1393,11 @@ mod tests {
     fn an_unbound_number_of_values_leaves_a_whole_result_target_unmet() {
         let (candidates, whole) = per_series_kll(AccuracyScope::WholeResult);
         let no_series_count = with_series(None);
-        let Err(SelectionError::NoValidCandidate(rejected)) = select_plan(
+        let Err(ErrorSelectingPlan::NoValidCandidate(rejected)) = select_among_plans(
             &candidates,
             &[entry_with(whole, repeating(10_000))],
             &no_series_count,
-            PlanningModels::builtin(),
+            SelectionModels::builtin(),
         ) else {
             panic!("the KLL candidates are invalid")
         };
@@ -2027,11 +1999,11 @@ mod tests {
             .failure_probability(0.5)
             .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
         let select = |metric| {
-            select_plan(
+            select_among_plans(
                 &candidates(),
                 &[entry_with(target.clone(), repeating(10_000))],
                 &counter,
-                PlanningModels::builtin().with_evidence(&EveryOutputMeasuredIn(metric)),
+                SelectionModels::builtin().with_evidence(&EveryOutputMeasuredIn(metric)),
             )
             .unwrap()
         };
@@ -2080,14 +2052,14 @@ mod tests {
             .collect();
         assert!(!summaries.is_empty());
 
-        let builtin = select_plan(
+        let builtin = select_among_plans(
             &candidates,
             &[entry_with(
                 target.clone().accuracy_metric(AccuracyMetric::ABSOLUTE),
                 repeating(10_000),
             )],
             &data(),
-            PlanningModels::builtin(),
+            SelectionModels::builtin(),
         )
         .unwrap();
         for id in &summaries {
@@ -2101,14 +2073,14 @@ mod tests {
         }
         assert!(!summaries.contains(&builtin.selected.as_str()));
 
-        let measured = select_plan(
+        let measured = select_among_plans(
             &candidates,
             &[entry_with(
                 target.clone().accuracy_metric(AccuracyMetric::ABSOLUTE),
                 repeating(10_000),
             )],
             &data(),
-            PlanningModels::builtin().with_evidence(&EveryOutputMeasuredExact),
+            SelectionModels::builtin().with_evidence(&EveryOutputMeasuredExact),
         )
         .unwrap();
         for id in &summaries {
@@ -2162,11 +2134,11 @@ mod tests {
             &AcceptsEveryOutput as &dyn AccuracyModel,
             &BuiltinAccuracyModel,
         ] {
-            let selection = select_plan(
+            let selection = select_among_plans(
                 &candidates(),
                 &[entry_with(target.clone(), repeating(10_000))],
                 &gauge,
-                PlanningModels::builtin().with_accuracy(accuracy),
+                SelectionModels::builtin().with_accuracy(accuracy),
             )
             .unwrap();
             let p2 = selection.rejected.iter().find(|r| r.id == "P2").unwrap();
@@ -2185,7 +2157,7 @@ mod tests {
         }
     }
 
-    /// `ignore_accuracy_guarantees` (issue #774) does not override the
+    /// `IgnoreAccuracyGuarantees` (issue #774) does not override the
     /// executor's requirement on Count-Min update weights either: over
     /// samples of a gauge, P2's CmsWithHeap is still rejected as
     /// `CountMinWeightsNotProvenNonNegative`.
@@ -2196,14 +2168,15 @@ mod tests {
             .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
         let gauge = with_metric_types(data(), &[("m", MetricType::Gauge)]);
         let settings = CostInputs {
-            ignore_accuracy_guarantees: true,
             ..CostInputs::default()
         };
-        let selection = select_plan(
+        let selection = select_among_plans(
             &candidates(),
             &[entry_with(target, repeating(10_000))],
             &gauge,
-            PlanningModels::builtin().with_plan_selection(&settings),
+            SelectionModels::builtin()
+                .with_plan_selection(&settings)
+                .with_accuracy(&asap_accuracy::IgnoreAccuracyGuarantees),
         )
         .unwrap();
         let p2 = selection.rejected.iter().find(|r| r.id == "P2").unwrap();
@@ -2215,7 +2188,7 @@ mod tests {
         );
     }
 
-    /// With `ignore_accuracy_guarantees` (issue #774), each summary
+    /// With `IgnoreAccuracyGuarantees` (issue #774), each summary
     /// candidate the built-in model rejects (no guarantee, or one that
     /// misses the target) is valid, and its accepted output records the
     /// cause the guarantee check would have rejected it with; an output
@@ -2227,16 +2200,18 @@ mod tests {
             .accuracy_metric(AccuracyMetric::ABSOLUTE);
         let entries = [entry_with(target, repeating(10_000))];
         let settings = CostInputs {
-            ignore_accuracy_guarantees: true,
             ..CostInputs::default()
         };
         let builtin =
-            select_plan(&candidates(), &entries, &data(), PlanningModels::builtin()).unwrap();
-        let ignoring = select_plan(
+            select_among_plans(&candidates(), &entries, &data(), SelectionModels::builtin())
+                .unwrap();
+        let ignoring = select_among_plans(
             &candidates(),
             &entries,
             &data(),
-            PlanningModels::builtin().with_plan_selection(&settings),
+            SelectionModels::builtin()
+                .with_plan_selection(&settings)
+                .with_accuracy(&asap_accuracy::IgnoreAccuracyGuarantees),
         )
         .unwrap();
         let mut marked = 0;
@@ -2309,7 +2284,7 @@ mod tests {
             })
             .collect();
         let CheckFailure { cause, reason, .. } =
-            accuracy_check(&p2, &[target], &gauge, &PlanningModels::builtin()).unwrap_err();
+            accuracy_check(&p2, &[target], &gauge, &SelectionModels::builtin()).unwrap_err();
         assert_eq!(cause, RejectionCause::CountMinWeightsNotProvenNonNegative);
         assert!(
             reason.contains("HydraCms needs non-negative update weights"),
@@ -2338,14 +2313,14 @@ mod tests {
             .collect();
         assert!(!summaries.is_empty());
         let select = |accuracy: &dyn AccuracyModel, evidence: &dyn AccuracyEvidenceProvider| {
-            select_plan(
+            select_among_plans(
                 &candidates,
                 &[entry_with(
                     target.clone().accuracy_metric(AccuracyMetric::ABSOLUTE),
                     repeating(10_000),
                 )],
                 &data(),
-                PlanningModels::builtin()
+                SelectionModels::builtin()
                     .with_accuracy(accuracy)
                     .with_evidence(evidence),
             )
@@ -2412,14 +2387,14 @@ mod tests {
             let candidates = keeping_state(all_candidates_sized(query, &target, &|roots| {
                 sized_as_pass1(&roots, std::slice::from_ref(&checked), &data)
             }));
-            let selection = select_plan(
+            let selection = select_among_plans(
                 &candidates,
                 &[entry_with(
                     target.clone().accuracy_metric(AccuracyMetric::Rank),
                     repeating(10_000),
                 )],
                 &data,
-                PlanningModels::builtin(),
+                SelectionModels::builtin(),
             )
             .unwrap();
             let kept_bytes = |sketch: bool| {
@@ -2454,11 +2429,11 @@ mod tests {
     fn exact_l2_state_is_priced_like_exact_quantile_state() {
         let aggregate_cost = |query: &str| {
             let candidates = all_candidates(query, &AccuracyTarget::exact());
-            let selection = select_plan(
+            let selection = select_among_plans(
                 &candidates,
                 &[entry(repeating(10_000))],
                 &data(),
-                PlanningModels::builtin(),
+                SelectionModels::builtin(),
             )
             .unwrap();
             let exact = candidates
@@ -2488,14 +2463,14 @@ mod tests {
         let one_series = with_series(Some(1));
         for (data, sketch_wins) in [(data(), false), (one_series, true)] {
             let candidates = keeping_state(all_candidates("distinct_over_time(x[5m])", &target));
-            let selection = select_plan(
+            let selection = select_among_plans(
                 &candidates,
                 &[entry_with(
                     target.clone().accuracy_metric(AccuracyMetric::Relative),
                     repeating(10_000),
                 )],
                 &data,
-                PlanningModels::builtin(),
+                SelectionModels::builtin(),
             )
             .unwrap();
             let selected = candidates
@@ -2548,11 +2523,11 @@ mod tests {
             for values_non_negative in [true, false] {
                 let mut data = with_metric_types(data(), &[("x", MetricType::Gauge)]);
                 data.sources.get_mut("x").unwrap().values_non_negative = values_non_negative;
-                let selection = select_plan(
+                let selection = select_among_plans(
                     &candidates,
                     &[entry_with(target.clone(), repeating(10_000))],
                     &data,
-                    PlanningModels::builtin(),
+                    SelectionModels::builtin(),
                 )
                 .unwrap();
                 for id in &ddsketch {
@@ -2596,11 +2571,11 @@ mod tests {
             );
             let mut data = with_metric_types(data(), &[("x", MetricType::Gauge)]);
             data.sources.get_mut("x").unwrap().values_non_negative = true;
-            let selection = select_plan(
+            let selection = select_among_plans(
                 &candidates,
                 &[entry_with(target.clone(), repeating(10_000))],
                 &data,
-                PlanningModels::builtin(),
+                SelectionModels::builtin(),
             )
             .unwrap();
             let selected = candidates
@@ -2624,11 +2599,11 @@ mod tests {
             let query = format!("topk(10, {function}(data_total[5m]))");
             let candidates = all_candidates(&query, &target);
             let data = with_metric_types(data(), &[("data_total", MetricType::Counter)]);
-            let selection = select_plan(
+            let selection = select_among_plans(
                 &candidates,
                 &[entry_with(target.clone(), repeating(10_000))],
                 &data,
-                PlanningModels::builtin(),
+                SelectionModels::builtin(),
             );
             assert!(selection.is_ok(), "{query}: {selection:?}");
         }
@@ -2643,11 +2618,11 @@ mod tests {
         let mut twin = candidates[0].clone();
         twin.id = "P1-twin".into();
         candidates.push(twin);
-        let selection = select_plan(
+        let selection = select_among_plans(
             &candidates,
             &[entry(repeating(10_000))],
             &data(),
-            PlanningModels::builtin(),
+            SelectionModels::builtin(),
         )
         .unwrap();
         assert_eq!(selection.selected, "P1");
@@ -2664,14 +2639,14 @@ mod tests {
     fn kll_candidate_meets_a_failure_probability_below_one_percent() {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let candidates = all_candidates("quantile(0.99, rate(x[5m]))", &target);
-        let selection = select_plan(
+        let selection = select_among_plans(
             &candidates,
             &[entry_with(
                 target.clone().accuracy_metric(AccuracyMetric::Rank),
                 repeating(10_000),
             )],
             &data(),
-            PlanningModels::builtin(),
+            SelectionModels::builtin(),
         )
         .unwrap();
         let kll = candidates
@@ -2741,8 +2716,8 @@ mod tests {
         query: &str,
         target: &AccuracyTarget,
         data: &DataWorkload,
-        models: PlanningModels<'_>,
-    ) -> (Vec<PhysicalWorkloadPlan>, Selection) {
+        models: SelectionModels<'_>,
+    ) -> (Vec<PhysicalWorkloadPlan>, WholePlanSelection) {
         run_selecting(query, target, target, data, models)
     }
 
@@ -2753,21 +2728,67 @@ mod tests {
         planned: &AccuracyTarget,
         selected: &AccuracyTarget,
         data: &DataWorkload,
-        models: PlanningModels<'_>,
-    ) -> (Vec<PhysicalWorkloadPlan>, Selection) {
+        models: SelectionModels<'_>,
+    ) -> (Vec<PhysicalWorkloadPlan>, WholePlanSelection) {
         let root = lower_promql(query, planned.clone());
-        let run = crate::search::run_stage1_to_stage3_with(
-            vec![(0, QueryRoot::Operator(root))],
-            &[entry_with(selected.clone(), QueryRecurrence::Unknown)],
+        let entries = [entry_with(selected.clone(), QueryRecurrence::Unknown)];
+        let roots = sized_as_pass1(
+            &[QueryRoot::Operator(root)],
+            std::slice::from_ref(planned),
             data,
-            models,
-            crate::search::Stage1ToStage3Search::exhaustive(),
+        );
+        let candidates = exhaustive_candidates(&roots, &entries, data);
+        let selection = select_among_plans(&candidates, &entries, data, models).unwrap();
+        (candidates, selection)
+    }
+
+    /// Every whole plan of `roots`: each combination of Pass 1's choices
+    /// composed, then every materialization assignment Stage 2 offers for
+    /// it, with unique ids.
+    fn exhaustive_candidates(
+        roots: &[QueryRoot],
+        entries: &[QueryWorkloadEntry],
+        data: &DataWorkload,
+    ) -> Vec<PhysicalWorkloadPlan> {
+        use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+            compose_logical_candidate, generate_per_computation_candidates,
+        };
+        let with_ids: Vec<_> = roots.iter().cloned().enumerate().collect();
+        let inventory = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                &with_ids,
+            ),
         )
         .unwrap();
-        (
-            run.stage2_physical_asap_optimization,
-            run.stage3_plan_selection.unwrap(),
-        )
+        let mut choices = vec![vec![]];
+        for target in &inventory.targets {
+            choices = choices
+                .into_iter()
+                .flat_map(|choice: Vec<usize>| {
+                    (0..target.choice_count()).map(move |index| {
+                        let mut choice = choice.clone();
+                        choice.push(index);
+                        choice
+                    })
+                })
+                .collect();
+        }
+        let mut candidates = Vec::new();
+        for (index, choice) in choices.iter().enumerate() {
+            let Ok(composed) = compose_logical_candidate(&inventory, choice) else {
+                continue;
+            };
+            let id = format!("L{}", index + 1);
+            let Ok(physical) = optimize_physical_asap(&id, &composed, entries, data, false) else {
+                continue;
+            };
+            for (k, mut plan) in physical.into_iter().enumerate() {
+                plan.id = format!("P{}-{k}", index + 1);
+                plan.from_logical = id.clone();
+                candidates.push(plan);
+            }
+        }
+        candidates
     }
 
     fn sketches(candidate: &PhysicalWorkloadPlan) -> Vec<SketchAlgorithm> {
@@ -2809,7 +2830,7 @@ mod tests {
                 query,
                 &target,
                 &non_negative_data(),
-                PlanningModels::builtin(),
+                SelectionModels::builtin(),
             );
             let ddsketch: Vec<_> = candidates
                 .iter()
@@ -2820,7 +2841,7 @@ mod tests {
                 let g = bound_of(
                     &candidate.roots[0],
                     &non_negative_data(),
-                    &PlanningModels::builtin(),
+                    &SelectionModels::builtin(),
                 )
                 .expect(query);
                 assert_eq!(g.spec.accuracy_metric, AccuracyMetric::Relative, "{query}");
@@ -2835,7 +2856,7 @@ mod tests {
                     bound_of(
                         &candidate.roots[0],
                         &non_negative_data(),
-                        &PlanningModels::builtin()
+                        &SelectionModels::builtin()
                     ),
                     None,
                     "{query}"
@@ -2865,7 +2886,7 @@ mod tests {
                 &query,
                 &target,
                 &non_negative_data(),
-                PlanningModels::builtin(),
+                SelectionModels::builtin(),
             );
             let ddsketch: Vec<_> = candidates
                 .iter()
@@ -2876,7 +2897,7 @@ mod tests {
                 let g = bound_of(
                     &candidate.roots[0],
                     &non_negative_data(),
-                    &PlanningModels::builtin(),
+                    &SelectionModels::builtin(),
                 );
                 if kept {
                     let g = g.expect(&query);
@@ -2904,7 +2925,7 @@ mod tests {
             &format!("max_over_time({q}[10m:1m])"),
             &target,
             &non_negative_data(),
-            PlanningModels::builtin(),
+            SelectionModels::builtin(),
         );
         let ddsketch: Vec<_> = candidates
             .iter()
@@ -2915,7 +2936,7 @@ mod tests {
             let g = bound_of(
                 &candidate.roots[0],
                 &non_negative_data(),
-                &PlanningModels::builtin(),
+                &SelectionModels::builtin(),
             )
             .expect("a guarantee");
             assert_eq!(g.spec.accuracy_metric, AccuracyMetric::Relative);
@@ -2930,7 +2951,7 @@ mod tests {
             &format!("max_over_time({q}[10m:])"),
             &target,
             &non_negative_data(),
-            PlanningModels::builtin(),
+            SelectionModels::builtin(),
         );
         for candidate in candidates
             .iter()
@@ -2940,7 +2961,7 @@ mod tests {
                 bound_of(
                     &candidate.roots[0],
                     &non_negative_data(),
-                    &PlanningModels::builtin()
+                    &SelectionModels::builtin()
                 ),
                 None
             );
@@ -2956,7 +2977,7 @@ mod tests {
             "count by (le) (quantile_over_time(0.99, m[1m]))",
             &target,
             &data(),
-            PlanningModels::builtin(),
+            SelectionModels::builtin(),
         );
         // The inner quantile is a sketch; the count itself is exact.
         let sketched: Vec<_> = candidates
@@ -3024,7 +3045,7 @@ mod tests {
         let output = &outputs[0];
         let guarantee = root_guarantee(output).expect("a symbolic bound");
         assert!(guarantee.spec.error.has_unknown(), "{guarantee:?}");
-        assert!(guarantee_check(0, output, &target, &data(), &PlanningModels::builtin()).is_err());
+        assert!(guarantee_check(0, output, &target, &data(), &SelectionModels::builtin()).is_err());
     }
 
     /// `max` folds one value per series, so its failure probability is
@@ -3048,7 +3069,7 @@ mod tests {
             query,
             &target,
             &non_negative_data(),
-            PlanningModels::builtin(),
+            SelectionModels::builtin(),
         );
         let ids = ddsketch(&candidates);
         assert!(!ids.is_empty());
@@ -3059,11 +3080,11 @@ mod tests {
         }
         // Evaluate the same physical candidates: IDs from independent timed
         // searches do not identify the same implementation or connections.
-        let without = select_plan(
+        let without = select_among_plans(
             &candidates,
             &[entry_with(target, QueryRecurrence::Unknown)],
             &unknown,
-            PlanningModels::builtin(),
+            SelectionModels::builtin(),
         )
         .unwrap();
         assert!(ids.iter().all(|id| !without.costs.contains_key(id)));
@@ -3094,7 +3115,7 @@ mod tests {
             &planned,
             &target,
             &non_negative_data(),
-            PlanningModels::builtin(),
+            SelectionModels::builtin(),
         );
         let ids: Vec<_> = candidates
             .iter()
@@ -3179,7 +3200,7 @@ mod tests {
                 guarantee(AccuracyMetric::ABSOLUTE_STREAM_L1, 0.02, 0.001),
             ),
         );
-        let models = PlanningModels::builtin();
+        let models = SelectionModels::builtin();
         let both = bound_of(&root, &norms(&[("a", 100.0), ("b", 1_000.0)]), &models).unwrap();
         assert!(
             (both.spec.error.evaluate().unwrap() - 21.0).abs() < 1e-9,
@@ -3210,7 +3231,7 @@ mod tests {
                 ),
             )
         };
-        let models = PlanningModels::builtin();
+        let models = SelectionModels::builtin();
         let data = norms(&[("m", 100.0)]);
         let column = || SummaryInputExpr::Column(ColumnRef::SampleValue);
         let raw = doubled(asap_logical_asap_optimization::test_support::weighted(
@@ -3251,7 +3272,7 @@ mod tests {
         );
         let product = scalar_root(ArithmeticOpKind::Mul, x.clone(), y.clone());
         let quotient = scalar_root(ArithmeticOpKind::Div, x, y);
-        let bounded = PlanningModels::builtin().with_evidence(&BoundedOperands);
+        let bounded = SelectionModels::builtin().with_evidence(&BoundedOperands);
         for (root, expected) in [
             (&product, 1_000.0 * 0.02 + 1_000.0 * 0.01 + 0.01 * 0.02),
             (&quotient, (1_000.0 * 0.02 + 1_000.0 * 0.01) / (1.0 - 0.02)),
@@ -3262,7 +3283,7 @@ mod tests {
                 "{g:?}"
             );
             assert!((g.spec.failure_probability.evaluate().unwrap() - 0.002).abs() < 1e-12);
-            let unbound = bound_of(root, &data(), &PlanningModels::builtin()).unwrap();
+            let unbound = bound_of(root, &data(), &SelectionModels::builtin()).unwrap();
             assert!(unbound.spec.error.has_unknown(), "{unbound:?}");
         }
         let ratio = scalar_root(
@@ -3270,7 +3291,7 @@ mod tests {
             scalar_of("sum(a)", guarantee(AccuracyMetric::Relative, 0.01, 0.0)),
             scalar_of("sum(b)", guarantee(AccuracyMetric::Relative, 0.01, 0.0)),
         );
-        let g = bound_of(&ratio, &data(), &PlanningModels::builtin()).unwrap();
+        let g = bound_of(&ratio, &data(), &SelectionModels::builtin()).unwrap();
         assert!(
             (g.spec.error.evaluate().unwrap() - 0.02 / 0.99).abs() < 1e-12,
             "{g:?}"
@@ -3291,7 +3312,7 @@ mod tests {
             &planned,
             &target,
             &non_negative_data(),
-            PlanningModels::builtin(),
+            SelectionModels::builtin(),
         );
         let ids: Vec<_> = candidates
             .iter()
@@ -3314,7 +3335,8 @@ mod tests {
         let query = "max by (job) (quantile_over_time(0.99, m[1m]))";
         let mut other_source = data();
         other_source.sources.remove("m");
-        let (candidates, selection) = run(query, &target, &other_source, PlanningModels::builtin());
+        let (candidates, selection) =
+            run(query, &target, &other_source, SelectionModels::builtin());
         let ddsketch: Vec<_> = candidates
             .iter()
             .filter(|c| reads_only(c, SketchAlgorithm::DDSketch))
@@ -3782,11 +3804,11 @@ mod tests {
     fn invalid_settings_are_rejected() {
         let candidates = pane_candidates(10_000.0);
         let select = |settings: &CostInputs| {
-            select_plan(
+            select_among_plans(
                 &candidates,
                 &[every_minute()],
                 &arriving(10_000.0),
-                PlanningModels::builtin().with_plan_selection(settings),
+                SelectionModels::builtin().with_plan_selection(settings),
             )
         };
         let only_provisioned = ResourceUnitCost {
@@ -3805,7 +3827,10 @@ mod tests {
             },
         ] {
             assert!(
-                matches!(select(&settings), Err(SelectionError::InvalidSettings(_))),
+                matches!(
+                    select(&settings),
+                    Err(ErrorSelectingPlan::InvalidSettings(_))
+                ),
                 "{settings:?}"
             );
         }
@@ -4016,54 +4041,6 @@ mod tests {
         assert!(within_one.usage.average_memory_bytes < kept.usage.average_memory_bytes);
     }
 
-    /// Stored data (at rest, or mixed) with no raw data retained is a
-    /// contradiction in the inputs, refused before any candidate is
-    /// measured; arriving or undeclared data is not.
-    #[test]
-    fn stored_data_without_raw_data_retained_is_bad_input() {
-        let candidates = pane_candidates(10_000.0);
-        let no_raw_data = DeploymentCapabilities {
-            raw_data_retained: false,
-            ..DeploymentCapabilities::default()
-        };
-        let select = |arrival: DataArrival| {
-            // Each source's own rate, so an unknown arrival is priced too.
-            let mut data = DataWorkload { arrival, ..data() };
-            for facts in data.sources.values_mut() {
-                facts.sample_interval = Some(asap_types::workload::DurationMs(1_000));
-            }
-            select_plan(
-                &candidates,
-                &[every_minute()],
-                &data,
-                PlanningModels::builtin().with_deployment_capabilities(&no_raw_data),
-            )
-        };
-        for arrival in [
-            DataArrival::AtRest,
-            DataArrival::Mixed {
-                rows_per_second: 10_000.0,
-            },
-        ] {
-            let error = select(arrival).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                format!(
-                    "deployment capabilities: the data is stored ({arrival:?}), \
-                     but the deployment does not retain raw data"
-                ),
-            );
-        }
-        for arrival in [
-            DataArrival::Ingesting {
-                rows_per_second: 10_000.0,
-            },
-            DataArrival::Unknown,
-        ] {
-            assert!(select(arrival).is_ok());
-        }
-    }
-
     fn is_chain(payload: &Payload) -> bool {
         matches!(payload, Payload::ASAP(ASAPOp::PaneChain { .. }))
     }
@@ -4147,11 +4124,11 @@ mod tests {
         let bound = (b1.query_ms + b2.query_ms) / 2.0;
         let mut bounded = every_minute();
         bounded.requirements.max_latency_ms = Some(bound);
-        let selection = select_plan(
+        let selection = select_among_plans(
             &candidates,
             &[bounded],
             &arriving(10_000.0),
-            PlanningModels::builtin(),
+            SelectionModels::builtin(),
         )
         .unwrap();
         assert_eq!(selection.selected, candidates[1].id);
@@ -4199,11 +4176,11 @@ mod tests {
         );
         let unbounded = every_minute();
         assert_eq!(unbounded.requirements.max_latency_ms, None);
-        let selection = select_plan(
+        let selection = select_among_plans(
             &candidates,
             &[unbounded],
             &arriving(rows_per_s),
-            PlanningModels::builtin(),
+            SelectionModels::builtin(),
         )
         .unwrap();
         assert_eq!(selection.selected, candidates[1].id);
@@ -4238,11 +4215,11 @@ mod tests {
             },
             ..every_minute()
         };
-        let selection = select_plan(
+        let selection = select_among_plans(
             &candidates,
             &[once],
             &arriving(rows_per_s),
-            PlanningModels::builtin(),
+            SelectionModels::builtin(),
         )
         .unwrap();
         // Run once an hour, rebuilding at query time is the cheaper plan,
@@ -4268,11 +4245,11 @@ mod tests {
             ..every_minute()
         };
         let select = |entry: &QueryWorkloadEntry| {
-            select_plan(
+            select_among_plans(
                 &candidates,
                 std::slice::from_ref(entry),
                 &arriving(rows_per_s),
-                PlanningModels::builtin(),
+                SelectionModels::builtin(),
             )
             .unwrap()
         };
@@ -4482,11 +4459,11 @@ mod tests {
         let candidates = pane_candidates(10_000.0);
         let select = |cpu_cores| {
             let settings = under(CostModel::ClusterCapacity(limits(cpu_cores)));
-            select_plan(
+            select_among_plans(
                 &candidates,
                 &[every_minute()],
                 &arriving(10_000.0),
-                PlanningModels::builtin().with_plan_selection(&settings),
+                SelectionModels::builtin().with_plan_selection(&settings),
             )
             .unwrap()
         };
@@ -4544,11 +4521,11 @@ mod tests {
                 cpu_cores: None,
                 objective: ClusterObjective::LeastMemory,
             }));
-            select_plan(
+            select_among_plans(
                 &candidates,
                 &[every_minute()],
                 &arriving(10_000.0),
-                PlanningModels::builtin().with_plan_selection(&settings),
+                SelectionModels::builtin().with_plan_selection(&settings),
             )
             .unwrap()
         };
@@ -4637,7 +4614,6 @@ mod tests {
         for objective in [
             ClusterObjective::LowestLatency,
             ClusterObjective::LeastMemory,
-            ClusterObjective::ParetoFront,
         ] {
             let settings = under(CostModel::ClusterCapacity(ClusterLimits {
                 memory_bytes: u64::MAX,
@@ -4645,11 +4621,11 @@ mod tests {
                 cpu_cores: None,
                 objective,
             }));
-            let selection = select_plan(
+            let selection = select_among_plans(
                 &candidates,
                 &[every_minute()],
                 &arriving(10_000.0),
-                PlanningModels::builtin().with_plan_selection(&settings),
+                SelectionModels::builtin().with_plan_selection(&settings),
             )
             .unwrap();
             assert_eq!(selection.selected, candidates[0].id, "{objective:?}");
@@ -4664,13 +4640,6 @@ mod tests {
                 "{objective:?}: {}",
                 twin.reason
             );
-            let expected_front = match objective {
-                ClusterObjective::ParetoFront => {
-                    vec![candidates[0].id.clone(), candidates[1].id.clone()]
-                }
-                _ => Vec::new(),
-            };
-            assert_eq!(selection.front, expected_front, "{objective:?}");
         }
     }
 
@@ -5256,12 +5225,12 @@ mod tests {
 
     /// The candidate Stage 3 selects among `candidates` for one p99 every
     /// minute over 10,000 rows per second.
-    fn selected(candidates: &[PhysicalWorkloadPlan], settings: &CostInputs) -> Selection {
-        select_plan(
+    fn selected(candidates: &[PhysicalWorkloadPlan], settings: &CostInputs) -> WholePlanSelection {
+        select_among_plans(
             candidates,
             &[every_minute()],
             &arriving(10_000.0),
-            PlanningModels::builtin().with_plan_selection(settings),
+            SelectionModels::builtin().with_plan_selection(settings),
         )
         .unwrap()
     }
@@ -5399,7 +5368,8 @@ mod tests {
         assert_eq!(free.selected, "EXACT", "{:?}", free.rejected);
         let priced = selected(&candidates, &table(200.0));
         assert_eq!(priced.selected, "P1-m1", "{:?}", priced.rejected);
-        let cost = |selection: &Selection, id: &str| selection.costs[id].cost_per_second.unwrap();
+        let cost =
+            |selection: &WholePlanSelection, id: &str| selection.costs[id].cost_per_second.unwrap();
         assert!(cost(&priced, "EXACT") > cost(&priced, "P1-m1"));
         assert!(cost(&priced, "EXACT") > cost(&free, "EXACT"));
     }
@@ -5535,16 +5505,16 @@ mod tests {
             objective: ClusterObjective::LowestLatency,
         });
         let facts = data();
-        let models = PlanningModels {
+        let models = SelectionModels {
             plan_selection: &settings,
-            ..PlanningModels::builtin()
+            ..SelectionModels::builtin()
         };
         let mut selector = PlanSelector::new(&entries, &facts, models, false).unwrap();
         selector.set_calibration(CalibrationFit::default());
         selector.offer(&candidate).unwrap();
         assert!(matches!(
             selector.finish(),
-            Err(SelectionError::NoValidCandidate(_))
+            Err(ErrorSelectingPlan::NoValidCandidate(_))
         ));
         // Finite input coefficients can still overflow when multiplied by demand.
         settings.measured_operation_costs.ns_per_evaluation = f64::MAX;

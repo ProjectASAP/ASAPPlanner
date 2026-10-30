@@ -448,19 +448,19 @@ mod tests {
         for id in &selected.selected_candidates {
             modes[id.0] = Some(expanded.physical.candidates[id.0].materialization);
         }
-        let original_roots = vec![QueryRoot::Operator(root); 2];
+        let query_roots = vec![QueryRoot::Operator(root); 2];
         let physical = asap_physical_asap_optimization::catalog::materialize_selected_candidates(
             &expanded.physical,
-            &selected,
+            &selected.to_selected_candidates(),
             &modes,
-            &original_roots,
+            &query_roots,
             &entries,
             &data,
             deployment.query_time_results_retained,
         )
         .unwrap();
-        physical.physical.dag.validate().unwrap();
-        assert_eq!(physical.physical.roots.len(), 2);
+        physical.plan.dag.validate().unwrap();
+        assert_eq!(physical.plan.roots.len(), 2);
     }
 
     // Repeating the same workload entry adds output references, not a quadratic

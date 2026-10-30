@@ -31,7 +31,8 @@ pub use budget::per_input_target;
 pub use evidence::OperandDomain;
 pub(crate) use evidence::PropagationStats;
 pub use model::{
-    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, NoAccuracyEvidence,
+    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, IgnoreAccuracyGuarantees,
+    NoAccuracyEvidence,
 };
 
 #[cfg(test)]

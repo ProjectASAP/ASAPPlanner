@@ -10,7 +10,7 @@ use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_
 use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
 use asap_logical_asap_optimization::pass2::memo::enumeration::enumerate;
 use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
-use asap_plan_selection::PlanningModels;
+use asap_planner::PlanningModels;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::QueryRoot;
 use asap_types::stages::CandidateMemo;
@@ -95,12 +95,13 @@ fn planned(workload: &PlanningWorkload, series_identity: bool) -> Planned {
 /// `stage_pipeline`'s models: the executor's summary families,
 /// `settings` (accuracy guarantees ignored unless enforced).
 fn models<'a>(
-    settings: &'a CostInputs,
+    settings: &'a Settings,
     deployment: &'a DeploymentCapabilities,
 ) -> PlanningModels<'a> {
     PlanningModels::builtin()
-        .with_plan_selection(settings)
+        .with_plan_selection(&settings.cost_inputs)
         .with_deployment_capabilities(deployment)
+        .with_ignore_accuracy_guarantees(settings.ignore_accuracy_guarantees)
 }
 
 fn deployment() -> DeploymentCapabilities {
@@ -110,10 +111,17 @@ fn deployment() -> DeploymentCapabilities {
     }
 }
 
-fn settings(enforce_accuracy_guarantees: bool) -> CostInputs {
-    CostInputs {
+/// `stage_pipeline`'s cost inputs, and whether it ignores accuracy
+/// guarantees.
+struct Settings {
+    cost_inputs: CostInputs,
+    ignore_accuracy_guarantees: bool,
+}
+
+fn settings(enforce_accuracy_guarantees: bool) -> Settings {
+    Settings {
+        cost_inputs: CostInputs::default(),
         ignore_accuracy_guarantees: !enforce_accuracy_guarantees,
-        ..CostInputs::default()
     }
 }
 
@@ -127,7 +135,7 @@ fn selected(planned: &Planned, models: PlanningModels<'_>) -> SelectedBaseline {
         models,
     )
     .unwrap();
-    SelectedBaseline::of(run.stage3_plan_selection.as_ref().expect("a selection"))
+    SelectedBaseline::of(run.run.selection.as_ref().expect("a selection"))
 }
 
 /// Every choice of `planned`'s Pass 1 memo (the enumeration is complete),

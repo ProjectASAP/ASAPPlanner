@@ -28,7 +28,9 @@ test-support = ["planner-types/test-support"]
 asap-executor = { path = ".", features = ["test-support"] }
 rmp-serde = "1"
 asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
-asap-plan-selection = { path = "../plan-selection" }
+# The planning stages through the facade (a dev-dependency cycle, for
+# integration tests only).
+asap-planner = { path = "../planner" }
 asap-frontend-promql = { path = "../frontend-promql" }
 
 [[test]]

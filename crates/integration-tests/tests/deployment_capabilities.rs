@@ -190,7 +190,7 @@ fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
         &workload,
         original,
         vec![pane_roots],
-        asap_plan_selection::PlanningModels::builtin()
+        asap_planner::PlanningModels::builtin()
             .with_plan_selection(&settings)
             .with_deployment_capabilities(deployment),
     )

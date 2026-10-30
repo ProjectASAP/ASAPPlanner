@@ -180,7 +180,7 @@ mod tests {
     use super::*;
     use crate::search::candidates::configurations::enumerate_candidate_configurations;
     use crate::search::candidates::inventory::build_candidate_inventory;
-    use crate::PlanningModels;
+    use crate::SelectionModels;
     use asap_cost::CalibrationFit;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
@@ -244,20 +244,20 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let models = PlanningModels::builtin();
+        let models = SelectionModels::builtin();
         let mut configured = enumerate_candidate_configurations(
             &inventory,
             &[0],
             &entries,
             &data,
-            models.deployment_capabilities,
+            &asap_logical_asap_optimization::DeploymentCapabilities::default(),
         )
         .unwrap();
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
             models,

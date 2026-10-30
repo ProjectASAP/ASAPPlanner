@@ -66,7 +66,11 @@ fn confirmed_as_counter(
         .into(),
         ..DataWorkload::default()
     };
-    match asap_plan_selection::with_confirmed_weights(&[QueryRoot::Operator(plan)], &data).remove(0)
+    match planner_types::workload::bounds::with_confirmed_weights(
+        &[QueryRoot::Operator(plan)],
+        &data,
+    )
+    .remove(0)
     {
         QueryRoot::Operator(node) => node,
         QueryRoot::Scalar(_) => unreachable!("an operator root"),

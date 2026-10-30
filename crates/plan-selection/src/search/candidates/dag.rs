@@ -4,10 +4,11 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use crate::search::candidates::graph::SelectedCandidateGraph;
 use asap_types::ir::OperatorNode;
 use asap_types::stages::{
     validate_selected_connections, PhysicalASAPMemoCandidates, PhysicalCandidateId,
-    ProducerCandidates, ReaderConstraint, SelectedCandidateGraph,
+    ProducerCandidates, ReaderConstraint,
 };
 
 /// One required input, distinct even when another input accepts the same
@@ -251,7 +252,7 @@ pub(crate) fn validate_selected_graph(
         },
         &query_output_candidates,
         &graph.reader_constraints,
-        selected,
+        &selected.to_selected_candidates(),
     )?;
     let active: HashSet<_> = selected.selected_candidates.iter().copied().collect();
     for budget in &graph.resource_budgets {
@@ -314,6 +315,47 @@ pub(crate) struct PhysicalCandidatesWithCosts {
     pub physical: PhysicalASAPMemoCandidates,
     /// What the MILP selects over: the same candidates with their costs.
     pub dag: DagOfPhysicalCandidatesWithCosts,
+}
+
+/// The workload's query roots as Stage 3 sees them, from Stage 2's output
+/// alone: each output reference of `physical.query_roots` is the operator
+/// tree of its group's first implementation root (its
+/// `physical_node`). The engine's heuristics read them instead of the
+/// frontends' roots (#1047 P7); `None` when a referenced group has no
+/// implementation root.
+pub(crate) fn query_roots_of(
+    physical: &PhysicalASAPMemoCandidates,
+) -> Option<Vec<asap_types::ir::QueryRoot>> {
+    use asap_types::ir::QueryRoot;
+    let tree = |group: &asap_types::stages::MemoGroupId| {
+        let &root = physical.implementation_roots(*group).first()?;
+        let candidate = &physical.candidates[root.0];
+        Some(Rc::clone(
+            &physical.operator_nodes_of_candidates_for_memo_groups[candidate.operator_node.0]
+                .physical_node,
+        ))
+    };
+    if !physical
+        .query_roots
+        .iter()
+        .flat_map(QueryRoot::operator_refs)
+        .all(|group| tree(group).is_some())
+    {
+        return None;
+    }
+    let tree = |group: &asap_types::stages::MemoGroupId| tree(group).expect("checked above");
+    Some(
+        physical
+            .query_roots
+            .iter()
+            .map(|root| match root {
+                QueryRoot::Operator(group) => QueryRoot::Operator(tree(group)),
+                QueryRoot::Scalar(expression) => {
+                    QueryRoot::Scalar(expression.map_operator_refs(&mut |group| tree(group)))
+                }
+            })
+            .collect(),
+    )
 }
 
 impl PhysicalCandidatesWithCosts {

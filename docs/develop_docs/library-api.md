@@ -15,7 +15,7 @@ plan, and a serializable DAG is not evidence of runtime readiness.
 | --- | --- | --- |
 | Pre-ASAP IR | Frontend `lower_*` | [Lower a query](#lower-a-query-into-pre-asap-ir) |
 | Selected plan for a workload (Stages 0–3) | `asap_planner::e2e_plan` | [Plan a workload](#plan-a-workload-through-the-stages) |
-| Every stage's candidates for already lowered roots | `asap_plan_selection::run_stage1_to_stage3` | [Plan a workload](#plan-a-workload-through-the-stages) |
+| Every stage's candidates for already lowered roots | `asap_planner::run_planning` | [Plan a workload](#plan-a-workload-through-the-stages) |
 | Physical DAG for an executor | `PlanOutput::physical_asap_dag`, or timing and export functions | [Export](#export) |
 
 Each recipe ends at a different artifact. Use only the stages needed for that
@@ -25,8 +25,8 @@ artifact, while preserving the checks required by its intended consumer.
 
 Inside this workspace, depend on the frontend you need, the stage crates
 (`asap-logical-asap-optimization` for Stage 1, `asap-physical-asap-optimization`
-for Stage 2, `asap-plan-selection` for Stage 3 and the Stage 1 to Stage 3
-driver), `asap-cost` for the cost model and its inputs (`CostInputs`),
+for Stage 2, `asap-plan-selection` for Stage 3), `asap-planner` for the facade that
+runs the stages, `asap-cost` for the cost model and its inputs (`CostInputs`),
 `asap-accuracy` for the accuracy model (`AccuracyModel`,
 `AccuracyEvidenceProvider`), and `asap-types`, or on `asap-planner`, which wraps every frontend and
 the planning stages. External users can use Git dependencies pinned to a
@@ -162,7 +162,8 @@ example, see `lineitem_catalog` in [the planner's end-to-end tests](../../crates
 `asap_planner::e2e_plan` runs the whole planner: the query-language frontends
 (Stage 0), then the default optimization pass `Stage1ToStage3Pass`, which runs
 logical ASAP-aware optimization (Stage 1), physical ASAP-aware optimization
-(Stage 2) and plan selection (Stage 3) in order.
+(Stage 2) and plan selection (Stage 3): Pass 1 once, then Pass 2, Stage 2
+and Stage 3 per pane-width round, keeping the best round's plan.
 
 ```text
 asap_planner::e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError>   // async
@@ -170,26 +171,40 @@ UserInput::new(workload: &PlanningWorkload, frontend_specific: FrontendInput<'_>
     models: PlanningModels<'_>) -> UserInput<'_>
 FrontendInput::{Sql { catalog: &SqlCatalog }, Promql { histograms: Option<HistogramCatalog> }, Metricsql}
 
-// A caller that already holds lowered roots calls the stages directly:
-asap_plan_selection::run_stage1_to_stage3<Id>(
-    roots: Vec<(Id, QueryRoot)>,
+// A caller that already holds lowered roots runs the stages through the facade:
+asap_planner::run_planning(
+    roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],   // one per root: accuracy, latency bound, recurrence
     data: &DataWorkload,
     models: PlanningModels<'_>,
-) -> Result<Stage1ToStage3Run<Id>, PerComputationCandidateError>
+    settings: PlanSearchSettings,     // time_limit_ms, default 30 s
+) -> Result<PlanningRun, PerComputationCandidateError>
+
+// Stage 3 alone, over one round's Stage 2 output:
+asap_plan_selection::select_plan(
+    physical: &PhysicalASAPMemoCandidates,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    accuracy_checks: &AccuracyCheckInputs<'_>,   // accuracy model and evidence
+    cost_inputs: &CostInputs,
+    realizer: &dyn AssignmentRealizer,           // Stage 2's, e.g. Stage2AssignmentRealizer
+    deadline: Option<Instant>,
+) -> Result<Selection, ErrorSelectingPlan>
 ```
 
 | Input or output | Meaning |
 | --- | --- |
 | `PlanningModels::new(accuracy, evidence)` | Your `&dyn AccuracyModel` and `&dyn AccuracyEvidenceProvider`, with default plan selection settings and deployment capabilities; `with_accuracy` and `with_evidence` replace one of them |
 | `PlanningModels::builtin()` | Built-in accuracy model (`BuiltinAccuracyModel`) and no extra evidence (`NoAccuracyEvidence`). `with_plan_selection(&settings)` sets the deployment's `CostInputs`; `with_deployment_capabilities(&capabilities)` sets its `DeploymentCapabilities` (field `deployment_capabilities`) |
-| `DeploymentCapabilities` (`asap_logical_asap_optimization::deployment_capabilities`) | What the executor supports: `supported_summaries` (`None`, the default, supports every summary the planner builds; otherwise `SupportedSummary { family: SketchAlgorithm, readouts: Vec<StatisticKind> }` entries; Pass 1 prunes others with `PruneReason::UnsupportedByDeployment`), `raw_data_retained` (default `true`; when `false`, a candidate that scans raw data at query time is invalid, and stored data is refused with `SelectionError::InvalidDeploymentCapabilities`) and `query_time_results_retained` (default `false`; when `true`, Stage 2 offers `MatAtQueryKeptAcrossEvaluations` for tumbling panes) |
+| `DeploymentCapabilities` (`asap_logical_asap_optimization::deployment_capabilities`) | What the executor supports: `supported_summaries` (`None`, the default, supports every summary the planner builds; otherwise `SupportedSummary { family: SketchAlgorithm, readouts: Vec<StatisticKind> }` entries; Pass 1 prunes others with `PruneReason::UnsupportedByDeployment`), `raw_data_retained` (default `true`; when `false`, a candidate that scans raw data at query time is pruned by Stage 2, and stored data is refused with `asap_planner::SelectionError::InvalidDeploymentCapabilities`) and `query_time_results_retained` (default `false`; when `true`, Stage 2 offers `MatAtQueryKeptAcrossEvaluations` for tumbling panes) |
 | `CostInputs` (`asap_cost`) | `cost_model`, `resource_speed` (`ms_per_cpu_op`, `ms_per_scanned_byte`), `non_repeating_query_horizon_seconds` (default 3,600) and `measured_operation_costs` (`MeasuredOperationCosts`, default empty: `operators`, one `OperatorCost { operator, phase, sketch / exact / measure, ns_per_unit, ns_per_invocation, memory_bytes_per_state }` per measured operator kind, phase and family; `ns_per_evaluation` per query request; `provenance` (executor version, machine). A node with an entry is priced from it, a sketch between the two nearest measured sizes; every other node from the formulas times one calibration factor fitted from the measured nodes; each node's `NodeCost::price_source` says which. The earlier JSON array of `MeasuredOperationCost { sketch, operation, cpu_ns_per_operation }` still loads) |
 | `CostModel::UsageOverTime(ResourceUnitCost)` | Cost model 1 (default, `ResourceUnitCost::illustrative()`): unit cost × usage per second; the cheapest valid candidate wins |
 | `CostModel::ProvisionedCapacity(ResourceUnitCost)` | Cost model 2: unit cost × peak memory, peak CPU cores and disk; the cheapest valid candidate wins |
-| `CostModel::ClusterCapacity(ClusterLimits)` | Cost model 3: memory, disk and optional CPU cores are hard limits; `ClusterObjective::{LowestLatency, LeastMemory, ParetoFront}` chooses among the candidates that fit |
+| `CostModel::ClusterCapacity(ClusterLimits)` | Cost model 3: memory, disk and optional CPU cores are hard limits; `ClusterObjective::{LowestLatency, LeastMemory}` chooses among the candidates that fit |
 | `PlanOutput.plans` | One `QueryPlan { entry_index, root }` per query, in `QueryWorkload::entries()` order |
-| `PlanOutput.selection` | `Some` with Stage 3's `Selection` under the default pass: `selected`, `costs` (each candidate's `PlanCost` with its `ResourceUsage` and `cost_per_second`, `None` under cost model 3), `accepted`, `rejected` (with reasons) and `front` |
+| `PlanOutput.selection` | `Some` with Stage 3's `Selection` under the default pass: `selected_candidates`, `candidates_with_proven_non_negative_weights`, `cost` (the selected plan's `PlanCost` with its `ResourceUsage` and `cost_per_second`, `None` under cost model 3), `accepted_accuracy_per_query`, `pruned_candidates` and `search_report` |
+| `PlanOutput.pane_retention_ms` | For each pane chain the selected plan keeps beyond one evaluation, by node id, how long its panes are kept (`RealizedPlan::pane_retention_ms`) |
+| `PlanningRun` | `per_computation_candidates`, the selected round's `logical_asap_candidates` and `physical_asap_candidates`, `selection`, `selected_physical_plan` (`RealizedPlan`), `selected_plan` (the roots to run), `memo_steps` and `report` (per round: counts and Pass 2, Stage 2 and Stage 3 times) |
 | `PlanOutput::physical_asap_dag()` | The planned queries as one `PhysicalASAPDAG`, timed with the default `MaterializationAssignment` (see [Export](#export)) |
 
 Each candidate's `ResourceUsage` holds its usage without prices:
@@ -248,11 +263,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = e2e_plan(input).await?;
     let selection = output.selection.as_ref().expect("Stage 3 selected a plan");
     println!(
-        "selected {} at {:?} per second",
-        selection.selected, selection.costs[&selection.selected].cost_per_second
+        "selected {} candidates at {:?} per second ({:?})",
+        selection.selected_candidates.candidates.len(),
+        selection.cost.cost_per_second,
+        selection.search_report.status,
     );
-    for rejection in &selection.rejected {
-        println!("{}: {}", rejection.id, rejection.reason);
+    for accepted in &selection.accepted_accuracy_per_query {
+        println!("{accepted}");
     }
     let dag = output.physical_asap_dag()?;
     println!("{} physical nodes", dag.nodes.len());
@@ -260,10 +277,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-It prints `selected P1 at Some(0.000313...) per second`, then the two
-rejected heap top-k candidates, `P2` and `P3`, each with the reason
-`q1: the output has no guarantee, ...`. To plan under cost
-model 3 instead:
+It prints the number of selected physical candidates, the selected plan's
+cost per second and how the search ended, then the accuracy Stage 3
+accepted for each query. To plan under cost model 3 instead:
 
 ```rust
 use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel};
@@ -360,7 +376,7 @@ cargo doc -p asap-logical-asap-optimization -p asap-physical-asap-optimization \
 ## Source references
 
 - [Frontend PromQL](../../crates/frontend-promql/src/lib.rs), [SQL](../../crates/frontend-sql/src/lib.rs), [MetricsQL](../../crates/frontend-metricsql/src/lib.rs)
-- [Planner facade](../../crates/planner/src/lib.rs), [planning stages](../../crates/plan-selection/src/search/pipeline.rs), [plan selection and cost models 1–3](../../crates/plan-selection/src/lib.rs)
+- [Planner facade](../../crates/planner/src/lib.rs), [planning stages](../../crates/planner/src/run.rs), [plan selection and cost models 1–3](../../crates/plan-selection/src/lib.rs)
 - [Deployment capabilities](../../crates/logical-asap-optimization/src/deployment_capabilities.rs)
 - [Workload types](../../crates/types/src/workload/mod.rs)
 - [Planner-runtime contract](../design_docs/architecture/planner-runtime-contract.md)

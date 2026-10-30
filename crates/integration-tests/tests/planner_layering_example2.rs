@@ -168,7 +168,7 @@ fn rule_fixture(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
         workload,
         roots,
         computations,
-        asap_plan_selection::PlanningModels::builtin(),
+        asap_planner::PlanningModels::builtin(),
     )
 }
 
@@ -299,7 +299,7 @@ fn memo_pipeline() -> Run {
         &workload,
         roots,
         computations,
-        asap_plan_selection::PlanningModels::builtin(),
+        asap_planner::PlanningModels::builtin(),
     )
 }
 
@@ -312,7 +312,7 @@ fn shared_pipeline(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
         workload,
         roots,
         computations,
-        asap_plan_selection::PlanningModels::builtin(),
+        asap_planner::PlanningModels::builtin(),
     )
 }
 
@@ -1095,11 +1095,11 @@ fn stage3_plan_selection_selected_plan_has_at_most_one_univmon() {
 /// binding").
 #[test]
 fn stage3_plan_selection_selected_kmv_plan_executes_end_to_end() {
+    use asap_devtools::memo_pricing::reference_select as select_plan;
     use asap_executor::physical_planner::{compile, promql_rows};
     use asap_executor::runtime::Scope;
     use asap_executor::values::Value;
-    use asap_plan_selection::select_plan;
-    use asap_plan_selection::PlanningModels;
+    use asap_planner::PlanningModels;
 
     let workload = standin_workload();
     let roots = lower_promql(&workload);

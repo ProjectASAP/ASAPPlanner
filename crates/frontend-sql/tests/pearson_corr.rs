@@ -154,8 +154,8 @@ async fn corr_survives_exact_plan_compilation() {
         serde_json::json!({"arrival": "at_rest", "sources": {"a": {"rows_held": 60000}}}),
     )
     .unwrap();
-    let run = asap_plan_selection::run_stage1_to_stage3_with(
-        vec![(0, asap_types::ir::QueryRoot::Operator(query.clone()))],
+    let run = asap_planner::run_planning(
+        vec![asap_types::ir::QueryRoot::Operator(query.clone())],
         &[asap_types::workload::QueryWorkloadEntry {
             query: Default::default(),
             requirements: asap_types::workload::QueryRequirements {
@@ -167,11 +167,11 @@ async fn corr_survives_exact_plan_compilation() {
             range_evaluation: None,
         }],
         &data,
-        asap_plan_selection::PlanningModels::builtin(),
-        asap_plan_selection::Stage1ToStage3Search::exhaustive(),
+        asap_planner::PlanningModels::builtin(),
+        asap_planner::PlanSearchSettings::default(),
     )
     .unwrap();
-    let [asap_types::ir::QueryRoot::Operator(plan)] = run.selected_logical().unwrap() else {
+    let [asap_types::ir::QueryRoot::Operator(plan)] = run.selected_plan.as_deref().unwrap() else {
         panic!("one operator root");
     };
     assert!(plan.guarantee.as_ref().unwrap().is_exact());

@@ -80,7 +80,7 @@ fn run_explicit_for(workload: &PlanningWorkload, deployment: &DeploymentCapabili
         workload,
         roots,
         candidates,
-        asap_plan_selection::PlanningModels::builtin()
+        asap_planner::PlanningModels::builtin()
             .with_plan_selection(&settings)
             .with_deployment_capabilities(deployment),
     )

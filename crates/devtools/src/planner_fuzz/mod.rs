@@ -9,7 +9,7 @@
 //! *witness*: `W`'s selected logical plan plus `q'` derived from `q`'s
 //! node by one operator. Stage 2 and Stage 3 implement and price the
 //! witness exactly as they price any candidate
-//! ([`optimize_physical_asap`], [`select_plan`]), and the relation
+//! ([`optimize_physical_asap`], the reference pricer), and the relation
 //!
 //! ```text
 //! cost(W ∪ {q'}) − cost(W) ≤ derive_cost + tolerance,
@@ -44,8 +44,7 @@ use serde_json::{json, Value};
 use asap_cost::CostInputs;
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_physical_asap_optimization::optimize_physical_asap;
-use asap_plan_selection::pass::Stage1ToStage3Search;
-use asap_plan_selection::{select_plan, PlanningModels};
+use asap_planner::{PlanSearchSettings, PlanningModels};
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::sketch::SketchAlgorithm;
 use asap_types::ir::QueryRoot;
@@ -400,10 +399,7 @@ impl Planner {
     }
 
     fn plan_selection_settings(&self) -> CostInputs {
-        CostInputs {
-            ignore_accuracy_guarantees: !self.settings.enforce_accuracy_guarantees,
-            ..CostInputs::default()
-        }
+        CostInputs::default()
     }
 
     /// The frontends' roots of `workload`, one per query.
@@ -439,7 +435,8 @@ impl Planner {
         let deployment = workload.deployment();
         let models = PlanningModels::builtin()
             .with_plan_selection(&plan_selection)
-            .with_deployment_capabilities(&deployment);
+            .with_deployment_capabilities(&deployment)
+            .with_ignore_accuracy_guarantees(!self.settings.enforce_accuracy_guarantees);
         let run = match self.settings.search {
             SearchKind::Exhaustive => run_planning_stages_over(
                 roots.clone(),
@@ -453,34 +450,58 @@ impl Planner {
                 &entries,
                 &data,
                 models,
-                Stage1ToStage3Search::default(),
+                PlanSearchSettings::default(),
+                None,
             ),
         }
         .map_err(|e| e.to_string())?;
-        let selection = run
-            .stage3_plan_selection
-            .as_ref()
-            .map_err(|e| format!("selection: {e}"))?;
-        let cost_per_second = selection.costs[&selection.selected]
-            .cost_per_second
-            .ok_or("no cost per second (cost model 3)")?;
-        let from_logical = run
-            .stage2_physical_asap_optimization
-            .iter()
-            .find(|p| p.id == selection.selected)
-            .map(|p| p.from_logical.clone());
-        let logical_roots = from_logical.and_then(|id| {
-            run.stage1_logical_asap_optimization
-                .iter()
-                .find(|c| c.id == id)
-                .and_then(|c| c.roots.as_ref().ok().cloned())
-        });
-        Ok(Planned {
-            selected: selection.selected.clone(),
-            cost_per_second,
-            stage0_roots: roots,
-            logical_roots,
-        })
+        match &run.reference {
+            // The reference pricer's selection among the enumerated plans.
+            Some(reference) => {
+                let selection = reference
+                    .selection
+                    .as_ref()
+                    .map_err(|e| format!("selection: {e}"))?;
+                let cost_per_second = selection.costs[&selection.selected]
+                    .cost_per_second
+                    .ok_or("no cost per second (cost model 3)")?;
+                let from_logical = reference
+                    .physical
+                    .iter()
+                    .find(|p| p.id == selection.selected)
+                    .map(|p| p.from_logical.clone());
+                let logical_roots = from_logical.and_then(|id| {
+                    reference
+                        .choices
+                        .iter()
+                        .find(|c| c.id == id)
+                        .and_then(|c| c.roots.as_ref().ok().cloned())
+                });
+                Ok(Planned {
+                    selected: selection.selected.clone(),
+                    cost_per_second,
+                    stage0_roots: roots,
+                    logical_roots,
+                })
+            }
+            None => {
+                let selection = run
+                    .run
+                    .selection
+                    .as_ref()
+                    .map_err(|e| format!("selection: {e}"))?;
+                let cost_per_second = selection
+                    .cost
+                    .cost_per_second
+                    .ok_or("no cost per second (cost model 3)")?;
+                Ok(Planned {
+                    selected: "selected".into(),
+                    cost_per_second,
+                    stage0_roots: roots,
+                    logical_roots: run.run.selected_plan.clone(),
+                })
+            }
+        }
     }
 
     /// Stage 2 and Stage 3 over the logical plan `roots` of `workload`'s
@@ -529,7 +550,8 @@ impl Planner {
         let deployment = workload.deployment();
         let models = PlanningModels::builtin()
             .with_plan_selection(&plan_selection)
-            .with_deployment_capabilities(&deployment);
+            .with_deployment_capabilities(&deployment)
+            .with_ignore_accuracy_guarantees(!self.settings.enforce_accuracy_guarantees);
         let mut candidates = optimize_physical_asap(
             "witness",
             &roots,
@@ -541,8 +563,9 @@ impl Planner {
         for (index, candidate) in candidates.iter_mut().enumerate() {
             candidate.id = format!("witness-m{index}");
         }
-        let selection = select_plan(&candidates, &entries, &workload.data, models)
-            .map_err(|e| format!("witness Stage 3: {e}"))?;
+        let selection =
+            crate::memo_pricing::reference_select(&candidates, &entries, &workload.data, models)
+                .map_err(|e| format!("witness Stage 3: {e}"))?;
         let cost = &selection.costs[&selection.selected];
         let cost_per_second = cost
             .cost_per_second

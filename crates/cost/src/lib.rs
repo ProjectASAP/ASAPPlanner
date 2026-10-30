@@ -27,6 +27,7 @@ pub mod analytical;
 pub mod execution_demand;
 mod measured;
 pub mod operator_statistics;
+mod ranking;
 mod resources;
 pub mod state_bytes;
 mod usage;
@@ -36,9 +37,11 @@ pub use measured::{
     aggregate_lookup, lookup, CostTableProvenance, MeasuredOperationCost, MeasuredOperationCosts,
     NodePriceSource, OperatorCost, OperatorKind, StateFamily, SummaryOperation,
 };
+pub use ranking::{cheaper, worst_latency_ms, PlanRanking};
 pub use usage::{
-    family_name, kept_pane_chains, node_map, node_usage, pane_retention_ms, panes_of, plan_cost,
-    query_reach, trailing_window, NodeMap, NodeUsage, ProducerOutput,
+    family_name, kept_pane_chains, node_map, node_usage, pane_retention_ms,
+    pane_retention_ms_of_plan, panes_of, plan_cost, query_reach, trailing_window, NodeMap,
+    NodeUsage, ProducerOutput,
 };
 
 /// Cost per second of wall time; one unit is one CPU-millisecond under
@@ -241,10 +244,6 @@ pub enum ClusterObjective {
     LowestLatency,
     /// The smallest peak memory; ties by disk, then worst-query latency.
     LeastMemory,
-    /// Report every candidate no other beats on peak memory, disk and
-    /// worst-query latency at once (plan selection's `Selection::front`); select the
-    /// front's lowest-latency member.
-    ParetoFront,
 }
 
 /// The deployment's choices for plan selection (Stage 3): the cost model,
@@ -274,17 +273,6 @@ pub struct CostInputs {
     /// candidate catalog before pricing, preserving the default calibration policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frozen_calibration_factor: Option<f64>,
-    /// Accept every query output regardless of its accuracy guarantee:
-    /// planning uses an accuracy model that accepts every output in place
-    /// of `PlanningModels::accuracy` (`asap-plan-selection`). This field is the one built-in way
-    /// to ignore guarantees.
-    /// For comparing candidates on cost alone, e.g. a benchmark of sketch
-    /// plans with no analytical guarantee. Executability checks still apply.
-    /// Each output accepted only because of it, i.e. whose guarantee check
-    /// fails, is marked in the report
-    /// (`AcceptedAccuracy::guarantee_check_rejection`). JSON:
-    /// `"ignore_accuracy_guarantees": true`. Default `false`.
-    pub ignore_accuracy_guarantees: bool,
 }
 
 impl Default for CostInputs {
@@ -295,7 +283,6 @@ impl Default for CostInputs {
             non_repeating_query_horizon_seconds: DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS,
             measured_operation_costs: MeasuredOperationCosts::default(),
             frozen_calibration_factor: None,
-            ignore_accuracy_guarantees: false,
         }
     }
 }

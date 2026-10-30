@@ -49,19 +49,18 @@ pub struct ProducerConsumerConnection {
     pub requirement: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct QueryRootAssignment {
-    /// The output reference (index over the group references of the query roots).
-    pub query_root: usize,
-    pub candidate: PhysicalCandidateId,
-}
-
+/// One selection over Stage 2's physical candidates: what Stage 3 selects
+/// and the facade builds through [`AssignmentRealizer::realize`](crate::stages::AssignmentRealizer::realize)
+/// (#1047; was `SelectedCandidateGraph`, without its `modeled_cost`: Stage 3
+/// checks cost itself).
 #[derive(Debug, Clone, PartialEq)]
-pub struct SelectedCandidateGraph {
-    pub selected_candidates: Vec<PhysicalCandidateId>,
+pub struct SelectedCandidates {
+    pub candidates: Vec<PhysicalCandidateId>,
     pub connections: Vec<ProducerConsumerConnection>,
-    pub query_roots: Vec<QueryRootAssignment>,
-    pub modeled_cost: f64,
+    /// The candidate producing each output reference (index over the group
+    /// references of the query roots, [`output_references`](super::output_references)),
+    /// one per output reference.
+    pub query_output_candidates: Vec<PhysicalCandidateId>,
 }
 
 /// Check a decoded selection's structure against the connections it may use,
@@ -81,29 +80,25 @@ pub fn validate_selected_connections<'a>(
     producers_of_input: impl Fn(PhysicalCandidateId, usize) -> Option<&'a ProducerCandidates>,
     query_output_candidates: &[&[PhysicalCandidateId]],
     reader_constraints: &[ReaderConstraint],
-    selected: &SelectedCandidateGraph,
+    selected: &SelectedCandidates,
 ) -> Result<(), String> {
     let invalid =
         || "decoded candidate selection violates dependency or root constraints".to_string();
-    let active: HashSet<_> = selected.selected_candidates.iter().copied().collect();
-    if active.len() != selected.selected_candidates.len()
+    let active: HashSet<_> = selected.candidates.iter().copied().collect();
+    if active.len() != selected.candidates.len()
         || active.iter().any(|c| c.0 >= candidate_count)
-        || selected.query_roots.len() != query_output_candidates.len()
+        || selected.query_output_candidates.len() != query_output_candidates.len()
     {
         return Err(invalid());
     }
-    let mut root_seen = vec![false; query_output_candidates.len()];
-    for root in &selected.query_roots {
-        let Some(allowed) = query_output_candidates.get(root.query_root) else {
-            return Err(invalid());
-        };
-        if root_seen[root.query_root]
-            || !active.contains(&root.candidate)
-            || !allowed.contains(&root.candidate)
-        {
+    for (candidate, allowed) in selected
+        .query_output_candidates
+        .iter()
+        .zip(query_output_candidates)
+    {
+        if !active.contains(candidate) || !allowed.contains(candidate) {
             return Err(invalid());
         }
-        root_seen[root.query_root] = true;
     }
     let mut producers: Vec<Vec<Option<PhysicalCandidateId>>> = (0..candidate_count)
         .map(|c| vec![None; input_count(PhysicalCandidateId(c))])
@@ -154,11 +149,7 @@ pub fn validate_selected_connections<'a>(
         return Err(invalid());
     }
     let mut reachable = HashSet::new();
-    let mut pending: Vec<_> = selected
-        .query_roots
-        .iter()
-        .map(|root| root.candidate)
-        .collect();
+    let mut pending: Vec<_> = selected.query_output_candidates.clone();
     while let Some(candidate) = pending.pop() {
         if reachable.insert(candidate) {
             pending.extend(producers[candidate.0].iter().flatten().copied());
@@ -168,9 +159,9 @@ pub fn validate_selected_connections<'a>(
     let mut output_reach = Vec::new();
     if !reader_constraints.is_empty() {
         output_reach = vec![HashSet::new(); query_output_candidates.len()];
-        for root in &selected.query_roots {
-            let reached = &mut output_reach[root.query_root];
-            let mut pending = vec![root.candidate];
+        for (output, &root) in selected.query_output_candidates.iter().enumerate() {
+            let reached = &mut output_reach[output];
+            let mut pending = vec![root];
             while let Some(candidate) = pending.pop() {
                 if reached.insert(candidate) {
                     pending.extend(producers[candidate.0].iter().flatten().copied());
@@ -207,10 +198,7 @@ pub fn validate_selected_connections<'a>(
                 query_outputs,
             } => {
                 active.contains(candidate)
-                    && !selected
-                        .query_roots
-                        .iter()
-                        .any(|root| root.candidate == *candidate)
+                    && !selected.query_output_candidates.contains(candidate)
                     && !selected.connections.iter().any(|edge| {
                         edge.producer == *candidate
                             && query_outputs

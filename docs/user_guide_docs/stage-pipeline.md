@@ -79,7 +79,7 @@ for workload, source-fact, and SQL examples.
 | `--milp-time-limit-s 280` | Set the planning time budget in seconds. A timeout may return a validated incumbent or no selected plan; it does not establish optimality. |
 | `--cost-model aws-fargate-us-east-1` | Compare plans using the configured AWS Fargate pricing model. Other supported names are `usage-over-time`, `provisioned-capacity`, and `cluster-capacity`. |
 | `--max-displayed 64` | Limit candidates shown in the document; this is not a search budget. |
-| `--exhaustive --max-combinations 10000` | Archive evaluated plans and rejections using the same engine, with an assignment budget. This does not guarantee enumeration of all candidates before a time or assignment limit. |
+| `--exhaustive --max-combinations 10000` | Enumerate up to this many memo choices of the selected round, implement each with Stage 2 and price every resulting plan with the whole-workload reference pricer; its selection, costs and rejections are under `reference_pricing`. It is a reference, not Stage 3's search. |
 | `--plan-selection-settings settings.json` | Load selection settings instead of `--cost-model`, cluster flags, or `--measured-operation-costs`. |
 | `--no-memo` | Leave out the `memo` section (the memo after each step and the enumerated candidate DAGs), for a smaller document. |
 | `--price-enumerated 50` | Cost the first 50 enumerated candidate DAGs through Stage 2 and Stage 3, and flag any cheaper than the selected plan. Off by default. |
@@ -105,11 +105,12 @@ print(json.dumps(document['stage3_plan_selection'], indent=2))
 PY
 ```
 
-The document format is `asap-stage-pipeline/v1`. Check `selected`, `costs`,
-`search`, and any `error` or rejection information in `stage3_plan_selection`.
-A written JSON document alone does not mean planning succeeded: `selected` may
-be null. A selected plan is not necessarily a proven optimum; inspect the search
-status and reported gap/bounds. Costs are model predictions, not measured
+The document format is `asap-stage-pipeline/v1`. Check `selected_candidates`,
+`cost`, `search_report` and any `error` in `stage3_plan_selection`, and the
+per-round counts and times in `planning_report`. A written JSON document
+alone does not mean planning succeeded: `selected_candidates` may be null.
+A selected plan is not necessarily a proven optimum; inspect the search
+status (`search_report.status`) and the lower bound. Costs are model predictions, not measured
 execution times or an actual cloud bill.
 
 ## Troubleshooting

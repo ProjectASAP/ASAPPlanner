@@ -22,94 +22,87 @@
 //     --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --out run.json
 //
 // Writes an `asap-stage-pipeline/v1` document (tools/dag-viewer) with the
-// four planner stages, using the joint candidate-connection engine. The default
-// document keeps the selected plan; `--exhaustive` archives evaluated plans
-// and rejections from the same finite catalog, not an independent optimizer.
-// `--milp-time-limit-s` bounds planning in either mode; a timeout reports a
-// partial result, never an optimality claim for unexplored candidates.
+// four planner stages as the facade runs them (`asap_planner::run_planning`).
+// The default document keeps the selected plan; `--exhaustive` adds the
+// reference enumeration: the selected round's memo choices, each implemented
+// by Stage 2 with every materialization assignment, all priced by the
+// reference pricer (`asap_plan_selection::reference_pricer`), under
+// `reference_pricing`. `--milp-time-limit-s` bounds planning; a timeout keeps
+// the best plan found, never an optimality claim for unexplored candidates.
 // Unlike `plan_installable`'s default settings, Stage 3 ignores accuracy
 // guarantees unless `--enforce-accuracy-guarantees` is given (below);
 // `accuracy_guarantees` is `"ignored"` or `"enforced"`.
 //   - stage0_query_language_frontends: the frontends' workload DAG, one root per query;
-//   - stage1_logical_asap_optimization: the logical DAGs of the plans the
-//     memo search evaluated, each one memo candidate per needed group
-//     rebuilt as a DAG (under the default search, only the selected one;
-//     the memo itself, after each step, is under `memo`). The document
-//     shows the Stage 1 candidates of the physical
-//     candidates it shows (below), and those among the first
-//     `--max-displayed` that have none, with `combinations` (how many were evaluated),
-//     `capped` (whether some are not shown), `pass1_pruned` (the
-//     candidates Pass 1 pruned per target, with reasons) and
+//   - stage1_logical_asap_optimization: `L1`, the selected plan's roots (as
+//     Stage 2 built them, with Stage 3's weight proofs), then under
+//     `--exhaustive` the enumerated choices `E<n>` (the memo itself, after
+//     each step, is under `memo`). The document shows the logical
+//     candidates of the physical candidates it shows (below), and those among
+//     the first `--max-displayed` that have none, with `combinations` (how
+//     many there are), `capped` (whether some are not shown), `pass1_pruned`
+//     (the candidates Pass 1 pruned per target, with reasons) and
 //     `pruned_candidates` (the same, each on its memo `group`:
 //     `PerComputationLogicalMemoCandidates::pruned_candidates`, with
-//     `candidate` and `reason`). A candidate that cannot be
-//     composed carries `error` instead of `dag`;
-//   - stage2_physical_asap_optimization: one physical candidate per composed logical
-//     candidate (operator implementation; every sub-DAG NotMaterialized), no
-//     cost; a composed logical candidate Stage 2 cannot implement is listed
-//     under `pruned` with the reason. `pruned_candidates` lists the
-//     physical candidates Stage 2 pruned
+//     `candidate` and `reason`). A candidate that cannot be composed carries
+//     `error` instead of `dag`;
+//   - stage2_physical_asap_optimization: `P1`, the selected plan as Stage 2
+//     built it, then under `--exhaustive` each enumerated choice's physical
+//     plans `E<n>-<k>`; an enumerated choice Stage 2 cannot implement is
+//     listed under `pruned` with the reason. `pruned_candidates` lists the
+//     physical candidates Stage 2 pruned in the selected round
 //     (`PhysicalASAPMemoCandidates::pruned_candidates`): each with its memo
 //     `group`, `operator_node`, `operator`, `implementation_root`, `timing`,
 //     `materialization`, `scope_copy` and `reason` (`PruneReason`:
 //     `PerEntityAggregateNotExecutable`, `RawDataNotRetained`,
 //     `InputHasNoBuildableProducer`, `ReachesNoQueryOutput`,
-//     `TooFewQueryReaders`, `PreviousScopeCopyPruned`). The document shows at most
-//     `--max-displayed` (default 64) physical candidates: the selected one,
-//     the other valid ones cheapest first, then the rejected ones taking
-//     each cause in turn;
-//   - stage3_plan_selection: the selected candidate, chosen among all candidates;
-//     the shown candidates' costs and accepted accuracy (per query: the
-//     target's metric or null when not set, the accepted guarantee's
-//     metric or null when exact or accepted regardless of guarantee,
-//     whether the deployment's accuracy model accepted it directly,
-//     whatever its guarantee says (`accepted_regardless_of_guarantee`),
-//     the cause the guarantee check would have rejected it with when it was
-//     accepted only so (`guarantee_check_rejection`, e.g.
-//     `no_accuracy_guarantee`; null otherwise),
-//     the sketches read and a one-line
-//     summary), and every other shown candidate under `rejected` with
-//     its `cause`: a failed check (`accuracy_target_missed`, `count_min_weights_not_proven_non_negative`,
-//     `no_accuracy_guarantee`, `latency_bound_exceeded`, `latency_over_repeat_interval`,
-//     `over_cluster_capacity`) or a loss under
-//     the cost model (`costlier`, `slower`, `more_memory`,
-//     `not_lowest_latency_on_pareto_front`, `dominated`,
-//     `tied_lost_on_enumeration_order`). Each node's `cost` is one
-//     computation's price times `multiplier`, the times it is computed:
-//     once if materialized, else once per query (or materialized node)
-//     that reads it, so a shared NotMaterialized node is charged once per
-//     query. `search` is the search's report (`SearchReport`: the physical
-//     candidates checked and, per query under the default search, its own
-//     candidates checked and those discarded with why), and
-//     `rejected_by_cause` counts the rejections by cause (every candidate's
-//     under `--exhaustive`; the recorded ones under the default search).
+//     `TooFewQueryReaders`, `PreviousScopeCopyPruned`). The document shows at
+//     most `--max-displayed` (default 64) enumerated physical candidates: the
+//     reference pricer's pick, the other valid ones cheapest first, then the
+//     rejected ones taking each cause in turn;
+//   - stage3_plan_selection: Stage 3's `Selection`: `selected_candidates`
+//     (candidate ids of the selected round's Stage 2 output, their
+//     connections and each output reference's candidate),
+//     `candidates_with_proven_non_negative_weights`, the plan's `cost` (its
+//     `usage`, `cost_per_second` and per-node charges: each node's `cost` is
+//     one computation's price times `multiplier`, the times it is computed),
+//     `accepted_accuracy_per_query` (per query: the target's metric or null
+//     when not set, the accepted guarantee's metric or null when exact or
+//     accepted regardless of guarantee, `accepted_regardless_of_guarantee`,
+//     `guarantee_check_rejection`, the sketches read and a one-line summary),
+//     `pruned_candidates` and `search_report` (`SearchReport`: `status`,
+//     `cost_lower_bound_per_second`, MILP size and timings); `error` when no
+//     plan was selected. `pane_retention_ms` maps each pane chain the
+//     selected plan keeps beyond one evaluation (by node id in `P1`) to how
+//     far back the runtime must keep its panes (`RealizedPlan::pane_retention_ms`).
 //     `materialized_views` are the selected plan's materialized views as
 //     `plan_installable`'s plan derives them (`installable_plan_of`, then
 //     `InstallablePlan::materialized_views`: each view's installed node id,
 //     `refresh`, `coverage` with its `definition_id` and `selection`,
-//     `inputs` and `retention_ms`), each with the node of the
-//     selected Stage 2 candidate it is installed from (`stage2_node_id`), its
-//     position among that node's installed nodes (`installed_position`, a
-//     pane chain's panes newest first) and their number
-//     (`installed_count`); empty without a selection, with
-//     `materialized_views_error` when the plan is not installable. When selection
-//     fails, `selected` is null, with the rejections (and under
-//     `search_rejected` the search's own, which name no candidate: e.g. a
-//     query whose every own candidate was discarded), or with `error` for
-//     any other failure. `pane_retention_ms` maps each
-//     pane chain the selected plan keeps beyond one evaluation (by node id)
-//     to how far back from the newest evaluation the runtime must keep its
-//     panes: the window plus the longest range-evaluation span reading it.
-//     `warnings` are one-line warnings about the workload and the selected
-//     plan: a PromQL query applying `rate`, `increase` or `irate` to a
-//     metric the data workload declares a gauge, prefixed with its id (the
-//     query still plans; `counter_function_over_gauge_warnings`), and the
-//     plan's peak memory when over 10^12 bytes and the cost model declares
-//     no memory capacity (`large_peak_memory_warning`); absent when there
-//     are none. Each node's `per_node` entry also has its `operator`,
-//     `timing` and predicted CPU (`cpu_core_seconds_per_second`), and each
-//     shown candidate's `cpu_core_seconds_per_second` is their sum: report
-//     only, as `plan_installable`'s predicted usage names them.
+//     `inputs` and `retention_ms`), each with the node of `P1` it is
+//     installed from (`stage2_node_id`), its position among that node's
+//     installed nodes (`installed_position`, a pane chain's panes newest
+//     first) and their number (`installed_count`); empty without a
+//     selection, with `materialized_views_error` when the plan is not
+//     installable. `warnings` are one-line warnings about the workload and
+//     the selected plan: a PromQL query applying `rate`, `increase` or
+//     `irate` to a metric the data workload declares a gauge, prefixed with
+//     its id (the query still plans; `counter_function_over_gauge_warnings`),
+//     and the plan's peak memory when over 10^12 bytes and the cost model
+//     declares no memory capacity (`large_peak_memory_warning`); absent when
+//     there are none;
+//   - planning_report: the facade's `PlanningReport`: Pass 1's time and, per
+//     pane-width round, Pass 2's and Stage 2's counts and each stage's time,
+//     with Stage 3's search report or error;
+//   - reference_pricing (with `--exhaustive`): the reference pricer's
+//     selection among the enumerated plans: the shown candidates' `costs`
+//     and `accepted`, its pick `selected`, every other shown candidate under
+//     `rejected` with its `cause` (a failed check: `accuracy_target_missed`,
+//     `count_min_weights_not_proven_non_negative`, `no_accuracy_guarantee`,
+//     `latency_bound_exceeded`, `latency_over_repeat_interval`,
+//     `over_cluster_capacity`; or a loss under the cost model: `costlier`,
+//     `slower`, `more_memory`, `tied_lost_on_enumeration_order`),
+//     `search_rejected` (rejections of candidates not shown) and
+//     `rejected_by_cause`.
 // `memo` (unless `--no-memo`) is the memo the search built, from the
 // planning round whose plan was selected (`MemoSteps`): `nodes`, one node
 // table for the whole section (`MemoNodes`: each distinct node once, matched
@@ -145,8 +138,8 @@
 // compose), `budget_share_1` (every chosen candidate sized for the whole
 // budget) and `selected` (it is `selected_choice`). With
 // `--price-enumerated <n>` (off by default), each of the first `n` listed
-// choices is also run through Stage 2 and Stage 3 as the selected plan is,
-// and its selected plan installed (`memo_pricing::price_choices`, under the
+// choices is also run through Stage 2 and the reference pricer, and its
+// selected plan installed (`memo_pricing::price_choices`, under the
 // run's models): `valid`, `rejection` (a Stage 3 rejection cause, or
 // `compose_failed`, `invalid_structure`, `stage2_failed`, `stage3_failed`,
 // `rejected`, `not_executable` (the executor cannot compile the selected
@@ -163,9 +156,8 @@
 // When Pass 1 fails, the document still has the Stage 0 DAG; Stage 1 has
 // `error` and no candidates, and nothing is selected.
 //
-// Under `--exhaustive`, `--max-combinations` (default 10^4) bounds evaluated
-// assignments. The report distinguishes catalog exhaustion from budget limits.
-// Display truncation (`--max-displayed`) is separate from the planning budgets.
+// Under `--exhaustive`, `--max-combinations` (default 10^4) bounds the memo
+// choices enumerated. Display truncation (`--max-displayed`) is separate.
 //
 // `--workload` may repeat, so one run plans queries in several languages
 // (e.g. a PromQL file and a SQL file) together. Each file is lowered by
@@ -188,22 +180,21 @@
 // queries are exact. `--accuracy-metric` (`absolute`, `absolute_stream_l1`, `absolute_stream_l2`,
 // `relative` or `rank`) sets the error metric of that target; without it,
 // a candidate is accepted in whatever metric its guarantee meets ε (and δ)
-// in, and `stage3_plan_selection.accepted` reports, per shown valid
-// candidate and query, the metric accepted (e.g. "metric not set; accepted
-// rank (Kll)").
+// in, and `stage3_plan_selection.accepted_accuracy_per_query` reports, per
+// query, the metric accepted (e.g. "metric not set; accepted rank (Kll)").
 // `--cost-model` chooses how plan selection compares valid candidates:
 // `usage-over-time` (cost model 1, the default: CPU, scanned bytes and
 // memory byte-seconds per second, priced), `provisioned-capacity` (cost
 // model 2: peak memory, peak CPU cores and disk, priced) or
 // `cluster-capacity` (cost model 3: no prices; `--cluster-memory-bytes`,
 // `--cluster-disk-bytes` and the optional `--cluster-cpu-cores` are hard
-// limits, and `--cluster-objective` is `lowest-latency`, `least-memory` or
-// `pareto-front`). Cost models 1 and 2 use the illustrative unit costs;
+// limits, and `--cluster-objective` is `lowest-latency` or `least-memory`).
+// Cost models 1 and 2 use the illustrative unit costs;
 // `aws-fargate-us-east-1` is cost model 1 at AWS Fargate's us-east-1
 // Linux/x86 prices (`ResourceUnitCost::aws_fargate_us_east_1`, in US dollars
 // per second).
-// Each shown candidate's `usage` lists what it uses; `cost_per_second` is null under
-// cost model 3, and `front` lists the Pareto front under `pareto-front`.
+// Each cost's `usage` lists what the plan uses; `cost_per_second` is null under
+// cost model 3.
 // `--deployment-capabilities '<json>'` declares what the deployment's
 // executor can run and keep (`DeploymentCapabilities`):
 // `{"supported_summaries": [{"family": "Kll", "readouts": ["Quantile"]}, ...],
@@ -238,14 +229,13 @@
 // `non_repeating_query_horizon_seconds` and `measured_operation_costs`;
 // an omitted field takes its default). It replaces `--cost-model`, the
 // `--cluster-*` flags and `--measured-operation-costs`.
-// Accuracy guarantees are ignored by default: stage_pipeline sets the
-// settings' `ignore_accuracy_guarantees` (also over
-// `--plan-selection-settings`), so Stage 3 accepts every query output
-// regardless of its accuracy guarantee and candidates are compared on cost
-// alone; executability checks still apply. `--enforce-accuracy-guarantees`
-// clears it, and Stage 3 rejects an output whose guarantee does not meet
-// its query's target, as `plan_installable` does with the default
-// `CostInputs`. The document's top-level `accuracy_guarantees` is
+// Accuracy guarantees are ignored by default: stage_pipeline plans with
+// `PlanningModels::ignore_accuracy_guarantees`, so the facade passes Stage 3
+// an accuracy model that accepts every query output regardless of its
+// accuracy guarantee, and candidates are compared on cost alone;
+// executability checks still apply. `--enforce-accuracy-guarantees` clears
+// it, and Stage 3 rejects an output whose guarantee does not meet its
+// query's target, as `plan_installable` does with the default models. The document's top-level `accuracy_guarantees` is
 // `"ignored"` or `"enforced"`.
 // `--sample-interval-ms` is the sample interval declared for every metric the
 // PromQL queries read (default 15000). `--series-count <n>`,
@@ -275,8 +265,8 @@ use asap_devtools::planner_layering_examples::{
     example1, example2, pattern_a, pattern_b, PatternARecurrence, SHARED_ROWS_PER_SECOND,
 };
 use asap_devtools::planning_stages::{
-    lower_promql_roots, lower_sql_roots, run_search_over, sql_catalog, MemoSteps,
-    PlanningStagesError, PlanningStagesRun,
+    lower_promql_roots, lower_sql_roots, run_search_over, sql_catalog, PlanningStagesError,
+    PlanningStagesRun,
 };
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{counter_function_over_gauge_warnings, promql_metric_names};
@@ -287,11 +277,13 @@ use asap_logical_asap_optimization::pass2::memo::enumeration::{
     build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
 };
 use asap_logical_asap_optimization::DeploymentCapabilities;
+use asap_physical_asap_optimization::PhysicalWorkloadPlan;
+use asap_plan_selection::reference_pricer::{Rejection, WholePlanSelection};
 use asap_plan_selection::{
-    large_peak_memory_warning, PlanningModels, Rejection, Selection, SelectionError,
-    Stage1ToStage3Search,
+    large_peak_memory_warning, AcceptedAccuracy, ErrorSelectingPlan, Selection,
 };
-use asap_planner::installable_plan_of;
+use asap_planner::MemoSteps;
+use asap_planner::{installable_plan_of, PlanSearchSettings, PlanningModels, SelectionError};
 use asap_types::ir::flat::{flatten, FlatDag, FlatNode, NodeId};
 use asap_types::ir::operator::node::OperatorNode;
 use asap_types::ir::properties::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
@@ -309,7 +301,7 @@ const USAGE: &str =
     "usage: stage_pipeline (--example planner-layering-{1,2,3a,3b} | (--workload <file>)... [--table <json>...] | ((--promql | --sql) <query> \
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>] [--series-count <u64>] [--rows-per-second <f64>] [--rows-held <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
---cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
+--cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory]] \
 [--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>]] [--milp-time-limit-s <f64>] [--max-displayed <n>] \
 [--no-memo] [--max-memo-candidates <n>] [--memo-enumeration-limit <n>] [--max-enumerated <n>] [--price-enumerated <n>] --out <file>";
 
@@ -550,7 +542,6 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 objective: match objective {
                     "lowest-latency" => ClusterObjective::LowestLatency,
                     "least-memory" => ClusterObjective::LeastMemory,
-                    "pareto-front" => ClusterObjective::ParetoFront,
                     other => return Err(format!("unknown cluster objective {other}").into()),
                 },
             })
@@ -576,7 +567,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         }
         None => MeasuredOperationCosts::default(),
     };
-    let mut plan_selection: CostInputs = match &plan_selection_settings_path {
+    let plan_selection: CostInputs = match &plan_selection_settings_path {
         Some(path) => {
             let text = std::fs::read_to_string(path)
                 .map_err(|e| format!("--plan-selection-settings {path}: {e}"))?;
@@ -589,7 +580,6 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             ..default_settings
         },
     };
-    plan_selection.ignore_accuracy_guarantees = !enforce_accuracy_guarantees;
     if memo_caps.choices_to_price > 0 {
         if !write_memo {
             return Err("--price-enumerated needs the memo (drop --no-memo)".into());
@@ -736,18 +726,17 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     }
     let models = PlanningModels::builtin()
         .with_plan_selection(&plan_selection)
-        .with_deployment_capabilities(&deployment_capabilities);
+        .with_deployment_capabilities(&deployment_capabilities)
+        .with_ignore_accuracy_guarantees(!enforce_accuracy_guarantees);
     let result = run_search_over(
         roots.clone(),
         &entries,
         &data,
         models,
-        Stage1ToStage3Search {
-            exhaustive,
-            keep_every_candidate: exhaustive,
-            max_evaluations: exhaustive.then_some(max_combinations),
-            milp_time_limit_ms,
+        PlanSearchSettings {
+            time_limit_ms: milp_time_limit_ms,
         },
+        exhaustive.then_some(max_combinations),
     );
     // A rate, increase or irate over a declared gauge (the query still plans).
     let mut warnings = counter_function_over_gauge_warnings_of(&described, &data)?;
@@ -757,10 +746,10 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         result
             .as_ref()
             .ok()
-            .and_then(|run| run.stage3_plan_selection.as_ref().ok())
+            .and_then(|run| run.run.selection.as_ref().ok())
             .and_then(|selection| {
                 large_peak_memory_warning(
-                    selection.costs[&selection.selected].usage.peak_memory_bytes,
+                    selection.cost.usage.peak_memory_bytes,
                     &plan_selection.cost_model,
                 )
             }),
@@ -768,7 +757,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let memo = result
         .as_ref()
         .ok()
-        .and_then(|run| run.memo_steps.as_ref())
+        .and_then(|run| run.run.memo_steps.as_ref())
         .filter(|_| write_memo)
         .map(|steps| {
             let pricing = Pricing {
@@ -779,7 +768,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 selected: result
                     .as_ref()
                     .ok()
-                    .and_then(|run| run.stage3_plan_selection.as_ref().ok())
+                    .and_then(|run| run.run.selection.as_ref().ok())
                     .map(SelectedBaseline::of),
             };
             memo_json(steps, &memo_caps, &pricing)
@@ -972,24 +961,25 @@ fn stage_pipeline(
     run: &PlanningStagesRun,
     max_displayed: usize,
 ) -> Value {
-    // The display keeps `max_displayed` physical candidates (plan selection
-    // has already ranked all of them): the selected one, the other valid
+    let logical = run.logical_candidates();
+    let every_physical = run.physical_candidates();
+    // The display keeps `max_displayed` physical candidates: under
+    // `--exhaustive` the reference pricer's selected one, the other valid
     // ones cheapest first, then the rejected ones taking each cause in turn,
     // so a cause with many candidates does not hide the others.
-    let shown_physical = displayed_physical(run, max_displayed);
-    let implemented: HashSet<&str> = run
-        .stage2_physical_asap_optimization
+    let shown_physical = displayed_physical(run, &every_physical, max_displayed);
+    let implemented: HashSet<&str> = every_physical
         .iter()
         .map(|p| p.from_logical.as_str())
         .collect();
-    // The Stage 1 candidates of the shown physical ones, and those among
-    // the first `max_displayed` that have none (pruned or not composed).
-    let shown: HashSet<&str> = run
-        .stage1_logical_asap_optimization
+    // The logical candidates of the shown physical ones, and those among
+    // the first `max_displayed` that have none (not composed or not
+    // implemented).
+    let shown: HashSet<&str> = logical
         .iter()
         .enumerate()
         .filter(|(index, c)| {
-            run.stage2_physical_asap_optimization
+            every_physical
                 .iter()
                 .any(|p| p.from_logical == c.id && shown_physical.contains(p.id.as_str()))
                 || (*index < max_displayed && !implemented.contains(c.id.as_str()))
@@ -1000,8 +990,7 @@ fn stage_pipeline(
     let labels = candidate_labels(run);
     // A choice that composition cannot substitute yet is listed with its
     // error rather than ending the run.
-    let candidates: Vec<_> = run
-        .stage1_logical_asap_optimization
+    let candidates: Vec<_> = logical
         .iter()
         .filter(|c| shown.contains(c.id.as_str()))
         .map(|c| match &c.roots {
@@ -1009,73 +998,108 @@ fn stage_pipeline(
                 json!({ "id": c.id, "display_name": labels[&c.id], "dag": export(roots) })
             }
             Err(error) => {
-                json!({ "id": c.id, "display_name": labels[&c.id], "error": error.to_string() })
+                json!({ "id": c.id, "display_name": labels[&c.id], "error": error })
             }
         })
         .collect();
-    let physical: Vec<_> = run
-        .stage2_physical_asap_optimization
+    let physical: Vec<_> = every_physical
         .iter()
         .filter(|p| shown_physical.contains(p.id.as_str()))
         .map(|p| json!({ "id": p.id, "from_logical": p.from_logical, "display_name": labels[&p.id], "dag": p.dag }))
         .collect();
     let pruned: Vec<_> = run
-        .stage2_pruned
+        .reference
         .iter()
-        .filter(|p| shown.contains(p.from_logical.as_str()))
-        .map(|p| json!({ "from_logical": p.from_logical, "display_name": labels[&p.from_logical], "reason": p.reason }))
+        .flat_map(|reference| &reference.stage2_failed)
+        .filter(|(id, _)| shown.contains(id.as_str()))
+        .map(|(id, reason)| json!({ "from_logical": id, "display_name": labels[id], "reason": reason }))
         .collect();
-    let every_physical: HashSet<&str> = run
-        .stage2_physical_asap_optimization
-        .iter()
-        .map(|p| p.id.as_str())
-        .collect();
-    let mut stage3 = plan_selection_json(
-        &run.stage3_plan_selection,
-        |id| shown_physical.contains(id),
-        |id| every_physical.contains(id),
-    );
-    match &run.stage3_plan_selection {
-        Ok(selection) => match materialized_views_json(selection, entries) {
-            Ok(views) => stage3["materialized_views"] = Value::Array(views),
-            Err(error) => {
-                stage3["materialized_views"] = json!([]);
-                stage3["materialized_views_error"] = json!(error);
+    let mut stage3 = selection_json(&run.run.selection);
+    match (&run.run.selection, &run.run.selected_plan) {
+        (Ok(selection), Some(roots)) => {
+            let pane_retention_ms = run
+                .run
+                .selected_physical_plan
+                .as_ref()
+                .map(|realized| realized.pane_retention_ms.clone())
+                .unwrap_or_default();
+            stage3["pane_retention_ms"] = pane_retention_ms
+                .iter()
+                .map(|(node, ms)| (node.to_string(), json!(ms)))
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+            match materialized_views_json(roots, selection, &pane_retention_ms, entries) {
+                Ok(views) => stage3["materialized_views"] = Value::Array(views),
+                Err(error) => {
+                    stage3["materialized_views"] = json!([]);
+                    stage3["materialized_views_error"] = json!(error);
+                }
             }
-        },
-        Err(_) => stage3["materialized_views"] = json!([]),
+        }
+        _ => stage3["materialized_views"] = json!([]),
     }
-    json!({
+    let memo_steps = run.run.memo_steps.as_ref();
+    let mut document = json!({
         "format": "asap-stage-pipeline/v1",
         "workload": { "queries": queries },
         "stage0_query_language_frontends": { "dag": export(&run.stage0_query_language_frontends) },
         "stage1_logical_asap_optimization": {
-            "combinations": run.stage1_logical_asap_optimization.len(),
-            "capped": physical.len() < run.stage2_physical_asap_optimization.len()
-                || candidates.len() < run.stage1_logical_asap_optimization.len(),
-            "pass1_pruned": pass1_pruned_json(&run.stage1_pass1_per_computation),
-            "pruned_candidates": pass1_pruned_candidates_json(run.memo_steps.as_ref()),
+            "combinations": logical.len(),
+            "capped": physical.len() < every_physical.len() || candidates.len() < logical.len()
+                || run.reference.as_ref().is_some_and(|reference| reference.capped),
+            "pass1_pruned": pass1_pruned_json(&run.run.per_computation_candidates),
+            "pruned_candidates": pass1_pruned_candidates_json(memo_steps),
             "candidates": candidates,
         },
         "stage2_physical_asap_optimization": {
             "candidates": physical,
             "pruned": pruned,
-            "pruned_candidates": stage2_pruned_candidates_json(run.memo_steps.as_ref()),
+            "pruned_candidates": stage2_pruned_candidates_json(memo_steps),
         },
         "stage3_plan_selection": stage3,
-    })
+        "planning_report": serde_json::to_value(&run.run.report).unwrap_or(Value::Null),
+    });
+    if let Some(reference) = &run.reference {
+        let every: HashSet<&str> = every_physical.iter().map(|p| p.id.as_str()).collect();
+        document["reference_pricing"] = reference_pricing_json(
+            &reference.selection,
+            |id| shown_physical.contains(id),
+            |id| every.contains(id),
+        );
+    }
+    document
 }
 
 /// The ids of the physical candidates the document shows: at most
-/// `max_displayed`, the selected one first, then the other valid ones
-/// cheapest first (in candidate order when unpriced), then the rejected
-/// ones, one of each cause in turn in candidate order.
-fn displayed_physical(run: &PlanningStagesRun, max_displayed: usize) -> HashSet<&str> {
-    let every = &run.stage2_physical_asap_optimization;
-    let Ok(selection) = &run.stage3_plan_selection else {
+/// `max_displayed`. Without a reference enumeration, the selected plan.
+/// Under `--exhaustive`, the reference pricer's selected one first, then
+/// the other valid ones cheapest first (in candidate order when unpriced),
+/// then the rejected ones, one of each cause in turn in candidate order.
+fn displayed_physical<'a>(
+    run: &PlanningStagesRun,
+    every: &'a [PhysicalWorkloadPlan],
+    max_displayed: usize,
+) -> HashSet<&'a str> {
+    // The selected plan is always shown.
+    let selected_plan = every.iter().map(|p| p.id.as_str()).filter(|id| *id == "P1");
+    let Some(reference) = &run.reference else {
+        return selected_plan.collect();
+    };
+    let shown: HashSet<&str> = displayed_reference(reference, every, max_displayed);
+    selected_plan.chain(shown).collect()
+}
+
+/// [`displayed_physical`] among the reference enumeration's plans.
+fn displayed_reference<'a>(
+    reference: &asap_devtools::memo_pricing::ReferenceEnumeration,
+    every: &'a [PhysicalWorkloadPlan],
+    max_displayed: usize,
+) -> HashSet<&'a str> {
+    let every: Vec<&'a PhysicalWorkloadPlan> = every.iter().filter(|p| p.id != "P1").collect();
+    let Ok(selection) = &reference.selection else {
         // Without a selection (rejected, or not judged): each cause in turn.
-        let causes: Vec<_> = match &run.stage3_plan_selection {
-            Err(SelectionError::NoValidCandidate(rejected)) => rejected.iter().collect(),
+        let causes: Vec<_> = match &reference.selection {
+            Err(ErrorSelectingPlan::NoValidCandidate(rejected)) => rejected.iter().collect(),
             _ => Vec::new(),
         };
         let cause_of = |id: &str| causes.iter().find(|r| r.id == id).map(|r| r.cause);
@@ -1101,8 +1125,10 @@ fn displayed_physical(run: &PlanningStagesRun, max_displayed: usize) -> HashSet<
         .iter()
         .filter(|p| p.id != selection.selected && !selection.costs.contains_key(&p.id))
         .map(|p| (p.id.as_str(), cause_of(&p.id)));
-    std::iter::once(selection.selected.as_str())
-        .filter(|id| every.iter().any(|p| p.id == *id))
+    every
+        .iter()
+        .map(|p| p.id.as_str())
+        .filter(|id| *id == selection.selected)
         .chain(valid)
         .chain(round_robin(rejected))
         // The selected candidate is always shown.
@@ -1141,17 +1167,21 @@ fn round_robin<'a, C: PartialEq>(
 /// position among that node's installed nodes (`installed_position`: a
 /// pane chain's panes, newest first) and their number (`installed_count`).
 fn materialized_views_json(
+    roots: &[QueryRoot],
     selection: &Selection,
+    pane_retention_ms: &std::collections::BTreeMap<
+        asap_types::ir::physical_export::PhysicalASAPNodeId,
+        u64,
+    >,
     entries: &[QueryWorkloadEntry],
 ) -> Result<Vec<Value>, String> {
-    let (plan, report) = installable_plan_of(&selection.plan, Some(selection), entries)
+    let (plan, report) = installable_plan_of(roots, Some(selection), pane_retention_ms, entries)
         .map_err(|e| e.to_string())?;
     let views = plan.materialized_views().map_err(|e| e.to_string())?;
     let mut stage2_of = std::collections::HashMap::new();
     for node in report
         .iter()
-        .filter_map(|report| report.predicted_usage.as_ref())
-        .flat_map(|usage| &usage.per_node)
+        .flat_map(|report| &report.predicted_usage.per_node)
     {
         for (position, installed) in node.installed_node_ids.iter().enumerate() {
             stage2_of.insert(
@@ -1261,10 +1291,10 @@ fn stage2_pruned_candidates_json(steps: Option<&MemoSteps>) -> Vec<Value> {
         .collect()
 }
 
-/// Plan selection over every candidate, listing the costs and rejections
-/// of the `shown` ones.
-fn plan_selection_json(
-    selection: &Result<Selection, SelectionError>,
+/// The reference pricer over every enumerated candidate (`--exhaustive`),
+/// listing the costs and rejections of the `shown` ones.
+fn reference_pricing_json(
+    selection: &Result<WholePlanSelection, ErrorSelectingPlan>,
     shown: impl Fn(&str) -> bool,
     is_candidate: impl Fn(&str) -> bool,
 ) -> Value {
@@ -1280,7 +1310,7 @@ fn plan_selection_json(
     };
     let selection = match selection {
         Ok(selection) => selection,
-        Err(SelectionError::NoValidCandidate(rejected)) => {
+        Err(ErrorSelectingPlan::NoValidCandidate(rejected)) => {
             let search_rejected = search_rejected(rejected);
             return json!({
                 "costs": {},
@@ -1291,85 +1321,20 @@ fn plan_selection_json(
             });
         }
         Err(error) => {
-            let mut output = json!({ "costs": {}, "selected": null, "rejected": [], "error": error.to_string() });
-            // A budget stop without an incumbent still carries the search's
-            // report in its solver diagnostic. Decode that typed report for
-            // the viewer while preserving the complete original error.
-            if let SelectionError::Solver(diagnostic) = error {
-                if let Some((_, report)) = diagnostic.split_once("Search report: ") {
-                    if let Some(Ok(report)) = serde_json::Deserializer::from_str(report)
-                        .into_iter::<asap_plan_selection::CandidateConnectionReport>()
-                        .next()
-                    {
-                        output["search"] = json!({ "candidate_connections": report });
-                    }
-                }
-            }
-            return output;
+            return json!({ "costs": {}, "selected": null, "rejected": [], "error": error.to_string() });
         }
     };
     let costs: serde_json::Map<_, _> = selection
         .costs
         .iter()
         .filter(|(id, _)| shown(id))
-        .map(|(id, cost)| {
-            let per_node: serde_json::Map<_, _> = cost
-                .per_node
-                .iter()
-                .map(|(node, c)| {
-                    (
-                        node.to_string(),
-                        json!({
-                            "operator": c.operator,
-                            "timing": c.timing,
-                            "cpu_core_seconds_per_second": c.cpu_core_seconds_per_second,
-                            "cost_per_second": c.cost_per_second,
-                            "multiplier": c.multiplier,
-                            "detail": c.detail,
-                            "price_source": c.price_source,
-                        }),
-                    )
-                })
-                .collect();
-            (
-                id.clone(),
-                json!({
-                    "cost_per_second": cost.cost_per_second,
-                    // Report-only: the nodes' predicted CPU, summed as
-                    // `plan_installable`'s predicted usage sums it.
-                    "cpu_core_seconds_per_second": cost
-                        .per_node
-                        .values()
-                        .map(|node| node.cpu_core_seconds_per_second)
-                        .sum::<f64>(),
-                    "cost_unit": cost.cost_unit,
-                    "source": cost.source,
-                    "usage": usage_json(&cost.usage),
-                    "per_node": per_node,
-                }),
-            )
-        })
+        .map(|(id, cost)| (id.clone(), cost_json(cost)))
         .collect();
     let accepted: serde_json::Map<_, _> = selection
         .accepted
         .iter()
         .filter(|(id, _)| shown(id))
-        .map(|(id, queries)| {
-            let queries: Vec<Value> = queries
-                .iter()
-                .map(|accepted| {
-                    json!({
-                        "target_metric": accepted.target_metric,
-                        "accepted_metric": accepted.accepted_metric,
-                        "accepted_regardless_of_guarantee": accepted.accepted_regardless_of_guarantee,
-                        "guarantee_check_rejection": accepted.guarantee_check_rejection,
-                        "sketches": accepted.sketches,
-                        "summary": accepted.to_string(),
-                    })
-                })
-                .collect();
-            (id.clone(), Value::Array(queries))
-        })
+        .map(|(id, queries)| (id.clone(), accepted_json(queries)))
         .collect();
     json!({
         "costs": costs,
@@ -1378,13 +1343,105 @@ fn plan_selection_json(
         "rejected": rejections_json(&selection.rejected),
         "search_rejected": search_rejected(&selection.rejected),
         "rejected_by_cause": rejected_by_cause(&selection.rejected),
-        "front": selection.front,
-        "search": selection.search,
         "pane_retention_ms": selection
             .pane_retention_ms
             .iter()
             .map(|(node, ms)| (node.to_string(), json!(ms)))
             .collect::<serde_json::Map<_, _>>(),
+    })
+}
+
+/// One plan's cost: per second, its predicted CPU, unit and source, its
+/// usage and each node's charge.
+fn cost_json(cost: &asap_cost::PlanCost) -> Value {
+    let per_node: serde_json::Map<_, _> = cost
+        .per_node
+        .iter()
+        .map(|(node, c)| {
+            (
+                node.to_string(),
+                json!({
+                    "operator": c.operator,
+                    "timing": c.timing,
+                    "cpu_core_seconds_per_second": c.cpu_core_seconds_per_second,
+                    "cost_per_second": c.cost_per_second,
+                    "multiplier": c.multiplier,
+                    "detail": c.detail,
+                    "price_source": c.price_source,
+                }),
+            )
+        })
+        .collect();
+    json!({
+        "cost_per_second": cost.cost_per_second,
+        // Report-only: the nodes' predicted CPU, summed as
+        // `plan_installable`'s predicted usage sums it.
+        "cpu_core_seconds_per_second": cost
+            .per_node
+            .values()
+            .map(|node| node.cpu_core_seconds_per_second)
+            .sum::<f64>(),
+        "cost_unit": cost.cost_unit,
+        "source": cost.source,
+        "usage": usage_json(&cost.usage),
+        "per_node": per_node,
+    })
+}
+
+/// Per query, the accuracy Stage 3 accepted: the target's metric, the
+/// accepted metric, whether it was accepted regardless of its guarantee,
+/// why the guarantee check would have rejected it, the sketches read and a
+/// one-line summary.
+fn accepted_json(queries: &[AcceptedAccuracy]) -> Value {
+    queries
+        .iter()
+        .map(|accepted| {
+            json!({
+                "target_metric": accepted.target_metric,
+                "accepted_metric": accepted.accepted_metric,
+                "accepted_regardless_of_guarantee": accepted.accepted_regardless_of_guarantee,
+                "guarantee_check_rejection": accepted.guarantee_check_rejection,
+                "sketches": accepted.sketches,
+                "summary": accepted.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Stage 3's selection ([`Selection`]): the selected candidates of the
+/// selected round's Stage 2 output, the candidates whose weights it proved
+/// non-negative, the plan's cost, the accuracy accepted per query, the
+/// candidates it pruned and its search report; `error` when the facade
+/// selected no plan.
+fn selection_json(selection: &Result<Selection, SelectionError>) -> Value {
+    let selection = match selection {
+        Ok(selection) => selection,
+        Err(error) => return json!({ "selected_candidates": null, "error": error.to_string() }),
+    };
+    let ids = |ids: &[asap_types::stages::PhysicalCandidateId]| -> Vec<usize> {
+        ids.iter().map(|id| id.0).collect()
+    };
+    json!({
+        "selected_candidates": {
+            "candidates": ids(&selection.selected_candidates.candidates),
+            "connections": selection
+                .selected_candidates
+                .connections
+                .iter()
+                .map(|c| json!({ "producer": c.producer.0, "consumer": c.consumer.0, "requirement": c.requirement }))
+                .collect::<Vec<_>>(),
+            "query_output_candidates": ids(&selection.selected_candidates.query_output_candidates),
+        },
+        "candidates_with_proven_non_negative_weights":
+            ids(&selection.candidates_with_proven_non_negative_weights),
+        "cost": cost_json(&selection.cost),
+        "accepted_accuracy_per_query": accepted_json(&selection.accepted_accuracy_per_query),
+        "pruned_candidates": selection
+            .pruned_candidates
+            .iter()
+            .map(|p| json!({ "group": p.group.0, "candidate": p.candidate.0, "reason": format!("{:?}", p.reason) }))
+            .collect::<Vec<_>>(),
+        "search_report": selection.search_report,
     })
 }
 
@@ -2034,8 +2091,8 @@ mod tests {
             cause: asap_plan_selection::RejectionCause::AccuracyTargetMissed,
             reason: "q1: misses target".into(),
         }];
-        let document = plan_selection_json(
-            &Err(SelectionError::NoValidCandidate(rejected)),
+        let document = reference_pricing_json(
+            &Err(ErrorSelectingPlan::NoValidCandidate(rejected)),
             |_| true,
             |_| true,
         );
@@ -2073,17 +2130,16 @@ mod tests {
             run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
         let entries: Vec<_> = workload.query_workload.entries().collect();
         let document = stage_pipeline(workload_queries(&workload), &entries, &run, 0);
-        let selected = document["stage3_plan_selection"]["selected"]
-            .as_str()
-            .unwrap();
+        let selected = document["reference_pricing"]["selected"].as_str().unwrap();
         let physical = document["stage2_physical_asap_optimization"]["candidates"]
             .as_array()
             .unwrap();
-        assert_eq!(physical.len(), 1);
-        assert_eq!(physical[0]["id"], selected);
-        assert!(document["stage3_plan_selection"]["costs"]
+        // The facade's selected plan (`P1`) and the reference pricer's.
+        assert_eq!(physical.len(), 2);
+        assert!(physical.iter().any(|p| p["id"] == selected));
+        assert!(document["reference_pricing"]["costs"]
             .get(selected)
             .is_some());
-        assert_eq!(document["stage3_plan_selection"]["rejected"], json!([]));
+        assert_eq!(document["reference_pricing"]["rejected"], json!([]));
     }
 }

@@ -3,17 +3,17 @@
 //! kernel, query-time scans of raw data not retained) Stage 2 prunes.
 
 use asap_cost::{family_name, PlanCost, QueryLatency};
-use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_types::ir::properties::{
     AccuracyGuarantee, AccuracyMetric, AccuracyScope, AccuracyTarget,
 };
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, WeightDomain};
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
+use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::accuracy_binding::{bound_root_guarantee, root_operators};
 use crate::report::{AcceptedAccuracy, RejectionCause};
-use crate::PlanningModels;
+use crate::SelectionModels;
 use asap_types::workload::bounds::{confirmed_weights, series_read, values_per_result};
 
 /// The first query whose latency per evaluation is over its
@@ -95,7 +95,7 @@ pub(crate) fn accuracy_targets(entries: &[QueryWorkloadEntry]) -> Vec<AccuracyTa
 /// [`RejectionCause::CountMinWeightsNotProvenNonNegative`]: the executor
 /// cannot run such a plan. Then the deployment's accuracy model is asked
 /// ([`AccuracyModel::accepts_output_regardless_of_guarantee`], through
-/// [`PlanningModels::effective_accuracy`]): an output it accepts is accepted
+/// `SelectionModels::accuracy`): an output it accepts is accepted
 /// whatever its guarantee says, and the guarantee check's rejection, if any,
 /// is only recorded ([`AcceptedAccuracy::guarantee_check_rejection`]).
 /// Otherwise, an output with no guarantee from either
@@ -106,7 +106,7 @@ pub(crate) fn accuracy_check(
     candidate: &PhysicalWorkloadPlan,
     targets: &[AccuracyTarget],
     data: &DataWorkload,
-    models: &PlanningModels<'_>,
+    models: &SelectionModels<'_>,
 ) -> Result<Vec<AcceptedAccuracy>, CheckFailure> {
     let mut accepted = Vec::with_capacity(targets.len());
     for (query, (root, target)) in candidate.roots.iter().zip(targets).enumerate() {
@@ -169,7 +169,7 @@ pub(crate) fn accuracy_check(
         // The deployment's model may accept the output directly, whatever
         // its guarantee says; the check's result is then only recorded.
         if models
-            .effective_accuracy()
+            .accuracy
             .accepts_output_regardless_of_guarantee(root, target)
         {
             accepted.push(AcceptedAccuracy {
@@ -216,7 +216,7 @@ pub(crate) fn guarantee_check(
     root: &QueryRoot,
     target: &AccuracyTarget,
     data: &DataWorkload,
-    models: &PlanningModels<'_>,
+    models: &SelectionModels<'_>,
 ) -> Result<Option<AccuracyMetric>, CheckFailure> {
     // A guarantee per value is stated over the values the target's scope
     // covers: the whole result's `G`, or at most `⌊1 / share⌋` groups.
@@ -224,7 +224,7 @@ pub(crate) fn guarantee_check(
     let values = values_per_result(root, series, data);
     let over_scope = |g: AccuracyGuarantee| g.over_scope(target.accuracy_scope, values);
     let guarantee = bound_root_guarantee(root, series, data, models).map(over_scope);
-    let meets = |g: &AccuracyGuarantee| models.effective_accuracy().satisfies(g, target);
+    let meets = |g: &AccuracyGuarantee| models.accuracy.satisfies(g, target);
     // The deployment's evidence is read only when the theoretical
     // guarantee does not meet the target.
     let evidence = || models.evidence.output_guarantee(root).map(over_scope);
@@ -240,9 +240,7 @@ pub(crate) fn guarantee_check(
     }
     // Whether the deployment's model or evidence may judge another size of
     // the plan's summaries otherwise.
-    let model_or_evidence_may_judge = models
-        .effective_accuracy()
-        .may_accept_regardless_of_guarantee()
+    let model_or_evidence_may_judge = models.accuracy.may_accept_regardless_of_guarantee()
         || models.evidence.may_provide_evidence();
     if guarantee.is_none() && evidence.is_none() {
         return Err(CheckFailure {

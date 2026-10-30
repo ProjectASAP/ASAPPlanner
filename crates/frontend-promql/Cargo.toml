@@ -20,7 +20,9 @@ promql-parser = { git = "https://github.com/ProjectASAP/promql-parser", rev = "9
 asap-types = { path = "../types", features = ["test-support"] }
 asap-accuracy = { path = "../accuracy", features = ["test-support"] }
 asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
-asap-plan-selection = { path = "../plan-selection" }
+# The planning stages through the facade (a dev-dependency cycle, for
+# integration tests only).
+asap-planner = { path = "../planner" }
 
 # Corpus tests live in domain folders (observability) but must still be declared
 # as test targets — Cargo only auto-discovers `.rs` files directly in `tests/`.

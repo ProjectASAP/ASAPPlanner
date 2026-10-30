@@ -22,8 +22,7 @@ pub use physical::{
     CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
     OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate,
     PhysicalCandidateId, PhysicalCandidateKey, ProducerCandidates, ProducerConsumerConnection,
-    ProducerSetInterner, ProducerStorageMetrics, QueryRootAssignment, ReaderConstraint,
-    SelectedCandidateGraph,
+    ProducerSetInterner, ProducerStorageMetrics, ReaderConstraint, SelectedCandidates,
 };
 pub use pruning::{PruneReason, PrunedCandidate};
-pub use realizer::{AssignmentRealizer, PhysicalCandidateError, SelectedPhysicalCandidate};
+pub use realizer::{AssignmentRealizer, PhysicalCandidateError, RealizedPlan};

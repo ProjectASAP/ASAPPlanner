@@ -140,7 +140,8 @@ pub mod physical_export {
     }
 }
 
-/// Plans and candidates from the planner pipeline (`run_stage1_to_stage3`) for one
+/// Plans and candidates from the planner pipeline (the facade's
+/// `run_planning`, with the developer tools' reference enumeration) for one
 /// query, with the built-in models.
 pub mod planning {
     use asap_types::ir::properties::AccuracyTarget;
@@ -182,14 +183,15 @@ pub mod planning {
         }
     }
 
-    /// Every planning stage's output for the single query `root`.
+    /// Every planning stage's output for the single query `root`, with
+    /// the reference enumeration of its memo.
     pub fn run_stage1_to_stage3(
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
-    ) -> asap_plan_selection::Stage1ToStage3Run {
+    ) -> asap_devtools::planning_stages::PlanningStagesRun {
         let data = declared_data(&root);
-        asap_plan_selection::run_stage1_to_stage3_with(
-            vec![(0, QueryRoot::Operator(root))],
+        asap_devtools::planning_stages::run_planning_stages_over(
+            vec![QueryRoot::Operator(root)],
             &[asap_types::workload::QueryWorkloadEntry {
                 query: Default::default(),
                 requirements: asap_types::workload::QueryRequirements {
@@ -201,8 +203,8 @@ pub mod planning {
                 range_evaluation: None,
             }],
             &data,
-            asap_plan_selection::PlanningModels::builtin(),
-            asap_plan_selection::Stage1ToStage3Search::exhaustive(),
+            None,
+            asap_planner::PlanningModels::builtin(),
         )
         .expect("Pass 1 accepts the query")
     }
@@ -210,7 +212,11 @@ pub mod planning {
     /// The logical DAG the planner pipeline selects for the single query
     /// `root` at `accuracy`.
     pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
-        match run_stage1_to_stage3(root, accuracy).selected_logical() {
+        match run_stage1_to_stage3(root, accuracy)
+            .run
+            .selected_plan
+            .as_deref()
+        {
             Some([QueryRoot::Operator(node)]) => Rc::clone(node),
             other => panic!("one selected operator root: {other:?}"),
         }
@@ -287,13 +293,13 @@ pub mod planning {
         accuracy: AccuracyTarget,
     ) -> Vec<Rc<OperatorNode>> {
         require_composed_operator_candidates(
-            run_stage1_to_stage3(root, accuracy).stage1_logical_asap_optimization,
+            run_stage1_to_stage3(root, accuracy).logical_candidates(),
         )
     }
 
     /// Fail on rejected composition rather than silently skipping a candidate.
     pub fn require_composed_operator_candidates(
-        candidates: Vec<asap_plan_selection::search::LogicalCandidate>,
+        candidates: Vec<asap_devtools::planning_stages::ShownLogicalCandidate>,
     ) -> Vec<Rc<OperatorNode>> {
         candidates
             .into_iter()
@@ -373,9 +379,9 @@ pub mod planning {
         data: &DataWorkload,
     ) -> (
         Vec<asap_physical_asap_optimization::PhysicalWorkloadPlan>,
-        asap_plan_selection::Selection,
+        asap_plan_selection::reference_pricer::WholePlanSelection,
     ) {
-        let models = asap_plan_selection::PlanningModels::builtin();
+        let models = asap_planner::PlanningModels::builtin();
         let mut physical = Vec::new();
         for (name, roots) in variants {
             // Composed nodes lose their guarantees; recompose them as
@@ -403,7 +409,9 @@ pub mod planning {
             }
             physical.extend(plans);
         }
-        let selection = asap_plan_selection::select_plan(&physical, entries, data, models).unwrap();
+        let selection =
+            asap_devtools::memo_pricing::reference_select(&physical, entries, data, models)
+                .unwrap();
         (physical, selection)
     }
 
@@ -591,7 +599,10 @@ pub mod planning {
 
     /// The lowest price per second among `selection`'s plans whose id starts
     /// with `name`.
-    pub fn cheapest_of(selection: &asap_plan_selection::Selection, name: &str) -> f64 {
+    pub fn cheapest_of(
+        selection: &asap_plan_selection::reference_pricer::WholePlanSelection,
+        name: &str,
+    ) -> f64 {
         selection
             .costs
             .iter()

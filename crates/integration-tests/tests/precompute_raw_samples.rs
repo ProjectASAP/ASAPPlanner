@@ -54,8 +54,8 @@ fn canonical(labels: &Series) -> Series {
 /// requirement that its weights are counter samples, which the executor
 /// needs before it builds a Count-Min heap.
 fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
-    use asap_plan_selection::with_confirmed_weights;
     use asap_types::ir::QueryRoot;
+    use asap_types::workload::bounds::with_confirmed_weights;
     use asap_types::workload::{DataWorkload, MetricType, SourceFacts};
     let root = lower_promql(query, accuracy.clone()).expect("lowering failed");
     let root = promql_rows::with_series_identity(&root).unwrap();

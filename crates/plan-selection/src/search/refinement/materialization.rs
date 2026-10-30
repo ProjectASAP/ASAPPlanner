@@ -2,8 +2,9 @@
 //! and producer bindings while changing one query-time materialization choice.
 use crate::search::candidates::dag::DagOfPhysicalCandidatesWithCosts;
 use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
+use crate::search::candidates::graph::SelectedCandidateGraph;
 use asap_types::physical::Materialization;
-use asap_types::stages::{PhysicalCandidateId, ReaderConstraint, SelectedCandidateGraph};
+use asap_types::stages::{PhysicalCandidateId, ReaderConstraint};
 
 pub(super) fn counterparts(
     configured: &PhysicalCandidatesWithCosts,

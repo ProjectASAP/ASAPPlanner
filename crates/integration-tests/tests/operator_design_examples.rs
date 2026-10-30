@@ -246,7 +246,7 @@ async fn sql_window_and_filtered_aggregate_types() {
 #[tokio::test]
 async fn batch_planning_replaces_summary_operators() {
     use asap_executor::values::Value;
-    use asap_plan_selection::pass::PlanningModels;
+    use asap_planner::PlanningModels;
     use asap_planner::{e2e_plan, FrontendInput, UserInput};
     use asap_types::workload::*;
     let queries = [

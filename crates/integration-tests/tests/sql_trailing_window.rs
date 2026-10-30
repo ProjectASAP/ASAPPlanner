@@ -155,7 +155,7 @@ async fn run(deployment: &DeploymentCapabilities) -> Run {
         &workload,
         roots,
         candidates,
-        asap_plan_selection::PlanningModels::builtin()
+        asap_planner::PlanningModels::builtin()
             .with_plan_selection(&settings)
             .with_deployment_capabilities(deployment),
     )

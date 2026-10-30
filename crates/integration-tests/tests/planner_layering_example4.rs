@@ -12,7 +12,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel, ResourceUnitCost};
 use asap_logical_asap_optimization::DeploymentCapabilities;
-use asap_plan_selection::RejectionCause;
 use asap_types::ir::flat::NodeId;
 use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::workload::{DataArrival, PlanningWorkload};
@@ -436,12 +435,10 @@ fn pattern_b_under(cost_model: CostModel) -> Run {
 }
 
 /// The candidates the cost models choose between: the exact plan, the KLL
-/// rebuilt over the whole window at query time, B2 (five 1-min panes rebuilt
-/// at query time) and B1 (the panes maintained at ingestion time).
+/// rebuilt over the whole window at query time and B1 (the panes maintained at ingestion time).
 struct PatternBCandidates {
     exact: String,
     whole_window_kll: String,
-    b2: String,
     b1: String,
 }
 
@@ -458,7 +455,6 @@ fn pattern_b_candidates(run: &Run) -> PatternBCandidates {
         whole_window_kll: options_of(run, Some(WindowForm::None), 1)[&NotMaterialized]
             .0
             .clone(),
-        b2: panes[&NotMaterialized].0.clone(),
         b1: panes[&MatAtIngestion].0.clone(),
     }
 }
@@ -510,41 +506,4 @@ fn stage3_plan_selection_b_cost_models_choose_differently() {
     let invalid = small.invalid();
     let b1 = invalid[ids.b1.as_str()];
     assert!(b1.starts_with("peak memory"), "{b1}");
-}
-
-/// The Pareto front over peak memory, disk and latency keeps the exact
-/// plan (least memory), the whole-window KLL and B1 (lowest latency); B2 is
-/// dominated by the whole-window KLL, which needs less memory and is faster.
-/// Least memory picks the exact plan.
-#[test]
-fn stage3_plan_selection_b_pareto_front_over_memory_disk_and_latency() {
-    let run = pattern_b_under(cluster(256, ClusterObjective::ParetoFront));
-    let ids = pattern_b_candidates(&run);
-    let mut front = run.selection.front.clone();
-    front.sort();
-    let mut expected = vec![
-        ids.exact.clone(),
-        ids.whole_window_kll.clone(),
-        ids.b1.clone(),
-    ];
-    expected.sort();
-    assert_eq!(front, expected);
-    assert_eq!(run.selection.selected, ids.b1);
-    let b2 = run
-        .selection
-        .rejected
-        .iter()
-        .find(|r| r.id == ids.b2)
-        .unwrap();
-    assert!(
-        b2.cause == RejectionCause::Dominated
-            && b2
-                .reason
-                .starts_with(&format!("dominated by {}", ids.whole_window_kll)),
-        "{}",
-        b2.reason
-    );
-
-    let least_memory = pattern_b_under(cluster(256, ClusterObjective::LeastMemory));
-    assert_eq!(least_memory.selection.selected, ids.exact);
 }
