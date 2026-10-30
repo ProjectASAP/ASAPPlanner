@@ -5,13 +5,6 @@ use std::time::{Duration, Instant};
 
 use asap_types::ir::{NonASAPOp, QueryRoot};
 
-use crate::search::candidates::configurations::CandidateConfigurationInventory;
-use crate::search::candidates::graph::{
-    validate_selected_graph, CandidateDependencyGraph, PhysicalCandidateId,
-    ProducerConsumerConnection, QueryRootAssignment, ReaderConstraint, SelectedCandidateGraph,
-};
-use crate::search::candidates::inventory::CandidateInventory;
-use crate::search::candidates::suppliers::{SupplierCandidates, SupplierSetInterner};
 use crate::search::milp::model::CandidateSolveMetrics;
 #[cfg(test)]
 use crate::search::refinement::planner::evaluate_configured_candidate;
@@ -24,6 +17,13 @@ use crate::search::refinement::search::{
 };
 use crate::PlanSelector;
 use asap_cost::CostModel;
+use asap_types::stages::CandidateConfigurationInventory;
+use asap_types::stages::CandidateInventory;
+use asap_types::stages::{
+    validate_selected_graph, CandidateDependencyGraph, PhysicalCandidateId,
+    ProducerConsumerConnection, QueryRootAssignment, ReaderConstraint, SelectedCandidateGraph,
+};
+use asap_types::stages::{SupplierCandidates, SupplierSetInterner};
 
 #[derive(Debug)]
 struct Component {
@@ -785,9 +785,6 @@ mod tests {
         assert_eq!(wall_time - (first + second), wall_time / 8);
     }
     use crate::search::candidates::configurations::enumerate_candidate_configurations;
-    use crate::search::candidates::graph::{
-        PhysicalCandidate, QueryRootCandidates, ResourceBudget,
-    };
     use crate::search::milp::model::{solve_candidate_proposal, ObservedAssignment};
     use crate::PlanningModels;
     use asap_cost::{CalibrationFit, CostInputs, ResourceUnitCost};
@@ -796,6 +793,7 @@ mod tests {
     use asap_types::ir::scalar::{ScalarExpr, ScalarValue};
     use asap_types::ir::{Operator, OperatorNode};
     use asap_types::stages::MemoGroupId;
+    use asap_types::stages::{PhysicalCandidate, QueryRootCandidates, ResourceBudget};
     use asap_types::workload::*;
     use std::rc::Rc;
     use std::time::Duration;

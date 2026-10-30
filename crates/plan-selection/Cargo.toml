@@ -24,6 +24,7 @@ highs = "=2.4.0"
 
 [dev-dependencies]
 asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
+asap-physical-asap-optimization = { path = "../physical-asap-optimization", features = ["test-support"] }
 asap-frontend-promql = { path = "../frontend-promql" }
 # The executor's charge for each summary state, checked against the bytes
 # plan selection prices for it plus the accumulator's own fields (#947).

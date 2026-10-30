@@ -8,10 +8,10 @@ use asap_types::ir::schema::{FieldDataType, SketchParams};
 use asap_types::ir::{ASAPOp, NonASAPOp};
 use asap_types::physical::Materialization;
 
-use crate::search::candidates::configurations::CandidateConfigurationInventory;
 use crate::search::refinement::planner::CandidatePlanningContext;
 use crate::{price_node, PricedNode, ProducerOutput, StateFamily};
 use asap_cost::CostModel;
+use asap_types::stages::CandidateConfigurationInventory;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(in crate::search) struct LowerBoundMetrics {
@@ -383,9 +383,7 @@ fn round_down_small_bounds(costs: &mut [f64]) -> usize {
     let largest = costs.iter().copied().fold(0.0_f64, f64::max);
     let mut removed = 0;
     for cost in costs {
-        if *cost > 0.0
-            && *cost / largest < crate::search::candidates::graph::MINIMUM_RELATIVE_COEFFICIENT
-        {
+        if *cost > 0.0 && *cost / largest < asap_types::stages::MINIMUM_RELATIVE_COEFFICIENT {
             *cost = 0.0;
             removed += 1;
         }
@@ -739,13 +737,6 @@ mod tests {
     }
 
     use super::*;
-    use crate::search::candidates::configurations::CandidateConfiguration;
-    use crate::search::candidates::graph::{
-        CandidateDependencyGraph, PhysicalCandidate, PhysicalCandidateId, ProducerRequirement,
-        QueryRootCandidates,
-    };
-    use crate::search::candidates::inventory::CandidateInventory;
-    use crate::search::candidates::physical::materialize_selected_candidates;
     use crate::search::milp::model::{solve_candidate_proposal, ObservedAssignment};
     use crate::{PlanSelector, PlanningModels};
     use asap_cost::CalibrationFit;
@@ -756,10 +747,17 @@ mod tests {
     use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
     use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
+    use asap_physical_asap_optimization::catalog::materialize_selected_candidates;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::{OperatorNode, QueryRoot};
     use asap_types::physical::Medium;
+    use asap_types::stages::CandidateConfiguration;
+    use asap_types::stages::CandidateInventory;
     use asap_types::stages::MemoGroupId;
+    use asap_types::stages::{
+        CandidateDependencyGraph, PhysicalCandidate, PhysicalCandidateId, ProducerRequirement,
+        QueryRootCandidates,
+    };
     use asap_types::workload::*;
     use std::{collections::HashMap, rc::Rc};
 

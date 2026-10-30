@@ -7,17 +7,18 @@ use asap_types::ir::QueryRoot;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 use std::collections::BTreeMap;
 
-use crate::search::candidates::configurations::CandidateConfigurationInventory;
-use crate::search::candidates::graph::{RejectedQuerySubgraph, SelectedCandidateGraph};
-use crate::search::candidates::physical::{
-    materialize_selected_candidates, PhysicalCandidateError,
-};
+use crate::search::candidates::graph::RejectedQuerySubgraph;
 use crate::search::refinement::search::{
     search_candidates_with_direct_feedback, CandidateEvaluation, CandidateSearchLimits,
     CandidateSearchResult, CandidateSearchStatus, DirectPriceModel, EvaluatedCandidate,
 };
 use crate::{PlanSelector, PlanningModels, Selection, SelectionError};
 use asap_cost::{CalibrationFit, CostModel};
+use asap_physical_asap_optimization::catalog::{
+    materialize_selected_candidates, PhysicalCandidateError,
+};
+use asap_types::stages::CandidateConfigurationInventory;
+use asap_types::stages::SelectedCandidateGraph;
 
 /// The share of a search's time a search spends before a final validation
 /// it must still afford: a search runs until its time is spent, so the rest
@@ -173,7 +174,7 @@ pub(in crate::search) fn optimize_configured_candidates(
     let maintained_graph = maintained
         .as_ref()
         .map(|profile| {
-            use crate::search::candidates::graph::{PhysicalCandidateId, ReaderConstraint};
+            use asap_types::stages::{PhysicalCandidateId, ReaderConstraint};
             let mut graph = configured.inventory.graph.clone();
             for (id, candidate) in graph.candidates.iter_mut().enumerate() {
                 candidate.local_cost = weights[id];
@@ -453,11 +454,11 @@ fn maintained_state_profile(
 fn joint_cost_seed(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
-    exclusions: &[crate::search::candidates::graph::PhysicalCandidateId],
+    exclusions: &[asap_types::stages::PhysicalCandidateId],
     fallback_reasons: &mut Vec<String>,
 ) -> Result<
     Option<(
-        crate::search::candidates::graph::CandidateDependencyGraph,
+        asap_types::stages::CandidateDependencyGraph,
         crate::search::milp::direct_price_options::JointPriceProfile,
     )>,
     String,
@@ -481,10 +482,8 @@ fn joint_cost_seed(
     // execution copies in this bounded proposal. Every supplier price option
     // remains available on the first copy; the full search retains all copies.
     for constraint in &configured.inventory.graph.reader_constraints {
-        if let crate::search::candidates::graph::ReaderConstraint::ActivationRequires {
-            candidate,
-            ..
-        } = constraint
+        if let asap_types::stages::ReaderConstraint::ActivationRequires { candidate, .. } =
+            constraint
         {
             profile.candidates[candidate.0].clear();
         }
@@ -511,19 +510,19 @@ fn joint_cost_seed(
 fn direct_cost_seed(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
-    seed_exclusions: &[crate::search::candidates::graph::PhysicalCandidateId],
+    seed_exclusions: &[asap_types::stages::PhysicalCandidateId],
     latest_panes: bool,
 ) -> Result<
     Option<(
-        crate::search::candidates::graph::CandidateDependencyGraph,
+        asap_types::stages::CandidateDependencyGraph,
         crate::search::milp::direct_cost::DirectCostProfile,
     )>,
     String,
 > {
-    use crate::search::candidates::graph::{PhysicalCandidateId, ReaderConstraint};
     use crate::search::costing::direct_profile::{
         extract, extract_latest_panes, DirectProfileError,
     };
+    use asap_types::stages::{PhysicalCandidateId, ReaderConstraint};
     let extracted = if latest_panes {
         extract_latest_panes(configured, context)
     } else {
@@ -687,13 +686,7 @@ fn seed_dds_budgets(
 fn accuracy_baseline(
     configured: &CandidateConfigurationInventory,
     context: &CandidatePlanningContext<'_>,
-) -> Result<
-    (
-        Vec<f64>,
-        Vec<crate::search::candidates::graph::PhysicalCandidateId>,
-    ),
-    String,
-> {
+) -> Result<(Vec<f64>, Vec<asap_types::stages::PhysicalCandidateId>), String> {
     use asap_types::ir::properties::AccuracyMetric;
     use asap_types::ir::schema::FieldDataType;
     use asap_types::ir::ASAPOp;
@@ -922,7 +915,7 @@ fn accuracy_baseline(
         .iter()
         .enumerate()
         .filter_map(|(id, (_, excluded))| {
-            excluded.then_some(crate::search::candidates::graph::PhysicalCandidateId(id))
+            excluded.then_some(asap_types::stages::PhysicalCandidateId(id))
         })
         .collect();
     Ok((
@@ -944,7 +937,7 @@ fn raw_scan_with_shifts(node: &asap_types::ir::OperatorNode) -> bool {
 // Group/cardinality and supplier choices remain authoritative after selection.
 fn retained_pane_priority_cost(
     node: &std::rc::Rc<asap_types::ir::OperatorNode>,
-    configuration: &crate::search::candidates::configurations::CandidateConfiguration,
+    configuration: &asap_types::stages::CandidateConfiguration,
     context: &CandidatePlanningContext<'_>,
 ) -> f64 {
     use asap_types::ir::{ASAPOp, NonASAPOp};
@@ -1314,8 +1307,8 @@ mod tests {
                 Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
             ) {
                 configured.inventory.graph.reader_constraints.push(
-                    crate::search::candidates::graph::ReaderConstraint::AllowedOutputs {
-                        candidate: crate::search::candidates::graph::PhysicalCandidateId(id),
+                    asap_types::stages::ReaderConstraint::AllowedOutputs {
+                        candidate: asap_types::stages::PhysicalCandidateId(id),
                         outputs: Vec::new(),
                     },
                 );
@@ -1591,11 +1584,8 @@ mod tests {
             };
             if *alpha >= 0.05 {
                 coarse += 1;
-                assert!(
-                    excluded.contains(&crate::search::candidates::graph::PhysicalCandidateId(id))
-                );
-            } else if !excluded.contains(&crate::search::candidates::graph::PhysicalCandidateId(id))
-            {
+                assert!(excluded.contains(&asap_types::stages::PhysicalCandidateId(id)));
+            } else if !excluded.contains(&asap_types::stages::PhysicalCandidateId(id)) {
                 composed += 1;
             }
         }
@@ -1774,8 +1764,8 @@ mod tests {
     // installation. Projection above a range remains a legal seed candidate.
     #[test]
     fn feasibility_seed_distinguishes_raw_source_and_range_projections() {
-        use crate::search::candidates::graph::{PhysicalCandidateId, ProducerRequirement};
         use asap_types::ir::{NonASAPOp, Operator, ProjectItem, ScalarExpr};
+        use asap_types::stages::{PhysicalCandidateId, ProducerRequirement};
         let (mut configured, roots, entries, data) = fixture();
         let find = |is_range: bool| {
             configured
@@ -2259,8 +2249,8 @@ mod tests {
                 Materialization::MatAtIngestion(_)
             ) {
                 ingestion_graph.reader_constraints.push(
-                    crate::search::candidates::graph::ReaderConstraint::AllowedOutputs {
-                        candidate: crate::search::candidates::graph::PhysicalCandidateId(id),
+                    asap_types::stages::ReaderConstraint::AllowedOutputs {
+                        candidate: asap_types::stages::PhysicalCandidateId(id),
                         outputs: vec![],
                     },
                 );

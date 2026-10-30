@@ -39,7 +39,7 @@ struct RouteOutcome {
     validation_seconds: f64,
     query_cuts: usize,
     rejections: crate::search::refinement::planner::CandidateRejectionSummary,
-    selected: Option<crate::search::candidates::graph::SelectedCandidateGraph>,
+    selected: Option<asap_types::stages::SelectedCandidateGraph>,
     best: Option<(
         crate::Selection,
         asap_physical_asap_optimization::PhysicalWorkloadPlan,
@@ -710,12 +710,6 @@ fn search_domain<Id: Clone>(
     let entries = context.entries;
     let data = context.data;
     let models = context.models;
-    use crate::search::candidates::configurations::{
-        enumerate_candidate_configurations_before, ConfigurationError,
-    };
-    use crate::search::candidates::inventory::{
-        build_candidate_inventory_before, CandidateInventoryError,
-    };
     use crate::search::costing::calibration::CandidateCalibration;
     use crate::search::refinement::planner::CandidatePlanningContext;
     use crate::search::refinement::search::{CandidateSearchLimits, CandidateSearchStatus};
@@ -724,6 +718,12 @@ fn search_domain<Id: Clone>(
         generate_logical_asap_memo_candidates, LogicalASAPMemoCandidatesError, Pass2RoundState,
     };
     use asap_logical_asap_optimization::pass2::memo::state_groups::StateGroupExpansionError;
+    use asap_physical_asap_optimization::catalog::{
+        build_candidate_inventory_before, CandidateInventoryError,
+    };
+    use asap_physical_asap_optimization::catalog::{
+        enumerate_candidate_configurations_before, ConfigurationError,
+    };
     use std::time::{Duration, Instant};
     let unsupported = |reason: &str| {
         SelectionError::Solver(format!(
@@ -936,14 +936,15 @@ fn search_domain<Id: Clone>(
         &output_queries,
         entries,
         data,
-        models.deployment_capabilities,
+        models.deployment_capabilities.query_time_results_retained,
+        models.deployment_capabilities.raw_data_retained,
         deadline,
     )
     .map_err(|error| {
         progress.budget_stopped = matches!(error, ConfigurationError::DeadlineExceeded(_));
         unsupported(&error.to_string())
     })?;
-    let structural_pruning = crate::search::refinement::pruning::prune(&mut configured)
+    let structural_pruning = asap_physical_asap_optimization::catalog::prune(&mut configured)
         .map_err(|error| unsupported(&error))?;
     check_budget("physical candidate generation", progress)?;
     let context = CandidatePlanningContext {
@@ -1099,7 +1100,7 @@ fn search_domain<Id: Clone>(
         CandidateSearchStatus::TimeLimit | CandidateSearchStatus::RefinementLimit
     );
     let supplier_storage =
-        crate::search::candidates::suppliers::supplier_storage_metrics(&configured.inventory.graph);
+        asap_types::stages::supplier_storage_metrics(&configured.inventory.graph);
     let report = crate::CandidateConnectionReport {
         inventory_pane_width_domain: Some(format!("{domain:?}")),
         supplier_sets: supplier_storage.unique_supplier_sets,
@@ -1188,10 +1189,10 @@ fn search_domain<Id: Clone>(
 /// different inputs); the one reading the selected producers' groups is taken.
 fn selected_chosen_candidates(
     memo: &CandidateMemo,
-    source: &crate::search::candidates::inventory::CandidateInventory,
-    memo_candidate_roots: &[Vec<crate::search::candidates::graph::PhysicalCandidateId>],
-    configured: &crate::search::candidates::configurations::CandidateConfigurationInventory,
-    selected: &crate::search::candidates::graph::SelectedCandidateGraph,
+    source: &asap_types::stages::CandidateInventory,
+    memo_candidate_roots: &[Vec<asap_types::stages::PhysicalCandidateId>],
+    configured: &asap_types::stages::CandidateConfigurationInventory,
+    selected: &asap_types::stages::SelectedCandidateGraph,
 ) -> Result<ChosenCandidatePerMemoGroup, String> {
     use std::collections::HashMap;
     let mut memo_candidates_of = HashMap::<_, Vec<(MemoGroupId, usize)>>::new();
@@ -1203,7 +1204,7 @@ fn selected_chosen_candidates(
                 .push((MemoGroupId(group as u32), index));
         }
     }
-    let source_of = |id: crate::search::candidates::graph::PhysicalCandidateId| {
+    let source_of = |id: asap_types::stages::PhysicalCandidateId| {
         configured.configurations[id.0].source_candidate
     };
     let mut producer_groups = HashMap::<_, Vec<MemoGroupId>>::new();
@@ -1264,11 +1265,11 @@ fn selected_chosen_candidates(
 }
 
 fn selected_logical_roots(
-    configured: &crate::search::candidates::configurations::CandidateConfigurationInventory,
-    selected: &crate::search::candidates::graph::SelectedCandidateGraph,
+    configured: &asap_types::stages::CandidateConfigurationInventory,
+    selected: &asap_types::stages::SelectedCandidateGraph,
     roots: &[QueryRoot],
 ) -> Result<Vec<QueryRoot>, String> {
-    let outputs = crate::search::candidates::reconstruction::reconstruct_selected_candidates(
+    let outputs = asap_physical_asap_optimization::catalog::reconstruct_selected_candidates(
         &configured.inventory.graph,
         selected,
         &configured.inventory.templates,

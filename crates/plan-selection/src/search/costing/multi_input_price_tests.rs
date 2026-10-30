@@ -1,11 +1,11 @@
 //! End-to-end pricing uses the evaluator's binary operators and shared DAGs.
 use super::*;
-use crate::search::candidates::configurations::CandidateConfiguration;
-use crate::search::candidates::graph::*;
-use crate::search::candidates::inventory::CandidateInventory;
 use asap_logical_asap_optimization::test_support::lower_promql;
 use asap_types::ir::{properties::AccuracyTarget, OperatorNode};
+use asap_types::stages::CandidateConfiguration;
+use asap_types::stages::CandidateInventory;
 use asap_types::stages::MemoGroupId;
+use asap_types::stages::*;
 use asap_types::workload::{
     DataWorkload, Predictability, Query, QueryRequirements, QueryWorkloadEntry, RepetitionInterval,
 };

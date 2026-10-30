@@ -20,9 +20,10 @@ fn initialized(
     }
 }
 
-use crate::search::candidates::graph::*;
+use crate::search::candidates::graph::RejectedQuerySubgraph;
 #[cfg(test)]
 use asap_types::stages::MemoGroupId;
+use asap_types::stages::*;
 use good_lp::solvers::highs::highs;
 use good_lp::solvers::{ResolutionError, SolutionStatus};
 use good_lp::{
@@ -1289,20 +1290,16 @@ mod tests {
             );
             let observed = SelectedCandidateGraph {
                 selected_candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
-                connections: vec![
-                    crate::search::candidates::graph::ProducerConsumerConnection {
-                        consumer: PhysicalCandidateId(1),
-                        requirement: 0,
-                        producer: PhysicalCandidateId(0),
-                    },
-                ],
+                connections: vec![asap_types::stages::ProducerConsumerConnection {
+                    consumer: PhysicalCandidateId(1),
+                    requirement: 0,
+                    producer: PhysicalCandidateId(0),
+                }],
                 query_roots: (0..2)
-                    .map(
-                        |query_root| crate::search::candidates::graph::QueryRootAssignment {
-                            query_root,
-                            candidate: PhysicalCandidateId(1),
-                        },
-                    )
+                    .map(|query_root| asap_types::stages::QueryRootAssignment {
+                        query_root,
+                        candidate: PhysicalCandidateId(1),
+                    })
                     .collect(),
                 modeled_cost: 0.0,
             };

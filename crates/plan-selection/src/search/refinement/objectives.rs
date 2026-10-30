@@ -6,8 +6,6 @@ use std::time::Instant;
 
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 
-use crate::search::candidates::configurations::CandidateConfigurationInventory;
-use crate::search::candidates::graph::{CandidateSelectionError, SelectedCandidateGraph};
 use crate::search::costing::calibration::CandidateCalibration;
 use crate::search::milp::model::{
     solve_candidate_proposal_with_metrics, CandidateSolveMetrics, ObservedAssignment,
@@ -20,6 +18,8 @@ use crate::search::refinement::planner::{
 use crate::search::refinement::search::{CandidateSearchLimits, CandidateSearchStatus};
 use crate::{PlanSelector, Selection, SelectionError};
 use asap_cost::CalibrationFit;
+use asap_types::stages::CandidateConfigurationInventory;
+use asap_types::stages::{CandidateSelectionError, SelectedCandidateGraph};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(in crate::search) struct ObjectiveSearchOptions {
@@ -812,7 +812,7 @@ mod tests {
         for rejected in &result.stage2_rejected_assignments {
             assert!(rejected.from_logical.starts_with("joint-logical-"));
             let rebuilt =
-                crate::search::candidates::reconstruction::reconstruct_selected_candidates(
+                asap_physical_asap_optimization::catalog::reconstruct_selected_candidates(
                     &configured.inventory.graph,
                     &rejected.selected_graph,
                     &configured.inventory.templates,

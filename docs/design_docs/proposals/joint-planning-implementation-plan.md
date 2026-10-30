@@ -15,9 +15,9 @@ Preserve supported accuracy semantics, physical eligibility, cost objectives, sc
 | Logical identity | `logical-asap-optimization/src/pass2/memo.rs`; `types/src/stages/` | `DagOfLogicalMemoGroups`, `MemoGroup` (`asap_types::stages`), stable initial query/group references. |
 | Computation and sharing rules | `logical-asap-optimization/src/pass2/memo/{candidates,rules,state_groups,shared_configurations,window_candidates}` | Populate groups, retain local candidates, expose shared states and compatible rewrites. |
 | Physical legality | `physical-asap-optimization` | Executable operators, timing, materialization eligibility, and `PhysicalWorkloadPlan`. |
-| Candidate dependency inventory | `plan-selection/src/search/candidates` | Local `PhysicalCandidate`, `ProducerRequirement`, compatible suppliers, execution scopes, selected connections, and reconstruction. |
+| Candidate dependency inventory | `physical-asap-optimization/src/catalog`; `types/src/stages/physical` | Local `PhysicalCandidate`, `ProducerRequirement` (`asap_types::stages`), compatible suppliers, execution scopes, structural pruning, selected connections, and reconstruction. |
 | Solver | `plan-selection/src/search/milp` | Activation, producer/root assignment, reachability, acyclicity, resource constraints, and solver warm starts. |
-| Search and validation | `plan-selection/src/search/refinement` | Actual evaluator checks, sound cuts, objective-specific ranking, certified component splitting, and structural pruning. |
+| Search and validation | `plan-selection/src/search/refinement` | Actual evaluator checks, sound cuts, objective-specific ranking, and certified component splitting. |
 | Pricing support | `plan-selection/src/search/costing` | Certified local bounds and consistent calibration. Production execution demand is owned by `cost/src/execution_demand.rs`; the search demand reference is test-only. |
 | Pipeline and lifecycle | `plan-selection/src/search/{pipeline,route}` | Initial groups, generation accounting, seed/full search budgets, archives, reports, and selected workload outputs. |
 

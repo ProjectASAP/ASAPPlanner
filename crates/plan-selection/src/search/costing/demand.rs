@@ -9,11 +9,11 @@ use std::collections::{BTreeSet, HashSet};
 use asap_types::physical::Materialization;
 use asap_types::workload::QueryWorkloadEntry;
 
-use crate::search::candidates::graph::{
-    validate_selected_graph, CandidateDependencyGraph, PhysicalCandidateId, SelectedCandidateGraph,
-};
 use asap_cost::execution_demand::evaluation_rate;
 use asap_cost::CostInputs;
+use asap_types::stages::{
+    validate_selected_graph, CandidateDependencyGraph, PhysicalCandidateId, SelectedCandidateGraph,
+};
 
 /// A computation boundary, not merely a rate: equal-rate materialized states
 /// still trigger separate upstream computations when their inputs are not kept.
@@ -202,14 +202,12 @@ pub(in crate::search) fn derive_candidate_demand(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::candidates::graph::{
-        PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
-    };
     use crate::search::milp::model::select_candidates;
     use asap_logical_asap_optimization::test_support::entry_with;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::physical::Medium;
     use asap_types::stages::MemoGroupId;
+    use asap_types::stages::{PhysicalCandidate, ProducerRequirement, QueryRootCandidates};
     use asap_types::workload::{
         QueryRecurrence, RangeEvaluation, RepeatedDemand, RepetitionInterval,
     };

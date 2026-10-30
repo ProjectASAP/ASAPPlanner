@@ -1,15 +1,15 @@
 //! Price-interface regressions: compatible inputs must not disappear merely
 //! because their statistics differ from the template's input.
 use super::*;
-use crate::search::candidates::configurations::CandidateConfiguration;
-use crate::search::candidates::graph::{
-    CandidateDependencyGraph, PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
-};
-use crate::search::candidates::inventory::CandidateInventory;
 use asap_logical_asap_optimization::test_support::lower_promql;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{Operator, OperatorNode, ProjectItem, ScalarExpr};
+use asap_types::stages::CandidateConfiguration;
+use asap_types::stages::CandidateInventory;
 use asap_types::stages::MemoGroupId;
+use asap_types::stages::{
+    CandidateDependencyGraph, PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
+};
 use asap_types::workload::{
     DataWorkload, Predictability, Query, QueryRequirements, QueryWorkloadEntry, RepetitionInterval,
 };
@@ -150,12 +150,11 @@ fn differing_supplier_statistics_keep_both_price_interfaces() {
     // Force each structurally legal supplier in turn. The model must price
     // the selected binding rather than only returning the cheapest interface.
     for producer in [PhysicalCandidateId(0), PhysicalCandidateId(1)] {
-        configured.inventory.graph.reader_constraints = vec![
-            crate::search::candidates::graph::ReaderConstraint::ActivationRequires {
+        configured.inventory.graph.reader_constraints =
+            vec![asap_types::stages::ReaderConstraint::ActivationRequires {
                 candidate: PhysicalCandidateId(2),
                 required_candidate: producer,
-            },
-        ];
+            }];
         let proposal =
             crate::search::milp::direct_price_options::solve_joint_price_proposal_with_metrics(
                 &configured.inventory.graph,
@@ -665,15 +664,14 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
     assert_eq!(raw_option.profile.compaction_seconds, 0.0);
     assert!(projected_option.profile.compaction_seconds > 0.0);
     for supplier in [raw_supplier, projected_supplier] {
-        configured.inventory.graph.reader_constraints = vec![
-            crate::search::candidates::graph::ReaderConstraint::ActivationRequires {
+        configured.inventory.graph.reader_constraints =
+            vec![asap_types::stages::ReaderConstraint::ActivationRequires {
                 candidate: root_id,
                 required_candidate: supplier,
-            },
-        ];
+            }];
         if supplier == raw_supplier {
             configured.inventory.graph.reader_constraints.push(
-                crate::search::candidates::graph::ReaderConstraint::AllowedOutputs {
+                asap_types::stages::ReaderConstraint::AllowedOutputs {
                     candidate: projected_supplier,
                     outputs: vec![],
                 },

@@ -99,6 +99,7 @@
 //! candidate alone, with the error as its reason.
 //! A summary needs no rewrite: `SummaryAgg` → `SummaryEstimate` already is
 //! build → estimate. Every node keeps the guarantee Stage 1 composed for it.
+pub mod catalog;
 pub mod summary_window;
 
 use std::collections::{BTreeMap, HashMap, HashSet};

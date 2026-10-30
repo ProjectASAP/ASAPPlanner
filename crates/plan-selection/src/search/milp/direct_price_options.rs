@@ -1,7 +1,7 @@
 //! Joint selection of supplier-dependent local pricing interfaces.
 //! Pricing options describe one physical candidate, not independent executions.
 use super::direct_cost::{NodeCostProfile, QueryScheduleRates};
-use crate::search::candidates::graph::PhysicalCandidateId;
+use asap_types::stages::PhysicalCandidateId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SupplierPriceBinding {
@@ -28,7 +28,7 @@ pub(crate) struct JointPriceProfile {
 
 use super::direct_cost::DirectCostProfile;
 use super::model::{CandidateProposal, CandidateSolveMetrics, ObservedAssignment};
-use crate::search::candidates::graph::*;
+use asap_types::stages::*;
 use good_lp::{constraint, variable, Constraint, Expression, ProblemVariables, Variable};
 
 /// Internal option nodes share an original physical identity. At most one may

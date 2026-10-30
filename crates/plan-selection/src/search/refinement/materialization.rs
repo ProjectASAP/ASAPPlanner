@@ -1,10 +1,10 @@
 //! Restricted proposals over the same finite catalog, preserving computations
 //! and producer bindings while changing one query-time materialization choice.
-use crate::search::candidates::configurations::CandidateConfigurationInventory;
-use crate::search::candidates::graph::{
+use asap_types::physical::Materialization;
+use asap_types::stages::CandidateConfigurationInventory;
+use asap_types::stages::{
     CandidateDependencyGraph, PhysicalCandidateId, ReaderConstraint, SelectedCandidateGraph,
 };
-use asap_types::physical::Materialization;
 
 pub(super) fn counterparts(
     configured: &CandidateConfigurationInventory,
@@ -107,14 +107,12 @@ pub(super) fn restrict(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::candidates::graph::{
-        PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
-    };
     use crate::search::refinement::search::{
         search_candidates_with_restricted_feedback, CandidateEvaluation, CandidateSearchLimits,
         CandidateSearchStatus,
     };
     use asap_types::stages::MemoGroupId;
+    use asap_types::stages::{PhysicalCandidate, ProducerRequirement, QueryRootCandidates};
     use std::time::Duration;
 
     fn graph(readers: usize) -> CandidateDependencyGraph {

@@ -1,20 +1,16 @@
-//! Candidate graph representation and physical implementation construction.
+//! The Stage 3 part of the candidate graph, and unit tests of Stage 2's
+//! catalog (`asap_physical_asap_optimization::catalog`) that select with the
+//! solver.
+#[cfg(test)]
 pub(crate) mod configurations;
+#[cfg(test)]
 mod factoring;
 pub(crate) mod graph;
+#[cfg(test)]
 pub(crate) mod inventory;
+#[cfg(test)]
 pub(crate) mod physical;
+#[cfg(test)]
 pub(crate) mod reconstruction;
+#[cfg(test)]
 pub(crate) mod scopes;
-pub(crate) mod suppliers;
-
-/// Discard partially built catalogs on timeout; they cannot certify coverage.
-fn check_deadline(
-    deadline: Option<std::time::Instant>,
-) -> Result<(), asap_types::stages::CandidateGenerationTimeout> {
-    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-        Err(asap_types::stages::CandidateGenerationTimeout)
-    } else {
-        Ok(())
-    }
-}

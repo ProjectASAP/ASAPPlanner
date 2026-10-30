@@ -15,7 +15,7 @@ mod general_schedule_rates;
 mod schedule_selection_tests;
 pub(crate) use general_schedule_rates::QueryScheduleRates;
 
-use crate::search::candidates::graph::*;
+use asap_types::stages::*;
 
 /// Smallest/largest monetary coefficient ratio after lifetime normalization.
 /// The minimum is scaled to one; no positive cost is rounded away.
