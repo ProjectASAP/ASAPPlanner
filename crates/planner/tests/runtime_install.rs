@@ -1889,17 +1889,27 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
 }
 
 /// Without a non-negative declaration, relative sketch error cannot propagate
-/// through the average. Early candidate pruning must report that missing bound
-/// and reject this no-raw deployment, just as final validation would.
+/// through the average, so this no-raw deployment has no valid plan: plan
+/// selection selects none. Today's engine cannot prove the catalog
+/// infeasible within its budget, so it reports no plan by the deadline
+/// rather than an infeasible catalog (early query pruning, which proved it,
+/// is gone; #1047 P6b).
 #[tokio::test]
 async fn an_undeclared_gauges_merged_ddsketch_panes_get_no_relative_bound_through_avg() {
     let error = plan_p99_avg(false).await.expect_err("no valid plan");
+    assert_plan_selection_selected_none(&error);
+}
+
+/// `error` says plan selection found no valid plan: no candidate is valid,
+/// or none was validated by the deadline. Not a solver, realizer or input
+/// failure.
+fn assert_plan_selection_selected_none(error: &str) {
     assert!(
-        error.contains("infeasible_under_configured_model"),
+        error.contains("plan selection: no valid candidate")
+            || error.contains("plan selection: no plan by the deadline")
+            || error.contains("the planning budget ended before a plan was selected"),
         "{error}"
     );
-    assert!(error.contains("AccuracyTargetMissed"), "{error}");
-    assert!(error.contains("Relative bound None"), "{error}");
 }
 
 /// `avg by (g) (quantile_over_time(0.99, x[100s]))` every 10 s at rank
@@ -2067,12 +2077,7 @@ async fn ignoring_accuracy_guarantees_selects_a_sketch_plan_that_runs() {
     let error = plan(false)
         .await
         .expect_err("no candidate is valid without the setting");
-    assert!(
-        error
-            .to_string()
-            .contains("infeasible_under_configured_model"),
-        "{error}"
-    );
+    assert_plan_selection_selected_none(&error.to_string());
     // With it.
     let (installed, report) = plan(true).await.expect("a sketch plan is selected");
     // A per-series KLL or DDSketch plan.
