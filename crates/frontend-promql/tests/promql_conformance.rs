@@ -112,7 +112,7 @@ fn has<F: Fn(&AggIntent) -> bool>(e: &OperatorNode, pred: F) -> bool {
     intents(e).iter().any(pred)
 }
 
-/// Whether the tree contains a `Mul`-by-`ScalarExpr(-1)` anywhere — the shape unary
+/// Whether the tree contains a `ScalarExpr::Negative` anywhere — the shape unary
 /// negation lowers to (issue #36).
 fn negates_via_scalar(e: &OperatorNode) -> bool {
     fn negative(expr: &ScalarExpr) -> bool {
@@ -538,11 +538,11 @@ fn comparison_bool_modifier_returns_zero_or_one() {
 }
 
 #[test]
-fn unary_negation_lowers_as_multiply_by_minus_one() {
-    // SEMANTICS (PromQL, issue #36): `-expr` flips the sign of every sample.
-    // Now that a scalar operand exists (#35), it lowers as `expr * -1` — a `Mul`
-    // BinaryOp of the (label-preserving) vector against `ScalarExpr(-1)`. These are
-    // the five cases the old `__GAP` test pinned as rejected.
+fn unary_negation_lowers_as_a_negative_projection() {
+    // SEMANTICS (PromQL, issue #36): `-expr` flips the sign of every sample and
+    // drops the metric name. It lowers as a projection whose value column is
+    // `ScalarExpr::Negative`. These are the five cases the old `__GAP` test
+    // pinned as rejected.
     for q in [
         "-rate(http_errors_total[5m])",
         "-some_metric",
@@ -551,11 +551,8 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
         "sum(-node_cpu_seconds_total)",
     ] {
         let qe = ok(q);
-        // A `Mul`-by-`-1` against a `ScalarExpr(-1)` appears somewhere in every tree.
-        assert!(
-            negates_via_scalar(&qe),
-            "no `* -1` negation found in {q}: {qe:?}"
-        );
+        // A `Negative` appears somewhere in every tree.
+        assert!(negates_via_scalar(&qe), "no negation found in {q}: {qe:?}");
     }
 
     let negated = ok("-some_metric");
