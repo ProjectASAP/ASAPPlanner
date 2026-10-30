@@ -318,15 +318,31 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
     }
     match expr {
         Expr::Aggregate(agg) => walk_aggregate(agg),
-        Expr::Call(call) if call.func.name.starts_with("histogram_") => walk_histogram(call),
-        Expr::Call(call) if is_math_fn(call.func.name) => walk_math(call),
-        Expr::Call(call) if is_presence_fn(call.func.name) => walk_presence(call),
-        Expr::Call(call) if is_time_fn(call.func.name) => walk_time(call),
-        Expr::Call(call) if is_typeconv_fn(call.func.name) => walk_typeconv(call),
-        Expr::Call(call) if is_label_fn(call.func.name) => walk_label(call),
-        Expr::Call(call) if is_sort_fn(call.func.name) => walk_sort(call),
-        Expr::Call(call) if call.func.name == "info" => walk_info(call),
-        Expr::Call(call) => walk_call(call),
+        Expr::Call(call) => match call.func.name {
+            name if name.starts_with("histogram_") => walk_histogram(call),
+            // Element-wise math / trig (issue #45).
+            "abs" | "ceil" | "floor" | "exp" | "ln" | "log2" | "log10" | "sqrt" | "sgn" | "sin"
+            | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "asinh"
+            | "acosh" | "atanh" | "deg" | "rad" | "round" | "clamp" | "clamp_min" | "clamp_max" => {
+                walk_math(call)
+            }
+            // Presence (issue #47).
+            "absent" | "absent_over_time" | "present_over_time" => walk_presence(call),
+            // Calendar functions (issue #46); `time()` is scalar-typed and
+            // lowers in `lower_scalar`.
+            "timestamp" | "minute" | "hour" | "day_of_week" | "day_of_month" | "day_of_year"
+            | "month" | "year" | "days_in_month" => walk_time(call),
+            // Scalar→vector conversion (issue #48); `scalar(v)` is
+            // scalar-typed and lowers in `lower_scalar`.
+            "vector" => walk_typeconv(call),
+            // Label rewrites (issue #50).
+            "label_replace" | "label_join" => walk_label(call),
+            // Instant-vector reordering (issue #51).
+            "sort" | "sort_desc" | "sort_by_label" | "sort_by_label_desc" => walk_sort(call),
+            // A label-enrichment join, not a type conversion (#84).
+            "info" => walk_info(call),
+            _ => walk_call(call),
+        },
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
         // `UnaryExpr` is built only by negation (`Neg`); unary `+` is folded to
@@ -1038,23 +1054,6 @@ fn open_metrics_float(v: f64) -> String {
     }
 }
 
-/// The calendar functions (issue #46); `time()` is scalar-typed and lowers in
-/// `lower_scalar`.
-fn is_time_fn(name: &str) -> bool {
-    matches!(
-        name,
-        "timestamp"
-            | "minute"
-            | "hour"
-            | "day_of_week"
-            | "day_of_month"
-            | "day_of_year"
-            | "month"
-            | "year"
-            | "days_in_month"
-    )
-}
-
 /// `timestamp(<selector>)` → `Aggregate{[TimeFn(Timestamp)]}`; `timestamp` of
 /// any other expression → `PromqlMap{EvalTimestamp}`. The calendar accessors →
 /// `PromqlMap` over the argument vector, or over
@@ -1095,11 +1094,6 @@ fn walk_time(call: &Call) -> Result<Unresolved> {
         },
         drop_metric_name: true,
     })
-}
-
-/// The presence functions (issue #47).
-fn is_presence_fn(name: &str) -> bool {
-    matches!(name, "absent" | "absent_over_time" | "present_over_time")
 }
 
 /// `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` — lowered
@@ -1146,27 +1140,12 @@ fn absent_labels(v: &Expr) -> BTreeMap<String, String> {
     labels
 }
 
-/// The scalar→vector conversion (issue #48); `scalar(v)` is scalar-typed and
-/// lowers in `lower_scalar`. `info` is *not* here: it is a label-enrichment
-/// join, not a type conversion (#84).
-fn is_typeconv_fn(name: &str) -> bool {
-    name == "vector"
-}
-
 /// `vector(s)` — promote a scalar to a label-less instant vector carrying the
 /// scalar expression `s` (issue #48).
 fn walk_typeconv(call: &Call) -> Result<Unresolved> {
     Ok(Unresolved::PromqlVectorFromScalar(lower_scalar(arg(
         call, 0,
     )?)?))
-}
-
-/// The instant-vector reordering functions (issue #51).
-fn is_sort_fn(name: &str) -> bool {
-    matches!(
-        name,
-        "sort" | "sort_desc" | "sort_by_label" | "sort_by_label_desc"
-    )
 }
 
 /// `sort`/`sort_desc(v)` reorder an instant vector by sample value;
@@ -1252,11 +1231,6 @@ fn info_selector(expr: &Expr) -> Result<Vec<InfoMatcher>> {
     }
 }
 
-/// The label-rewrite functions (issue #50).
-fn is_label_fn(name: &str) -> bool {
-    matches!(name, "label_replace" | "label_join")
-}
-
 /// `label_replace(v, dst, replacement, src, regex)` /
 /// `label_join(v, dst, sep, src…)` — per-series label rewrites. Both lower to a
 /// `PromqlRelabel` over the fully-lowered vector argument, differing only in the
@@ -1299,40 +1273,6 @@ fn walk_label(call: &Call) -> Result<Unresolved> {
         }
         other => Err(LoweringError::UnsupportedFunction(other.to_string())),
     }
-}
-
-/// The element-wise math / trig functions (issue #45).
-fn is_math_fn(name: &str) -> bool {
-    matches!(
-        name,
-        "abs"
-            | "ceil"
-            | "floor"
-            | "exp"
-            | "ln"
-            | "log2"
-            | "log10"
-            | "sqrt"
-            | "sgn"
-            | "sin"
-            | "cos"
-            | "tan"
-            | "asin"
-            | "acos"
-            | "atan"
-            | "sinh"
-            | "cosh"
-            | "tanh"
-            | "asinh"
-            | "acosh"
-            | "atanh"
-            | "deg"
-            | "rad"
-            | "round"
-            | "clamp"
-            | "clamp_min"
-            | "clamp_max"
-    )
 }
 
 /// A math / trig function — a per-series element-wise value transform, lowered
