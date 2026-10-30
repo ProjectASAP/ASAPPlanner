@@ -425,7 +425,12 @@ mod tests {
         let identified = vec![(0usize, roots[0].clone())];
         let initial = DagOfLogicalMemoGroups::from_roots(&identified);
         let output = *initial.query_roots[0].as_operator().unwrap();
-        let generated = generate_per_computation_candidates(identified).unwrap();
+        let generated = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                &identified,
+            ),
+        )
+        .unwrap();
         let memo = try_populate_pass1(initial, &generated).unwrap();
         let inventory = build_candidate_inventory(&memo, &[output], |_| Ok(0.0)).unwrap();
         let mut entry = entry_with(

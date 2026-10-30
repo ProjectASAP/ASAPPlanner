@@ -56,9 +56,12 @@ fn analyze_corpus(
     let mut rejected = 0;
     let mut summaries = Vec::new();
     for (id, root) in roots {
-        let Ok(inventory) =
-            generate_per_computation_candidates(vec![(id.clone(), QueryRoot::Operator(root))])
-        else {
+        let Ok(inventory) = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+                id.clone(),
+                QueryRoot::Operator(root),
+            )]),
+        ) else {
             rejected += 1;
             continue;
         };

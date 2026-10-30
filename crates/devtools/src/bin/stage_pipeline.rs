@@ -1180,7 +1180,7 @@ fn materialized_views_json(
 /// index, the query it is listed under, and each pruned candidate of its
 /// own (`pruned`) and of its fused computation (`fused_pruned`) with the
 /// reason, e.g. `UnsupportedByDeployment`.
-fn pass1_pruned_json(inventory: &PerComputationCandidates<usize>) -> Vec<Value> {
+fn pass1_pruned_json(inventory: &PerComputationCandidates) -> Vec<Value> {
     let pruned_json = |pruned: &[(HowToComputeAggregateMeasure, PruneReason)]| -> Vec<Value> {
         pruned
             .iter()

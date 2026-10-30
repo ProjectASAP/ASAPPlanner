@@ -14,6 +14,7 @@ mod filtered_aggregates;
 mod finer_aggregate_reuse;
 mod frequency_execution;
 mod frontend_timestamps;
+mod having_shared_aggregate;
 mod identical_exact_queries;
 mod independent_plan_seed;
 mod joint_search_equivalence;

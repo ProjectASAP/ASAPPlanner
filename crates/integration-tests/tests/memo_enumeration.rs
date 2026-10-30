@@ -96,10 +96,7 @@ fn production_roots(workload: &PlanningWorkload) -> Vec<(usize, QueryRoot)> {
 }
 
 /// The production run of Stages 1 to 3 over `workload`.
-fn production_run(
-    workload: &PlanningWorkload,
-    search: Stage1ToStage3Search,
-) -> Stage1ToStage3Run<usize> {
+fn production_run(workload: &PlanningWorkload, search: Stage1ToStage3Search) -> Stage1ToStage3Run {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
     let roots = production_roots(workload);
@@ -116,7 +113,7 @@ fn complete_domain_round() -> Stage1ToStage3Search {
     }
 }
 
-fn memo_steps(run: &Stage1ToStage3Run<usize>) -> &MemoSteps {
+fn memo_steps(run: &Stage1ToStage3Run) -> &MemoSteps {
     run.memo_steps
         .as_ref()
         .expect("a planning round recorded its memo within the time budget")
@@ -128,7 +125,7 @@ fn candidate_count(memo: &CandidateMemo) -> usize {
 
 /// Every plan the whole-workload path composes from the inventory: one per
 /// assignment of each target's choices, with the assignment.
-fn whole_workload_plans(inventory: &PerComputationCandidates<usize>) -> Vec<(Vec<usize>, Plan)> {
+fn whole_workload_plans(inventory: &PerComputationCandidates) -> Vec<(Vec<usize>, Plan)> {
     let counts: Vec<_> = inventory.targets.iter().map(|t| t.choice_count()).collect();
     let total: usize = counts.iter().product();
     (0..total)
@@ -147,7 +144,7 @@ fn whole_workload_plans(inventory: &PerComputationCandidates<usize>) -> Vec<(Vec
             let roots = compose_logical_candidate(inventory, &choice).ok()?;
             let plan = roots
                 .into_iter()
-                .map(|(_, root)| match root {
+                .map(|root| match root {
                     QueryRoot::Operator(node) => node,
                     QueryRoot::Scalar(_) => panic!("operator roots only"),
                 })
@@ -211,7 +208,7 @@ fn sized_for_whole_result(candidate: &CandidateForMemoGroup) -> bool {
 /// whole-budget DAGs and the whole-workload plans; returns (memo choices,
 /// whole-budget ones, whole-workload plans, plans in both).
 fn assert_pass1_memo_and_whole_workload_plans(
-    run: &Stage1ToStage3Run<usize>,
+    run: &Stage1ToStage3Run,
 ) -> (usize, usize, usize, usize) {
     let memo = &memo_steps(run).pass1;
     let enumeration = enumerate(memo, 100_000);
@@ -237,7 +234,7 @@ fn assert_pass1_memo_and_whole_workload_plans(
         .flat_map(|a| (a + 1..inventory.targets.len()).map(move |b| (a, b)))
         .filter(|&(a, b)| {
             let (a, b) = (&inventory.targets[a], &inventory.targets[b]);
-            a.aggregate == b.aggregate && a.measure_index == b.measure_index
+            inventory.aggregate(a) == inventory.aggregate(b) && a.measure_index == b.measure_index
         })
         .collect();
     let takes_kll = |plan: &Plan| {

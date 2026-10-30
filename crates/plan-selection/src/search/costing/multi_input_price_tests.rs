@@ -159,9 +159,13 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
         .failure_probability(0.01)
         .accuracy_scope(AccuracyScope::PerValue);
     let original = lower_promql(query, planned);
-    let generated =
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(original.clone()))])
-            .unwrap();
+    let generated = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+            0,
+            QueryRoot::Operator(original.clone()),
+        )]),
+    )
+    .unwrap();
     let choices: Vec<_> = generated
         .targets
         .iter()
@@ -179,11 +183,7 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
         })
         .collect();
     assert_eq!(choices.len(), 2);
-    let roots: Vec<_> = compose_logical_candidate(&generated, &choices)
-        .unwrap()
-        .into_iter()
-        .map(|(_, root)| root)
-        .collect();
+    let roots: Vec<_> = compose_logical_candidate(&generated, &choices).unwrap();
     let data: DataWorkload = serde_json::from_value(serde_json::json!({
         "arrival":{"ingesting":{"rows_per_second":100.0}},
         "sources":{"m":{"rows_held":3000,"series_count":1,"values_non_negative":true},

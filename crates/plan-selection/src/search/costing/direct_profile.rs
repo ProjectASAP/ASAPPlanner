@@ -1289,18 +1289,14 @@ mod tests {
                     "quantile_over_time(0.95, latency[5m])"
                 };
                 let original = lower_promql(query, target.clone());
-                let generated = generate_per_computation_candidates(vec![(
+                let generated = generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
                     0,
                     QueryRoot::Operator(original.clone()),
-                )])
+                )]))
                 .unwrap();
                 let choice = generated.targets[0].ways_to_compute.iter().position(|candidate|
                     matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == algorithm)).unwrap();
-                let roots: Vec<_> = compose_logical_candidate(&generated, &[choice])
-                    .unwrap()
-                    .into_iter()
-                    .map(|(_, root)| root)
-                    .collect();
+                let roots: Vec<_> = compose_logical_candidate(&generated, &[choice]).unwrap();
                 let data: DataWorkload = serde_json::from_value(serde_json::json!({
                     "arrival":{"ingesting":{"rows_per_second":100.0}},
                     "sources":{"latency":{"series_count":2,"rows_held":30000,"values_non_negative":true,"max_distinct_per_evaluation":1000}}
@@ -1513,18 +1509,14 @@ mod tests {
                         "quantile_over_time(0.95, latency[5m])"
                     };
                     let original = lower_promql(query, target.clone());
-                    let generated = generate_per_computation_candidates(vec![(
+                    let generated = generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
                         0,
                         QueryRoot::Operator(original.clone()),
-                    )])
+                    )]))
                     .unwrap();
                     let choice = generated.targets[0].ways_to_compute.iter().position(|candidate|
                     matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == algorithm)).unwrap();
-                    let roots: Vec<_> = compose_logical_candidate(&generated, &[choice])
-                        .unwrap()
-                        .into_iter()
-                        .map(|(_, root)| root)
-                        .collect();
+                    let roots: Vec<_> = compose_logical_candidate(&generated, &[choice]).unwrap();
                     let pane_rules =
                         asap_logical_asap_optimization::pass2::asap_aware_cse::pane_candidates(
                             &roots,
@@ -1985,17 +1977,13 @@ mod tests {
                         ))
                     })
                     .collect();
-                let generated = generate_per_computation_candidates(
-                    originals.iter().cloned().enumerate().collect(),
-                )
+                let generated = generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&
+                    originals.iter().cloned().enumerate().collect::<Vec<_>>(),
+                ))
                 .unwrap();
                 let choices: Vec<_> = generated.targets.iter().map(|target| target.ways_to_compute.iter().position(|candidate|
                     matches!(candidate,HowToComputeAggregateMeasure::Summary(found) if *found==algorithm)).unwrap()).collect();
-                let roots: Vec<_> = compose_logical_candidate(&generated, &choices)
-                    .unwrap()
-                    .into_iter()
-                    .map(|(_, root)| root)
-                    .collect();
+                let roots: Vec<_> = compose_logical_candidate(&generated, &choices).unwrap();
                 // Identical sub-DAGs made one node, as the memo's groups are.
                 let shared: Vec<_> =
                     asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(

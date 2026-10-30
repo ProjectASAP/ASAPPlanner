@@ -237,9 +237,11 @@ pub fn cms_summary(query: &str) -> OperatorNode {
     let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let root = lower_promql(query, target);
     // Inspect each local computation choice under the built-in deployment.
-    let per_computation = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))])
-        .unwrap()
-        .without_unsupported_summaries(None);
+    let per_computation = generate_per_computation_candidates(
+        &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(0, QueryRoot::Operator(root))]),
+    )
+    .unwrap()
+    .without_unsupported_summaries(None);
     let summary = per_computation
         .targets
         .iter()
@@ -249,9 +251,7 @@ pub fn cms_summary(query: &str) -> OperatorNode {
             (0..choices.choice_count()).filter_map(move |candidate| {
                 let mut assignment = vec![0; inventory.targets.len()];
                 assignment[target] = candidate;
-                compose_logical_candidate(inventory, &assignment)
-                    .ok()
-                    .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>())
+                compose_logical_candidate(inventory, &assignment).ok()
             })
         })
         .flat_map(|roots| match &roots[0] {

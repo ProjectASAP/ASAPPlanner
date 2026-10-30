@@ -318,7 +318,10 @@ async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
             ),
         ));
     }
-    let local = generate_per_computation_candidates(roots).unwrap();
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+    )
+    .unwrap();
     // Explicit fixture configurations: exact; one local substitution at a
     // time (mixed percentiles); and all quantiles using each supported family.
     // Do not enumerate a Cartesian product of complete workload choices.
@@ -358,13 +361,7 @@ async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
         .collect::<Vec<_>>();
     let mut candidates = Vec::new();
     for choice in choices {
-        let roots = share(
-            compose_logical_candidate(&local, &choice)
-                .unwrap()
-                .into_iter()
-                .map(|(_, root)| root)
-                .collect(),
-        );
+        let roots = share(compose_logical_candidate(&local, &choice).unwrap());
         candidates.push(roots.clone());
         let panes = pane_candidates(&roots, &grids);
         if !panes.is_empty() {

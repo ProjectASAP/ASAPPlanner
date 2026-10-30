@@ -22,7 +22,7 @@ pub struct PlanningStagesRun {
     pub stage0_query_language_frontends: Vec<QueryRoot>,
     /// Stage 1, Pass 1: the per-computation candidates (query `i` has id
     /// `i`).
-    pub stage1_pass1_per_computation: PerComputationCandidates<usize>,
+    pub stage1_pass1_per_computation: PerComputationCandidates,
     pub stage1_logical_asap_optimization: Vec<LogicalCandidate>,
     /// Evaluated physical plans reference their archived logical source by ID.
     pub stage2_physical_asap_optimization: Vec<PhysicalWorkloadPlan>,

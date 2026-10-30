@@ -104,8 +104,12 @@ fn composed_summary_candidates(
     };
     let workload = promql_workload(queries);
     let roots = lower_promql_query_workload(&workload).expect("lowers");
-    let inventory =
-        generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &roots.into_iter().enumerate().collect::<Vec<_>>(),
+        ),
+    )
+    .unwrap();
     let mut assignments = vec![vec![0; inventory.targets.len()]];
     for family in [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch] {
         let choices: Vec<_> = inventory
@@ -135,11 +139,7 @@ fn composed_summary_candidates(
         .into_iter()
         .enumerate()
         .map(|(index, choices)| {
-            let roots: Vec<_> = compose_logical_candidate(&inventory, &choices)
-                .unwrap()
-                .into_iter()
-                .map(|(_, root)| root)
-                .collect();
+            let roots: Vec<_> = compose_logical_candidate(&inventory, &choices).unwrap();
             let mut candidate =
                 asap_physical_asap_optimization::test_support::optimize_physical_asap_chosen(
                     "explicit-composition",
@@ -170,25 +170,25 @@ fn shared_kll_candidate(
     };
     use asap_types::physical::Materialization;
     let roots = lower_promql_query_workload(workload).unwrap();
-    let inventory =
-        generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &roots.into_iter().enumerate().collect::<Vec<_>>(),
+        ),
+    )
+    .unwrap();
     let mut choices = vec![0; inventory.targets.len()];
     for index in 0..choices.len() {
         choices[index] = (1..inventory.targets[index].choice_count()).find(|choice| {
             let mut trial = vec![0; choices.len()];
             trial[index] = *choice;
-            compose_logical_candidate(&inventory, &trial).unwrap().iter().any(|(_, root)| {
+            compose_logical_candidate(&inventory, &trial).unwrap().iter().any(|root| {
                 root_operators(root).into_iter().flat_map(OperatorNode::reachable).any(|node| {
                     matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if matches!(kind.params(), SketchParams::Kll { .. }))
                 })
             })
         }).expect("KLL implementation exists");
     }
-    let roots: Vec<_> = compose_logical_candidate(&inventory, &choices)
-        .unwrap()
-        .into_iter()
-        .map(|(_, root)| root)
-        .collect();
+    let roots: Vec<_> = compose_logical_candidate(&inventory, &choices).unwrap();
     // Every identical sub-DAG of the two queries made one node.
     let roots: Vec<_> = asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
         roots

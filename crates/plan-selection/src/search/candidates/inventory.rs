@@ -148,7 +148,12 @@ mod tests {
         let output_groups = (0..2)
             .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect();
-        let candidates = generate_per_computation_candidates(roots).unwrap();
+        let candidates = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                &roots,
+            ),
+        )
+        .unwrap();
         let memo = try_populate_pass1(initial, &candidates).unwrap();
         (
             sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap(),
@@ -378,7 +383,12 @@ mod tests {
         let outputs: Vec<_> = (0..roots.len())
             .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect();
-        let generated = generate_per_computation_candidates(roots.clone()).unwrap();
+        let generated = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                &roots.clone(),
+            ),
+        )
+        .unwrap();
         let mut memo = try_populate_pass1(initial, &generated).unwrap();
         let entries: Vec<_> = (0..roots.len())
             .map(|query| {
@@ -561,7 +571,12 @@ mod tests {
             let outputs: Vec<_> = (0..2)
                 .map(|query| *initial.query_roots[query].as_operator().unwrap())
                 .collect();
-            let generated = generate_per_computation_candidates(roots.clone()).unwrap();
+            let generated = generate_per_computation_candidates(
+                &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                    &roots.clone(),
+                ),
+            )
+            .unwrap();
             let memo = sharing_rules_and_shared_state_groups(
                 try_populate_pass1(initial, &generated).unwrap(),
                 PaneWidthDomain::Complete,
@@ -706,7 +721,12 @@ mod tests {
             let outputs: Vec<_> = (0..roots.len())
                 .map(|query| *initial.query_roots[query].as_operator().unwrap())
                 .collect();
-            let generated = generate_per_computation_candidates(roots.clone()).unwrap();
+            let generated = generate_per_computation_candidates(
+                &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                    &roots.clone(),
+                ),
+            )
+            .unwrap();
             let mut memo = try_populate_pass1(initial, &generated).unwrap();
             let owner = outputs[0].0 as usize;
             let mut fused = memo.candidates[owner][0].clone();
@@ -868,7 +888,12 @@ mod tests {
             &initial.groups[initial.groups[output.0 as usize].child_groups[0].0 as usize]
                 .logical_node,
         );
-        let generated = generate_per_computation_candidates(roots.clone()).unwrap();
+        let generated = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                &roots.clone(),
+            ),
+        )
+        .unwrap();
         let memo = try_populate_pass1(initial, &generated).unwrap();
         let mut priced_operators = Vec::new();
         let inventory = build_candidate_inventory(&memo, &[output], |node| {
@@ -936,7 +961,12 @@ mod tests {
         let outputs = (0..queries.len())
             .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect();
-        let generated = generate_per_computation_candidates(roots).unwrap();
+        let generated = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                &roots,
+            ),
+        )
+        .unwrap();
         (try_populate_pass1(initial, &generated).unwrap(), outputs)
     }
 
@@ -1132,7 +1162,12 @@ mod tests {
         let roots = vec![(0, QueryRoot::Operator(lower_promql(query, target.clone())))];
         let logical = DagOfLogicalMemoGroups::from_roots(&roots);
         let output = *logical.query_roots[0].as_operator().unwrap();
-        let generated = generate_per_computation_candidates(roots).unwrap();
+        let generated = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                &roots,
+            ),
+        )
+        .unwrap();
         let original = try_populate_pass1(logical, &generated).unwrap();
         assert!(original
             .candidates

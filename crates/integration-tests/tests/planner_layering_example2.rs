@@ -184,8 +184,12 @@ fn rule_fixture_computations(
     use asap_logical_asap_optimization::pass2::asap_aware_cse::{
         pane_candidates, window_composition_pass2_candidates,
     };
-    let local =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &roots.iter().cloned().enumerate().collect::<Vec<_>>(),
+        ),
+    )
+    .unwrap();
     let exact = vec![0; local.targets.len()];
     let mut choices = BTreeSet::from([exact.clone()]);
     let mut univmon = exact.clone();
@@ -227,11 +231,7 @@ fn rule_fixture_computations(
         if local.absorbed_choice_varies(&choice) {
             continue;
         }
-        let whole: Vec<_> = compose_logical_candidate(&local, &choice)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let whole: Vec<_> = compose_logical_candidate(&local, &choice).unwrap();
         computations.push(whole.clone());
         let shared = share_identical(&whole);
         if distinct_nodes(&shared) < distinct_nodes(&whole) {

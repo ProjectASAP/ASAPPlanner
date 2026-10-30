@@ -108,15 +108,13 @@ async fn run(deployment: &DeploymentCapabilities) -> Run {
     use asap_logical_asap_optimization::pass2::asap_aware_cse::{
         pane_candidates, window_composition_pass2_candidates,
     };
-    let local =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
-    let compose = |choices: &[usize]| {
-        compose_logical_candidate(&local, choices)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect::<Vec<_>>()
-    };
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &roots.iter().cloned().enumerate().collect::<Vec<_>>(),
+        ),
+    )
+    .unwrap();
+    let compose = |choices: &[usize]| compose_logical_candidate(&local, choices).unwrap();
     let exact = compose(&vec![0; local.targets.len()]);
     let choices = local
         .targets

@@ -25,9 +25,14 @@ async fn targets(sql: &str) -> Vec<ComputationTarget> {
     let root = lower_sql(sql, &catalog, accuracy)
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
-    generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))])
-        .unwrap()
-        .targets
+    generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+            0,
+            QueryRoot::Operator(root),
+        )]),
+    )
+    .unwrap()
+    .targets
 }
 
 fn placements(targets: &[ComputationTarget]) -> Vec<HavingPlacement> {
@@ -204,8 +209,13 @@ async fn heap_updates_over(fields: Vec<Field>, sql: &str) -> Vec<(String, String
     let catalog = SqlCatalog::new().with_table("flows", Schema::new(fields));
     let accuracy = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let root = lower_sql(sql, &catalog, accuracy).await.unwrap();
-    let inventory =
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+            0,
+            QueryRoot::Operator(root),
+        )]),
+    )
+    .unwrap();
     let name = |expr: &SummaryInputExpr| match expr {
         SummaryInputExpr::Column(ColumnRef::Named(name)) => name.clone(),
         SummaryInputExpr::Column(ColumnRef::Qualified { table, name }) => {
@@ -241,7 +251,7 @@ async fn heap_updates_over(fields: Vec<Field>, sql: &str) -> Vec<(String, String
             choice[t] = c;
             let composed = compose_logical_candidate(&inventory, &choice)
                 .unwrap_or_else(|e| panic!("{candidate:?} composes: {e}"));
-            let QueryRoot::Operator(root) = &composed[0].1 else {
+            let QueryRoot::Operator(root) = &composed[0] else {
                 panic!("operator root")
             };
             for node in OperatorNode::reachable(root) {

@@ -53,8 +53,12 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
     let (workload, roots) = fixture();
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.as_ref().unwrap();
-    let generated =
-        generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
+    let generated = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &roots.into_iter().enumerate().collect::<Vec<_>>(),
+        ),
+    )
+    .unwrap();
     let mut settings = CostInputs::default();
     settings.cost_model = CostModel::UsageOverTime(ResourceUnitCost::aws_fargate_us_east_1(
         settings.resource_speed,
@@ -76,11 +80,7 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
                     .expect("family generated"),
             })
             .collect();
-        let roots: Vec<_> = compose_logical_candidate(&generated, &choices)
-            .unwrap()
-            .into_iter()
-            .map(|(_, r)| r)
-            .collect();
+        let roots: Vec<_> = compose_logical_candidate(&generated, &choices).unwrap();
         // Identical sub-DAGs made one node, as the memo's groups are.
         let roots: Vec<_> = asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
             roots

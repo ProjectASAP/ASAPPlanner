@@ -69,7 +69,7 @@ fn production(
     roots: Vec<(usize, QueryRoot)>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
-) -> Stage1ToStage3Run<usize> {
+) -> Stage1ToStage3Run {
     let mut settings = CostInputs::default();
     settings.cost_model = CostModel::UsageOverTime(ResourceUnitCost::aws_fargate_us_east_1(
         settings.resource_speed,
@@ -88,7 +88,7 @@ fn production(
 }
 
 fn check(
-    run: &Stage1ToStage3Run<usize>,
+    run: &Stage1ToStage3Run,
     queries: usize,
     expected_rollups: usize,
     family: &str,
@@ -168,7 +168,7 @@ fn check(
     );
 }
 
-async fn sql(queries: &[String], accuracy: AccuracyTarget) -> Stage1ToStage3Run<usize> {
+async fn sql(queries: &[String], accuracy: AccuracyTarget) -> Stage1ToStage3Run {
     let mut roots = Vec::new();
     for (id, query) in queries.iter().enumerate() {
         roots.push((
@@ -251,7 +251,10 @@ fn independent_kll_cost(
         compose_logical_candidate, generate_per_computation_candidates,
         HowToComputeAggregateMeasure,
     };
-    let inventory = generate_per_computation_candidates(roots).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+    )
+    .unwrap();
     let choices: Vec<_> = inventory
         .targets
         .iter()
@@ -270,11 +273,7 @@ fn independent_kll_cost(
                 .unwrap()
         })
         .collect();
-    let roots: Vec<_> = compose_logical_candidate(&inventory, &choices)
-        .unwrap()
-        .into_iter()
-        .map(|(_, root)| root)
-        .collect();
+    let roots: Vec<_> = compose_logical_candidate(&inventory, &choices).unwrap();
     // Composed outside the memo: sized as Pass 1 sizes a candidate.
     let targets: Vec<_> = entries
         .iter()

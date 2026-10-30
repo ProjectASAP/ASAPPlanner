@@ -704,8 +704,13 @@ fn ddsketch_ratio_selection(
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         generate_per_computation_candidates, HowToComputeAggregateMeasure,
     };
-    let inventory =
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+            0,
+            QueryRoot::Operator(root),
+        )]),
+    )
+    .unwrap();
     let exact = vec![0; inventory.targets.len()];
     let dds = inventory
         .targets
@@ -737,11 +742,7 @@ fn ddsketch_ratio_selection(
     let models = asap_plan_selection::PlanningModels::builtin();
     let mut physical = Vec::new();
     for choice in [exact, dds] {
-        let roots: Vec<_> = compose_logical_candidate(&inventory, &choice)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let roots: Vec<_> = compose_logical_candidate(&inventory, &choice).unwrap();
         let roots = recompose_guarantees(&roots).unwrap();
         physical.extend(
             asap_physical_asap_optimization::optimize_physical_asap(

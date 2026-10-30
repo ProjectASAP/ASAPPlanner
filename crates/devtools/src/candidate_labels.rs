@@ -99,7 +99,7 @@ fn connected_candidate_label(roots: &[QueryRoot]) -> String {
 
 /// The query (index into `inventory.roots`) each target of `inventory` is
 /// listed under: the first that reads it.
-pub fn query_of_each_target<Id>(inventory: &PerComputationCandidates<Id>) -> Vec<usize> {
+pub fn query_of_each_target(inventory: &PerComputationCandidates) -> Vec<usize> {
     inventory
         .targets
         .iter()
@@ -107,11 +107,11 @@ pub fn query_of_each_target<Id>(inventory: &PerComputationCandidates<Id>) -> Vec
             inventory
                 .roots
                 .iter()
-                .position(|(_, root)| {
+                .position(|root| {
                     root_operators(root).into_iter().any(|node| {
                         OperatorNode::reachable(node)
                             .iter()
-                            .any(|n| Rc::ptr_eq(n, &target.aggregate))
+                            .any(|n| Rc::ptr_eq(n, inventory.aggregate(target)))
                     })
                 })
                 .expect("every target is reached from a root")
@@ -301,19 +301,17 @@ mod tests {
     fn connected_labels_describe_selected_states() {
         let workload = example1();
         let inventory = generate_per_computation_candidates(
-            lower_promql_roots(&workload)
-                .unwrap()
-                .into_iter()
-                .enumerate()
-                .collect(),
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                &lower_promql_roots(&workload)
+                    .unwrap()
+                    .into_iter()
+                    .enumerate()
+                    .collect::<Vec<_>>(),
+            ),
         )
         .unwrap();
         let choice = vec![0; inventory.targets.len()];
-        let roots: Vec<_> = compose_logical_candidate(&inventory, &choice)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let roots: Vec<_> = compose_logical_candidate(&inventory, &choice).unwrap();
         let label = connected_candidate_label(&roots);
         assert!(label.contains("Q1 ") && label.contains("Q2 "));
         assert!(label.contains("acc"), "{label}");
@@ -324,16 +322,18 @@ mod tests {
     fn connected_labels_name_actual_shared_state() {
         let workload = example1();
         let inventory = generate_per_computation_candidates(
-            lower_promql_roots(&workload)
-                .unwrap()
-                .into_iter()
-                .enumerate()
-                .collect(),
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                &lower_promql_roots(&workload)
+                    .unwrap()
+                    .into_iter()
+                    .enumerate()
+                    .collect::<Vec<_>>(),
+            ),
         )
         .unwrap();
         let roots =
             compose_logical_candidate(&inventory, &vec![0; inventory.targets.len()]).unwrap();
-        let label = connected_candidate_label(&[roots[1].1.clone(), roots[1].1.clone()]);
+        let label = connected_candidate_label(&[roots[1].clone(), roots[1].clone()]);
         assert!(label.contains("shared Sum acc (Q1, Q2)"), "{label}");
         assert_eq!(label.matches("shared Sum acc").count(), 1);
     }
@@ -362,11 +362,13 @@ mod tests {
         )
         .unwrap();
         let inventory = generate_per_computation_candidates(
-            lower_promql_roots(&workload)
-                .unwrap()
-                .into_iter()
-                .enumerate()
-                .collect(),
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                &lower_promql_roots(&workload)
+                    .unwrap()
+                    .into_iter()
+                    .enumerate()
+                    .collect::<Vec<_>>(),
+            ),
         )
         .unwrap();
         let choice: Vec<usize> = inventory
@@ -382,11 +384,7 @@ mod tests {
                     .expect("a DDSketch candidate")
             })
             .collect();
-        let summary: Vec<_> = compose_logical_candidate(&inventory, &choice)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let summary: Vec<_> = compose_logical_candidate(&inventory, &choice).unwrap();
         let entries: Vec<_> = workload.query_workload.entries().collect();
         let grids: Vec<_> = entries.iter().map(|e| e.evaluation_grid_ms()).collect();
         let panes = pane_candidates(&summary, &grids);

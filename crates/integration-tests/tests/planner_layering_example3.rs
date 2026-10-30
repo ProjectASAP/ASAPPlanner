@@ -30,8 +30,12 @@ fn run_a() -> Run {
         },
     );
     let roots = lower_promql(&workload);
-    let local =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &roots.iter().cloned().enumerate().collect::<Vec<_>>(),
+        ),
+    )
+    .unwrap();
     let mut computations = Vec::new();
     for kll in [false, true] {
         let choices: Vec<_> = local
@@ -55,11 +59,7 @@ fn run_a() -> Run {
                 }
             })
             .collect();
-        let whole: Vec<_> = compose_logical_candidate(&local, &choices)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let whole: Vec<_> = compose_logical_candidate(&local, &choices).unwrap();
         computations.push(whole.clone());
         computations.push(share_identical(&whole));
     }
@@ -81,8 +81,12 @@ fn run_b() -> Run {
     };
     let workload = pattern_b();
     let roots = lower_promql(&workload);
-    let local =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &roots.iter().cloned().enumerate().collect::<Vec<_>>(),
+        ),
+    )
+    .unwrap();
     let mut computations = vec![roots.clone()];
     for option in 0..local.targets[0].choice_count() {
         if !matches!(
@@ -91,11 +95,7 @@ fn run_b() -> Run {
         ) {
             continue;
         }
-        let whole: Vec<_> = compose_logical_candidate(&local, &[option])
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let whole: Vec<_> = compose_logical_candidate(&local, &[option]).unwrap();
         let panes = pane_candidates(&whole, &[Some(PATTERN_B_INTERVAL_MS)]);
         let chain = window_composition_pass2_candidates(&whole, &panes)
             .unwrap()

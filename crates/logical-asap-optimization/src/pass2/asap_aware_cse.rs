@@ -2340,10 +2340,12 @@ mod tests {
             "count_over_time(m[5m])",
             asap_types::ir::properties::AccuracyTarget::max_error(0.01).failure_probability(0.001),
         );
-        let inventory = generate_per_computation_candidates(vec![(
-            0,
-            QueryRoot::Operator(with_promql_series_identity(&root).unwrap()),
-        )])
+        let inventory = generate_per_computation_candidates(
+            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
+                0,
+                QueryRoot::Operator(with_promql_series_identity(&root).unwrap()),
+            )]),
+        )
         .unwrap();
         let choice: Vec<usize> = inventory
             .targets
@@ -2355,11 +2357,7 @@ mod tests {
                     .expect("Count-Min is offered for a count")
             })
             .collect();
-        let roots: Vec<QueryRoot> = compose_logical_candidate(&inventory, &choice)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let roots: Vec<QueryRoot> = compose_logical_candidate(&inventory, &choice).unwrap();
         let candidates = pane_candidates(&roots, &[Some(60_000)]);
         let pass2_candidates = window_composition_pass2_candidates(&roots, &candidates).unwrap();
         let [pass2_candidate] = pass2_candidates.as_slice() else {
@@ -2392,7 +2390,7 @@ mod tests {
         use crate::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates,
         };
-        let roots = queries
+        let roots: Vec<_> = queries
             .iter()
             .enumerate()
             .map(|(i, (q, epsilon))| {
@@ -2408,7 +2406,10 @@ mod tests {
                 )
             })
             .collect();
-        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let inventory = generate_per_computation_candidates(
+            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        )
+        .unwrap();
         let choice: Vec<usize> = inventory
             .targets
             .iter()
@@ -2419,11 +2420,7 @@ mod tests {
                     .expect("the family is a candidate")
             })
             .collect();
-        compose_logical_candidate(&inventory, &choice)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect()
+        compose_logical_candidate(&inventory, &choice).unwrap()
     }
 
     /// The summary builds `roots` read, by address, with each one's KLL `k`.
@@ -3454,21 +3451,23 @@ mod tests {
             HowToComputeAggregateMeasure as C,
         };
         let inventory = generate_per_computation_candidates(
-            [
-                "topk by (job) (5, sum_over_time(m[1m]))",
-                "topk by (job) (10, sum_over_time(m[1m]))",
-            ]
-            .iter()
-            .enumerate()
-            .map(|(i, q)| {
-                let root = lower_promql(
-                    q,
-                    asap_types::ir::properties::AccuracyTarget::max_error(0.01)
-                        .failure_probability(0.01),
-                );
-                (i, QueryRoot::Operator(root))
-            })
-            .collect(),
+            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                &[
+                    "topk by (job) (5, sum_over_time(m[1m]))",
+                    "topk by (job) (10, sum_over_time(m[1m]))",
+                ]
+                .iter()
+                .enumerate()
+                .map(|(i, q)| {
+                    let root = lower_promql(
+                        q,
+                        asap_types::ir::properties::AccuracyTarget::max_error(0.01)
+                            .failure_probability(0.01),
+                    );
+                    (i, QueryRoot::Operator(root))
+                })
+                .collect::<Vec<_>>(),
+            ),
         )
         .unwrap();
         // The CountSketch heap, the top-k's fused whole-expression one.
@@ -3482,11 +3481,7 @@ mod tests {
                     .unwrap_or(0)
             })
             .collect();
-        let heaps: Vec<QueryRoot> = compose_logical_candidate(&inventory, &choice)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let heaps: Vec<QueryRoot> = compose_logical_candidate(&inventory, &choice).unwrap();
         assert!(OperatorNode::reachable(operator(&heaps[0]))
             .iter()
             .any(|n| matches!(n.asap(), Some(ASAPOp::SummaryEstimate { .. }))));

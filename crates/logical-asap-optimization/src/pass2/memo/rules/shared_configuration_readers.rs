@@ -503,7 +503,10 @@ mod tests {
             })
             .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let inventory = generate_per_computation_candidates(
+            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        )
+        .unwrap();
         let mut memo = try_populate_pass1(initial, &inventory).unwrap();
         let entries = vec![
             entry_with(

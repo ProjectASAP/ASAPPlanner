@@ -59,7 +59,12 @@ mod tests {
         let output_groups = (0..2)
             .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect::<Vec<_>>();
-        let candidates = generate_per_computation_candidates(roots.clone()).unwrap();
+        let candidates = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                &roots.clone(),
+            ),
+        )
+        .unwrap();
         let memo = sharing_rules_and_shared_state_groups(
             try_populate_pass1(initial, &candidates).unwrap(),
             PaneWidthDomain::Complete,

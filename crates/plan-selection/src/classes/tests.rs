@@ -458,7 +458,12 @@ fn through_stages_1_and_2(queries: &[&str]) -> PhysicalASAPMemoCandidates {
             )
         })
         .collect();
-    let per_computation = generate_per_computation_candidates(roots.clone()).unwrap();
+    let per_computation = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &roots.clone(),
+        ),
+    )
+    .unwrap();
     let memo =
         try_populate_pass1(DagOfLogicalMemoGroups::from_roots(&roots), &per_computation).unwrap();
     let logical = LogicalASAPMemoCandidates {

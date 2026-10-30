@@ -386,8 +386,12 @@ pub fn pattern_b_computations(workload: &PlanningWorkload) -> Vec<Vec<QueryRoot>
         pane_candidates, window_composition_pass2_candidates,
     };
     let roots = lower_promql(workload);
-    let local =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &roots.iter().cloned().enumerate().collect::<Vec<_>>(),
+        ),
+    )
+    .unwrap();
     assert_eq!(
         local.targets.len(),
         1,
@@ -403,11 +407,7 @@ pub fn pattern_b_computations(workload: &PlanningWorkload) -> Vec<Vec<QueryRoot>
             )
         })
         .unwrap();
-    let whole: Vec<_> = compose_logical_candidate(&local, &[kll])
-        .unwrap()
-        .into_iter()
-        .map(|(_, root)| root)
-        .collect();
+    let whole: Vec<_> = compose_logical_candidate(&local, &[kll]).unwrap();
     let panes = pane_candidates(&whole, &[Some(60_000)]);
     assert_eq!(panes.len(), 1);
     let chain = window_composition_pass2_candidates(&whole, &panes)

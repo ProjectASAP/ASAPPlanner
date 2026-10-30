@@ -53,7 +53,10 @@ fn expanded(queries: &[String]) -> CandidateMemo {
         .enumerate()
         .collect();
     let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-    let inventory = generate_per_computation_candidates(roots).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+    )
+    .unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
     asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
         memo,

@@ -11,8 +11,8 @@ use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 use std::rc::Rc;
 
 /// Immutable workload and evaluator inputs shared by seed and complete searches.
-pub(crate) struct CandidateSearchContext<'a, Id> {
-    pub inventory: &'a PerComputationCandidates<Id>,
+pub(crate) struct CandidateSearchContext<'a> {
+    pub inventory: &'a PerComputationCandidates,
     pub entries: &'a [QueryWorkloadEntry],
     pub data: &'a DataWorkload,
     pub models: PlanningModels<'a>,
@@ -75,9 +75,9 @@ struct DomainProgress {
 /// Obtain an incumbent on seed grids, then progressively expose finer widths.
 /// All rounds use the same planner and frozen objective; only a completed
 /// full-domain round can establish a bound for the declared search space.
-pub(crate) fn candidate_connection_search<Id: Clone>(
+pub(crate) fn candidate_connection_search(
     initial: DagOfLogicalMemoGroups,
-    context: &CandidateSearchContext<'_, Id>,
+    context: &CandidateSearchContext<'_>,
     search: Stage1ToStage3Search,
     local_candidate_generation_ms: Option<f64>,
     archive: &mut CandidateArchive,
@@ -684,9 +684,9 @@ fn validated_seed_after_stop(
     }
 }
 
-fn search_domain<Id: Clone>(
+fn search_domain(
     initial: DagOfLogicalMemoGroups,
-    context: &CandidateSearchContext<'_, Id>,
+    context: &CandidateSearchContext<'_>,
     search: Stage1ToStage3Search,
     local_candidate_generation_ms: Option<f64>,
     archive: &mut CandidateArchive,
@@ -760,17 +760,13 @@ fn search_domain<Id: Clone>(
     let calibration_policy =
         CandidateCalibration::for_models(models).map_err(|error| unsupported(&error))?;
     // The output references are the initial memo's query roots, which
-    // stand for the inventory's roots only when the memo was built from them.
-    if !initial.matches_root_dependencies(&inventory.roots) {
+    // stand for the inventory's roots only when Pass 1 walked this memo.
+    if !inventory.walked(&initial) {
         return Err(unsupported(
             "the workload's query roots are not the initial memo's",
         ));
     }
-    let roots = inventory
-        .roots
-        .iter()
-        .map(|(_, root)| root.clone())
-        .collect::<Vec<_>>();
+    let roots = inventory.roots.clone();
     let output_references = asap_types::stages::output_references(&initial.query_roots).len();
     let started = Instant::now();
     let mut pass2_round = match progress.pass2_round.take() {
@@ -1206,7 +1202,7 @@ mod tests {
     fn generation_time_is_charged_before_search_starts() {
         let (roots, entries, data) = workload();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
+        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots)).unwrap();
         let error = candidate_connection_search(
             initial,
             &CandidateSearchContext {
@@ -1271,7 +1267,7 @@ mod tests {
             )),
         )];
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
+        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots)).unwrap();
         let seed = search_domain(
             initial.clone(),
             &CandidateSearchContext {
@@ -1341,7 +1337,7 @@ mod tests {
     fn invalid_generation_durations_are_rejected_before_seed_search() {
         let (roots, entries, data) = workload();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
+        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots)).unwrap();
         for invalid in [-1.0, f64::INFINITY, f64::NAN] {
             let error = candidate_connection_search(
                 initial.clone(),
@@ -1700,7 +1696,7 @@ mod tests {
             QueryRoot::Operator(lower_promql("latency[5m]", AccuracyTarget::exact())),
         )];
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(roots).unwrap();
+        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots)).unwrap();
         let error = candidate_connection_search(
             initial,
             &CandidateSearchContext {
@@ -1738,7 +1734,7 @@ mod tests {
     fn scalar_run(
         settings: &asap_cost::CostInputs,
         search: Stage1ToStage3Search,
-    ) -> crate::Stage1ToStage3Run<usize> {
+    ) -> crate::Stage1ToStage3Run {
         let (_, entries, data) = workload();
         let roots = vec![(
             0,
@@ -1849,7 +1845,12 @@ mod tests {
                 QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(1_000)));
         }
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let generated = generate_per_computation_candidates(roots).unwrap();
+        let generated = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+                &roots,
+            ),
+        )
+        .unwrap();
         let mut memo = try_populate_pass1(initial, &generated).unwrap();
         asap_logical_asap_optimization::pass2::memo::window_candidates::add_local_window_composition(
             &mut memo, &entries,
