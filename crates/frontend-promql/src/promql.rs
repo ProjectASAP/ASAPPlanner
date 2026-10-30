@@ -97,13 +97,8 @@ pub(crate) struct PromqlLowerer;
 #[derive(Debug, Clone)]
 enum Outer {
     None,
-    Plain(OuterIntent),
-    Count,
-    /// `count_values("l", v)` — group by value + count, emitting the value as a
-    /// new label `l` (issue #49).
-    CountValues {
-        label: String,
-    },
+    /// A reducing aggregation (`sum`/`count`/`quantile`/`count_values`/…).
+    Reduce(AggIntent<ColumnRef>),
     TopK {
         k: u64,
         descending: bool,
@@ -112,19 +107,6 @@ enum Outer {
     Sample {
         kind: SampleKind,
     },
-}
-
-#[derive(Debug, Clone)]
-enum OuterIntent {
-    Sum,
-    Avg,
-    Min,
-    Max,
-    StdDev,
-    Variance,
-    Quantile(f64),
-    /// `group(v)` — constant 1 per group (issue #49).
-    Group,
 }
 
 struct Inner {
@@ -693,19 +675,22 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
             descending: false,
         }
     } else if op == token::T_COUNT {
-        Outer::Count
+        // Counts vector elements regardless of their sample values.
+        Outer::Reduce(AggIntent::Count {
+            accuracy: current_accuracy(),
+        })
     } else if op == token::T_SUM {
-        Outer::Plain(OuterIntent::Sum)
+        Outer::Reduce(AggIntent::Sum { col: None })
     } else if op == token::T_GROUP {
         // `group(v)` yields a constant 1 per group (presence), not a sum of
         // values — a distinct intent, never folded onto `Sum` (issue #49).
-        Outer::Plain(OuterIntent::Group)
+        Outer::Reduce(AggIntent::Group)
     } else if op == token::T_COUNT_VALUES {
         // `count_values("l", v)` groups by sample value and counts, emitting the
         // value as a new label `l` (the string parameter) — issue #49.
-        Outer::CountValues {
+        Outer::Reduce(AggIntent::CountValues {
             label: str_param(agg)?,
-        }
+        })
     } else if op == token::T_LIMITK {
         // `limitk(k, v)` — up to k series per group (issue #86).
         Outer::Sample {
@@ -717,17 +702,27 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
             kind: SampleKind::LimitRatio(ratio_param(agg)?),
         }
     } else if op == token::T_AVG {
-        Outer::Plain(OuterIntent::Avg)
+        Outer::Reduce(AggIntent::Avg { col: None })
     } else if op == token::T_MIN {
-        Outer::Plain(OuterIntent::Min)
+        Outer::Reduce(AggIntent::Min { col: None })
     } else if op == token::T_MAX {
-        Outer::Plain(OuterIntent::Max)
+        Outer::Reduce(AggIntent::Max { col: None })
     } else if op == token::T_STDDEV {
-        Outer::Plain(OuterIntent::StdDev)
+        Outer::Reduce(AggIntent::StdDev {
+            col: None,
+            population: true,
+        })
     } else if op == token::T_STDVAR {
-        Outer::Plain(OuterIntent::Variance)
+        Outer::Reduce(AggIntent::Variance {
+            col: None,
+            population: true,
+        })
     } else if op == token::T_QUANTILE {
-        Outer::Plain(OuterIntent::Quantile(quantile_param(num_param(agg)?)?))
+        Outer::Reduce(AggIntent::Quantile {
+            col: None,
+            q: quantile_param(num_param(agg)?)?,
+            accuracy: current_accuracy(),
+        })
     } else {
         return Err(LoweringError::UnsupportedAggregateOp(format!(
             "aggregate token {op}"
@@ -798,11 +793,7 @@ fn build_over_sub_dag(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
     Ok(match outer {
         // `walk_aggregate` always passes a real aggregator; `None` can't occur.
         Outer::None => child,
-        Outer::Plain(intent) => outer_aggregate(keys, outer_intent(&intent), child),
-        Outer::Count => outer_aggregate(keys, count(), child),
-        Outer::CountValues { label } => {
-            outer_aggregate(keys, AggIntent::CountValues { label }, child)
-        }
+        Outer::Reduce(intent) => outer_aggregate(keys, intent, child),
         Outer::Sample { kind } => Unresolved::PromqlSeriesSample {
             by: keys.into(),
             kind,
@@ -1633,25 +1624,11 @@ fn build(mut inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresol
         // two-level reduction: the inner func runs per series, the outer op
         // then aggregates across series. Collapsing them into one aggregate
         // silently drops a level — e.g. `sum(rate(m[w]))` must keep the `sum`.
-        Outer::Plain(intent) => Ok(match func {
-            None => windowed_aggregate(inner, keys, outer_intent(&intent))?,
+        Outer::Reduce(intent) => Ok(match func {
+            None => windowed_aggregate(inner, keys, intent)?,
             Some(inner_i) => {
                 let inner_agg = windowed_aggregate(inner, vec![], inner_i)?;
-                outer_aggregate(keys, outer_intent(&intent), inner_agg)
-            }
-        }),
-        Outer::Count => Ok(match func {
-            None => windowed_aggregate(inner, keys, count())?,
-            Some(inner_i) => {
-                let inner_agg = windowed_aggregate(inner, vec![], inner_i)?;
-                outer_aggregate(keys, count(), inner_agg)
-            }
-        }),
-        Outer::CountValues { label } => Ok(match func {
-            None => windowed_aggregate(inner, keys, AggIntent::CountValues { label })?,
-            Some(inner_i) => {
-                let inner_agg = windowed_aggregate(inner, vec![], inner_i)?;
-                outer_aggregate(keys, AggIntent::CountValues { label }, inner_agg)
+                outer_aggregate(keys, intent, inner_agg)
             }
         }),
         Outer::Sample { kind } => {
@@ -1673,26 +1650,11 @@ fn build(mut inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresol
             // Preserve the counter-value ranking intent. Physical candidates
             // may rebuild a heap over finalized rates or use exact Sort/Limit;
             // neither is allowed to sum raw counter samples as ranking weights.
-            if descending
+            let counter_ranking = descending
                 && matches!(
                     func,
                     Some(AggIntent::Rate | AggIntent::Increase | AggIntent::IRate)
-                )
-            {
-                let intent = func.expect("counter function");
-                let ranked = windowed_aggregate(inner, vec![], intent)?;
-                return Ok(Unresolved::Aggregate {
-                    reduction: Reduction::Reduce(keys.into()),
-                    measures: vec![AggIntent::TopK {
-                        k: k as usize,
-                        accuracy: current_accuracy(),
-                    }],
-                    output_names: vec![],
-                    filters: vec![],
-                    having: None,
-                    child: Rc::new(ranked),
-                });
-            }
+                );
             // Heavy-hitter only when ranking by an additive measure (`count`
             // or `sum`): that is a
             // first-class aggregate intent → `TopK`. Any other ranking (topk
@@ -1705,17 +1667,29 @@ fn build(mut inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresol
                 Some(AggIntent::Sum { .. }) => topk::Ranking::WeightedSum,
                 _ => topk::Ranking::NonAdditive,
             };
-            let additive_ranking = measure.is_supported(descending);
-            if additive_ranking {
+            // The base over which we rank. A range-vector-function argument
+            // (`topk(k, rate(m[5m]))`) reduces *per series* first — that is
+            // label-preserving, so the `by (host)` partition labels survive.
+            // A **bare instant selector** (`topk(k, m)`) ranks its own
+            // samples directly: it must NOT be wrapped in a reducing
+            // aggregate. Defaulting it to `Sum` was both semantically wrong
+            // (PromQL `topk` ranks the raw data samples, it does not sum them) and
+            // destructive — the cross-series `Sum` collapses every label,
+            // including the `by (…)` partition keys, so they no longer
+            // resolve (issue #30). Keep the selector label-preserving so
+            // `Sort.partition_by` can rank within each group (issue #12).
+            let base = match func {
+                Some(intent) => windowed_aggregate(inner, vec![], intent)?,
+                None => instant_source(inner.metric, inner.matchers, inner.shift)?,
+            };
+            if counter_ranking || measure.is_supported(descending) {
                 // Preserve the ranked aggregate intent in the canonical DAG so the
                 // intent algebra is explicit about what is being computed.
                 // Post-ASAP binding may fuse the Count and TopK into a
                 // single-pass heavy-hitter sketch (SpaceSaving /
                 // CMS-with-heap), but that is a cost-model decision, not a
                 // canonical-IR concern.
-                let ranked = func.expect("additive ranking has a range function");
-                let ranked_agg = windowed_aggregate(inner, vec![], ranked)?;
-                Ok(Unresolved::Aggregate {
+                return Ok(Unresolved::Aggregate {
                     // A ranking always reduces (a `by`-empty TopK ranks the
                     // whole input into one ordering, never per-entity).
                     reduction: Reduction::Reduce(keys.into()),
@@ -1726,26 +1700,10 @@ fn build(mut inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresol
                     output_names: vec![],
                     filters: vec![],
                     having: None,
-                    child: Rc::new(ranked_agg),
-                })
-            } else {
-                // The base over which we rank. A range-vector-function argument
-                // (`topk(k, rate(m[5m]))`) reduces *per series* first — that is
-                // label-preserving, so the `by (host)` partition labels survive.
-                // A **bare instant selector** (`topk(k, m)`) ranks its own
-                // samples directly: it must NOT be wrapped in a reducing
-                // aggregate. Defaulting it to `Sum` was both semantically wrong
-                // (PromQL `topk` ranks the raw data samples, it does not sum them) and
-                // destructive — the cross-series `Sum` collapses every label,
-                // including the `by (…)` partition keys, so they no longer
-                // resolve (issue #30). Keep the selector label-preserving so
-                // `Sort.partition_by` can rank within each group (issue #12).
-                let base = match func {
-                    Some(intent) => windowed_aggregate(inner, vec![], intent)?,
-                    None => instant_source(inner.metric, inner.matchers, inner.shift)?,
-                };
-                Ok(ranked_by_value(keys, k, descending, base))
+                    child: Rc::new(base),
+                });
             }
+            Ok(ranked_by_value(keys, k, descending, base))
         }
     }
 }
@@ -1863,36 +1821,6 @@ fn instant_source(metric: String, matchers: Vec<Scalar>, shift: TimeShift) -> Re
         kind: TimeRangeKind::Instant,
         child: Rc::new(filtered_source(metric, matchers, shift)),
     })
-}
-
-/// Count vector elements regardless of their sample values.
-fn count() -> AggIntent<ColumnRef> {
-    AggIntent::Count {
-        accuracy: current_accuracy(),
-    }
-}
-
-fn outer_intent(o: &OuterIntent) -> AggIntent<ColumnRef> {
-    match o {
-        OuterIntent::Sum => AggIntent::Sum { col: None },
-        OuterIntent::Avg => AggIntent::Avg { col: None },
-        OuterIntent::Min => AggIntent::Min { col: None },
-        OuterIntent::Max => AggIntent::Max { col: None },
-        OuterIntent::StdDev => AggIntent::StdDev {
-            col: None,
-            population: true,
-        },
-        OuterIntent::Variance => AggIntent::Variance {
-            col: None,
-            population: true,
-        },
-        OuterIntent::Quantile(q) => AggIntent::Quantile {
-            col: None,
-            q: *q,
-            accuracy: current_accuracy(),
-        },
-        OuterIntent::Group => AggIntent::Group,
-    }
 }
 
 /// Unwrap a (possibly parenthesised) string literal — `count_values` labels and
