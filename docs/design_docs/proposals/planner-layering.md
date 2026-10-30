@@ -462,7 +462,7 @@ that vector.
   3. `recompose_guarantees` then runs over the roots, as plan reconstruction
      does: every node is rebuilt with the schema and guarantee derived from
      the children chosen, not the ones its candidate had alone.
-  4. `ErrorBuildingLogicalAsapDagsFromChosenCandidates` reports a candidate index the group does not have
+  4. `ErrorBuildingLogicalASAPDagsFromChosenCandidates` reports a candidate index the group does not have
      (`NoSuchCandidate`, bad input), a child group whose node is not in the
      candidate (`ChildNotInCandidate`, a memo construction bug), or a
      DAG whose schemas or guarantees cannot be re-derived (`Recompose`).
@@ -529,7 +529,7 @@ is in `crates/plan-selection/src/search/`.
 | Pass 1 | `generate_per_computation_candidates_with_memo` and `without_unsupported_summaries` (the inventory); `generate_per_computation_logical_memo_candidates` → `PerComputationLogicalMemoCandidates` (the memo: `try_populate_pass1`, exported from `pass2::memo::candidates`, then the accuracy-scoped candidates) | `pass1/per_computation_candidates.rs`; `pass1/logical_memo_candidates.rs`; `pass2/memo/groups.rs` |
 | Memo types | `CandidateMemo`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup`, `LogicalASAPMemoCandidates`, `CandidateGenerationTimeout`, `root_groups`, `queries_rooted_at` | `crates/types/src/stages/` (`asap_types::stages`) |
 | Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, one pane-width round over a `Pass2RoundState` (kept between rounds: the memo after step 1 and before the rules, and the widths already generated). It calls in this order: 1. window composition for the round's new widths (`extend_local_window_composition`); 2–9. the rules in `pass2/memo/rules/`: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; 10. `add_shared_summary_state_groups`, the shared builds | `pass2/logical_memo_candidates.rs` (`LogicalASAPMemoCandidates` itself: `asap_types::stages`); `pass2/memo/window_candidates.rs`, `pass2/memo/rules/`, `pass2/memo/state_groups.rs`, `pass2/memo/shared_configurations.rs` |
-| Memo to candidate DAGs | `enumerate`, `build_logical_asap_dags_from_chosen_candidates`, `ChosenCandidatePerMemoGroup`, `AllChosenCandidatesPerMemoGroup`, `ErrorBuildingLogicalAsapDagsFromChosenCandidates` | `pass2/memo/enumeration.rs` (module `pass2::memo::enumeration`) |
+| Memo to candidate DAGs | `enumerate`, `build_logical_asap_dags_from_chosen_candidates`, `ChosenCandidatePerMemoGroup`, `AllChosenCandidatesPerMemoGroup`, `ErrorBuildingLogicalASAPDagsFromChosenCandidates` | `pass2/memo/enumeration.rs` (module `pass2::memo::enumeration`) |
 | Production memo build and search | `run_stage1_to_stage3_with` builds the DAG of logical memo groups (`pipeline.rs`); `candidate_connection_search` (`route.rs`) builds the candidate memo for each pane-width round: query pruning (first round), `generate_per_computation_logical_memo_candidates` (first round), `generate_logical_asap_memo_candidates` (the `Pass2RoundState` is kept in `DomainProgress.pass2_round` between rounds); then `candidates/`, `milp/` and `refinement/` | `crates/plan-selection/src/search/` |
 
 ## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies

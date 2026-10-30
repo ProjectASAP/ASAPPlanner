@@ -43,7 +43,7 @@ pub struct AllChosenCandidatesPerMemoGroup {
 
 /// A choice that does not compose.
 #[derive(Debug, thiserror::Error)]
-pub enum ErrorBuildingLogicalAsapDagsFromChosenCandidates {
+pub enum ErrorBuildingLogicalASAPDagsFromChosenCandidates {
     #[error("group {group:?} has no candidate {candidate}")]
     NoSuchCandidate {
         group: MemoGroupId,
@@ -133,7 +133,7 @@ pub fn enumerate(memo: &CandidateMemo, limit: usize) -> AllChosenCandidatesPerMe
 pub fn build_logical_asap_dags_from_chosen_candidates(
     memo: &CandidateMemo,
     chosen_candidates: &ChosenCandidatePerMemoGroup,
-) -> Result<Vec<(MemoGroupId, Rc<OperatorNode>)>, ErrorBuildingLogicalAsapDagsFromChosenCandidates>
+) -> Result<Vec<(MemoGroupId, Rc<OperatorNode>)>, ErrorBuildingLogicalASAPDagsFromChosenCandidates>
 {
     fn composed(
         memo: &CandidateMemo,
@@ -141,16 +141,16 @@ pub fn build_logical_asap_dags_from_chosen_candidates(
         chosen_candidates: &ChosenCandidatePerMemoGroup,
         done: &mut HashMap<MemoGroupId, Rc<OperatorNode>>,
         composing: &mut HashSet<MemoGroupId>,
-    ) -> Result<Rc<OperatorNode>, ErrorBuildingLogicalAsapDagsFromChosenCandidates> {
+    ) -> Result<Rc<OperatorNode>, ErrorBuildingLogicalASAPDagsFromChosenCandidates> {
         if let Some(found) = done.get(&group) {
             return Ok(Rc::clone(found));
         }
         if !composing.insert(group) {
-            return Err(ErrorBuildingLogicalAsapDagsFromChosenCandidates::Cycle { group });
+            return Err(ErrorBuildingLogicalASAPDagsFromChosenCandidates::Cycle { group });
         }
         let index = chosen_candidates.get(&group).copied().unwrap_or(0);
         let candidate = memo.candidates[group.0 as usize].get(index).ok_or(
-            ErrorBuildingLogicalAsapDagsFromChosenCandidates::NoSuchCandidate {
+            ErrorBuildingLogicalASAPDagsFromChosenCandidates::NoSuchCandidate {
                 group,
                 candidate: index,
             },
@@ -164,7 +164,7 @@ pub fn build_logical_asap_dags_from_chosen_candidates(
             let old = &memo.groups[child.0 as usize].logical_node;
             if !own_nodes.contains(&Rc::as_ptr(old)) {
                 return Err(
-                    ErrorBuildingLogicalAsapDagsFromChosenCandidates::ChildNotInCandidate {
+                    ErrorBuildingLogicalASAPDagsFromChosenCandidates::ChildNotInCandidate {
                         group,
                         candidate: index,
                         child,
@@ -195,7 +195,7 @@ pub fn build_logical_asap_dags_from_chosen_candidates(
                 )?),
             ))
         })
-        .collect::<Result<Vec<_>, ErrorBuildingLogicalAsapDagsFromChosenCandidates>>()?
+        .collect::<Result<Vec<_>, ErrorBuildingLogicalASAPDagsFromChosenCandidates>>()?
         .into_iter()
         .unzip();
     let roots = recompose_guarantees(&roots).map_err(PerComputationCandidateError::from)?;
