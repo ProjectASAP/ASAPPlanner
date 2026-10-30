@@ -14,7 +14,7 @@ const NOT_MATERIALIZED: Materialization = Materialization::NotMaterialized;
 const AT_QUERY: Materialization = Materialization::MatAtQuery(Medium::Memory);
 
 /// A one-row `VALUES` node: stateless at any timing.
-fn values_node(value: f64) -> Rc<OperatorNode> {
+pub(crate) fn values_node(value: f64) -> Rc<OperatorNode> {
     use asap_types::ir::scalar::expr_ir::ScalarValue;
     use asap_types::ir::schema::{DataType, Field, Schema};
     use asap_types::ir::ScalarExpr;
@@ -27,7 +27,7 @@ fn values_node(value: f64) -> Rc<OperatorNode> {
 
 /// One hand-built candidate: operator node `node`, query time, not
 /// materialized, `producers` per input, no output, no keep flags.
-fn copy_of(node: usize, producers: &[&[usize]]) -> PhysicalCandidate {
+pub(crate) fn copy_of(node: usize, producers: &[&[usize]]) -> PhysicalCandidate {
     PhysicalCandidate {
         operator_node: OperatorNodeOfCandidateForMemoGroupId(node),
         timing: QUERY_TIME,

@@ -251,7 +251,9 @@ pub(crate) fn fold_copies_into_classes(physical: &PhysicalASAPMemoCandidates) ->
 /// Per candidate, its reader constraints other than `ActivationRequires`,
 /// each as an id equal for equal constraints, ascending and without
 /// repeats.
-fn reader_constraint_ids_per_candidate(physical: &PhysicalASAPMemoCandidates) -> Vec<Vec<u32>> {
+pub(crate) fn reader_constraint_ids_per_candidate(
+    physical: &PhysicalASAPMemoCandidates,
+) -> Vec<Vec<u32>> {
     let mut ids: HashMap<ReaderConstraintOfOneCandidate<'_>, u32> = HashMap::new();
     let mut per_candidate = vec![Vec::new(); physical.candidates.len()];
     for constraint in &physical.reader_constraints {
@@ -391,4 +393,4 @@ fn refine(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
