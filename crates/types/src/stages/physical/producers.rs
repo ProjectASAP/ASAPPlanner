@@ -138,6 +138,7 @@ mod tests {
                         index: 0,
                     }],
                     is_implementation_root: true,
+                    accuracy_budget_parts: 1,
                     physical_node: Rc::clone(&node),
                 })
                 .collect(),

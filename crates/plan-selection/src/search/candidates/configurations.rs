@@ -91,6 +91,7 @@ pub(in crate::search) fn inventory_for_tests(
                         index: id,
                     }],
                     is_implementation_root: true,
+                    accuracy_budget_parts: 1,
                     physical_node: node,
                 },
                 inputs.into_iter().map(Into::into).collect(),

@@ -2,9 +2,9 @@
 //! Stage 2's physical candidates (one per operator node, timing and
 //! materialization; Stage 2 makes no copies), it computes:
 //!
-//! 1. **Candidate dominance** ([`prune_dominated_classes`]): a candidate no optimal
+//! 1. **Candidate dominance** ([`prune_dominated_candidates`]): a candidate no optimal
 //!    plan under cost model 1 uses is deleted, with its links.
-//! 2. **Per-candidate data** ([`ClassData`]): whether the candidate outputs
+//! 2. **Per-candidate data** ([`CandidateData`]): whether the candidate outputs
 //!    approximate values and the budget parts it is sized for, and its usage
 //!    per execution, standing cost, held bytes and own latency, every number
 //!    from [`asap_cost::node_usage`].
@@ -35,8 +35,8 @@
 //! Every combination of these options is costed (at most
 //! [`MAX_CONTEXTS`]); a combination `asap-cost` cannot cost is skipped
 //! (no plan can use it). When the numbers agree, the usage is
-//! plan-independent; otherwise [`ClassData::usage_depends_on`] says which
-//! options changed it, and [`ClassData::usage`] holds the first costed
+//! plan-independent; otherwise [`CandidateData::usage_depends_on`] says which
+//! options changed it, and [`CandidateData::usage`] holds the first costed
 //! combination's numbers. An ingestion-time node's maintained window is
 //! read from the first producer candidate of each input
 //! ([`asap_cost::maintained_window_ms`]).
@@ -133,15 +133,15 @@ pub(crate) const MAX_CONTEXTS: usize = 64;
 #[derive(Debug, Clone)]
 pub(crate) struct MilpInputs {
     /// Indexed by [`PhysicalCandidateId`]: each candidate's data, pruned or not.
-    pub(crate) class_data: Vec<ClassData>,
+    pub(crate) candidate_data: Vec<CandidateData>,
     /// The candidates dominance deleted, ascending.
-    pub(crate) pruned_classes: Vec<PrunedClass>,
+    pub(crate) pruned_candidates: Vec<DominatedCandidate>,
     /// Indexed by [`PhysicalCandidateId`]: per input, the producer candidates left
     /// after pruning (empty for a pruned candidate).
-    pub(crate) producer_classes_per_input: Vec<Vec<Vec<PhysicalCandidateId>>>,
+    pub(crate) producer_candidates_per_input: Vec<Vec<Vec<PhysicalCandidateId>>>,
     /// Per output reference (`output_references` of the query roots): the
     /// candidates left that may produce it, `Out(r)`, ascending.
-    pub(crate) output_classes: Vec<Vec<PhysicalCandidateId>>,
+    pub(crate) output_candidates: Vec<Vec<PhysicalCandidateId>>,
     /// Indexed by [`PhysicalCandidateId`]: the queries that can reach the
     /// candidate after pruning, ascending.
     pub(crate) queries_reaching: Vec<Vec<usize>>,
@@ -156,28 +156,72 @@ pub(crate) struct MilpInputs {
 
 /// One candidate's data for the MILP.
 #[derive(Debug, Clone)]
-pub(crate) struct ClassData {
+pub(crate) struct CandidateData {
     /// Whether it outputs approximate values: a sketch `SummaryAgg` or
     /// `PaneChain`, each an approximate input of the queries reading it.
     pub(crate) approximate: bool,
-    /// `parts(k)`: the `accuracy_budget_parts` of the memo candidate its
-    /// operator node implements; for a node factored over several
-    /// candidates, the smallest. A factored node is an identical terminal
-    /// reader shared by those candidates, and its producers decide which one
-    /// it implements; the smallest share is the one every choice meets.
+    /// `parts(k)`: its operator node's `accuracy_budget_parts` (Stage 2's
+    /// `OperatorNodeOfCandidateForMemoGroup`: for a factored node, the
+    /// largest among its candidates).
     pub(crate) accuracy_budget_parts: usize,
     /// Its usage under the first context, or why `asap-cost` could not cost
     /// it.
-    pub(crate) usage: Result<ClassUsage, String>,
+    pub(crate) usage: Result<CandidateUsage, String>,
     /// The context options that changed its usage, ascending; empty when it
     /// is plan-independent.
     pub(crate) usage_depends_on: Vec<UsageContext>,
+    /// The inputs whose producer (or that producer's output) changes its
+    /// usage or its own output, ascending.
+    pub(crate) inputs_changing_usage: Vec<usize>,
+    /// Its usage and its own output (an index below `output_count`) per
+    /// choice of a producer and that producer's output for each of
+    /// `inputs_changing_usage` (in that order); `None` when `asap-cost` could
+    /// not cost that choice, so no plan can make it. Empty when
+    /// `inputs_changing_usage` is.
+    pub(crate) usage_per_producers: Vec<(Vec<ProducerChoice>, Option<UsageAndOutput>)>,
+    /// For a query-time scan whose usage depends on the window its reader
+    /// reads ([`UsageContext::ScanWindowOfReader`]): its usage per window it
+    /// can be costed at, with its output there. Empty otherwise.
+    pub(crate) usage_per_window: Vec<(ScanWindow, CandidateUsage, usize)>,
+    /// How many distinct outputs (statistics its readers are costed from)
+    /// it can give, by context.
+    pub(crate) output_count: usize,
+    /// For a query-time scan: per reader, the windows it may read the scan
+    /// at (through time shifts, [`window_read_through`]). Empty for any
+    /// other candidate.
+    pub(crate) windows_per_reader: Vec<(PhysicalCandidateId, Vec<ScanWindow>)>,
+    /// Whether some entry of `usage_per_producers` stands for several usages
+    /// (a producer whose own output depends on its context), of which the
+    /// costliest is kept.
+    pub(crate) producer_usage_ambiguous: bool,
 }
+
+impl Default for CandidateData {
+    fn default() -> Self {
+        Self {
+            approximate: false,
+            accuracy_budget_parts: 1,
+            usage: Err("not costed".to_string()),
+            usage_depends_on: Vec::new(),
+            inputs_changing_usage: Vec::new(),
+            usage_per_producers: Vec::new(),
+            usage_per_window: Vec::new(),
+            output_count: 1,
+            windows_per_reader: Vec::new(),
+            producer_usage_ambiguous: false,
+        }
+    }
+}
+
+/// The most producer choices [`CandidateData::usage_per_producers`] lists; beyond
+/// it the candidate's usage is marked [`UsageContext::TooManyContexts`] and
+/// its first costed usage stands for every choice.
+pub(crate) const MAX_PRODUCER_CHOICES: usize = 256;
 
 /// One candidate's usage, from [`asap_cost::node_usage`] (module
 /// documentation).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct ClassUsage {
+pub(crate) struct CandidateUsage {
     /// `u(k)`: CPU operations of one execution.
     pub(crate) cpu_ops_per_execution: f64,
     /// `u(k)`: bytes one execution scans.
@@ -208,6 +252,18 @@ pub(crate) struct ClassUsage {
     pub(crate) output_bytes: u64,
 }
 
+/// A candidate's usage and its output (an index below
+/// [`CandidateData::output_count`]) in one context.
+pub(crate) type UsageAndOutput = (CandidateUsage, usize);
+
+/// One producer choice for an input: a producer candidate, and for one
+/// with several outputs ([`CandidateData::output_count`]), which output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProducerChoice {
+    pub(crate) class: PhysicalCandidateId,
+    pub(crate) output: Option<usize>,
+}
+
 /// A context option that changed a candidate's usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum UsageContext {
@@ -230,7 +286,7 @@ pub(crate) enum UsageContext {
 
 /// A candidate dominance deleted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PrunedClass {
+pub(crate) struct DominatedCandidate {
     pub(crate) class: PhysicalCandidateId,
     pub(crate) dominated_by: PhysicalCandidateId,
     pub(crate) reason: String,
@@ -403,12 +459,10 @@ fn reader_constraint_ids_per_candidate(physical: &PhysicalASAPMemoCandidates) ->
     per_candidate
 }
 
-/// [`MilpInputs`] for `physical`'s candidates.
-/// `parts_per_memo_candidate[g][i]` is memo group `g`'s candidate `i`'s
-/// `accuracy_budget_parts`; `entries[q]` is query `q`'s workload entry.
+/// [`MilpInputs`] for `physical`'s candidates; `entries[q]` is query `q`'s
+/// workload entry.
 pub(crate) fn prepare_milp_inputs(
     physical: &PhysicalASAPMemoCandidates,
-    parts_per_memo_candidate: &[Vec<usize>],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     cost_inputs: &CostInputs,
@@ -416,29 +470,23 @@ pub(crate) fn prepare_milp_inputs(
     let links = &CandidateLinks::new(physical);
     let class_count = physical.candidates.len();
     let all_alive = vec![true; class_count];
-    let unpruned_links = producer_classes_left(links, &all_alive);
-    let unpruned_outputs = output_classes(physical, &all_alive);
+    let unpruned_links = producer_candidates_left(links, &all_alive);
+    let unpruned_outputs = output_candidates(physical, &all_alive);
     let unpruned_reach = queries_reaching(physical, &unpruned_links, &unpruned_outputs);
-    let class_data = class_data(
-        physical,
-        links,
-        parts_per_memo_candidate,
-        entries,
-        &unpruned_reach,
-        data,
-        cost_inputs,
-    );
-    let pruned_classes = prune_dominated_classes(
+    let candidate_data =
+        candidate_data(physical, links, entries, &unpruned_reach, data, cost_inputs);
+    let pruned_candidates = prune_dominated_candidates(
         &dominance_profiles(physical, links, &unpruned_outputs),
-        &class_data,
+        &candidate_data,
     );
     let mut alive = all_alive;
-    for pruned in &pruned_classes {
+    for pruned in &pruned_candidates {
         alive[pruned.class.0] = false;
     }
-    let producer_classes_per_input = producer_classes_left(links, &alive);
-    let output_classes = output_classes(physical, &alive);
-    let queries_reaching = queries_reaching(physical, &producer_classes_per_input, &output_classes);
+    let producer_candidates_per_input = producer_candidates_left(links, &alive);
+    let output_candidates = output_candidates(physical, &alive);
+    let queries_reaching =
+        queries_reaching(physical, &producer_candidates_per_input, &output_candidates);
     let shareable = |class: PhysicalCandidateId| links.is_shareable(class);
     let output_refs = output_references(&physical.query_roots);
     let query_owners = (0..physical.query_roots.len())
@@ -447,14 +495,14 @@ pub(crate) fn prepare_milp_inputs(
                 .iter()
                 .enumerate()
                 .filter(|(_, (q, _))| *q == query)
-                .map(|(reference, _)| (reference, output_classes[reference].as_slice()))
+                .map(|(reference, _)| (reference, output_candidates[reference].as_slice()))
                 .collect();
             let mut region = region_below(
                 outputs
                     .iter()
                     .flat_map(|(_, out)| out.iter().copied())
                     .filter(|&class| !shareable(class)),
-                &producer_classes_per_input,
+                &producer_candidates_per_input,
                 shareable,
             );
             region.output_reads = outputs
@@ -477,21 +525,21 @@ pub(crate) fn prepare_milp_inputs(
             (instance_count > 0).then(|| InstanceOwners {
                 class,
                 instance_count,
-                region: region_below([class], &producer_classes_per_input, shareable),
+                region: region_below([class], &producer_candidates_per_input, shareable),
             })
         })
         .collect();
     let accuracy_weights = accuracy_weights(
         physical,
-        &class_data,
-        &producer_classes_per_input,
-        &output_classes,
+        &candidate_data,
+        &producer_candidates_per_input,
+        &output_candidates,
     );
     MilpInputs {
-        class_data,
-        pruned_classes,
-        producer_classes_per_input,
-        output_classes,
+        candidate_data,
+        pruned_candidates,
+        producer_candidates_per_input,
+        output_candidates,
         queries_reaching,
         query_owners,
         instance_owners,
@@ -501,7 +549,7 @@ pub(crate) fn prepare_milp_inputs(
 
 /// Per candidate, per input, its producer candidates that are `alive` (none for a
 /// candidate that is not).
-fn producer_classes_left(
+fn producer_candidates_left(
     links: &CandidateLinks,
     alive: &[bool],
 ) -> Vec<Vec<Vec<PhysicalCandidateId>>> {
@@ -527,7 +575,7 @@ fn producer_classes_left(
 
 /// `Out(r)` per output reference: the `alive` candidates among its output
 /// candidates, ascending.
-fn output_classes(
+fn output_candidates(
     physical: &PhysicalASAPMemoCandidates,
     alive: &[bool],
 ) -> Vec<Vec<PhysicalCandidateId>> {
@@ -543,21 +591,21 @@ fn output_classes(
 }
 
 /// Per candidate, the queries whose output candidates reach it through the links
-/// `producer_classes_per_input`, ascending.
+/// `producer_candidates_per_input`, ascending.
 fn queries_reaching(
     physical: &PhysicalASAPMemoCandidates,
-    producer_classes_per_input: &[Vec<Vec<PhysicalCandidateId>>],
-    output_classes: &[Vec<PhysicalCandidateId>],
+    producer_candidates_per_input: &[Vec<Vec<PhysicalCandidateId>>],
+    output_candidates: &[Vec<PhysicalCandidateId>],
 ) -> Vec<Vec<usize>> {
-    let mut reaching = vec![Vec::new(); producer_classes_per_input.len()];
+    let mut reaching = vec![Vec::new(); producer_candidates_per_input.len()];
     let output_refs = output_references(&physical.query_roots);
     for query in 0..physical.query_roots.len() {
-        let mut seen = vec![false; producer_classes_per_input.len()];
+        let mut seen = vec![false; producer_candidates_per_input.len()];
         let mut stack: Vec<PhysicalCandidateId> = output_refs
             .iter()
             .enumerate()
             .filter(|(_, (q, _))| *q == query)
-            .flat_map(|(reference, _)| output_classes[reference].iter().copied())
+            .flat_map(|(reference, _)| output_candidates[reference].iter().copied())
             .collect();
         while let Some(class) = stack.pop() {
             if std::mem::replace(&mut seen[class.0], true) {
@@ -565,7 +613,7 @@ fn queries_reaching(
             }
             reaching[class.0].push(query);
             stack.extend(
-                producer_classes_per_input[class.0]
+                producer_candidates_per_input[class.0]
                     .iter()
                     .flatten()
                     .copied(),
@@ -580,7 +628,7 @@ fn queries_reaching(
 /// the links among them and the boundary reads.
 fn region_below(
     tops: impl IntoIterator<Item = PhysicalCandidateId>,
-    producer_classes_per_input: &[Vec<Vec<PhysicalCandidateId>>],
+    producer_candidates_per_input: &[Vec<Vec<PhysicalCandidateId>>],
     shareable: impl Fn(PhysicalCandidateId) -> bool,
 ) -> OwnerRegion {
     let mut region = OwnerRegion::default();
@@ -593,7 +641,7 @@ fn region_below(
         if !shareable(reader) {
             region.classes.push(reader);
         }
-        for (input, producers) in producer_classes_per_input[reader.0].iter().enumerate() {
+        for (input, producers) in producer_candidates_per_input[reader.0].iter().enumerate() {
             for &producer in producers {
                 if shareable(producer) {
                     region.boundary_reads.push((reader, input, producer));
@@ -614,7 +662,7 @@ fn region_below(
 // Per-candidate data
 // ---------------------------------------------------------------------------
 
-/// Whether `node` outputs approximate values ([`ClassData::approximate`]).
+/// Whether `node` outputs approximate values ([`CandidateData::approximate`]).
 fn outputs_approximate_values(node: &OperatorNode) -> bool {
     matches!(
         node.asap(),
@@ -723,9 +771,30 @@ fn scan_window_options(
     nodes: &[PhysicalASAPDAGNode],
     readers: &[Vec<(PhysicalCandidateId, usize)>],
 ) -> Vec<ScanWindow> {
+    let mut windows = Vec::new();
+    for (_, read) in scan_windows_per_reader(scan, nodes, readers) {
+        for window in read {
+            if !windows.contains(&window) {
+                windows.push(window);
+            }
+        }
+    }
+    if windows.is_empty() {
+        windows.push(ScanWindow::Unbounded);
+    }
+    windows
+}
+
+/// Per class reading the query-time scan `scan`, the windows it may read it
+/// at (through time shifts above it), distinct.
+fn scan_windows_per_reader(
+    scan: PhysicalCandidateId,
+    nodes: &[PhysicalASAPDAGNode],
+    readers: &[Vec<(PhysicalCandidateId, usize)>],
+) -> Vec<(PhysicalCandidateId, Vec<ScanWindow>)> {
     /// Time shifts nested deeper than this are not followed.
     const MAX_SHIFTS: usize = 4;
-    let mut windows = Vec::new();
+    let mut per_reader: Vec<(PhysicalCandidateId, Vec<ScanWindow>)> = Vec::new();
     let mut paths: Vec<Vec<PhysicalCandidateId>> = vec![vec![scan]];
     while let Some(path) = paths.pop() {
         let last = *path.last().expect("never empty");
@@ -737,10 +806,15 @@ fn scan_window_options(
                 && !readers[last.0].is_empty());
         if !follow {
             // The path ends at a reader: what the scan reads under it.
-            let readers: Vec<_> = path[1..].iter().map(|class| &nodes[class.0]).collect();
-            let window = window_read_through(&readers);
-            if !windows.contains(&window) {
-                windows.push(window);
+            let through: Vec<_> = path[1..].iter().map(|class| &nodes[class.0]).collect();
+            let window = window_read_through(&through);
+            let Some(&reader) = path.get(1) else {
+                continue;
+            };
+            match per_reader.iter_mut().find(|(known, _)| *known == reader) {
+                Some((_, windows)) if windows.contains(&window) => {}
+                Some((_, windows)) => windows.push(window),
+                None => per_reader.push((reader, vec![window])),
             }
             continue;
         }
@@ -752,10 +826,8 @@ fn scan_window_options(
             }
         }
     }
-    if windows.is_empty() {
-        windows.push(ScanWindow::Unbounded);
-    }
-    windows
+    per_reader.sort_by_key(|(reader, _)| *reader);
+    per_reader
 }
 
 /// The panes kept pane chain `chain` may keep, one per query that can reach
@@ -843,10 +915,10 @@ fn producer_output<'a>(node: &'a PhysicalASAPDAGNode, usage: &NodeUsage<'a>) -> 
 
 /// Per candidate, every `(reader candidate, input)` that may read it, ascending.
 fn readers_of(
-    producer_classes_per_input: &[Vec<Vec<PhysicalCandidateId>>],
+    producer_candidates_per_input: &[Vec<Vec<PhysicalCandidateId>>],
 ) -> Vec<Vec<(PhysicalCandidateId, usize)>> {
-    let mut readers = vec![Vec::new(); producer_classes_per_input.len()];
-    for (reader, inputs) in producer_classes_per_input.iter().enumerate() {
+    let mut readers = vec![Vec::new(); producer_candidates_per_input.len()];
+    for (reader, inputs) in producer_candidates_per_input.iter().enumerate() {
         for (input, producers) in inputs.iter().enumerate() {
             for producer in producers {
                 readers[producer.0].push((PhysicalCandidateId(reader), input));
@@ -856,18 +928,17 @@ fn readers_of(
     readers
 }
 
-/// Each candidate's [`ClassData`] (module documentation, "Usage per execution
+/// Each candidate's [`CandidateData`] (module documentation, "Usage per execution
 /// and its context"). `reaching[k]` are the queries that can reach candidate
 /// `k` before pruning.
-fn class_data(
+fn candidate_data(
     physical: &PhysicalASAPMemoCandidates,
     links: &CandidateLinks,
-    parts_per_memo_candidate: &[Vec<usize>],
     entries: &[QueryWorkloadEntry],
     reaching: &[Vec<usize>],
     data: &DataWorkload,
     cost_inputs: &CostInputs,
-) -> Vec<ClassData> {
+) -> Vec<CandidateData> {
     let count = physical.candidates.len();
     let formula_scale = cost_inputs.frozen_calibration_factor.unwrap_or(1.0);
     let nodes: Vec<PhysicalASAPDAGNode> = (0..count)
@@ -901,27 +972,18 @@ fn class_data(
     // Per candidate, the distinct outputs it may give its readers; `None` until
     // it is costed.
     let mut outputs: Vec<Option<Result<Vec<ProducerOutput<'_>>, String>>> = vec![None; count];
-    let mut result: Vec<ClassData> = (0..count)
+    let mut result: Vec<CandidateData> = (0..count)
         .map(|class| {
             let node = physical.physical_node(PhysicalCandidateId(class));
             let operator_node = physical.candidates[class].operator_node;
             let accuracy_budget_parts = physical.operator_nodes_of_candidates_for_memo_groups
                 [operator_node.0]
-                .candidates_for_memo_group
-                .iter()
-                .filter_map(|id| {
-                    parts_per_memo_candidate
-                        .get(id.group.0 as usize)?
-                        .get(id.index)
-                        .copied()
-                })
-                .min()
-                .unwrap_or(1);
-            ClassData {
+                .accuracy_budget_parts;
+            CandidateData {
                 approximate: outputs_approximate_values(node),
                 accuracy_budget_parts,
                 usage: Err("not costed".to_string()),
-                usage_depends_on: Vec::new(),
+                ..CandidateData::default()
             }
         })
         .collect();
@@ -1008,6 +1070,8 @@ fn class_data(
         }
         let windows = match (&node.payload, node.output_state.timing) {
             (Operator::NonASAP(NonASAPOp::Scan { .. }), ExecutionTiming::QueryTime) => {
+                result[class.0].windows_per_reader =
+                    scan_windows_per_reader(class, &nodes, &readers);
                 scan_window_options(class, &nodes, &readers)
             }
             _ => vec![ScanWindow::Unbounded],
@@ -1024,7 +1088,9 @@ fn class_data(
             .chain([windows.len(), retained.len()])
             .try_fold(1usize, |total, options| total.checked_mul(options))
             .unwrap_or(usize::MAX);
-        let mut costed: Vec<(ClassUsage, ProducerOutput<'_>)> = Vec::new();
+        // Each costed combination: its usage, its output, and its picks
+        // (the option per input, the window and the retained panes).
+        let mut costed: Vec<(CandidateUsage, ProducerOutput<'_>, Picks)> = Vec::new();
         let mut error = None;
         for index in 0..combinations.min(MAX_CONTEXTS) {
             let mut rest = index;
@@ -1033,14 +1099,21 @@ fn class_data(
                 rest /= options;
                 picked
             };
-            let retained_panes = retained[pick(retained.len())];
-            let window = windows[pick(windows.len())];
-            let mut producers: Vec<ProducerOutput<'_>> = producer_options
+            let retained_pick = pick(retained.len());
+            let retained_panes = retained[retained_pick];
+            let window_pick = pick(windows.len());
+            let window = windows[window_pick];
+            let mut option_picks: Vec<usize> = producer_options
                 .iter()
                 .rev()
-                .map(|options| options[pick(options.len())].clone())
+                .map(|options| pick(options.len()))
                 .collect();
-            producers.reverse();
+            option_picks.reverse();
+            let producers: Vec<ProducerOutput<'_>> = producer_options
+                .iter()
+                .zip(&option_picks)
+                .map(|(options, &picked)| options[picked].clone())
+                .collect();
             let usage_at = |per_second: f64| {
                 asap_cost::node_usage(
                     node,
@@ -1056,8 +1129,16 @@ fn class_data(
             };
             match (usage_at(1.0), usage_at(0.0)) {
                 (Ok(executed), Ok(standing)) => {
-                    let usage = class_usage(&executed, &standing, node.output_state.timing);
-                    costed.push((usage, producer_output(node, &executed)));
+                    let usage = candidate_usage(&executed, &standing, node.output_state.timing);
+                    costed.push((
+                        usage,
+                        producer_output(node, &executed),
+                        Picks {
+                            options: option_picks,
+                            window: window_pick,
+                            retained: retained_pick,
+                        },
+                    ));
                 }
                 (Err(e), _) | (_, Err(e)) => {
                     error.get_or_insert(e.to_string());
@@ -1074,7 +1155,152 @@ fn class_data(
         }
         let first = costed[0].0;
         let mut depends_on = Vec::new();
-        if costed.iter().any(|(usage, _)| *usage != first) {
+        // Its distinct outputs, and the one each costed combination gives.
+        let mut produced: Vec<ProducerOutput<'_>> = Vec::new();
+        let mut output_of_combination = Vec::with_capacity(costed.len());
+        for (_, output, _) in &costed {
+            let at = match produced
+                .iter()
+                .position(|known| same_producer_output(known, output))
+            {
+                Some(at) => at,
+                None => {
+                    produced.push(output.clone());
+                    produced.len() - 1
+                }
+            };
+            output_of_combination.push(at);
+        }
+        // What a combination gives its plan: its usage and its output.
+        let given: Vec<(CandidateUsage, usize)> = costed
+            .iter()
+            .zip(&output_of_combination)
+            .map(|((usage, _, _), &output)| (*usage, output))
+            .collect();
+        // The inputs whose option changes the usage or the output, and
+        // whether the window does: two costed combinations differing only
+        // there give different usages or outputs.
+        let changes = |differs: &dyn Fn(&Picks, &Picks) -> bool| {
+            costed.iter().zip(&given).any(|((_, _, picks), gives)| {
+                costed
+                    .iter()
+                    .zip(&given)
+                    .any(|((_, _, others), other)| differs(picks, others) && gives != other)
+            })
+        };
+        let inputs_changing_usage: Vec<usize> = (0..producer_options.len())
+            .filter(|&input| {
+                changes(&|a: &Picks, b: &Picks| {
+                    a.window == b.window
+                        && a.retained == b.retained
+                        && a.options[input] != b.options[input]
+                        && (0..a.options.len())
+                            .all(|other| other == input || a.options[other] == b.options[other])
+                })
+            })
+            .collect();
+        let window_changes_usage = changes(&|a: &Picks, b: &Picks| {
+            a.window != b.window && a.retained == b.retained && a.options == b.options
+        });
+        if !inputs_changing_usage.is_empty() {
+            // Per changing input, each producer and the options it gives:
+            // one choice per output of a producer with several.
+            let options_of_producers: Vec<Vec<(ProducerChoice, Vec<usize>)>> =
+                inputs_changing_usage
+                    .iter()
+                    .map(|&input| {
+                        let mut choices = Vec::new();
+                        for &producer in &inputs[input] {
+                            let Some(Ok(produced)) = &outputs[producer.0] else {
+                                continue;
+                            };
+                            let option_of = |output: &ProducerOutput<'_>| {
+                                producer_options[input]
+                                    .iter()
+                                    .position(|known| same_producer_output(known, output))
+                            };
+                            if produced.len() == 1 {
+                                choices.push((
+                                    ProducerChoice {
+                                        class: producer,
+                                        output: None,
+                                    },
+                                    produced.iter().filter_map(option_of).collect(),
+                                ));
+                                continue;
+                            }
+                            for (at, output) in produced.iter().enumerate() {
+                                choices.push((
+                                    ProducerChoice {
+                                        class: producer,
+                                        output: Some(at),
+                                    },
+                                    option_of(output).into_iter().collect(),
+                                ));
+                            }
+                        }
+                        choices
+                    })
+                    .collect();
+            let choices = options_of_producers
+                .iter()
+                .try_fold(1usize, |total, producers| {
+                    total.checked_mul(producers.len())
+                })
+                .unwrap_or(usize::MAX);
+            if choices > MAX_PRODUCER_CHOICES {
+                depends_on.push(UsageContext::TooManyContexts);
+            } else {
+                for index in 0..choices {
+                    let mut rest = index;
+                    let chosen: Vec<&(ProducerChoice, Vec<usize>)> = options_of_producers
+                        .iter()
+                        .map(|producers| {
+                            let picked = &producers[rest % producers.len()];
+                            rest /= producers.len();
+                            picked
+                        })
+                        .collect();
+                    let matching: Vec<&(CandidateUsage, usize)> = costed
+                        .iter()
+                        .zip(&given)
+                        .filter(|((_, _, picks), _)| {
+                            inputs_changing_usage.iter().zip(&chosen).all(
+                                |(&input, (_, options))| options.contains(&picks.options[input]),
+                            )
+                        })
+                        .map(|(_, gives)| gives)
+                        .collect();
+                    let costliest = matching.iter().copied().max_by(|a, b| {
+                        let total = |usage: &CandidateUsage| {
+                            usage.cost_per_execution.unwrap_or(0.0)
+                                + usage.standing_cost_per_second.unwrap_or(0.0)
+                                + usage.work_ms_per_execution
+                        };
+                        total(&a.0).total_cmp(&total(&b.0))
+                    });
+                    if matching.iter().any(|gives| Some(*gives) != costliest) {
+                        result[class.0].producer_usage_ambiguous = true;
+                    }
+                    result[class.0].usage_per_producers.push((
+                        chosen.iter().map(|(choice, _)| *choice).collect(),
+                        costliest.copied(),
+                    ));
+                }
+                result[class.0].inputs_changing_usage = inputs_changing_usage;
+            }
+        }
+        if window_changes_usage {
+            for (pick, window) in windows.iter().enumerate() {
+                if let Some(at) = costed.iter().position(|(_, _, picks)| picks.window == pick) {
+                    let (usage, output) = given[at];
+                    result[class.0]
+                        .usage_per_window
+                        .push((*window, usage, output));
+                }
+            }
+        }
+        if given.iter().any(|gives| gives.0 != first) {
             if producer_options.iter().any(|options| options.len() > 1) {
                 depends_on.push(UsageContext::ProducerOutput);
             }
@@ -1094,15 +1320,7 @@ fn class_data(
         if combinations > MAX_CONTEXTS {
             depends_on.push(UsageContext::TooManyContexts);
         }
-        let mut produced: Vec<ProducerOutput<'_>> = Vec::new();
-        for (_, output) in costed {
-            if !produced
-                .iter()
-                .any(|known| same_producer_output(known, &output))
-            {
-                produced.push(output);
-            }
-        }
+        result[class.0].output_count = produced.len();
         outputs[class.0] = Some(Ok(produced));
         result[class.0].usage = Ok(first);
         result[class.0].usage_depends_on = depends_on;
@@ -1115,15 +1333,24 @@ fn class_data(
     result
 }
 
+/// One costed combination of a class's context options, by index: the
+/// option per input, the window and the retained panes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Picks {
+    options: Vec<usize>,
+    window: usize,
+    retained: usize,
+}
+
 /// The numbers of one execution (`executed`, at one execution per second)
 /// and of none (`standing`) of a node at `timing`.
-fn class_usage(
+fn candidate_usage(
     executed: &NodeUsage<'_>,
     standing: &NodeUsage<'_>,
     timing: ExecutionTiming,
-) -> ClassUsage {
+) -> CandidateUsage {
     let standing_cost = standing.cost.cost_per_second;
-    ClassUsage {
+    CandidateUsage {
         cpu_ops_per_execution: executed.cpu_ops_per_second,
         scanned_bytes_per_execution: executed.scanned_bytes_per_second,
         work_ms_per_execution: executed.work_ms_per_execution,
@@ -1167,7 +1394,7 @@ pub(crate) struct DominanceKey<'a> {
     pub(crate) timing: ExecutionTiming,
     pub(crate) materialization: Materialization,
     pub(crate) shareable: bool,
-    pub(crate) producer_classes_per_input: &'a [Vec<PhysicalCandidateId>],
+    pub(crate) producer_candidates_per_input: &'a [Vec<PhysicalCandidateId>],
     pub(crate) readers: Vec<(PhysicalCandidateId, usize)>,
     pub(crate) output_references: Vec<usize>,
     pub(crate) reader_constraint_ids: Vec<u32>,
@@ -1184,12 +1411,12 @@ pub(crate) enum OperatorKindForReaders {
     Other(std::mem::Discriminant<Operator>, &'static str),
 }
 
-/// Each candidate's [`DominanceProfile`]. `output_classes` are `Out(r)` before
+/// Each candidate's [`DominanceProfile`]. `output_candidates` are `Out(r)` before
 /// pruning.
 fn dominance_profiles<'a>(
     physical: &'a PhysicalASAPMemoCandidates,
     links: &'a CandidateLinks,
-    output_classes: &[Vec<PhysicalCandidateId>],
+    output_candidates: &[Vec<PhysicalCandidateId>],
 ) -> Vec<DominanceProfile<'a>> {
     let constraint_ids = reader_constraint_ids_per_candidate(physical);
     let mut readers = readers_of(&links.producers_per_input);
@@ -1197,7 +1424,7 @@ fn dominance_profiles<'a>(
         list.sort_unstable();
     }
     let mut output_refs_of = vec![Vec::new(); physical.candidates.len()];
-    for (reference, out) in output_classes.iter().enumerate() {
+    for (reference, out) in output_candidates.iter().enumerate() {
         for class in out {
             output_refs_of[class.0].push(reference);
         }
@@ -1216,7 +1443,7 @@ fn dominance_profiles<'a>(
                     timing: candidate.timing,
                     materialization: candidate.materialization,
                     shareable: links.is_shareable(copy),
-                    producer_classes_per_input: producers_per_input,
+                    producer_candidates_per_input: producers_per_input,
                     readers: std::mem::take(&mut readers[class]),
                     output_references: std::mem::take(&mut output_refs_of[class]),
                     reader_constraint_ids: constraint_ids[copy.0].clone(),
@@ -1278,7 +1505,7 @@ pub(crate) fn guarantee_at_least_as_strong(
 
 /// Every number of `usage` that a candidate it dominates must not beat, in a
 /// fixed order.
-fn compared_numbers(usage: &ClassUsage) -> [f64; 12] {
+fn compared_numbers(usage: &CandidateUsage) -> [f64; 12] {
     [
         usage.cpu_ops_per_execution,
         usage.scanned_bytes_per_execution,
@@ -1297,8 +1524,8 @@ fn compared_numbers(usage: &ClassUsage) -> [f64; 12] {
 
 /// Whether candidate `by` dominates candidate `candidate` (module documentation).
 pub(crate) fn dominates(
-    by: (&DominanceProfile<'_>, &ClassData),
-    class: (&DominanceProfile<'_>, &ClassData),
+    by: (&DominanceProfile<'_>, &CandidateData),
+    class: (&DominanceProfile<'_>, &CandidateData),
 ) -> bool {
     let ((by_profile, by_data), (profile, data)) = (by, class);
     let (Ok(by_usage), Ok(usage)) = (&by_data.usage, &data.usage) else {
@@ -1319,10 +1546,10 @@ pub(crate) fn dominates(
 /// The candidates another candidate dominates (module documentation), each with
 /// the smallest dominating candidate that is kept. Among candidates that dominate
 /// each other, the smallest id is kept.
-pub(crate) fn prune_dominated_classes(
+pub(crate) fn prune_dominated_candidates(
     profiles: &[DominanceProfile<'_>],
-    class_data: &[ClassData],
-) -> Vec<PrunedClass> {
+    candidate_data: &[CandidateData],
+) -> Vec<DominatedCandidate> {
     // Only candidates with equal keys can dominate each other.
     let mut buckets: Vec<Vec<usize>> = Vec::new();
     let mut bucket_of_key: HashMap<(MemoGroupId, ExecutionTiming, Materialization), Vec<usize>> =
@@ -1352,17 +1579,17 @@ pub(crate) fn prune_dominated_classes(
             let dominated_by = bucket.iter().copied().find(|&other| {
                 other != class
                     && dominates(
-                        (&profiles[other], &class_data[other]),
-                        (&profiles[class], &class_data[class]),
+                        (&profiles[other], &candidate_data[other]),
+                        (&profiles[class], &candidate_data[class]),
                     )
                     && (other < class
                         || !dominates(
-                            (&profiles[class], &class_data[class]),
-                            (&profiles[other], &class_data[other]),
+                            (&profiles[class], &candidate_data[class]),
+                            (&profiles[other], &candidate_data[other]),
                         ))
             });
             if let Some(other) = dominated_by {
-                pruned.push(PrunedClass {
+                pruned.push(DominatedCandidate {
                     class: PhysicalCandidateId(class),
                     dominated_by: PhysicalCandidateId(other),
                     reason: format!(
@@ -1627,10 +1854,10 @@ fn scalar_root_positions<C>(
 /// (not a row count). A fixpoint, so cycles of candidate links are covered.
 fn may_carry_approximate_values(
     physical: &PhysicalASAPMemoCandidates,
-    class_data: &[ClassData],
-    producer_classes_per_input: &[Vec<Vec<PhysicalCandidateId>>],
+    candidate_data: &[CandidateData],
+    producer_candidates_per_input: &[Vec<Vec<PhysicalCandidateId>>],
 ) -> Vec<bool> {
-    let mut carries: Vec<bool> = class_data.iter().map(|data| data.approximate).collect();
+    let mut carries: Vec<bool> = candidate_data.iter().map(|data| data.approximate).collect();
     loop {
         let mut changed = false;
         for class in 0..carries.len() {
@@ -1638,15 +1865,12 @@ fn may_carry_approximate_values(
                 continue;
             }
             let node = physical.physical_node(PhysicalCandidateId(class));
-            let reads =
-                producer_classes_per_input[class]
-                    .iter()
-                    .enumerate()
-                    .any(|(input, producers)| {
-                        input_position(node, input, Position::Ordinary, true)
-                            != Position::Irrelevant
-                            && producers.iter().any(|producer| carries[producer.0])
-                    });
+            let reads = producer_candidates_per_input[class].iter().enumerate().any(
+                |(input, producers)| {
+                    input_position(node, input, Position::Ordinary, true) != Position::Irrelevant
+                        && producers.iter().any(|producer| carries[producer.0])
+                },
+            );
             if reads {
                 carries[class] = true;
                 changed = true;
@@ -1662,11 +1886,12 @@ fn may_carry_approximate_values(
 /// through the links left (module documentation, "Accuracy weights").
 fn accuracy_weights(
     physical: &PhysicalASAPMemoCandidates,
-    class_data: &[ClassData],
-    producer_classes_per_input: &[Vec<Vec<PhysicalCandidateId>>],
-    output_classes: &[Vec<PhysicalCandidateId>],
+    candidate_data: &[CandidateData],
+    producer_candidates_per_input: &[Vec<Vec<PhysicalCandidateId>>],
+    output_candidates: &[Vec<PhysicalCandidateId>],
 ) -> Vec<BTreeMap<PhysicalCandidateId, AccuracyWeight>> {
-    let carries = may_carry_approximate_values(physical, class_data, producer_classes_per_input);
+    let carries =
+        may_carry_approximate_values(physical, candidate_data, producer_candidates_per_input);
     let output_refs = output_references(&physical.query_roots);
     let mut root_positions = Vec::new();
     for root in &physical.query_roots {
@@ -1675,7 +1900,7 @@ fn accuracy_weights(
             QueryRoot::Scalar(expr) => {
                 let first = root_positions.len();
                 let may_be_approximate = |reference: usize| {
-                    output_classes
+                    output_candidates
                         .get(first + reference)
                         .is_some_and(|out| out.iter().any(|class| carries[class.0]))
                 };
@@ -1691,7 +1916,7 @@ fn accuracy_weights(
             .get(reference)
             .copied()
             .unwrap_or(Position::Unusable(UnusableReason::UnclearOperator));
-        let mut stack: Vec<(PhysicalCandidateId, Position)> = output_classes[reference]
+        let mut stack: Vec<(PhysicalCandidateId, Position)> = output_candidates[reference]
             .iter()
             .map(|&class| (class, start))
             .collect();
@@ -1709,15 +1934,15 @@ fn accuracy_weights(
             if !seen[query].insert(visited) {
                 continue;
             }
-            if let (true, Some(weight)) = (class_data[class.0].approximate, position.weight()) {
+            if let (true, Some(weight)) = (candidate_data[class.0].approximate, position.weight()) {
                 let entry = weights[query].entry(class).or_insert(weight);
                 *entry = (*entry).max(weight);
             }
             let node = physical.physical_node(class);
-            let denominator_may_be_approximate = producer_classes_per_input[class.0]
+            let denominator_may_be_approximate = producer_candidates_per_input[class.0]
                 .get(1)
                 .is_some_and(|producers| producers.iter().any(|producer| carries[producer.0]));
-            for (input, producers) in producer_classes_per_input[class.0].iter().enumerate() {
+            for (input, producers) in producer_candidates_per_input[class.0].iter().enumerate() {
                 let below = input_position(node, input, position, denominator_may_be_approximate);
                 stack.extend(producers.iter().map(|&producer| (producer, below)));
             }

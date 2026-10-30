@@ -192,6 +192,7 @@ pub fn build_with_compatible_producers_cache(
                         index,
                     }],
                     is_implementation_root: true,
+                    accuracy_budget_parts: candidate.accuracy_budget_parts,
                     physical_node: implemented,
                 },
             );
@@ -229,6 +230,7 @@ pub fn build_with_compatible_producers_cache(
                     group: MemoGroupId(group as u32),
                     index,
                 },
+                owner_accuracy_budget_parts: candidate.accuracy_budget_parts,
                 deadline,
             };
             let root_id = builder.inventory.implementation_roots_of_group[group][index];
@@ -275,6 +277,8 @@ struct ImmediateCandidateBuilder<'a> {
     used_boundaries: HashSet<MemoGroupId>,
     /// The memo candidate being lowered; owner of every node it adds.
     owner: CandidateForMemoGroupId,
+    /// The owner's `accuracy_budget_parts`, which its private nodes carry.
+    owner_accuracy_budget_parts: usize,
     deadline: Option<std::time::Instant>,
 }
 
@@ -343,6 +347,7 @@ impl ImmediateCandidateBuilder<'_> {
                 .push(OperatorNodeOfCandidateForMemoGroup {
                     candidates_for_memo_group: vec![self.owner],
                     is_implementation_root: false,
+                    accuracy_budget_parts: self.owner_accuracy_budget_parts,
                     physical_node: Rc::clone(node),
                 });
             id
