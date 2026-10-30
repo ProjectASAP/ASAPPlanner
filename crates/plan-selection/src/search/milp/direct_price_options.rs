@@ -1,10 +1,10 @@
-//! Joint selection of supplier-dependent local pricing interfaces.
+//! Joint selection of producer-dependent local pricing interfaces.
 //! Pricing options describe one physical candidate, not independent executions.
 use super::direct_cost::{NodeCostProfile, QueryScheduleRates};
 use asap_types::stages::PhysicalCandidateId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SupplierPriceBinding {
+pub(crate) struct ProducerPriceBinding {
     pub producer: PhysicalCandidateId,
     pub price_option: usize,
 }
@@ -12,7 +12,7 @@ pub(crate) struct SupplierPriceBinding {
 #[derive(Debug, Clone)]
 pub(crate) struct CandidatePriceOption {
     pub profile: NodeCostProfile,
-    pub compatible_input_tuples: Vec<Vec<SupplierPriceBinding>>,
+    pub compatible_input_tuples: Vec<Vec<ProducerPriceBinding>>,
     pub required_range_span_ms: Option<u64>,
 }
 
@@ -253,7 +253,7 @@ pub(crate) fn solve_joint_price_proposal_with_metrics(
             projection.origins.push(PhysicalCandidateId(id));
             nodes.push(option.profile.clone());
             expanded.candidates.push(PhysicalCandidateWithCost {
-                supplier_candidates_per_input: Vec::new(),
+                producer_candidates_per_input: Vec::new(),
                 ..graph.candidates[id].clone()
             });
         }
@@ -265,7 +265,7 @@ pub(crate) fn solve_joint_price_proposal_with_metrics(
                 "time budget exhausted expanding price options".into(),
             ));
         }
-        let required = &graph.candidates[id].supplier_candidates_per_input;
+        let required = &graph.candidates[id].producer_candidates_per_input;
         for (index, option) in options.iter().enumerate() {
             let consumer = projection.options[id][index];
             if let Some(span) = option.required_range_span_ms {
@@ -306,15 +306,15 @@ pub(crate) fn solve_joint_price_proposal_with_metrics(
                     }
                 }
                 expanded.candidates[consumer.0]
-                    .supplier_candidates_per_input
-                    .push(InputSupplierCandidates {
+                    .producer_candidates_per_input
+                    .push(InputProducerCandidates {
                         candidates: suppliers.into(),
                     });
             }
             // Unary choices and single tuples are already exact under the
             // existing one-producer-per-input constraints; no extra binaries.
             let cartesian_size = expanded.candidates[consumer.0]
-                .supplier_candidates_per_input
+                .producer_candidates_per_input
                 .iter()
                 .try_fold(1usize, |size, input| {
                     size.checked_mul(input.candidates.len())
@@ -468,10 +468,10 @@ mod tests {
     fn candidate(inputs: &[usize]) -> PhysicalCandidateWithCost {
         PhysicalCandidateWithCost {
             local_cost: 0.0,
-            supplier_candidates_per_input: if inputs.is_empty() {
+            producer_candidates_per_input: if inputs.is_empty() {
                 vec![]
             } else {
-                vec![InputSupplierCandidates {
+                vec![InputProducerCandidates {
                     candidates: inputs
                         .iter()
                         .map(|id| PhysicalCandidateId(*id))
@@ -496,7 +496,7 @@ mod tests {
             compatible_input_tuples: producer
                 .into_iter()
                 .map(|(id, price_option)| {
-                    vec![SupplierPriceBinding {
+                    vec![ProducerPriceBinding {
                         producer: PhysicalCandidateId(id),
                         price_option,
                     }]
@@ -584,7 +584,7 @@ mod tests {
 
     // Rejecting an original connection assignment excludes all internal encodings.
     #[test]
-    fn projected_rejection_selects_the_other_supplier() {
+    fn projected_rejection_selects_the_other_producer() {
         let (graph, profile) = fixture();
         let first = solve_joint_price_proposal_with_metrics(
             &graph,
@@ -648,8 +648,8 @@ mod tests {
     fn correlated_inputs_cannot_form_an_unpriced_cartesian_combination() {
         let mut consumer = candidate(&[0, 1]);
         consumer
-            .supplier_candidates_per_input
-            .push(consumer.supplier_candidates_per_input[0].clone());
+            .producer_candidates_per_input
+            .push(consumer.producer_candidates_per_input[0].clone());
         let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![candidate(&[]), candidate(&[]), consumer],
             query_roots: vec![QueryOutputCandidates {
@@ -657,7 +657,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let binding = |id| SupplierPriceBinding {
+        let binding = |id| ProducerPriceBinding {
             producer: PhysicalCandidateId(id),
             price_option: 0,
         };

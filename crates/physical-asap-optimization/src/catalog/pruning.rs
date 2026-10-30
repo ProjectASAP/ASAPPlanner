@@ -4,7 +4,7 @@
 use asap_types::stages::{
     PhysicalASAPMemoCandidates, PhysicalCandidateId, PruningMetrics, ReaderConstraint,
 };
-use asap_types::stages::{SupplierCandidates, SupplierSetInterner};
+use asap_types::stages::{ProducerCandidates, ProducerSetInterner};
 use std::collections::HashMap;
 
 /// `configured` without the candidates [`usable_candidates`] rules out, its
@@ -26,13 +26,13 @@ pub fn prune(configured: PhysicalASAPMemoCandidates) -> Result<PhysicalASAPMemoC
         physical
             .candidates
             .iter()
-            .flat_map(|c| &c.supplier_candidates_per_input)
+            .flat_map(|c| &c.producer_candidates_per_input)
             .map(|input| input.len())
             .sum()
     };
     let connections_before = connections(&configured);
-    let mut supplier_sets = SupplierSetInterner::default();
-    let mut remapped: HashMap<SupplierCandidates, SupplierCandidates> = HashMap::new();
+    let mut producer_sets = ProducerSetInterner::default();
+    let mut remapped: HashMap<ProducerCandidates, ProducerCandidates> = HashMap::new();
     let candidates = configured
         .candidates
         .into_iter()
@@ -41,11 +41,11 @@ pub fn prune(configured: PhysicalASAPMemoCandidates) -> Result<PhysicalASAPMemoC
             if !keep[id] {
                 return None;
             }
-            for input in &mut candidate.supplier_candidates_per_input {
+            for input in &mut candidate.producer_candidates_per_input {
                 *input = remapped
                     .entry(input.clone())
                     .or_insert_with(|| {
-                        supplier_sets.intern(
+                        producer_sets.intern(
                             input
                                 .iter()
                                 .filter_map(|id| mapping[id.0])
@@ -107,7 +107,7 @@ pub fn usable_candidates(physical: &PhysicalASAPMemoCandidates) -> Vec<bool> {
                 if enabled[id]
                     && !realizable[id]
                     && candidate
-                        .supplier_candidates_per_input
+                        .producer_candidates_per_input
                         .iter()
                         .all(|input| input.iter().any(|id| realizable[id.0]))
                 {
@@ -127,7 +127,7 @@ pub fn usable_candidates(physical: &PhysicalASAPMemoCandidates) -> Vec<bool> {
                     reached[id.0][output] = true;
                     pending.extend(
                         physical.candidates[id.0]
-                            .supplier_candidates_per_input
+                            .producer_candidates_per_input
                             .iter()
                             .flat_map(|input| input.iter().copied()),
                     );

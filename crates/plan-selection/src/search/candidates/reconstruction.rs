@@ -47,7 +47,7 @@ pub(in crate::search) fn reconstruct_candidate_outputs(
 mod tests {
     use super::*;
     use crate::search::candidates::dag::{
-        InputSupplierCandidates, PhysicalCandidateWithCost, QueryOutputCandidates,
+        InputProducerCandidates, PhysicalCandidateWithCost, QueryOutputCandidates,
     };
     use crate::search::milp::model::select_candidates;
     use asap_logical_asap_optimization::test_support::lower_promql;
@@ -99,9 +99,9 @@ mod tests {
             if let Some(id) = templates.iter().position(|t| Rc::ptr_eq(t, node)) {
                 return PhysicalCandidateId(id);
             }
-            let supplier_candidates_per_input = ordered_inputs(node)
+            let producer_candidates_per_input = ordered_inputs(node)
                 .iter()
-                .map(|child| InputSupplierCandidates {
+                .map(|child| InputProducerCandidates {
                     candidates: vec![add(child, graph, templates)].into(),
                 })
                 .collect();
@@ -109,7 +109,7 @@ mod tests {
             templates.push(Rc::clone(node));
             graph.candidates.push(PhysicalCandidateWithCost {
                 local_cost: 1.0,
-                supplier_candidates_per_input,
+                producer_candidates_per_input,
             });
             PhysicalCandidateId(id)
         }
@@ -131,7 +131,7 @@ mod tests {
         ));
         let root = templates.len() - 1;
         assert_eq!(
-            graph.candidates[root].supplier_candidates_per_input.len(),
+            graph.candidates[root].producer_candidates_per_input.len(),
             1
         );
         // Same group and same template, deliberately distinct physical candidates.
@@ -152,7 +152,7 @@ mod tests {
 
     // Input positions remain independent even when template references are identical.
     #[test]
-    fn repeated_input_positions_can_select_distinct_suppliers() {
+    fn repeated_input_positions_can_select_distinct_producers() {
         let root = lower_promql(
             "metric + metric",
             asap_types::ir::properties::AccuracyTarget::exact(),
@@ -160,10 +160,10 @@ mod tests {
         let (mut graph, mut templates) = catalog(root);
         let root = templates.len() - 1;
         assert_eq!(
-            graph.candidates[root].supplier_candidates_per_input.len(),
+            graph.candidates[root].producer_candidates_per_input.len(),
             2
         );
-        let first = graph.candidates[root].supplier_candidates_per_input[0].candidates[0];
+        let first = graph.candidates[root].producer_candidates_per_input[0].candidates[0];
         let duplicate = PhysicalCandidateId(templates.len());
         graph.candidates.push(graph.candidates[first.0].clone());
         templates.push(templates[first.0].clone());
@@ -174,8 +174,8 @@ mod tests {
             template.operator.map_children(|_| Rc::clone(&child)),
             template.schema.clone(),
         ));
-        graph.candidates[root].supplier_candidates_per_input[0].candidates = vec![first].into();
-        graph.candidates[root].supplier_candidates_per_input[1].candidates = vec![duplicate].into();
+        graph.candidates[root].producer_candidates_per_input[0].candidates = vec![first].into();
+        graph.candidates[root].producer_candidates_per_input[1].candidates = vec![duplicate].into();
         let selected = select_candidates(&graph).unwrap().unwrap();
         let outputs = reconstruct_candidate_outputs(&graph, &selected, &templates).unwrap();
         let children = outputs[0].children();

@@ -613,8 +613,8 @@ fn add_phase_metrics(
         report.immediate_candidates = phase.immediate_candidates;
         report.physical_configurations = phase.physical_configurations;
         report.compatible_connections = phase.compatible_connections;
-        report.supplier_sets = phase.supplier_sets;
-        report.stored_supplier_ids = phase.stored_supplier_ids;
+        report.producer_sets = phase.producer_sets;
+        report.stored_producer_ids = phase.stored_producer_ids;
         report.output_references = phase.output_references;
         report.structurally_removed_candidates = phase.structurally_removed_candidates;
         report.structurally_removed_connections = phase.structurally_removed_connections;
@@ -1068,11 +1068,11 @@ fn search_domain<Id: Clone>(
         result.status,
         CandidateSearchStatus::TimeLimit | CandidateSearchStatus::RefinementLimit
     );
-    let supplier_storage = asap_types::stages::supplier_storage_metrics(&configured.physical);
+    let producer_storage = asap_types::stages::producer_storage_metrics(&configured.physical);
     let report = crate::CandidateConnectionReport {
         inventory_pane_width_domain: Some(format!("{domain:?}")),
-        supplier_sets: supplier_storage.unique_supplier_sets,
-        stored_supplier_ids: supplier_storage.stored_supplier_ids,
+        producer_sets: producer_storage.unique_producer_sets,
+        stored_producer_ids: producer_storage.stored_producer_ids,
         pane_width_rounds: vec![format!("{domain:?}")],
         pane_widths_pending: domain != asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain::Complete,
         rounded_down_cost_bounds: bound_metrics.rounded_down_candidates,
@@ -1087,7 +1087,7 @@ fn search_domain<Id: Clone>(
         catalog_scope: "Pass 1, local panes, shared summary/pane states, exact and sketch rollups, compatible TopK ranking reuse, and scan widening; finite capacity, pane-width, horizon, materialization and execution-scope configurations".into(),
         status, groups, logical_candidates, immediate_candidates,
         physical_configurations: configured.physical.candidates.len(),
-        compatible_connections: configured.dag.candidates.iter().flat_map(|candidate| &candidate.supplier_candidates_per_input).map(|input| input.candidates.len()).sum(),
+        compatible_connections: configured.dag.candidates.iter().flat_map(|candidate| &candidate.producer_candidates_per_input).map(|input| input.candidates.len()).sum(),
         output_references, refinements: result.refinements,
         max_refinements: search.max_evaluations.unwrap_or(128), time_limit_ms: search.milp_time_limit_ms.unwrap_or(30_000),
         lower_bound: result.lower_bound, relative_gap: result.relative_gap,
@@ -1560,8 +1560,8 @@ mod tests {
             immediate_candidates: 13,
             physical_configurations: 17,
             compatible_connections: 101,
-            supplier_sets: 3,
-            stored_supplier_ids: 19,
+            producer_sets: 3,
+            stored_producer_ids: 19,
             output_references: 2,
             structurally_removed_candidates: 5,
             structurally_removed_connections: 23,
@@ -1595,8 +1595,8 @@ mod tests {
             (
                 interrupted.physical_configurations,
                 interrupted.compatible_connections,
-                interrupted.supplier_sets,
-                interrupted.stored_supplier_ids
+                interrupted.producer_sets,
+                interrupted.stored_producer_ids
             ),
             (17, 101, 3, 19)
         );
@@ -1631,8 +1631,8 @@ mod tests {
             (
                 empty.physical_configurations,
                 empty.compatible_connections,
-                empty.supplier_sets,
-                empty.stored_supplier_ids
+                empty.producer_sets,
+                empty.stored_producer_ids
             ),
             (0, 0, 0, 0)
         );

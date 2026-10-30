@@ -228,7 +228,7 @@ mod tests {
     use asap_types::workload::QueryRecurrence;
 
     /// Select `candidate` and, for each input, its first unmaterialized
-    /// supplier (else its first supplier), recursively.
+    /// producer (else its first producer), recursively.
     fn select_from(
         physical: &PhysicalASAPMemoCandidates,
         candidate: PhysicalCandidateId,
@@ -238,18 +238,18 @@ mod tests {
             return;
         }
         selected.selected_candidates.push(candidate);
-        for (requirement, suppliers) in physical.candidates[candidate.0]
-            .supplier_candidates_per_input
+        for (requirement, producer_candidates) in physical.candidates[candidate.0]
+            .producer_candidates_per_input
             .iter()
             .enumerate()
         {
-            let producer = suppliers
+            let producer = producer_candidates
                 .iter()
                 .copied()
                 .find(|s| {
                     physical.candidates[s.0].materialization == Materialization::NotMaterialized
                 })
-                .unwrap_or(suppliers[0]);
+                .unwrap_or(producer_candidates[0]);
             selected.connections.push(ProducerConsumerConnection {
                 producer,
                 consumer: candidate,

@@ -56,7 +56,7 @@ pub struct ReconstructedCandidates {
 }
 
 /// The selected candidates of `physical` rebuilt over their selected
-/// suppliers, with guarantees recomposed. Checks the selection's structure,
+/// producers, with guarantees recomposed. Checks the selection's structure,
 /// not its cost.
 pub fn reconstruct_selected_candidates(
     physical: &PhysicalASAPMemoCandidates,
@@ -68,7 +68,7 @@ pub fn reconstruct_selected_candidates(
     let mut inputs = physical
         .candidates
         .iter()
-        .map(|candidate| vec![None; candidate.supplier_candidates_per_input.len()])
+        .map(|candidate| vec![None; candidate.producer_candidates_per_input.len()])
         .collect::<Vec<_>>();
     let mut consumers = vec![Vec::new(); count];
     for connection in &selected.connections {

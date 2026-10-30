@@ -3,7 +3,7 @@
 
 mod graph;
 mod memo_candidates;
-mod suppliers;
+mod producers;
 
 pub use graph::{
     validate_selected_connections, PhysicalCandidateId, ProducerConsumerConnection,
@@ -14,6 +14,6 @@ pub use memo_candidates::{
     OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate,
     PruningMetrics,
 };
-pub use suppliers::{
-    supplier_storage_metrics, SupplierCandidates, SupplierSetInterner, SupplierStorageMetrics,
+pub use producers::{
+    producer_storage_metrics, ProducerCandidates, ProducerSetInterner, ProducerStorageMetrics,
 };

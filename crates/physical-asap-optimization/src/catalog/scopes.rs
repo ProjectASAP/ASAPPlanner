@@ -4,7 +4,7 @@
 //! Activation-prefix constraints remove permutations of unused copies only.
 use super::configurations::ConfigurationError;
 use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, ReaderConstraint};
-use asap_types::stages::{SupplierCandidates, SupplierSetInterner};
+use asap_types::stages::{ProducerCandidates, ProducerSetInterner};
 use std::collections::HashMap;
 
 pub fn expand_execution_scopes_before(
@@ -26,7 +26,7 @@ pub fn expand_execution_scopes_before(
     for input in source
         .candidates
         .iter()
-        .flat_map(|candidate| &candidate.supplier_candidates_per_input)
+        .flat_map(|candidate| &candidate.producer_candidates_per_input)
     {
         super::check_deadline(deadline)?;
         for producer in input {
@@ -49,7 +49,7 @@ pub fn expand_execution_scopes_before(
             output_positions[id.0] += 1;
             pending.extend(
                 source.candidates[id.0]
-                    .supplier_candidates_per_input
+                    .producer_candidates_per_input
                     .iter()
                     .flat_map(|input| input.iter().copied()),
             );
@@ -73,7 +73,7 @@ pub fn expand_execution_scopes_before(
             matches!(constraint,
             ReaderConstraint::IncompatibleOutputs { candidate, .. } if candidate.0 == id)
         });
-        let shared_ingestion_leaf = candidate.supplier_candidates_per_input.is_empty()
+        let shared_ingestion_leaf = candidate.producer_candidates_per_input.is_empty()
             && candidate.timing == asap_types::ir::properties::ExecutionTiming::IngestionTime
             && candidate.materialization == asap_types::physical::Materialization::NotMaterialized
             && !conflicting_readers;
@@ -88,7 +88,7 @@ pub fn expand_execution_scopes_before(
             contexts.max(uses)
         };
         let terminal_unary_reader =
-            !internally_consumed[id] && candidate.supplier_candidates_per_input.len() == 1 && {
+            !internally_consumed[id] && candidate.producer_candidates_per_input.len() == 1 && {
                 let node = source.physical_node(PhysicalCandidateId(id));
                 matches!(
                     node.asap(),
@@ -120,31 +120,31 @@ pub fn expand_execution_scopes_before(
             candidates.push(candidate.clone());
         }
     }
-    let mut supplier_sets = SupplierSetInterner::default();
-    let mut input_cache: HashMap<SupplierCandidates, SupplierCandidates> = HashMap::new();
+    let mut producer_sets = ProducerSetInterner::default();
+    let mut input_cache: HashMap<ProducerCandidates, ProducerCandidates> = HashMap::new();
     for (id, candidate) in source.candidates.iter().enumerate() {
         super::check_deadline(deadline)?;
         let mut requirements = Vec::new();
-        for input in &candidate.supplier_candidates_per_input {
-            let compatible_producers = if let Some(suppliers) = input_cache.get(input) {
-                suppliers.clone()
+        for input in &candidate.producer_candidates_per_input {
+            let compatible_producers = if let Some(producer_candidates) = input_cache.get(input) {
+                producer_candidates.clone()
             } else {
                 let mut compatible = Vec::new();
                 for producer in input {
                     super::check_deadline(deadline)?;
                     compatible.extend(copies[producer.0].iter().copied());
                 }
-                let suppliers = supplier_sets.intern(compatible);
-                input_cache.insert(input.clone(), suppliers.clone());
-                suppliers
+                let producer_candidates = producer_sets.intern(compatible);
+                input_cache.insert(input.clone(), producer_candidates.clone());
+                producer_candidates
             };
             requirements.push(compatible_producers);
         }
         // Consumer copies retain distinct requirement slots and MILP edges;
-        // only their immutable compatible-supplier storage is shared.
+        // only their immutable compatible-producer storage is shared.
         for &copy in &copies[id] {
             super::check_deadline(deadline)?;
-            candidates[copy.0].supplier_candidates_per_input = requirements.clone();
+            candidates[copy.0].producer_candidates_per_input = requirements.clone();
         }
     }
     for constraint in &source.reader_constraints {

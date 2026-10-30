@@ -186,7 +186,7 @@ def compare(args):
              "| Workload | Metric | Before | After | Change |", "|---|---|---:|---:|---:|"]
     metrics = ["wall_seconds", "peak_planner_rss_kib", "modeled_cost_per_second", "accepted_queries",
                "passed", "guarantees_enforced", "cost_certificate_valid", "domain_certificate_valid"]
-    counters = ["logical_candidates", "physical_configurations", "compatible_connections", "supplier_sets", "stored_supplier_ids",
+    counters = ["logical_candidates", "physical_configurations", "compatible_connections", "producer_sets", "stored_producer_ids",
                 "peak_milp_variables", "peak_milp_constraints", "local_candidate_generation_ms", "memo_expansion_ms",
                 "inventory_construction_ms", "model_construction_ms", "solver_ms", "validation_ms", "solve_calls"]
     if args.quality_only:
@@ -223,7 +223,7 @@ def compare(args):
             # A final preparation timeout can carry default zero catalog
             # counters despite earlier solved rounds. Do not call that 100%
             # compression; preserve raw reports in results.json for diagnosis.
-            catalog_counters = {"logical_candidates", "physical_configurations", "compatible_connections", "supplier_sets", "stored_supplier_ids"}
+            catalog_counters = {"logical_candidates", "physical_configurations", "compatible_connections", "producer_sets", "stored_producer_ids"}
             if key in catalog_counters:
                 if previous["search"].get("physical_configurations", 0) == 0:
                     a = None
@@ -235,7 +235,7 @@ def compare(args):
         for key in (() if args.quality_only else domain_keys):
             lines.append(f"| {row['workload']} | {key} | {previous['search'].get(key, 'unreported')} | {row['search'].get(key, 'unreported')} | — |")
     if not args.quality_only:
-        lines += ["", "Supplier IDs measure storage sharing; compatible connections and MILP variables measure different things. Missing baseline counters are unreported, not zero.",
+        lines += ["", "Producer IDs measure storage sharing; compatible connections and MILP variables measure different things. Missing baseline counters are unreported, not zero.",
                   "Candidate/edge counters describe reported catalogs; peaks and times can span multiple rounds. A smaller restricted domain is not evidence of lossless full-domain compression."]
     args.output.write_text("\n".join(lines) + "\n")
     return 0

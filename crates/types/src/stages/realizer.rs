@@ -45,7 +45,7 @@ pub struct SelectedPhysicalCandidate {
 /// facade.
 ///
 /// Guarantees: a returned result has each selected candidate rebuilt over
-/// its selected suppliers with its candidate identity kept, guarantees
+/// its selected producers with its candidate identity kept, guarantees
 /// recomposed, and every output contract (result kind and schema) met; a
 /// realized assignment also passes Stage 2's timing and dependency rules
 /// and the physical DAG validator, with every candidate keeping the
@@ -56,7 +56,7 @@ pub struct SelectedPhysicalCandidate {
 pub trait AssignmentRealizer {
     /// The output reference of every query root, in `map_operator_refs`
     /// traversal order of the roots in workload order, rebuilt from the
-    /// selected candidates over their selected suppliers.
+    /// selected candidates over their selected producers.
     fn reconstruct_selected_outputs(
         &self,
         physical: &PhysicalASAPMemoCandidates,

@@ -30,9 +30,9 @@ fn fixed(interval: u32, evaluations: u64) -> QueryWorkloadEntry {
 fn node(input: Option<usize>) -> PhysicalCandidateWithCost {
     PhysicalCandidateWithCost {
         local_cost: 0.0,
-        supplier_candidates_per_input: input
+        producer_candidates_per_input: input
             .into_iter()
-            .map(|input| InputSupplierCandidates {
+            .map(|input| InputProducerCandidates {
                 candidates: vec![PhysicalCandidateId(input)].into(),
             })
             .collect(),

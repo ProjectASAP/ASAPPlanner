@@ -121,7 +121,7 @@ impl PaneWidthFrontier {
     }
 
     /// Skip frontiers which expose no new width for any individual reader grid.
-    /// Comparing per-grid sets also protects group-specific supplier choices.
+    /// Comparing per-grid sets also protects group-specific producer choices.
     pub fn next_domain(
         &mut self,
         deadline: Option<std::time::Instant>,

@@ -38,12 +38,12 @@ mod tests {
     use asap_types::physical::Materialization;
 
     use crate::search::candidates::dag::{
-        DagOfPhysicalCandidatesWithCosts, InputSupplierCandidates, PhysicalCandidateWithCost,
+        DagOfPhysicalCandidatesWithCosts, InputProducerCandidates, PhysicalCandidateWithCost,
         QueryOutputCandidates,
     };
     use asap_types::stages::{PhysicalCandidateId, ReaderConstraint};
 
-    fn terminal_reader_inventory(separate_suppliers: bool) -> PhysicalCandidatesWithCosts {
+    fn terminal_reader_inventory(separate_producers: bool) -> PhysicalCandidatesWithCosts {
         use asap_logical_asap_optimization::test_support::{cms_summary, estimate_over};
         use asap_types::ir::properties::AccuracyGuarantee;
         use std::rc::Rc;
@@ -53,15 +53,15 @@ mod tests {
             candidates: vec![
                 PhysicalCandidateWithCost {
                     local_cost: 2.0,
-                    supplier_candidates_per_input: vec![],
+                    producer_candidates_per_input: vec![],
                 },
                 PhysicalCandidateWithCost {
                     local_cost: 3.0,
-                    supplier_candidates_per_input: vec![],
+                    producer_candidates_per_input: vec![],
                 },
                 PhysicalCandidateWithCost {
                     local_cost: 1.0,
-                    supplier_candidates_per_input: vec![InputSupplierCandidates {
+                    producer_candidates_per_input: vec![InputProducerCandidates {
                         candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
                     }],
                 },
@@ -74,7 +74,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        if separate_suppliers {
+        if separate_producers {
             for output in 0..2 {
                 graph
                     .reader_constraints
@@ -131,7 +131,7 @@ mod tests {
             let producer_connections: usize = graph
                 .candidates
                 .iter()
-                .flat_map(|candidate| &candidate.supplier_candidates_per_input)
+                .flat_map(|candidate| &candidate.producer_candidates_per_input)
                 .map(|input| input.candidates.len())
                 .sum();
             assert_eq!(producer_count, 2);
@@ -207,7 +207,7 @@ mod tests {
             ExecutionTiming::QueryTime,
             Materialization::NotMaterialized,
             1.0,
-            vec![InputSupplierCandidates {
+            vec![InputProducerCandidates {
                 candidates: vec![PhysicalCandidateId(2)].into(),
             }],
         );
@@ -235,14 +235,14 @@ mod tests {
         for (index, cost) in [3.0, 5.0, 1.0, 1.0].into_iter().enumerate() {
             graph.candidates.push(PhysicalCandidateWithCost {
                 local_cost: cost,
-                supplier_candidates_per_input: if index < 2 {
+                producer_candidates_per_input: if index < 2 {
                     Vec::new()
                 } else {
                     vec![
-                        InputSupplierCandidates {
+                        InputProducerCandidates {
                             candidates: vec![id(0)].into(),
                         },
-                        InputSupplierCandidates {
+                        InputProducerCandidates {
                             candidates: vec![id(1)].into(),
                         },
                     ]
@@ -276,19 +276,19 @@ mod tests {
                 .collect(),
         );
         let expanded = expand_execution_scopes(source, &[2, 2, 2, 2], &[0, 1, 2, 3]).unwrap();
-        // Copy expansion must preserve every slot's complete ordered supplier
+        // Copy expansion must preserve every slot's complete ordered producer
         // mapping even though repeated copies share the backing allocation.
         for (id, configuration) in expanded.physical.candidates.iter().enumerate() {
             let original = &original_graph.candidates[configuration.operator_node.0];
             let copied = &expanded.dag.candidates[id];
             assert_eq!(
-                original.supplier_candidates_per_input.len(),
-                copied.supplier_candidates_per_input.len()
+                original.producer_candidates_per_input.len(),
+                copied.producer_candidates_per_input.len()
             );
             for (input, copied_input) in original
-                .supplier_candidates_per_input
+                .producer_candidates_per_input
                 .iter()
-                .zip(&copied.supplier_candidates_per_input)
+                .zip(&copied.producer_candidates_per_input)
             {
                 let expected: Vec<_> = input
                     .candidates
@@ -305,9 +305,9 @@ mod tests {
                 assert_eq!(copied_input.candidates.as_slice(), expected.as_slice());
             }
         }
-        let metrics = asap_types::stages::supplier_storage_metrics(&expanded.physical);
+        let metrics = asap_types::stages::producer_storage_metrics(&expanded.physical);
         assert!(
-            metrics.stored_supplier_ids < metrics.logical_connections,
+            metrics.stored_producer_ids < metrics.logical_connections,
             "{metrics:?}"
         );
         let selected = select_candidates(&expanded.dag).unwrap().unwrap();

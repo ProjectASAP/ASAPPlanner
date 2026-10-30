@@ -8,7 +8,7 @@ use asap_types::ir::properties::{AccuracyScope, AccuracyTarget};
 use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::ir::OperatorNode;
 
-use crate::search::candidates::dag::{InputSupplierCandidates, QueryOutputCandidates};
+use crate::search::candidates::dag::{InputProducerCandidates, QueryOutputCandidates};
 use asap_types::workload::{
     DataWorkload, Predictability, Query, QueryRequirements, QueryWorkloadEntry, RangeEvaluation,
     RepetitionInterval,
@@ -46,7 +46,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             0.0,
             inputs
                 .into_iter()
-                .map(|supplier| InputSupplierCandidates {
+                .map(|supplier| InputProducerCandidates {
                     candidates: vec![supplier].into(),
                 })
                 .collect(),

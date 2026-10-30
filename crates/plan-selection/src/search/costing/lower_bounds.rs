@@ -86,7 +86,7 @@ pub(in crate::search) fn apply(
             }
             pending.extend(
                 configured.dag.candidates[id]
-                    .supplier_candidates_per_input
+                    .producer_candidates_per_input
                     .iter()
                     .flat_map(|input| input.candidates.iter().map(|producer| producer.0)),
             );
@@ -192,7 +192,7 @@ pub(in crate::search) fn apply(
                 });
                 if position
                     != configured.dag.candidates[id]
-                        .supplier_candidates_per_input
+                        .producer_candidates_per_input
                         .len()
                 {
                     return None;
@@ -283,7 +283,7 @@ fn common_reader_windows(configured: &PhysicalCandidatesWithCosts) -> Vec<Option
     let graph = &configured.dag;
     let mut readers = vec![Vec::new(); graph.candidates.len()];
     for (reader, candidate) in graph.candidates.iter().enumerate() {
-        for requirement in &candidate.supplier_candidates_per_input {
+        for requirement in &candidate.producer_candidates_per_input {
             for producer in requirement.candidates.iter() {
                 readers[producer.0].push(reader);
             }
@@ -491,7 +491,7 @@ impl ConcreteRows {
                     continue;
                 }
                 let root = self.roots[id].unwrap();
-                let inputs = &configured.dag.candidates[id].supplier_candidates_per_input;
+                let inputs = &configured.dag.candidates[id].producer_candidates_per_input;
                 let agrees = inputs.len() == self.children[root].len()
                     && inputs
                         .iter()
@@ -541,7 +541,7 @@ fn certified_price<'a>(
     visiting[id] = true;
     let result: Result<Option<PricedNode<'a>>, String> = (|| {
         let mut views = Vec::new();
-        for requirement in &configured.dag.candidates[id].supplier_candidates_per_input {
+        for requirement in &configured.dag.candidates[id].producer_candidates_per_input {
             let mut representative = None;
             let mut signature = None;
             for supplier in &requirement.candidates {
@@ -708,7 +708,7 @@ mod tests {
     use asap_types::ir::{OperatorNode, QueryRoot};
     use asap_types::physical::Medium;
 
-    use crate::search::candidates::dag::{InputSupplierCandidates, QueryOutputCandidates};
+    use crate::search::candidates::dag::{InputProducerCandidates, QueryOutputCandidates};
 
     use asap_types::stages::PhysicalCandidateId;
     use asap_types::workload::*;
@@ -814,7 +814,7 @@ mod tests {
                 0.0,
                 inputs
                     .into_iter()
-                    .map(|input| InputSupplierCandidates {
+                    .map(|input| InputProducerCandidates {
                         candidates: vec![PhysicalCandidateId(input)].into(),
                     })
                     .collect(),
@@ -842,7 +842,7 @@ mod tests {
             })
             .collect();
         for candidate in &mut configured.dag.candidates {
-            for input in &mut candidate.supplier_candidates_per_input {
+            for input in &mut candidate.producer_candidates_per_input {
                 if chains.contains(&input.candidates[0]) {
                     input.candidates = chains.clone().into();
                 }
@@ -893,7 +893,7 @@ mod tests {
         let mut projects = Vec::new();
         for (index, &chain) in chains.iter().enumerate() {
             let scan =
-                configured.dag.candidates[chain].supplier_candidates_per_input[0].candidates[0];
+                configured.dag.candidates[chain].producer_candidates_per_input[0].candidates[0];
             configured.sync_physical_for_tests();
             let input = configured.node(scan.0).clone();
             let range =
@@ -927,7 +927,7 @@ mod tests {
                     ExecutionTiming::IngestionTime,
                     Materialization::NotMaterialized,
                     0.0,
-                    vec![InputSupplierCandidates {
+                    vec![InputProducerCandidates {
                         candidates: vec![producer].into(),
                     }],
                 );
@@ -936,7 +936,7 @@ mod tests {
             projects.push(producer);
         }
         for chain in chains {
-            configured.dag.candidates[chain].supplier_candidates_per_input[0].candidates =
+            configured.dag.candidates[chain].producer_candidates_per_input[0].candidates =
                 projects.clone().into();
             configured.sync_physical_for_tests();
             let child = configured.nodes_for_tests()[projects[0].0].clone();
@@ -988,7 +988,7 @@ mod tests {
                 ExecutionTiming::IngestionTime,
                 Materialization::NotMaterialized,
                 0.0,
-                vec![InputSupplierCandidates {
+                vec![InputProducerCandidates {
                     candidates: vec![*scan].into(),
                 }],
             );
@@ -996,7 +996,7 @@ mod tests {
         }
         for (id, template) in configured.nodes_for_tests().iter().enumerate() {
             if matches!(template.asap(), Some(ASAPOp::PaneChain { .. })) {
-                let input = &mut configured.dag.candidates[id].supplier_candidates_per_input[0];
+                let input = &mut configured.dag.candidates[id].producer_candidates_per_input[0];
                 // Put larger signed-domain Project pricing last to expose the
                 // former arbitrary representative selection.
                 let mut suppliers = scans.clone();
@@ -1121,7 +1121,7 @@ mod tests {
                         })
                         .collect();
                     for project in &projects {
-                        configured.dag.candidates[project.0].supplier_candidates_per_input[0]
+                        configured.dag.candidates[project.0].producer_candidates_per_input[0]
                             .candidates
                             .extend(projects.iter().copied());
                         configured.sync_physical_for_tests();
@@ -1275,7 +1275,7 @@ mod tests {
     }
     // Equal row counts do not certify different sources as interchangeable cost inputs.
     #[test]
-    fn differing_supplier_metadata_leaves_pane_bounds_zero() {
+    fn differing_producer_metadata_leaves_pane_bounds_zero() {
         let (mut configured, roots, entries, mut data) = fixture();
         let scans: Vec<_> = configured
             .nodes_for_tests()
@@ -1303,7 +1303,7 @@ mod tests {
         let nodes = configured.nodes_for_tests();
         for (candidate, node) in configured.dag.candidates.iter_mut().zip(&nodes) {
             if matches!(node.asap(), Some(ASAPOp::PaneChain { .. })) {
-                candidate.supplier_candidates_per_input[0].candidates = scans.clone().into();
+                candidate.producer_candidates_per_input[0].candidates = scans.clone().into();
             }
         }
         configured.sync_physical_for_tests();
@@ -1406,7 +1406,7 @@ mod tests {
                 0.0,
                 inputs
                     .into_iter()
-                    .map(|input| InputSupplierCandidates {
+                    .map(|input| InputProducerCandidates {
                         candidates: vec![PhysicalCandidateId(input)].into(),
                     })
                     .collect(),

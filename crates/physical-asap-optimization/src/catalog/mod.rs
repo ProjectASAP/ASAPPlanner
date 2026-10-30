@@ -1,6 +1,6 @@
 //! Stage 2's physical candidates: implement each memo candidate's
 //! operators, enumerate its timing and materialization, record which
-//! candidates can supply each input, and prune what cannot be used
+//! candidates can produce each input, and prune what cannot be used
 //! ([`generate_physical_asap_memo_candidates`]); and realize one selected
 //! assignment as a physical plan (#1047). The output type,
 //! `PhysicalASAPMemoCandidates`, lives in `asap_types::stages`; Stage 3
@@ -52,7 +52,7 @@ impl ErrorGeneratingPhysicalASAPMemoCandidates {
 /// Stage 2: implement every operator node of every candidate in `logical`'s
 /// memo, enumerate the timings and materializations the data and deployment
 /// allow (`query_time_results_retained`; no query-time raw scans unless
-/// `raw_data_retained`), record which candidates may supply each input, and
+/// `raw_data_retained`), record which candidates may produce each input, and
 /// prune what cannot be used. Prices nothing.
 pub fn generate_physical_asap_memo_candidates(
     logical: &LogicalASAPMemoCandidates,
@@ -101,7 +101,7 @@ fn validate_ids(ids: &[PhysicalCandidateId], count: usize, context: &str) -> Res
     Ok(())
 }
 
-/// Every supplier, operator node and reader constraint of `physical` names an
+/// Every producer, operator node and reader constraint of `physical` names an
 /// existing candidate or output reference, and each query reader constraint
 /// partitions the output references.
 fn validate_candidates(physical: &PhysicalASAPMemoCandidates) -> Result<(), String> {
@@ -161,9 +161,11 @@ fn validate_candidates(physical: &PhysicalASAPMemoCandidates) -> Result<(), Stri
                 "candidate {index} references missing operator node"
             )));
         }
-        for (input, suppliers) in candidate.supplier_candidates_per_input.iter().enumerate() {
+        for (input, producer_candidates) in
+            candidate.producer_candidates_per_input.iter().enumerate()
+        {
             validate_ids(
-                suppliers,
+                producer_candidates,
                 count,
                 &format!("candidate {index}, requirement {input}"),
             )
@@ -198,12 +200,12 @@ fn validate_selected_graph(
         physical.candidates.len(),
         |candidate| {
             physical.candidates[candidate.0]
-                .supplier_candidates_per_input
+                .producer_candidates_per_input
                 .len()
         },
         |candidate, input| {
             physical.candidates[candidate.0]
-                .supplier_candidates_per_input
+                .producer_candidates_per_input
                 .get(input)
         },
         &query_output_candidates,
