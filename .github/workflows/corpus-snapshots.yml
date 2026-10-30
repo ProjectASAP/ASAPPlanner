@@ -40,3 +40,13 @@ jobs:
         name: corpus-snapshots
         path: target/tmp/corpus_snapshots/
         if-no-files-found: ignore
+
+    - name: Notify Slack
+      if: failure()
+      run: |
+        curl -sf -X POST -H "Content-type: application/json" \
+          -d "{\"text\":\"${SLACK_MENTIONS} ❌ ${GITHUB_REPOSITORY} ${GITHUB_WORKFLOW} failed: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}" \
+          "$SLACK_WEBHOOK_URL"
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        SLACK_MENTIONS: ${{ secrets.SLACK_MENTIONS }}
