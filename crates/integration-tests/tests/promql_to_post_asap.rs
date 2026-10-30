@@ -12,7 +12,9 @@ use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::physical_export::{
     at_ingestion, at_ingestion_physical_asap_dag, physical_asap_dag,
 };
-use asap_integration_tests::planning::logical_candidates;
+use asap_integration_tests::planning::{
+    logical_candidates, logical_candidates_ignoring_guarantees,
+};
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_plan_selection::reference_pricer::WholePlanSelection as Selection;
 use asap_types::ir::operator::operator_properties::Reduction;
@@ -64,7 +66,28 @@ fn candidates_using(
     accuracy: AccuracyTarget,
     algorithm: SketchAlgorithm,
 ) -> Vec<Rc<OperatorNode>> {
-    logical_candidates(Rc::clone(root), accuracy)
+    using(logical_candidates(Rc::clone(root), accuracy), algorithm)
+}
+
+/// [`candidates_using`] with every output accepted whatever its guarantee:
+/// a heap-backed Top-K's output has no guarantee, so Pass 1 prunes the
+/// heap these update and execution tests check unless guarantees are
+/// ignored.
+fn heap_topk_candidates_using(
+    root: &Rc<OperatorNode>,
+    accuracy: AccuracyTarget,
+    algorithm: SketchAlgorithm,
+) -> Vec<Rc<OperatorNode>> {
+    using(
+        logical_candidates_ignoring_guarantees(Rc::clone(root), accuracy),
+        algorithm,
+    )
+}
+
+/// The `candidates` that build a sketch of `algorithm`, each below its
+/// `Project`s.
+fn using(candidates: Vec<Rc<OperatorNode>>, algorithm: SketchAlgorithm) -> Vec<Rc<OperatorNode>> {
+    candidates
         .into_iter()
         .filter(|candidate| uses_sketch(candidate, &algorithm))
         .map(|candidate| Rc::clone(below_projects(&candidate)))
@@ -255,7 +278,7 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_evaluation_contract
             AccuracyTarget::max_error(0.01).failure_probability(0.01),
         )
         .expect("lower temporal Top-K");
-        let candidates = candidates_using(
+        let candidates = heap_topk_candidates_using(
             &pre,
             AccuracyTarget::max_error(0.01).failure_probability(0.01),
             expected_family,
@@ -430,7 +453,7 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
             SketchAlgorithm::CountSketchWithHeap,
         ]
         .into_iter()
-        .flat_map(|algorithm| candidates_using(&pre, accuracy.clone(), algorithm))
+        .flat_map(|algorithm| heap_topk_candidates_using(&pre, accuracy.clone(), algorithm))
         .collect();
         assert!(!candidates.is_empty(), "no heap candidate for {query}");
         for plan in candidates {
