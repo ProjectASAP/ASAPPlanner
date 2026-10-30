@@ -257,11 +257,10 @@ product of every sub-DAG's choices. The memo search, which is the planner's
 search (every Stage 1 to Stage 3 entry point runs it), runs the same stages
 with the same semantics and code boundaries, but on the workload's distinct
 logical sub-expressions: each choice is made once per sub-expression, and only
-the choices several sub-expressions depend on are made jointly. The
-whole-workload form remains in one place: before the joint search, each
-query's own candidates are checked alone, applying Pass 2 to one explicit
-Pass 1 assignment at a time, to prune choices that fail regardless of
-sharing.
+the choices several sub-expressions depend on are made jointly. The code no
+longer builds whole-workload candidates: the memo rules replace each
+whole-workload Pass 2 rule, and the reference pricer enumerates memo
+choices (`memo::enumeration`).
 
 This section gives the memo's components, follows one query through each
 step, and gives the algorithm that turns a memo back into the candidate DAGs
@@ -601,7 +600,7 @@ the memo path's entry points.
 |---|---|---|---|
 | 0. Frontends | Query text, language → one logical root per query, carrying its accuracy target | Same: a `QueryRoot` per query | `lower_promql_workload`, `lower_sql_dialect` (`asap-frontend-*`); `plan_installable` (`asap_planner`) runs the frontends and Stages 1–3 on the user input |
 | 1, Pass 1 | Logical roots; the deployment's supported summaries → the Pass 1 inventory, every computation's candidates (`PerComputationCandidates`) | Logical roots → `DagOfLogicalMemoGroups` (hash-consed `MemoGroup`s); with the Pass 1 inventory, less the summaries the deployment does not support → `PerComputationLogicalMemoCandidates`: the `CandidateMemo` (each group's `CandidateForMemoGroup`s, with the accuracy-scoped sizes), the computation targets and the pruned candidates (`PrunedCandidate<HowToComputeAggregateMeasure>`) | `DagOfLogicalMemoGroups::from_roots`, `generate_per_computation_candidates_with_memo`, `without_unsupported_summaries`, `generate_per_computation_logical_memo_candidates` |
-| 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (`stage1_candidates_of_choice`) | `CandidateMemo`; the entries' recurrence and range steps → the same memo with each rule's candidates added to the groups they implement | the memo rules (`pass2/memo/rules/`), `pass2::memo::window_candidates` |
+| 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (no longer in the code) | `CandidateMemo`; the entries' recurrence and range steps → the same memo with each rule's candidates added to the groups they implement | the memo rules (`pass2/memo/rules/`), `pass2::memo::window_candidates` |
 | 1, concrete summary-state groups | (part of Pass 2) | `CandidateMemo` → the memo with concrete summary-state groups: one group per shared size or pane layout that readers can read | `add_shared_summary_state_groups`, Pass 2's last step; the Pass 2 output is `LogicalASAPMemoCandidates` (`generate_logical_asap_memo_candidates`) |
 | 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per materialization assignment | `LogicalASAPMemoCandidates`; entries, `DataWorkload`, query-time and raw-data retention → `PhysicalASAPMemoCandidates`: every operator node of every candidate with each allowed timing, materialization and scope copy, the producers of each input, reader constraints, and the pruned candidates (`PrunedCandidate<PhysicalCandidateKey>`) | `generate_physical_asap_memo_candidates` (`asap_physical_asap_optimization::catalog`) |
 | 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model → one plan | The expanded memo's candidates and their configurations; the same inputs → one candidate per needed group, connected into one plan | `run_stage1_to_stage3_with`, `candidate_connection_search`; output `Stage1ToStage3Run`, which holds the selected `PhysicalWorkloadPlan` and the selection |

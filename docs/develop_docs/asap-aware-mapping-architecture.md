@@ -16,7 +16,7 @@ depends on the executor.
 | --- | --- |
 | `asap-types` (`crates/types`) | Shared vocabulary, by IR section: `ir::operator` (`OperatorNode`, `NonASAPOp`, `ASAPOp`, operator parameters, `AggIntent`), `ir::scalar` (`ScalarExpr`, `ColumnRef`), `ir::schema` (`Schema`, `FieldDataType`, summary-state types such as `SketchAlgorithm` and `FamilyCapability`), `ir::properties` (`AccuracyTarget`, `AccuracyMetric`, `AccuracyGuarantee`, execution timing, summary coverage), plus `ir::flat` and `ir::physical_export`; the planner inputs (`workload`); Stage 2 decision data (`physical`: `Materialization`, panes) |
 | `asap-frontend-sql`, `asap-frontend-promql`, `asap-frontend-metricsql` (with `asap-frontend-common`) | Stage 0, the query-language frontends: lower each query into the logical DAG (`QueryRoot`s of `NonASAPOp` nodes, no summaries, no timing) |
-| `asap-logical-asap-optimization` (`crates/logical-asap-optimization`) | Stage 1: Pass 1, Pass 2 and the whole-workload Stage 1 candidates |
+| `asap-logical-asap-optimization` (`crates/logical-asap-optimization`) | Stage 1: Pass 1 and Pass 2 (the memo rules) |
 | `asap-accuracy` (`crates/accuracy`) | The accuracy model the stages share: the analytical rules (per-family estimators, composition, budget split, target check) and the deployment's `AccuracyModel` and `AccuracyEvidenceProvider`; depends only on `asap-types` |
 | `asap-physical-asap-optimization` (`crates/physical-asap-optimization`) | Stage 2: materialization and physical operator implementation |
 | `asap-cost` (`crates/cost`) | The cost model the stages share: resource-usage estimation (the analytical per-operator model, measured operation costs, state byte sizes) and the cost models (`ResourceUsage`, `CostModel`, `CostInputs`); depends only on `asap-types` |
@@ -39,17 +39,18 @@ asap-types ◄── asap-executor (Stage 4; no stage crate depends on it)
 
 ```text
 QueryRoots (Stage 0)
-  │  per_computation_candidates::generate_per_computation_candidates     Stage 1, Pass 1
+  │  DagOfLogicalMemoGroups::from_roots, then
+  │  pass1::logical_memo_candidates::generate_per_computation_logical_memo_candidates
+  ▼                                                                     Stage 1, Pass 1
+PerComputationLogicalMemoCandidates (CandidateMemo + pruned_candidates)
+  │  pass2::logical_memo_candidates::generate_logical_asap_memo_candidates
+  │    the memo rules (pass2/memo/rules/) over the candidate memo       Stage 1, Pass 2
   ▼
-PerComputationCandidates  ──without_unsupported_summaries(supported)───┐
-  │  workload_candidates::stage1_logical_asap_optimization              │ Stage 1, enumeration
-  │    compose_logical_candidate per choice, then asap_aware_cse rules  │ + Pass 2
-  ▼                                                                    │
-LogicalCandidate (its id and roots)                                ◄──┘
-  │  asap_physical_asap_optimization::optimize_physical_asap            Stage 2
+LogicalASAPMemoCandidates
+  │  asap_physical_asap_optimization::catalog::generate_physical_asap_memo_candidates  Stage 2
   ▼
-PhysicalCandidate (one per materialization assignment)
-  │  asap_plan_selection::select_plan                                   Stage 3
+PhysicalASAPMemoCandidates (operator nodes per timing/materialization + pruned_candidates)
+  │  asap_plan_selection search::route::candidate_connection_search     Stage 3
   ▼
 Selection (selected id and plan, costs, accepted, rejected, front)
 ```
@@ -62,8 +63,8 @@ same pipeline behind the `OptimizationPass` trait that `asap-planner` calls.
 | --- | --- |
 | Pass 1: which computations a query has (`ComputationTarget`), how each can be computed (`HowToComputeAggregateMeasure`: `Exact`, `ExactAccumulator`, `Summary`), fused computations (`FusedComputation`), pruning (`PruneReason`) and composing one choice into a logical DAG (`compose_logical_candidate`) | `asap-logical-asap-optimization`, `pass1/per_computation_candidates.rs` |
 | Which summary families serve an intent (`summary_candidates`) | `asap-logical-asap-optimization`, `pass1/realization.rs` |
-| Pass 2 rules: identical-expression, summary-capability, window-composition (tumbling panes), rollup and exact top-k reuse; each produces `*Candidate` parts and `*Pass2Candidate` whole-workload plans | `asap-logical-asap-optimization`, `pass2/asap_aware_cse.rs` |
-| Enumeration of Stage 1 candidates (the Cartesian product of Pass 1 choices, each followed by its Pass 2 candidates) | `asap-logical-asap-optimization`, `pass2/workload_candidates.rs` |
+| Pass 2 memo rules: shared producers (identical expressions by memo group identity, one build at different sizes), scan-label widening, window composition (tumbling panes), rollup, exact top-k reuse and finer-aggregate reuse | `asap-logical-asap-optimization`, `pass2/memo/rules/` and `pass2/memo/window_candidates.rs`, over the helpers in `pass2/asap_aware_cse.rs` |
+| Enumeration of the plans a memo stands for (reference pricer, DAG viewer) | `asap-logical-asap-optimization`, `pass2/memo/enumeration.rs` |
 | What each summary family can merge and answer (`FamilyCapability::of`: `merge_inputs`, `readouts`) | `asap-types`, `ir/schema/family_capability.rs` |
 | Stage 2: materialization options per summary build (`NotMaterialized`, `MatAtIngestion`, `MatAtQuery`, `MatAtQueryKeptAcrossEvaluations`), ingestion-time eligibility, physical operator implementation | `asap-physical-asap-optimization` |
 | Timing and data-state edge rules applied from a `MaterializationAssignment` | `asap-types`, `ir/properties/timing.rs` and `ir/properties/execution_data_state.rs`; `Materialization` in `physical/materialization.rs` |
