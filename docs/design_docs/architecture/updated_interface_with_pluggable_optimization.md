@@ -91,6 +91,7 @@ pub struct PlanOutput {
     pub scalar_roots: Vec<(usize, ScalarExpr)>,  // standalone scalar entries
     pub scalar_plans: Vec<QueryPlan>,            // the operator sub-DAGs they read
     pub selection: Option<Selection>,            // how plan selection chose, if the pass selects
+    pub pane_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>, // kept pane chains' retention
 }
 
 pub struct QueryPlan {
@@ -99,9 +100,9 @@ pub struct QueryPlan {
 }
 ```
 
-`Stage1ToStage3Pass` returns the selected physical candidate's roots, with every
-sub-DAG `NotMaterialized`; `PlanOutput::physical_asap_dag()` exports them
-with that same assignment. Physical ASAP-aware optimization decides per
+`Stage1ToStage3Pass` returns the selected plan's roots, as Stage 2's realizer
+built them with each node's timing and materialization, and with the weight
+proofs Stage 3 made applied; `PlanOutput::physical_asap_dag()` exports them. Physical ASAP-aware optimization decides per
 sub-DAG whether to materialize, and whether at ingestion or query time, from
 #604 on.
 
@@ -116,23 +117,22 @@ The `Stage1ToStage3Pass` described below is used by default.
 
 `Stage1ToStage3Pass` runs Stage 1 (logical ASAP-aware optimization), Stage 2
 (physical ASAP-aware optimization) and Stage 3 (plan selection) of
-[planner-layering.md](../proposals/planner-layering.md) in order and is
-registered under the name `stage1-to-stage3`. It replaced `MajorPass`, the
+[planner-layering.md](../proposals/planner-layering.md) through the facade's
+`run_planning` and is registered under the name `stage1-to-stage3`. It replaced `MajorPass`, the
 legacy replacement search; the coverage this gives up until Pass 2 is
 tracked in #580.
 
 | Step | Call |
 |---|---|
 | Prepare roots | Entries in `entries()` order, the accuracy target from each entry's `requirements`; PromQL operator roots carry the series identity (`with_promql_series_identity`) where it has a realization |
-| Stage 1: logical ASAP-aware optimization | `generate_per_computation_candidates` (Pass 1), then `compose_logical_candidate` for every combination of per-computation candidates |
-| Stage 2: physical ASAP-aware optimization | `optimize_physical_asap` for every composed candidate |
-| Stage 3: plan selection | `select_plan`: reject candidates that miss an accuracy target, price the rest, select the cheapest |
+| Stage 1: logical ASAP-aware optimization | `generate_per_computation_logical_memo_candidates` (Pass 1, once), then per pane-width round `generate_logical_asap_memo_candidates` (Pass 2) |
+| Stage 2: physical ASAP-aware optimization | `generate_physical_asap_memo_candidates` per round |
+| Stage 3: plan selection | `select_plan` per round: check accuracy and latency, price under the cost model, select one plan; the facade keeps the best round's and builds it with Stage 2's `AssignmentRealizer::realize` |
 
-`run_stage1_to_stage3` runs these steps over the query-language frontends'
-roots (Stage 0) and returns every stage's candidates as well as the
-selection; the `stage_pipeline` devtool shows them. Every combination is enumerated and plan selection prices
-every candidate; nothing is capped. A search that avoids building every
-candidate is future work (#671).
+`run_planning` runs these steps over the query-language frontends' roots
+(Stage 0) and returns `PlanningRun`: Pass 1's candidates, the selected
+round's Pass 2 and Stage 2 outputs, the selection, the selected plan and a
+report per round; the `stage_pipeline` devtool shows them.
 
 `ReplacementStrategy` remains a concept of the legacy candidate search, which
 no pass uses any more.
@@ -235,22 +235,22 @@ pass no longer runs these steps; another pass need not run any of them.
 | Crate | What it holds |
 |---|---|
 | `asap-types` | `ParsedWorkload` |
-| `asap-plan-selection` | `OptimizationPass`, `OptimizationInput`, `PlanOutput`, `PlanningModels`, `optimize`, `PassRegistry`, `Stage1ToStage3Pass`, `run_stage1_to_stage3` |
-| `asap-planner` *(new)* | `e2e_plan`, `UserInput`, `FrontendInput`, lowering dispatch |
+| `asap-plan-selection` | Stage 3: `select_plan`, `Selection`, `SearchReport`, `AccuracyCheckInputs` |
+| `asap-planner` *(new)* | `e2e_plan`, `UserInput`, `FrontendInput`, lowering dispatch; `OptimizationPass`, `OptimizationInput`, `PlanOutput`, `PlanningModels`, `optimize`, `PassRegistry`, `Stage1ToStage3Pass`, `run_planning` |
 
 ```text
 asap-planner ──┬──> asap-frontend-{sql, promql, metricsql}
-               └──> asap-plan-selection ──> asap-physical-asap-optimization
-                          ▲                     ──> asap-logical-asap-optimization ──> asap-types
-                     a pass depends only this far
+               ├──> asap-logical-asap-optimization ──> asap-types
+               ├──> asap-physical-asap-optimization ──> asap-types
+               └──> asap-plan-selection ──> asap-types, asap-cost, asap-accuracy
 ```
 
 `asap-planner` is separate because it is the only crate depending on every
 frontend; before it, the sole facade re-exporting more than one was
-`asap-devtools`, a developer-tools crate. `PlanningModels` lives in
-`asap-plan-selection` (Stage 3, the only stage that uses the deployment's
-models) because both inputs use it, and `asap-planner` re-exports
-it.
+`asap-devtools`, a developer-tools crate. It is also the only crate that
+depends on every stage, so it orchestrates them; `PlanningModels` lives in
+it, and it gives each stage only its part (Stage 3 gets
+`AccuracyCheckInputs` and `CostInputs`).
 
 ---
 

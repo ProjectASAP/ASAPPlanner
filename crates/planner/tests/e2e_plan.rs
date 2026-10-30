@@ -4,12 +4,12 @@
 use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
-use asap_plan_selection::pass::PlanningModels;
-use asap_plan_selection::pass::{
-    run_stage1_to_stage3, OptimizationInput, OptimizationPass, OptimizeError, PlanOutput,
+use asap_planner::PlanningModels;
+use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
+use asap_planner::{
+    run_planning, OptimizationInput, OptimizationPass, OptimizeError, PlanOutput,
     Stage1ToStage3Pass,
 };
-use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::workload::{
@@ -107,7 +107,7 @@ async fn plans_every_query_in_entry_order() {
 }
 
 /// The facade selects what the planning stages select over the frontends'
-/// roots ([`run_stage1_to_stage3`]), and reports that selection.
+/// roots ([`run_planning`]), and reports that selection.
 #[tokio::test]
 async fn facade_plans_match_run_stage1_to_stage3() {
     let workload = sql_workload(
@@ -154,30 +154,25 @@ async fn facade_plans_match_run_stage1_to_stage3() {
             .collect::<Vec<_>>(),
         targets
     );
-    let run = run_stage1_to_stage3(roots, &entries, &data, models).unwrap();
-    let selection = run
-        .stage3_plan_selection
-        .as_ref()
-        .expect("a candidate is selected");
-    let selected = run.selected().expect("the selected candidate is listed");
-
-    assert!(
-        selection.search.candidates_checked > 1,
-        "the stages chose among candidates"
-    );
-    // Separate searches have different timings and visited-plan archives.
-    // The facade must preserve the chosen execution, cost, and guarantees.
+    let roots = roots.into_iter().map(|(_, root)| root).collect();
+    let run = run_planning(
+        roots,
+        &entries,
+        &data,
+        models,
+        asap_planner::PlanSearchSettings::default(),
+    )
+    .unwrap();
+    let selection = run.selection.as_ref().expect("a candidate is selected");
+    // Separate searches have different timings. The facade must preserve
+    // the chosen execution, cost, and guarantees.
     let facade = output.selection.as_ref().expect("facade reports selection");
-    assert_eq!(facade.plan, selection.plan);
+    assert_eq!(facade.cost, selection.cost);
     assert_eq!(
-        facade.costs[&facade.selected],
-        selection.costs[&selection.selected]
+        facade.accepted_accuracy_per_query,
+        selection.accepted_accuracy_per_query
     );
-    assert_eq!(
-        facade.accepted[&facade.selected],
-        selection.accepted[&selection.selected]
-    );
-    assert_eq!(output.roots(), selected.roots);
+    assert_eq!(&output.roots(), run.selected_plan.as_ref().unwrap());
 }
 
 /// A repeating SQL query reaches the optimizer. `lower_sql_batch` walks

@@ -18,11 +18,12 @@ use std::time::{Duration, Instant};
 
 use crate::search::candidates::dag::{CandidateSelectionError, DagOfPhysicalCandidatesWithCosts};
 use crate::search::candidates::graph::RejectedQuerySubgraph;
+use crate::search::candidates::graph::SelectedCandidateGraph;
 use crate::search::milp::model::{
     solve_candidate_proposal_with_metrics, solve_direct_cost_proposal_with_metrics,
     CandidateProposal, CandidateSolveMetrics, ObservedAssignment,
 };
-use asap_types::stages::{PhysicalCandidateId, SelectedCandidateGraph};
+use asap_types::stages::PhysicalCandidateId;
 
 #[derive(Debug, Default)]
 pub(in crate::search) struct CandidateEvaluation {
@@ -70,6 +71,8 @@ pub(in crate::search) enum CandidateSearchStatus {
     NumericalStall,
 }
 
+// Read by the engine's tests; #1095 replaces the engine.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug)]
 pub(in crate::search) struct CandidateSearchResult {
     pub incumbent: Option<EvaluatedCandidate>,
@@ -937,7 +940,7 @@ mod tests {
     #[test]
     fn nonoptimal_proposal_preserves_bound_and_improves_incumbent() {
         use crate::search::candidates::dag::validate_selected_graph;
-        use asap_types::stages::QueryRootAssignment;
+        use crate::search::candidates::graph::QueryRootAssignment;
         let graph = choices(&[2.0, 3.0]);
         let mut round = 0;
         let result = search_with_solver(

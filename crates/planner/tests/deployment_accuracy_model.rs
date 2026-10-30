@@ -8,7 +8,20 @@ use std::rc::Rc;
 
 use asap_accuracy::{AccuracyModel, BuiltinAccuracyModel};
 use asap_frontend_promql::{lower_promql_query_workload, promql_metric_names};
-use asap_plan_selection::{PlanOutput, PlanningModels, RejectionCause};
+use asap_plan_selection::reference_pricer::{select_among_plans, WholePlanSelection};
+use asap_plan_selection::{ErrorSelectingPlan, RejectionCause};
+use asap_planner::PlanningModels;
+
+/// The reference pricer's selection among every given candidate, and the
+/// selected plan's operator roots.
+struct PlanOutput {
+    plans: Vec<QueryPlan>,
+    selection: Option<WholePlanSelection>,
+}
+
+struct QueryPlan {
+    root: Rc<OperatorNode>,
+}
 use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
@@ -119,28 +132,28 @@ fn plan_every_candidate(
     workload: &PlanningWorkload,
     candidates: &[asap_physical_asap_optimization::PhysicalWorkloadPlan],
     models: PlanningModels<'_>,
-) -> Result<PlanOutput, asap_plan_selection::SelectionError> {
-    let selection = asap_plan_selection::select_plan(
+) -> Result<PlanOutput, ErrorSelectingPlan> {
+    let selection = select_among_plans(
         candidates,
         &workload.query_workload.entries().collect::<Vec<_>>(),
         workload.data_workload.as_ref().unwrap(),
-        models,
+        &models.accuracy_check_inputs(),
+        models.plan_selection,
     )?;
     let plans = selection
         .plan
         .iter()
-        .enumerate()
-        .map(|(entry_index, root)| match root {
-            QueryRoot::Operator(node) => asap_plan_selection::QueryPlan {
-                entry_index,
+        .map(|root| match root {
+            QueryRoot::Operator(node) => QueryPlan {
                 root: Rc::clone(node),
             },
             QueryRoot::Scalar(_) => panic!("operator queries only"),
         })
         .collect();
-    let mut output = PlanOutput::new(plans);
-    output.selection = Some(selection);
-    Ok(output)
+    Ok(PlanOutput {
+        plans,
+        selection: Some(selection),
+    })
 }
 
 /// Every candidate Stage 3 was given: the valid ones it priced and the

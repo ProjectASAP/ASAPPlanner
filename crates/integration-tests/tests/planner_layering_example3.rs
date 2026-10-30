@@ -67,7 +67,7 @@ fn run_a() -> Run {
         &workload,
         roots,
         computations,
-        asap_plan_selection::PlanningModels::builtin(),
+        asap_planner::PlanningModels::builtin(),
     )
 }
 
@@ -108,7 +108,7 @@ fn run_b() -> Run {
         &workload,
         roots,
         computations,
-        asap_plan_selection::PlanningModels::builtin(),
+        asap_planner::PlanningModels::builtin(),
     )
 }
 

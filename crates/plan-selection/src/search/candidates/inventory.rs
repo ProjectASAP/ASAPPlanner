@@ -469,7 +469,7 @@ mod tests {
         let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
         let mut physical = materialize_selected_candidates(
             &configured.physical,
-            &selected,
+            &selected.to_selected_candidates(),
             &modes,
             &roots,
             &entries,
@@ -477,7 +477,7 @@ mod tests {
             deployment.query_time_results_retained,
         )
         .unwrap();
-        physical.physical.dag.validate().unwrap();
+        physical.plan.dag.validate().unwrap();
         if let Some(window_ms) = newest_window_ms {
             let Some(ASAPOp::PaneChain {
                 pane_width_ms,
@@ -489,7 +489,7 @@ mod tests {
             };
             // The complete width domain permits different pane counts. Verify
             // the short reader's coverage, not one traversal-dependent width.
-            assert!(physical.physical.dag.nodes.iter().any(|node| matches!(
+            assert!(physical.plan.dag.nodes.iter().any(|node| matches!(
                 node.payload, asap_types::ir::Operator::ASAP(ASAPOp::SummaryMerge {newest_panes: Some(count), ..})
                     if u64::from(count) * pane_width_ms == window_ms && count < *pane_count
             )));
@@ -498,18 +498,17 @@ mod tests {
         assert!(physical.nodes_by_candidate[chains[0].0].is_some());
         // Validate this exact selected shared graph. Bounded search incumbents
         // need not choose it, and synthetic activation prices are never bills.
-        physical.physical.id = "shared-pane-regression".into();
+        physical.plan.id = "shared-pane-regression".into();
         let mut evaluator = crate::PlanSelector::new(
             &entries,
             &data,
-            crate::PlanningModels {
-                deployment_capabilities: &deployment,
-                ..crate::PlanningModels::builtin()
+            crate::SelectionModels {
+                ..crate::SelectionModels::builtin()
             },
             false,
         )
         .unwrap();
-        evaluator.offer(&physical.physical).unwrap();
+        evaluator.offer(&physical.plan).unwrap();
         let (selection, physical) = evaluator
             .finish()
             .expect("shared pane graph must pass accuracy and cost validation");
@@ -658,7 +657,7 @@ mod tests {
                 .values_non_negative = true;
             let mut realized = materialize_selected_candidates(
                 &inventory.configured_for_tests().physical,
-                &selected,
+                &selected.to_selected_candidates(),
                 &modes,
                 &roots,
                 &entries,
@@ -666,11 +665,11 @@ mod tests {
                 false,
             )
             .unwrap();
-            realized.physical.id = format!("shared-{kind}");
+            realized.plan.id = format!("shared-{kind}");
             let mut evaluator =
-                crate::PlanSelector::new(&entries, &data, crate::PlanningModels::builtin(), false)
+                crate::PlanSelector::new(&entries, &data, crate::SelectionModels::builtin(), false)
                     .unwrap();
-            evaluator.offer(&realized.physical).unwrap();
+            evaluator.offer(&realized.plan).unwrap();
             let (selection, physical) = evaluator
                 .finish()
                 .unwrap_or_else(|error| panic!("{kind}: {error:?}"));
@@ -840,7 +839,7 @@ mod tests {
             let mut realized =
                 asap_physical_asap_optimization::catalog::materialize_selected_candidates(
                     &inventory.configured_for_tests().physical,
-                    &selected,
+                    &selected.to_selected_candidates(),
                     &modes,
                     &roots,
                     &entries,
@@ -848,11 +847,11 @@ mod tests {
                     false,
                 )
                 .unwrap();
-            realized.physical.id = format!("independent-capacities-{share_both}");
+            realized.plan.id = format!("independent-capacities-{share_both}");
             let mut evaluator =
-                crate::PlanSelector::new(&entries, &data, crate::PlanningModels::builtin(), false)
+                crate::PlanSelector::new(&entries, &data, crate::SelectionModels::builtin(), false)
                     .unwrap();
-            evaluator.offer(&realized.physical).unwrap();
+            evaluator.offer(&realized.plan).unwrap();
             let (selection, physical) = evaluator.finish().unwrap();
             physical.dag.validate().unwrap();
             assert!(selection.costs[&selection.selected]
@@ -923,7 +922,7 @@ mod tests {
         )];
         let physical = materialize_selected_candidates(
             &inventory.configured_for_tests().physical,
-            &selected,
+            &selected.to_selected_candidates(),
             &modes,
             &roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>(),
             &entries,
@@ -931,7 +930,7 @@ mod tests {
             false,
         )
         .unwrap();
-        physical.physical.dag.validate().unwrap();
+        physical.plan.dag.validate().unwrap();
         assert_eq!(
             physical.nodes_by_candidate.iter().flatten().count(),
             selected.selected_candidates.len()
@@ -1146,7 +1145,7 @@ mod tests {
     // label, decides feasibility. Oversizing one remaining estimate stays legal.
     #[test]
     fn ratio_accuracy_is_validated_after_selecting_concrete_budget_shares() {
-        use crate::{PlanSelector, PlanningModels, SelectionError};
+        use crate::{ErrorSelectingPlan, PlanSelector, SelectionModels};
         use asap_accuracy::test_support::satisfies;
         use asap_cost::CalibrationFit;
         use asap_logical_asap_optimization::test_support::entry_with;
@@ -1196,7 +1195,7 @@ mod tests {
             target.clone(),
             QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(60_000))),
         )];
-        let models = PlanningModels::builtin();
+        let models = SelectionModels::builtin();
         for (share, one_exact, valid) in [(1, false, false), (2, false, true), (2, true, true)] {
             let mut memo = original.clone();
             let mut made_exact = false;
@@ -1248,7 +1247,7 @@ mod tests {
                 &roots,
                 &entries,
                 &data,
-                models.deployment_capabilities.query_time_results_retained,
+                false,
                 &mut |_, _, _| Materialization::NotMaterialized,
             )
             .unwrap()
@@ -1258,7 +1257,7 @@ mod tests {
             selector.offer(&physical).unwrap();
             match selector.finish() {
                 Ok(_) => assert!(valid, "undersized ratio must fail end-to-end accuracy"),
-                Err(SelectionError::NoValidCandidate(_)) => {
+                Err(ErrorSelectingPlan::NoValidCandidate(_)) => {
                     assert!(!valid, "properly sized ratio must be accepted")
                 }
                 Err(error) => panic!("unexpected evaluation error: {error}"),

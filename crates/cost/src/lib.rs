@@ -27,6 +27,7 @@ pub mod analytical;
 pub mod execution_demand;
 mod measured;
 pub mod operator_statistics;
+mod ranking;
 mod resources;
 pub mod state_bytes;
 mod usage;
@@ -36,9 +37,11 @@ pub use measured::{
     aggregate_lookup, lookup, CostTableProvenance, MeasuredOperationCost, MeasuredOperationCosts,
     NodePriceSource, OperatorCost, OperatorKind, StateFamily, SummaryOperation,
 };
+pub use ranking::{cheaper, worst_latency_ms, PlanRanking};
 pub use usage::{
-    family_name, kept_pane_chains, node_map, node_usage, pane_retention_ms, panes_of, plan_cost,
-    query_reach, trailing_window, NodeMap, NodeUsage, ProducerOutput,
+    family_name, kept_pane_chains, node_map, node_usage, pane_retention_ms,
+    pane_retention_ms_of_plan, panes_of, plan_cost, query_reach, trailing_window, NodeMap,
+    NodeUsage, ProducerOutput,
 };
 
 /// Cost per second of wall time; one unit is one CPU-millisecond under
@@ -241,10 +244,6 @@ pub enum ClusterObjective {
     LowestLatency,
     /// The smallest peak memory; ties by disk, then worst-query latency.
     LeastMemory,
-    /// Report every candidate no other beats on peak memory, disk and
-    /// worst-query latency at once (plan selection's `Selection::front`); select the
-    /// front's lowest-latency member.
-    ParetoFront,
 }
 
 /// The deployment's choices for plan selection (Stage 3): the cost model,

@@ -102,11 +102,11 @@ fn prepare_profile(
         return Ok(None);
     };
     if context
-        .original_roots
+        .query_roots
         .iter()
         .any(|root| !matches!(root, QueryRoot::Operator(_)))
-        || context.original_roots.len() != context.entries.len()
-        || context.original_roots.len() != configured.dag.query_roots.len()
+        || context.query_roots.len() != context.entries.len()
+        || context.query_roots.len() != configured.dag.query_roots.len()
     {
         return Ok(None);
     }
@@ -196,10 +196,6 @@ fn prepare_profile(
                             ) || (configuration.materialization
                                 == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
                                 && matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
-                                && context
-                                    .models
-                                    .deployment_capabilities
-                                    .query_time_results_retained
                                 && configuration
                                     .may_keep_across_evaluations_per_sole_reader_query
                                     .iter()
@@ -787,7 +783,7 @@ fn failure_budget(
     let result = (|| {
         let population = || {
             let mut sources = HashSet::new();
-            for root in context.original_roots {
+            for root in context.query_roots {
                 let QueryRoot::Operator(root) = root else {
                     return None;
                 };
@@ -850,7 +846,7 @@ fn failure_budget(
             }
             let mut cache = std::collections::HashMap::new();
             context
-                .original_roots
+                .query_roots
                 .iter()
                 .map(|root| match root {
                     QueryRoot::Operator(node) => {
@@ -1223,11 +1219,11 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: crate::PlanningModels::builtin(),
+            models: crate::SelectionModels::builtin(),
             calibration: asap_cost::CalibrationFit::default(),
         };
         let extracted = extract(&configured, &context).unwrap().unwrap();
@@ -1328,11 +1324,11 @@ mod tests {
                 let context = CandidatePlanningContext {
                     deadline: None,
                     refine_materialization: false,
-                    seed_separate_plans: false,
-                    original_roots: &originals,
+                    query_roots: &originals,
+                    realizer: &crate::search::test_realizer(&originals, &entries, &data),
                     entries: &entries,
                     data: &data,
-                    models: crate::PlanningModels::builtin(),
+                    models: crate::SelectionModels::builtin(),
                     calibration: asap_cost::CalibrationFit::default(),
                 };
                 let extracted = extract(&configured, &context).unwrap().unwrap();
@@ -1579,13 +1575,12 @@ mod tests {
                     let context = CandidatePlanningContext {
                         deadline: None,
                         refine_materialization: false,
-                        seed_separate_plans: false,
-                        original_roots: &originals,
+                        query_roots: &originals,
+                        realizer: &crate::search::test_realizer(&originals, &entries, &data),
                         entries: &entries,
                         data: &data,
-                        models: crate::PlanningModels {
-                            deployment_capabilities: &deployment,
-                            ..crate::PlanningModels::builtin().with_plan_selection(&settings)
+                        models: crate::SelectionModels {
+                            ..crate::SelectionModels::builtin().with_plan_selection(&settings)
                         },
                         calibration: asap_cost::CalibrationFit::default(),
                     };
@@ -1708,7 +1703,7 @@ mod tests {
                         boundary_settings.resource_speed.ms_per_cpu_op *= 1000.0 / work_ms;
                         boundary_settings.resource_speed.ms_per_scanned_byte *= 1000.0 / work_ms;
                         let boundary_context = CandidatePlanningContext {
-                            models: crate::PlanningModels {
+                            models: crate::SelectionModels {
                                 plan_selection: &boundary_settings,
                                 ..context.models
                             },
@@ -1739,7 +1734,7 @@ mod tests {
                                 },
                             );
                             let measured_context = CandidatePlanningContext {
-                                models: crate::PlanningModels {
+                                models: crate::SelectionModels {
                                     plan_selection: &measured,
                                     ..context.models
                                 },
@@ -1853,21 +1848,6 @@ mod tests {
                         assert!(
                             (actual - modeled).abs() <= 1e-9 * actual.max(1e-15),
                             "full-window class: {actual} vs {modeled}"
-                        );
-                        let forbidden =
-                            asap_logical_asap_optimization::DeploymentCapabilities::default();
-                        let no_retention = CandidatePlanningContext {
-                            models: crate::PlanningModels {
-                                deployment_capabilities: &forbidden,
-                                ..context.models
-                            },
-                            ..context
-                        };
-                        assert!(
-                            !extract(&configured, &no_retention)
-                                .unwrap()
-                                .unwrap()
-                                .supported[chain]
                         );
                     }
                     if algorithm == SketchAlgorithm::Hll {
@@ -2045,11 +2025,11 @@ mod tests {
                 let context = CandidatePlanningContext {
                     deadline: None,
                     refine_materialization: false,
-                    seed_separate_plans: false,
-                    original_roots: &originals,
+                    query_roots: &originals,
+                    realizer: &crate::search::test_realizer(&originals, &entries, &data),
                     entries: &entries,
                     data: &data,
-                    models: crate::PlanningModels::builtin(),
+                    models: crate::SelectionModels::builtin(),
                     calibration: asap_cost::CalibrationFit::default(),
                 };
                 let extracted = extract(&configured, &context).unwrap().unwrap();
@@ -2174,11 +2154,11 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: crate::PlanningModels::builtin(),
+            models: crate::SelectionModels::builtin(),
             calibration: asap_cost::CalibrationFit::default(),
         };
         let extracted = extract(&configured, &context).unwrap().unwrap();

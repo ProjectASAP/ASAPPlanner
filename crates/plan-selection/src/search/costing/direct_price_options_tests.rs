@@ -83,11 +83,11 @@ fn differing_producer_statistics_keep_both_price_interfaces() {
     let context = CandidatePlanningContext {
         deadline: None,
         refine_materialization: false,
-        seed_separate_plans: false,
-        original_roots: &roots,
+        query_roots: &roots,
+        realizer: &crate::search::test_realizer(&roots, &entries, &data),
         entries: &entries,
         data: &data,
-        models: crate::PlanningModels::builtin(),
+        models: crate::SelectionModels::builtin(),
         calibration: asap_cost::CalibrationFit::default(),
     };
     let extracted = extract_price_options(&configured, &context)
@@ -286,11 +286,11 @@ fn downstream_prices_follow_the_selected_producer_interface() {
     let context = CandidatePlanningContext {
         deadline: None,
         refine_materialization: false,
-        seed_separate_plans: false,
-        original_roots: &roots,
+        query_roots: &roots,
+        realizer: &crate::search::test_realizer(&roots, &entries, &data),
         entries: &entries,
         data: &data,
-        models: crate::PlanningModels::builtin(),
+        models: crate::SelectionModels::builtin(),
         calibration: asap_cost::CalibrationFit::default(),
     };
     let extracted = extract_price_options(&configured, &context)
@@ -518,11 +518,11 @@ fn producer_worker_buckets_remain_joint_choices_and_match_evaluator() {
     let context = CandidatePlanningContext {
         deadline: None,
         refine_materialization: false,
-        seed_separate_plans: false,
-        original_roots: &originals,
+        query_roots: &originals,
+        realizer: &crate::search::test_realizer(&originals, &entries, &data),
         entries: &entries,
         data: &data,
-        models: crate::PlanningModels::builtin(),
+        models: crate::SelectionModels::builtin(),
         calibration: asap_cost::CalibrationFit::default(),
     };
     let initial = extract(&configured, &context).unwrap().unwrap();
@@ -548,7 +548,7 @@ fn producer_worker_buckets_remain_joint_choices_and_match_evaluator() {
             memory_bytes_per_state: None,
         });
     let context = CandidatePlanningContext {
-        models: crate::PlanningModels {
+        models: crate::SelectionModels {
             plan_selection: &settings,
             ..context.models
         },
@@ -735,11 +735,11 @@ fn mixed_schedule_joint_prices_match_the_real_evaluator() {
     let context = CandidatePlanningContext {
         deadline: None,
         refine_materialization: false,
-        seed_separate_plans: false,
-        original_roots: &roots,
+        query_roots: &roots,
+        realizer: &crate::search::test_realizer(&roots, &entries, &data),
         entries: &entries,
         data: &data,
-        models: crate::PlanningModels::builtin(),
+        models: crate::SelectionModels::builtin(),
         calibration: asap_cost::CalibrationFit::default(),
     };
     let profile = extract_price_options(&configured, &context)

@@ -3,12 +3,8 @@
 //! tests, so both see the same candidates, ids and selection.
 
 use asap_frontend_sql::SqlCatalog;
-use asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidates;
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
-use asap_plan_selection::pass::{run_stage1_to_stage3_with, Stage1ToStage3Search};
-pub use asap_plan_selection::pass::{LogicalCandidate, MemoSteps, PrunedCandidate};
-use asap_plan_selection::PlanningModels;
-use asap_plan_selection::{Selection, SelectionError};
+use asap_planner::{run_planning, PlanSearchSettings, PlanningModels, PlanningRun};
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
@@ -16,20 +12,74 @@ use asap_types::workload::{DataWorkload, PlanningWorkload, QueryWorkloadEntry};
 use serde_json::Value;
 use std::collections::HashSet;
 
+use crate::memo_pricing::{reference_enumeration, ReferenceEnumeration};
+
+/// The memo choices `--exhaustive` prices when no limit is given.
+pub const DEFAULT_REFERENCE_CHOICES: usize = 10_000;
+
 #[derive(Debug)]
 pub struct PlanningStagesRun {
     /// The query-language frontends' roots, one per workload entry.
     pub stage0_query_language_frontends: Vec<QueryRoot>,
-    /// Stage 1, Pass 1: the per-computation candidates (query `i` has id
-    /// `i`).
-    pub stage1_pass1_per_computation: PerComputationCandidates,
-    pub stage1_logical_asap_optimization: Vec<LogicalCandidate>,
-    /// Evaluated physical plans reference their archived logical source by ID.
-    pub stage2_physical_asap_optimization: Vec<PhysicalWorkloadPlan>,
-    pub stage2_pruned: Vec<PrunedCandidate>,
-    pub stage3_plan_selection: Result<Selection, SelectionError>,
-    /// The memo after each step and the selected plan's choice over it.
-    pub memo_steps: Option<MemoSteps>,
+    /// The facade's run: Pass 1, the pane-width rounds and the selection.
+    pub run: PlanningRun,
+    /// `--exhaustive`: the selected round's memo choices, each implemented
+    /// by Stage 2 and all priced by the reference pricer.
+    pub reference: Option<ReferenceEnumeration>,
+}
+
+/// A logical candidate the document shows: its id and composed roots, or
+/// why they do not compose.
+#[derive(Debug, Clone)]
+pub struct ShownLogicalCandidate {
+    pub id: String,
+    pub roots: Result<Vec<QueryRoot>, String>,
+}
+
+impl PlanningStagesRun {
+    /// The logical candidates the document shows: the selected plan (`L1`;
+    /// its roots as Stage 2 built them, with Stage 3's weight proofs), then
+    /// under `--exhaustive` the reference enumeration's choices (`E<n>`).
+    pub fn logical_candidates(&self) -> Vec<ShownLogicalCandidate> {
+        let selected = self
+            .run
+            .selected_plan
+            .iter()
+            .map(|roots| ShownLogicalCandidate {
+                id: "L1".into(),
+                roots: Ok(roots.clone()),
+            });
+        let enumerated = self.reference.iter().flat_map(|reference| {
+            reference
+                .choices
+                .iter()
+                .map(|choice| ShownLogicalCandidate {
+                    id: choice.id.clone(),
+                    roots: choice.roots.clone(),
+                })
+        });
+        selected.chain(enumerated).collect()
+    }
+
+    /// The physical candidates the document shows: the selected plan as
+    /// Stage 2 built it (`P1`, from `L1`), then under `--exhaustive` every
+    /// plan the reference pricer priced (`E<n>-<k>`).
+    pub fn physical_candidates(&self) -> Vec<PhysicalWorkloadPlan> {
+        let selected =
+            self.run
+                .selected_physical_plan
+                .iter()
+                .map(|realized| PhysicalWorkloadPlan {
+                    id: "P1".into(),
+                    from_logical: "L1".into(),
+                    ..realized.plan.clone()
+                });
+        let enumerated = self
+            .reference
+            .iter()
+            .flat_map(|reference| reference.physical.iter().cloned());
+        selected.chain(enumerated).collect()
+    }
 }
 
 /// Lower a PromQL workload, each series' identity as a column (the row
@@ -101,10 +151,9 @@ impl From<PlanningStagesError> for String {
     }
 }
 
-/// Traverse the candidate-connection catalog while archiving evaluated plans.
-/// `max_combinations` bounds evaluated assignments, not a Cartesian product.
-/// Exhaustive mode uses the same engine and honors its time and evaluation
-/// budgets; consult the search report before claiming catalog exhaustion.
+/// The planning stages over `workload`, with the reference enumeration of
+/// at most `max_combinations` memo choices (default
+/// [`DEFAULT_REFERENCE_CHOICES`]).
 pub fn run_planning_stages(
     workload: &PlanningWorkload,
     roots: Vec<QueryRoot>,
@@ -124,10 +173,8 @@ pub fn run_planning_stages(
 /// [`run_planning_stages`] over roots lowered from any mix of query
 /// languages: query `i` is `roots[i]`, with workload entry `entries[i]`
 /// (its accuracy target, latency bound, recurrence and predictability).
-/// Plan selection compares candidates under `models.plan_selection`'s cost
-/// model and applies the deployment capabilities.
 /// `models.deployment_capabilities` is what the executor can run and keep:
-/// Pass 1 offers only the summaries it supports, and Stages 2 and 3 read its
+/// Pass 1 offers only the summaries it supports, and Stage 2 reads its
 /// retention.
 pub fn run_planning_stages_over(
     roots: Vec<QueryRoot>,
@@ -141,17 +188,14 @@ pub fn run_planning_stages_over(
         entries,
         data,
         models,
-        Stage1ToStage3Search {
-            max_evaluations: max_combinations,
-            ..Stage1ToStage3Search::exhaustive()
-        },
+        PlanSearchSettings::default(),
+        Some(max_combinations.unwrap_or(DEFAULT_REFERENCE_CHOICES)),
     )
 }
 
-/// The same bounded candidate-connection search used by `plan_installable`.
-/// The run retains the selected logical and physical plans, validation
-/// diagnostics, and search metrics. Use the executor's summary capabilities
-/// in `models` when comparing with installation behavior.
+/// The facade's planning, as `plan_installable` runs it, without a
+/// reference enumeration. Use the executor's summary capabilities in
+/// `models` when comparing with installation behavior.
 pub fn run_default_search_over(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],
@@ -163,49 +207,33 @@ pub fn run_default_search_over(
         entries,
         data,
         models,
-        Stage1ToStage3Search::default(),
+        PlanSearchSettings::default(),
+        None,
     )
 }
 
-/// [`run_default_search_over`] with the search `search` (e.g. the memo
-/// over logical sub-expressions searched as a MILP, with a time limit).
+/// The facade's planning with `settings`, and with `reference_choices`
+/// the reference enumeration of that many memo choices.
 pub fn run_search_over(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
-    search: Stage1ToStage3Search,
+    settings: PlanSearchSettings,
+    reference_choices: Option<usize>,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
     validate(&roots)?;
-    // Use the production entry point so Pass 1 generation is included in the
-    // same planning budget and report rather than happening outside the timer.
-    let run = run_stage1_to_stage3_with(
-        roots.iter().cloned().enumerate().collect(),
-        entries,
-        data,
-        models,
-        search,
-    )
-    .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?;
-    if let Some(Ok(roots)) = run.stage1_selected.as_ref().map(|c| &c.roots) {
+    let run = run_planning(roots.clone(), entries, data, models, settings)
+        .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?;
+    if let Some(roots) = &run.selected_plan {
         validate(roots)?;
     }
+    let reference = reference_choices
+        .and_then(|max| reference_enumeration(&run, &roots, entries, data, models, max));
     Ok(PlanningStagesRun {
         stage0_query_language_frontends: roots,
-        stage1_pass1_per_computation: run.stage1_pass1_per_computation,
-        stage1_logical_asap_optimization: if search.keep_every_candidate {
-            run.stage1_logical_asap_optimization
-        } else {
-            run.stage1_selected.into_iter().collect()
-        },
-        stage2_physical_asap_optimization: if search.keep_every_candidate {
-            run.stage2_physical_asap_optimization
-        } else {
-            run.stage3_selected.into_iter().collect()
-        },
-        stage2_pruned: run.stage2_pruned,
-        stage3_plan_selection: run.stage3_plan_selection,
-        memo_steps: run.memo_steps,
+        run,
+        reference,
     })
 }
 

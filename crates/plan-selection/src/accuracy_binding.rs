@@ -20,7 +20,7 @@ use asap_types::ir::scalar::ScalarValue;
 use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode, QueryRoot, ScalarExpr};
 use asap_types::workload::DataWorkload;
 
-use crate::PlanningModels;
+use crate::SelectionModels;
 use asap_types::workload::bounds::declared_non_negative;
 
 /// The operator nodes a query root reads.
@@ -48,7 +48,7 @@ pub(crate) fn bound_root_guarantee(
     root: &QueryRoot,
     series: Option<u64>,
     data: &DataWorkload,
-    models: &PlanningModels<'_>,
+    models: &SelectionModels<'_>,
 ) -> Option<AccuracyGuarantee> {
     let domains = operand_domain_bounds(root, series, data, models);
     let bind = |guarantee: &AccuracyGuarantee| {
@@ -148,7 +148,7 @@ impl<'a> DomainOperand<'a> {
         }
     }
 
-    fn domain(&self, models: &PlanningModels<'_>) -> Option<OperandDomain> {
+    fn domain(&self, models: &SelectionModels<'_>) -> Option<OperandDomain> {
         match self {
             Self::Node(node) => models.evidence.operand_domain(node),
             Self::Literal(value) => Some(OperandDomain {
@@ -177,7 +177,7 @@ fn operand_domain_bounds(
     root: &QueryRoot,
     series: Option<u64>,
     data: &DataWorkload,
-    models: &PlanningModels<'_>,
+    models: &SelectionModels<'_>,
 ) -> HashMap<&'static str, Option<f64>> {
     let mut operations = Vec::new();
     if let QueryRoot::Scalar(expr) = root {
@@ -270,7 +270,7 @@ fn domain_bound(
     operation: &DomainOperation<'_>,
     series: Option<u64>,
     data: &DataWorkload,
-    models: &PlanningModels<'_>,
+    models: &SelectionModels<'_>,
 ) -> Option<f64> {
     let [(x, gx), (y, gy)] = &operation.operands;
     let (dx, dy) = (x.domain(models)?, y.domain(models)?);

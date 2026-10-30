@@ -531,7 +531,7 @@ async fn the_plan_carries_stage3s_predicted_usage() {
         "a pane-only plan"
     );
     let selection = selection.as_ref().expect("Stage 3's report");
-    let usage = selection.predicted_usage.as_ref().expect("predicted usage");
+    let usage = &selection.predicted_usage;
     let node_costs: f64 = usage
         .per_node
         .iter()
@@ -1779,9 +1779,7 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
     let (plan, selection) = plan_p99_avg(true).await.expect("a valid plan");
     let selection = selection.as_ref().expect("Stage 3's report");
     let views = plan.materialized_views().unwrap();
-    // Its id depends on what the search enumerates: without raw data the
-    // search builds only the plans that scan nothing at query time.
-    assert!(!selection.selected_candidate_id.is_empty());
+    assert!(selection.cost_per_second.is_some());
     assert!(!views.is_empty(), "panes built at ingestion");
     assert_eq!(
         stored_definitions(&plan, "DDSketch").len(),

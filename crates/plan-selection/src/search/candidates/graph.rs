@@ -1,6 +1,39 @@
 //! The Stage 3 part of the candidate graph: structural witnesses of rejected
 //! selections, checked against the decoded selected graph.
-use asap_types::stages::{ProducerConsumerConnection, QueryRootAssignment, SelectedCandidateGraph};
+use asap_types::stages::{PhysicalCandidateId, ProducerConsumerConnection, SelectedCandidates};
+
+/// One output reference's producing candidate in a decoded selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct QueryRootAssignment {
+    /// The output reference (index over the group references of the query roots).
+    pub query_root: usize,
+    pub candidate: PhysicalCandidateId,
+}
+
+/// Today's engine's decoded selection: a [`SelectedCandidates`] with the
+/// cost the MILP modeled for it, which the engine compares with the cost it
+/// validates (#1047 P7 keeps it inside Stage 3).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SelectedCandidateGraph {
+    pub selected_candidates: Vec<PhysicalCandidateId>,
+    pub connections: Vec<ProducerConsumerConnection>,
+    pub query_roots: Vec<QueryRootAssignment>,
+    pub modeled_cost: f64,
+}
+
+impl SelectedCandidateGraph {
+    /// The selection as Stage 2 realizes it: one candidate per output
+    /// reference, in output order.
+    pub(crate) fn to_selected_candidates(&self) -> SelectedCandidates {
+        let mut roots = self.query_roots.clone();
+        roots.sort_by_key(|root| root.query_root);
+        SelectedCandidates {
+            candidates: self.selected_candidates.clone(),
+            connections: self.connections.clone(),
+            query_output_candidates: roots.into_iter().map(|root| root.candidate).collect(),
+        }
+    }
+}
 
 /// A certified size-independent failure of a complete query dependency closure.
 /// The evaluator certifies semantics; this module verifies the structural witness.

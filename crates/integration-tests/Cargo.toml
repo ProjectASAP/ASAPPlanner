@@ -13,7 +13,11 @@ asap-logical-asap-optimization = { path = "../logical-asap-optimization", featur
 asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
 asap-accuracy = { path = "../accuracy" }
 asap-cost = { path = "../cost" }
-asap-plan-selection = { path = "../plan-selection" }
+asap-plan-selection = { path = "../plan-selection", features = ["reference-pricer"] }
+# The fixtures plan through the facade and the developer tools' reference
+# enumeration.
+asap-planner = { path = "../planner", features = ["test-support"] }
+asap-devtools = { path = "../devtools" }
 
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }

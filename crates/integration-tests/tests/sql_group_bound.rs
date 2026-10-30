@@ -84,7 +84,7 @@ fn run_group_choices(workload: &PlanningWorkload) -> Run {
         workload,
         roots,
         candidates,
-        asap_plan_selection::PlanningModels::builtin(),
+        asap_planner::PlanningModels::builtin(),
     )
 }
 

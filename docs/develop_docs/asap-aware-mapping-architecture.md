@@ -20,8 +20,8 @@ depends on the executor.
 | `asap-accuracy` (`crates/accuracy`) | The accuracy model the stages share: the analytical rules (per-family estimators, composition, budget split, target check) and the deployment's `AccuracyModel` and `AccuracyEvidenceProvider`; depends only on `asap-types` |
 | `asap-physical-asap-optimization` (`crates/physical-asap-optimization`) | Stage 2: materialization and physical operator implementation |
 | `asap-cost` (`crates/cost`) | The cost model the stages share: resource-usage estimation (the analytical per-operator model, measured operation costs, state byte sizes) and the cost models (`ResourceUsage`, `CostModel`, `CostInputs`); depends only on `asap-types` |
-| `asap-plan-selection` (`crates/plan-selection`) | Stage 3: accuracy and latency checks, pricing candidates with `asap-cost`; the planning models (`PlanningModels`) and the Stage 1 to Stage 3 driver (`pass`) |
-| `asap-planner` (`crates/planner`) | The facade: `e2e_plan` runs Stage 0, then the optimization pass (`Stage1ToStage3Pass` by default) |
+| `asap-plan-selection` (`crates/plan-selection`) | Stage 3: `select_plan` over Stage 2's output; accuracy and latency checks, pricing candidates with `asap-cost` |
+| `asap-planner` (`crates/planner`) | The facade: `e2e_plan` runs Stage 0, then the optimization pass (`Stage1ToStage3Pass` by default), which orchestrates Stages 1–3 (`run_planning`); the planning models (`PlanningModels`) and the `OptimizationPass` trait |
 | `asap-executor` (`crates/executor`) | Stage 4, the reference executor: operators and summary kernels over `asap_sketchlib`; it runs a `PhysicalASAPDAG` |
 | `asap-devtools` | `stage_pipeline` and the other inspection tools, the design-doc example workloads (`planner_layering_examples`) and the candidate labels |
 
@@ -29,8 +29,8 @@ depends on the executor.
 asap-types ◄── frontends (Stage 0)
 asap-types ◄── asap-cost (shared cost model) ◄── asap-plan-selection
 asap-types ◄── asap-accuracy (shared accuracy model) ◄── asap-logical-asap-optimization, asap-plan-selection
-asap-types ◄── asap-logical-asap-optimization (Stage 1) ◄── asap-plan-selection
-asap-types ◄── asap-physical-asap-optimization (Stage 2) ◄── asap-plan-selection
+asap-types ◄── asap-logical-asap-optimization (Stage 1) ◄── asap-planner
+asap-types ◄── asap-physical-asap-optimization (Stage 2) ◄── asap-planner
 asap-plan-selection (Stage 3) ◄── asap-planner (also depends on the frontends)
 asap-types ◄── asap-executor (Stage 4; no stage crate depends on it)
 ```
@@ -50,14 +50,16 @@ LogicalASAPMemoCandidates
   │  asap_physical_asap_optimization::catalog::generate_physical_asap_memo_candidates  Stage 2
   ▼
 PhysicalASAPMemoCandidates (operator nodes per timing/materialization + pruned_candidates)
-  │  asap_plan_selection search::route::candidate_connection_search     Stage 3
+  │  asap_plan_selection::select_plan (with Stage 2's AssignmentRealizer) Stage 3
   ▼
-Selection (selected id and plan, costs, accepted, rejected, front)
+Selection (selected_candidates, cost, accepted_accuracy_per_query, search_report)
 ```
 
-`asap_plan_selection::pass::run_stage1_to_stage3` runs all of it over lowered roots and returns
-every stage's candidates (`Stage1ToStage3Run`); `Stage1ToStage3Pass` is the
-same pipeline behind the `OptimizationPass` trait that `asap-planner` calls.
+`asap_planner::run_planning` runs all of it over lowered roots: Pass 1 once,
+then Pass 2, Stage 2 and Stage 3 per pane-width round, keeping the best
+round's selection and building that plan with `AssignmentRealizer::realize`.
+It returns every stage's output (`PlanningRun`); `Stage1ToStage3Pass` is the
+same pipeline behind the `OptimizationPass` trait.
 
 | Concern | Where it lives |
 | --- | --- |
@@ -68,11 +70,11 @@ same pipeline behind the `OptimizationPass` trait that `asap-planner` calls.
 | What each summary family can merge and answer (`FamilyCapability::of`: `merge_inputs`, `readouts`) | `asap-types`, `ir/schema/family_capability.rs` |
 | Stage 2: materialization options per summary build (`NotMaterialized`, `MatAtIngestion`, `MatAtQuery`, `MatAtQueryKeptAcrossEvaluations`), ingestion-time eligibility, physical operator implementation | `asap-physical-asap-optimization` |
 | Timing and data-state edge rules applied from a `MaterializationAssignment` | `asap-types`, `ir/properties/timing.rs` and `ir/properties/execution_data_state.rs`; `Materialization` in `physical/materialization.rs` |
-| Stage 3: accuracy check, latency check, deployment-capability checks, resource usage (`ResourceUsage`), cost models 1–3 (`CostModel`), measured operation costs | `asap-plan-selection`, `lib.rs`; `asap-cost`, `lib.rs` and `measured.rs` |
+| Stage 3: accuracy check, latency check, resource usage (`ResourceUsage`), cost models 1–3 (`CostModel`), measured operation costs | `asap-plan-selection`, `lib.rs`; `asap-cost`, `lib.rs` and `measured.rs` |
 | The analytical per-operator resource model Stage 3 measures with | `asap-cost`, `analytical.rs` and `operator_statistics.rs` |
 | The accuracy algebra: per-family guarantees, composition, budget split; guarantee propagation through a DAG; sizing a summary for its target, (ε, δ) budget and default sizes | `asap-accuracy` (`AccuracyModel`, `BuiltinAccuracyModel`, `estimators/`, `composition.rs`, `budget.rs`, `propagation.rs`, `sizing.rs`) |
-| What the executor supports (`DeploymentCapabilities`) | `asap-logical-asap-optimization`, `deployment_capabilities.rs`; Pass 1 receives only `supported_summaries` and Stage 2 only `query_time_results_retained` (a `bool` argument, so Stage 2 does not depend on the Stage 1 crate); Stage 3 still receives the whole struct through `PlanningModels` and reads only `raw_data_retained` |
-| The inputs every stage reads (`PlanningModels`: accuracy model, evidence, plan selection settings, deployment capabilities) and the `OptimizationPass` trait | `asap-plan-selection`, `search/mod.rs` (public path `asap_plan_selection::pass`) |
+| What the executor supports (`DeploymentCapabilities`) | `asap-logical-asap-optimization`, `deployment_capabilities.rs`; Pass 1 receives only `supported_summaries` and Stage 2 only `query_time_results_retained` and `raw_data_retained` (`bool` arguments, so Stage 2 does not depend on the Stage 1 crate); Stage 3 reads none of it |
+| The inputs every stage reads (`PlanningModels`: accuracy model, evidence, plan selection settings, deployment capabilities) and the `OptimizationPass` trait | `asap-planner`, `pass.rs`; the facade gives Stage 3 only `AccuracyCheckInputs` and `CostInputs` |
 
 The current production search organizes these computations in memo result/state
 groups and jointly selects physical candidates and connections; it does not

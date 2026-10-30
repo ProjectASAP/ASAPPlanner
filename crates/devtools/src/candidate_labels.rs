@@ -18,12 +18,12 @@ use asap_types::physical::Materialization;
 
 use crate::planning_stages::PlanningStagesRun;
 
-/// The label of every logical (`L<n>`) and physical (`P<n>`, `P<n>-m<k>`)
-/// candidate of `run`, by id.
+/// The label of every logical and physical candidate the document shows
+/// of `run` ([`PlanningStagesRun::logical_candidates`],
+/// [`PlanningStagesRun::physical_candidates`]), by id.
 pub fn candidate_labels(run: &PlanningStagesRun) -> BTreeMap<String, String> {
-    let logical = &run.stage1_logical_asap_optimization;
     let mut labels = BTreeMap::new();
-    for candidate in logical {
+    for candidate in run.logical_candidates() {
         let label = candidate
             .roots
             .as_deref()
@@ -31,7 +31,7 @@ pub fn candidate_labels(run: &PlanningStagesRun) -> BTreeMap<String, String> {
             .unwrap_or_else(|_| "Unimplemented candidate".into());
         labels.insert(candidate.id.clone(), label);
     }
-    for candidate in &run.stage2_physical_asap_optimization {
+    for candidate in &run.physical_candidates() {
         let logical = labels
             .get(&candidate.from_logical)
             .cloned()

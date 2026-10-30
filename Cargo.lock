@@ -330,7 +330,7 @@ dependencies = [
  "asap-executor",
  "asap-frontend-promql",
  "asap-logical-asap-optimization",
- "asap-plan-selection",
+ "asap-planner",
  "asap-types",
  "asap_sketchlib",
  "chrono",
@@ -369,7 +369,7 @@ dependencies = [
  "asap-accuracy",
  "asap-frontend-common",
  "asap-logical-asap-optimization",
- "asap-plan-selection",
+ "asap-planner",
  "asap-types",
  "promql-parser",
 ]
@@ -381,7 +381,7 @@ dependencies = [
  "asap-frontend-common",
  "asap-frontend-sql",
  "asap-logical-asap-optimization",
- "asap-plan-selection",
+ "asap-planner",
  "asap-sql-function-catalog",
  "asap-types",
  "datafusion",
@@ -431,6 +431,7 @@ name = "asap-physical-asap-optimization"
 version = "0.1.0"
 dependencies = [
  "asap-accuracy",
+ "asap-cost",
  "asap-logical-asap-optimization",
  "asap-types",
  "rmp-serde",

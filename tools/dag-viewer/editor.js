@@ -137,7 +137,7 @@
       if (!window.StageViewer.showDocument(result, `editor · ${count} quer${count === 1 ? 'y' : 'ies'}`)) {
         throw new Error('the viewer could not show the planner output (see above)');
       }
-      const selection = result.stage3_plan_selection;
+      const selection = selectionTable(result);
       const cost = selection.costs[selection.selected];
       plannerStatus.textContent = selection.selected
         ? `Stage 3 selected ${selection.selected} (cost ${cost.cost_per_second} ${cost.cost_unit}) of ${result.stage1_logical_asap_optimization.combinations} candidates.`

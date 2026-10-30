@@ -23,7 +23,7 @@
 //! costing and display) is not the runtime's concern: the installable DAG
 //! has every chain expanded into the panes the executor runs.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_cost::{NodePriceSource, OperatorKind};
@@ -71,18 +71,14 @@ pub struct InstallablePlan {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelectedPlanReport {
-    /// The selected physical candidate's id, e.g. `P3-m1`.
-    pub selected_candidate_id: String,
-    /// Its price per second; `None` under cost model 3, which has no
-    /// prices, or when Stage 3 recorded no cost for it.
+    /// Its cost per second; `None` under cost model 3, which has no
+    /// prices.
     pub cost_per_second: Option<f64>,
     /// The resources Stage 3 predicts it uses, for a runtime to report
-    /// against what it measures; `None` when Stage 3 recorded no cost.
-    pub predicted_usage: Option<PredictedUsage>,
-    /// What the search checked and discarded on the way
-    /// (`Selection::search`); empty when not recorded.
-    #[serde(default)]
-    pub search: SearchReport,
+    /// against what it measures.
+    pub predicted_usage: PredictedUsage,
+    /// How the search behind the selection ended (`Selection::search_report`).
+    pub search_report: SearchReport,
     /// The workload queries (entry indices) whose output Stage 3 accepted
     /// only because the accuracy model accepts it regardless of its
     /// guarantee (e.g. `CostInputs::ignore_accuracy_guarantees`):
@@ -251,19 +247,27 @@ pub async fn plan_installable(
         pass: input.pass,
     };
     let output = e2e_plan(input).await?;
-    installable_plan_of(&output.roots(), output.selection.as_ref(), &entries)
-        .map_err(PlanError::Installable)
+    installable_plan_of(
+        &output.roots(),
+        output.selection.as_ref(),
+        &output.pane_retention_ms,
+        &entries,
+    )
+    .map_err(PlanError::Installable)
 }
 
 /// The installable plan of `roots`, the selected roots of a workload whose
 /// entries are `entries` (in `QueryWorkload::entries()` order), with
-/// Stage 3's report of its `selection` of them when there is one: what
-/// [`plan_installable`] returns after planning. A caller that runs the
-/// planning stages itself (e.g. a developer tool that keeps every
-/// candidate) uses it to see what a runtime would install.
+/// Stage 3's report of its `selection` of them when there is one, and the
+/// pane retention of the selected plan's kept chains
+/// (`RealizedPlan::pane_retention_ms`, by node id in the DAG `roots`
+/// export): what [`plan_installable`] returns after planning. A caller that
+/// runs the planning stages itself (e.g. a developer tool) uses it to see
+/// what a runtime would install.
 pub fn installable_plan_of(
     roots: &[QueryRoot],
     selection: Option<&Selection>,
+    pane_retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
     entries: &[QueryWorkloadEntry],
 ) -> Result<(InstallablePlan, Option<SelectedPlanReport>), InstallablePlanError> {
     // Each query's longest range-evaluation span, which the views it
@@ -276,7 +280,7 @@ pub fn installable_plan_of(
     // Every node keeps the timing Stage 3 gave it.
     let timed =
         apply_materialization_timings_to_roots(roots, &MaterializationAssignment::default())?;
-    let expanded = pane_retention_of_expanded_panes(&timed, selection)?;
+    let expanded = pane_retention_of_expanded_panes(&timed, pane_retention_ms)?;
     let report = selection.map(|selection| report_of(selection, &expanded.installed_node_ids));
     let reader_span_ms_by_node = reader_span_ms_by_node(&expanded.dag, &range_spans_ms);
     let plan = InstallablePlan::of_dag(
@@ -597,12 +601,12 @@ struct ExpandedWithRetention {
 }
 
 /// Expand the pane chains of `timed` and export it; each pane takes the
-/// retention Stage 3 gives its chain (`Selection::pane_retention_ms`, by
+/// retention Stage 2 gives its chain (`RealizedPlan::pane_retention_ms`, by
 /// node id in the selected candidate's physical DAG, which is `timed`
 /// exported).
 fn pane_retention_of_expanded_panes(
     timed: &[QueryRoot],
-    selection: Option<&Selection>,
+    pane_retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
 ) -> Result<ExpandedWithRetention, InstallablePlanError> {
     use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
     let selected = compile_physical_asap_workload_with_node_ids(timed)?;
@@ -610,7 +614,7 @@ fn pane_retention_of_expanded_panes(
     // of panes. The complete expanded-plan validation remains authoritative.
     selected.dag.check_raw_data_windows()?;
     let mut retention_by_chain: Vec<(Rc<OperatorNode>, u64)> = Vec::new();
-    for (&node_id, &retention_ms) in selection.iter().flat_map(|s| &s.pane_retention_ms) {
+    for (&node_id, &retention_ms) in pane_retention_ms {
         let chain = selected
             .node_ids
             .operator_node(node_id)
@@ -684,26 +688,23 @@ fn pane_retention_of_expanded_panes(
     })
 }
 
-/// Stage 3's record of its selected candidate.
+/// Stage 3's record of its selected plan.
 fn report_of(
     selection: &Selection,
     installed_node_ids: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
 ) -> SelectedPlanReport {
-    let cost = selection.costs.get(&selection.selected);
+    let cost = &selection.cost;
     let queries_accepted_without_guarantee = selection
-        .accepted
-        .get(&selection.selected)
-        .into_iter()
-        .flatten()
+        .accepted_accuracy_per_query
+        .iter()
         .enumerate()
         .filter(|(_, accepted)| accepted.guarantee_check_rejection.is_some())
         .map(|(query, _)| query)
         .collect();
     SelectedPlanReport {
         queries_accepted_without_guarantee,
-        selected_candidate_id: selection.selected.clone(),
-        cost_per_second: cost.and_then(|cost| cost.cost_per_second),
-        predicted_usage: cost.map(|cost| PredictedUsage {
+        cost_per_second: cost.cost_per_second,
+        predicted_usage: PredictedUsage {
             cpu_core_seconds_per_second: cost
                 .per_node
                 .values()
@@ -736,8 +737,8 @@ fn report_of(
                     query_ms: latency.query_ms,
                 })
                 .collect(),
-        }),
-        search: selection.search.clone(),
+        },
+        search_report: selection.search_report.clone(),
     }
 }
 

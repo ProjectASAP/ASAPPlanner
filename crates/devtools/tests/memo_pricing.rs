@@ -10,7 +10,7 @@ use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_
 use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
 use asap_logical_asap_optimization::pass2::memo::enumeration::enumerate;
 use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
-use asap_plan_selection::PlanningModels;
+use asap_planner::PlanningModels;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::QueryRoot;
 use asap_types::stages::CandidateMemo;
@@ -127,7 +127,7 @@ fn selected(planned: &Planned, models: PlanningModels<'_>) -> SelectedBaseline {
         models,
     )
     .unwrap();
-    SelectedBaseline::of(run.stage3_plan_selection.as_ref().expect("a selection"))
+    SelectedBaseline::of(run.run.selection.as_ref().expect("a selection"))
 }
 
 /// Every choice of `planned`'s Pass 1 memo (the enumeration is complete),

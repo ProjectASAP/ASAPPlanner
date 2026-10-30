@@ -507,10 +507,14 @@ into one plan and check and cost it with Stage 2 and Stage 3. The search is a
 candidate-connection search: a MILP (mixed-integer linear program) over the graph of candidates and the
 groups they read proposes a choice from local cost bounds, Stage 2 and
 Stage 3 validate and cost it, and each validated cost constrains the MILP
-again (evaluator-backed refinement). It first finds an incumbent (the best validated plan so far) on seed pane
-grids, then exposes finer pane widths; only a completed round over the full
-pane-width domain bounds the declared search space, and otherwise the result
-is the best validated plan found. On tiny catalogs, tests check that this
+again (evaluator-backed refinement). Stage 3 realizes each proposed choice
+through Stage 2's `AssignmentRealizer`, which the facade builds and passes in,
+so Stage 3 does not depend on the Stage 2 crate. The facade first finds an
+incumbent (the best validated plan so far) in a round over seed pane grids,
+then exposes finer pane widths in later rounds, each round running Pass 2,
+Stage 2 and Stage 3; only a completed round over the full pane-width domain
+bounds the declared search space, and otherwise the result is the best
+validated plan found. On tiny catalogs, tests check that this
 bounded search selects the same plan cost as a complete traversal of the same
 catalog under every cost model, and that the MILP's selection matches an
 independent enumeration of the candidate graph.
@@ -519,8 +523,9 @@ independent enumeration of the candidate graph.
 
 The memo rules are in `crates/logical-asap-optimization/src/` (module
 `memo`); the memo types Stage 1 hands Stage 2 are in
-`crates/types/src/stages/` (`asap_types::stages`); the search over the memo
-is in `crates/plan-selection/src/search/`.
+`crates/types/src/stages/` (`asap_types::stages`); the facade that runs the
+stages is in `crates/planner/src/run.rs`; the search over Stage 2's
+candidates is in `crates/plan-selection/src/search/`.
 
 | Step | Entry point | Path |
 |---|---|---|
@@ -529,7 +534,7 @@ is in `crates/plan-selection/src/search/`.
 | Memo types | `CandidateMemo`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup`, `LogicalASAPMemoCandidates`, `CandidateGenerationTimeout`, `root_groups`, `queries_rooted_at` | `crates/types/src/stages/` (`asap_types::stages`) |
 | Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, one pane-width round over a `Pass2RoundState` (kept between rounds: the memo after step 1 and before the rules, and the widths already generated). It calls in this order: 1. window composition for the round's new widths (`extend_local_window_composition`); 2–9. the rules in `pass2/memo/rules/`: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; 10. `add_shared_summary_state_groups`, the shared builds | `pass2/logical_memo_candidates.rs` (`LogicalASAPMemoCandidates` itself: `asap_types::stages`); `pass2/memo/window_candidates.rs`, `pass2/memo/rules/`, `pass2/memo/state_groups.rs`, `pass2/memo/shared_configurations.rs` |
 | Memo to candidate DAGs | `enumerate`, `build_logical_asap_dags_from_chosen_candidates`, `ChosenCandidatePerMemoGroup`, `AllChosenCandidatesPerMemoGroup`, `ErrorBuildingLogicalASAPDagsFromChosenCandidates` | `pass2/memo/enumeration.rs` (module `pass2::memo::enumeration`) |
-| Production memo build and search | `run_stage1_to_stage3_with` builds the DAG of logical memo groups (`pipeline.rs`); `candidate_connection_search` (`route.rs`) builds the candidate memo for each pane-width round: query pruning (first round), `generate_per_computation_logical_memo_candidates` (first round), `generate_logical_asap_memo_candidates` (the `Pass2RoundState` is kept in `DomainProgress.pass2_round` between rounds); then `candidates/`, `milp/` and `refinement/` | `crates/plan-selection/src/search/` |
+| Production memo build and search | The facade's `run_planning` builds the DAG of logical memo groups and runs Pass 1 (`generate_per_computation_logical_memo_candidates`) once; then, for each pane-width round, `generate_logical_asap_memo_candidates` (the `Pass2RoundState` is kept between rounds), `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`. It keeps the best round's selection (`asap_cost::PlanRanking`) and builds that plan with Stage 2's `AssignmentRealizer::realize`. Behind `select_plan`: `candidates/`, `milp/` and `refinement/` | `crates/planner/src/run.rs`; `crates/plan-selection/src/search/` |
 
 ## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies
 
@@ -603,7 +608,7 @@ the memo path's entry points.
 | 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (no longer in the code) | `CandidateMemo`; the entries' recurrence and range steps → the same memo with each rule's candidates added to the groups they implement | the memo rules (`pass2/memo/rules/`), `pass2::memo::window_candidates` |
 | 1, concrete summary-state groups | (part of Pass 2) | `CandidateMemo` → the memo with concrete summary-state groups: one group per shared size or pane layout that readers can read | `add_shared_summary_state_groups`, Pass 2's last step; the Pass 2 output is `LogicalASAPMemoCandidates` (`generate_logical_asap_memo_candidates`) |
 | 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per materialization assignment | `LogicalASAPMemoCandidates`; entries, `DataWorkload`, query-time and raw-data retention → `PhysicalASAPMemoCandidates`: every operator node of every candidate with each allowed timing, materialization and scope copy, the producers of each input, reader constraints, and the pruned candidates (`PrunedCandidate<PhysicalCandidateKey>`) | `generate_physical_asap_memo_candidates` (`asap_physical_asap_optimization::catalog`) |
-| 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model → one plan | The expanded memo's candidates and their configurations; the same inputs → one candidate per needed group, connected into one plan | `run_stage1_to_stage3_with`, `candidate_connection_search`; output `Stage1ToStage3Run`, which holds the selected `PhysicalWorkloadPlan` and the selection |
+| 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model → one plan | `PhysicalASAPMemoCandidates`; entries, `DataWorkload`, `AccuracyCheckInputs`, `CostInputs`, Stage 2's realizer, a deadline → `Selection`: the selected candidates (`SelectedCandidates`: one candidate per needed group, connected into one plan), its cost, the accepted accuracy per query and the search report | `select_plan` (`asap_plan_selection`); the facade (`run_planning`, output `PlanningRun`) runs it per pane-width round and builds the selected `PhysicalWorkloadPlan` with `AssignmentRealizer::realize` |
 | 4. Execution | The selected `PhysicalASAPDAG` → query results | Same: an `InstallablePlan` (`{dag, query_texts}`) → query results | The deployment runtime installs the `InstallablePlan` |
 
 What changed with the memo:
@@ -1362,7 +1367,7 @@ usage into a choice:
 |---|---|---|
 | Cost model 1, `UsageOverTime(ResourceUnitCost)` (default) | Pay-as-you-go | Unit cost × usage per second; the cheapest wins |
 | Cost model 2, `ProvisionedCapacity(ResourceUnitCost)` | Pays for provisioned capacity | Unit cost × peak memory, peak CPU cores and disk; the cheapest wins |
-| Cost model 3, `ClusterCapacity(ClusterLimits)` | Its own cluster | No prices: a candidate over the cluster's memory, disk or (optionally) cores is invalid; the objective `LowestLatency`, `LeastMemory` or `ParetoFront` chooses among the rest |
+| Cost model 3, `ClusterCapacity(ClusterLimits)` | Its own cluster | No prices: a candidate over the cluster's memory, disk or (optionally) cores is invalid; the objective `LowestLatency` or `LeastMemory` chooses among the rest |
 
 ### 4. Execution
 

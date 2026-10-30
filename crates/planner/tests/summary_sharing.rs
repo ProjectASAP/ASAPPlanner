@@ -10,9 +10,10 @@ use std::rc::Rc;
 use asap_accuracy::test_support::{default_size_params, DEFAULT_DELTA};
 use asap_frontend_promql::{lower_promql_query_workload, promql_metric_names};
 use asap_frontend_sql::SqlCatalog;
-use asap_plan_selection::pass::{PlanOutput, PlanningModels, QueryPlan};
+use asap_plan_selection::reference_pricer::WholePlanSelection;
 use asap_plan_selection::RejectionCause;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
+use asap_planner::{PlanOutput, PlanningModels, QueryPlan};
 use asap_types::ir::operator::agg_intent::default_quantile;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
@@ -96,7 +97,7 @@ fn composed_summary_candidates(
     queries: &[(&str, f64)],
 ) -> (
     Vec<asap_physical_asap_optimization::PhysicalWorkloadPlan>,
-    asap_plan_selection::Selection,
+    WholePlanSelection,
 ) {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
@@ -155,7 +156,7 @@ fn composed_summary_candidates(
             candidate
         })
         .collect();
-    let selection = asap_plan_selection::select_plan(&candidates, &entries, data, models)
+    let selection = select_plan(&candidates, &entries, data, models)
         .expect("the exact candidate meets the requested accuracy");
     (candidates, selection)
 }
@@ -215,7 +216,7 @@ fn shared_kll_candidate(
         .unwrap()
         .unwrap();
     physical.id = "shared-kll".into();
-    asap_plan_selection::select_plan(
+    select_plan(
         std::slice::from_ref(&physical),
         &workload.query_workload.entries().collect::<Vec<_>>(),
         workload.data_workload.as_ref().unwrap(),
@@ -766,4 +767,20 @@ async fn exact_state_roots_are_finalized() {
             "{query}"
         );
     }
+}
+
+/// The reference pricer over `candidates`, every candidate kept.
+fn select_plan(
+    candidates: &[asap_physical_asap_optimization::PhysicalWorkloadPlan],
+    entries: &[asap_types::workload::QueryWorkloadEntry],
+    data: &asap_types::workload::DataWorkload,
+    models: PlanningModels<'_>,
+) -> Result<WholePlanSelection, asap_plan_selection::ErrorSelectingPlan> {
+    asap_plan_selection::reference_pricer::select_among_plans(
+        candidates,
+        entries,
+        data,
+        &models.accuracy_check_inputs(),
+        models.plan_selection,
+    )
 }

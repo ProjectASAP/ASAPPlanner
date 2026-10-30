@@ -354,8 +354,6 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
         C::Costlier,
         C::Slower,
         C::MoreMemory,
-        C::NotLowestLatencyOnParetoFront,
-        C::Dominated,
         C::TiedLostOnEnumerationOrder,
     ];
     for cause in causes {
@@ -369,8 +367,6 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
             | C::Costlier
             | C::Slower
             | C::MoreMemory
-            | C::NotLowestLatencyOnParetoFront
-            | C::Dominated
             | C::TiedLostOnEnumerationOrder => {}
         }
     }

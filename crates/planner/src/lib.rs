@@ -3,19 +3,19 @@
 //!
 //! ```text
 //! PlanningWorkload ──frontends──▶ ParsedWorkload ──optimization pass──▶ PlanOutput
-//!                   (this crate)                  (asap-plan-selection)
 //! ```
 //!
-//! The default pass, [`Stage1ToStage3Pass`], runs Stage 1 (logical ASAP-aware
-//! optimization), Stage 2 (physical ASAP-aware optimization) and Stage 3 (plan
-//! selection) in order ([`run_stage1_to_stage3`]).
+//! The default pass, [`Stage1ToStage3Pass`], orchestrates the stages
+//! ([`run_planning`]): Stage 0 and Pass 1, then per pane-width round Pass 2,
+//! Stage 2 (`generate_physical_asap_memo_candidates`) and Stage 3
+//! (`asap_plan_selection::select_plan`), and builds the selected plan through
+//! Stage 2's realizer. The stages never call each other.
 //!
 //! [`e2e_plan`] runs both steps. [`plan_installable`] runs them for a
 //! deployment runtime and returns the single selected DAG ready to install
 //! ([`InstallablePlan`]). A caller who already holds pre-ASAP IR — a
 //! new frontend, a deserialized plan, a test that does not want to build SQL
-//! and a catalog — skips this crate and calls
-//! [`asap_plan_selection::optimize`] directly.
+//! and a catalog — calls [`optimize`] with its own [`ParsedWorkload`].
 
 use asap_types::workload::parsed_workload::{ParsedWorkload, ParsedWorkloadError};
 use asap_types::workload::SqlDialect;
@@ -27,12 +27,15 @@ use asap_frontend_promql::{
 };
 use asap_frontend_sql::{lower_sql_dialect, SqlError};
 
-// The optimization stage's vocabulary is this facade's vocabulary too: a caller
-// configures the same models and reads the same output whether it goes through
-// `e2e_plan` or straight to `optimize`.
-pub use asap_plan_selection::pass::{
-    optimize, run_stage1_to_stage3, OptimizationInput, OptimizationPass, OptimizeError,
-    PassRegistry, PlanOutput, PlanningModels, QueryPlan, Stage1ToStage3Pass, Stage1ToStage3Run,
+mod pass;
+mod run;
+pub use pass::{
+    optimize, OptimizationInput, OptimizationInputError, OptimizationPass, OptimizeError,
+    PassNameConflict, PassRegistry, PlanOutput, PlanningModels, QueryPlan,
+};
+pub use run::{
+    run_planning, MemoSteps, PlanSearchSettings, PlanningReport, PlanningRoundReport, PlanningRun,
+    SelectionError, Stage1ToStage3Pass,
 };
 
 mod installable;
@@ -78,7 +81,9 @@ pub use asap_cost::{
 pub use asap_frontend_promql::{HistogramCatalog, HistogramKind};
 pub use asap_frontend_sql::SqlCatalog;
 pub use asap_logical_asap_optimization::{DeploymentCapabilities, SupportedSummary};
-pub use asap_plan_selection::{RejectionCause, SearchReport};
+pub use asap_plan_selection::{
+    AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, SearchReport, SearchStatus, Selection,
+};
 pub use asap_types::ir::materialized_view::{
     InstallableDagError, MaterializedView, MaterializedViewInputs, MaterializedViewRefresh,
     RawDataRetention, RawDataWindow, ViewCoverage,

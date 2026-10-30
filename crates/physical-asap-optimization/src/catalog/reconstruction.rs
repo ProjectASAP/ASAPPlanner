@@ -8,7 +8,7 @@ use std::rc::Rc;
 use asap_accuracy::propagation::recompose_guarantees;
 use asap_types::ir::{OperatorNode, QueryRoot};
 
-use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, SelectedCandidateGraph};
+use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, SelectedCandidates};
 
 /// Enumerate in exactly the traversal order used when rebinding. `children()`
 /// puts direct children before scalar references; `map_children` follows fields.
@@ -60,7 +60,7 @@ pub struct ReconstructedCandidates {
 /// not its cost.
 pub fn reconstruct_selected_candidates(
     physical: &PhysicalASAPMemoCandidates,
-    selected: &SelectedCandidateGraph,
+    selected: &SelectedCandidates,
 ) -> Result<ReconstructedCandidates, String> {
     super::validate_candidates(physical)?;
     super::validate_selected_graph(physical, selected)?;
@@ -77,7 +77,7 @@ pub fn reconstruct_selected_candidates(
     }
     let mut remaining = inputs.iter().map(Vec::len).collect::<Vec<_>>();
     let mut ready = Vec::new();
-    for &PhysicalCandidateId(id) in &selected.selected_candidates {
+    for &PhysicalCandidateId(id) in &selected.candidates {
         let template = physical.physical_node(PhysicalCandidateId(id));
         if template.children().len() != inputs[id].len() {
             return Err(format!(
@@ -125,9 +125,9 @@ pub fn reconstruct_selected_candidates(
         }
     }
     let mut roots = vec![None; physical.output_reference_count()];
-    for root in &selected.query_roots {
-        roots[root.query_root] = Some(QueryRoot::Operator(Rc::clone(
-            rebuilt[root.candidate.0].as_ref().unwrap(),
+    for (output, candidate) in selected.query_output_candidates.iter().enumerate() {
+        roots[output] = Some(QueryRoot::Operator(Rc::clone(
+            rebuilt[candidate.0].as_ref().unwrap(),
         )));
     }
     let roots = roots.into_iter().map(Option::unwrap).collect::<Vec<_>>();

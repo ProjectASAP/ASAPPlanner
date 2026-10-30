@@ -3,6 +3,7 @@
 //! uses exact evaluator atoms. Retained state carries separate standing charges.
 //! Profiles are supplied by physical costing; this module never infers prices
 //! from a logical template or treats accuracy as a monetary penalty.
+use crate::search::candidates::graph::{QueryRootAssignment, SelectedCandidateGraph};
 use good_lp::{constraint, variable, Constraint, Expression, ProblemVariables, Variable};
 use std::collections::BTreeMap;
 

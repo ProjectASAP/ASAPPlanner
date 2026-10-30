@@ -1,22 +1,26 @@
-//! Choosing among checked candidates: [`select_plan`], [`PlanSelector`] and the
-//! cost model rankings.
+//! Choosing among whole checked plans: [`PlanSelector`] and
+//! [`select_among_plans`]. Today's engine evaluates each plan it proposes
+//! with it, and the reference pricer (feature `reference-pricer`) selects
+//! among enumerated plans with it.
 
 use std::collections::BTreeMap;
 
 use asap_cost::{
-    CalibrationFit, ClusterLimits, ClusterObjective, CostModel, PlanCost, QueryLatency,
+    worst_latency_ms, CalibrationFit, ClusterLimits, CostModel, PlanCost, PlanRanking,
     ResourceUsage, COST_UNIT,
 };
-use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_types::ir::properties::AccuracyTarget;
+use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkloadEntry, RangeEvaluation};
 
 use crate::checks::{accuracy_check, accuracy_targets, latency_violation};
 use crate::report::{
-    AcceptedAccuracy, Rejection, RejectionCause, SearchReport, Selection, SelectionError,
+    AcceptedAccuracy, ErrorSelectingPlan, Rejection, RejectionCause, WholePlanSelection,
 };
-use crate::PlanningModels;
+use crate::SelectionModels;
 use asap_cost::{kept_pane_chains, node_map, pane_retention_ms, plan_cost, query_reach};
+
+type Ranking = PlanRanking;
 use asap_types::workload::bounds::with_confirmed_weights;
 
 /// A cost per second for a rejection reason: three decimals, or three
@@ -31,7 +35,7 @@ fn display_cost(cost_per_second: f64) -> String {
     }
 }
 
-/// Stage 3 (plan selection): reject candidates that the executor cannot
+/// Select among whole plans: reject candidates that the executor cannot
 /// run or that miss a query's accuracy target or latency bound (or, under
 /// cost model 3, the cluster's capacity), measure the rest's resource
 /// usage per second and choose one under the deployment's cost model
@@ -40,12 +44,13 @@ fn display_cost(cost_per_second: f64) -> String {
 /// entry of `candidate.roots[i]`: its accuracy target, its latency bound and
 /// how often it is evaluated. Every candidate is kept in the selection
 /// ([`PlanSelector`] with `keep_every_candidate`).
-pub fn select_plan(
+#[cfg(any(test, feature = "reference-pricer"))]
+pub(crate) fn select_among_plans(
     cands: &[PhysicalWorkloadPlan],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
-    models: PlanningModels<'_>,
-) -> Result<Selection, SelectionError> {
+    models: SelectionModels<'_>,
+) -> Result<WholePlanSelection, ErrorSelectingPlan> {
     let mut selector = PlanSelector::new(entries, data, models, true)?;
     if selector.needs_calibration() {
         let mut fit = CalibrationFit::default();
@@ -60,16 +65,15 @@ pub fn select_plan(
     selector.finish().map(|(selection, _)| selection)
 }
 
-/// Stage 3 over candidates offered one at a time, in candidate order
-/// ([`select_plan`] over all of them at once). Each candidate is checked
-/// and priced as it is offered; only the best so far is kept (under
-/// [`ClusterObjective::ParetoFront`], the Pareto front so far), unless
-/// `keep_every_candidate`. Either way it selects what [`select_plan`]
-/// selects over the same candidates.
+/// Whole plans offered one at a time, in candidate order
+/// ([`select_among_plans`] over all of them at once). Each candidate is
+/// checked and priced as it is offered; only the best so far is kept,
+/// unless `keep_every_candidate`. Either way it selects what
+/// [`select_among_plans`] selects over the same candidates.
 pub struct PlanSelector<'a> {
     entries: &'a [QueryWorkloadEntry],
     data: &'a DataWorkload,
-    models: PlanningModels<'a>,
+    models: SelectionModels<'a>,
     targets: Vec<AccuracyTarget>,
     recurrence: Vec<QueryRecurrence>,
     range_evaluations: Vec<Option<RangeEvaluation>>,
@@ -85,34 +89,21 @@ pub struct PlanSelector<'a> {
     /// The factor that calibrates the formulas' CPU time to the measured
     /// table's ([`Self::set_calibration`]); 1 without a measured table.
     pub(crate) formula_scale: f64,
-    /// Under a price ranking, the cheapest price of the valid candidates
-    /// offered, and the cheapest more than [`ROUNDING`] above it.
-    cheapest: Option<f64>,
-    runner_up: Option<f64>,
 }
-
-/// Prices within this fraction of each other are the same sum of charges
-/// rounded differently (Stage 3's tie tolerance is 1e-9).
-const ROUNDING: f64 = 1e-12;
 
 impl<'a> PlanSelector<'a> {
     /// A selector for the workload `entries` over `data` under `models`.
-    /// Bad settings or deployment capabilities are an error here, before
-    /// any candidate.
+    /// Bad settings are an error here, before any candidate.
     pub fn new(
         entries: &'a [QueryWorkloadEntry],
         data: &'a DataWorkload,
-        models: PlanningModels<'a>,
+        models: SelectionModels<'a>,
         keep_every_candidate: bool,
-    ) -> Result<Self, SelectionError> {
+    ) -> Result<Self, ErrorSelectingPlan> {
         models
             .plan_selection
             .validate()
-            .map_err(SelectionError::InvalidSettings)?;
-        models
-            .deployment_capabilities
-            .validate(data)
-            .map_err(SelectionError::InvalidDeploymentCapabilities)?;
+            .map_err(ErrorSelectingPlan::InvalidSettings)?;
         Ok(Self {
             entries,
             data,
@@ -131,8 +122,6 @@ impl<'a> PlanSelector<'a> {
                 .plan_selection
                 .frozen_calibration_factor
                 .unwrap_or(1.0),
-            cheapest: None,
-            runner_up: None,
         })
     }
 
@@ -162,9 +151,9 @@ impl<'a> PlanSelector<'a> {
     pub fn calibration_fit(
         &self,
         candidate: &PhysicalWorkloadPlan,
-    ) -> Result<CalibrationFit, SelectionError> {
+    ) -> Result<CalibrationFit, ErrorSelectingPlan> {
         if candidate.roots.len() != self.entries.len() {
-            return Err(SelectionError::EntryCount {
+            return Err(ErrorSelectingPlan::EntryCount {
                 candidate: candidate.id.clone(),
                 roots: candidate.roots.len(),
                 entries: self.entries.len(),
@@ -185,7 +174,7 @@ impl<'a> PlanSelector<'a> {
             self.models.plan_selection,
             1.0,
         )
-        .map_err(|(node, error)| SelectionError::Cost {
+        .map_err(|(node, error)| ErrorSelectingPlan::Cost {
             candidate: candidate.id.clone(),
             node,
             error,
@@ -205,7 +194,8 @@ impl<'a> PlanSelector<'a> {
 
     /// Check and price `candidate`, the next in candidate order, and keep
     /// it if it can still be selected.
-    pub fn offer(&mut self, candidate: &PhysicalWorkloadPlan) -> Result<(), SelectionError> {
+    #[cfg(any(test, feature = "reference-pricer"))]
+    pub fn offer(&mut self, candidate: &PhysicalWorkloadPlan) -> Result<(), ErrorSelectingPlan> {
         self.offer_before(candidate, None)
     }
 
@@ -214,17 +204,17 @@ impl<'a> PlanSelector<'a> {
         &mut self,
         candidate: &PhysicalWorkloadPlan,
         deadline: Option<std::time::Instant>,
-    ) -> Result<(), SelectionError> {
+    ) -> Result<(), ErrorSelectingPlan> {
         let check_deadline = || {
             if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
-                Err(SelectionError::EvaluationDeadlineExceeded)
+                Err(ErrorSelectingPlan::EvaluationDeadlineExceeded)
             } else {
                 Ok(())
             }
         };
         check_deadline()?;
         if candidate.roots.len() != self.entries.len() {
-            return Err(SelectionError::EntryCount {
+            return Err(ErrorSelectingPlan::EntryCount {
                 candidate: candidate.id.clone(),
                 roots: candidate.roots.len(),
                 entries: self.entries.len(),
@@ -252,7 +242,7 @@ impl<'a> PlanSelector<'a> {
             settings,
             self.formula_scale,
         )
-        .map_err(|(node, error)| SelectionError::Cost {
+        .map_err(|(node, error)| ErrorSelectingPlan::Cost {
             candidate: candidate.id.clone(),
             node,
             error,
@@ -267,51 +257,22 @@ impl<'a> PlanSelector<'a> {
             self.reject(&candidate.id, cause, reason);
             return Ok(());
         }
-        self.track_runner_up(&cost);
         if !self.keep_every_candidate {
-            let kept_cost = |kept: &PhysicalWorkloadPlan| &self.costs[&kept.id];
-            let selectable = match self.ranking {
-                // A candidate another dominates is never on the front, and
-                // one it dominates leaves it.
-                Ranking::Front => {
-                    let latency = worst_latency_ms(&cost.usage);
-                    let dominated_by = |kept: &PhysicalWorkloadPlan| {
-                        let usage = &kept_cost(kept).usage;
-                        dominates_at((usage, worst_latency_ms(usage)), (&cost.usage, latency))
-                    };
-                    !self.kept.iter().any(dominated_by)
-                }
-                // Ties keep the earlier candidate.
-                _ => self
-                    .kept
-                    .first()
-                    .is_none_or(|best| self.ranking.better(&cost, kept_cost(best))),
-            };
+            // Ties keep the earlier candidate.
+            let selectable = self
+                .kept
+                .first()
+                .is_none_or(|best| self.ranking.better(&cost, &self.costs[&best.id]));
             if !selectable {
                 return Ok(());
             }
         }
         check_deadline()?;
         if !self.keep_every_candidate {
-            let kept_cost = |kept: &PhysicalWorkloadPlan| &self.costs[&kept.id];
-            let dominated: Vec<bool> = self
-                .kept
-                .iter()
-                .map(|kept| match self.ranking {
-                    Ranking::Front => dominates(&cost.usage, &kept_cost(kept).usage),
-                    _ => true,
-                })
-                .collect();
-            let mut dominated = dominated.into_iter();
-            let (costs, accepted) = (&mut self.costs, &mut self.accepted);
-            self.kept.retain(|kept| {
-                let drop = dominated.next().unwrap_or(false);
-                if drop {
-                    costs.remove(&kept.id);
-                    accepted.remove(&kept.id);
-                }
-                !drop
-            });
+            for kept in self.kept.drain(..) {
+                self.costs.remove(&kept.id);
+                self.accepted.remove(&kept.id);
+            }
         }
         self.costs.insert(candidate.id.clone(), cost);
         self.accepted
@@ -320,31 +281,23 @@ impl<'a> PlanSelector<'a> {
         Ok(())
     }
 
-    /// Whether a candidate Stage 1 candidate `from_logical` implements is
-    /// kept: it may still be selected (or every candidate is kept).
-    pub fn keeps_from_logical(&self, from_logical: &str) -> bool {
-        self.kept
-            .iter()
-            .any(|kept| kept.from_logical == from_logical)
-    }
-
     /// The selection over every candidate offered, and the selected
     /// candidate as Stage 2 built it (the selection's plan is its roots
     /// with the weight requirements Stage 3 confirmed made proofs).
-    pub fn finish(mut self) -> Result<(Selection, PhysicalWorkloadPlan), SelectionError> {
+    pub fn finish(
+        mut self,
+    ) -> Result<(WholePlanSelection, PhysicalWorkloadPlan), ErrorSelectingPlan> {
         let ranking = self.ranking;
         let valid_costs: Vec<&PlanCost> =
             self.kept.iter().map(|kept| &self.costs[&kept.id]).collect();
-        let Some((best, front)) = choose(ranking, &valid_costs) else {
-            return Err(SelectionError::NoValidCandidate(self.rejected));
+        let Some(best) = choose(ranking, &valid_costs) else {
+            return Err(ErrorSelectingPlan::NoValidCandidate(self.rejected));
         };
-        let id = |index: usize| self.kept[index].id.clone();
-        let selected = id(best);
-        let front: Vec<String> = front.into_iter().map(id).collect();
+        let selected = self.kept[best].id.clone();
         for kept in &self.kept {
             let id = &kept.id;
             if *id != selected {
-                let (cause, reason) = ranking.lost_reason(id, &selected, &self.costs, &front);
+                let (cause, reason) = lost_reason(ranking, id, &selected, &self.costs);
                 self.rejected.push(Rejection {
                     id: id.clone(),
                     cause,
@@ -359,46 +312,16 @@ impl<'a> PlanSelector<'a> {
             &query_reach(&built.dag, &node_map(&built.dag)),
             &self.range_evaluations,
         );
-        let incumbent_cost = self.costs.get(&selected).and_then(|c| c.cost_per_second);
-        let selection = Selection {
+        let selection = WholePlanSelection {
             selected,
             plan,
             costs: self.costs,
             accepted: self.accepted,
             rejected: self.rejected,
-            front,
             pane_retention_ms,
-            search: SearchReport {
-                candidates_checked: self.candidates_checked,
-                runner_up_cost_per_second: self.runner_up,
-                incumbent_cost,
-                ..SearchReport::default()
-            },
+            candidates_checked: self.candidates_checked,
         };
         Ok((selection, built))
-    }
-
-    /// Under a price ranking, fold the price of valid candidate `cost`
-    /// into the cheapest price and the runner-up ([`ROUNDING`]).
-    fn track_runner_up(&mut self, cost: &PlanCost) {
-        let (Ranking::Price, Some(price)) = (self.ranking, cost.cost_per_second) else {
-            return;
-        };
-        let Some(cheapest) = self.cheapest else {
-            self.cheapest = Some(price);
-            return;
-        };
-        let rounding = ROUNDING * cheapest.abs();
-        let runner_up = if price < cheapest - rounding {
-            self.cheapest = Some(price);
-            cheapest
-        } else if price <= cheapest + rounding {
-            self.cheapest = Some(cheapest.min(price));
-            return;
-        } else {
-            price
-        };
-        self.runner_up = Some(self.runner_up.map_or(runner_up, |r| r.min(runner_up)));
     }
 
     /// Record that candidate `id` failed a check: every rejection when
@@ -415,55 +338,14 @@ impl<'a> PlanSelector<'a> {
 }
 
 /// The index of the candidate `ranking` selects among `costs` (the first on
-/// ties) and, under [`Ranking::Front`], the indices of the Pareto front in
-/// order; `None` without candidates.
-pub(crate) fn choose(ranking: Ranking, costs: &[&PlanCost]) -> Option<(usize, Vec<usize>)> {
-    let front: Vec<usize> = match ranking {
-        Ranking::Front => {
-            // Each candidate's worst latency once, not once per comparison.
-            let latencies: Vec<f64> = costs.iter().map(|c| worst_latency_ms(&c.usage)).collect();
-            (0..costs.len())
-                .filter(|&i| {
-                    !(0..costs.len()).any(|j| {
-                        dominates_at(
-                            (&costs[j].usage, latencies[j]),
-                            (&costs[i].usage, latencies[i]),
-                        )
-                    })
-                })
-                .collect()
-        }
-        _ => Vec::new(),
-    };
-    // Under the Pareto front, only a front member can be selected.
-    let pool: Vec<usize> = match ranking {
-        Ranking::Front => front.clone(),
-        _ => (0..costs.len()).collect(),
-    };
-    let best =
-        pool.into_iter().reduce(
-            |best, next| match ranking.better(costs[next], costs[best]) {
-                true => next,
-                false => best,
-            },
-        )?;
-    Some((best, front))
-}
-
-/// Whether `cost` is cheaper than `best`. Totals that differ only by
-/// floating-point rounding (summing the same charges in another grouping)
-/// tie, and a tie keeps the earlier candidate.
-pub(crate) fn cheaper(cost: f64, best: f64) -> bool {
-    cost < best - best.abs() * 1e-9
-}
-
-/// The worst latency per evaluation among a candidate's queries (0 with none).
-pub(crate) fn worst_latency_ms(usage: &ResourceUsage) -> f64 {
-    usage
-        .latency_per_query
-        .iter()
-        .map(QueryLatency::total_ms)
-        .fold(0.0, f64::max)
+/// ties); `None` without candidates.
+pub(crate) fn choose(ranking: Ranking, costs: &[&PlanCost]) -> Option<usize> {
+    (0..costs.len()).reduce(
+        |best, next| match ranking.better(costs[next], costs[best]) {
+            true => next,
+            false => best,
+        },
+    )
 }
 
 /// Under cost model 3, the first limit of the cluster `usage` is over, as a
@@ -490,145 +372,55 @@ fn capacity_violation(usage: &ResourceUsage, limits: &ClusterLimits) -> Option<S
     }
 }
 
-/// Whether `a` is at least as good as `b` on peak memory, disk and
-/// worst-query latency, and better on one of them.
-fn dominates(a: &ResourceUsage, b: &ResourceUsage) -> bool {
-    dominates_at((a, worst_latency_ms(a)), (b, worst_latency_ms(b)))
-}
-
-/// [`dominates`] with each usage's worst-query latency already computed.
-fn dominates_at((a, la): (&ResourceUsage, f64), (b, lb): (&ResourceUsage, f64)) -> bool {
-    a.peak_memory_bytes <= b.peak_memory_bytes
-        && a.disk_bytes <= b.disk_bytes
-        && !cheaper(lb, la)
-        && (a.peak_memory_bytes < b.peak_memory_bytes
-            || a.disk_bytes < b.disk_bytes
-            || cheaper(la, lb))
-}
-
-/// How a cost model orders valid candidates.
-#[derive(Clone, Copy)]
-pub(crate) enum Ranking {
-    /// Cost models 1 and 2: by price.
-    Price,
-    /// Latency, then peak memory, then disk.
-    Latency,
-    /// Peak memory, then disk, then latency.
-    Memory,
-    /// The Pareto front; the selected member by [`Ranking::Latency`].
-    Front,
-}
-
-impl Ranking {
-    pub(crate) fn of(model: &CostModel) -> Self {
-        match model {
-            CostModel::UsageOverTime(_) | CostModel::ProvisionedCapacity(_) => Ranking::Price,
-            CostModel::ClusterCapacity(limits) => match limits.objective {
-                ClusterObjective::LowestLatency => Ranking::Latency,
-                ClusterObjective::LeastMemory => Ranking::Memory,
-                ClusterObjective::ParetoFront => Ranking::Front,
-            },
-        }
-    }
-
-    /// Whether `cost` ranks strictly before `best`. Prices and latencies tie
-    /// within rounding ([`cheaper`]); peak memory and disk are whole bytes,
-    /// compared exactly, as [`dominates`] compares them.
-    pub(crate) fn better(self, cost: &PlanCost, best: &PlanCost) -> bool {
-        use std::cmp::Ordering;
-        let rounded = |a: f64, b: f64| match (cheaper(a, b), cheaper(b, a)) {
-            (true, _) => Ordering::Less,
-            (_, true) => Ordering::Greater,
-            _ => Ordering::Equal,
+/// Why valid candidate `id` was not `selected` under `ranking`, and the
+/// reason with its numbers.
+fn lost_reason(
+    ranking: Ranking,
+    id: &str,
+    selected: &str,
+    costs: &BTreeMap<String, PlanCost>,
+) -> (RejectionCause, String) {
+    let (cost, best) = (&costs[id], &costs[selected]);
+    if !ranking.better(best, cost) {
+        let tied = match ranking {
+            Ranking::Price => format!(
+                "{} {COST_UNIT}",
+                display_cost(cost.cost_per_second.unwrap_or_default())
+            ),
+            _ => describe_usage(&cost.usage),
         };
-        let (a, b) = (&cost.usage, &best.usage);
-        let latency = || rounded(worst_latency_ms(a), worst_latency_ms(b));
-        let memory = || a.peak_memory_bytes.cmp(&b.peak_memory_bytes);
-        let disk = || a.disk_bytes.cmp(&b.disk_bytes);
-        let order = match self {
-            Ranking::Price => rounded(
-                cost.cost_per_second.unwrap_or(f64::INFINITY),
-                best.cost_per_second.unwrap_or(f64::INFINITY),
+        return (
+            RejectionCause::TiedLostOnEnumerationOrder,
+            format!(
+                "tied with the selected candidate {selected} at {tied}; lost on enumeration order"
             ),
-            Ranking::Latency | Ranking::Front => latency().then_with(memory).then_with(disk),
-            Ranking::Memory => memory().then_with(disk).then_with(latency),
-        };
-        order == Ordering::Less
+        );
     }
-
-    /// Why valid candidate `id` was not `selected`, and the reason with
-    /// its numbers.
-    fn lost_reason(
-        self,
-        id: &str,
-        selected: &str,
-        costs: &BTreeMap<String, PlanCost>,
-        front: &[String],
-    ) -> (RejectionCause, String) {
-        let (cost, best) = (&costs[id], &costs[selected]);
-        if !self.better(best, cost) {
-            let tied = match self {
-                Ranking::Price => format!(
-                    "{} {COST_UNIT}",
-                    display_cost(cost.cost_per_second.unwrap_or_default())
-                ),
-                _ => describe_usage(&cost.usage),
-            };
-            return (
-                RejectionCause::TiedLostOnEnumerationOrder,
-                format!(
-                    "tied with the selected candidate {selected} at {tied}; lost on enumeration order"
-                ),
-            );
-        }
-        match self {
-            Ranking::Price => (
-                RejectionCause::Costlier,
-                format!(
-                    "costlier: {} vs {} {COST_UNIT}",
-                    display_cost(cost.cost_per_second.unwrap_or_default()),
-                    display_cost(best.cost_per_second.unwrap_or_default())
-                ),
+    match ranking {
+        Ranking::Price => (
+            RejectionCause::Costlier,
+            format!(
+                "costlier: {} vs {} {COST_UNIT}",
+                display_cost(cost.cost_per_second.unwrap_or_default()),
+                display_cost(best.cost_per_second.unwrap_or_default())
             ),
-            Ranking::Latency => (
-                RejectionCause::Slower,
-                format!(
-                    "slower: {} vs {}",
-                    describe_usage(&cost.usage),
-                    describe_usage(&best.usage)
-                ),
+        ),
+        Ranking::Latency => (
+            RejectionCause::Slower,
+            format!(
+                "slower: {} vs {}",
+                describe_usage(&cost.usage),
+                describe_usage(&best.usage)
             ),
-            Ranking::Memory => (
-                RejectionCause::MoreMemory,
-                format!(
-                    "more memory: {} vs {}",
-                    describe_usage(&cost.usage),
-                    describe_usage(&best.usage)
-                ),
+        ),
+        Ranking::Memory => (
+            RejectionCause::MoreMemory,
+            format!(
+                "more memory: {} vs {}",
+                describe_usage(&cost.usage),
+                describe_usage(&best.usage)
             ),
-            Ranking::Front if front.iter().any(|f| f == id) => (
-                RejectionCause::NotLowestLatencyOnParetoFront,
-                format!(
-                    "on the Pareto front, not its lowest-latency member: {} vs {}",
-                    describe_usage(&cost.usage),
-                    describe_usage(&best.usage)
-                ),
-            ),
-            Ranking::Front => {
-                let by = front
-                    .iter()
-                    .find(|f| dominates(&costs[f.as_str()].usage, &cost.usage))
-                    .map_or(selected, String::as_str);
-                (
-                    RejectionCause::Dominated,
-                    format!(
-                        "dominated by {by}: {} vs {}",
-                        describe_usage(&cost.usage),
-                        describe_usage(&costs[by].usage)
-                    ),
-                )
-            }
-        }
+        ),
     }
 }
 
@@ -645,38 +437,7 @@ fn describe_usage(usage: &ResourceUsage) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_cost::COST_SOURCE;
-
-    /// Totals that differ only by rounding tie, so the earlier candidate is
-    /// kept; a real difference is cheaper.
-    #[test]
-    fn totals_differing_by_rounding_tie() {
-        // One unit in the last place apart, as the same charges summed in
-        // another grouping can be.
-        let separate = 0.336006_f64;
-        let together = f64::from_bits(separate.to_bits() - 1);
-        assert!(!cheaper(separate, together));
-        assert!(!cheaper(together, separate));
-        assert!(cheaper(0.3, 0.4));
-        assert!(!cheaper(0.4, 0.3));
-    }
-
-    /// One candidate dominates another only when it is no worse on peak
-    /// memory, disk and latency and better on one; equal usage does not.
-    #[test]
-    fn dominance_needs_one_strictly_better_resource() {
-        let usage = |memory, latency_ms| ResourceUsage {
-            peak_memory_bytes: memory,
-            latency_per_query: vec![QueryLatency {
-                compaction_ms: 0.0,
-                query_ms: latency_ms,
-            }],
-            ..ResourceUsage::default()
-        };
-        assert!(dominates(&usage(1, 5.0), &usage(2, 5.0)));
-        assert!(!dominates(&usage(1, 5.0), &usage(1, 5.0)));
-        assert!(!dominates(&usage(1, 6.0), &usage(2, 5.0)));
-    }
+    use asap_cost::{QueryLatency, COST_SOURCE};
 
     /// A candidate with the given latency, peak memory and disk under cost
     /// model 3.
@@ -698,19 +459,14 @@ mod tests {
         }
     }
 
-    /// Peak memory and disk are compared exactly, as dominance compares
-    /// them: 100 bytes less at 124 GB is less memory, not a tie. Under the
-    /// Pareto front the selected candidate is a front member, and under
-    /// least memory the smaller one wins.
+    /// Peak memory and disk are compared exactly: 100 bytes less at 124 GB
+    /// is less memory, not a tie.
     #[test]
     fn memory_differing_by_a_few_bytes_is_compared_exactly() {
         let larger = cluster_cost(7.0, 124_000_000_100, 0);
         let smaller = cluster_cost(7.0, 124_000_000_000, 0);
         let costs = [&larger, &smaller];
-        let (best, front) = choose(Ranking::Front, &costs).unwrap();
-        assert_eq!(front, [1]);
-        assert_eq!(best, 1, "the selection is on the front");
-        assert_eq!(choose(Ranking::Memory, &costs).unwrap().0, 1);
-        assert_eq!(choose(Ranking::Latency, &costs).unwrap().0, 1);
+        assert_eq!(choose(Ranking::Memory, &costs).unwrap(), 1);
+        assert_eq!(choose(Ranking::Latency, &costs).unwrap(), 1);
     }
 }

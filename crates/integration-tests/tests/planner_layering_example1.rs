@@ -10,8 +10,8 @@ use crate::planner_layering_common;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use asap_plan_selection::select_plan;
-use asap_plan_selection::PlanningModels;
+use asap_devtools::memo_pricing::reference_select as select_plan;
+use asap_planner::PlanningModels;
 use asap_types::ir::flat::NodeId;
 use asap_types::ir::schema::{FieldDataType, GroupingStrategy, HydraKind, SketchAlgorithm};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot, ScalarExpr, SortKey};

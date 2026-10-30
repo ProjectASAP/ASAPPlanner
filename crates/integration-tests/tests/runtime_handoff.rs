@@ -90,10 +90,10 @@ async fn export_carries_the_selected_materialization() {
         .iter()
         .any(|n| n.output_state.timing == ExecutionTiming::IngestionTime));
     // Exactly Stage 3's selected plan, as Stage 3 timed it.
-    let selection = output.selection.as_ref().expect("Stage 3 selected");
+    assert!(output.selection.is_some(), "Stage 3 selected");
     assert_eq!(
         dag,
-        compile_physical_asap_workload(&selection.plan).expect("the selected plan exports")
+        compile_physical_asap_workload(&output.roots()).expect("the selected plan exports")
     );
 }
 
@@ -348,12 +348,9 @@ async fn stored_panes_carry_stage3_pane_retention() {
         .unwrap()
         .iter()
         .all(|v| v.retention_ms() == 7_200_000));
-    let selection = plan(&workload, &without_raw_data())
-        .await
-        .selection
-        .unwrap();
+    let output = plan(&workload, &without_raw_data()).await;
     assert_eq!(
-        selection
+        output
             .pane_retention_ms
             .values()
             .copied()

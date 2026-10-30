@@ -101,7 +101,7 @@ async fn raw_data_retention_is_the_lookback_stage3_prices() {
         [RawDataRetention::new(m.clone(), Some(65 * 60_000))]
     );
     let output = e2e_plan(input()).await.unwrap();
-    let selected = compile_physical_asap_workload(&output.selection.unwrap().plan).unwrap();
+    let selected = compile_physical_asap_workload(&output.roots()).unwrap();
     assert_eq!(stage3_raw_lookback_ms(&selected), [(m, Some(65 * 60_000))]);
 
     let capabilities = DeploymentCapabilities {
@@ -133,7 +133,7 @@ fn a_range_evaluated_query_time_scan_keeps_its_window_plus_the_span() {
     );
     let roots = asap_devtools::planning_stages::lower_promql_roots(&workload).unwrap();
     let entries: Vec<_> = workload.query_workload.entries().collect();
-    let (plan, _) = installable_plan_of(&roots, None, &entries).unwrap();
+    let (plan, _) = installable_plan_of(&roots, None, &Default::default(), &entries).unwrap();
     plan.validate().unwrap();
     assert!(plan.materialized_views().unwrap().is_empty());
     assert_eq!(

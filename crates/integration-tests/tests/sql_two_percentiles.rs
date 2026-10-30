@@ -97,7 +97,7 @@ async fn run(queries: &[&str]) -> Run {
         &workload,
         roots,
         candidates,
-        asap_plan_selection::PlanningModels::builtin().with_plan_selection(&settings),
+        asap_planner::PlanningModels::builtin().with_plan_selection(&settings),
     )
 }
 

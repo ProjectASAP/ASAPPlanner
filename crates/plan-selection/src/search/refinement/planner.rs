@@ -2,42 +2,35 @@
 //!
 //! Every proposal passes Stage 2 and PlanSelector; only a validated price
 //! becomes an exact refinement cut.
-use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_types::ir::QueryRoot;
+use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 use std::collections::BTreeMap;
 
 use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
 use crate::search::candidates::graph::RejectedQuerySubgraph;
+use crate::search::candidates::graph::SelectedCandidateGraph;
 use crate::search::refinement::search::{
     search_candidates_with_direct_feedback, CandidateEvaluation, CandidateSearchLimits,
-    CandidateSearchResult, CandidateSearchStatus, DirectPriceModel, EvaluatedCandidate,
+    CandidateSearchResult, DirectPriceModel,
 };
-use crate::{PlanSelector, PlanningModels, Selection, SelectionError};
+use crate::{ErrorSelectingPlan, PlanSelector, SelectionModels, WholePlanSelection};
 use asap_cost::{CalibrationFit, CostModel};
-use asap_physical_asap_optimization::catalog::{
-    materialize_selected_candidates, PhysicalCandidateError,
-};
-use asap_types::stages::SelectedCandidateGraph;
-
-/// The share of a search's time a search spends before a final validation
-/// it must still afford: a search runs until its time is spent, so the rest
-/// (an eighth) is kept to evaluate a plan found outside it (the queries'
-/// separate plans combined, or independent components' plans combined)
-/// before the deadline.
-pub(in crate::search) const SEARCH_SHARE_BEFORE_FINAL_VALIDATION: f64 = 0.875;
+use asap_types::stages::{AssignmentRealizer, PhysicalCandidateError};
 
 #[derive(Clone, Copy)]
 pub(in crate::search) struct CandidatePlanningContext<'a> {
     pub deadline: Option<std::time::Instant>,
     pub refine_materialization: bool,
-    /// Whether the search first evaluates the queries' separate plans
-    /// combined: in the first round of a search only.
-    pub seed_separate_plans: bool,
-    pub original_roots: &'a [QueryRoot],
+    /// The workload's query roots as Stage 3 sees them: each output
+    /// reference is an operator tree of its group read from Stage 2's
+    /// candidates ([`query_roots_of`](crate::search::candidates::dag::query_roots_of)).
+    pub query_roots: &'a [QueryRoot],
+    /// Stage 2's realizer, over the whole workload.
+    pub realizer: &'a dyn AssignmentRealizer,
     pub entries: &'a [QueryWorkloadEntry],
     pub data: &'a DataWorkload,
-    pub models: PlanningModels<'a>,
+    pub models: SelectionModels<'a>,
     /// One externally established fit, held constant across every proposal.
     pub calibration: CalibrationFit,
 }
@@ -72,13 +65,14 @@ impl CandidateRejectionSummary {
     }
 }
 
+// Read by the engine's tests; #1095 replaces the engine.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::search) struct CandidatePlanningResult {
-    pub independent_components: usize,
     pub search: CandidateSearchResult,
     pub rejections: CandidateRejectionSummary,
-    /// Same convention as PlanSelector::finish: Selection.plan is the validated
+    /// Same convention as PlanSelector::finish: WholePlanSelection.plan is the validated
     /// execution plan; PhysicalWorkloadPlan is the offered Stage 2 candidate.
-    pub best: Option<(Selection, PhysicalWorkloadPlan)>,
+    pub best: Option<(WholePlanSelection, PhysicalWorkloadPlan)>,
 }
 
 /// Usage and provisioned-price objectives use the complete evaluator cost,
@@ -99,8 +93,8 @@ pub(in crate::search) fn optimize_configured_candidates(
     if configured.physical.candidates.len() != configured.dag.candidates.len() {
         return Err("physical configurations must be indexed by candidate ID".into());
     }
-    if context.original_roots.len() != context.entries.len() {
-        return Err("original roots and workload entries differ in length".into());
+    if context.query_roots.len() != context.entries.len() {
+        return Err("query roots and workload entries differ in length".into());
     }
     // Reject invalid settings/deployment even if the search budget is zero.
     PlanSelector::new(context.entries, context.data, context.models, false)
@@ -124,7 +118,12 @@ pub(in crate::search) fn optimize_configured_candidates(
         deadline: earliest_deadline(context.deadline, local_deadline),
         ..*context
     };
-    let mut best: Option<(f64, SelectedCandidateGraph, Selection, PhysicalWorkloadPlan)> = None;
+    let mut best: Option<(
+        f64,
+        SelectedCandidateGraph,
+        WholePlanSelection,
+        PhysicalWorkloadPlan,
+    )> = None;
     let mut evaluation_number = 0;
     let mut rejections = CandidateRejectionSummary::default();
     let weighting_started = std::time::Instant::now();
@@ -219,24 +218,6 @@ pub(in crate::search) fn optimize_configured_candidates(
     if let Some((graph, profile)) = &joint {
         direct_refs.push((graph, DirectPriceModel::Joint(profile)));
     }
-    // The model's lower bounds can rank many shared plans below the queries'
-    // separate plans, so the search could stop above what planning each query
-    // alone achieves. In the first round of a search, a quarter of the time
-    // plans each query alone; their combination is evaluated after the joint
-    // search, only when it ended above their summed cost, so it never takes
-    // the place of one of the search's own evaluations.
-    let separate = (context.seed_separate_plans && context.entries.len() > 1)
-        .then(|| {
-            super::components::separate_plans_combined(
-                configured,
-                context,
-                CandidateSearchLimits {
-                    wall_time: limits.wall_time / 4,
-                    ..limits
-                },
-            )
-        })
-        .flatten();
     let mut evaluate = |selected: &SelectedCandidateGraph| -> Result<CandidateEvaluation, String> {
         evaluation_number += 1;
         let mut rejected_queries = Vec::new();
@@ -250,14 +231,14 @@ pub(in crate::search) fn optimize_configured_candidates(
         );
         let Some((selection, physical)) = (match evaluated {
             Ok(result) => result,
-            Err(SelectionError::EvaluationDeadlineExceeded) => {
+            Err(ErrorSelectingPlan::EvaluationDeadlineExceeded) => {
                 return Ok(CandidateEvaluation {
                     budget_exhausted: true,
                     ..Default::default()
                 });
             }
             Err(
-                error @ SelectionError::Cost {
+                error @ ErrorSelectingPlan::Cost {
                     error: crate::AnalyticalCostError::Overflow,
                     ..
                 },
@@ -291,14 +272,7 @@ pub(in crate::search) fn optimize_configured_candidates(
     let mut search = search_candidates_with_direct_feedback(
         &configured.dag,
         CandidateSearchLimits {
-            wall_time: limits
-                .wall_time
-                .saturating_sub(weighting_started.elapsed())
-                .mul_f64(if separate.is_some() {
-                    SEARCH_SHARE_BEFORE_FINAL_VALIDATION
-                } else {
-                    1.0
-                }),
+            wall_time: limits.wall_time.saturating_sub(weighting_started.elapsed()),
             ..limits
         },
         &weights,
@@ -307,34 +281,6 @@ pub(in crate::search) fn optimize_configured_candidates(
         &direct_refs,
         &mut evaluate,
     )?;
-    if let Some((separate, separate_cost)) = separate {
-        let above = search.status != CandidateSearchStatus::Optimal
-            && search
-                .incumbent
-                .as_ref()
-                .is_none_or(|best| best.actual_cost > separate_cost * (1.0 + 1e-9));
-        // An evaluator error leaves the joint result as it is: the separate
-        // plans are only a safeguard.
-        if above {
-            if let Some(cost) = evaluate(&separate).ok().and_then(|e| e.actual_cost) {
-                if search
-                    .incumbent
-                    .as_ref()
-                    .is_none_or(|best| cost < best.actual_cost)
-                {
-                    search.incumbent = Some(EvaluatedCandidate {
-                        selected: separate,
-                        actual_cost: cost,
-                    });
-                    search.relative_gap = Some(if cost == 0.0 {
-                        0.0
-                    } else {
-                        ((cost - search.lower_bound) / cost).max(0.0)
-                    });
-                }
-            }
-        }
-    }
     search
         .solve_metrics
         .direct_cost_fallback_reasons
@@ -346,7 +292,6 @@ pub(in crate::search) fn optimize_configured_candidates(
         _ => return Err("search incumbent and validated physical plan disagree".into()),
     }
     Ok(CandidatePlanningResult {
-        independent_components: 1,
         search,
         rejections,
         best: best.map(|(_, _, selection, physical)| (selection, physical)),
@@ -613,7 +558,7 @@ fn seed_dds_budgets(
         return budgets;
     }
     let query_budgets: Vec<_> = context
-        .original_roots
+        .query_roots
         .iter()
         .zip(context.entries)
         .map(|(root, entry)| {
@@ -686,7 +631,7 @@ fn accuracy_baseline(
         return Err("baseline templates must be indexed by candidate ID".into());
     }
     let mut output_queries = Vec::new();
-    for (query, root) in context.original_roots.iter().enumerate() {
+    for (query, root) in context.query_roots.iter().enumerate() {
         match root {
             QueryRoot::Operator(_) => output_queries.push(query),
             QueryRoot::Scalar(expression) => {
@@ -978,7 +923,7 @@ fn retained_pane_priority_cost(
 
 pub(in crate::search) enum MaterializationOutcome {
     Implemented(PhysicalWorkloadPlan),
-    RejectedAssignment(String),
+    RejectedAssignment,
 }
 
 pub(in crate::search) fn materialize_configured_candidate(
@@ -996,7 +941,7 @@ pub(in crate::search) fn materialize_configured_candidate(
         rejections,
     )? {
         MaterializationOutcome::Implemented(physical) => Ok(Some(physical)),
-        MaterializationOutcome::RejectedAssignment(_) => Ok(None),
+        MaterializationOutcome::RejectedAssignment => Ok(None),
     }
 }
 
@@ -1007,50 +952,27 @@ pub(in crate::search) fn materialize_configured_candidate_with_diagnostics(
     evaluation_number: usize,
     rejections: &mut CandidateRejectionSummary,
 ) -> Result<MaterializationOutcome, String> {
-    let mut modes = vec![None; configured.physical.candidates.len()];
-    for id in &selected.selected_candidates {
-        modes[id.0] = Some(configured.physical.candidates[id.0].materialization);
-    }
     // Only a typed infeasible assignment justifies a no-good cut. Missing
     // identity, incompatible contracts and unsupported rewrites stop search.
     configured
         .validate_selected(selected)
         .map_err(|error| PhysicalCandidateError::InvalidOrUnsupported(error).to_string())?;
-    let mut realized = match materialize_selected_candidates(
-        &configured.physical,
-        selected,
-        &modes,
-        context.original_roots,
-        context.entries,
-        context.data,
-        context
-            .models
-            .deployment_capabilities
-            .query_time_results_retained,
-    ) {
+    let mut realized = match context
+        .realizer
+        .realize(&configured.physical, &selected.to_selected_candidates())
+    {
         Ok(realized) => realized,
         Err(PhysicalCandidateError::RejectedAssignment(reason)) => {
             rejections.record("materialization_assignment".into(), &reason);
-            return Ok(MaterializationOutcome::RejectedAssignment(reason));
+            return Ok(MaterializationOutcome::RejectedAssignment);
         }
         Err(error) => return Err(error.to_string()),
     };
-    for id in &selected.selected_candidates {
-        let node = realized.nodes_by_candidate[id.0]
-            .as_ref()
-            .ok_or_else(|| format!("candidate {} has no physical node", id.0))?;
-        if node.timing != Some(configured.physical.candidates[id.0].timing) {
-            return Err(format!(
-                "candidate {} requested timing {:?}, Stage 2 produced {:?}",
-                id.0, configured.physical.candidates[id.0].timing, node.timing
-            ));
-        }
-    }
     // Stage 2 leaves IDs to its caller. A nonempty, stable proposal label keeps
     // selected-plan references and viewer cost lookups consistent.
-    realized.physical.id = format!("joint-plan-{evaluation_number}");
-    realized.physical.from_logical = format!("joint-logical-{evaluation_number}");
-    Ok(MaterializationOutcome::Implemented(realized.physical))
+    realized.plan.id = format!("joint-plan-{evaluation_number}");
+    realized.plan.from_logical = format!("joint-logical-{evaluation_number}");
+    Ok(MaterializationOutcome::Implemented(realized.plan))
 }
 
 pub(in crate::search) fn reconstruct_configured_candidate(
@@ -1078,7 +1000,7 @@ pub(in crate::search) fn reconstruct_configured_candidate(
     let mut output_index = 0;
     for (query, root) in physical.roots.iter().enumerate() {
         let mut outputs = Vec::new();
-        match &context.original_roots[query] {
+        match &context.query_roots[query] {
             QueryRoot::Operator(_) => {
                 outputs.push(output_index);
                 output_index += 1;
@@ -1120,7 +1042,7 @@ pub(in crate::search) fn evaluate_configured_candidate(
     evaluation_number: usize,
     rejections: &mut CandidateRejectionSummary,
     rejected_queries: &mut Vec<RejectedQuerySubgraph>,
-) -> Result<Option<(Selection, PhysicalWorkloadPlan)>, String> {
+) -> Result<Option<(WholePlanSelection, PhysicalWorkloadPlan)>, String> {
     evaluate_configured_candidate_before(
         configured,
         context,
@@ -1139,7 +1061,7 @@ pub(in crate::search) fn evaluate_configured_candidate_before(
     evaluation_number: usize,
     rejections: &mut CandidateRejectionSummary,
     rejected_queries: &mut Vec<RejectedQuerySubgraph>,
-) -> Result<Option<(Selection, PhysicalWorkloadPlan)>, SelectionError> {
+) -> Result<Option<(WholePlanSelection, PhysicalWorkloadPlan)>, ErrorSelectingPlan> {
     let Some(physical) = reconstruct_configured_candidate(
         configured,
         context,
@@ -1148,7 +1070,7 @@ pub(in crate::search) fn evaluate_configured_candidate_before(
         rejections,
         rejected_queries,
     )
-    .map_err(SelectionError::Solver)?
+    .map_err(ErrorSelectingPlan::Solver)?
     else {
         return Ok(None);
     };
@@ -1157,7 +1079,7 @@ pub(in crate::search) fn evaluate_configured_candidate_before(
     selector.offer_before(&physical, context.deadline)?;
     match selector.finish() {
         Ok(result) => Ok(Some(result)),
-        Err(SelectionError::NoValidCandidate(rejected)) => {
+        Err(ErrorSelectingPlan::NoValidCandidate(rejected)) => {
             for rejection in rejected {
                 let category = serde_json::to_value(rejection.cause)
                     .ok()
@@ -1271,7 +1193,7 @@ mod tests {
             &[0, 1],
             &entries,
             &data,
-            PlanningModels::builtin().deployment_capabilities,
+            &asap_logical_asap_optimization::DeploymentCapabilities::default(),
         )
         .unwrap();
         // Keep this refinement fixture's finite search space focused on summary
@@ -1309,11 +1231,11 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: PlanningModels::builtin(),
+            models: SelectionModels::builtin(),
             calibration: CalibrationFit::default(),
         };
         let profile = extract_price_options(&configured, &context)
@@ -1359,11 +1281,11 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: Some(std::time::Instant::now()),
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: PlanningModels::builtin(),
+            models: SelectionModels::builtin(),
             calibration: CalibrationFit::default(),
         };
         let mut reasons = Vec::new();
@@ -1423,13 +1345,13 @@ mod tests {
             asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain::SeedGrids,
         );
         let source = build_candidate_inventory(&memo, &[output, output], |_| Ok(0.0)).unwrap();
-        let models = PlanningModels::builtin();
+        let models = SelectionModels::builtin();
         let mut configured = enumerate_candidate_configurations(
             &source,
             &[0, 1],
             &entries,
             &data,
-            models.deployment_capabilities,
+            &asap_logical_asap_optimization::DeploymentCapabilities::default(),
         )
         .unwrap();
         let has_panes: Vec<_> = configured
@@ -1468,8 +1390,8 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
             models,
@@ -1520,20 +1442,20 @@ mod tests {
         }
         let roots = [root];
         let entries = [entry_with(target, QueryRecurrence::Unknown)];
-        let models = PlanningModels::builtin();
+        let models = SelectionModels::builtin();
         let configured = enumerate_candidate_configurations(
             &source,
             &[0],
             &entries,
             &data,
-            models.deployment_capabilities,
+            &asap_logical_asap_optimization::DeploymentCapabilities::default(),
         )
         .unwrap();
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
             models,
@@ -1640,9 +1562,8 @@ mod tests {
                 })
                 .collect(),
         };
-        let models = PlanningModels {
-            deployment_capabilities: &deployment,
-            ..PlanningModels::builtin()
+        let models = SelectionModels {
+            ..SelectionModels::builtin()
         };
         let configured =
             enumerate_candidate_configurations(&source, &[0, 1], &entries, &data, &deployment)
@@ -1651,8 +1572,8 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
             models,
@@ -1702,7 +1623,7 @@ mod tests {
         let evidence = PotentialEvidence;
         let evidence_context = CandidatePlanningContext {
             deadline: None,
-            models: PlanningModels {
+            models: SelectionModels {
                 evidence: &evidence,
                 ..models
             },
@@ -1796,11 +1717,11 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: PlanningModels::builtin(),
+            models: SelectionModels::builtin(),
             calibration: CalibrationFit::default(),
         };
         let (_, excluded) = accuracy_baseline(&configured, &context).unwrap();
@@ -1814,7 +1735,7 @@ mod tests {
         let (_, ignored_excluded) = accuracy_baseline(
             &configured,
             &CandidatePlanningContext {
-                models: PlanningModels::builtin().with_plan_selection(&ignored),
+                models: SelectionModels::builtin().with_plan_selection(&ignored),
                 ..context
             },
         )
@@ -1845,11 +1766,11 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: PlanningModels::builtin().with_plan_selection(&settings),
+            models: SelectionModels::builtin().with_plan_selection(&settings),
             calibration: CalibrationFit::default(),
         };
         let id = configured
@@ -1873,7 +1794,7 @@ mod tests {
         let enforced = accuracy_baseline_weights(
             &configured,
             &CandidatePlanningContext {
-                models: PlanningModels::builtin(),
+                models: SelectionModels::builtin(),
                 ..context
             },
         )
@@ -1892,11 +1813,11 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: PlanningModels::builtin(),
+            models: SelectionModels::builtin(),
             calibration: CalibrationFit::default(),
         };
         let original = accuracy_baseline_weights(&configured, &context).unwrap();
@@ -1915,11 +1836,11 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: PlanningModels::builtin(),
+            models: SelectionModels::builtin(),
             calibration: CalibrationFit::default(),
         };
         let original = accuracy_baseline_weights(&configured, &context).unwrap();
@@ -2010,11 +1931,11 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: PlanningModels::builtin(),
+            models: SelectionModels::builtin(),
             calibration: CalibrationFit::default(),
         };
         let weights = accuracy_baseline_weights(&configured, &context).unwrap();
@@ -2038,11 +1959,11 @@ mod tests {
                 &CandidatePlanningContext {
                     deadline: None,
                     refine_materialization: false,
-                    seed_separate_plans: false,
-                    original_roots: &roots,
+                    query_roots: &roots,
+                    realizer: &crate::search::test_realizer(&roots, entries, &data),
                     entries,
                     data: &data,
-                    models: PlanningModels::builtin(),
+                    models: SelectionModels::builtin(),
                     calibration: CalibrationFit::default(),
                 },
             )
@@ -2104,15 +2025,15 @@ mod tests {
                 };
                 settings.cost_model = CostModel::ProvisionedCapacity(prices);
             }
-            let models = PlanningModels {
+            let models = SelectionModels {
                 plan_selection: &settings,
-                ..PlanningModels::builtin()
+                ..SelectionModels::builtin()
             };
             let context = CandidatePlanningContext {
                 deadline: None,
                 refine_materialization: false,
-                seed_separate_plans: false,
-                original_roots: &roots,
+                query_roots: &roots,
+                realizer: &crate::search::test_realizer(&roots, &entries, &data),
                 entries: &entries,
                 data: &data,
                 models,
@@ -2164,11 +2085,11 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: PlanningModels::builtin(),
+            models: SelectionModels::builtin(),
             calibration: CalibrationFit::default(),
         };
         let result = optimize_configured_candidates(
@@ -2197,11 +2118,11 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: PlanningModels::builtin(),
+            models: SelectionModels::builtin(),
             calibration: CalibrationFit::default(),
         };
         // Select an ingestion-only summary assignment explicitly. Solver
@@ -2280,11 +2201,11 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: PlanningModels::builtin(),
+            models: SelectionModels::builtin(),
             calibration: CalibrationFit::default(),
         };
         let result = optimize_configured_candidates(
@@ -2313,20 +2234,20 @@ mod tests {
                 memory_bytes: u64::MAX,
                 disk_bytes: u64::MAX,
                 cpu_cores: None,
-                objective: asap_cost::ClusterObjective::ParetoFront,
+                objective: asap_cost::ClusterObjective::LowestLatency,
             }),
             ..Default::default()
         };
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: PlanningModels {
+            models: SelectionModels {
                 plan_selection: &settings,
-                ..PlanningModels::builtin()
+                ..SelectionModels::builtin()
             },
             calibration: CalibrationFit::default(),
         };

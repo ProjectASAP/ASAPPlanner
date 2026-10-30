@@ -6,7 +6,7 @@
 //!
 //! Lowering is production's: the PromQL frontend, then each root with the
 //! series-identity column, as `Stage1ToStage3Pass` does. The memo is read from
-//! the production run's `Stage1ToStage3Run::memo_steps`.
+//! the production run's `PlanningRun::memo_steps`.
 //!
 //! **Which round's memo.** The default search plans in rounds of growing
 //! pane-width domains and records the memo of the round whose plan it
@@ -43,9 +43,7 @@ use asap_logical_asap_optimization::pass1::per_computation_candidates::{
 use asap_logical_asap_optimization::pass2::memo::enumeration::{
     build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
 };
-use asap_plan_selection::{
-    run_stage1_to_stage3_with, MemoSteps, PlanningModels, Stage1ToStage3Run, Stage1ToStage3Search,
-};
+use asap_planner::{run_planning, MemoSteps, PlanSearchSettings, PlanningModels, PlanningRun};
 use asap_types::ir::schema::{FieldDataType, SketchParams};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use asap_types::stages::{queries_rooted_at, MemoGroupId};
@@ -96,24 +94,25 @@ fn production_roots(workload: &PlanningWorkload) -> Vec<(usize, QueryRoot)> {
 }
 
 /// The production run of Stages 1 to 3 over `workload`.
-fn production_run(workload: &PlanningWorkload, search: Stage1ToStage3Search) -> Stage1ToStage3Run {
+fn production_run(workload: &PlanningWorkload, search: PlanSearchSettings) -> PlanningRun {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    let roots = production_roots(workload);
-    run_stage1_to_stage3_with(roots, &entries, &data, PlanningModels::builtin(), search).unwrap()
+    let roots = production_roots(workload)
+        .into_iter()
+        .map(|(_, root)| root)
+        .collect();
+    run_planning(roots, &entries, &data, PlanningModels::builtin(), search).unwrap()
 }
 
 /// One round over the complete pane-width domain, without a time limit that
 /// a slow machine could reach.
-fn complete_domain_round() -> Stage1ToStage3Search {
-    Stage1ToStage3Search {
-        max_evaluations: Some(1),
-        milp_time_limit_ms: Some(3_600_000),
-        ..Stage1ToStage3Search::default()
+fn complete_domain_round() -> PlanSearchSettings {
+    PlanSearchSettings {
+        time_limit_ms: Some(3_600_000),
     }
 }
 
-fn memo_steps(run: &Stage1ToStage3Run) -> &MemoSteps {
+fn memo_steps(run: &PlanningRun) -> &MemoSteps {
     run.memo_steps
         .as_ref()
         .expect("a planning round recorded its memo within the time budget")
@@ -207,9 +206,7 @@ fn sized_for_whole_result(candidate: &CandidateForMemoGroup) -> bool {
 /// Checks the relation of the module doc between the Pass 1 memo's
 /// whole-budget DAGs and the whole-workload plans; returns (memo choices,
 /// whole-budget ones, whole-workload plans, plans in both).
-fn assert_pass1_memo_and_whole_workload_plans(
-    run: &Stage1ToStage3Run,
-) -> (usize, usize, usize, usize) {
+fn assert_pass1_memo_and_whole_workload_plans(run: &PlanningRun) -> (usize, usize, usize, usize) {
     let memo = &memo_steps(run).pass1;
     let enumeration = enumerate(memo, 100_000);
     assert!(enumeration.complete);
@@ -227,7 +224,7 @@ fn assert_pass1_memo_and_whole_workload_plans(
         .zip(&plans)
         .filter(|(choice, _)| chosen(memo, choice).all(|c| c.accuracy_budget_parts == 1))
         .collect();
-    let inventory = &run.stage1_pass1_per_computation;
+    let inventory = &run.per_computation_candidates;
     let whole = whole_workload_plans(inventory);
     // Targets that compute the same thing.
     let same: Vec<(usize, usize)> = (0..inventory.targets.len())
@@ -365,7 +362,7 @@ fn shared_quantiles_pass1_memo_and_whole_workload_plans() {
         ],
         60_000,
     );
-    let run = production_run(&workload, Stage1ToStage3Search::default());
+    let run = production_run(&workload, PlanSearchSettings::default());
     assert_eq!(
         assert_pass1_memo_and_whole_workload_plans(&run),
         (9, 9, 9, 4)

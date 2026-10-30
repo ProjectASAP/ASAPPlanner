@@ -17,7 +17,7 @@ pub fn compile_physical_asap_dag(
     Ok(planner_types::ir::physical_export::compile_physical_asap_dag(&root)?)
 }
 
-/// The logical DAG the planner pipeline (`run_stage1_to_stage3`) selects for the
+/// The logical DAG the planner pipeline (`asap_planner::run_planning`) selects for the
 /// single query `root` at `accuracy`, over a continuously ingested source,
 /// with the built-in models.
 pub fn selected_dag(
@@ -26,8 +26,9 @@ pub fn selected_dag(
 ) -> Rc<OperatorNode> {
     let run = run_stage1_to_stage3(root, accuracy);
     let [QueryRoot::Operator(selected)] = run
-        .selected_logical()
-        .unwrap_or_else(|| panic!("a plan is selected: {:?}", run.stage3_plan_selection))
+        .selected_plan
+        .as_deref()
+        .unwrap_or_else(|| panic!("a plan is selected: {:?}", run.selection))
     else {
         panic!("one operator root");
     };
@@ -69,29 +70,10 @@ pub fn computation_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
         .collect()
 }
 
-/// Fail on rejected composition rather than silently skipping a candidate.
-pub fn require_composed_operator_candidates(
-    candidates: Vec<asap_plan_selection::search::LogicalCandidate>,
-) -> Vec<Rc<OperatorNode>> {
-    candidates
-        .into_iter()
-        .map(|candidate| {
-            match candidate
-                .roots
-                .unwrap_or_else(|e| panic!("{} does not compose: {e}", candidate.id))
-                .remove(0)
-            {
-                QueryRoot::Operator(node) => node,
-                QueryRoot::Scalar(_) => panic!("operator root"),
-            }
-        })
-        .collect()
-}
-
 fn run_stage1_to_stage3(
     root: Rc<OperatorNode>,
     accuracy: planner_types::ir::properties::AccuracyTarget,
-) -> asap_plan_selection::Stage1ToStage3Run {
+) -> asap_planner::PlanningRun {
     use planner_types::workload::{DataArrival, DataWorkload};
     let data = DataWorkload {
         arrival: DataArrival::Ingesting {
@@ -99,8 +81,8 @@ fn run_stage1_to_stage3(
         },
         ..Default::default()
     };
-    asap_plan_selection::run_stage1_to_stage3_with(
-        vec![(0, QueryRoot::Operator(root))],
+    asap_planner::run_planning(
+        vec![QueryRoot::Operator(root)],
         &[planner_types::workload::QueryWorkloadEntry {
             query: Default::default(),
             requirements: planner_types::workload::QueryRequirements {
@@ -112,8 +94,8 @@ fn run_stage1_to_stage3(
             range_evaluation: None,
         }],
         &data,
-        asap_plan_selection::PlanningModels::builtin(),
-        asap_plan_selection::Stage1ToStage3Search::default(),
+        asap_planner::PlanningModels::builtin(),
+        asap_planner::PlanSearchSettings::default(),
     )
     .expect("Pass 1 accepts the query")
 }

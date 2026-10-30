@@ -302,7 +302,7 @@ fn narrower_finer_aggregate_has_no_read() {
 /// The selected plan's cost per second for `queries`.
 fn cost(queries: &[String]) -> f64 {
     use asap_cost::CostInputs;
-    use asap_plan_selection::{PlanningModels, Stage1ToStage3Search};
+    use asap_planner::{PlanSearchSettings, PlanningModels};
     let w = workload(queries);
     let roots = Planner::new(FuzzSettings::default()).lower(&w).unwrap();
     let planning = w.planning_workload();
@@ -317,17 +317,15 @@ fn cost(queries: &[String]) -> f64 {
         &entries,
         &w.data,
         models,
-        Stage1ToStage3Search {
-            milp_time_limit_ms: Some(30_000),
-            ..Default::default()
+        PlanSearchSettings {
+            time_limit_ms: Some(30_000),
         },
+        None,
     )
     .unwrap();
-    let selection = run.stage3_plan_selection.as_ref().unwrap();
-    let value = selection.costs[&selection.selected]
-        .cost_per_second
-        .unwrap();
-    println!("cost={value}; selected={}", selection.selected);
+    let selection = run.run.selection.as_ref().unwrap();
+    let value = selection.cost.cost_per_second.unwrap();
+    println!("cost={value}");
     value
 }
 

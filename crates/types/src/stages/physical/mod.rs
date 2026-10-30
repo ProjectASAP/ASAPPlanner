@@ -7,7 +7,7 @@ mod producers;
 
 pub use graph::{
     validate_selected_connections, PhysicalCandidateId, ProducerConsumerConnection,
-    QueryRootAssignment, ReaderConstraint, SelectedCandidateGraph,
+    ReaderConstraint, SelectedCandidates,
 };
 pub use memo_candidates::{
     output_references, CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,

@@ -153,6 +153,7 @@
 
   function statusChip(status) {
     if (status === 'selected') return '<span class="chip selected">✓ selected</span>';
+    if (status === 'reference selected') return '<span class="chip costlier">reference pricer\'s pick</span>';
     if (status === 'costlier') return '<span class="chip costlier">valid · costlier</span>';
     if (status === 'rejected') return '<span class="chip invalid">✗ invalid</span>';
     if (status === 'not judged') return '<span class="chip">not judged</span>';
@@ -228,7 +229,7 @@
     current.physical = id;
     $('pick2').value = id;
     const c = physicalById.get(id);
-    const selection = doc.stage3_plan_selection;
+    const selection = selectionTable(doc);
     const cost = selection.costs[id];
     render(2, c.dag, true, cost ? cost.per_node : null);
     const row = rows.find((r) => rowKey(r) === `P:${id}`);
@@ -264,7 +265,7 @@
     $('queryPick').value = '';
     const logical = doc.stage1_logical_asap_optimization;
     const physical = doc.stage2_physical_asap_optimization;
-    const selection = doc.stage3_plan_selection;
+    const selection = selectionTable(doc);
     logicalById = new Map(logical.candidates.map((c) => [c.id, c]));
     physicalById = new Map(physical.candidates.map((c) => [c.id, c]));
     rows = stageCandidateRows(doc);
@@ -332,7 +333,7 @@
   // The selected plan's materialized views, one row per Stage 2 node (a pane
   // chain's panes listed inside its row); a row selects its Stage 2 node.
   function renderMaterializedViews() {
-    const selection = doc.stage3_plan_selection;
+    const selection = selectionTable(doc);
     if (!selection.selected) {
       $('views-meta').textContent = 'no plan selected';
       $('materializedViews').innerHTML = '';
@@ -382,7 +383,7 @@
 
   // Show the selected plan in the Stage 2 lane and select its node `id`.
   function selectStage2Node(id) {
-    const selected = doc.stage3_plan_selection.selected;
+    const selected = selectionTable(doc).selected;
     if (current.physical !== selected) selectPhysical(selected);
     const cy = cys[2];
     if (!cy) return;

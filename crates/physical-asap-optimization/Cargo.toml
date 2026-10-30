@@ -13,6 +13,8 @@ edition = "2021"
 [dependencies]
 asap-accuracy = { path = "../accuracy" }
 asap-types = { path = "../types" }
+# The pane retention of a realized plan (`AssignmentRealizer::realize`).
+asap-cost = { path = "../cost" }
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

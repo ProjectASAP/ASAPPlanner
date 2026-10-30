@@ -221,9 +221,43 @@ const FAILED_CHECK_CAUSES = [
 // Every `stage3_plan_selection.rejected[].cause` Stage 3 writes: the failed
 // checks, then the losses under the cost model (priced, not selected).
 const REJECTION_CAUSES = FAILED_CHECK_CAUSES.concat([
-  'costlier', 'slower', 'more_memory', 'not_lowest_latency_on_pareto_front', 'dominated',
+  'costlier', 'slower', 'more_memory',
   'tied_lost_on_enumeration_order',
 ]);
+
+// The per-candidate selection table the panels read, from Stage 3's
+// `Selection` (`stage3_plan_selection`): the selected plan `P1` with its
+// cost and accepted accuracy. Under `--exhaustive` it also holds the
+// reference pricer's table (`reference_pricing`) over the enumerated plans:
+// their costs, accepted accuracy and rejections, with the reference
+// pricer's own pick as `reference_selected`. A document written before
+// `Selection` (its Stage 3 section has `costs`) is its own table.
+function selectionTable(doc) {
+  const stage3 = doc.stage3_plan_selection || {};
+  if ('costs' in stage3) return stage3;
+  const table = {
+    selected: null, costs: {}, accepted: {}, rejected: [], search_rejected: [],
+    error: stage3.error, warnings: stage3.warnings,
+    materialized_views: stage3.materialized_views, materialized_views_error: stage3.materialized_views_error,
+    pane_retention_ms: stage3.pane_retention_ms, search_report: stage3.search_report,
+  };
+  if (stage3.cost) {
+    table.selected = 'P1';
+    table.costs.P1 = stage3.cost;
+    table.accepted.P1 = stage3.accepted_accuracy_per_query;
+  }
+  const reference = doc.reference_pricing;
+  if (reference) {
+    Object.assign(table.costs, reference.costs || {});
+    Object.assign(table.accepted, reference.accepted || {});
+    table.rejected = (reference.rejected || []).slice();
+    table.search_rejected = (reference.search_rejected || []).slice();
+    table.rejected_by_cause = reference.rejected_by_cause;
+    table.reference_selected = reference.selected ?? null;
+    if (reference.error && !table.error) table.reference_error = reference.error;
+  }
+  return table;
+}
 
 function validateSelection(selection, physicalById) {
   const errors = [];
@@ -232,7 +266,7 @@ function validateSelection(selection, physicalById) {
     errors.push('stage3_plan_selection.selected must name a Stage 2 candidate or be null');
   }
   if (!Array.isArray(selection.rejected)) return errors.concat('stage3_plan_selection.rejected must be an array');
-  const accounted = new Set(selection.selected === null ? [] : [selection.selected]);
+  const accounted = new Set([selection.selected, selection.reference_selected].filter((id) => id !== null && id !== undefined));
   selection.rejected.forEach((entry, index) => {
     const at = `stage3_plan_selection.rejected[${index}]`;
     const id = entry && entry.id;
@@ -313,9 +347,10 @@ function validateStagePipeline(doc) {
   });
   errors.push(...validateDataWorkload(doc.workload.data_workload));
   if (errors.length) return errors;
-  const selectionErrors = validateSelection(stage3, physicalById);
+  const table = selectionTable(doc);
+  const selectionErrors = validateSelection(table, physicalById);
   if (selectionErrors.length) return selectionErrors;
-  return validateMaterializedViews(stage3, physicalById).concat(validateMemoPlan((stage3.search || {}).memo_plan, doc.workload.queries.length));
+  return validateMaterializedViews(table, physicalById).concat(validateMemoPlan((stage3.search || {}).memo_plan, doc.workload.queries.length));
 }
 
 // A query's accuracy target (`AccuracyTarget` JSON: `accuracy_metric`,
@@ -361,7 +396,7 @@ function acceptedText(queries) {
 // ("composition error") with theirs. `logical` names the Stage 1
 // candidate to show beside the row; `rank` counts the priced ones.
 function stageCandidateRows(doc) {
-  const selection = doc.stage3_plan_selection || {};
+  const selection = selectionTable(doc);
   const costs = selection.costs || {};
   const rejected = new Map((selection.rejected || []).map((r) => [r.id, r]));
   const accepted = selection.accepted || {};
@@ -372,6 +407,7 @@ function stageCandidateRows(doc) {
     // A rejection's cause says whether it failed a check or lost under
     // the cost model; a failed selection (`error`) judged no candidate.
     const status = candidate.id === selection.selected ? 'selected'
+      : candidate.id === selection.reference_selected ? 'reference selected'
       : rejection ? (FAILED_CHECK_CAUSES.includes(rejection.cause) ? 'rejected' : 'costlier')
         : selection.error ? 'not judged' : 'rejected';
     return {
@@ -397,12 +433,12 @@ function stageCandidateRows(doc) {
   (selection.search_rejected || []).forEach((r) => rows.push({
     id: r.id, logical: null, display_name: `not kept · ${r.cause.replace(/_/g, ' ')}`, total: null, rank: null, status: 'not kept', reason: r.reason,
   }));
-  const order = { selected: 0, costlier: 1, rejected: 2, 'not judged': 2, pruned: 3, 'composition error': 4, 'not kept': 5 };
+  const order = { selected: 0, 'reference selected': 1, costlier: 1, rejected: 2, 'not judged': 2, pruned: 3, 'composition error': 4, 'not kept': 5 };
   rows.sort((a, b) => order[a.status] - order[b.status] || (a.total ?? 0) - (b.total ?? 0));
   let rank = 0;
   // Only valid candidates are ranked: the selected one and those that lost
   // under the cost model, whether or not the document carries their cost.
-  rows.forEach((row) => { if (row.status === 'selected' || row.status === 'costlier') row.rank = ++rank; });
+  rows.forEach((row) => { if (['selected', 'reference selected', 'costlier'].includes(row.status)) row.rank = ++rank; });
   return rows;
 }
 
@@ -418,7 +454,7 @@ function byPlanNumber(a, b) {
 
 function stageCandidateHeader(doc) {
   const logical = doc.stage1_logical_asap_optimization || {};
-  const selection = doc.stage3_plan_selection || {};
+  const selection = selectionTable(doc);
   const shown = logical.capped ? ` (document shows ${(logical.candidates || []).length})` : '';
   const error = [
     logical.error ? ` · Stage 1 failed: ${logical.error}` : '',
@@ -477,7 +513,18 @@ function searchText(doc) {
     const classes = (search.interchangeable_queries || []).map((members) => `(${members.map((i) => queryIds[i] || `q${i + 1}`).join(', ')})`);
     if (classes.length) parts.push(`interchangeable queries: ${classes.join(', ')}`);
   }
-  const counts = selection.rejected_by_cause;
+  const report = selection.search_report;
+  if (report) {
+    parts.push(`search ${String(report.status).replace(/_/g, ' ')}`);
+    if (typeof report.cost_lower_bound_per_second === 'number') parts.push(`cost lower bound ${Number(report.cost_lower_bound_per_second.toPrecision(4))}`);
+    parts.push(`MILP ${report.milp_variables} variables, ${report.milp_constraints} constraints · model ${report.model_construction_ms} ms, solve ${report.solver_ms} ms, validation ${report.validation_ms} ms`);
+  }
+  const planning = doc.planning_report;
+  if (planning && Array.isArray(planning.rounds)) {
+    parts.push(`${planning.rounds.length} pane-width round${planning.rounds.length === 1 ? '' : 's'} (${planning.rounds.map((r) => r.pane_width_domain).join(', ')})`);
+    if (planning.pane_widths_pending) parts.push('some pane widths not searched');
+  }
+  const counts = (doc.reference_pricing || {}).rejected_by_cause || selection.rejected_by_cause;
   if (doc.search === 'exhaustive' && counts && Object.keys(counts).length) {
     parts.push(`rejected: ${Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([c, n]) => `${cause(c)} ×${n}`).join(', ')}`);
   }
@@ -890,7 +937,7 @@ function physicalReaders(dag, nodeId, queryIds) {
 // retention, the Stage 3 cost of its Stage 2 node and the queries that read
 // it. Empty without a selection.
 function materializedViewRows(doc) {
-  const selection = doc.stage3_plan_selection || {};
+  const selection = selectionTable(doc);
   const views = Array.isArray(selection.materialized_views) ? selection.materialized_views : [];
   const candidate = ((doc.stage2_physical_asap_optimization || {}).candidates || []).find((c) => c.id === selection.selected);
   if (!candidate) return [];
@@ -929,7 +976,7 @@ function materializedViewRows(doc) {
 // panes differ), the Stage 3 cost and the queries that read it.
 function materializedViewGroups(doc) {
   const rows = materializedViewRows(doc);
-  const candidate = ((doc.stage2_physical_asap_optimization || {}).candidates || []).find((c) => c.id === (doc.stage3_plan_selection || {}).selected);
+  const candidate = ((doc.stage2_physical_asap_optimization || {}).candidates || []).find((c) => c.id === selectionTable(doc).selected);
   const nodes = new Map(candidate ? candidate.dag.nodes.map((node) => [node.id, node]) : []);
   const groups = [];
   const byNode = new Map();

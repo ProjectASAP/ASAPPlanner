@@ -37,7 +37,9 @@ test-support = []
 asap-types = { path = "../types", features = ["test-support"] }
 asap-frontend-sql = { path = ".", features = ["test-support"] }
 asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
-asap-plan-selection = { path = "../plan-selection" }
+# The planning stages through the facade (a dev-dependency cycle, for
+# integration tests only).
+asap-planner = { path = "../planner" }
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 # bgp_jan2024_workload corpus is sourced verbatim as YAML (ASAPQuery PR #561)
 # rather than transcribed into the flat .sql shape the other corpora use.

@@ -29,6 +29,7 @@ pub(crate) struct JointPriceProfile {
 use super::direct_cost::DirectCostProfile;
 use super::model::{CandidateProposal, CandidateSolveMetrics, ObservedAssignment};
 use crate::search::candidates::dag::*;
+use crate::search::candidates::graph::QueryRootAssignment;
 use asap_types::stages::*;
 use good_lp::{constraint, variable, Constraint, Expression, ProblemVariables, Variable};
 

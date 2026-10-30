@@ -191,7 +191,7 @@ mod tests {
         }
         let physical = materialize_selected_candidates(
             &configured.physical,
-            &selected,
+            &selected.to_selected_candidates(),
             &assignments,
             &roots,
             &entries,
@@ -199,8 +199,8 @@ mod tests {
             deployment.query_time_results_retained,
         )
         .unwrap();
-        assert_eq!(physical.physical.dag.nodes.len(), 1);
-        assert_eq!(physical.physical.dag.nodes[0].materialization, mode);
+        assert_eq!(physical.plan.dag.nodes.len(), 1);
+        assert_eq!(physical.plan.dag.nodes[0].materialization, mode);
         let same_query =
             enumerate_candidate_configurations(&source, &[0, 0], &entries[..1], &data, &deployment)
                 .unwrap();
@@ -224,7 +224,7 @@ mod tests {
         assert!(matches!(
             materialize_selected_candidates(
                 &inventory.configured_for_tests().physical,
-                &selected,
+                &selected.to_selected_candidates(),
                 &modes,
                 &roots,
                 &entries,
@@ -257,7 +257,7 @@ mod tests {
             modes[build] = Some(mode);
             let result = materialize_selected_candidates(
                 &inventory.configured_for_tests().physical,
-                &selected,
+                &selected.to_selected_candidates(),
                 &modes,
                 &roots,
                 &entries,
@@ -272,7 +272,7 @@ mod tests {
                     .materialization,
                 mode
             );
-            let outputs = ordered_output_references(&result.physical.roots);
+            let outputs = ordered_output_references(&result.plan.roots);
             let states = outputs
                 .iter()
                 .map(|root| {
@@ -306,7 +306,7 @@ mod tests {
         }
         let result = materialize_selected_candidates(
             &inventory.configured_for_tests().physical,
-            &selected,
+            &selected.to_selected_candidates(),
             &modes,
             &roots,
             &entries,
