@@ -303,14 +303,22 @@ pub fn run_explicit_candidates(
 ) -> Run {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
+    let targets: Vec<_> = entries
+        .iter()
+        .map(|entry| entry.requirements.accuracy.clone())
+        .collect();
+    // Explicit candidates are composed outside the memo: their summaries are
+    // sized as Pass 1 sizes a candidate, which Stage 3 only checks.
     let logical: Vec<_> = candidates
         .into_iter()
         .enumerate()
         .map(|(index, roots)| {
+            let roots = asap_accuracy::propagation::recompose_guarantees(&roots)
+                .expect("explicit fixture contracts compose");
             logical(
                 format!("P{}", index + 1),
-                asap_accuracy::propagation::recompose_guarantees(&roots)
-                    .expect("explicit fixture contracts compose"),
+                asap_accuracy::sizing::with_summaries_sized_for_targets(&roots, &targets, &data)
+                    .expect("explicit fixture summaries rebuild"),
             )
         })
         .collect();

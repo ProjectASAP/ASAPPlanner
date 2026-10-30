@@ -4,7 +4,7 @@ use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, HowToComputeAggregateMeasure,
 };
 use asap_logical_asap_optimization::test_support::lower_promql;
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::properties::{AccuracyScope, AccuracyTarget};
 use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::ir::OperatorNode;
 
@@ -98,9 +98,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             "sources":{"latency":{"series_count":2,"rows_held":30000,"values_non_negative":true}}
         }))
         .unwrap();
-        let sized =
-            crate::resize_for_failure_probability(&roots, std::slice::from_ref(&target), &data)
-                .unwrap();
+        let sized = crate::sized_as_pass1(&roots, std::slice::from_ref(&target), &data);
         let mut configured = PhysicalCandidatesWithCosts::empty_for_tests();
         let QueryRoot::Operator(root) = &sized[0] else {
             panic!("operator")

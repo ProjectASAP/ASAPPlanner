@@ -69,7 +69,7 @@ pub fn raw_data_samples_of_metric(node: &OperatorNode) -> Option<String> {
 /// guarantee that is not exact ([`root_guarantee`]), including compositions
 /// conditional on source-sign facts supplied later. Empty when neither the
 /// current nor conditional contract composes the inputs, or the result is
-/// exact. Plan selection sizes each for its share of failure probability too.
+/// exact. Pass 1 sizes each for its share of failure probability too.
 pub fn approximate_inputs(root: &QueryRoot) -> Vec<Rc<OperatorNode>> {
     // Sizing may depend on a source-domain proof supplied only at Stage 3.
     // Count the inputs of that conditional composition too, without attaching
@@ -163,7 +163,7 @@ pub fn bind_guarantees(
 /// `resize` gives it (same algorithm; `None` keeps them), and every node
 /// above one rebuilt over its new inputs with its guarantee composed again
 /// ([`composed_guarantee`]; a node that had none keeps none). Timing,
-/// materialization and sharing are kept. Plan selection enlarges summaries
+/// materialization and sharing are kept. Pass 1 sizes summaries
 /// for a failure probability this way.
 pub fn with_resized_summaries(
     roots: &[QueryRoot],

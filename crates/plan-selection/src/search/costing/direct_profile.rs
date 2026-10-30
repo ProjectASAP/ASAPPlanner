@@ -1303,13 +1303,8 @@ mod tests {
                     "arrival":{"ingesting":{"rows_per_second":100.0}},
                     "sources":{"latency":{"series_count":2,"rows_held":30000,"values_non_negative":true,"max_distinct_per_evaluation":1000}}
                 })).unwrap();
-                // A legal finite configuration is sized before direct pricing.
-                let sized = crate::resize_for_failure_probability(
-                    &roots,
-                    std::slice::from_ref(&target),
-                    &data,
-                )
-                .unwrap();
+                // Sized as Pass 1 sizes it: Stage 3 prices and checks that size.
+                let sized = crate::sized_as_pass1(&roots, std::slice::from_ref(&target), &data);
                 let mut configured = PhysicalCandidatesWithCosts::empty_for_tests();
                 let QueryRoot::Operator(root) = &sized[0] else {
                     panic!("operator")
@@ -1538,13 +1533,8 @@ mod tests {
                     "arrival":{"ingesting":{"rows_per_second":rows_per_second}},
                     "sources":{"latency":{"series_count":series_count,"rows_held":rows_per_second * 300,"values_non_negative":true,"max_distinct_per_evaluation":1000}}
                 })).unwrap();
-                    // A legal finite configuration is sized before direct pricing.
-                    let sized = crate::resize_for_failure_probability(
-                        &roots,
-                        std::slice::from_ref(&target),
-                        &data,
-                    )
-                    .unwrap();
+                    // Sized as Pass 1 sizes it: Stage 3 prices and checks that size.
+                    let sized = crate::sized_as_pass1(&roots, std::slice::from_ref(&target), &data);
                     let mut configured = PhysicalCandidatesWithCosts::empty_for_tests();
                     let QueryRoot::Operator(root) = &sized[0] else {
                         panic!("operator")

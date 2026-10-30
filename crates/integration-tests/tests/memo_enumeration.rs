@@ -22,14 +22,14 @@
 //! (`accuracy_budget_parts` 1) and the plans `compose_logical_candidate` builds from
 //! the Pass 1 inventory's assignments are not equal sets:
 //! - A whole-workload plan is a memo DAG exactly when targets that compute
-//!   the same thing take the same choice. With series identity the two
-//!   `quantile 0.5` are one memo group, which takes one candidate; the
-//!   inventory keeps a target for each and may give them different
-//!   summaries.
+//!   the same thing take the same choice and it takes no KLL. With series
+//!   identity the two `quantile 0.5` are one memo group, which takes one
+//!   candidate; the inventory keeps a target for each and may give them
+//!   different summaries. The inventory sizes a KLL per value; Pass 1 sizes
+//!   every memo KLL for the whole result (a failure probability below the
+//!   query's, divided over the source's series), so no KLL plan is in both.
 //! - A whole-budget memo DAG is a whole-workload plan exactly when it takes
-//!   no KLL sized for the whole result (Pass 1's accuracy-scoped candidates,
-//!   sized for a failure probability below the query's, which the inventory
-//!   does not offer).
+//!   no KLL sized for the whole result, that is, no KLL.
 //!
 //! The memo's other choices size an operand's summary for a share of the
 //! budget (a ratio's operands); the whole-workload path has no such plans.
@@ -198,10 +198,9 @@ fn kll(candidate: &CandidateForMemoGroup) -> Vec<(u32, Option<f64>)> {
         .collect()
 }
 
-/// Pass 1's accuracy-scoped candidate: a KLL sized for the whole result, at
-/// the query's failure probability divided over the source's series (1e-7
-/// here), far below what a per-value KLL is sized for (the query's, or half
-/// of it).
+/// A KLL Pass 1 sized for the whole result, at the query's failure
+/// probability divided over the source's series (1e-7 here), far below what
+/// a per-value KLL is sized for (the query's, or half of it).
 fn sized_for_whole_result(candidate: &CandidateForMemoGroup) -> bool {
     kll(candidate)
         .iter()
@@ -241,11 +240,19 @@ fn assert_pass1_memo_and_whole_workload_plans(
             a.aggregate == b.aggregate && a.measure_index == b.measure_index
         })
         .collect();
+    let takes_kll = |plan: &Plan| {
+        plan.iter().flat_map(OperatorNode::reachable).any(|node| {
+            matches!(node.asap(), Some(ASAPOp::SummaryAgg {
+                family: FieldDataType::Sketch(kind, _), ..
+            }) if matches!(kind.params(), SketchParams::Kll { .. }))
+        })
+    };
     for (assignment, plan) in &whole {
         assert_eq!(
             whole_budget.iter().any(|(_, p)| *p == plan),
-            same.iter().all(|&(a, b)| assignment[a] == assignment[b]),
-            "a whole-workload plan is a memo DAG when equal targets choose alike"
+            same.iter().all(|&(a, b)| assignment[a] == assignment[b]) && !takes_kll(plan),
+            "a whole-workload plan is a memo DAG when equal targets choose alike \
+             and it takes no (per-value) KLL"
         );
         assert!(
             !plans.iter().any(|p| p == plan) || whole_budget.iter().any(|(_, p)| *p == plan),
@@ -276,22 +283,23 @@ fn ratio_of_quantiles_production_memo() {
     // Stage 0: series identity makes the two `quantile 0.5` one group.
     assert_eq!(steps.stage0.groups.len(), 7);
     assert_eq!(candidate_count(&steps.stage0), 0);
-    // Pass 1: the two quantile groups have 7 candidates each, 4 for the
-    // whole budget (exact, KLL per value, DDSketch, KLL for the whole
-    // result) and 3 for half of it; the other 5 groups one each.
+    // Pass 1: the two quantile groups have 5 candidates each, 3 for the
+    // whole budget (exact, DDSketch, KLL sized for the whole result) and 2
+    // for half of it; the other 5 groups one each.
     assert_eq!(steps.pass1.groups.len(), 7);
-    assert_eq!(candidate_count(&steps.pass1), 19);
-    // 7 × 7 choices, 4 × 4 of them for the whole budget. The inventory has
+    assert_eq!(candidate_count(&steps.pass1), 15);
+    // 5 × 5 choices, 3 × 3 of them for the whole budget. The inventory has
     // 3 × 3 × 3 assignments (a target per `quantile 0.5`, 3 choices each):
-    // the 3 × 3 that give both `quantile 0.5` the same choice are memo DAGs.
+    // the 2 × 2 that give both `quantile 0.5` the same choice and take no
+    // KLL are memo DAGs.
     assert_eq!(
         assert_pass1_memo_and_whole_workload_plans(&run),
-        (49, 16, 27, 9)
+        (25, 9, 27, 4)
     );
     // The last step, over the complete pane-width domain.
     let last = &steps.concrete_states;
-    assert_eq!(last.groups.len(), 438);
-    assert_eq!(candidate_count(last), 2158);
+    assert_eq!(last.groups.len(), 255);
+    assert_eq!(candidate_count(last), 1243);
     let enumeration = enumerate(last, 2_000);
     assert!(!enumeration.complete);
     assert_eq!(enumeration.all_chosen_candidates.len(), 2_000);
@@ -306,14 +314,14 @@ fn ratio_of_quantiles_production_memo() {
     // the readers of a state share; the rewrite is a copy of the candidate
     // (`derive` in `pass2/memo/rules/shared_configuration_readers.rs`), so it keeps its
     // `accuracy_budget_parts`. In each quantile group the `accuracy_budget_parts` 1 KLL `k` 567
-    // (sized for the whole result) gets copies at `k` 567, 1156 and 1184,
-    // all with `accuracy_budget_parts` 1; the `accuracy_budget_parts` 2 KLL `k` 1184 keeps 2.
+    // (sized for the whole result) gets copies at `k` 567 and 1184, both
+    // with `accuracy_budget_parts` 1; the `accuracy_budget_parts` 2 KLL `k` 1184 keeps 2.
     // The `k` 1184 copy with `accuracy_budget_parts` 1 composes the same DAG as the
     // `accuracy_budget_parts` 2 candidate: one sketch, sized for half the budget,
     // which also meets the whole budget, so the label is sound.
     let pass1 = &steps.pass1;
     let quantile_groups: Vec<_> = (0..pass1.groups.len())
-        .filter(|&group| pass1.candidates[group].len() == 7)
+        .filter(|&group| pass1.candidates[group].len() == 5)
         .collect();
     assert_eq!(quantile_groups.len(), 2);
     for group in quantile_groups {
@@ -324,22 +332,11 @@ fn ratio_of_quantiles_production_memo() {
                 .filter_map(|c| kll(c).first().map(|&(k, _)| (k, c.accuracy_budget_parts)))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(
-            sizes(&pass1.candidates[group]),
-            [(345, 1), (746, 2), (567, 1), (1184, 2)]
-        );
+        assert_eq!(sizes(&pass1.candidates[group]), [(567, 1), (1184, 2)]);
         let candidates = &last.candidates[group];
         assert_eq!(
             sizes(candidates),
-            [
-                (345, 1),
-                (746, 2),
-                (567, 1),
-                (1184, 2),
-                (567, 1),
-                (1156, 1),
-                (1184, 1)
-            ]
+            [(567, 1), (1184, 2), (567, 1), (1184, 1)]
         );
         let at = |k: u32, share: usize| {
             candidates
@@ -356,10 +353,11 @@ fn ratio_of_quantiles_production_memo() {
     }
 }
 
-/// On the three-query workload, the same relation: the inventory's 3 × 3
-/// assignments are all memo DAGs; the memo's 4 × 4 whole-budget DAGs add
-/// the KLL sized for the whole result. Pass 1 is the same in every round,
-/// so the default search will do.
+/// On the three-query workload, the same relation: the memo's 3 × 3
+/// whole-budget DAGs and the inventory's 3 × 3 assignments share the 2 × 2
+/// that take no KLL (the memo's is sized for the whole result, the
+/// inventory's per value). Pass 1 is the same in every round, so the
+/// default search will do.
 #[test]
 fn shared_quantiles_pass1_memo_and_whole_workload_plans() {
     let workload = with_queries(
@@ -373,7 +371,7 @@ fn shared_quantiles_pass1_memo_and_whole_workload_plans() {
     let run = production_run(&workload, Stage1ToStage3Search::default());
     assert_eq!(
         assert_pass1_memo_and_whole_workload_plans(&run),
-        (16, 16, 9, 9)
+        (9, 9, 9, 4)
     );
 }
 

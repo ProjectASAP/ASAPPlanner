@@ -328,39 +328,10 @@ fn common_reader_windows(configured: &PhysicalCandidatesWithCosts) -> Vec<Option
 }
 
 /// Whether a summary build's price at its template's parameters is at most
-/// its price in any plan that selects it. Stage 3 resizes a sketch only to
-/// larger parameters (`with_failure_probability` and HLL's `min_precision`
-/// keep at least the current size), and the analytical shape
-/// (`sketch_shape`) never charges a larger sketch less. A measured table
-/// interpolates between measured sizes and need not grow with size, so a
-/// resizable sketch with measured entries is not certified. DDSketch and
-/// exact accumulators are never resized.
-fn template_price_is_a_floor(build: &ASAPOp, context: &CandidatePlanningContext<'_>) -> bool {
-    let (ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. }) = build else {
-        return false;
-    };
-    let FieldDataType::Sketch(kind, _) = family else {
-        return true;
-    };
-    let params = kind.params();
-    matches!(params, SketchParams::DDSketch { .. })
-        || !measured_family(
-            params,
-            &context.models.plan_selection.measured_operation_costs,
-        )
-}
-
-/// Whether `table` measures any operator, at any phase, over `params`'s
-/// sketch algorithm. Such a family is priced by interpolating measured
-/// sizes, which need not rise with size, so a resized sketch can be priced
-/// below its Pass 1 size: neither its build nor the estimates and merges
-/// above it get a size-based bound.
-fn measured_family(params: &SketchParams, table: &asap_cost::MeasuredOperationCosts) -> bool {
-    table.operators.iter().any(|entry| {
-        entry.sketch.as_ref().is_some_and(|measured| {
-            std::mem::discriminant(measured) == std::mem::discriminant(params)
-        })
-    })
+/// its price in any plan that selects it: always, since Stage 1 sizes every
+/// summary and Stage 3 only checks, so the template is the size that runs.
+fn template_price_is_a_floor(_build: &ASAPOp, _context: &CandidatePlanningContext<'_>) -> bool {
+    true
 }
 
 fn round_down_small_bounds(costs: &mut [f64]) -> usize {
@@ -672,7 +643,7 @@ fn certified_price<'a>(
         };
         // One ingestion boundary executes once per accounted second; additional
         // unmaterialized consumers can only add executions. A summary build is
-        // priced at its template's size, the smallest Stage 3 can give it
+        // priced at its template's size, its final size
         // ([`template_price_is_a_floor`]). Retention above its own pane count
         // and all whole-plan charges are deliberately omitted.
         Ok(price_node(
@@ -724,6 +695,7 @@ mod tests {
     use crate::search::milp::model::{solve_candidate_proposal, ObservedAssignment};
     use crate::{PlanSelector, PlanningModels};
     use asap_cost::CalibrationFit;
+    use asap_logical_asap_optimization::pass1::logical_memo_candidates::generate_per_computation_logical_memo_candidates;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::asap_aware_cse::{
         pane_candidates, window_composition_pass2_candidates,
@@ -1350,33 +1322,55 @@ mod tests {
         assert_eq!(metrics.ingestion_scans, 2);
     }
 
-    /// Each of `queries`' Pass 1 candidates that `pick` selects, built for
-    /// `built_for`, every node at query time and equal nodes shared: their
-    /// configured inventory after [`apply`], the bound of the selected plan,
-    /// and that plan's evaluated cost for queries with target
-    /// `evaluated_for` (Stage 3 resizes sketches to it).
+    /// Each of `queries`' Pass 1 candidates that `pick` selects, sized by
+    /// Pass 1 for `target` (their final size), every node at query time and
+    /// equal nodes shared: their configured inventory after [`apply`], the
+    /// bound of the selected plan, and that plan's evaluated cost.
     fn query_time_bound_and_cost(
         queries: &[&str],
-        built_for: AccuracyTarget,
-        evaluated_for: AccuracyTarget,
+        target: AccuracyTarget,
         settings: &asap_cost::CostInputs,
         pick: fn(&OperatorNode) -> bool,
     ) -> (PhysicalCandidatesWithCosts, f64, f64) {
         let roots_with_ids: Vec<_> = queries
             .iter()
             .enumerate()
-            .map(|(id, query)| {
-                (
-                    id,
-                    QueryRoot::Operator(lower_promql(query, built_for.clone())),
+            .map(|(id, query)| (id, QueryRoot::Operator(lower_promql(query, target.clone()))))
+            .collect();
+        let entries: Vec<_> = queries
+            .iter()
+            .map(|_| {
+                entry_with(
+                    target.clone(),
+                    QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(
+                        10_000,
+                    ))),
                 )
             })
             .collect();
-        let memo = try_populate_pass1(
+        let data = DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1000.0,
+            },
+            sources: [(
+                "latency".into(),
+                SourceFacts {
+                    series_count: Some(2),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let memo = generate_per_computation_logical_memo_candidates(
             DagOfLogicalMemoGroups::from_roots(&roots_with_ids),
-            &generate_per_computation_candidates(roots_with_ids).unwrap(),
+            generate_per_computation_candidates(roots_with_ids).unwrap(),
+            &entries,
+            &data,
+            None,
         )
-        .unwrap();
+        .unwrap()
+        .memo;
         let picked: Vec<_> = (0..queries.len())
             .map(|query| {
                 let root_group = memo.query_roots[query].as_operator().unwrap().0 as usize;
@@ -1430,31 +1424,6 @@ mod tests {
             .iter()
             .map(|candidate| QueryRoot::Operator(Rc::clone(&candidate.root_node)))
             .collect();
-        let entries: Vec<_> = queries
-            .iter()
-            .map(|_| {
-                entry_with(
-                    evaluated_for.clone(),
-                    QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(
-                        10_000,
-                    ))),
-                )
-            })
-            .collect();
-        let data = DataWorkload {
-            arrival: DataArrival::Ingesting {
-                rows_per_second: 1000.0,
-            },
-            sources: [(
-                "latency".into(),
-                SourceFacts {
-                    series_count: Some(2),
-                    ..Default::default()
-                },
-            )]
-            .into_iter()
-            .collect(),
-        };
         let models = PlanningModels::builtin().with_plan_selection(settings);
         let context = CandidatePlanningContext {
             deadline: None,
@@ -1522,7 +1491,6 @@ mod tests {
             let (configured, bound, cost) = query_time_bound_and_cost(
                 &[query],
                 AccuracyTarget::exact(),
-                AccuracyTarget::exact(),
                 &asap_cost::CostInputs::default(),
                 |node| {
                     matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(..), child, .. })
@@ -1572,7 +1540,6 @@ mod tests {
             let (configured, bound, cost) = query_time_bound_and_cost(
                 queries,
                 AccuracyTarget::exact(),
-                AccuracyTarget::exact(),
                 &asap_cost::CostInputs::default(),
                 pick,
             );
@@ -1601,17 +1568,16 @@ mod tests {
             if matches!(kind.params(), SketchParams::Kll { .. }))
     }
 
-    // A KLL build is priced at its template's size, the smallest Stage 3
-    // gives it: a smaller failure probability (as a smaller budget share
-    // gives) resizes it larger, and the bound stays below every such cost.
+    // A KLL build is priced at its template's size, which Pass 1 sized for
+    // the target and Stage 3 never changes: at every failure probability
+    // the bound stays at or below the evaluated cost, and a smaller one
+    // gives a larger sketch.
     #[test]
-    fn a_kll_build_bound_holds_for_every_resized_size() {
-        let built_for = AccuracyTarget::max_error(0.01).failure_probability(0.01);
+    fn a_kll_build_bound_holds_at_every_failure_probability() {
         let mut costs = Vec::new();
         for failure_probability in [0.01, 0.001, 0.0001] {
             let (configured, bound, cost) = query_time_bound_and_cost(
                 &["quantile_over_time(0.9, latency[5m])"],
-                built_for.clone(),
                 AccuracyTarget::max_error(0.01).failure_probability(failure_probability),
                 &asap_cost::CostInputs::default(),
                 is_kll_build,
@@ -1625,56 +1591,37 @@ mod tests {
         }
         assert!(
             costs[2] > costs[0],
-            "resizing must enlarge the sketch: {costs:?}"
+            "a smaller failure probability sizes a larger sketch: {costs:?}"
         );
     }
 
-    // A measured table need not grow with size, so a resizable sketch with
-    // measured entries gets no certified bound.
+    // A measured table need not grow with size, but the template is the
+    // size the plan runs: a KLL build with measured entries, and the
+    // estimate over it, keep a certified bound at or below the evaluated
+    // cost.
     #[test]
-    fn a_measured_kll_build_is_not_certified() {
+    fn a_measured_kll_build_and_estimate_keep_the_bound_below_the_cost() {
         let settings = asap_cost::CostInputs {
             measured_operation_costs: serde_json::from_value(serde_json::json!({"operators": [
-            {"operator": "SummaryAgg", "phase": "query_time", "sketch": {"Kll": {"k": 200}}, "ns_per_unit": 300.0, "ns_per_invocation": 200.0}
-        ]}))
-        .unwrap(),
-            ..Default::default()
-        };
-        let (configured, _, _) = query_time_bound_and_cost(
-            &["quantile_over_time(0.9, latency[5m])"],
-            AccuracyTarget::max_error(0.01).failure_probability(0.01),
-            AccuracyTarget::max_error(0.01).failure_probability(0.01),
-            &settings,
-            is_kll_build,
-        );
-        assert_eq!(bound_of(&configured, is_kll_build), 0.0);
-    }
-
-    // A measured estimate over a KLL can make a larger, resized KLL cheaper
-    // than its Pass 1 size: a measured entry for the family on any operator
-    // leaves the build and the estimate above it uncertified, so the bound
-    // stays below the evaluated cost.
-    #[test]
-    fn a_measured_kll_estimate_keeps_the_bound_below_the_cost() {
-        let settings = asap_cost::CostInputs {
-            measured_operation_costs: serde_json::from_value(serde_json::json!({"operators": [
+            {"operator": "SummaryAgg", "phase": "query_time", "sketch": {"Kll": {"k": 200}}, "ns_per_unit": 300.0, "ns_per_invocation": 200.0},
             {"operator": "SummaryEstimate", "phase": "query_time", "sketch": {"Kll": {"k": 8}}, "ns_per_unit": 0.0, "ns_per_invocation": 5.0e9},
             {"operator": "SummaryEstimate", "phase": "query_time", "sketch": {"Kll": {"k": 20000}}, "ns_per_unit": 0.0, "ns_per_invocation": 1.0}
         ]}))
         .unwrap(),
             ..Default::default()
         };
-        let built_for = AccuracyTarget::max_error(0.01).failure_probability(0.01);
         for failure_probability in [0.01, 0.0001] {
             let (configured, bound, cost) = query_time_bound_and_cost(
                 &["quantile_over_time(0.9, latency[5m])"],
-                built_for.clone(),
                 AccuracyTarget::max_error(0.01).failure_probability(failure_probability),
                 &settings,
                 is_kll_build,
             );
-            assert_eq!(bound_of(&configured, is_kll_build), 0.0);
-            assert!(bound <= cost, "{failure_probability}: {bound} above {cost}");
+            assert!(bound_of(&configured, is_kll_build) > 0.0);
+            assert!(
+                bound > 0.0 && bound <= cost * (1.0 + 1e-9),
+                "{failure_probability}: {bound} above {cost}"
+            );
         }
     }
 }

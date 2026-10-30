@@ -19,7 +19,6 @@ use crate::pricing::{kept_pane_chains, node_map, pane_retention_ms, price_at_sca
 use crate::report::{
     AcceptedAccuracy, Rejection, RejectionCause, SearchReport, Selection, SelectionError,
 };
-use crate::sizing::sized_for_failure_probability;
 use crate::PlanningModels;
 use asap_types::workload::bounds::with_confirmed_weights;
 
@@ -85,7 +84,7 @@ pub struct PlanSelector<'a> {
     rejected: Vec<Rejection>,
     /// The valid candidates kept, in candidate order: every one, the best
     /// so far, or the Pareto front so far.
-    kept: Vec<KeptCandidate>,
+    kept: Vec<PhysicalWorkloadPlan>,
     /// The factor that calibrates the formulas' CPU time to the measured
     /// table's ([`Self::set_calibration`]); 1 without a measured table.
     pub(crate) formula_scale: f64,
@@ -98,13 +97,6 @@ pub struct PlanSelector<'a> {
 /// Prices within this fraction of each other are the same sum of charges
 /// rounded differently (Stage 3's tie tolerance is 1e-9).
 const ROUNDING: f64 = 1e-12;
-
-/// A valid candidate the selector keeps: as Stage 2 built it, and sized
-/// for its queries' failure probabilities as Stage 3 priced it.
-struct KeptCandidate {
-    built: PhysicalWorkloadPlan,
-    sized: PhysicalWorkloadPlan,
-}
 
 impl<'a> PlanSelector<'a> {
     /// A selector for the workload `entries` over `data` under `models`.
@@ -181,19 +173,18 @@ impl<'a> PlanSelector<'a> {
                 entries: self.entries.len(),
             });
         }
-        let Ok((sized, _)) = checked_candidate(candidate, &self.targets, self.data, &self.models)
-        else {
+        if checked_candidate(candidate, &self.targets, self.data, &self.models).is_err() {
             return Ok(CalibrationFit::default());
-        };
-        let nodes = node_map(&sized.dag);
-        let kept_chains = kept_pane_chains(&sized.dag);
+        }
+        let nodes = node_map(&candidate.dag);
+        let kept_chains = kept_pane_chains(&candidate.dag);
         if !self.models.deployment_capabilities.raw_data_retained
-            && raw_data_violation(&sized.dag, &kept_chains).is_some()
+            && raw_data_violation(&candidate.dag, &kept_chains).is_some()
         {
             return Ok(CalibrationFit::default());
         }
         let (_, fit) = price_at_scale(
-            &sized.dag,
+            &candidate.dag,
             &nodes,
             &kept_chains,
             &self.recurrence,
@@ -248,26 +239,26 @@ impl<'a> PlanSelector<'a> {
             });
         }
         self.candidates_checked += 1;
-        let (sized, accepted_accuracy) =
+        let accepted_accuracy =
             match checked_candidate(candidate, &self.targets, self.data, &self.models) {
-                Ok(checked) => checked,
+                Ok(accepted) => accepted,
                 Err(failed) => {
                     self.reject(&candidate.id, failed.cause, failed.reason);
                     return Ok(());
                 }
             };
         // Built once per candidate for the raw-data check and pricing.
-        let nodes = node_map(&sized.dag);
-        let kept_chains = kept_pane_chains(&sized.dag);
+        let nodes = node_map(&candidate.dag);
+        let kept_chains = kept_pane_chains(&candidate.dag);
         if !self.models.deployment_capabilities.raw_data_retained {
-            if let Some(reason) = raw_data_violation(&sized.dag, &kept_chains) {
+            if let Some(reason) = raw_data_violation(&candidate.dag, &kept_chains) {
                 self.reject(&candidate.id, RejectionCause::RawDataNotRetained, reason);
                 return Ok(());
             }
         }
         let settings = self.models.plan_selection;
         let (cost, _) = price_at_scale(
-            &sized.dag,
+            &candidate.dag,
             &nodes,
             &kept_chains,
             &self.recurrence,
@@ -293,13 +284,13 @@ impl<'a> PlanSelector<'a> {
         }
         self.track_runner_up(&cost);
         if !self.keep_every_candidate {
-            let kept_cost = |kept: &KeptCandidate| &self.costs[&kept.built.id];
+            let kept_cost = |kept: &PhysicalWorkloadPlan| &self.costs[&kept.id];
             let selectable = match self.ranking {
                 // A candidate another dominates is never on the front, and
                 // one it dominates leaves it.
                 Ranking::Front => {
                     let latency = worst_latency_ms(&cost.usage);
-                    let dominated_by = |kept: &KeptCandidate| {
+                    let dominated_by = |kept: &PhysicalWorkloadPlan| {
                         let usage = &kept_cost(kept).usage;
                         dominates_at((usage, worst_latency_ms(usage)), (&cost.usage, latency))
                     };
@@ -317,7 +308,7 @@ impl<'a> PlanSelector<'a> {
         }
         check_deadline()?;
         if !self.keep_every_candidate {
-            let kept_cost = |kept: &KeptCandidate| &self.costs[&kept.built.id];
+            let kept_cost = |kept: &PhysicalWorkloadPlan| &self.costs[&kept.id];
             let dominated: Vec<bool> = self
                 .kept
                 .iter()
@@ -331,8 +322,8 @@ impl<'a> PlanSelector<'a> {
             self.kept.retain(|kept| {
                 let drop = dominated.next().unwrap_or(false);
                 if drop {
-                    costs.remove(&kept.built.id);
-                    accepted.remove(&kept.built.id);
+                    costs.remove(&kept.id);
+                    accepted.remove(&kept.id);
                 }
                 !drop
             });
@@ -340,10 +331,7 @@ impl<'a> PlanSelector<'a> {
         self.costs.insert(candidate.id.clone(), cost);
         self.accepted
             .insert(candidate.id.clone(), accepted_accuracy);
-        self.kept.push(KeptCandidate {
-            built: candidate.clone(),
-            sized,
-        });
+        self.kept.push(candidate.clone());
         Ok(())
     }
 
@@ -352,27 +340,24 @@ impl<'a> PlanSelector<'a> {
     pub fn keeps_from_logical(&self, from_logical: &str) -> bool {
         self.kept
             .iter()
-            .any(|kept| kept.built.from_logical == from_logical)
+            .any(|kept| kept.from_logical == from_logical)
     }
 
     /// The selection over every candidate offered, and the selected
-    /// candidate as Stage 2 built it (the selection's plan is it sized for
-    /// its queries' failure probabilities).
+    /// candidate as Stage 2 built it (the selection's plan is its roots
+    /// with the weight requirements Stage 3 confirmed made proofs).
     pub fn finish(mut self) -> Result<(Selection, PhysicalWorkloadPlan), SelectionError> {
         let ranking = self.ranking;
-        let valid_costs: Vec<&CandidateCost> = self
-            .kept
-            .iter()
-            .map(|kept| &self.costs[&kept.built.id])
-            .collect();
+        let valid_costs: Vec<&CandidateCost> =
+            self.kept.iter().map(|kept| &self.costs[&kept.id]).collect();
         let Some((best, front)) = choose(ranking, &valid_costs) else {
             return Err(SelectionError::NoValidCandidate(self.rejected));
         };
-        let id = |index: usize| self.kept[index].built.id.clone();
+        let id = |index: usize| self.kept[index].id.clone();
         let selected = id(best);
         let front: Vec<String> = front.into_iter().map(id).collect();
         for kept in &self.kept {
-            let id = &kept.built.id;
+            let id = &kept.id;
             if *id != selected {
                 let (cause, reason) = ranking.lost_reason(id, &selected, &self.costs, &front);
                 self.rejected.push(Rejection {
@@ -382,11 +367,11 @@ impl<'a> PlanSelector<'a> {
                 });
             }
         }
-        let KeptCandidate { built, sized } = self.kept.swap_remove(best);
-        let plan = with_confirmed_weights(&sized.roots, self.data);
+        let built = self.kept.swap_remove(best);
+        let plan = with_confirmed_weights(&built.roots, self.data);
         let pane_retention_ms = pane_retention_ms(
-            &sized.dag,
-            &query_reach(&sized.dag, &node_map(&sized.dag)),
+            &built.dag,
+            &query_reach(&built.dag, &node_map(&built.dag)),
             &self.range_evaluations,
         );
         let incumbent_cost = self.costs.get(&selected).and_then(|c| c.cost_per_second);
@@ -444,24 +429,18 @@ impl<'a> PlanSelector<'a> {
     }
 }
 
-/// `candidate` sized for its queries' failure probabilities, with the
-/// accuracy Stage 3 accepted for each query, or the first check it fails
-/// that does not depend on its materialization or prices: its resized
-/// summaries do not rebuild, the executor cannot run a per-series
-/// aggregate it reads, or a query misses its accuracy target.
+/// The accuracy Stage 3 accepted for each of `candidate`'s queries, or the
+/// first check it fails that does not depend on its materialization or
+/// prices: the executor cannot run a per-series aggregate it reads, or a
+/// query misses its accuracy target. Its summaries keep the sizes Stage 1
+/// gave them; this only checks them.
 pub(crate) fn checked_candidate(
     candidate: &PhysicalWorkloadPlan,
     targets: &[AccuracyTarget],
     data: &DataWorkload,
     models: &PlanningModels<'_>,
-) -> Result<(PhysicalWorkloadPlan, Vec<AcceptedAccuracy>), CheckFailure> {
-    let sized =
-        sized_for_failure_probability(candidate, targets, data).map_err(|reason| CheckFailure {
-            cause: RejectionCause::FailureProbabilityResizeFailed,
-            reason,
-            size_independent: false,
-        })?;
-    if let Some(reason) = per_entity_aggregate_violation(&sized.dag) {
+) -> Result<Vec<AcceptedAccuracy>, CheckFailure> {
+    if let Some(reason) = per_entity_aggregate_violation(&candidate.dag) {
         // The aggregate is the plan's own exact per-series reduction, which
         // no summary size changes.
         return Err(CheckFailure {
@@ -470,8 +449,7 @@ pub(crate) fn checked_candidate(
             size_independent: true,
         });
     }
-    let accepted = accuracy_check(&sized, targets, data, models)?;
-    Ok((sized, accepted))
+    accuracy_check(candidate, targets, data, models)
 }
 
 /// The index of the candidate `ranking` selects among `costs` (the first on

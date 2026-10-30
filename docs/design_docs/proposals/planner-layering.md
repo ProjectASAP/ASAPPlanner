@@ -815,11 +815,16 @@ model for its share. Pass 2 never resizes a summary for its own readers: a
 pane chain inherits the size of the build it replaces (a merge of equal-size
 panes keeps the guarantee when the family's merged error is `Exact` or
 `AsIfBuiltOverUnion`), and a build shared by several readers takes the
-strictest reader's size, one state group per distinct size. The whole-result
-failure-probability capacities (`add_scoped_candidates`) run in Pass 1's
-`generate_per_computation_logical_memo_candidates`; one sizing step still runs
-outside Pass 1 and is to move into it: Stage 3's failure-probability resizing
-(`resize_for_failure_probability`).
+strictest reader's size, one state group per distinct size. The failure
+probability is part of Pass 1's size too
+(`generate_per_computation_logical_memo_candidates`): each approximate input
+of a candidate with `n` budget parts is sized for `δ / (n · V)`, the smallest
+over the queries reaching its group, where `V` is the number of values the
+query's accuracy scope covers (1 per value, at most `⌊1 / share⌋` for a record
+share, and `G` from the workload-derived bounds for the whole result), and a
+classic HLL's precision is raised for its source's declared distinct bound.
+Stage 3 never resizes: a candidate whose sizes miss the composed accuracy
+target is rejected.
 Pass 1 creates no merge nodes: each candidate summarizes exactly its own
 window, and merging across windows comes from the window-composition rule in
 Pass 2.
