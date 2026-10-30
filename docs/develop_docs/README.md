@@ -10,7 +10,6 @@ formats, evidence, and verification workflows.
 - [Pre-ASAP IR reference](pre-asap-ir.md)
 - [Post-ASAP IR](../design_docs/concepts/post-asap-ir.md)
 - [Accuracy implementation companion](end-to-end-accuracy-guarantees.md)
-- [Offline sketch evidence](offline-sketch-evidence.md)
 - [Metrics-observability corpora](metrics-observability-corpora.md)
 - [Physical compile coverage for deployment computation](physical-compile-coverage.md)
 - [Planner snapshots](planner-snapshots.md)

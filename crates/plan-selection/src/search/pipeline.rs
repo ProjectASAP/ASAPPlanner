@@ -191,27 +191,9 @@ pub fn run_stage1_to_stage3_with<Id: Clone + std::fmt::Debug>(
         data,
         models,
         search,
-        Some(initial),
+        initial,
         Some(generation_started.elapsed().as_secs_f64() * 1000.0),
     ))
-}
-
-/// [`run_stage1_to_stage3_with`] after Pass 1: searches the Stage 1
-/// candidates of `per_computation` (the Pass 1 inventory of the frontends'
-/// roots) without the summaries the
-/// deployment does not support
-/// ([`PerComputationCandidates::without_unsupported_summaries`]), so a
-/// caller can read the inventory, e.g. its
-/// [`combinations`](PerComputationCandidates::combinations), before
-/// generating the memo.
-pub fn run_stage1_to_stage3_from_pass1<Id: Clone + std::fmt::Debug>(
-    per_computation: PerComputationCandidates<Id>,
-    entries: &[QueryWorkloadEntry],
-    data: &DataWorkload,
-    models: PlanningModels<'_>,
-    search: Stage1ToStage3Search,
-) -> Stage1ToStage3Run<Id> {
-    run_with_initial_memo(per_computation, entries, data, models, search, None, None)
 }
 
 fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
@@ -220,7 +202,7 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
     data: &DataWorkload,
     models: PlanningModels<'_>,
     search: Stage1ToStage3Search,
-    initial: Option<DagOfLogicalMemoGroups>,
+    initial: DagOfLogicalMemoGroups,
     local_candidate_generation_ms: Option<f64>,
 ) -> Stage1ToStage3Run<Id> {
     let pruned = per_computation.without_unsupported_summaries(
@@ -229,7 +211,6 @@ fn run_with_initial_memo<Id: Clone + std::fmt::Debug>(
             .supported_summaries
             .as_deref(),
     );
-    let initial = initial.unwrap_or_else(|| DagOfLogicalMemoGroups::from_roots(&pruned.roots));
     let mut archive = crate::search::route::CandidateArchive::default();
     let found = crate::search::route::candidate_connection_search(
         initial,

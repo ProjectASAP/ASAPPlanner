@@ -2,10 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{cpu::MeasuredCpu, measurement::Measurement};
-
-pub type MeasuredResources = PhysicalResources<MeasuredCpu, Measurement>;
-
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PhysicalResources<Cpu, Bytes> {

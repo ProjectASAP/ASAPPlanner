@@ -1,46 +1,16 @@
-//! Resource dimensions shared by analytical estimates and benchmark evidence.
+//! Resource dimensions of analytical estimates.
 //!
 //! The CPU payload establishes its unit and operation scope; CPU operations
-//! must never be interpreted as nanoseconds. Byte values can be exact integers
-//! or measurements carrying uncertainty. `None` means unavailable, not zero.
+//! must never be interpreted as nanoseconds. `None` means unavailable, not zero.
 
 pub mod cpu;
-pub mod measurement;
 pub mod physical;
 
-pub use cpu::{MeasuredCpu, ModeledCpu};
-pub use measurement::Measurement;
-pub use physical::{MeasuredResources, PhysicalResources};
+pub use cpu::ModeledCpu;
+pub use physical::PhysicalResources;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Distinct CPU payloads reject each other's units at the wire boundary;
-    /// measured phase metadata survives without filling unknown phases.
-    #[test]
-    fn cpu_units_and_measurement_metadata_remain_distinct() {
-        let modeled = ModeledCpu { cpu_ops: 12.0 };
-        assert!(
-            serde_json::from_value::<MeasuredCpu>(serde_json::to_value(modeled).unwrap()).is_err()
-        );
-        let measured = MeasuredCpu {
-            update_cpu_ns: Some(Measurement {
-                value: 12.0,
-                stddev: Some(0.5),
-                samples: 5,
-                method: Some("test process CPU clock".into()),
-            }),
-            ..Default::default()
-        };
-        let encoded = serde_json::to_value(&measured).unwrap();
-        assert!(serde_json::from_value::<ModeledCpu>(encoded.clone()).is_err());
-        assert_eq!(
-            serde_json::from_value::<MeasuredCpu>(encoded).unwrap(),
-            measured
-        );
-        assert!(measured.build_cpu_ns.is_none());
-        assert!(measured.read_cpu_ns.is_none());
-    }
 
     /// Default resources preserve unavailable dimensions instead of inventing zeros.
     #[test]
