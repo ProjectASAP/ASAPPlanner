@@ -242,6 +242,9 @@ mod checks;
 #[cfg_attr(not(test), allow(dead_code))]
 mod classes;
 mod models;
+// #1095 C3: the MILP's inputs; the class-level MILP (C4) reads them.
+#[cfg_attr(not(test), allow(dead_code))]
+mod owners;
 mod report;
 mod search;
 mod selector;

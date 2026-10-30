@@ -1,0 +1,1650 @@
+//! #1095 C3: what the owner-scoped class MILP (§2.0) is built from. Given
+//! Stage 2's candidates folded into classes ([`crate::classes`]), it
+//! computes:
+//!
+//! 1. **Class dominance** ([`prune_dominated_classes`]): a class no optimal
+//!    plan under cost model 1 uses is deleted, with its links.
+//! 2. **Per-class data** ([`ClassData`]): whether the class outputs
+//!    approximate values and the budget parts it is sized for, and its usage
+//!    per execution, standing cost, held bytes and own latency, every number
+//!    from [`asap_cost::node_usage`].
+//! 3. **Owners** ([`OwnerRegion`]): one per query and one per possible
+//!    instance of each shareable class, each with its region of stateless
+//!    classes, the links inside it and the shareable classes it may read.
+//! 4. **Accuracy weights** ([`AccuracyWeight`]) per query and approximate
+//!    class, from the query's expression shape.
+//!
+//! Nothing calls it yet; the MILP (C4) will.
+//!
+//! ## Usage per execution and its context
+//!
+//! A class's usage is [`asap_cost::node_usage`] of its operator node at one
+//! execution per second (`rate = (1, 1.0)`); its standing cost is the same
+//! call's cost at no execution (`rate = (1, 0.0)`), and its execution cost
+//! the difference. `node_usage` also needs facts the class alone does not
+//! fix, its *context*:
+//! - the outputs of the producers it reads (one per input; the producer
+//!   classes of an input may output different statistics);
+//! - for a query-time scan, the window each reader reads, through time
+//!   shifts ([`window_read_through`], which follows
+//!   [`PhysicalASAPDAG::scan_window`] for a plan with that one reader);
+//! - for a pane chain kept beyond one evaluation, the panes it keeps, which
+//!   grow with the range-evaluation span of the queries reaching it
+//!   ([`asap_cost::pane_retention_ms`], [`asap_cost::retained_panes`]).
+//!
+//! Every combination of these options is costed (at most
+//! [`MAX_CONTEXTS`]); a combination `asap-cost` cannot cost is skipped
+//! (no plan can use it). When the numbers agree, the usage is
+//! plan-independent; otherwise [`ClassData::usage_depends_on`] says which
+//! options changed it, and [`ClassData::usage`] holds the first costed
+//! combination's numbers. An ingestion-time node's maintained window is
+//! read from the first producer class of each input
+//! ([`asap_cost::maintained_window_ms`]).
+//!
+//! Folding can close a cycle of class links (a copy reads another copy of a
+//! class on the cycle; on #1036 workload-01, a widened scan's `Project`
+//! that reads its own memo group). Classes are costed producers first; on a
+//! cycle, a class is costed from its producers already costed and marked
+//! [`UsageContext::ProducerOnACycle`].
+
+//! ## Dominance (exact under cost model 1)
+//!
+//! Class `k` is deleted when another class `k'` (the *dominating* class):
+//! - is in the same memo group, at the same timing and materialization,
+//!   with the same held state;
+//! - has the same producer classes per input, the same readers (every
+//!   (reader class, input) that may read `k` may read `k'`, and nothing
+//!   else), the same output references it may produce, the same reader
+//!   constraints and keep flags;
+//! - has the same `(approx, parts)`;
+//! - has at least `k`'s capacity;
+//! - has a guarantee at least as strong ([`guarantee_at_least_as_strong`]);
+//! - outputs the same schema, sources, state family and unchanged columns
+//!   with an operator of the same kind (pane chains: the same panes), so its
+//!   readers are costed with the same formulas;
+//! - and has every number at most `k`'s: CPU operations and scanned bytes
+//!   per execution, latency (work per execution), output rows and bytes,
+//!   kept memory (average and peak), disk bytes, held bytes and raw data
+//!   kept.
+//!
+//! Both classes' usage must be plan-independent (otherwise the comparison
+//! would hold for one context only). Readers' usage is assumed
+//! non-decreasing in their inputs' rows and bytes. Among classes that
+//! dominate each other the one with the smallest id is kept. Every link to
+//! a deleted class is deleted; its readers still read the dominating class.
+//!
+//! ## Accuracy weights
+//!
+//! `w(q, k)` counts the shares of `q`'s accuracy budget an approximate
+//! class `k` (a sketch [`ASAPOp::SummaryAgg`] or [`ASAPOp::PaneChain`], what
+//! [`asap_accuracy::propagation::approximate_inputs`] counts) uses, from
+//! the operators on the way from `q`'s output down to `k`
+//! ([`asap_accuracy::budget`]): `1` for an ordinary position, `2` for a
+//! quotient's denominator (a lone approximate denominator sized for the
+//! whole target misses it: `ε/(1 − ε) > ε`) and [`AccuracyWeight::Unusable`]
+//! for a quotient inside a quotient, an operator with no error bound, or an
+//! operator whose rule is unclear here ([`UnusableReason`]). When `k` sits
+//! at several positions under `q`, the largest weight counts.
+//!
+//! | Operator on the way down | Input | Position below |
+//! |---|---|---|
+//! | `BinaryOp` `/` whose right input may carry an approximate value | left, right | numerator, denominator |
+//! | `BinaryOp` `/` whose right input is exact in every plan | left, right | unchanged (a scaling), irrelevant |
+//! | `BinaryOp` `+ − ×` | both | unchanged |
+//! | `BinaryOp` `% ^ atan2` | both | unusable (no bound) |
+//! | `BinaryOp` comparison, `bool` comparison, set operator | both | unusable (unclear) |
+//! | `Aggregate` of `count` only; a count accumulator (`SummaryAgg`, `PaneChain`) | its input | irrelevant (no value reaches the output) |
+//! | `Project` dividing by a column, or with `%`, `^`, `atan2`, a function, `CASE`, a comparison or a subquery | its input | unusable (unclear: which side is which is not known per input) |
+//! | `SQLWindowFunc`, SQL `SetOp`, `PromqlVectorFromScalar` | all | unusable (unclear) |
+//! | an operator read inside an expression (a scalar subquery in a filter) | that input | unusable (unclear) |
+//! | any other operator | its inputs | unchanged |
+//!
+//! A quotient below a numerator or denominator makes the position below it
+//! unusable (nested quotient). An approximate class only at irrelevant
+//! positions gets no weight. "May carry an approximate value" is a fixpoint
+//! over the class links: the class is approximate, or reads such a class
+//! through an input that is not irrelevant. A scalar query root is read the
+//! same way: `/` over operator references, `+ − ×`, unary minus and casts
+//! keep the position; any other expression around a reference makes it
+//! unusable.
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+use asap_cost::{CostInputs, NodeUsage, ProducerOutput};
+use asap_types::ir::operator::operator_properties::BinaryOpKind;
+use asap_types::ir::physical_export::{
+    PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId, ScanWindow,
+};
+use asap_types::ir::properties::execution_data_state::{DataPrimitive, ExecutionDataState};
+use asap_types::ir::properties::{AccuracyGuarantee, ExecutionTiming};
+use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
+use asap_types::ir::schema::{ExactKind, FieldDataType, Schema};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr};
+use asap_types::physical::Materialization;
+use asap_types::stages::{output_references, MemoGroupId, PhysicalASAPMemoCandidates};
+use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
+
+use crate::classes::{reader_constraint_ids_per_candidate, CandidateClassId, CandidateClasses};
+
+/// The most contexts (combinations of producer outputs, scan windows and
+/// pane retentions) one class is costed under; beyond it the class's usage
+/// is marked [`UsageContext::TooManyContexts`].
+pub(crate) const MAX_CONTEXTS: usize = 64;
+
+/// What the MILP is built from (module documentation).
+#[derive(Debug, Clone)]
+pub(crate) struct MilpInputs {
+    /// Indexed by [`CandidateClassId`]: each class's data, pruned or not.
+    pub(crate) class_data: Vec<ClassData>,
+    /// The classes dominance deleted, ascending.
+    pub(crate) pruned_classes: Vec<PrunedClass>,
+    /// Indexed by [`CandidateClassId`]: per input, the producer classes left
+    /// after pruning (empty for a pruned class).
+    pub(crate) producer_classes_per_input: Vec<Vec<Vec<CandidateClassId>>>,
+    /// Per output reference (`output_references` of the query roots): the
+    /// classes left that may produce it, `Out(r)`, ascending.
+    pub(crate) output_classes: Vec<Vec<CandidateClassId>>,
+    /// Indexed by [`CandidateClassId`]: the queries that can reach the
+    /// class after pruning, ascending.
+    pub(crate) queries_reaching: Vec<Vec<usize>>,
+    /// One per query, in workload order.
+    pub(crate) query_owners: Vec<OwnerRegion>,
+    /// One per shareable class left that some query can reach, ascending by
+    /// class: its `m_s` instance owners share one region.
+    pub(crate) instance_owners: Vec<InstanceOwners>,
+    /// Per query: `w(q, k)` for each approximate class `k` it can reach.
+    pub(crate) accuracy_weights: Vec<BTreeMap<CandidateClassId, AccuracyWeight>>,
+}
+
+/// One class's data for the MILP.
+#[derive(Debug, Clone)]
+pub(crate) struct ClassData {
+    /// Whether it outputs approximate values: a sketch `SummaryAgg` or
+    /// `PaneChain`, each an approximate input of the queries reading it.
+    pub(crate) approximate: bool,
+    /// `parts(k)`: the `accuracy_budget_parts` of the memo candidate its
+    /// operator node implements; for a node factored over several
+    /// candidates, the smallest. A factored node is an identical terminal
+    /// reader shared by those candidates, and its producers decide which one
+    /// it implements; the smallest share is the one every choice meets.
+    pub(crate) accuracy_budget_parts: usize,
+    /// Its usage under the first context, or why `asap-cost` could not cost
+    /// it.
+    pub(crate) usage: Result<ClassUsage, String>,
+    /// The context options that changed its usage, ascending; empty when it
+    /// is plan-independent.
+    pub(crate) usage_depends_on: Vec<UsageContext>,
+}
+
+/// One class's usage, from [`asap_cost::node_usage`] (module
+/// documentation).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ClassUsage {
+    /// `u(k)`: CPU operations of one execution.
+    pub(crate) cpu_ops_per_execution: f64,
+    /// `u(k)`: bytes one execution scans.
+    pub(crate) scanned_bytes_per_execution: f64,
+    /// Milliseconds of one execution on one core.
+    pub(crate) work_ms_per_execution: f64,
+    /// `d_k`: what it adds to a reaching query's latency in
+    /// [`asap_cost::plan_cost`], its work per execution at query time; 0
+    /// at ingestion time, whose latency is the plan-level compaction term.
+    pub(crate) own_latency_ms: f64,
+    /// Cost model 1: the cost of one execution; `None` under other models.
+    pub(crate) cost_per_execution: Option<f64>,
+    /// Cost model 1: the cost per second of what it keeps whatever runs it
+    /// (kept memory and disk); `None` under other models.
+    pub(crate) standing_cost_per_second: Option<f64>,
+    /// Memory kept between executions, averaged over time.
+    pub(crate) average_memory_bytes: f64,
+    pub(crate) peak_memory_bytes: u64,
+    pub(crate) disk_bytes: u64,
+    /// Query-time memory held while an evaluation reading it runs (a
+    /// `MatAtQuery` state, or a not-materialized node's working memory).
+    pub(crate) held_bytes: u64,
+    /// Raw data a query-time scan keeps on disk.
+    pub(crate) raw_data_kept_bytes: u64,
+    /// An in-memory ingestion-time state's bytes per window.
+    pub(crate) maintained_window_bytes: u64,
+    pub(crate) output_rows: u64,
+    pub(crate) output_bytes: u64,
+}
+
+/// A context option that changed a class's usage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum UsageContext {
+    /// Which producer class (of different output) an input reads.
+    ProducerOutput,
+    /// Which reader reads a query-time scan, so which window it scans.
+    ScanWindowOfReader,
+    /// Which queries reach a kept pane chain, so how many panes it keeps.
+    PaneRetentionOfReachingQueries,
+    /// A producer class on a cycle of class links was not costed yet, so
+    /// its outputs were not among the options.
+    ProducerOnACycle,
+    /// `asap-cost` could not cost some contexts (e.g. a scan read with no
+    /// window from a source without `rows_held`); the usage is the first
+    /// costed one's.
+    UncostableContext,
+    /// More than [`MAX_CONTEXTS`] combinations: not all were costed.
+    TooManyContexts,
+}
+
+/// A class dominance deleted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrunedClass {
+    pub(crate) class: CandidateClassId,
+    pub(crate) dominated_by: CandidateClassId,
+    pub(crate) reason: String,
+}
+
+/// The choices one owner holds: its region and how it reads outside it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct OwnerRegion {
+    /// `Reg(o)`: the stateless classes reachable from its top before a
+    /// shareable class, ascending.
+    pub(crate) classes: Vec<CandidateClassId>,
+    /// Producer links inside it: `(reader, input, producer)` with both in
+    /// `classes`, or the reader the instance's own class.
+    pub(crate) links: Vec<(CandidateClassId, usize, CandidateClassId)>,
+    /// Its boundary reads: `(reader, input, shareable class)`, the reader
+    /// in `classes` or the instance's own class.
+    pub(crate) boundary_reads: Vec<(CandidateClassId, usize, CandidateClassId)>,
+    /// For a query owner, its output references' shareable classes:
+    /// `(output reference, shareable class)` read directly as the output.
+    pub(crate) output_reads: Vec<(usize, CandidateClassId)>,
+}
+
+/// The instance owners `(s, j)`, `j < m_s`, of shareable class `s`: their
+/// regions are equal, so they are stored once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InstanceOwners {
+    pub(crate) class: CandidateClassId,
+    /// `m_s = min(cap(s), queries that can reach s)`.
+    pub(crate) instance_count: usize,
+    /// The region below `s`; its links and boundary reads include `s`'s own
+    /// inputs.
+    pub(crate) region: OwnerRegion,
+}
+
+/// `w(q, k)`, ordered by size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum AccuracyWeight {
+    One,
+    Two,
+    /// `∞`: `k` is unusable for `q`.
+    Unusable(UnusableReason),
+}
+
+/// Why a position's weight is `∞`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum UnusableReason {
+    /// A quotient below a quotient's numerator or denominator.
+    NestedQuotient,
+    /// `%`, `^` or `atan2`: no error bound.
+    NoErrorBound,
+    /// An operator whose rule is not decided (module documentation).
+    UnclearOperator,
+}
+
+/// [`MilpInputs`] for `physical` folded into `classes`.
+/// `parts_per_memo_candidate[g][i]` is memo group `g`'s candidate `i`'s
+/// `accuracy_budget_parts`; `entries[q]` is query `q`'s workload entry.
+pub(crate) fn prepare_milp_inputs(
+    physical: &PhysicalASAPMemoCandidates,
+    classes: &CandidateClasses,
+    parts_per_memo_candidate: &[Vec<usize>],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    cost_inputs: &CostInputs,
+) -> MilpInputs {
+    let class_count = classes.classes.len();
+    let all_alive = vec![true; class_count];
+    let unpruned_links = producer_classes_left(classes, &all_alive);
+    let unpruned_outputs = output_classes(physical, classes, &all_alive);
+    let unpruned_reach = queries_reaching(physical, &unpruned_links, &unpruned_outputs);
+    let class_data = class_data(
+        physical,
+        classes,
+        parts_per_memo_candidate,
+        entries,
+        &unpruned_reach,
+        data,
+        cost_inputs,
+    );
+    let pruned_classes = prune_dominated_classes(
+        &dominance_profiles(physical, classes, &unpruned_outputs),
+        &class_data,
+    );
+    let mut alive = all_alive;
+    for pruned in &pruned_classes {
+        alive[pruned.class.0] = false;
+    }
+    let producer_classes_per_input = producer_classes_left(classes, &alive);
+    let output_classes = output_classes(physical, classes, &alive);
+    let queries_reaching = queries_reaching(physical, &producer_classes_per_input, &output_classes);
+    let shareable = |class: CandidateClassId| classes.class(class).is_shareable();
+    let output_refs = output_references(&physical.query_roots);
+    let query_owners = (0..physical.query_roots.len())
+        .map(|query| {
+            let outputs: Vec<(usize, &[CandidateClassId])> = output_refs
+                .iter()
+                .enumerate()
+                .filter(|(_, (q, _))| *q == query)
+                .map(|(reference, _)| (reference, output_classes[reference].as_slice()))
+                .collect();
+            let mut region = region_below(
+                outputs
+                    .iter()
+                    .flat_map(|(_, out)| out.iter().copied())
+                    .filter(|&class| !shareable(class)),
+                &producer_classes_per_input,
+                shareable,
+            );
+            region.output_reads = outputs
+                .iter()
+                .flat_map(|&(reference, out)| {
+                    out.iter()
+                        .copied()
+                        .filter(|&class| shareable(class))
+                        .map(move |class| (reference, class))
+                })
+                .collect();
+            region
+        })
+        .collect();
+    let instance_owners = (0..class_count)
+        .map(CandidateClassId)
+        .filter(|&class| alive[class.0] && shareable(class))
+        .filter_map(|class| {
+            let instance_count = classes
+                .class(class)
+                .capacity()
+                .min(queries_reaching[class.0].len());
+            (instance_count > 0).then(|| InstanceOwners {
+                class,
+                instance_count,
+                region: region_below([class], &producer_classes_per_input, shareable),
+            })
+        })
+        .collect();
+    let accuracy_weights = accuracy_weights(
+        physical,
+        classes,
+        &class_data,
+        &producer_classes_per_input,
+        &output_classes,
+    );
+    MilpInputs {
+        class_data,
+        pruned_classes,
+        producer_classes_per_input,
+        output_classes,
+        queries_reaching,
+        query_owners,
+        instance_owners,
+        accuracy_weights,
+    }
+}
+
+/// Per class, per input, its producer classes that are `alive` (none for a
+/// class that is not).
+fn producer_classes_left(
+    classes: &CandidateClasses,
+    alive: &[bool],
+) -> Vec<Vec<Vec<CandidateClassId>>> {
+    classes
+        .classes
+        .iter()
+        .enumerate()
+        .map(|(class, data)| match alive[class] {
+            false => Vec::new(),
+            true => data
+                .producer_classes_per_input
+                .iter()
+                .map(|producers| {
+                    producers
+                        .iter()
+                        .copied()
+                        .filter(|producer| alive[producer.0])
+                        .collect()
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// `Out(r)` per output reference: the `alive` classes of its output
+/// candidates, ascending.
+fn output_classes(
+    physical: &PhysicalASAPMemoCandidates,
+    classes: &CandidateClasses,
+    alive: &[bool],
+) -> Vec<Vec<CandidateClassId>> {
+    (0..physical.output_reference_count())
+        .map(|reference| {
+            let set: BTreeSet<_> = physical
+                .query_output_candidates(reference)
+                .map(|candidate| classes.class_of(candidate))
+                .filter(|class| alive[class.0])
+                .collect();
+            set.into_iter().collect()
+        })
+        .collect()
+}
+
+/// Per class, the queries whose output classes reach it through the links
+/// `producer_classes_per_input`, ascending.
+fn queries_reaching(
+    physical: &PhysicalASAPMemoCandidates,
+    producer_classes_per_input: &[Vec<Vec<CandidateClassId>>],
+    output_classes: &[Vec<CandidateClassId>],
+) -> Vec<Vec<usize>> {
+    let mut reaching = vec![Vec::new(); producer_classes_per_input.len()];
+    let output_refs = output_references(&physical.query_roots);
+    for query in 0..physical.query_roots.len() {
+        let mut seen = vec![false; producer_classes_per_input.len()];
+        let mut stack: Vec<CandidateClassId> = output_refs
+            .iter()
+            .enumerate()
+            .filter(|(_, (q, _))| *q == query)
+            .flat_map(|(reference, _)| output_classes[reference].iter().copied())
+            .collect();
+        while let Some(class) = stack.pop() {
+            if std::mem::replace(&mut seen[class.0], true) {
+                continue;
+            }
+            reaching[class.0].push(query);
+            stack.extend(
+                producer_classes_per_input[class.0]
+                    .iter()
+                    .flatten()
+                    .copied(),
+            );
+        }
+    }
+    reaching
+}
+
+/// The region below `tops`: the stateless classes reached from them before
+/// a shareable class (the stateless tops included, a shareable top not),
+/// the links among them and the boundary reads.
+fn region_below(
+    tops: impl IntoIterator<Item = CandidateClassId>,
+    producer_classes_per_input: &[Vec<Vec<CandidateClassId>>],
+    shareable: impl Fn(CandidateClassId) -> bool,
+) -> OwnerRegion {
+    let mut region = OwnerRegion::default();
+    let mut seen = HashSet::new();
+    let mut stack: Vec<CandidateClassId> = tops.into_iter().collect();
+    while let Some(reader) = stack.pop() {
+        if !seen.insert(reader) {
+            continue;
+        }
+        if !shareable(reader) {
+            region.classes.push(reader);
+        }
+        for (input, producers) in producer_classes_per_input[reader.0].iter().enumerate() {
+            for &producer in producers {
+                if shareable(producer) {
+                    region.boundary_reads.push((reader, input, producer));
+                } else {
+                    region.links.push((reader, input, producer));
+                    stack.push(producer);
+                }
+            }
+        }
+    }
+    region.classes.sort_unstable();
+    region.links.sort_unstable();
+    region.boundary_reads.sort_unstable();
+    region
+}
+
+// ---------------------------------------------------------------------------
+// Per-class data
+// ---------------------------------------------------------------------------
+
+/// Whether `node` outputs approximate values ([`ClassData::approximate`]).
+fn outputs_approximate_values(node: &OperatorNode) -> bool {
+    matches!(
+        node.asap(),
+        Some(
+            ASAPOp::SummaryAgg {
+                family: FieldDataType::Sketch(..),
+                ..
+            } | ASAPOp::PaneChain {
+                family: FieldDataType::Sketch(..),
+                ..
+            }
+        )
+    )
+}
+
+/// The physical-DAG node of `class` (its first copy), with node id `class`
+/// and each input's child id its first producer class (`usize::MAX` when it
+/// has none), as Stage 2's realizer would export it before retention.
+fn catalog_node(
+    physical: &PhysicalASAPMemoCandidates,
+    classes: &CandidateClasses,
+    class: CandidateClassId,
+) -> PhysicalASAPDAGNode {
+    let data = classes.class(class);
+    let copy = data.copies[0];
+    let candidate = &physical.candidates[copy.0];
+    let node = physical.physical_node(copy);
+    let mut input = 0;
+    let payload = node.operator.map_children(|_| {
+        let child = data
+            .producer_classes_per_input
+            .get(input)
+            .and_then(|producers| producers.first())
+            .map_or(usize::MAX, |producer| producer.0);
+        input += 1;
+        child
+    });
+    PhysicalASAPDAGNode {
+        id: class.0,
+        payload,
+        output_state: ExecutionDataState {
+            timing: candidate.timing,
+            primitive: if node.asap().and_then(ASAPOp::produced_state).is_some() {
+                DataPrimitive::SummaryState
+            } else {
+                DataPrimitive::Raw
+            },
+        },
+        materialization: candidate.materialization,
+        output_schema: node.schema.clone(),
+        guarantee: node.guarantee.clone(),
+        retention_ms: None,
+    }
+}
+
+/// A DAG of `nodes` alone, without edges: what
+/// [`asap_cost::pane_retention_ms`] reads (payload children and nodes).
+fn nodes_dag(nodes: &[&PhysicalASAPDAGNode]) -> PhysicalASAPDAG {
+    PhysicalASAPDAG {
+        nodes: nodes.iter().map(|&node| node.clone()).collect(),
+        edges: Vec::new(),
+        roots: Vec::new(),
+        scalar_roots: Vec::new(),
+    }
+}
+
+/// The window a scan read through `path` (time shifts, then the reader that
+/// ends it) covers, as [`PhysicalASAPDAG::scan_window`] computes it for a
+/// plan where `path` is the scan's only reader: the shifts' offsets add up,
+/// and a `TimeRange` reads its range, a kept pane chain one pane, any other
+/// pane chain its whole window; any other reader reads `Unbounded`.
+fn window_read_through(path: &[&PhysicalASAPDAGNode]) -> ScanWindow {
+    let mut end_offset_ms: i64 = 0;
+    for node in path {
+        let width_ms: u128 = match &node.payload {
+            Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) if shift.at.is_none() => {
+                end_offset_ms = end_offset_ms.saturating_add(shift.offset_ms);
+                continue;
+            }
+            Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => range.as_millis(),
+            Operator::ASAP(ASAPOp::PaneChain { pane_width_ms, .. })
+                if matches!(
+                    node.materialization,
+                    Materialization::MatAtQueryKeptAcrossEvaluations(_)
+                ) =>
+            {
+                u128::from(*pane_width_ms)
+            }
+            Operator::ASAP(ASAPOp::PaneChain {
+                pane_width_ms,
+                pane_count,
+                ..
+            }) => u128::from(*pane_width_ms) * u128::from(*pane_count),
+            _ => return ScanWindow::Unbounded,
+        };
+        return ScanWindow::Within {
+            end_offset_ms,
+            width_ms: i64::try_from(width_ms).unwrap_or(i64::MAX),
+        };
+    }
+    ScanWindow::Unbounded
+}
+
+/// The windows a query-time scan `scan` may read, one per way a reader
+/// reads it (through time shifts), distinct; `Unbounded` alone when nothing
+/// reads it.
+fn scan_window_options(
+    scan: CandidateClassId,
+    nodes: &[PhysicalASAPDAGNode],
+    readers: &[Vec<(CandidateClassId, usize)>],
+) -> Vec<ScanWindow> {
+    /// Time shifts nested deeper than this are not followed.
+    const MAX_SHIFTS: usize = 4;
+    let mut windows = Vec::new();
+    let mut paths: Vec<Vec<CandidateClassId>> = vec![vec![scan]];
+    while let Some(path) = paths.pop() {
+        let last = *path.last().expect("never empty");
+        let follow = path.len() == 1
+            || (matches!(
+                nodes[last.0].payload,
+                Operator::NonASAP(NonASAPOp::TimeShift { .. })
+            ) && path.len() <= MAX_SHIFTS
+                && !readers[last.0].is_empty());
+        if !follow {
+            // The path ends at a reader: what the scan reads under it.
+            let readers: Vec<_> = path[1..].iter().map(|class| &nodes[class.0]).collect();
+            let window = window_read_through(&readers);
+            if !windows.contains(&window) {
+                windows.push(window);
+            }
+            continue;
+        }
+        for &(reader, _) in readers[last.0].iter().rev() {
+            if !path.contains(&reader) {
+                let mut longer = path.clone();
+                longer.push(reader);
+                paths.push(longer);
+            }
+        }
+    }
+    if windows.is_empty() {
+        windows.push(ScanWindow::Unbounded);
+    }
+    windows
+}
+
+/// The panes kept pane chain `chain` may keep, one per query that can reach
+/// it (its range-evaluation span), distinct; its pane count for any other
+/// node.
+fn retained_pane_options(
+    chain: CandidateClassId,
+    nodes: &[PhysicalASAPDAGNode],
+    first_producer: &[Option<CandidateClassId>],
+    reaching: &[usize],
+    entries: &[QueryWorkloadEntry],
+) -> Vec<u64> {
+    let node = &nodes[chain.0];
+    let kept = matches!(
+        (&node.payload, node.materialization),
+        (
+            Operator::ASAP(ASAPOp::PaneChain { .. }),
+            Materialization::MatAtIngestion(_)
+                | Materialization::MatAtQueryKeptAcrossEvaluations(_)
+        )
+    );
+    if !kept {
+        return vec![asap_cost::panes_of(node)];
+    }
+    // The chain over the time shifts below it, which set its input offset.
+    let mut below = Vec::new();
+    let mut current = first_producer[chain.0];
+    while let Some(producer) = current {
+        if !matches!(
+            nodes[producer.0].payload,
+            Operator::NonASAP(NonASAPOp::TimeShift { .. })
+        ) || below.contains(&producer)
+        {
+            break;
+        }
+        below.push(producer);
+        current = first_producer[producer.0];
+    }
+    let mut dag_nodes: Vec<&PhysicalASAPDAGNode> =
+        below.iter().rev().map(|class| &nodes[class.0]).collect();
+    dag_nodes.push(node);
+    let dag = nodes_dag(&dag_nodes);
+    let mut options = Vec::new();
+    let reach = vec![HashSet::from([chain.0])];
+    let spans: Vec<_> = match reaching.is_empty() {
+        true => vec![None],
+        false => reaching
+            .iter()
+            .map(|&query| entries.get(query).and_then(|entry| entry.range_evaluation))
+            .collect(),
+    };
+    for range in spans {
+        let retention = asap_cost::pane_retention_ms(&dag, &reach, &[range]);
+        let panes = asap_cost::retained_panes(node, &retention);
+        if !options.contains(&panes) {
+            options.push(panes);
+        }
+    }
+    options
+}
+
+/// Whether two producer outputs cost their readers the same.
+fn same_producer_output(left: &ProducerOutput<'_>, right: &ProducerOutput<'_>) -> bool {
+    left.output.rows == right.output.rows
+        && left.output.bytes == right.output.bytes
+        && left.sources == right.sources
+        && left.family == right.family
+        && left.unchanged_columns == right.unchanged_columns
+        && (std::ptr::eq(left.payload, right.payload) || left.payload == right.payload)
+        && (std::ptr::eq(left.output_schema, right.output_schema)
+            || left.output_schema == right.output_schema)
+}
+
+/// `usage` as a reader of `node` sees it.
+fn producer_output<'a>(node: &'a PhysicalASAPDAGNode, usage: &NodeUsage<'a>) -> ProducerOutput<'a> {
+    ProducerOutput {
+        payload: &node.payload,
+        output_schema: &node.output_schema,
+        output: usage.output,
+        sources: usage.sources.clone(),
+        family: usage.family,
+        unchanged_columns: usage.unchanged_columns.clone(),
+    }
+}
+
+/// Per class, every `(reader class, input)` that may read it, ascending.
+fn readers_of(
+    producer_classes_per_input: &[Vec<Vec<CandidateClassId>>],
+) -> Vec<Vec<(CandidateClassId, usize)>> {
+    let mut readers = vec![Vec::new(); producer_classes_per_input.len()];
+    for (reader, inputs) in producer_classes_per_input.iter().enumerate() {
+        for (input, producers) in inputs.iter().enumerate() {
+            for producer in producers {
+                readers[producer.0].push((CandidateClassId(reader), input));
+            }
+        }
+    }
+    readers
+}
+
+/// Each class's [`ClassData`] (module documentation, "Usage per execution
+/// and its context"). `reaching[k]` are the queries that can reach class
+/// `k` before pruning.
+fn class_data(
+    physical: &PhysicalASAPMemoCandidates,
+    classes: &CandidateClasses,
+    parts_per_memo_candidate: &[Vec<usize>],
+    entries: &[QueryWorkloadEntry],
+    reaching: &[Vec<usize>],
+    data: &DataWorkload,
+    cost_inputs: &CostInputs,
+) -> Vec<ClassData> {
+    let count = classes.classes.len();
+    let formula_scale = cost_inputs.frozen_calibration_factor.unwrap_or(1.0);
+    let nodes: Vec<PhysicalASAPDAGNode> = (0..count)
+        .map(|class| catalog_node(physical, classes, CandidateClassId(class)))
+        .collect();
+    let node_by_id: asap_cost::NodeMap<'_> = nodes.iter().map(|node| (node.id, node)).collect();
+    let first_producer: Vec<Option<CandidateClassId>> = classes
+        .classes
+        .iter()
+        .map(|class| {
+            class
+                .producer_classes_per_input
+                .first()
+                .and_then(|producers| producers.first().copied())
+        })
+        .collect();
+    let first_producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = classes
+        .classes
+        .iter()
+        .enumerate()
+        .map(|(class, data)| {
+            (
+                class,
+                data.producer_classes_per_input
+                    .iter()
+                    .filter_map(|producers| producers.first().map(|producer| producer.0))
+                    .collect(),
+            )
+        })
+        .collect();
+    let all_producers: Vec<Vec<Vec<CandidateClassId>>> = classes
+        .classes
+        .iter()
+        .map(|class| class.producer_classes_per_input.clone())
+        .collect();
+    let readers = readers_of(&all_producers);
+    // Per class, the distinct outputs it may give its readers; `None` until
+    // it is costed.
+    let mut outputs: Vec<Option<Result<Vec<ProducerOutput<'_>>, String>>> = vec![None; count];
+    let mut result: Vec<ClassData> = (0..count)
+        .map(|class| {
+            let data = classes.class(CandidateClassId(class));
+            let node = physical.physical_node(data.copies[0]);
+            let operator_node = physical.candidates[data.copies[0].0].operator_node;
+            let accuracy_budget_parts = physical.operator_nodes_of_candidates_for_memo_groups
+                [operator_node.0]
+                .candidates_for_memo_group
+                .iter()
+                .filter_map(|id| {
+                    parts_per_memo_candidate
+                        .get(id.group.0 as usize)?
+                        .get(id.index)
+                        .copied()
+                })
+                .min()
+                .unwrap_or(1);
+            ClassData {
+                approximate: outputs_approximate_values(node),
+                accuracy_budget_parts,
+                usage: Err("not costed".to_string()),
+                usage_depends_on: Vec::new(),
+            }
+        })
+        .collect();
+    // Producers first (Kahn's order). Folding can close a cycle of class
+    // links (one copy reads another copy of a class on the cycle, e.g. a
+    // widened scan's `Project` that reads its own memo group): when no class
+    // is ready, the smallest one each of whose inputs has a costed producer
+    // is costed from those producers alone, and marked
+    // [`UsageContext::ProducerOnACycle`].
+    let producer_sets: Vec<BTreeSet<usize>> = classes
+        .classes
+        .iter()
+        .map(|class| {
+            class
+                .producer_classes_per_input
+                .iter()
+                .flatten()
+                .map(|p| p.0)
+                .collect()
+        })
+        .collect();
+    let mut waiting: Vec<usize> = producer_sets.iter().map(BTreeSet::len).collect();
+    let mut ready: std::collections::BinaryHeap<std::cmp::Reverse<usize>> = (0..count)
+        .filter(|&class| waiting[class] == 0)
+        .map(std::cmp::Reverse)
+        .collect();
+    let mut costed_classes = vec![false; count];
+    loop {
+        let class = match ready.pop() {
+            Some(std::cmp::Reverse(class)) => class,
+            None => match (0..count).find(|&class| {
+                !costed_classes[class]
+                    && classes.classes[class]
+                        .producer_classes_per_input
+                        .iter()
+                        .all(|producers| producers.iter().any(|p| costed_classes[p.0]))
+            }) {
+                Some(class) => class,
+                None => break,
+            },
+        };
+        if std::mem::replace(&mut costed_classes[class], true) {
+            continue;
+        }
+        let mut readers_of_class: BTreeSet<usize> = BTreeSet::new();
+        for &(reader, _) in &readers[class] {
+            readers_of_class.insert(reader.0);
+        }
+        for reader in readers_of_class {
+            waiting[reader] -= 1;
+            if waiting[reader] == 0 && !costed_classes[reader] {
+                ready.push(std::cmp::Reverse(reader));
+            }
+        }
+        let class = CandidateClassId(class);
+        let node = &nodes[class.0];
+        let inputs = &classes.class(class).producer_classes_per_input;
+        // Per input, the distinct outputs of its costed producer classes.
+        let mut producer_options: Vec<Vec<ProducerOutput<'_>>> = Vec::with_capacity(inputs.len());
+        let mut failed = None;
+        let mut on_a_cycle = false;
+        for producers in inputs {
+            let mut options: Vec<ProducerOutput<'_>> = Vec::new();
+            for producer in producers {
+                match &outputs[producer.0] {
+                    Some(Ok(produced)) => {
+                        for output in produced {
+                            if !options
+                                .iter()
+                                .any(|known| same_producer_output(known, output))
+                            {
+                                options.push(output.clone());
+                            }
+                        }
+                    }
+                    Some(Err(_)) => {
+                        failed.get_or_insert_with(|| {
+                            format!("producer class {} has no usage", producer.0)
+                        });
+                    }
+                    None => on_a_cycle = true,
+                }
+            }
+            if options.is_empty() {
+                failed.get_or_insert_with(|| "an input has no producer with a usage".into());
+            }
+            producer_options.push(options);
+        }
+        if let Some(reason) = failed {
+            outputs[class.0] = Some(Err(reason.clone()));
+            result[class.0].usage = Err(reason);
+            continue;
+        }
+        let windows = match (&node.payload, node.output_state.timing) {
+            (Operator::NonASAP(NonASAPOp::Scan { .. }), ExecutionTiming::QueryTime) => {
+                scan_window_options(class, &nodes, &readers)
+            }
+            _ => vec![ScanWindow::Unbounded],
+        };
+        let retained =
+            retained_pane_options(class, &nodes, &first_producer, &reaching[class.0], entries);
+        let ingestion_window_ms = (node.output_state.timing == ExecutionTiming::IngestionTime)
+            .then(|| asap_cost::maintained_window_ms(class.0, &node_by_id, &first_producers_of))
+            .flatten();
+        // Every combination of the options.
+        let combinations = producer_options
+            .iter()
+            .map(Vec::len)
+            .chain([windows.len(), retained.len()])
+            .try_fold(1usize, |total, options| total.checked_mul(options))
+            .unwrap_or(usize::MAX);
+        let mut costed: Vec<(ClassUsage, ProducerOutput<'_>)> = Vec::new();
+        let mut error = None;
+        for index in 0..combinations.min(MAX_CONTEXTS) {
+            let mut rest = index;
+            let mut pick = |options: usize| {
+                let picked = rest % options;
+                rest /= options;
+                picked
+            };
+            let retained_panes = retained[pick(retained.len())];
+            let window = windows[pick(windows.len())];
+            let mut producers: Vec<ProducerOutput<'_>> = producer_options
+                .iter()
+                .rev()
+                .map(|options| options[pick(options.len())].clone())
+                .collect();
+            producers.reverse();
+            let usage_at = |per_second: f64| {
+                asap_cost::node_usage(
+                    node,
+                    &producers,
+                    (1, per_second),
+                    window,
+                    retained_panes,
+                    ingestion_window_ms,
+                    data,
+                    cost_inputs,
+                    formula_scale,
+                )
+            };
+            match (usage_at(1.0), usage_at(0.0)) {
+                (Ok(executed), Ok(standing)) => {
+                    let usage = class_usage(&executed, &standing, node.output_state.timing);
+                    costed.push((usage, producer_output(node, &executed)));
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    error.get_or_insert(e.to_string());
+                }
+            }
+        }
+        // A context `asap-cost` cannot cost is one no plan can use.
+        let uncostable_context = error.is_some();
+        if costed.is_empty() {
+            let error = error.unwrap_or_else(|| "no context".into());
+            outputs[class.0] = Some(Err(error.clone()));
+            result[class.0].usage = Err(error);
+            continue;
+        }
+        let first = costed[0].0;
+        let mut depends_on = Vec::new();
+        if costed.iter().any(|(usage, _)| *usage != first) {
+            if producer_options.iter().any(|options| options.len() > 1) {
+                depends_on.push(UsageContext::ProducerOutput);
+            }
+            if windows.len() > 1 {
+                depends_on.push(UsageContext::ScanWindowOfReader);
+            }
+            if retained.len() > 1 {
+                depends_on.push(UsageContext::PaneRetentionOfReachingQueries);
+            }
+        }
+        if on_a_cycle {
+            depends_on.push(UsageContext::ProducerOnACycle);
+        }
+        if uncostable_context {
+            depends_on.push(UsageContext::UncostableContext);
+        }
+        if combinations > MAX_CONTEXTS {
+            depends_on.push(UsageContext::TooManyContexts);
+        }
+        let mut produced: Vec<ProducerOutput<'_>> = Vec::new();
+        for (_, output) in costed {
+            if !produced
+                .iter()
+                .any(|known| same_producer_output(known, &output))
+            {
+                produced.push(output);
+            }
+        }
+        outputs[class.0] = Some(Ok(produced));
+        result[class.0].usage = Ok(first);
+        result[class.0].usage_depends_on = depends_on;
+    }
+    for (class, costed) in costed_classes.iter().enumerate() {
+        if !costed {
+            result[class].usage = Err("its producer classes form a cycle".into());
+        }
+    }
+    result
+}
+
+/// The numbers of one execution (`executed`, at one execution per second)
+/// and of none (`standing`) of a node at `timing`.
+fn class_usage(
+    executed: &NodeUsage<'_>,
+    standing: &NodeUsage<'_>,
+    timing: ExecutionTiming,
+) -> ClassUsage {
+    let standing_cost = standing.cost.cost_per_second;
+    ClassUsage {
+        cpu_ops_per_execution: executed.cpu_ops_per_second,
+        scanned_bytes_per_execution: executed.scanned_bytes_per_second,
+        work_ms_per_execution: executed.work_ms_per_execution,
+        own_latency_ms: match timing {
+            ExecutionTiming::QueryTime => executed.work_ms_per_execution,
+            ExecutionTiming::IngestionTime => 0.0,
+        },
+        cost_per_execution: executed
+            .cost
+            .cost_per_second
+            .zip(standing_cost)
+            .map(|(total, standing)| total - standing),
+        standing_cost_per_second: standing_cost,
+        average_memory_bytes: executed.average_memory_bytes,
+        peak_memory_bytes: executed.peak_memory_bytes,
+        disk_bytes: executed.disk_bytes,
+        held_bytes: executed.held.map_or(0, |(bytes, _, _)| bytes),
+        raw_data_kept_bytes: executed.raw_scan.map_or(0, |(_, bytes)| bytes),
+        maintained_window_bytes: executed.maintained.unwrap_or(0),
+        output_rows: executed.output.rows,
+        output_bytes: executed.output.bytes,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dominance
+// ---------------------------------------------------------------------------
+
+/// What one class is compared on (module documentation, "Dominance").
+#[derive(Debug, Clone)]
+pub(crate) struct DominanceProfile<'a> {
+    /// Must be equal for one class to dominate another.
+    pub(crate) same: DominanceKey<'a>,
+    pub(crate) capacity: usize,
+    pub(crate) guarantee: Option<&'a AccuracyGuarantee>,
+}
+
+/// The parts of a [`DominanceProfile`] that must be equal.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DominanceKey<'a> {
+    pub(crate) group: MemoGroupId,
+    pub(crate) timing: ExecutionTiming,
+    pub(crate) materialization: Materialization,
+    pub(crate) shareable: bool,
+    pub(crate) producer_classes_per_input: &'a [Vec<CandidateClassId>],
+    pub(crate) readers: Vec<(CandidateClassId, usize)>,
+    pub(crate) output_references: Vec<usize>,
+    pub(crate) reader_constraint_ids: Vec<u32>,
+    pub(crate) may_keep_across_evaluations_per_sole_reader_query: &'a [bool],
+    pub(crate) output_schema: &'a Schema,
+    pub(crate) operator_kind: OperatorKindForReaders,
+}
+
+/// The parts of a node's operator its readers' costs read: its kind, and a
+/// pane chain's panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OperatorKindForReaders {
+    PaneChain { pane_width_ms: u64, pane_count: u32 },
+    Other(std::mem::Discriminant<Operator>, &'static str),
+}
+
+/// Each class's [`DominanceProfile`]. `output_classes` are `Out(r)` before
+/// pruning.
+fn dominance_profiles<'a>(
+    physical: &'a PhysicalASAPMemoCandidates,
+    classes: &'a CandidateClasses,
+    output_classes: &[Vec<CandidateClassId>],
+) -> Vec<DominanceProfile<'a>> {
+    let constraint_ids = reader_constraint_ids_per_candidate(physical);
+    let all_producers: Vec<Vec<Vec<CandidateClassId>>> = classes
+        .classes
+        .iter()
+        .map(|class| class.producer_classes_per_input.clone())
+        .collect();
+    let mut readers = readers_of(&all_producers);
+    for list in &mut readers {
+        list.sort_unstable();
+    }
+    let mut output_refs_of = vec![Vec::new(); classes.classes.len()];
+    for (reference, out) in output_classes.iter().enumerate() {
+        for class in out {
+            output_refs_of[class.0].push(reference);
+        }
+    }
+    classes
+        .classes
+        .iter()
+        .enumerate()
+        .map(|(class, data)| {
+            let copy = data.copies[0];
+            let candidate = &physical.candidates[copy.0];
+            let node = physical.physical_node(copy);
+            DominanceProfile {
+                same: DominanceKey {
+                    group: physical.memo_group_of(copy),
+                    timing: candidate.timing,
+                    materialization: candidate.materialization,
+                    shareable: data.is_shareable(),
+                    producer_classes_per_input: &data.producer_classes_per_input,
+                    readers: std::mem::take(&mut readers[class]),
+                    output_references: std::mem::take(&mut output_refs_of[class]),
+                    reader_constraint_ids: constraint_ids[copy.0].clone(),
+                    may_keep_across_evaluations_per_sole_reader_query: &candidate
+                        .may_keep_across_evaluations_per_sole_reader_query,
+                    output_schema: &node.schema,
+                    operator_kind: match &node.operator {
+                        Operator::ASAP(ASAPOp::PaneChain {
+                            pane_width_ms,
+                            pane_count,
+                            ..
+                        }) => OperatorKindForReaders::PaneChain {
+                            pane_width_ms: *pane_width_ms,
+                            pane_count: *pane_count,
+                        },
+                        operator => OperatorKindForReaders::Other(
+                            std::mem::discriminant(operator),
+                            node.operator.kind_name(),
+                        ),
+                    },
+                },
+                capacity: data.capacity(),
+                guarantee: node.guarantee.as_ref(),
+            }
+        })
+        .collect()
+}
+
+/// Whether `stronger` is at least as strong as `weaker`: equal, or `stronger`
+/// exact, or both in one metric and scope with constant bounds and failure
+/// probabilities no larger. Anything else (an unknown statistic, different
+/// metrics) is not comparable.
+pub(crate) fn guarantee_at_least_as_strong(
+    stronger: Option<&AccuracyGuarantee>,
+    weaker: Option<&AccuracyGuarantee>,
+) -> bool {
+    match (stronger, weaker) {
+        (None, None) => true,
+        (Some(stronger), Some(weaker)) => {
+            if stronger.spec == weaker.spec || stronger.is_exact() {
+                return true;
+            }
+            stronger.spec.accuracy_metric == weaker.spec.accuracy_metric
+                && stronger.spec.accuracy_scope == weaker.spec.accuracy_scope
+                && matches!(
+                    (stronger.spec.error.evaluate(), weaker.spec.error.evaluate()),
+                    (Some(s), Some(w)) if s <= w
+                )
+                && matches!(
+                    (
+                        stronger.spec.failure_probability.evaluate(),
+                        weaker.spec.failure_probability.evaluate()
+                    ),
+                    (Some(s), Some(w)) if s <= w
+                )
+        }
+        _ => false,
+    }
+}
+
+/// Every number of `usage` that a class it dominates must not beat, in a
+/// fixed order.
+fn compared_numbers(usage: &ClassUsage) -> [f64; 12] {
+    [
+        usage.cpu_ops_per_execution,
+        usage.scanned_bytes_per_execution,
+        usage.work_ms_per_execution,
+        usage.own_latency_ms,
+        usage.average_memory_bytes,
+        usage.peak_memory_bytes as f64,
+        usage.disk_bytes as f64,
+        usage.held_bytes as f64,
+        usage.raw_data_kept_bytes as f64,
+        usage.maintained_window_bytes as f64,
+        usage.output_rows as f64,
+        usage.output_bytes as f64,
+    ]
+}
+
+/// Whether class `by` dominates class `class` (module documentation).
+pub(crate) fn dominates(
+    by: (&DominanceProfile<'_>, &ClassData),
+    class: (&DominanceProfile<'_>, &ClassData),
+) -> bool {
+    let ((by_profile, by_data), (profile, data)) = (by, class);
+    let (Ok(by_usage), Ok(usage)) = (&by_data.usage, &data.usage) else {
+        return false;
+    };
+    by_profile.same == profile.same
+        && by_data.usage_depends_on.is_empty()
+        && data.usage_depends_on.is_empty()
+        && by_data.approximate == data.approximate
+        && by_data.accuracy_budget_parts == data.accuracy_budget_parts
+        && by_profile.capacity >= profile.capacity
+        && guarantee_at_least_as_strong(by_profile.guarantee, profile.guarantee)
+        && compared_numbers(by_usage)
+            .iter()
+            .zip(compared_numbers(usage))
+            .all(|(by, class)| *by <= class)
+}
+
+/// The classes another class dominates (module documentation), each with
+/// the smallest dominating class that is kept. Among classes that dominate
+/// each other, the smallest id is kept.
+pub(crate) fn prune_dominated_classes(
+    profiles: &[DominanceProfile<'_>],
+    class_data: &[ClassData],
+) -> Vec<PrunedClass> {
+    // Only classes with equal keys can dominate each other.
+    let mut buckets: Vec<Vec<usize>> = Vec::new();
+    let mut bucket_of_key: HashMap<(MemoGroupId, ExecutionTiming, Materialization), Vec<usize>> =
+        HashMap::new();
+    for (class, profile) in profiles.iter().enumerate() {
+        let candidates = bucket_of_key
+            .entry((
+                profile.same.group,
+                profile.same.timing,
+                profile.same.materialization,
+            ))
+            .or_default();
+        match candidates
+            .iter()
+            .find(|&&bucket| profiles[buckets[bucket][0]].same == profile.same)
+        {
+            Some(&bucket) => buckets[bucket].push(class),
+            None => {
+                candidates.push(buckets.len());
+                buckets.push(vec![class]);
+            }
+        }
+    }
+    let mut pruned = Vec::new();
+    for bucket in buckets.iter().filter(|bucket| bucket.len() > 1) {
+        for &class in bucket {
+            let dominated_by = bucket.iter().copied().find(|&other| {
+                other != class
+                    && dominates(
+                        (&profiles[other], &class_data[other]),
+                        (&profiles[class], &class_data[class]),
+                    )
+                    && (other < class
+                        || !dominates(
+                            (&profiles[class], &class_data[class]),
+                            (&profiles[other], &class_data[other]),
+                        ))
+            });
+            if let Some(other) = dominated_by {
+                pruned.push(PrunedClass {
+                    class: CandidateClassId(class),
+                    dominated_by: CandidateClassId(other),
+                    reason: format!(
+                        "class {other} has the same memo group, producers, readers and \
+                         (approx, parts), a guarantee at least as strong, at least its \
+                         capacity, and no larger usage, latency, output or held state"
+                    ),
+                });
+            }
+        }
+    }
+    pruned.sort_by_key(|pruned| pruned.class);
+    pruned
+}
+
+// ---------------------------------------------------------------------------
+// Accuracy weights
+// ---------------------------------------------------------------------------
+
+/// Where a value sits under a query's output (module documentation,
+/// "Accuracy weights").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Position {
+    Ordinary,
+    Numerator,
+    Denominator,
+    /// Its values do not reach the output (only a row count does).
+    Irrelevant,
+    Unusable(UnusableReason),
+}
+
+impl Position {
+    /// Its weight; `None` for [`Position::Irrelevant`].
+    fn weight(self) -> Option<AccuracyWeight> {
+        match self {
+            Position::Ordinary | Position::Numerator => Some(AccuracyWeight::One),
+            Position::Denominator => Some(AccuracyWeight::Two),
+            Position::Irrelevant => None,
+            Position::Unusable(reason) => Some(AccuracyWeight::Unusable(reason)),
+        }
+    }
+
+    /// The position of a quotient's numerator (`numerator`) or denominator
+    /// below this one, when its denominator may be approximate.
+    fn quotient_side(self, numerator: bool) -> Self {
+        match self {
+            Position::Ordinary if numerator => Position::Numerator,
+            Position::Ordinary => Position::Denominator,
+            Position::Numerator | Position::Denominator => {
+                Position::Unusable(UnusableReason::NestedQuotient)
+            }
+            other => other,
+        }
+    }
+
+    fn unusable(self, reason: UnusableReason) -> Self {
+        match self {
+            Position::Unusable(_) | Position::Irrelevant => self,
+            _ => Position::Unusable(reason),
+        }
+    }
+}
+
+/// The number of `operator`'s direct inputs, which come first in its
+/// `map_children` order; any later child is an operator read inside one of
+/// its expressions. `None` for an ASAP operator, whose children are all
+/// direct inputs.
+fn direct_input_count(operator: &Operator) -> Option<usize> {
+    match operator {
+        Operator::NonASAP(operator) => Some(match operator {
+            NonASAPOp::Scan { .. } | NonASAPOp::Values { .. } => 0,
+            NonASAPOp::PromqlVectorFromScalar(_) => 0,
+            NonASAPOp::Join { .. } | NonASAPOp::SetOp { .. } | NonASAPOp::BinaryOp { .. } => 2,
+            NonASAPOp::Concat { children, .. } => children.len(),
+            _ => 1,
+        }),
+        Operator::ASAP(_) => None,
+    }
+}
+
+/// Whether `expr`, a `Project` item, keeps each value's position: columns,
+/// literals, unary minus, casts, `+ − ×` and division by a column-free
+/// expression.
+fn keeps_position<C>(expr: &ScalarExpr<C>) -> bool {
+    match expr {
+        ScalarExpr::Column(_) | ScalarExpr::Literal(_) => true,
+        ScalarExpr::Negative { expr, .. } | ScalarExpr::Cast { expr, .. } => keeps_position(expr),
+        ScalarExpr::Arithmetic {
+            op, left, right, ..
+        } => match op {
+            ArithmeticOpKind::Add | ArithmeticOpKind::Sub | ArithmeticOpKind::Mul => {
+                keeps_position(left) && keeps_position(right)
+            }
+            ArithmeticOpKind::Div => keeps_position(left) && is_constant(right),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Whether `expr` reads no column and no operator.
+fn is_constant<C>(expr: &ScalarExpr<C>) -> bool {
+    match expr {
+        ScalarExpr::Literal(_) => true,
+        ScalarExpr::Negative { expr, .. } | ScalarExpr::Cast { expr, .. } => is_constant(expr),
+        ScalarExpr::Arithmetic { left, right, .. } => is_constant(left) && is_constant(right),
+        _ => false,
+    }
+}
+
+/// The position of input `input` of `node` when `node` is at `position`
+/// (module documentation, "Accuracy weights"). `denominator_may_be_approximate`
+/// says whether a quotient's right input may carry an approximate value.
+fn input_position(
+    node: &OperatorNode,
+    input: usize,
+    position: Position,
+    denominator_may_be_approximate: bool,
+) -> Position {
+    if matches!(position, Position::Unusable(_) | Position::Irrelevant) {
+        return position;
+    }
+    let unclear = position.unusable(UnusableReason::UnclearOperator);
+    if direct_input_count(&node.operator).is_some_and(|direct| input >= direct) {
+        return unclear;
+    }
+    let operator = match &node.operator {
+        // A count accumulator reads no value of its input.
+        Operator::ASAP(
+            ASAPOp::SummaryAgg {
+                family: FieldDataType::ExactAggregate(ExactKind::Count, _),
+                ..
+            }
+            | ASAPOp::PaneChain {
+                family: FieldDataType::ExactAggregate(ExactKind::Count, _),
+                ..
+            },
+        ) if input == 0 => return Position::Irrelevant,
+        Operator::ASAP(_) => return position,
+        Operator::NonASAP(operator) => operator,
+    };
+    match operator {
+        NonASAPOp::BinaryOp { operator, .. } => match operator.kind {
+            BinaryOpKind::Arithmetic(ArithmeticOpKind::Div) if !denominator_may_be_approximate => {
+                // An exact divisor scales the numerator.
+                match input {
+                    0 => position,
+                    _ => Position::Irrelevant,
+                }
+            }
+            BinaryOpKind::Arithmetic(ArithmeticOpKind::Div) => position.quotient_side(input == 0),
+            BinaryOpKind::Arithmetic(
+                ArithmeticOpKind::Add | ArithmeticOpKind::Sub | ArithmeticOpKind::Mul,
+            ) => position,
+            BinaryOpKind::Arithmetic(_) => position.unusable(UnusableReason::NoErrorBound),
+            BinaryOpKind::Compare(_) | BinaryOpKind::CompareBool(_) | BinaryOpKind::Set(_) => {
+                unclear
+            }
+        },
+        NonASAPOp::Aggregate { measures, .. }
+            if measures.iter().all(|measure| {
+                matches!(measure, asap_types::ir::operator::AggIntent::Count { .. })
+            }) =>
+        {
+            Position::Irrelevant
+        }
+        NonASAPOp::Project { cols, .. } => {
+            match cols.iter().all(|item| keeps_position(&item.expr)) {
+                true => position,
+                false => unclear,
+            }
+        }
+        NonASAPOp::SQLWindowFunc { .. }
+        | NonASAPOp::SetOp { .. }
+        | NonASAPOp::PromqlVectorFromScalar(_) => unclear,
+        _ => position,
+    }
+}
+
+/// The position of each operator reference of a scalar query root, in
+/// `map_operator_refs` order (the order of `output_references`).
+/// `may_be_approximate(r)` says whether reference `r` may carry an
+/// approximate value.
+fn scalar_root_positions<C>(
+    expr: &ScalarExpr<C>,
+    may_be_approximate: &dyn Fn(usize) -> bool,
+) -> Vec<Position> {
+    let mut count = 0;
+    let numbered = expr.map_operator_refs(&mut |_| {
+        count += 1;
+        count - 1
+    });
+    let mut positions = vec![Position::Ordinary; count];
+    fn walk(
+        expr: &ScalarExpr<usize>,
+        position: Position,
+        positions: &mut [Position],
+        may_be_approximate: &dyn Fn(usize) -> bool,
+    ) {
+        match expr {
+            ScalarExpr::PromqlScalarFromVector(reference)
+            | ScalarExpr::ScalarSubquery(reference) => {
+                positions[*reference] = position;
+            }
+            ScalarExpr::Negative { expr, .. } | ScalarExpr::Cast { expr, .. } => {
+                walk(expr, position, positions, may_be_approximate)
+            }
+            ScalarExpr::Arithmetic {
+                op, left, right, ..
+            } => match op {
+                ArithmeticOpKind::Add | ArithmeticOpKind::Sub | ArithmeticOpKind::Mul => {
+                    walk(left, position, positions, may_be_approximate);
+                    walk(right, position, positions, may_be_approximate);
+                }
+                ArithmeticOpKind::Div
+                    if !right
+                        .operator_refs()
+                        .into_iter()
+                        .any(|&reference| may_be_approximate(reference)) =>
+                {
+                    walk(left, position, positions, may_be_approximate);
+                    walk(right, Position::Irrelevant, positions, may_be_approximate);
+                }
+                ArithmeticOpKind::Div => {
+                    walk(
+                        left,
+                        position.quotient_side(true),
+                        positions,
+                        may_be_approximate,
+                    );
+                    walk(
+                        right,
+                        position.quotient_side(false),
+                        positions,
+                        may_be_approximate,
+                    );
+                }
+                _ => {
+                    for reference in expr.operator_refs() {
+                        positions[*reference] = position.unusable(UnusableReason::NoErrorBound);
+                    }
+                }
+            },
+            other => {
+                for reference in other.operator_refs() {
+                    positions[*reference] = position.unusable(UnusableReason::UnclearOperator);
+                }
+            }
+        }
+    }
+    walk(
+        &numbered,
+        Position::Ordinary,
+        &mut positions,
+        may_be_approximate,
+    );
+    positions
+}
+
+/// Per class, whether it may carry an approximate value to its readers: it
+/// outputs one, or reads one through an input whose values reach its output
+/// (not a row count). A fixpoint, so cycles of class links are covered.
+fn may_carry_approximate_values(
+    physical: &PhysicalASAPMemoCandidates,
+    classes: &CandidateClasses,
+    class_data: &[ClassData],
+    producer_classes_per_input: &[Vec<Vec<CandidateClassId>>],
+) -> Vec<bool> {
+    let mut carries: Vec<bool> = class_data.iter().map(|data| data.approximate).collect();
+    loop {
+        let mut changed = false;
+        for class in 0..carries.len() {
+            if carries[class] {
+                continue;
+            }
+            let node = physical.physical_node(classes.class(CandidateClassId(class)).copies[0]);
+            let reads =
+                producer_classes_per_input[class]
+                    .iter()
+                    .enumerate()
+                    .any(|(input, producers)| {
+                        input_position(node, input, Position::Ordinary, true)
+                            != Position::Irrelevant
+                            && producers.iter().any(|producer| carries[producer.0])
+                    });
+            if reads {
+                carries[class] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            return carries;
+        }
+    }
+}
+
+/// `w(q, k)` for every query `q` and approximate class `k` it can reach
+/// through the links left (module documentation, "Accuracy weights").
+fn accuracy_weights(
+    physical: &PhysicalASAPMemoCandidates,
+    classes: &CandidateClasses,
+    class_data: &[ClassData],
+    producer_classes_per_input: &[Vec<Vec<CandidateClassId>>],
+    output_classes: &[Vec<CandidateClassId>],
+) -> Vec<BTreeMap<CandidateClassId, AccuracyWeight>> {
+    let carries =
+        may_carry_approximate_values(physical, classes, class_data, producer_classes_per_input);
+    let output_refs = output_references(&physical.query_roots);
+    let mut root_positions = Vec::new();
+    for root in &physical.query_roots {
+        match root {
+            QueryRoot::Operator(_) => root_positions.push(Position::Ordinary),
+            QueryRoot::Scalar(expr) => {
+                let first = root_positions.len();
+                let may_be_approximate = |reference: usize| {
+                    output_classes
+                        .get(first + reference)
+                        .is_some_and(|out| out.iter().any(|class| carries[class.0]))
+                };
+                root_positions.extend(scalar_root_positions(expr, &may_be_approximate));
+            }
+        }
+    }
+    let mut weights = vec![BTreeMap::new(); physical.query_roots.len()];
+    let mut seen: Vec<HashSet<(CandidateClassId, Position)>> =
+        vec![HashSet::new(); physical.query_roots.len()];
+    for (reference, &(query, _)) in output_refs.iter().enumerate() {
+        let start = root_positions
+            .get(reference)
+            .copied()
+            .unwrap_or(Position::Unusable(UnusableReason::UnclearOperator));
+        let mut stack: Vec<(CandidateClassId, Position)> = output_classes[reference]
+            .iter()
+            .map(|&class| (class, start))
+            .collect();
+        while let Some((class, position)) = stack.pop() {
+            if position == Position::Irrelevant {
+                continue;
+            }
+            // One unusable state per class is enough.
+            let visited = match position {
+                Position::Unusable(_) => {
+                    (class, Position::Unusable(UnusableReason::NestedQuotient))
+                }
+                _ => (class, position),
+            };
+            if !seen[query].insert(visited) {
+                continue;
+            }
+            if let (true, Some(weight)) = (class_data[class.0].approximate, position.weight()) {
+                let entry = weights[query].entry(class).or_insert(weight);
+                *entry = (*entry).max(weight);
+            }
+            let node = physical.physical_node(classes.class(class).copies[0]);
+            let denominator_may_be_approximate = producer_classes_per_input[class.0]
+                .get(1)
+                .is_some_and(|producers| producers.iter().any(|producer| carries[producer.0]));
+            for (input, producers) in producer_classes_per_input[class.0].iter().enumerate() {
+                let below = input_position(node, input, position, denominator_may_be_approximate);
+                stack.extend(producers.iter().map(|&producer| (producer, below)));
+            }
+        }
+    }
+    weights
+}
+
+#[cfg(test)]
+mod tests;
