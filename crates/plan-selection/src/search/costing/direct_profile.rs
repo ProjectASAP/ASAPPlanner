@@ -22,9 +22,7 @@ use std::collections::HashSet;
 #[derive(Debug, thiserror::Error)]
 pub(in crate::search) enum DirectProfileError {
     #[error(transparent)]
-    DeadlineExceeded(
-        #[from] asap_logical_asap_optimization::pass2::memo::CandidateGenerationTimeout,
-    ),
+    DeadlineExceeded(#[from] asap_types::stages::CandidateGenerationTimeout),
     #[error("direct cost profile: {0}")]
     Invalid(String),
     #[error("direct cost profile unsupported: {0}")]
@@ -1011,7 +1009,7 @@ fn state_compaction_seconds(
 
 fn check_deadline(deadline: Option<std::time::Instant>) -> Result<(), DirectProfileError> {
     if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-        Err(asap_logical_asap_optimization::pass2::memo::CandidateGenerationTimeout.into())
+        Err(asap_types::stages::CandidateGenerationTimeout.into())
     } else {
         Ok(())
     }
@@ -1084,10 +1082,10 @@ mod tests {
         CandidateDependencyGraph, PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
     };
     use crate::search::candidates::inventory::CandidateInventory;
-    use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::{Operator, OperatorNode, ProjectItem, ScalarExpr};
+    use asap_types::stages::MemoGroupId;
     use asap_types::workload::{
         DataWorkload, Predictability, Query, QueryRequirements, QueryWorkloadEntry,
         RepetitionInterval,

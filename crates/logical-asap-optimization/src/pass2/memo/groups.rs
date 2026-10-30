@@ -39,10 +39,10 @@ use crate::pass1::per_computation_candidates::{
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 
-use super::candidates::{
-    CandidateForMemoGroup, CandidateMemo, CandidatePopulationError, OriginOfCandidateForMemoGroup,
+use super::candidates::CandidatePopulationError;
+use asap_types::stages::{
+    CandidateForMemoGroup, CandidateMemo, MemoGroup, MemoGroupId, OriginOfCandidateForMemoGroup,
 };
-use super::{MemoGroup, MemoGroupId};
 
 /// Populate implementation candidates without changing initial group identities.
 /// The inventory must retain the original ordered root dependencies. This phase
@@ -188,7 +188,7 @@ fn target_candidates<Id: Clone>(
             .or_insert(d);
     }
     let own_key = structural_ids.structural_id(&groups[g.0 as usize].logical_node);
-    let root_groups = super::root_groups(&group_of.query_roots);
+    let root_groups = asap_types::stages::root_groups(&group_of.query_roots);
     let mut candidates = Vec::new();
     let mut choice = vec![0; per_computation.targets.len()];
     loop {
@@ -469,51 +469,6 @@ impl NodeToStructuralIdCache {
     }
 }
 
-impl CandidateMemo {
-    /// The groups, each after every group it or one of its candidates
-    /// reads, the lower index first among those ready: a dependency order for
-    /// candidate traversal, whatever order transformations appended
-    /// groups in. `None` when those reads form a cycle.
-    pub fn topological_order(&self) -> Option<Vec<MemoGroupId>> {
-        let count = self.groups.len();
-        let mut reads: Vec<HashSet<usize>> = vec![HashSet::new(); count];
-        for (g, group) in self.groups.iter().enumerate() {
-            let candidates = self.candidates.get(g).map_or(&[][..], Vec::as_slice);
-            for child in group
-                .child_groups
-                .iter()
-                .chain(candidates.iter().flat_map(|c| &c.input_groups))
-            {
-                if child.0 as usize != g {
-                    reads[g].insert(child.0 as usize);
-                }
-            }
-        }
-        let mut readers: Vec<Vec<usize>> = vec![Vec::new(); count];
-        let mut waiting: Vec<usize> = reads.iter().map(HashSet::len).collect();
-        for (g, read) in reads.iter().enumerate() {
-            for &child in read {
-                readers[child].push(g);
-            }
-        }
-        let mut ready: std::collections::BinaryHeap<std::cmp::Reverse<usize>> = (0..count)
-            .filter(|&g| waiting[g] == 0)
-            .map(std::cmp::Reverse)
-            .collect();
-        let mut order = Vec::with_capacity(count);
-        while let Some(std::cmp::Reverse(g)) = ready.pop() {
-            order.push(MemoGroupId(g as u32));
-            for &reader in &readers[g] {
-                waiting[reader] -= 1;
-                if waiting[reader] == 0 {
-                    ready.push(std::cmp::Reverse(reader));
-                }
-            }
-        }
-        (order.len() == count).then_some(order)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -725,7 +680,7 @@ mod tests {
         let group = &memo.groups[sum];
         assert_eq!(group.queries, vec![0, 1]);
         assert_eq!(
-            super::super::queries_rooted_at(&memo.query_roots, MemoGroupId(sum as u32)),
+            asap_types::stages::queries_rooted_at(&memo.query_roots, MemoGroupId(sum as u32)),
             vec![0]
         );
         let product = memo.query_roots[1].as_operator().unwrap().0 as usize;

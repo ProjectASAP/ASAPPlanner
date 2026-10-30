@@ -6,10 +6,10 @@ use crate::search::candidates::graph::{
     CandidateDependencyGraph, PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
 };
 use crate::search::candidates::inventory::CandidateInventory;
-use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_logical_asap_optimization::test_support::lower_promql;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{Operator, OperatorNode, ProjectItem, ScalarExpr};
+use asap_types::stages::MemoGroupId;
 use asap_types::workload::{
     DataWorkload, Predictability, Query, QueryRequirements, QueryWorkloadEntry, RepetitionInterval,
 };

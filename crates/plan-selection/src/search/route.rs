@@ -2,10 +2,11 @@
 use crate::{PlanningModels, SelectionError, Stage1ToStage3Search};
 use asap_cost::CostModel;
 use asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidates;
-use asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo;
 use asap_logical_asap_optimization::pass2::memo::enumeration::ChosenCandidatePerMemoGroup;
-use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};
+use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
 use asap_types::ir::QueryRoot;
+use asap_types::stages::CandidateMemo;
+use asap_types::stages::MemoGroupId;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 use std::rc::Rc;
 
@@ -62,8 +63,8 @@ struct DomainProgress {
         Option<asap_logical_asap_optimization::pass2::logical_memo_candidates::Pass2RoundState>,
     /// The memo after Stage 0 and after Pass 1, kept with `pass2_round`.
     pass1_steps: Option<(
-        asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo,
-        asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo,
+        asap_types::stages::CandidateMemo,
+        asap_types::stages::CandidateMemo,
     )>,
     /// This round's memo steps, with its selected plan's ID when it has one.
     memo_steps: Option<(Option<String>, crate::search::pipeline::MemoSteps)>,
@@ -1243,10 +1244,9 @@ fn selected_chosen_candidates(
         }
     }
     // Every group the chosen candidates need, from the query roots, is chosen.
-    let mut pending: Vec<_> =
-        asap_logical_asap_optimization::pass2::memo::root_groups(&memo.query_roots)
-            .into_iter()
-            .collect();
+    let mut pending: Vec<_> = asap_types::stages::root_groups(&memo.query_roots)
+        .into_iter()
+        .collect();
     let mut seen = std::collections::HashSet::new();
     while let Some(group) = pending.pop() {
         if !seen.insert(group) {

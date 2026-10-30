@@ -6,7 +6,7 @@
 pub mod asap_aware_cse;
 pub mod cse;
 pub(crate) mod finer_aggregate;
-/// Stage 1, Pass 2's entry and its output, [`logical_memo_candidates::LogicalASAPMemoCandidates`].
+/// Stage 1, Pass 2's entry, producing [`asap_types::stages::LogicalASAPMemoCandidates`].
 pub mod logical_memo_candidates;
 /// Logical group identity available before Pass 1 candidate generation.
 pub mod memo;

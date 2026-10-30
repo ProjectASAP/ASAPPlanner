@@ -3,14 +3,14 @@
 use super::reuse::{append_producer, append_reader, eligible, replace};
 use super::shared_producer::{add_shared_producer_candidates, Reader, SharedProducer};
 use crate::pass2::asap_aware_cse::topk_reuse_candidates;
-use crate::pass2::memo::candidates::{CandidateMemo, OriginOfCandidateForMemoGroup};
 use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::state_groups::StateGroupExpansionError;
-use crate::pass2::memo::MemoGroupId;
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::properties::AccuracyGuarantee;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
+use asap_types::stages::MemoGroupId;
+use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;

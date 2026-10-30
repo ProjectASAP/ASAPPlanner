@@ -759,7 +759,7 @@ mod tests {
     use crate::search::candidates::graph::{
         PhysicalCandidate, PhysicalCandidateId, ProducerRequirement, QueryRootCandidates,
     };
-    use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
+    use asap_types::stages::MemoGroupId;
 
     fn choices(costs: &[f64]) -> CandidateDependencyGraph {
         CandidateDependencyGraph {

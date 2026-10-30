@@ -1,6 +1,6 @@
 //! Candidate dependency graph, declared constraints, and structural validation.
 use super::suppliers::SupplierCandidates;
-use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
+use asap_types::stages::MemoGroupId;
 use std::collections::HashSet;
 
 /// Index into [`CandidateDependencyGraph::candidates`].

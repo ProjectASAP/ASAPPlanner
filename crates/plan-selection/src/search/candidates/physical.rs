@@ -207,13 +207,14 @@ mod tests {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
     use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
-    use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};
+    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::{ASAPOp, NonASAPOp};
     use asap_types::physical::Medium;
+    use asap_types::stages::MemoGroupId;
     use asap_types::workload::{
         DataArrival, Predictability, Query, QueryRecurrence, QueryRequirements, RepeatedDemand,
         RepetitionInterval,

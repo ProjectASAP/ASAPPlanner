@@ -466,7 +466,7 @@ pub(crate) fn solve_joint_price_proposal_with_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
+    use asap_types::stages::MemoGroupId;
 
     fn candidate(inputs: &[usize]) -> PhysicalCandidate {
         PhysicalCandidate {

@@ -21,11 +21,11 @@ use std::rc::Rc;
 
 use asap_types::ir::{OperatorNode, QueryRoot};
 
-use super::candidates::CandidateMemo;
 use super::rules::reuse::replace;
-use super::MemoGroupId;
 use crate::pass1::per_computation_candidates::PerComputationCandidateError;
 use asap_accuracy::propagation::recompose_guarantees;
+use asap_types::stages::CandidateMemo;
+use asap_types::stages::MemoGroupId;
 
 /// One candidate (an index into `CandidateMemo::candidates[group]`) for each
 /// group it names. [`build_logical_asap_dags_from_chosen_candidates`] gives a group it does not name its first
@@ -233,5 +233,5 @@ fn reaches(
 }
 
 fn root_groups(memo: &CandidateMemo) -> impl DoubleEndedIterator<Item = MemoGroupId> {
-    super::root_groups(&memo.query_roots).into_iter()
+    asap_types::stages::root_groups(&memo.query_roots).into_iter()
 }

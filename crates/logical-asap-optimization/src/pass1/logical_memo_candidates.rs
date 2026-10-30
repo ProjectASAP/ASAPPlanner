@@ -16,11 +16,10 @@ use asap_accuracy::propagation::with_resized_summaries;
 use crate::pass1::per_computation_candidates::{
     ComputationTarget, HowToComputeAggregateMeasure, PerComputationCandidates, PruneReason,
 };
-use crate::pass2::memo::candidates::{try_populate_pass1, CandidateMemo, CandidatePopulationError};
-use crate::pass2::memo::{
-    check_generation_deadline, CandidateGenerationTimeout, DagOfLogicalMemoGroups, MemoGroupId,
-};
+use crate::pass2::memo::candidates::{try_populate_pass1, CandidatePopulationError};
+use crate::pass2::memo::{check_generation_deadline, DagOfLogicalMemoGroups};
 use asap_accuracy::estimators::with_failure_probability;
+use asap_types::stages::{CandidateGenerationTimeout, CandidateMemo, MemoGroupId};
 
 /// One candidate a stage removed from group `group`, and why. `C` is the
 /// stage's candidate type.
@@ -37,7 +36,7 @@ pub struct PrunedCandidate<C> {
 pub struct PerComputationLogicalMemoCandidates {
     /// The groups moved from the [`DagOfLogicalMemoGroups`], its query
     /// roots, and every group's candidates (origin
-    /// [`Pass1`](crate::pass2::memo::candidates::OriginOfCandidateForMemoGroup::Pass1)).
+    /// [`Pass1`](asap_types::stages::OriginOfCandidateForMemoGroup::Pass1)).
     pub memo: CandidateMemo,
     /// One per aggregate measure: what Pass 1 chose among.
     pub computation_targets: Vec<ComputationTarget>,

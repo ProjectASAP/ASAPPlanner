@@ -2,10 +2,10 @@
 //! choose a state configuration independently, without enumerating combinations
 //! of all private states in the enclosing query.
 use super::reuse::{append_producer, append_reader, eligible, replace};
-use crate::pass2::memo::candidates::{CandidateMemo, OriginOfCandidateForMemoGroup};
 use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::state_groups::{direct_input_builds, StateGroupExpansionError};
 use asap_types::ir::{ASAPOp, OperatorNode};
+use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;

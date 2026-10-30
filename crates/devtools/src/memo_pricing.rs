@@ -9,15 +9,15 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo;
 use asap_logical_asap_optimization::pass2::memo::enumeration::{
     build_logical_asap_dags_from_chosen_candidates, ChosenCandidatePerMemoGroup,
 };
-use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_physical_asap_optimization::optimize_physical_asap;
 use asap_plan_selection::{select_plan, PlanningModels, Selection, SelectionError};
 use asap_planner::{installable_plan_of, InstallablePlanError};
 use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::stages::CandidateMemo;
+use asap_types::stages::MemoGroupId;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 /// One choice's result: valid with its cost, or why it is not valid.

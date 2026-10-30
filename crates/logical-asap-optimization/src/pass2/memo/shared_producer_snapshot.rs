@@ -4,7 +4,7 @@
 //! The top-k pins were re-recorded when equal keyless results became one
 //! group: the readers' shared `sum_over_time` is now one group, not one per
 //! reader.
-use super::candidates::{try_populate_pass1, CandidateMemo, OriginOfCandidateForMemoGroup};
+use super::candidates::try_populate_pass1;
 use super::shared_configurations::PaneWidthDomain;
 use super::window_candidates::add_local_window_composition;
 use super::DagOfLogicalMemoGroups;
@@ -13,6 +13,7 @@ use crate::test_support::{entry_with, lower_promql, sharing_rules_and_shared_sta
 use asap_types::ir::flat::flatten;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::QueryRoot;
+use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup};
 use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
 use std::rc::Rc;
 
@@ -89,7 +90,7 @@ fn fingerprint(memo: &CandidateMemo) -> (usize, u64) {
                     "{:?}|{}|{:?}|{:?}|{}",
                     candidate.origin,
                     candidate.accuracy_budget_parts,
-                    std::iter::once(super::MemoGroupId(index as u32))
+                    std::iter::once(asap_types::stages::MemoGroupId(index as u32))
                         .chain(candidate.fused_groups.iter().copied())
                         .collect::<Vec<_>>(),
                     candidate.input_groups,
@@ -103,7 +104,10 @@ fn fingerprint(memo: &CandidateMemo) -> (usize, u64) {
             group.child_groups,
             group.parents,
             group.queries,
-            super::queries_rooted_at(&memo.query_roots, super::MemoGroupId(index as u32)),
+            asap_types::stages::queries_rooted_at(
+                &memo.query_roots,
+                asap_types::stages::MemoGroupId(index as u32)
+            ),
             own
         ));
     }

@@ -291,11 +291,9 @@ fn pipeline_with_distinct_bound(bound: Option<u64>) -> Run {
 /// queries, those queries reading it.
 fn memo_pipeline() -> Run {
     use asap_integration_tests::planning::{compose_memo_plan, expanded_memo, own_choices};
-    use asap_logical_asap_optimization::pass2::memo::candidates::{
-        CandidateForMemoGroup, OriginOfCandidateForMemoGroup,
-    };
     use asap_types::ir::schema::FieldDataType;
     use asap_types::ir::{ASAPOp, OperatorNode};
+    use asap_types::stages::{CandidateForMemoGroup, OriginOfCandidateForMemoGroup};
     let workload = standin_workload();
     let roots = lower_promql(&workload);
     let entries: Vec<_> = workload.query_workload.entries().collect();

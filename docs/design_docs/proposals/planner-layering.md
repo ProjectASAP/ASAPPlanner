@@ -518,16 +518,17 @@ independent enumeration of the candidate graph.
 
 #### Memo code interface
 
-The memo types and rules are in `crates/logical-asap-optimization/src/`
-(module `memo`); the search over the memo is in
-`crates/plan-selection/src/search/`.
+The memo rules are in `crates/logical-asap-optimization/src/` (module
+`memo`); the memo types Stage 1 hands Stage 2 are in
+`crates/types/src/stages/` (`asap_types::stages`); the search over the memo
+is in `crates/plan-selection/src/search/`.
 
 | Step | Entry point | Path |
 |---|---|---|
-| Stage 0 | `DagOfLogicalMemoGroups::from_roots`, `MemoGroup`, `MemoGroupId` | `pass2/memo.rs`; hash-consing is `share_common_sub_dags` in `pass2/cse.rs` |
+| Stage 0 | `DagOfLogicalMemoGroups::from_roots`, `MemoGroup`, `MemoGroupId` | `pass2/memo.rs` (`MemoGroup`, `MemoGroupId`: `asap_types::stages`); hash-consing is `share_common_sub_dags` in `pass2/cse.rs` |
 | Pass 1 | `generate_per_computation_candidates_with_memo` and `without_unsupported_summaries` (the inventory); `generate_per_computation_logical_memo_candidates` → `PerComputationLogicalMemoCandidates` (the memo: `try_populate_pass1`, exported from `pass2::memo::candidates`, then the accuracy-scoped candidates) | `pass1/per_computation_candidates.rs`; `pass1/logical_memo_candidates.rs`; `pass2/memo/groups.rs` |
-| Memo types | `CandidateMemo`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup` | `pass2/memo/candidates.rs` |
-| Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, one pane-width round over a `Pass2RoundState` (kept between rounds: the memo after step 1 and before the rules, and the widths already generated). It calls in this order: 1. window composition for the round's new widths (`extend_local_window_composition`); 2–9. the rules in `pass2/memo/rules/`: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; 10. `add_shared_summary_state_groups`, the shared builds | `pass2/logical_memo_candidates.rs`; `pass2/memo/window_candidates.rs`, `pass2/memo/rules/`, `pass2/memo/state_groups.rs`, `pass2/memo/shared_configurations.rs` |
+| Memo types | `CandidateMemo`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup`, `LogicalASAPMemoCandidates`, `CandidateGenerationTimeout`, `root_groups`, `queries_rooted_at` | `crates/types/src/stages/` (`asap_types::stages`) |
+| Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, one pane-width round over a `Pass2RoundState` (kept between rounds: the memo after step 1 and before the rules, and the widths already generated). It calls in this order: 1. window composition for the round's new widths (`extend_local_window_composition`); 2–9. the rules in `pass2/memo/rules/`: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; 10. `add_shared_summary_state_groups`, the shared builds | `pass2/logical_memo_candidates.rs` (`LogicalASAPMemoCandidates` itself: `asap_types::stages`); `pass2/memo/window_candidates.rs`, `pass2/memo/rules/`, `pass2/memo/state_groups.rs`, `pass2/memo/shared_configurations.rs` |
 | Memo to candidate DAGs | `enumerate`, `build_logical_asap_dags_from_chosen_candidates`, `ChosenCandidatePerMemoGroup`, `AllChosenCandidatesPerMemoGroup`, `ErrorBuildingLogicalAsapDagsFromChosenCandidates` | `pass2/memo/enumeration.rs` (module `pass2::memo::enumeration`) |
 | Production memo build and search | `run_stage1_to_stage3_with` and `run_stage1_to_stage3_from_pass1` build the DAG of logical memo groups (`pipeline.rs`); `candidate_connection_search` (`route.rs`) builds the candidate memo for each pane-width round: query pruning (first round), `generate_per_computation_logical_memo_candidates` (first round), `generate_logical_asap_memo_candidates` (the `Pass2RoundState` is kept in `DomainProgress.pass2_round` between rounds); then `candidates/`, `milp/` and `refinement/` | `crates/plan-selection/src/search/` |
 

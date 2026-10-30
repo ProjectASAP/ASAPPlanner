@@ -4,9 +4,9 @@
 //! from it as one more candidate; its own candidates stay, so plan selection
 //! decides. Identical expressions are the trivial case, shared by memo group
 //! identity, and add no candidates here.
-use crate::pass2::memo::candidates::CandidateMemo;
 use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::state_groups::StateGroupExpansionError;
+use asap_types::stages::CandidateMemo;
 use std::time::Instant;
 
 /// One reader of a kind of shared producer: its memo group and its need.

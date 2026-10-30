@@ -8,11 +8,11 @@ use crate::search::candidates::inventory::CandidateInventory;
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     compose_logical_candidate, generate_per_computation_candidates, HowToComputeAggregateMeasure,
 };
-use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_logical_asap_optimization::test_support::lower_promql;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::ir::OperatorNode;
+use asap_types::stages::MemoGroupId;
 use asap_types::workload::{
     DataWorkload, Predictability, Query, QueryRequirements, QueryWorkloadEntry, RangeEvaluation,
     RepetitionInterval,

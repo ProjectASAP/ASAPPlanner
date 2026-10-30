@@ -7,12 +7,13 @@ use asap_devtools::planner_layering_examples::example1;
 use asap_devtools::planning_stages::{lower_promql_roots, run_default_search_over};
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
 use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
-use asap_logical_asap_optimization::pass2::memo::candidates::{try_populate_pass1, CandidateMemo};
+use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
 use asap_logical_asap_optimization::pass2::memo::enumeration::enumerate;
 use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
 use asap_plan_selection::PlanningModels;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::QueryRoot;
+use asap_types::stages::CandidateMemo;
 use asap_types::workload::{
     DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
     QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand, RepeatingEntry,

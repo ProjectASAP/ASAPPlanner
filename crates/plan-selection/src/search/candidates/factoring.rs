@@ -2,8 +2,8 @@
 //! Scope copies preserve independent bindings; internal computations are never merged.
 use std::collections::HashMap;
 
-use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_types::ir::OperatorNode;
+use asap_types::stages::MemoGroupId;
 
 use super::graph::PhysicalCandidateId;
 use super::suppliers::{SupplierCandidates, SupplierSetInterner};

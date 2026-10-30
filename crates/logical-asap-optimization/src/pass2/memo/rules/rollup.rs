@@ -3,13 +3,13 @@ use super::reuse::{
     append_producer, append_reader, combined_inputs, eligible, replace, restore_inputs,
 };
 use crate::pass2::asap_aware_cse::{rollup_candidate_for, rollup_pass2_candidates};
-use crate::pass2::memo::candidates::{CandidateMemo, OriginOfCandidateForMemoGroup};
 use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::state_groups::{simple_build, StateGroupExpansionError};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, ProjectItem, QueryRoot, ScalarExpr,
 };
+use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
@@ -327,12 +327,13 @@ pub(crate) fn add_window_rollup_candidates(
 #[cfg(test)]
 mod tests {
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::candidates::{try_populate_pass1, OriginOfCandidateForMemoGroup};
+    use crate::pass2::memo::candidates::try_populate_pass1;
     use crate::pass2::memo::shared_configurations::PaneWidthDomain;
     use crate::pass2::memo::DagOfLogicalMemoGroups;
     use crate::test_support::{lower_promql, sharing_rules_and_shared_state_groups};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::QueryRoot;
+    use asap_types::stages::OriginOfCandidateForMemoGroup;
 
     // When the finer query's own result is the finalized value the coarse
     // query rolls up, the rollup reads the finer query's group, so one

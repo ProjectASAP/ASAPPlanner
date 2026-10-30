@@ -6,9 +6,9 @@
 
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo;
 use asap_logical_asap_optimization::pass2::memo::enumeration::ChosenCandidatePerMemoGroup;
 use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
+use asap_types::stages::CandidateMemo;
 
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::{OperatorNode, QueryRoot};

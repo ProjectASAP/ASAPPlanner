@@ -1,16 +1,16 @@
 //! Local pane candidates generated from compatible reader grids. Selected
 //! connections, not the union of potential consumers, determine eligibility.
-use super::candidates::{
-    CandidateForMemoGroup, CandidateMemo as Memo, OriginOfCandidateForMemoGroup,
-};
 #[cfg(test)]
 use super::shared_configurations::pane_width_divisors;
 use super::shared_configurations::{pane_width_domain_before, PaneWidthDomain};
 use super::{check_generation_deadline, CandidateGenerationTimeout};
-use super::{MemoGroup, MemoGroupId as GroupId};
 use crate::pass2::asap_aware_cse::{pane_candidates, window_composition_pass2_candidates};
 use asap_types::ir::flat::flatten;
 use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::stages::{
+    CandidateForMemoGroup, CandidateMemo as Memo, OriginOfCandidateForMemoGroup,
+};
+use asap_types::stages::{MemoGroup, MemoGroupId as GroupId};
 use asap_types::workload::QueryWorkloadEntry;
 #[cfg(test)]
 use std::collections::BTreeSet;

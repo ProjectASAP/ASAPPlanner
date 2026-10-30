@@ -9,10 +9,10 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo;
-use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
 use asap_types::ir::OperatorNode;
 use asap_types::physical::Materialization;
+use asap_types::stages::CandidateMemo;
+use asap_types::stages::MemoGroupId;
 
 use crate::search::candidates::factoring::{
     MemoGroupOutputKey, MemoGroupOutputToCompatibleProducersCache,
@@ -34,9 +34,7 @@ pub(in crate::search) struct CandidateInventory {
 #[derive(Debug, thiserror::Error)]
 pub(in crate::search) enum CandidateInventoryError {
     #[error(transparent)]
-    DeadlineExceeded(
-        #[from] asap_logical_asap_optimization::pass2::memo::CandidateGenerationTimeout,
-    ),
+    DeadlineExceeded(#[from] asap_types::stages::CandidateGenerationTimeout),
     #[error("invalid candidate memo: {0}")]
     InvalidMemo(String),
     #[error("unsupported candidate {candidate} in group {group}: {reason}")]
@@ -846,7 +844,7 @@ mod tests {
             .unwrap();
             if matches!(kind, "ranking" | "sketch") {
                 for (output, group) in inventory.graph.query_roots.iter_mut().zip(&outputs) {
-                    output.compatible_candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| memo.candidates[group.0 as usize][index].origin == if kind == "ranking" { asap_logical_asap_optimization::pass2::memo::candidates::OriginOfCandidateForMemoGroup::TopKReuse } else { asap_logical_asap_optimization::pass2::memo::candidates::OriginOfCandidateForMemoGroup::SharedBuild }));
+                    output.compatible_candidates.retain(|id| inventory.group_candidates[group.0 as usize].iter().position(|candidate| candidate == id).is_some_and(|index| memo.candidates[group.0 as usize][index].origin == if kind == "ranking" { asap_types::stages::OriginOfCandidateForMemoGroup::TopKReuse } else { asap_types::stages::OriginOfCandidateForMemoGroup::SharedBuild }));
                     assert!(
                         !output.compatible_candidates.is_empty(),
                         "{kind} reader generated"
@@ -924,9 +922,9 @@ mod tests {
     // one or both states can serve external queries without a configuration product.
     #[test]
     fn factored_summary_results_choose_independent_capacities_and_sharing() {
-        use asap_logical_asap_optimization::pass2::memo::candidates::OriginOfCandidateForMemoGroup;
         use asap_logical_asap_optimization::test_support::entry_with;
         use asap_types::ir::schema::sketch::SketchParams;
+        use asap_types::stages::OriginOfCandidateForMemoGroup;
         use asap_types::workload::{
             DataWorkload, QueryRecurrence, RepeatedDemand, RepetitionInterval,
         };

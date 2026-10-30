@@ -40,18 +40,16 @@ use asap_integration_tests::planning::expanded_memo;
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     compose_logical_candidate, PerComputationCandidates,
 };
-use asap_logical_asap_optimization::pass2::memo::candidates::{
-    CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup,
-};
 use asap_logical_asap_optimization::pass2::memo::enumeration::{
     build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
 };
-use asap_logical_asap_optimization::pass2::memo::{queries_rooted_at, MemoGroupId};
 use asap_plan_selection::{
     run_stage1_to_stage3_with, MemoSteps, PlanningModels, Stage1ToStage3Run, Stage1ToStage3Search,
 };
 use asap_types::ir::schema::{FieldDataType, SketchParams};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
+use asap_types::stages::{queries_rooted_at, MemoGroupId};
+use asap_types::stages::{CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup};
 use asap_types::workload::{PlanningWorkload, Query, RepeatedDemand, RepetitionInterval};
 
 const RATIO_OF_QUANTILES: &str = concat!(
