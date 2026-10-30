@@ -123,6 +123,7 @@ use asap_accuracy::sizing::{accuracy_budget, sized, sizing_target, sketch_statis
 
 use crate::deployment_capabilities::{summary_supported, SupportedSummary};
 use crate::pass1::realization::summary_candidates;
+use asap_types::stages::PruneReason;
 
 /// How one Pass 1 target is computed: exact or a summary.
 ///
@@ -160,34 +161,6 @@ fn exact_family(kind: ExactKind) -> FieldDataType {
         ExactKind::Increase => ExactParams::Increase,
     };
     FieldDataType::ExactAggregate(kind, params)
-}
-
-/// Why Pass 1 proved a candidate unable to realize its target.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PruneReason {
-    /// The measure requires an exact answer and the summary is approximate.
-    RequiresExact,
-    /// `count` counts rows, so a possibly-null `avg` input changes the result.
-    NullableAvgInput,
-    /// Frequency sketches do not implement SQL row-count updates. Keep the
-    /// exact counter; a fused raw-row TopK has its own keyed update contract.
-    NoRelationalCountSketchRealization,
-    /// The deployment's executor cannot build the summary's family or
-    /// answer the measure's readout from it
-    /// ([`summary_supported`]).
-    UnsupportedByDeployment,
-    /// The quantile's φ is outside [0, 1], where PromQL answers -Inf or
-    /// +Inf: no sketch estimates that, and the executor's sketches refuse
-    /// such a φ, so only the exact answer remains.
-    QuantileOutsideUnitInterval,
-    /// A PromQL top-k's heap (Count-Min or CountSketch with a heap) over its
-    /// own input, an instant vector with one row per ranked series or
-    /// group: the heap reads every row and adds
-    /// nothing to it, so an exact top-k over the same rows, which keeps only
-    /// `k` of them, is exact and no costlier. Only the whole-expression heap
-    /// over the inner aggregate's input, where an item's rows repeat, is
-    /// offered ([`FusedComputation`]).
-    TopKHeapOverOneRowPerItem,
 }
 
 /// Unranked candidates of one measure and the candidates pruned for it.

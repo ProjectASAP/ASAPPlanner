@@ -11,10 +11,7 @@ use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkloadEntry, RangeEvaluation};
 
-use crate::checks::{
-    accuracy_check, accuracy_targets, latency_violation, per_entity_aggregate_violation,
-    raw_data_violation, CheckFailure,
-};
+use crate::checks::{accuracy_check, accuracy_targets, latency_violation};
 use crate::report::{
     AcceptedAccuracy, Rejection, RejectionCause, SearchReport, Selection, SelectionError,
 };
@@ -173,16 +170,11 @@ impl<'a> PlanSelector<'a> {
                 entries: self.entries.len(),
             });
         }
-        if checked_candidate(candidate, &self.targets, self.data, &self.models).is_err() {
+        if accuracy_check(candidate, &self.targets, self.data, &self.models).is_err() {
             return Ok(CalibrationFit::default());
         }
         let nodes = node_map(&candidate.dag);
         let kept_chains = kept_pane_chains(&candidate.dag);
-        if !self.models.deployment_capabilities.raw_data_retained
-            && raw_data_violation(&candidate.dag, &kept_chains).is_some()
-        {
-            return Ok(CalibrationFit::default());
-        }
         let (_, fit) = plan_cost(
             &candidate.dag,
             &nodes,
@@ -240,22 +232,15 @@ impl<'a> PlanSelector<'a> {
         }
         self.candidates_checked += 1;
         let accepted_accuracy =
-            match checked_candidate(candidate, &self.targets, self.data, &self.models) {
+            match accuracy_check(candidate, &self.targets, self.data, &self.models) {
                 Ok(accepted) => accepted,
                 Err(failed) => {
                     self.reject(&candidate.id, failed.cause, failed.reason);
                     return Ok(());
                 }
             };
-        // Built once per candidate for the raw-data check and pricing.
         let nodes = node_map(&candidate.dag);
         let kept_chains = kept_pane_chains(&candidate.dag);
-        if !self.models.deployment_capabilities.raw_data_retained {
-            if let Some(reason) = raw_data_violation(&candidate.dag, &kept_chains) {
-                self.reject(&candidate.id, RejectionCause::RawDataNotRetained, reason);
-                return Ok(());
-            }
-        }
         let settings = self.models.plan_selection;
         let (cost, _) = plan_cost(
             &candidate.dag,
@@ -427,29 +412,6 @@ impl<'a> PlanSelector<'a> {
             });
         }
     }
-}
-
-/// The accuracy Stage 3 accepted for each of `candidate`'s queries, or the
-/// first check it fails that does not depend on its materialization or
-/// prices: the executor cannot run a per-series aggregate it reads, or a
-/// query misses its accuracy target. Its summaries keep the sizes Stage 1
-/// gave them; this only checks them.
-pub(crate) fn checked_candidate(
-    candidate: &PhysicalWorkloadPlan,
-    targets: &[AccuracyTarget],
-    data: &DataWorkload,
-    models: &PlanningModels<'_>,
-) -> Result<Vec<AcceptedAccuracy>, CheckFailure> {
-    if let Some(reason) = per_entity_aggregate_violation(&candidate.dag) {
-        // The aggregate is the plan's own exact per-series reduction, which
-        // no summary size changes.
-        return Err(CheckFailure {
-            cause: RejectionCause::PerEntityAggregateNotExecutable,
-            reason,
-            size_independent: true,
-        });
-    }
-    accuracy_check(candidate, targets, data, models)
 }
 
 /// The index of the candidate `ranking` selects among `costs` (the first on

@@ -13,20 +13,11 @@ use asap_accuracy::sizing::{
 };
 
 use crate::pass1::per_computation_candidates::{
-    ComputationTarget, HowToComputeAggregateMeasure, PerComputationCandidates, PruneReason,
+    ComputationTarget, HowToComputeAggregateMeasure, PerComputationCandidates,
 };
 use crate::pass2::memo::candidates::{try_populate_pass1, CandidatePopulationError};
 use crate::pass2::memo::{check_generation_deadline, DagOfLogicalMemoGroups};
-use asap_types::stages::{CandidateGenerationTimeout, CandidateMemo, MemoGroupId};
-
-/// One candidate a stage removed from group `group`, and why. `C` is the
-/// stage's candidate type.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PrunedCandidate<C> {
-    pub group: MemoGroupId,
-    pub candidate: C,
-    pub reason: PruneReason,
-}
+use asap_types::stages::{CandidateGenerationTimeout, CandidateMemo, MemoGroupId, PrunedCandidate};
 
 /// Stage 1, Pass 1's output: the workload's memo groups, each with its
 /// Pass 1 candidates, and the computation targets they were built from.

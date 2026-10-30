@@ -52,8 +52,11 @@ impl ErrorGeneratingPhysicalASAPMemoCandidates {
 /// Stage 2: implement every operator node of every candidate in `logical`'s
 /// memo, enumerate the timings and materializations the data and deployment
 /// allow (`query_time_results_retained`; no query-time raw scans unless
-/// `raw_data_retained`), record which candidates may produce each input, and
-/// prune what cannot be used. Prices nothing.
+/// `raw_data_retained`; no exact per-entity aggregate the executor cannot
+/// run), record which candidates may produce each input, and prune what
+/// cannot be used. Every configuration not generated and every candidate
+/// pruned is recorded in the output's `pruned_candidates` with its
+/// `PruneReason`. Prices nothing.
 pub fn generate_physical_asap_memo_candidates(
     logical: &LogicalASAPMemoCandidates,
     entries: &[QueryWorkloadEntry],

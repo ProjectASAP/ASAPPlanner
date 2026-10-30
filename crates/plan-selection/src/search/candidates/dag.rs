@@ -514,8 +514,9 @@ impl PhysicalCandidatesWithCosts {
     /// Stage 2's structural pruning of `physical`, with the DAG restricted to
     /// the kept candidates at their costs and resource usage. Each candidate
     /// must run its own operator node (as the test constructors make them),
-    /// which then names its index before pruning.
-    pub(crate) fn prune_for_tests(&mut self) -> asap_types::stages::PruningMetrics {
+    /// which then names its index before pruning. Returns how many
+    /// candidates were pruned.
+    pub(crate) fn prune_for_tests(&mut self) -> usize {
         let physical = std::mem::replace(
             &mut self.physical,
             PhysicalASAPMemoCandidates::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
@@ -542,7 +543,7 @@ impl PhysicalCandidatesWithCosts {
             })
             .collect();
         self.dag = dag;
-        self.physical.pruning_metrics
+        self.physical.pruned_candidates.len()
     }
 }
 

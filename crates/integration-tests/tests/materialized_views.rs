@@ -46,8 +46,8 @@ fn repeating_with(queries: &[&str], extra: &str) -> PlanningWorkload {
 /// Stage 3's priced raw lookback of `dag` (the selected candidate's
 /// physical DAG, pane chains unexpanded), per source: each query-time
 /// scan's `PhysicalASAPDAG::scan_window` with every chain kept across
-/// evaluations reading its newest pane, as `query_time_lookback_ms` in
-/// `asap-plan-selection` prices it, the longest per source.
+/// evaluations reading its newest pane, as `asap-plan-selection` prices
+/// it, the longest per source.
 fn stage3_raw_lookback_ms(dag: &PhysicalASAPDAG) -> Vec<(Source, Option<u64>)> {
     let kept_chains: HashSet<_> = dag
         .nodes

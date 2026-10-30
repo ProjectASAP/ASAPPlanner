@@ -10,6 +10,7 @@ use asap_types::stages::{ProducerCandidates, ProducerSetInterner};
 use std::collections::HashMap;
 
 use crate::summary_materialization_eligibility;
+use asap_types::ir::operator::{agg_has_exact_per_entity_kernel, Reduction};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use asap_types::physical::{Materialization, Medium};
@@ -19,7 +20,8 @@ use super::inventory::CandidateInventory;
 use asap_types::ir::QueryRoot;
 use asap_types::stages::{
     output_references, MemoGroupId, OperatorNodeOfCandidateForMemoGroupId,
-    PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, ReaderConstraint,
+    PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PhysicalCandidateKey,
+    PruneReason, PrunedCandidate, ReaderConstraint,
 };
 
 /// [`PhysicalCandidate::may_keep_across_evaluations_per_sole_reader_query`] for `node` configured
@@ -122,6 +124,7 @@ pub fn enumerate_candidate_configurations_before(
     }
     let mut candidates = Vec::new();
     let mut reader_constraints = Vec::new();
+    let mut pruned_candidates = Vec::new();
     let mut source_configurations = vec![Vec::new(); source_count];
     for source_id in 0..source_count {
         super::check_deadline(deadline)?;
@@ -200,12 +203,36 @@ pub fn enumerate_candidate_configurations_before(
                 ExecutionTiming::QueryTime,
             ));
         }
-        // This is the same deployment restriction enforced by PlanSelector's
-        // raw_data_violation. Encode it before solving instead of excluding
-        // each complete plan that uses an unavailable query-time raw scan.
+        // Configurations the deployment cannot run are not generated; each is
+        // recorded as pruned, copy 0 standing for its scope copies.
+        let group = source.operator_nodes_of_candidates_for_memo_groups[source_id].group();
+        let mut prune_modes = |reason, applies: &dyn Fn(ExecutionTiming) -> bool| {
+            modes.retain(|&(materialization, timing)| {
+                let pruned = applies(timing);
+                if pruned {
+                    pruned_candidates.push(PrunedCandidate {
+                        group,
+                        candidate: PhysicalCandidateKey {
+                            operator_node: OperatorNodeOfCandidateForMemoGroupId(source_id),
+                            timing,
+                            materialization,
+                            scope_copy: 0,
+                        },
+                        reason,
+                    });
+                }
+                !pruned
+            });
+        };
+        if !per_entity_aggregate_executable(node) {
+            prune_modes(PruneReason::PerEntityAggregateNotExecutable, &|_| true);
+        }
+        // Without raw data retained, only ingestion-time work reads raw rows.
         if !raw_data_retained && matches!(node.operator, Operator::NonASAP(NonASAPOp::Scan { .. }))
         {
-            modes.retain(|(_, timing)| *timing == ExecutionTiming::IngestionTime);
+            prune_modes(PruneReason::RawDataNotRetained, &|timing| {
+                timing != ExecutionTiming::IngestionTime
+            });
         }
         for (materialization, timing) in modes {
             let id = PhysicalCandidateId(candidates.len());
@@ -342,12 +369,13 @@ pub fn enumerate_candidate_configurations_before(
         }
         candidate.producer_candidates_per_input = requirements;
     }
-    let result = PhysicalASAPMemoCandidates::new(
+    let mut result = PhysicalASAPMemoCandidates::new(
         source.operator_nodes_of_candidates_for_memo_groups.clone(),
         candidates,
         query_roots.to_vec(),
         reader_constraints,
     );
+    result.pruned_candidates = pruned_candidates;
     super::validate_candidates(&result).map_err(|error| invalid(&error))?;
     // Repeated identical workload entries and identical logical outputs have
     // identical timing, accuracy and pricing requirements. Their request counts
@@ -388,6 +416,29 @@ pub fn enumerate_candidate_configurations_before(
         &output_contexts,
         deadline,
     )
+}
+
+/// Whether the executor can run `node`: false only for an exact per-entity
+/// `Aggregate` (a per-series range reduction over raw data samples) that
+/// has more than one measure, a measure without an exact per-entity kernel
+/// ([`agg_has_exact_per_entity_kernel`]), a measure filter or a `HAVING`.
+/// The rule reads one operator node, so Stage 2 does not generate the node
+/// rather than Stage 3 rejecting each plan that reads it.
+fn per_entity_aggregate_executable(node: &OperatorNode) -> bool {
+    match &node.operator {
+        Operator::NonASAP(NonASAPOp::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures,
+            filters,
+            having,
+            ..
+        }) => {
+            matches!(measures.as_slice(), [measure] if agg_has_exact_per_entity_kernel(measure))
+                && filters.iter().all(Option::is_none)
+                && having.is_none()
+        }
+        _ => true,
+    }
 }
 
 pub fn compatible_timing(consumer_timing: ExecutionTiming, producer: &PhysicalCandidate) -> bool {

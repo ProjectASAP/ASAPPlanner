@@ -1,7 +1,7 @@
 //! Frontend-to-Pass-1 acceptance: candidate discovery precedes empirical selection.
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     computation_candidates_for_intent, generate_per_computation_candidates, HavingEntry,
-    HavingPlacement, HowToComputeAggregateMeasure, PerComputationCandidateError, PruneReason,
+    HavingPlacement, HowToComputeAggregateMeasure, PerComputationCandidateError,
 };
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
@@ -14,6 +14,7 @@ use asap_types::ir::schema::{
 use asap_types::ir::{
     ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, QueryRoot, ScalarExpr,
 };
+use asap_types::stages::PruneReason;
 use std::rc::Rc;
 
 fn approximate() -> AccuracyTarget {
