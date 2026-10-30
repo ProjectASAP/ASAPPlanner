@@ -15,7 +15,9 @@ use asap_types::workload::{
 };
 
 use crate::support;
-use asap_frontend_promql::{lower_promql_workload, PromqlError as LoweringError};
+use asap_frontend_promql::{
+    lower_promql_query_workload, HistogramCatalog, PromqlError as LoweringError,
+};
 use support::lower_promql;
 
 fn lower(q: &str) -> Rc<OperatorNode> {
@@ -1135,7 +1137,8 @@ fn batch_lowers_each_entry_and_reads_per_query_accuracy() {
         // Range selectors only: no sample interval is needed.
         data_workload: None,
     };
-    let results = lower_promql_workload(&workload).expect("valid workload");
+    let results = lower_promql_query_workload(&workload, &HistogramCatalog::default())
+        .expect("valid workload");
     assert_eq!(results.len(), 2);
 }
 
@@ -1158,7 +1161,7 @@ fn batch_rejects_non_promql_language() {
         data_workload: None,
     };
     assert!(matches!(
-        lower_promql_workload(&workload),
+        lower_promql_query_workload(&workload, &HistogramCatalog::default()),
         Err(LoweringError::WrongLanguage(_))
     ));
 }

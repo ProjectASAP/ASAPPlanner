@@ -57,7 +57,7 @@ impl HistogramCatalog {
 }
 
 thread_local! {
-    static CURRENT: RefCell<Option<HistogramCatalog>> = const { RefCell::new(None) };
+    static CURRENT: RefCell<HistogramCatalog> = RefCell::new(HistogramCatalog::default());
 }
 
 /// RAII guard installing `catalog` as the ambient histogram catalog for the
@@ -68,25 +68,26 @@ thread_local! {
 /// free-function `walk` recursion without threading a parameter through every
 /// signature (the discrimination is consulted in exactly one place,
 /// `walk_histogram`).
-pub(crate) struct CatalogGuard(Option<HistogramCatalog>);
+pub(crate) struct CatalogGuard(HistogramCatalog);
 
 impl CatalogGuard {
     pub(crate) fn install(catalog: HistogramCatalog) -> Self {
-        let prev = CURRENT.with(|c| c.borrow_mut().replace(catalog));
+        let prev = CURRENT.with(|c| c.replace(catalog));
         CatalogGuard(prev)
     }
 }
 
 impl Drop for CatalogGuard {
     fn drop(&mut self) {
-        CURRENT.with(|c| *c.borrow_mut() = self.0.take());
+        CURRENT.with(|c| c.replace(std::mem::take(&mut self.0)));
     }
 }
 
-/// The ambient catalog's declared kind for `metric`, or `None` when no catalog
-/// is installed or the metric is undeclared (→ fall back to the heuristic).
+/// The ambient catalog's declared kind for `metric`, or `None` when the metric
+/// is undeclared (→ fall back to the heuristic). Outside a guard the ambient
+/// catalog is empty.
 pub(crate) fn current_kind_of(metric: &str) -> Option<HistogramKind> {
-    CURRENT.with(|c| c.borrow().as_ref().and_then(|cat| cat.kind_of(metric)))
+    CURRENT.with(|c| c.borrow().kind_of(metric))
 }
 
 #[cfg(test)]

@@ -72,9 +72,12 @@ fn promql(query: &str) -> QueryRoot {
             DurationMs(1000),
         )),
     };
-    asap_frontend_promql::lower_promql_query_workload(&workload)
-        .unwrap_or_else(|e| panic!("lower failed for {query:?}: {e}"))
-        .remove(0)
+    asap_frontend_promql::lower_promql_query_workload(
+        &workload,
+        &asap_frontend_promql::HistogramCatalog::default(),
+    )
+    .unwrap_or_else(|e| panic!("lower failed for {query:?}: {e}"))
+    .remove(0)
 }
 
 fn output_columns(root: &QueryRoot) -> Vec<(String, String, bool)> {

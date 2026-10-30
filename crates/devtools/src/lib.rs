@@ -29,9 +29,8 @@ pub mod planner_layering_examples;
 pub mod planning_stages;
 pub mod rqe_atomic_costs;
 
-pub use asap_frontend_promql::{
-    lower_promql_workload, lower_promql_workload_with_histograms, PromqlError,
-};
+pub use asap_frontend_promql::PromqlError;
+use asap_frontend_promql::{lower_promql_query_workload, HistogramCatalog};
 pub use asap_frontend_sql::{lower_sql, lower_sql_batch, SqlCatalog, SqlError};
 
 /// Lower one developer-supplied PromQL query whose metrics are each sampled
@@ -70,5 +69,11 @@ pub fn lower_promql_with_sample_interval(
         )),
     };
     // One workload entry lowers to one root.
-    Ok(lower_promql_workload(&workload)?.remove(0))
+    lower_promql_query_workload(&workload, &HistogramCatalog::default())?
+        .remove(0)
+        .as_operator()
+        .cloned()
+        .ok_or_else(|| {
+            PromqlError::UnsupportedFeature("scalar root: use lower_promql_query_workload".into())
+        })
 }

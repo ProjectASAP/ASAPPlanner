@@ -1927,16 +1927,19 @@ fn pass1_pruned_for_no_error_bound(
     workload: &PlanningWorkload,
     models: PlanningModels<'_>,
 ) -> Vec<String> {
-    let roots = asap_frontend_promql::lower_promql_query_workload(workload)
-        .unwrap()
-        .into_iter()
-        .map(|root| match root {
-            QueryRoot::Operator(node) => {
-                QueryRoot::Operator(with_promql_series_identity(&node).unwrap_or(node))
-            }
-            scalar => scalar,
-        })
-        .collect();
+    let roots = asap_frontend_promql::lower_promql_query_workload(
+        workload,
+        &asap_frontend_promql::HistogramCatalog::default(),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|root| match root {
+        QueryRoot::Operator(node) => {
+            QueryRoot::Operator(with_promql_series_identity(&node).unwrap_or(node))
+        }
+        scalar => scalar,
+    })
+    .collect();
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
     let run = run_planning(

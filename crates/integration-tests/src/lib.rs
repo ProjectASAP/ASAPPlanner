@@ -61,7 +61,10 @@ pub mod fixtures {
                 DurationMs(1_000),
             )),
         };
-        let mut lowered = asap_frontend_promql::lower_promql_query_workload(&workload)?;
+        let mut lowered = asap_frontend_promql::lower_promql_query_workload(
+            &workload,
+            &asap_frontend_promql::HistogramCatalog::default(),
+        )?;
         Ok(lowered.remove(0))
     }
 

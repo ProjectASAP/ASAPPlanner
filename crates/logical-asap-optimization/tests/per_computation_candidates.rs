@@ -208,7 +208,11 @@ fn exact_promql(query: &str) -> Vec<QueryRoot> {
             asap_types::workload::DurationMs(1000),
         )),
     };
-    asap_frontend_promql::lower_promql_query_workload(&workload).unwrap()
+    asap_frontend_promql::lower_promql_query_workload(
+        &workload,
+        &asap_frontend_promql::HistogramCatalog::default(),
+    )
+    .unwrap()
 }
 
 #[test]

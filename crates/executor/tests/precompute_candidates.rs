@@ -45,9 +45,15 @@ fn exact_promql_root(query: &str) -> std::rc::Rc<planner_types::ir::OperatorNode
             DurationMs(1000),
         )),
     };
-    let root = asap_frontend_promql::lower_promql_workload(&workload)
-        .unwrap()
-        .remove(0);
+    let root = asap_frontend_promql::lower_promql_query_workload(
+        &workload,
+        &asap_frontend_promql::HistogramCatalog::default(),
+    )
+    .unwrap()
+    .remove(0)
+    .as_operator()
+    .cloned()
+    .expect("operator root");
     asap_executor::physical_planner::promql_rows::with_series_identity(&root).unwrap()
 }
 

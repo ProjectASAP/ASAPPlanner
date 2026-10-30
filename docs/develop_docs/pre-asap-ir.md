@@ -149,8 +149,8 @@ yet — and calls `asap_frontend_common::resolve_root`, which does three things 
    scalar subquery to a `Join { Cross }` plus column reference. The pass is idempotent and
    keeps the pointer identity of every untouched sub-DAG.
 
-The result is `Rc<OperatorNode>`. `lower_promql_workload`, `lower_sql` / `lower_sql_dialect` /
-`lower_sql_batch` and `lower_metricsql` all return it.
+The result is `Rc<OperatorNode>`. `lower_sql` / `lower_sql_dialect` / `lower_sql_batch` and
+`lower_metricsql` return it; `lower_promql_query_workload` returns a `QueryRoot` per query.
 
 Workload search then runs structural CSE (`asap_logical_asap_optimization::pass2::cse::share_common_sub_dags`) once
 across every root: bottom-up hash-consing where the structural hash is only a filter and the
@@ -690,8 +690,7 @@ histogram_quantiles(rate(http_request_duration_seconds_bucket[5m]), "le", 0.5, 0
 an API root discriminator, not an operator. `2`, `time()`, and
 `scalar(sum(up)) + 1` therefore introduce no constant-wrapper nodes.
 
-Use `lower_promql_query_workload` for mixed scalar/vector workloads. The
-operator-only convenience API rejects standalone scalar roots. `ParsedWorkload`
+`lower_promql_query_workload` lowers mixed scalar/vector workloads. `ParsedWorkload`
 retains each scalar's workload index; `PlanOutput::roots()` returns all results
 in workload order. Scalar plan reads remain exact and retain their operator
 references; summary selection currently operates on operator roots.

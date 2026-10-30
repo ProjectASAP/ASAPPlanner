@@ -85,16 +85,19 @@ impl PlanningStagesRun {
 /// Lower a PromQL workload, each series' identity as a column (the row
 /// representation per-series state needs at runtime).
 pub fn lower_promql_roots(workload: &PlanningWorkload) -> Result<Vec<QueryRoot>, String> {
-    asap_frontend_promql::lower_promql_query_workload(workload)
-        .map_err(|e| format!("lowering: {e}"))?
-        .into_iter()
-        .map(|root| match root {
-            QueryRoot::Operator(node) => with_promql_series_identity(&node)
-                .map(QueryRoot::Operator)
-                .map_err(|e| format!("series identity: {e}")),
-            scalar => Ok(scalar),
-        })
-        .collect()
+    asap_frontend_promql::lower_promql_query_workload(
+        workload,
+        &asap_frontend_promql::HistogramCatalog::default(),
+    )
+    .map_err(|e| format!("lowering: {e}"))?
+    .into_iter()
+    .map(|root| match root {
+        QueryRoot::Operator(node) => with_promql_series_identity(&node)
+            .map(QueryRoot::Operator)
+            .map_err(|e| format!("series identity: {e}")),
+        scalar => Ok(scalar),
+    })
+    .collect()
 }
 
 /// Lower a SQL workload over the tables of `catalog`: every entry, batch

@@ -1,8 +1,6 @@
 use std::rc::Rc;
 
-use asap_frontend_promql::{
-    lower_promql_workload, lower_promql_workload_with_histograms, HistogramCatalog, PromqlError,
-};
+use asap_frontend_promql::{lower_promql_query_workload, HistogramCatalog, PromqlError};
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::ScalarValue;
 use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
@@ -40,8 +38,7 @@ pub fn lower_promql(
     query: &str,
     accuracy: AccuracyTarget,
 ) -> Result<Rc<OperatorNode>, PromqlError> {
-    let mut lowered = lower_promql_workload(&workload(query, accuracy))?;
-    Ok(lowered.remove(0))
+    lower_promql_with_histograms(query, accuracy, HistogramCatalog::default())
 }
 
 #[allow(dead_code)]
@@ -50,9 +47,13 @@ pub fn lower_promql_with_histograms(
     accuracy: AccuracyTarget,
     histograms: HistogramCatalog,
 ) -> Result<Rc<OperatorNode>, PromqlError> {
-    let mut lowered =
-        lower_promql_workload_with_histograms(&workload(query, accuracy), histograms)?;
-    Ok(lowered.remove(0))
+    lower_promql_query_workload(&workload(query, accuracy), &histograms)?
+        .remove(0)
+        .as_operator()
+        .cloned()
+        .ok_or_else(|| {
+            PromqlError::UnsupportedFeature("scalar root: use lower_promql_query_workload".into())
+        })
 }
 
 /// The value of a bare PromQL numeric literal / folded constant at an
@@ -88,10 +89,10 @@ pub fn physical_asap_dag(
 
 #[allow(dead_code)]
 pub fn scalar_root(query: &str) -> ScalarExpr {
-    match asap_frontend_promql::lower_promql_query_workload(&workload(
-        query,
-        AccuracyTarget::exact(),
-    ))
+    match lower_promql_query_workload(
+        &workload(query, AccuracyTarget::exact()),
+        &HistogramCatalog::default(),
+    )
     .unwrap()
     .remove(0)
     {
