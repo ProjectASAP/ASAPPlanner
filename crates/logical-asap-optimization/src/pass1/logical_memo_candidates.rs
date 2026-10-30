@@ -11,9 +11,10 @@ use asap_types::ir::properties::AccuracyScope;
 use asap_types::ir::{NonASAPOp, QueryRoot, SchemaDerivationError};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
+use asap_accuracy::propagation::with_resized_summaries;
+
 use crate::pass1::per_computation_candidates::{
-    with_resized_summaries, ComputationTarget, HowToComputeAggregateMeasure,
-    PerComputationCandidates, PruneReason,
+    ComputationTarget, HowToComputeAggregateMeasure, PerComputationCandidates, PruneReason,
 };
 use crate::pass2::memo::candidates::{try_populate_pass1, CandidateMemo, CandidatePopulationError};
 use crate::pass2::memo::{

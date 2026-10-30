@@ -186,7 +186,7 @@ another implementation with the same algorithm name. In particular, a named
 empirical calibration is different from an arbitrary benchmark's maximum
 observed error; both its confidence and applicability must remain explicit.
 
-Default sizing is `realization::default_size_params`, which dispatches to the
+Default sizing is `asap_accuracy::sizing::default_size_params`, which dispatches to the
 estimator modules; a summary shared by several readers is sized with each
 parameter's largest value among them. Where an error bound grows as the failure
 probability shrinks (a KLL's `k`, a distinct-count UnivMon's heap), each

@@ -24,4 +24,5 @@ asap-frontend-promql = { path = "../frontend-promql", optional = true }
 test-support = ["dep:asap-frontend-promql"]
 
 [dev-dependencies]
+asap-accuracy = { path = "../accuracy", features = ["test-support"] }
 asap-frontend-promql = { path = "../frontend-promql" }

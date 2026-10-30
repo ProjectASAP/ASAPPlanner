@@ -24,9 +24,8 @@ use asap_types::ir::{OperatorNode, QueryRoot};
 use super::candidates::CandidateMemo;
 use super::rules::reuse::replace;
 use super::MemoGroupId;
-use crate::pass1::per_computation_candidates::{
-    recompose_guarantees, PerComputationCandidateError,
-};
+use crate::pass1::per_computation_candidates::PerComputationCandidateError;
+use asap_accuracy::propagation::recompose_guarantees;
 
 /// One candidate (an index into `CandidateMemo::candidates[group]`) for each
 /// group it names. [`build_logical_asap_dags_from_chosen_candidates`] gives a group it does not name its first
@@ -199,7 +198,7 @@ pub fn build_logical_asap_dags_from_chosen_candidates(
         .collect::<Result<Vec<_>, ErrorBuildingLogicalAsapDagsFromChosenCandidates>>()?
         .into_iter()
         .unzip();
-    let roots = recompose_guarantees(&roots)?;
+    let roots = recompose_guarantees(&roots).map_err(PerComputationCandidateError::from)?;
     Ok(groups
         .into_iter()
         .zip(roots)

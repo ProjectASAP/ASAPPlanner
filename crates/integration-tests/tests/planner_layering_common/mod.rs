@@ -303,16 +303,17 @@ pub fn run_explicit_candidates(
 ) -> Run {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    let logical: Vec<_> =
-        candidates
-            .into_iter()
-            .enumerate()
-            .map(|(index, roots)| {
-                logical(format!("P{}", index + 1),
-            asap_logical_asap_optimization::pass1::per_computation_candidates::recompose_guarantees(&roots)
-                .expect("explicit fixture contracts compose"))
-            })
-            .collect();
+    let logical: Vec<_> = candidates
+        .into_iter()
+        .enumerate()
+        .map(|(index, roots)| {
+            logical(
+                format!("P{}", index + 1),
+                asap_accuracy::propagation::recompose_guarantees(&roots)
+                    .expect("explicit fixture contracts compose"),
+            )
+        })
+        .collect();
     let mut physical = Vec::new();
     for candidate in &logical {
         for (index, mut plan) in asap_physical_asap_optimization::optimize_physical_asap(

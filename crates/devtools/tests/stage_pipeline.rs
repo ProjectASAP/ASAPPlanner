@@ -1161,8 +1161,9 @@ fn workload_file_with_a_range_evaluation_is_planned() {
     // priced under the same models. Its absolute cost is pinned in
     // integration-tests/tests/range_evaluation.rs.
     let kept_panes = {
+        use asap_accuracy::propagation::recompose_guarantees;
         use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-            compose_logical_candidate, generate_per_computation_candidates, recompose_guarantees,
+            compose_logical_candidate, generate_per_computation_candidates,
         };
         use asap_logical_asap_optimization::pass2::asap_aware_cse::{
             pane_candidates, window_composition_pass2_candidates,
@@ -2405,8 +2406,8 @@ fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
 /// the same implementation.
 #[test]
 fn composed_selected_choice_is_the_selected_stage1_dag() {
+    use asap_accuracy::propagation::recompose_guarantees;
     use asap_devtools::planning_stages::run_default_search_over;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::recompose_guarantees;
     use asap_logical_asap_optimization::pass2::memo::enumeration::build_logical_asap_dags_from_chosen_candidates;
     use asap_types::ir::flat::flatten;
     let ratio: PlanningWorkload =

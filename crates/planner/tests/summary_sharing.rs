@@ -7,10 +7,10 @@
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use std::rc::Rc;
 
+use asap_accuracy::sizing::{default_size_params, DEFAULT_DELTA};
 use asap_frontend_promql::{lower_promql_query_workload, promql_metric_names};
 #[cfg(feature = "sql")]
 use asap_frontend_sql::SqlCatalog;
-use asap_logical_asap_optimization::pass1::realization::{default_size_params, DEFAULT_DELTA};
 use asap_plan_selection::pass::{PlanOutput, PlanningModels, QueryPlan};
 use asap_plan_selection::RejectionCause;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};

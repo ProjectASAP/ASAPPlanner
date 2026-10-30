@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use asap_accuracy::estimators::{hll, with_failure_probability};
-use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+use asap_accuracy::propagation::{
     approximate_inputs, distinct_bound_source, with_resized_summaries,
 };
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;

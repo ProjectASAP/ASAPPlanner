@@ -9,8 +9,9 @@
 //! the extra rows, and a rollup merges finer groups into the query's. A
 //! filter that reads only finer group-by columns is constant within a finer
 //! group, so filtering finer groups equals filtering input rows.
-use asap_types::ir::scalar::CompareOpKind;
 use asap_types::ir::{NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr};
+
+use asap_accuracy::propagation::{pinned_column, split_and};
 
 /// How a query aggregate is computed from a finer one: keep the finer rows
 /// that pass `compensating_filter`, then, when `needs_rollup`, merge them
@@ -141,45 +142,5 @@ impl Rows {
                 _ => return None,
             }
         }
-    }
-}
-
-fn split_and(expr: &ScalarExpr, out: &mut Vec<ScalarExpr>) {
-    match expr {
-        ScalarExpr::BoolAnd(items) => items.iter().for_each(|item| split_and(item, out)),
-        other => out.push(other.clone()),
-    }
-}
-
-/// The columns `pred` pins to one literal value each: its conjuncts
-/// `c = v` and `c IN (v)`.
-pub(crate) fn pinned_columns(pred: &ScalarExpr) -> Vec<usize> {
-    let mut conjuncts = Vec::new();
-    split_and(pred, &mut conjuncts);
-    conjuncts.iter().filter_map(pinned_column).collect()
-}
-
-/// The column `conjunct` pins to one literal value (`c = v`, `c IN (v)`).
-fn pinned_column(conjunct: &ScalarExpr) -> Option<usize> {
-    match conjunct {
-        ScalarExpr::Compare {
-            left,
-            op: CompareOpKind::Eq,
-            right,
-            ..
-        } => match (&**left, &**right) {
-            (ScalarExpr::Column(column), ScalarExpr::Literal(_))
-            | (ScalarExpr::Literal(_), ScalarExpr::Column(column)) => Some(*column),
-            _ => None,
-        },
-        ScalarExpr::InList {
-            expr,
-            list,
-            negated: false,
-        } => match (&**expr, list.as_slice()) {
-            (ScalarExpr::Column(column), [ScalarExpr::Literal(_)]) => Some(*column),
-            _ => None,
-        },
-        _ => None,
     }
 }

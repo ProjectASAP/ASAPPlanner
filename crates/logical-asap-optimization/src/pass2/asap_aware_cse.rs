@@ -167,10 +167,9 @@ use asap_types::ir::{
     TimeRangeKind,
 };
 
-use crate::pass1::per_computation_candidates::{
-    recompose_guarantees, PerComputationCandidateError,
-};
+use crate::pass1::per_computation_candidates::PerComputationCandidateError;
 use asap_accuracy::estimators::size_for_all_readers;
+use asap_accuracy::propagation::recompose_guarantees;
 
 /// A Pass 2 candidate of the identical-expression rule: the candidate's
 /// roots with each of `sharing_candidates` made one node.
@@ -376,7 +375,7 @@ pub fn with_union_scan_labels(
             ),
         });
     }
-    recompose_guarantees(&out).map(Some)
+    Ok(Some(recompose_guarantees(&out)?))
 }
 
 /// The source and schema of a time-series `Scan` without predicates.
@@ -1750,7 +1749,7 @@ fn in_panes(
             }
         });
     }
-    recompose_guarantees(&out)
+    Ok(recompose_guarantees(&out)?)
 }
 
 /// `roots` with the `SummaryMerge` `merge` (over one [`ASAPOp::PaneChain`]
@@ -1831,7 +1830,7 @@ pub fn with_pane_chain(
             }
         });
     }
-    recompose_guarantees(&out)
+    Ok(recompose_guarantees(&out)?)
 }
 
 /// `roots` with the summary build `build` (a `SummaryAgg` of `roots`)
@@ -1884,7 +1883,7 @@ pub fn with_resized_build(
             }
         });
     }
-    recompose_guarantees(&out)
+    Ok(recompose_guarantees(&out)?)
 }
 
 /// The [`ASAPOp::PaneChain`] of `candidate`'s panes, with the build's
@@ -2806,7 +2805,7 @@ fn replace_all(
             }
         });
     }
-    recompose_guarantees(&out)
+    Ok(recompose_guarantees(&out)?)
 }
 
 /// Exact top-k computations of one input and partition with at least two

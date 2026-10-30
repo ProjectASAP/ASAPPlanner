@@ -11,6 +11,7 @@ edition = "2021"
 [dependencies]
 asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-sql = { path = "../frontend-sql" }
+asap-accuracy = { path = "../accuracy" }
 asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
 asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
 asap-cost = { path = "../cost" }

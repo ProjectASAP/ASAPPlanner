@@ -9,11 +9,11 @@ use asap_accuracy::composition::{
     PRODUCT_OPERAND_DOMAINS, STREAM_L1_NORM,
 };
 use asap_accuracy::estimators::{hll, univmon};
-use asap_accuracy::OperandDomain;
-use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+use asap_accuracy::propagation::{
     operand_domain_statistic, operand_guarantee, operand_of, project_column_guarantee,
     root_guarantee,
 };
+use asap_accuracy::OperandDomain;
 use asap_types::ir::operator::operator_properties::BinaryOpKind;
 use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric};
 use asap_types::ir::scalar::ScalarValue;
@@ -59,9 +59,7 @@ pub(crate) fn bound_root_guarantee(
     };
     match root_guarantee(root) {
         Some(guarantee) => Some(bind(&guarantee)),
-        None => asap_logical_asap_optimization::pass1::per_computation_candidates::bind_guarantees(
-            root, &bind,
-        ),
+        None => asap_accuracy::propagation::bind_guarantees(root, &bind),
     }
 }
 

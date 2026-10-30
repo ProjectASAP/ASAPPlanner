@@ -368,10 +368,7 @@ pub mod planning {
         for (name, roots) in variants {
             // Composed nodes lose their guarantees; recompose them as
             // `run_explicit_candidates` does.
-            let roots =
-                asap_logical_asap_optimization::pass1::per_computation_candidates::recompose_guarantees(
-                    roots,
-                )
+            let roots = asap_accuracy::propagation::recompose_guarantees(roots)
                 .unwrap_or_else(|error| panic!("{name} composes guarantees: {error}"));
             let mut plans = asap_physical_asap_optimization::optimize_physical_asap(
                 name,
@@ -594,7 +591,7 @@ pub mod planning {
         entries: &[asap_types::workload::QueryWorkloadEntry],
         data: &asap_types::workload::DataWorkload,
     ) -> asap_plan_selection::Stage1ToStage3Run<usize> {
-        use asap_logical_asap_optimization::pass1::per_computation_candidates::recompose_guarantees;
+        use asap_accuracy::propagation::recompose_guarantees;
         use asap_logical_asap_optimization::pass2::workload_candidates::stage1_candidates_of_choice;
         use asap_plan_selection::{search::LogicalCandidate, PlanningModels, Stage1ToStage3Run};
         let mut logical = Vec::new();
