@@ -106,6 +106,15 @@ fn resolve(
             })
             .collect::<Result<Vec<_>, _>>()
     };
+    // A PromQL child over an open schema gets an opaque series-identity column.
+    let promql_series = |child: &UnresolvedOp| -> Result<Rc<OperatorNode>, ResolveDAGError> {
+        let child = resolve(child, usage_derived_schema)?;
+        if child.schema.closed {
+            return Ok(child);
+        }
+        asap_types::ir::schema::schema_support::with_promql_series_identity(&child)
+            .map_err(|e| SchemaDerivationError::InvalidScalarSignature(e).into())
+    };
     match tree {
         U::Scan {
             source,
@@ -152,13 +161,7 @@ fn resolve(
             scalar_left,
             return_bool,
         } => {
-            let child = resolve(child, usage_derived_schema)?;
-            let child = if child.schema.closed {
-                child
-            } else {
-                asap_types::ir::schema::schema_support::with_promql_series_identity(&child)
-                    .map_err(SchemaDerivationError::InvalidScalarSignature)?
-            };
+            let child = promql_series(child)?;
             let scalar = resolve_expr(scalar, &Schema::default())?;
             lower_scalar_vector(child, scalar, op, *scalar_left, *return_bool)
         }
@@ -167,13 +170,7 @@ fn resolve(
             sample,
             drop_metric_name,
         } => {
-            let child = resolve(child, usage_derived_schema)?;
-            let child = if child.schema.closed {
-                child
-            } else {
-                asap_types::ir::schema::schema_support::with_promql_series_identity(&child)
-                    .map_err(SchemaDerivationError::InvalidScalarSignature)?
-            };
+            let child = promql_series(child)?;
             let sample = resolve_expr(sample, &child.schema)?;
             project_sample(child, sample, *drop_metric_name)
         }
