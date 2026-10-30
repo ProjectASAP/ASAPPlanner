@@ -341,7 +341,7 @@ impl Schema {
     /// Look up a field by `(table, name)` qualifier — disambiguates columns
     /// that share a `name` across a join (`a.k` vs `b.k`). `None` if no field
     /// has both that qualifier and name.
-    pub fn column_id_qualified(&self, table: &str, name: &str) -> Option<ColumnId> {
+    pub(crate) fn column_id_qualified(&self, table: &str, name: &str) -> Option<ColumnId> {
         self.fields
             .iter()
             .position(|c| c.name == name && c.table.as_deref() == Some(table))
@@ -355,7 +355,7 @@ impl Schema {
     /// Append `cols` as an additional unique-key set if not already present.
     /// Used by `Dedup { cols }`: "the input schema with `unique_keys`
     /// tightened to include `cols`".
-    pub fn add_unique_key(&mut self, cols: Vec<ColumnId>) {
+    pub(crate) fn add_unique_key(&mut self, cols: Vec<ColumnId>) {
         if !self.unique_keys.contains(&cols) {
             self.unique_keys.push(cols);
         }

@@ -26,11 +26,21 @@ impl QueryRoot {
             }
         }
     }
-
-    pub fn as_operator(&self) -> Option<&Rc<OperatorNode>> {
+}
+impl<C> QueryRoot<C> {
+    pub fn as_operator(&self) -> Option<&C> {
         match self {
             Self::Operator(node) => Some(node),
             Self::Scalar(_) => None,
+        }
+    }
+
+    /// The operator references this root reads: its operator, or its scalar
+    /// expression's [`ScalarExpr::operator_refs`].
+    pub fn operator_refs(&self) -> Vec<&C> {
+        match self {
+            Self::Operator(node) => vec![node],
+            Self::Scalar(expr) => expr.operator_refs(),
         }
     }
 }

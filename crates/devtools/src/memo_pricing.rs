@@ -136,12 +136,17 @@ fn price_choice(
         return invalid("invalid_structure", error.to_string());
     }
     let id = format!("E{}", index + 1);
-    let mut physical =
-        match optimize_physical_asap(&id, &roots, entries, data, models.deployment_capabilities) {
-            Ok(physical) if !physical.is_empty() => physical,
-            Ok(_) => return invalid("stage2_failed", "no physical plan".into()),
-            Err(error) => return invalid("stage2_failed", error.to_string()),
-        };
+    let mut physical = match optimize_physical_asap(
+        &id,
+        &roots,
+        entries,
+        data,
+        models.deployment_capabilities.query_time_results_retained,
+    ) {
+        Ok(physical) if !physical.is_empty() => physical,
+        Ok(_) => return invalid("stage2_failed", "no physical plan".into()),
+        Err(error) => return invalid("stage2_failed", error.to_string()),
+    };
     for (k, plan) in physical.iter_mut().enumerate() {
         plan.id = format!("{id}-{k}");
     }
@@ -178,8 +183,9 @@ fn price_choice(
 }
 
 /// For each query, the root group of each of its operator references, in
-/// `operator_refs` order: the one group whose `roots_of` names the query when
-/// its root is one operator, else the group whose node is the reference.
+/// `operator_refs` order: the one group the query's root (in the memo's
+/// `query_roots`) reads when its root is one operator, else the group
+/// whose node is the reference.
 fn root_groups_of_queries(
     memo: &CandidateMemo,
     stage0_roots: &[QueryRoot],
@@ -188,9 +194,17 @@ fn root_groups_of_queries(
         .iter()
         .enumerate()
         .map(|(query, root)| {
-            let groups: Vec<_> = (0..memo.groups.len())
-                .filter(|&g| memo.groups[g].roots_of.contains(&query))
-                .map(|g| MemoGroupId(g as u32))
+            let groups: Vec<_> = memo
+                .query_roots
+                .get(query)
+                .map(|root| {
+                    root.operator_refs()
+                        .into_iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>()
+                })
+                .unwrap_or_default()
+                .into_iter()
                 .collect();
             match root {
                 QueryRoot::Operator(_) if groups.len() == 1 => Ok(groups),

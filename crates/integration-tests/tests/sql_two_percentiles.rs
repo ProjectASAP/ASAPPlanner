@@ -10,9 +10,9 @@
 use crate::physical_common;
 use crate::planner_layering_common;
 
+use asap_cost::CostInputs;
 use asap_executor::values::Value;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
-use asap_plan_selection::PlanSelectionSettings;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema, SketchAlgorithm};
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot};
@@ -84,9 +84,9 @@ async fn run(queries: &[&str]) -> Run {
     }
     // Every output accepted whatever its guarantee, as `stage_pipeline`
     // plans by default: this test checks the answers against the bound.
-    let settings = PlanSelectionSettings {
+    let settings = CostInputs {
         ignore_accuracy_guarantees: true,
-        ..PlanSelectionSettings::default()
+        ..CostInputs::default()
     };
     let candidates = stage1(queries)
         .await
@@ -331,14 +331,14 @@ async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
         }
     }
     for algorithm in [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch] {
-        let together: Option<Vec<_>> = local.targets.iter().map(|target| target.choices.candidates.iter()
+        let together: Option<Vec<_>> = local.targets.iter().map(|target| target.ways_to_compute.iter()
             .position(|candidate| matches!(candidate, HowToComputeAggregateMeasure::Summary(family) if *family == algorithm))).collect();
         if let Some(choice) = together {
             choices.insert(choice);
         }
     }
     let share = |roots: Vec<QueryRoot>| {
-        asap_types::ir::cse::share_common_sub_dags(
+        asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
             roots
                 .into_iter()
                 .enumerate()

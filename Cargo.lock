@@ -314,9 +314,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "asap-accuracy"
+version = "0.1.0"
+dependencies = [
+ "asap-types",
+ "asap_sketchlib",
+ "serde_json",
+]
+
+[[package]]
+name = "asap-cost"
+version = "0.1.0"
+dependencies = [
+ "asap-executor",
+ "asap-types",
+ "asap_sketchlib",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "asap-devtools"
 version = "0.1.0"
 dependencies = [
+ "asap-accuracy",
+ "asap-cost",
  "asap-executor",
  "asap-frontend-promql",
  "asap-frontend-sql",
@@ -375,6 +398,7 @@ dependencies = [
 name = "asap-frontend-promql"
 version = "0.1.0"
 dependencies = [
+ "asap-accuracy",
  "asap-frontend-common",
  "asap-logical-asap-optimization",
  "asap-plan-selection",
@@ -402,6 +426,8 @@ dependencies = [
 name = "asap-integration-tests"
 version = "0.1.0"
 dependencies = [
+ "asap-accuracy",
+ "asap-cost",
  "asap-devtools",
  "asap-executor",
  "asap-frontend-promql",
@@ -421,6 +447,7 @@ dependencies = [
 name = "asap-logical-asap-optimization"
 version = "0.1.0"
 dependencies = [
+ "asap-accuracy",
  "asap-frontend-promql",
  "asap-types",
  "asap_sketchlib",
@@ -436,6 +463,8 @@ version = "0.1.0"
 dependencies = [
  "asap-logical-asap-optimization",
  "asap-types",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -443,7 +472,8 @@ dependencies = [
 name = "asap-plan-selection"
 version = "0.1.0"
 dependencies = [
- "asap-executor",
+ "asap-accuracy",
+ "asap-cost",
  "asap-frontend-promql",
  "asap-logical-asap-optimization",
  "asap-physical-asap-optimization",
@@ -462,6 +492,8 @@ name = "asap-planner"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "asap-accuracy",
+ "asap-cost",
  "asap-executor",
  "asap-frontend-metricsql",
  "asap-frontend-promql",

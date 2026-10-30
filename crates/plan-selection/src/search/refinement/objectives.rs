@@ -18,7 +18,8 @@ use crate::search::refinement::planner::{
     MaterializationOutcome,
 };
 use crate::search::refinement::search::{CandidateSearchLimits, CandidateSearchStatus};
-use crate::{CalibrationFit, PlanSelector, Selection, SelectionError};
+use crate::{PlanSelector, Selection, SelectionError};
+use asap_cost::CalibrationFit;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(in crate::search) struct ObjectiveSearchOptions {
@@ -396,12 +397,11 @@ mod tests {
     use crate::search::candidates::configurations::enumerate_candidate_configurations;
     use crate::search::candidates::inventory::build_candidate_inventory;
     use crate::search::milp::model::solve_candidate_proposal;
-    use crate::{
-        ClusterLimits, ClusterObjective, CostModel, PlanSelectionSettings, PlanningModels,
-    };
+    use crate::PlanningModels;
+    use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel};
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};
+    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::{properties::AccuracyTarget, QueryRoot};
     use asap_types::workload::{
@@ -423,13 +423,7 @@ mod tests {
         let roots = vec![root];
         let identified = vec![(0usize, roots[0].clone())];
         let initial = DagOfLogicalMemoGroups::from_roots(&identified);
-        let output = MemoGroupId(
-            initial
-                .groups
-                .iter()
-                .position(|group| group.roots_of.contains(&0))
-                .unwrap() as u32,
-        );
+        let output = *initial.query_roots[0].as_operator().unwrap();
         let generated = generate_per_computation_candidates(identified).unwrap();
         let memo = try_populate_pass1(initial, &generated).unwrap();
         let inventory = build_candidate_inventory(&memo, &[output], |_| Ok(0.0)).unwrap();
@@ -511,7 +505,7 @@ mod tests {
         (
             usage.peak_memory_bytes,
             usage.disk_bytes,
-            crate::worst_latency_ms(usage).to_bits(),
+            crate::selector::worst_latency_ms(usage).to_bits(),
         )
     }
 
@@ -524,7 +518,7 @@ mod tests {
             ClusterObjective::LeastMemory,
             ClusterObjective::ParetoFront,
         ] {
-            let settings = PlanSelectionSettings {
+            let settings = CostInputs {
                 cost_model: CostModel::ClusterCapacity(ClusterLimits {
                     memory_bytes: u64::MAX,
                     disk_bytes: u64::MAX,
@@ -583,7 +577,7 @@ mod tests {
     #[test]
     fn partial_cluster_front_has_valid_selected_physical_plan() {
         let (configured, roots, entries, data) = fixture();
-        let settings = PlanSelectionSettings {
+        let settings = CostInputs {
             cost_model: CostModel::ClusterCapacity(ClusterLimits {
                 memory_bytes: u64::MAX,
                 disk_bytes: u64::MAX,
@@ -625,7 +619,7 @@ mod tests {
         );
     }
 
-    fn measured_settings() -> PlanSelectionSettings {
+    fn measured_settings() -> CostInputs {
         serde_json::from_value(serde_json::json!({"measured_operation_costs":{"operators":[{"operator":"Scan", "ns_per_unit":100.0}]}})).unwrap()
     }
 
@@ -728,7 +722,7 @@ mod tests {
     #[test]
     fn infeasible_archive_preserves_capacity_rejections_and_unique_logical_ids() {
         let (configured, roots, entries, data) = fixture();
-        let settings = PlanSelectionSettings {
+        let settings = CostInputs {
             cost_model: CostModel::ClusterCapacity(ClusterLimits {
                 memory_bytes: 0,
                 disk_bytes: 0,
@@ -888,7 +882,7 @@ mod tests {
             assert!(CalibrationFit::from_factor(invalid).is_err());
         }
         let (configured, roots, entries, data) = fixture();
-        let settings = PlanSelectionSettings {
+        let settings = CostInputs {
             frozen_calibration_factor: Some(3.0),
             ..measured_settings()
         };

@@ -1,10 +1,11 @@
 //! Driver integration for the explicit, bounded candidate-connection search.
-use crate::{CostModel, PlanningModels, SelectionError, Stage1ToStage3Search};
+use crate::{PlanningModels, SelectionError, Stage1ToStage3Search};
+use asap_cost::CostModel;
 use asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidates;
 use asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo;
 use asap_logical_asap_optimization::pass2::memo::enumeration::ChosenCandidatePerMemoGroup;
 use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};
-use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::ir::QueryRoot;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 use std::rc::Rc;
 
@@ -44,7 +45,7 @@ struct RouteOutcome {
     )>,
     lower_bound: Option<f64>,
     relative_gap: Option<f64>,
-    calibration: crate::CalibrationFit,
+    calibration: asap_cost::CalibrationFit,
     calibration_scope: &'static str,
 }
 
@@ -55,16 +56,17 @@ struct DomainProgress {
     catalog_completed: bool,
     refinements: usize,
     report: Option<crate::CandidateConnectionReport>,
-    local_memo: Option<asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo>,
-    /// The memo after Stage 0 and after Pass 1, kept with `local_memo`.
+    /// Pass 2's state between pane-width rounds; `None` before the first
+    /// round and after a round whose local window composition timed out.
+    pass2_round:
+        Option<asap_logical_asap_optimization::pass2::logical_memo_candidates::Pass2RoundState>,
+    /// The memo after Stage 0 and after Pass 1, kept with `pass2_round`.
     pass1_steps: Option<(
         asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo,
         asap_logical_asap_optimization::pass2::memo::candidates::CandidateMemo,
     )>,
     /// This round's memo steps, with its selected plan's ID when it has one.
     memo_steps: Option<(Option<String>, crate::search::pipeline::MemoSteps)>,
-    previous_domain:
-        Option<asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain>,
 }
 
 /// Obtain an incumbent on seed grids, then progressively expose finer widths.
@@ -161,9 +163,8 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
     let seed_report = seed_progress.report.clone();
     let full_started = Instant::now();
     let mut full_progress = DomainProgress {
-        local_memo: seed_progress.local_memo.take(),
+        pass2_round: seed_progress.pass2_round.take(),
         pass1_steps: seed_progress.pass1_steps.take(),
-        previous_domain: seed_progress.previous_domain,
         ..Default::default()
     };
     let global_deadline = started.checked_add(
@@ -224,9 +225,8 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         rounds.push(format!("{domain:?}"));
         let complete = domain == PaneWidthDomain::Complete;
         let mut round_progress = DomainProgress {
-            local_memo: full_progress.local_memo.take(),
+            pass2_round: full_progress.pass2_round.take(),
             pass1_steps: full_progress.pass1_steps.take(),
-            previous_domain: full_progress.previous_domain,
             ..Default::default()
         };
         let round = search_domain(
@@ -256,9 +256,8 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
             &mut round_progress,
             &format!("pane-round-{}-", rounds.len() - 1),
         );
-        full_progress.local_memo = round_progress.local_memo.take();
+        full_progress.pass2_round = round_progress.pass2_round.take();
         full_progress.pass1_steps = round_progress.pass1_steps.take();
-        full_progress.previous_domain = round_progress.previous_domain;
         full_progress.refinements += round_progress.refinements;
         completed_full_domain = complete && round_progress.catalog_completed;
         full_progress.catalog_completed = completed_full_domain;
@@ -295,7 +294,7 @@ pub(crate) fn candidate_connection_search<Id: Clone>(
         }
         // A timed-out rule pass leaves no reusable partial memo; stop rather
         // than repeating all generation and pretending the domain expanded.
-        if full_progress.local_memo.is_none() {
+        if full_progress.pass2_round.is_none() {
             break;
         }
     }
@@ -719,10 +718,11 @@ fn search_domain<Id: Clone>(
     use crate::search::costing::calibration::CandidateCalibration;
     use crate::search::refinement::planner::CandidatePlanningContext;
     use crate::search::refinement::search::{CandidateSearchLimits, CandidateSearchStatus};
-    use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::state_groups::{
-        expand_concrete_summary_state_groups_before, StateGroupExpansionError,
+    use asap_logical_asap_optimization::pass1::logical_memo_candidates::generate_per_computation_logical_memo_candidates;
+    use asap_logical_asap_optimization::pass2::logical_memo_candidates::{
+        generate_logical_asap_memo_candidates, LogicalASAPMemoCandidatesError, Pass2RoundState,
     };
+    use asap_logical_asap_optimization::pass2::memo::state_groups::StateGroupExpansionError;
     use std::time::{Duration, Instant};
     let unsupported = |reason: &str| {
         SelectionError::Solver(format!(
@@ -776,6 +776,13 @@ fn search_domain<Id: Clone>(
     crate::PlanSelector::new(entries, data, models, false)?;
     let calibration_policy =
         CandidateCalibration::for_models(models).map_err(|error| unsupported(&error))?;
+    // The output references are the initial memo's query roots, which
+    // stand for the inventory's roots only when the memo was built from them.
+    if !initial.matches_root_dependencies(&inventory.roots) {
+        return Err(unsupported(
+            "the workload's query roots are not the initial memo's",
+        ));
+    }
     let roots = inventory
         .roots
         .iter()
@@ -783,33 +790,20 @@ fn search_domain<Id: Clone>(
         .collect::<Vec<_>>();
     let mut output_groups = Vec::new();
     let mut output_queries = Vec::new();
-    let mut missing_group = false;
-    for (query, root) in roots.iter().enumerate() {
-        let mut reference = |node: &Rc<OperatorNode>| {
-            if let Some(group) = initial.group_for_node(node) {
-                output_groups.push(group);
-                output_queries.push(query);
-            } else {
-                missing_group = true;
-            }
-            Rc::clone(node)
+    for (query, root) in initial.query_roots.iter().enumerate() {
+        let mut reference = |&group: &MemoGroupId| {
+            output_groups.push(group);
+            output_queries.push(query);
         };
         match root {
-            QueryRoot::Operator(node) => {
-                reference(node);
-            }
+            QueryRoot::Operator(group) => reference(group),
             QueryRoot::Scalar(expression) => {
                 expression.map_operator_refs(&mut reference);
             }
         }
     }
-    if missing_group {
-        return Err(unsupported(
-            "an output reference is absent from the initial memo",
-        ));
-    }
     let started = Instant::now();
-    let pruned = if progress.local_memo.is_none() {
+    let pruned = if progress.pass2_round.is_none() {
         Some(
             crate::search::query_pruning::prune_query_candidates(
                 inventory,
@@ -862,61 +856,60 @@ fn search_domain<Id: Clone>(
         })
         .collect();
     let started = Instant::now();
-    let mut memo = match progress.local_memo.take() {
-        Some(memo) => memo,
+    let mut pass2_round = match progress.pass2_round.take() {
+        Some(pass2_round) => pass2_round,
         None => {
             let stage0 = CandidateMemo {
                 candidates: vec![Vec::new(); initial.groups.len()],
                 groups: initial.groups.clone(),
+                query_roots: initial.query_roots.clone(),
             };
-            let mut memo = try_populate_pass1(
+            // While budget remains, now plus the remaining budget is the same
+            // instant before or after population; once it is spent, either
+            // instant is already past and generation stops at its first check.
+            let pass1 = generate_per_computation_logical_memo_candidates(
                 initial,
-                &pruned.as_ref().expect("first round pruned").inventory,
-            )
-            .map_err(|error| unsupported(&error.to_string()))?;
-            crate::search::candidates::accuracy_configurations::add_scoped_candidates(
-                &mut memo,
+                pruned.expect("first round pruned").inventory,
                 entries,
                 data,
                 Instant::now().checked_add(remaining()),
             )
-            .map_err(|error| unsupported(&error))?;
-            progress.pass1_steps = Some((stage0, memo.clone()));
-            memo
+            .map_err(|error| unsupported(&error.to_string()))?;
+            progress.pass1_steps = Some((stage0, pass1.memo.clone()));
+            Pass2RoundState::new(pass1)
         }
     };
     let deadline = Instant::now().checked_add(remaining());
-    asap_logical_asap_optimization::pass2::memo::window_candidates::extend_local_window_composition(
-        &mut memo,
-        entries,
-        progress.previous_domain,
-        domain,
-        deadline,
-    )
-    .map_err(|error| {
-        progress.budget_stopped = true;
-        unsupported(&error.to_string())
-    })?;
-    // State-group splitting is currently one-shot. Keep the unexpanded memo;
-    // later rounds append local widths, then rebuild the state/physical catalog.
-    progress.local_memo = Some(memo.clone());
     // The seed-grid round, or the one complete round when there is none.
-    let first_round = progress.previous_domain.is_none();
-    progress.previous_domain = Some(domain);
-    let memo = expand_concrete_summary_state_groups_before(memo, domain, deadline)
-        .map_err(|error| {
-            progress.budget_stopped =
-                matches!(error, StateGroupExpansionError::DeadlineExceeded(_));
-            unsupported(&error.to_string())
-        })?
-        .memo;
+    let first_round = pass2_round.previous_domain().is_none();
+    // Pass 2 keeps its memo before state-group splitting across rounds: later
+    // rounds append local widths, then rebuild the state/physical catalog.
+    let memo =
+        match generate_logical_asap_memo_candidates(&mut pass2_round, entries, domain, deadline) {
+            Ok(candidates) => candidates.memo,
+            Err(error) => {
+                match &error {
+                    // A timed-out window composition leaves partial work: drop it.
+                    LogicalASAPMemoCandidatesError::LocalWindowComposition(_) => {
+                        progress.budget_stopped = true;
+                    }
+                    LogicalASAPMemoCandidatesError::Expansion(expansion) => {
+                        progress.budget_stopped =
+                            matches!(expansion, StateGroupExpansionError::DeadlineExceeded(_));
+                        progress.pass2_round = Some(pass2_round);
+                    }
+                }
+                return Err(unsupported(&error.to_string()));
+            }
+        };
+    let pass2_round = progress.pass2_round.insert(pass2_round);
     progress.memo_steps = progress.pass1_steps.as_ref().map(|(stage0, pass1)| {
         (
             None,
             crate::search::pipeline::MemoSteps {
                 stage0: stage0.clone(),
                 pass1: pass1.clone(),
-                pass2: progress.local_memo.clone().expect("kept above"),
+                pass2: pass2_round.unexpanded_memo().clone(),
                 concrete_states: memo.clone(),
                 selected_chosen_candidates: Err("no plan was selected".into()),
             },
@@ -962,7 +955,7 @@ fn search_domain<Id: Clone>(
         models,
         calibration: match calibration_policy {
             CandidateCalibration::Frozen(fit) => fit,
-            CandidateCalibration::CompleteCatalog => crate::CalibrationFit::default(),
+            CandidateCalibration::CompleteCatalog => asap_cost::CalibrationFit::default(),
         },
     };
     let bound_metrics = crate::search::costing::lower_bounds::apply(&mut configured, &context)
@@ -1246,10 +1239,10 @@ fn selected_chosen_candidates(
         }
     }
     // Every group the chosen candidates need, from the query roots, is chosen.
-    let mut pending: Vec<_> = (0..memo.groups.len())
-        .filter(|&group| !memo.groups[group].roots_of.is_empty())
-        .map(|group| MemoGroupId(group as u32))
-        .collect();
+    let mut pending: Vec<_> =
+        asap_logical_asap_optimization::pass2::memo::root_groups(&memo.query_roots)
+            .into_iter()
+            .collect();
     let mut seen = std::collections::HashSet::new();
     while let Some(group) = pending.pop() {
         if !seen.insert(group) {
@@ -1297,7 +1290,7 @@ fn selected_logical_roots(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{run_stage1_to_stage3_with, SearchAlgorithm};
+    use crate::run_stage1_to_stage3_with;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{
@@ -1320,7 +1313,6 @@ mod tests {
                 models: PlanningModels::builtin(),
             },
             Stage1ToStage3Search {
-                search: SearchAlgorithm::CandidateConnections,
                 milp_time_limit_ms: Some(1),
                 ..Default::default()
             },
@@ -1470,7 +1462,7 @@ mod tests {
     // Calibration over all assignments must never be fitted to a restricted seed.
     #[test]
     fn complete_catalog_calibration_skips_seed_domain() {
-        let settings: crate::PlanSelectionSettings = serde_json::from_value(serde_json::json!({
+        let settings: asap_cost::CostInputs = serde_json::from_value(serde_json::json!({
             "measured_operation_costs": {"operators": [{"operator":"Scan", "ns_per_unit":100.0}]}
         }))
         .unwrap();
@@ -1487,13 +1479,13 @@ mod tests {
     // Joint phases retain valid frontier metadata under the exact configured ranking.
     #[test]
     fn pane_free_pareto_uses_complete_domain_and_frozen_fit() {
-        let settings = crate::PlanSelectionSettings {
+        let settings = asap_cost::CostInputs {
             frozen_calibration_factor: Some(3.0),
-            cost_model: CostModel::ClusterCapacity(crate::ClusterLimits {
+            cost_model: CostModel::ClusterCapacity(asap_cost::ClusterLimits {
                 memory_bytes: 1_000_000,
                 disk_bytes: 1_000_000,
                 cpu_cores: Some(8),
-                objective: crate::ClusterObjective::ParetoFront,
+                objective: asap_cost::ClusterObjective::ParetoFront,
             }),
             ..Default::default()
         };
@@ -1692,7 +1684,7 @@ mod tests {
     fn repeated_round_ids_preserve_all_cost_and_accuracy_records() {
         let make = |price| {
             let run = scalar_run(
-                &crate::PlanSelectionSettings::default(),
+                &asap_cost::CostInputs::default(),
                 Stage1ToStage3Search {
                     max_evaluations: Some(1),
                     ..Default::default()
@@ -1727,12 +1719,12 @@ mod tests {
         assert_eq!(prices, vec![1.0, 2.0, 3.0]);
         assert_eq!(merged.0.selected, merged.1.id);
         assert_eq!(merged.0.costs[&merged.1.id].cost_per_second, Some(1.0));
-        let settings = crate::PlanSelectionSettings {
-            cost_model: CostModel::ClusterCapacity(crate::ClusterLimits {
+        let settings = asap_cost::CostInputs {
+            cost_model: CostModel::ClusterCapacity(asap_cost::ClusterLimits {
                 memory_bytes: 1_000_000,
                 disk_bytes: 1_000_000,
                 cpu_cores: Some(8),
-                objective: crate::ClusterObjective::ParetoFront,
+                objective: asap_cost::ClusterObjective::ParetoFront,
             }),
             ..Default::default()
         };
@@ -1772,7 +1764,7 @@ mod tests {
     #[test]
     fn literal_workload_does_not_repeat_identical_width_models() {
         let run = scalar_run(
-            &crate::PlanSelectionSettings::default(),
+            &asap_cost::CostInputs::default(),
             Stage1ToStage3Search::default(),
         );
         let selection = run.stage3_plan_selection.unwrap();
@@ -1784,7 +1776,7 @@ mod tests {
     /// A deployment's accuracy model that accepts no output.
     struct AcceptsNothing;
 
-    impl crate::AccuracyModel for AcceptsNothing {
+    impl asap_accuracy::AccuracyModel for AcceptsNothing {
         fn satisfies(
             &self,
             _: &asap_types::ir::properties::AccuracyGuarantee,
@@ -1843,7 +1835,7 @@ mod tests {
     }
 
     fn scalar_run(
-        settings: &crate::PlanSelectionSettings,
+        settings: &asap_cost::CostInputs,
         search: Stage1ToStage3Search,
     ) -> crate::Stage1ToStage3Run<usize> {
         let (_, entries, data) = workload();
@@ -1924,15 +1916,11 @@ mod tests {
             PlanningModels::builtin(),
             Stage1ToStage3Search {
                 milp_time_limit_ms: Some(10_000),
-                ..Stage1ToStage3Search::with_algorithm(SearchAlgorithm::CandidateConnections)
+                ..Default::default()
             },
         )
         .unwrap();
         let selection = run.stage3_plan_selection.unwrap();
-        assert_eq!(
-            selection.search.algorithm,
-            SearchAlgorithm::CandidateConnections
-        );
         let report = selection.search.candidate_connections.unwrap();
         assert!(report.catalog_scope.contains("finite capacity"));
         assert!(report.physical_configurations >= report.immediate_candidates);
@@ -1950,7 +1938,10 @@ mod tests {
     fn local_pane_rules_expose_identical_chains_to_state_groups() {
         use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
         use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-        use asap_logical_asap_optimization::pass2::memo::state_groups::expand_concrete_summary_state_groups;
+        use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
+        use asap_logical_asap_optimization::test_support::{
+            shared_summary_state_groups, sharing_rules_and_shared_state_groups,
+        };
         let (roots, mut entries, _) = workload();
         for entry in &mut entries {
             entry.recurrence =
@@ -1962,14 +1953,15 @@ mod tests {
         asap_logical_asap_optimization::pass2::memo::window_candidates::add_local_window_composition(
             &mut memo, &entries,
         );
-        let expanded = expand_concrete_summary_state_groups(memo).unwrap();
+        let expanded =
+            sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap();
         assert!(
-            expanded.state_groups.iter().any(|group| {
-                let state = &expanded.memo.groups[group.0 as usize];
+            shared_summary_state_groups(&expanded).iter().any(|group| {
+                let state = &expanded.groups[group.0 as usize];
                 matches!(
                     state.logical_node.asap(),
                     Some(asap_types::ir::ASAPOp::PaneChain { .. })
-                ) && state.queries == vec![0, 1]
+                ) && state.reached_by_queries() == [0, 1]
             }),
             "identical panes must expose a common state producer"
         );
@@ -1999,7 +1991,7 @@ mod tests {
             models,
             Stage1ToStage3Search {
                 milp_time_limit_ms: Some(10_000),
-                ..Stage1ToStage3Search::with_algorithm(SearchAlgorithm::CandidateConnections)
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2016,7 +2008,7 @@ mod tests {
             .roots
             .iter()
             .flat_map(|root| match root {
-                QueryRoot::Operator(node) => OperatorNode::reachable(node),
+                QueryRoot::Operator(node) => asap_types::ir::OperatorNode::reachable(node),
                 QueryRoot::Scalar(_) => Vec::new(),
             })
             .any(|node| matches!(node.asap(), Some(asap_types::ir::ASAPOp::PaneChain { .. }))));
@@ -2040,15 +2032,11 @@ mod tests {
             Stage1ToStage3Search {
                 exhaustive: true,
                 keep_every_candidate: true,
-                ..Stage1ToStage3Search::with_algorithm(SearchAlgorithm::CandidateConnections)
+                ..Default::default()
             },
         )
         .unwrap();
         let selection = run.stage3_plan_selection.unwrap();
-        assert_eq!(
-            selection.search.algorithm,
-            SearchAlgorithm::CandidateConnections
-        );
         assert_eq!(run.stage1_logical_asap_optimization.len(), 1);
         assert_eq!(run.stage2_physical_asap_optimization.len(), 1);
         assert_eq!(

@@ -15,13 +15,6 @@ use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 use super::candidates::{CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup};
 use super::{MemoGroup, MemoGroupId};
 
-#[derive(Debug)]
-pub struct StateGroupExpansion {
-    pub memo: CandidateMemo,
-    pub state_groups: Vec<MemoGroupId>,
-    pub added_reader_candidates: usize,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum StateGroupExpansionError {
     #[error(transparent)]
@@ -52,42 +45,11 @@ struct BuildReaders {
     readers: Vec<(usize, usize, Rc<OperatorNode>)>,
 }
 
-/// Preserve local candidates and add explicit shared-state reader candidates.
-/// The input must precede explicit state-group expansion. Unsupported candidate
-/// shapes are retained unchanged, rather than guessed into a shared interface.
-pub fn expand_concrete_summary_state_groups(
-    memo: CandidateMemo,
-) -> Result<StateGroupExpansion, StateGroupExpansionError> {
-    expand_concrete_summary_state_groups_in_domain(
-        memo,
-        super::shared_configurations::PaneWidthDomain::Complete,
-    )
-}
-
-pub fn expand_concrete_summary_state_groups_in_domain(
-    memo: CandidateMemo,
-    domain: super::shared_configurations::PaneWidthDomain,
-) -> Result<StateGroupExpansion, StateGroupExpansionError> {
-    expand_concrete_summary_state_groups_before(memo, domain, None)
-}
-
-/// An interrupted catalog is discarded, never returned as a complete search space.
-pub fn expand_concrete_summary_state_groups_before(
-    memo: CandidateMemo,
-    domain: super::shared_configurations::PaneWidthDomain,
-    deadline: Option<Instant>,
-) -> Result<StateGroupExpansion, StateGroupExpansionError> {
-    expand_with_state_index(memo, domain, deadline, true)
-}
-
-fn expand_with_state_index(
-    mut memo: CandidateMemo,
-    domain: super::shared_configurations::PaneWidthDomain,
-    deadline: Option<Instant>,
-    indexed: bool,
-) -> Result<StateGroupExpansion, StateGroupExpansionError> {
-    check_generation_deadline(deadline)?;
-    validate_references(&memo)?;
+/// Rejects a memo the Pass 2 rules cannot extend: mismatched or
+/// out-of-range group references, shared summary-state groups already
+/// added, or cyclic dependencies. Pass 2 checks this before its rules.
+pub(crate) fn check_unexpanded_memo(memo: &CandidateMemo) -> Result<(), StateGroupExpansionError> {
+    validate_references(memo)?;
     if memo.groups.iter().any(|group| {
         matches!(
             group.logical_node.asap(),
@@ -99,23 +61,36 @@ fn expand_with_state_index(
     if memo.topological_order().is_none() {
         return Err(StateGroupExpansionError::CyclicDependencies);
     }
-    super::rules::scan_labels::add_scan_label_candidates(&mut memo, deadline)?;
-    super::rules::summary_inputs::factor_summary_inputs(&mut memo, deadline)?;
-    super::rules::topk::add_topk_candidates(&mut memo, deadline)?;
-    super::rules::finer_aggregate::add_finer_aggregate_candidates(&mut memo, deadline)?;
-    super::rules::rollup::add_rollup_candidates(&mut memo, deadline)?;
-    super::rules::rollup::add_window_rollup_candidates(&mut memo, deadline)?;
-    super::rules::summary_results::factor_summary_results(&mut memo, deadline)?;
-    super::rules::shared_configuration_readers::add_state_configuration_candidates_in_domain(
-        &mut memo, domain, deadline,
-    )?;
+    Ok(())
+}
+
+/// Pass 2's last step, after its rules: give each summary build that two or
+/// more candidates make identically its own group, and add to each reader
+/// group a candidate reading that group. Every existing candidate stays
+/// (unsupported candidate shapes unchanged). Then rebuilds every group's
+/// parents and the queries it may serve. On error, discard `memo`: it may
+/// hold partial work.
+pub(crate) fn add_shared_summary_state_groups(
+    memo: &mut CandidateMemo,
+    deadline: Option<Instant>,
+) -> Result<(), StateGroupExpansionError> {
+    add_shared_summary_state_groups_with_index(memo, deadline, true)
+}
+
+/// `indexed` looks builds up by fingerprint; otherwise by a linear scan
+/// (the reference the index is tested against).
+fn add_shared_summary_state_groups_with_index(
+    memo: &mut CandidateMemo,
+    deadline: Option<Instant>,
+    indexed: bool,
+) -> Result<(), StateGroupExpansionError> {
     let mut builds: Vec<BuildReaders> = Vec::new();
     let mut build_index: HashMap<Option<BuildFingerprint>, Vec<usize>> = HashMap::new();
     for (group, candidates) in memo.candidates.iter().enumerate() {
         check_generation_deadline(deadline)?;
         for (index, candidate) in candidates.iter().enumerate() {
             check_generation_deadline(deadline)?;
-            for (build, children) in direct_input_builds(&memo, candidate) {
+            for (build, children) in direct_input_builds(memo, candidate) {
                 check_generation_deadline(deadline)?;
                 let fingerprint = build_fingerprint(&build);
                 let bucket = build_index.entry(fingerprint).or_default();
@@ -168,10 +143,9 @@ fn expand_with_state_index(
             child_groups: build.children.clone(),
             parents: Vec::new(),
             queries,
-            roots_of: Vec::new(),
         });
         memo.candidates.push(vec![CandidateForMemoGroup {
-            implements: vec![state_group],
+            fused_groups: Vec::new(),
             root_node: Rc::clone(&build.build),
             input_groups: build.children,
             origin: OriginOfCandidateForMemoGroup::SharedBuild,
@@ -186,7 +160,6 @@ fn expand_with_state_index(
         }
         state_groups.push(state_group);
     }
-    let mut added_reader_candidates = 0;
     for ((group, index), replacements) in replacements {
         check_generation_deadline(deadline)?;
         // Factor every available producer boundary together. A producer used by
@@ -206,7 +179,6 @@ fn expand_with_state_index(
         reader.input_groups = boundary_groups(&reader.root_node, &boundaries);
         reader.origin = OriginOfCandidateForMemoGroup::SharedBuild;
         memo.candidates[group].push(reader);
-        added_reader_candidates += 1;
     }
     // Parents describe every possible group/candidate dependency, not a selected plan.
     for group in &mut memo.groups {
@@ -262,11 +234,7 @@ fn expand_with_state_index(
         }
     }
     check_generation_deadline(deadline)?;
-    Ok(StateGroupExpansion {
-        memo,
-        state_groups,
-        added_reader_candidates,
-    })
+    Ok(())
 }
 
 fn validate_references(memo: &CandidateMemo) -> Result<(), StateGroupExpansionError> {
@@ -290,7 +258,7 @@ fn validate_references(memo: &CandidateMemo) -> Result<(), StateGroupExpansionEr
         if candidate
             .input_groups
             .iter()
-            .chain(&candidate.implements)
+            .chain(&candidate.fused_groups)
             .any(|id| id.0 as usize >= memo.groups.len())
         {
             return Err(StateGroupExpansionError::InvalidGroupReference);
@@ -318,8 +286,7 @@ pub(super) fn direct_input_builds(
             | OriginOfCandidateForMemoGroup::WidenedScans
             | OriginOfCandidateForMemoGroup::Rollup
             | OriginOfCandidateForMemoGroup::SummaryResult
-    ) || candidate.implements.is_empty()
-        || candidate.accuracy_budget_parts == 0
+    ) || candidate.accuracy_budget_parts == 0
     {
         return Vec::new();
     }
@@ -491,6 +458,42 @@ mod tests {
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::QueryRoot;
 
+    /// An expanded memo with what its shared summary-state step added.
+    struct Expanded {
+        memo: CandidateMemo,
+        /// The groups the shared summary-state step added.
+        state_groups: Vec<MemoGroupId>,
+        /// The candidates it added to reader groups.
+        added_reader_candidates: usize,
+    }
+
+    /// Pass 2 after local window composition, over the complete pane-width
+    /// domain, as the Pass 2 entry runs it.
+    fn expand(memo: CandidateMemo) -> Result<Expanded, StateGroupExpansionError> {
+        let memo = crate::test_support::sharing_rules_and_shared_state_groups(
+            memo,
+            super::super::shared_configurations::PaneWidthDomain::Complete,
+        )?;
+        Ok(expanded(memo))
+    }
+
+    fn expanded(memo: CandidateMemo) -> Expanded {
+        let state_groups = crate::test_support::shared_summary_state_groups(&memo);
+        // Before this step no candidate is a shared build; after it, each
+        // state group has one and each added reader candidate is one.
+        let shared_builds = memo
+            .candidates
+            .iter()
+            .flatten()
+            .filter(|candidate| candidate.origin == OriginOfCandidateForMemoGroup::SharedBuild)
+            .count();
+        Expanded {
+            added_reader_candidates: shared_builds - state_groups.len(),
+            state_groups,
+            memo,
+        }
+    }
+
     // Hash indexing is only an acceleration: independently run the original
     // linear state lookup and compare every generated candidate and state.
     #[test]
@@ -504,8 +507,14 @@ mod tests {
             &[6, 6, 6],
         );
         let domain = super::super::shared_configurations::PaneWidthDomain::Complete;
-        let indexed = expand_with_state_index(memo.clone(), domain, None, true).unwrap();
-        let linear = expand_with_state_index(memo, domain, None, false).unwrap();
+        let mut memo = memo;
+        crate::pass2::logical_memo_candidates::apply_sharing_rules(&mut memo, domain, None)
+            .unwrap();
+        let mut linear = memo.clone();
+        let mut indexed = memo;
+        add_shared_summary_state_groups_with_index(&mut indexed, None, true).unwrap();
+        add_shared_summary_state_groups_with_index(&mut linear, None, false).unwrap();
+        let (indexed, linear) = (expanded(indexed), expanded(linear));
         assert_eq!(indexed.state_groups, linear.state_groups);
         assert_eq!(indexed.memo.groups.len(), linear.memo.groups.len());
         for (left, right) in indexed.memo.candidates.iter().zip(&linear.memo.candidates) {
@@ -540,10 +549,10 @@ mod tests {
     // solver could incorrectly report as optimal over the complete catalog.
     #[test]
     fn expired_state_expansion_returns_timeout() {
-        let memo = workload(&[("quantile_over_time(0.95, latency[5m])", 0.01)]);
+        let mut memo = workload(&[("quantile_over_time(0.95, latency[5m])", 0.01)]);
         assert!(matches!(
-            expand_concrete_summary_state_groups_before(
-                memo,
+            crate::pass2::logical_memo_candidates::apply_sharing_rules(
+                &mut memo,
                 super::super::shared_configurations::PaneWidthDomain::Complete,
                 Some(Instant::now())
             ),
@@ -586,7 +595,7 @@ mod tests {
             ("quantile_over_time(0.99, latency[5m])", 0.01),
         ]);
         let original_count = original.groups.len();
-        let expanded = expand_concrete_summary_state_groups(original.clone()).unwrap();
+        let expanded = expand(original.clone()).unwrap();
         assert!(!expanded.state_groups.is_empty());
         assert!(expanded.added_reader_candidates >= 2);
         let order = expanded.memo.topological_order().unwrap();
@@ -601,7 +610,7 @@ mod tests {
                 )));
             }
             assert_eq!(group.parents.len(), 2);
-            assert!(group.roots_of.is_empty());
+            assert!(!crate::pass2::memo::root_groups(&expanded.memo.query_roots).contains(state));
             for &parent in &group.parents {
                 assert!(
                     order.iter().position(|id| id == state).unwrap()
@@ -627,7 +636,7 @@ mod tests {
             }
         }
         assert!(matches!(
-            expand_concrete_summary_state_groups(expanded.memo),
+            expand(expanded.memo),
             Err(StateGroupExpansionError::AlreadyExpanded)
         ));
     }
@@ -639,7 +648,7 @@ mod tests {
             ("quantile_over_time(0.95, latency[5m])", 0.01),
             ("quantile_over_time(0.99, latency[5m])", 0.02),
         ]);
-        let expanded = expand_concrete_summary_state_groups(original.clone()).unwrap();
+        let expanded = expand(original.clone()).unwrap();
         assert!(!expanded.state_groups.is_empty());
         for (group, candidates) in original.candidates.iter().enumerate() {
             for candidate in candidates {
@@ -662,7 +671,7 @@ mod tests {
             ("quantile_over_time(0.99, latency{job=\"b\"}[5m])", 0.02),
         ]);
         let count = original.groups.len();
-        let expanded = expand_concrete_summary_state_groups(original).unwrap();
+        let expanded = expand(original).unwrap();
         assert!(expanded.state_groups.is_empty());
         assert_eq!(expanded.memo.groups.len(), count);
     }
@@ -749,7 +758,7 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .collect();
-        let expanded = expand_concrete_summary_state_groups(original).unwrap();
+        let expanded = expand(original).unwrap();
         let shared = expanded
             .state_groups
             .iter()
@@ -816,7 +825,7 @@ mod tests {
             ),
             &[60_000, 60_000],
         );
-        let expanded = expand_concrete_summary_state_groups(memo).unwrap();
+        let expanded = expand(memo).unwrap();
         let state = expanded
             .state_groups
             .iter()
@@ -883,7 +892,7 @@ mod tests {
             ]),
             &[60_000, 60_000],
         );
-        let expanded = expand_concrete_summary_state_groups(original).unwrap();
+        let expanded = expand(original).unwrap();
         assert!(expanded
             .state_groups
             .iter()
@@ -907,7 +916,7 @@ mod tests {
             .filter(|candidate| candidate.origin == OriginOfCandidateForMemoGroup::Panes)
             .count();
         assert!(local_panes >= 2);
-        let expanded = expand_concrete_summary_state_groups(original.clone()).unwrap();
+        let expanded = expand(original.clone()).unwrap();
         let chains: Vec<_> = expanded
             .state_groups
             .iter()
@@ -940,7 +949,7 @@ mod tests {
             }
         }
         assert!(matches!(
-            expand_concrete_summary_state_groups(expanded.memo),
+            expand(expanded.memo),
             Err(StateGroupExpansionError::AlreadyExpanded)
         ));
     }
@@ -955,7 +964,7 @@ mod tests {
             ]),
             &[60_000, 30_000],
         );
-        let expanded = expand_concrete_summary_state_groups(original.clone()).unwrap();
+        let expanded = expand(original.clone()).unwrap();
         let state = expanded
             .state_groups
             .iter()
@@ -1004,13 +1013,9 @@ mod tests {
             ("sum by (job) (m)", 0.01),
             ("sum by (job, instance) (m)", 0.01),
         ]);
-        let expanded = expand_concrete_summary_state_groups(original).unwrap();
+        let expanded = expand(original).unwrap();
         let memo = &expanded.memo;
-        let fine = memo
-            .groups
-            .iter()
-            .position(|group| group.roots_of == [1])
-            .unwrap();
+        let fine = memo.query_roots[1].as_operator().unwrap().0 as usize;
         assert!(memo.candidates[fine].iter().all(|candidate| matches!(
             candidate.root_node.asap(),
             Some(ASAPOp::FinalizeExactAccumulator { .. })
@@ -1036,7 +1041,7 @@ mod tests {
             ("quantile(0.9, m)", 0.01),
             ("quantile by (job) (0.9, m)", 0.02),
         ]);
-        let expanded = expand_concrete_summary_state_groups(original).unwrap();
+        let expanded = expand(original).unwrap();
         assert!(expanded
             .memo
             .candidates
@@ -1065,7 +1070,7 @@ mod tests {
             ("topk by (job) (3, sum_over_time(m[1m]))", 0.01),
             ("topk by (job) (5, sum_over_time(m[1m]))", 0.01),
         ]);
-        let expanded = expand_concrete_summary_state_groups(original).unwrap();
+        let expanded = expand(original).unwrap();
         assert!(expanded.memo.groups.iter().any(|group| matches!(
             group.logical_node.non_asap(),
             Some(NonASAPOp::Limit { n: Some(5), .. })
@@ -1087,7 +1092,7 @@ mod tests {
             ("topk by (job) (3, m)", 0.01),
             ("topk by (region) (5, m)", 0.01),
         ]);
-        let expanded = expand_concrete_summary_state_groups(original.clone()).unwrap();
+        let expanded = expand(original.clone()).unwrap();
         let union = expanded
             .memo
             .groups
@@ -1128,11 +1133,7 @@ mod tests {
     #[test]
     fn multiple_private_states_can_share_only_the_common_producer() {
         let mut original = workload(&[("avg(m)", 0.01), ("sum(m)", 0.01)]);
-        let average = original
-            .groups
-            .iter()
-            .position(|group| group.roots_of.contains(&0))
-            .unwrap();
+        let average = original.query_roots[0].as_operator().unwrap().0 as usize;
         assert!(original.candidates[average]
             .iter()
             .any(|candidate| direct_input_builds(&original, candidate).len() >= 2));
@@ -1141,7 +1142,7 @@ mod tests {
                 candidate.accuracy_budget_parts = 2;
             }
         }
-        let expanded = expand_concrete_summary_state_groups(original.clone()).unwrap();
+        let expanded = expand(original.clone()).unwrap();
         assert!(!expanded.state_groups.is_empty());
         let reader = expanded.memo.candidates[average]
             .iter()
@@ -1229,7 +1230,7 @@ mod tests {
             try_populate_pass1(initial, &generated).unwrap(),
             &[10_000, 10_000],
         );
-        let expanded = expand_concrete_summary_state_groups(memo).unwrap();
+        let expanded = expand(memo).unwrap();
         assert!(expanded
             .memo
             .candidates
@@ -1322,7 +1323,7 @@ mod tests {
             }
         }
         assert!(injected >= 2);
-        let expanded = expand_concrete_summary_state_groups(memo).unwrap();
+        let expanded = expand(memo).unwrap();
         assert!(expanded.state_groups.iter().any(|state| {
             let group = &expanded.memo.groups[state.0 as usize];
             group.queries == vec![0, 1]
@@ -1503,7 +1504,7 @@ mod tests {
         candidate.root_node = Rc::clone(&combined);
         memo.groups[owner].logical_node = combined;
         memo.candidates[owner] = vec![candidate];
-        let expanded = expand_concrete_summary_state_groups(memo).unwrap();
+        let expanded = expand(memo).unwrap();
         assert_eq!(expanded.state_groups.len(), 1);
         let state = expanded.state_groups[0];
         assert!(expanded.memo.groups[state.0 as usize]
@@ -1523,7 +1524,7 @@ mod tests {
         let mut memo = workload(&[("quantile_over_time(0.95, latency[5m])", 0.01)]);
         memo.groups[0].child_groups.push(MemoGroupId(u32::MAX));
         assert!(matches!(
-            expand_concrete_summary_state_groups(memo),
+            expand(memo),
             Err(StateGroupExpansionError::InvalidGroupReference)
         ));
     }

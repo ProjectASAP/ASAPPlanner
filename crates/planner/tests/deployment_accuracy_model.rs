@@ -6,10 +6,9 @@
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
+use asap_accuracy::{AccuracyModel, BuiltinAccuracyModel};
 use asap_frontend_promql::{lower_promql_query_workload, promql_metric_names};
-use asap_plan_selection::{
-    AccuracyModel, BuiltinAccuracyModel, PlanOutput, PlanningModels, RejectionCause,
-};
+use asap_plan_selection::{PlanOutput, PlanningModels, RejectionCause};
 use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
@@ -74,7 +73,6 @@ fn reads_sketch(root: &Rc<OperatorNode>) -> bool {
 fn physical_candidates(
     workload: &PlanningWorkload,
 ) -> Vec<asap_physical_asap_optimization::PhysicalWorkloadPlan> {
-    use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
@@ -106,7 +104,7 @@ fn physical_candidates(
                 &roots,
                 &workload.query_workload.entries().collect::<Vec<_>>(),
                 workload.data_workload.as_ref().unwrap(),
-                &DeploymentCapabilities::default(),
+                false,
                 &mut |_, _, _| Materialization::NotMaterialized,
             )
             .unwrap()

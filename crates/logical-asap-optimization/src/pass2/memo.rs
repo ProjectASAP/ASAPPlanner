@@ -9,7 +9,7 @@ pub mod candidates;
 /// The candidate DAGs a memo stands for: choices and their composition.
 pub mod enumeration;
 mod groups;
-mod rules;
+pub(crate) mod rules;
 /// Shared finite state configuration enumeration.
 pub mod shared_configurations;
 #[cfg(test)]
@@ -19,11 +19,11 @@ pub mod state_groups;
 /// Local pane candidates with selected-reader grid configurations.
 pub mod window_candidates;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 
-use asap_types::ir::cse::share_common_sub_dags;
+use crate::pass2::cse::share_common_sub_dags;
 use asap_types::ir::{OperatorNode, QueryRoot};
 
 /// Candidate generation stopped before its finite catalog was complete.
@@ -54,18 +54,49 @@ pub struct MemoGroup {
     pub logical_node: Rc<OperatorNode>,
     /// Its child groups, in the node's child order.
     pub child_groups: Vec<MemoGroupId>,
+    /// The groups that read it ([`Self::parent_groups`]).
+    pub(crate) parents: Vec<MemoGroupId>,
+    /// The queries whose roots reach it ([`Self::reached_by_queries`]).
+    pub(crate) queries: Vec<usize>,
+}
+
+impl MemoGroup {
     /// The groups that read it.
-    pub parents: Vec<MemoGroupId>,
-    /// The queries whose roots reach it, by index in the workload.
-    pub queries: Vec<usize>,
-    /// The queries whose root it is.
-    pub roots_of: Vec<usize>,
+    pub fn parent_groups(&self) -> &[MemoGroupId] {
+        &self.parents
+    }
+
+    /// The queries whose roots reach it, by index in the workload, ascending.
+    pub fn reached_by_queries(&self) -> &[usize] {
+        &self.queries
+    }
+}
+
+/// The groups some query's root reads, ascending: the groups of
+/// `query_roots` that are a query's result or a scalar query's operand.
+pub fn root_groups(query_roots: &[QueryRoot<MemoGroupId>]) -> BTreeSet<MemoGroupId> {
+    query_roots
+        .iter()
+        .flat_map(QueryRoot::operator_refs)
+        .copied()
+        .collect()
+}
+
+/// The queries whose root reads `group`, ascending.
+pub fn queries_rooted_at(query_roots: &[QueryRoot<MemoGroupId>], group: MemoGroupId) -> Vec<usize> {
+    (0..query_roots.len())
+        .filter(|&query| query_roots[query].operator_refs().contains(&&group))
+        .collect()
 }
 
 /// Initial logical groups, without implementation choices or solver state.
 #[derive(Debug, Clone)]
 pub struct DagOfLogicalMemoGroups {
     pub groups: Vec<MemoGroup>,
+    /// Each query's root over groups, by index in the workload: its
+    /// operator's group, or its scalar expression with every operator
+    /// reference replaced by that operator's group.
+    pub query_roots: Vec<QueryRoot<MemoGroupId>>,
     original_roots: Vec<QueryRoot>,
     group_of: GroupOf,
 }
@@ -73,8 +104,19 @@ pub struct DagOfLogicalMemoGroups {
 impl DagOfLogicalMemoGroups {
     pub fn from_roots<Id>(roots: &[(Id, QueryRoot)]) -> Self {
         let (groups, group_of) = hash_consed(roots);
+        let group = |node: &Rc<OperatorNode>| group_of[&Rc::as_ptr(node)];
+        let query_roots = roots
+            .iter()
+            .map(|(_, root)| match root {
+                QueryRoot::Operator(node) => QueryRoot::Operator(group(node)),
+                QueryRoot::Scalar(expr) => {
+                    QueryRoot::Scalar(expr.map_operator_refs(&mut |node| group(node)))
+                }
+            })
+            .collect();
         Self {
             groups,
+            query_roots,
             original_roots: roots.iter().map(|(_, root)| root.clone()).collect(),
             group_of,
         }
@@ -113,8 +155,8 @@ impl DagOfLogicalMemoGroups {
 type GroupOf = HashMap<*const OperatorNode, MemoGroupId>;
 
 /// The groups of `roots`, children before parents, and each original node's
-/// group. A scalar query's roots are the operator nodes its expression
-/// reads.
+/// group. A scalar query reaches the groups of the operator nodes its
+/// expression reads.
 fn hash_consed<Id>(roots: &[(Id, QueryRoot)]) -> (Vec<MemoGroup>, GroupOf) {
     let originals: Vec<(usize, Rc<OperatorNode>)> = roots
         .iter()
@@ -134,10 +176,6 @@ fn hash_consed<Id>(roots: &[(Id, QueryRoot)]) -> (Vec<MemoGroup>, GroupOf) {
     }
     for (query, root) in &interned {
         let g = id_of[&Rc::as_ptr(root)];
-        let roots_of = &mut groups[g.0 as usize].roots_of;
-        if !roots_of.contains(query) {
-            roots_of.push(*query);
-        }
         let mut reached = HashSet::new();
         reach(&groups, g, &mut reached);
         for reached in reached {
@@ -161,10 +199,7 @@ fn hash_consed<Id>(roots: &[(Id, QueryRoot)]) -> (Vec<MemoGroup>, GroupOf) {
 
 /// The operator nodes a query root reads.
 fn operator_roots(root: &QueryRoot) -> Vec<Rc<OperatorNode>> {
-    match root {
-        QueryRoot::Operator(node) => vec![Rc::clone(node)],
-        QueryRoot::Scalar(expr) => expr.operator_refs().into_iter().cloned().collect(),
-    }
+    root.operator_refs().into_iter().cloned().collect()
 }
 
 /// Number `node` (interned) and its descendants, children first.
@@ -193,7 +228,6 @@ fn number(
         child_groups: children,
         parents: Vec::new(),
         queries: Vec::new(),
-        roots_of: Vec::new(),
     });
     id_of.insert(Rc::as_ptr(node), id);
     id
@@ -250,12 +284,7 @@ mod tests {
             (3, query("quantile_over_time(0.99, m[5m])")),
         ];
         let memo = DagOfLogicalMemoGroups::from_roots(&roots);
-        let root_group = |q| {
-            memo.groups
-                .iter()
-                .position(|g| g.roots_of.contains(&q))
-                .unwrap()
-        };
+        let root_group = |q: usize| *memo.query_roots[q].as_operator().unwrap();
         assert_eq!(root_group(0), root_group(1));
         assert_ne!(root_group(2), root_group(3));
         for (index, group) in memo.groups.iter().enumerate() {
@@ -314,9 +343,9 @@ mod tests {
             (30, QueryRoot::Operator(node.clone())),
         ];
         let memo = DagOfLogicalMemoGroups::from_roots(&roots);
-        let group = &memo.groups[memo.group_for_node(&node).unwrap().0 as usize];
-        assert_eq!(group.roots_of, vec![1, 2]);
-        assert_eq!(group.queries, vec![1, 2]);
+        let id = memo.group_for_node(&node).unwrap();
+        assert_eq!(queries_rooted_at(&memo.query_roots, id), vec![1, 2]);
+        assert_eq!(memo.groups[id.0 as usize].reached_by_queries(), [1, 2]);
         assert!(memo.matches_root_dependencies(&roots));
         let mut reordered = roots.clone();
         reordered.swap(0, 1);
@@ -362,6 +391,7 @@ mod tests {
         let roots = vec![(0, QueryRoot::Operator(node))];
         let memo = DagOfLogicalMemoGroups {
             groups: Vec::new(),
+            query_roots: Vec::new(),
             original_roots: roots.iter().map(|(_, r)| r.clone()).collect(),
             group_of: GroupOf::new(),
         };

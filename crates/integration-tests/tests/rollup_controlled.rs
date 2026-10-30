@@ -1,4 +1,5 @@
 //! Controlled plans for the viewer's actual distinct-count rollup workload.
+use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
 use asap_integration_tests::planning::{builds_and_rollups, expanded_memo, select_rollup};
 use asap_logical_asap_optimization::{
     pass1::per_computation_candidates::{
@@ -7,7 +8,7 @@ use asap_logical_asap_optimization::{
     },
     pass2::asap_aware_cse::{rollup_candidates, rollup_pass2_candidates},
 };
-use asap_plan_selection::{CostModel, PlanSelectionSettings, PlanningModels, ResourceUnitCost};
+use asap_plan_selection::PlanningModels;
 use asap_types::{
     ir::{
         schema::{DataType, Field, Schema, SketchAlgorithm},
@@ -54,7 +55,7 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
     let data = workload.data_workload.as_ref().unwrap();
     let generated =
         generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
-    let mut settings = PlanSelectionSettings::default();
+    let mut settings = CostInputs::default();
     settings.cost_model = CostModel::UsageOverTime(ResourceUnitCost::aws_fargate_us_east_1(
         settings.resource_speed,
     ));
@@ -67,8 +68,7 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
             .map(|target| match &algorithm {
                 None => 0,
                 Some(a) => target
-                    .choices
-                    .candidates
+                    .ways_to_compute
                     .iter()
                     .position(
                         |c| matches!(c,HowToComputeAggregateMeasure::Summary(found) if found==a),
@@ -82,7 +82,7 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
             .map(|(_, r)| r)
             .collect();
         // Identical sub-DAGs made one node, as the memo's groups are.
-        let roots: Vec<_> = asap_types::ir::cse::share_common_sub_dags(
+        let roots: Vec<_> = asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
             roots
                 .iter()
                 .enumerate()
@@ -118,7 +118,7 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
                 &roots,
                 &entries,
                 data,
-                models.deployment_capabilities,
+                models.deployment_capabilities.query_time_results_retained,
                 &mut |node, _, options| {
                     let mat = Materialization::MatAtQuery(Medium::Memory);
                     if builds.contains(&node) && options.contains(&mat) {
@@ -165,7 +165,7 @@ fn production_distinct_rollup_finds_shared_kmv() {
     let (workload, roots) = fixture();
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.as_ref().unwrap();
-    let mut settings = PlanSelectionSettings::default();
+    let mut settings = CostInputs::default();
     settings.cost_model = CostModel::UsageOverTime(ResourceUnitCost::aws_fargate_us_east_1(
         settings.resource_speed,
     ));

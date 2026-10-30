@@ -343,7 +343,6 @@ mod tests {
     /// have the same family and pane count (6 × 10s for Q1, 6 × 30s for Q2).
     #[test]
     fn physical_labels_name_the_pane_chain_maintained_at_ingestion() {
-        use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
         use asap_logical_asap_optimization::pass2::asap_aware_cse::{
             pane_candidates, window_composition_pass2_candidates,
         };
@@ -375,8 +374,7 @@ mod tests {
             .iter()
             .map(|target| {
                 target
-                    .choices
-                    .candidates
+                    .ways_to_compute
                     .iter()
                     .position(|c| {
                         *c == HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch)
@@ -404,7 +402,7 @@ mod tests {
             &roots,
             &entries,
             &workload.data_workload.clone().unwrap_or_default(),
-            &DeploymentCapabilities::default(),
+            false,
         )
         .unwrap();
         // The plans that maintain exactly one pane chain at ingestion time.

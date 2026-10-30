@@ -284,7 +284,7 @@ pub enum AggIntent<C = ColumnId> {
     /// Core treats this opaquely: [`AggIntent::requires`] returns
     /// [`DataModel::Any`], [`AggIntent::is_per_series`] returns `false`,
     /// [`AggIntent::input_col`] returns `None`, and
-    /// [`AggIntent::output_column`] names the output column after `kind`
+    /// `AggIntent::output_column` names the output column after `kind`
     /// with an unconstrained `Utf8` type — a deployment model that binds
     /// `Extension` intents is expected to override/re-derive the schema
     /// itself rather than rely on core's generic guess. SQL arg selectors are
@@ -387,7 +387,7 @@ impl AggIntent<ColumnId> {
     /// The tuple is (selected value column, ordering column).
     /// Unknown extensions remain owned by their deployment model. Recognized
     /// malformed selectors fail instead of acquiring a fabricated output type.
-    pub fn arg_selector_columns(
+    pub(crate) fn arg_selector_columns(
         &self,
         schema: &crate::ir::schema::Schema,
     ) -> Result<Option<(ColumnId, ColumnId)>, String> {
@@ -527,7 +527,7 @@ impl<C: Clone> AggIntent<C> {
     /// Used by `NonASAPOp::Aggregate`'s schema-derivation rule. The PromQL
     /// convention names the column after the intent kind so consumers can
     /// locate it without an alias lookup.
-    pub fn output_column(&self, input: &Field) -> Field {
+    pub(crate) fn output_column(&self, input: &Field) -> Field {
         match self {
             AggIntent::Count { .. } => col("count", DataType::Int64, false),
             AggIntent::Sum { .. } => col("sum", input.dtype.clone(), false),

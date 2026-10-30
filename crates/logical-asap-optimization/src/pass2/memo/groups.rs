@@ -2,7 +2,7 @@
 //! group (design steps 1 and 2, Pass 1 part).
 //!
 //! Groups are the workload's logical DAG interned by
-//! [`asap_types::ir::cse::share_common_sub_dags`], the identical-expression rule's legality
+//! [`crate::pass2::cse::share_common_sub_dags`], the identical-expression rule's legality
 //! included: structurally equal nodes are one group when sharing them is
 //! legal: an ASAP node, or a non-ASAP node that returns the same rows for
 //! the same input rows (`NonASAPOp::is_shareable_when_equal`).
@@ -28,7 +28,7 @@
 //! the resulting error contract. The connection planner may select a conservative
 //! larger configuration, and validates the recomposed query-root guarantee.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use super::DagOfLogicalMemoGroups;
@@ -76,6 +76,7 @@ pub fn try_populate_pass1<Id: Clone>(
     let candidates = pass1_candidates(per_computation, &initial.groups, &initial);
     Ok(CandidateMemo {
         groups: initial.groups,
+        query_roots: initial.query_roots,
         candidates,
     })
 }
@@ -111,7 +112,7 @@ fn pass1_candidates<Id: Clone>(
         }
     }
     let own = |g: usize| CandidateForMemoGroup {
-        implements: vec![MemoGroupId(g as u32)],
+        fused_groups: Vec::new(),
         root_node: Rc::clone(&groups[g].logical_node),
         input_groups: groups[g].child_groups.clone(),
         origin: OriginOfCandidateForMemoGroup::Pass1,
@@ -124,11 +125,11 @@ fn pass1_candidates<Id: Clone>(
         let summary = |c: &HowToComputeAggregateMeasure| {
             matches!(c, HowToComputeAggregateMeasure::Summary(_))
         };
-        target.choices.candidates.iter().any(summary)
+        target.ways_to_compute.iter().any(summary)
             || target
                 .fused_computation
                 .as_ref()
-                .is_some_and(|fused| fused.candidates.iter().any(summary))
+                .is_some_and(|fused| fused.ways_to_compute.iter().any(summary))
     };
     let mut most_approximate_inputs = vec![0usize; per_computation.roots.len()];
     for (g, targets) in &targets_of {
@@ -187,6 +188,7 @@ fn target_candidates<Id: Clone>(
             .or_insert(d);
     }
     let own_key = structural_ids.structural_id(&groups[g.0 as usize].logical_node);
+    let root_groups = super::root_groups(&group_of.query_roots);
     let mut candidates = Vec::new();
     let mut choice = vec![0; per_computation.targets.len()];
     loop {
@@ -204,7 +206,7 @@ fn target_candidates<Id: Clone>(
                 }
             }
         }
-        private_absorbed(groups, &mut implements);
+        private_absorbed(groups, &root_groups, &mut implements);
         for budget_share in 1..=max_budget_share {
             let Ok(composed) =
                 compose_alone(per_computation, &aggregate, targets, &choice, budget_share)
@@ -252,7 +254,7 @@ fn target_candidates<Id: Clone>(
                 (node, children)
             };
             candidates.push(CandidateForMemoGroup {
-                implements: implements.clone(),
+                fused_groups: implements[1..].to_vec(),
                 root_node: node,
                 input_groups: children,
                 origin: OriginOfCandidateForMemoGroup::Pass1,
@@ -285,11 +287,18 @@ fn target_candidates<Id: Clone>(
 /// is computed privately inside the fused candidate and stays its own group
 /// for its other readers, so e.g. `topk(5, sum by (job) (…))` by a heap
 /// never answers a second query's `sum by (job) (…)`.
-fn private_absorbed(groups: &[MemoGroup], implements: &mut Vec<MemoGroupId>) {
+fn private_absorbed(
+    groups: &[MemoGroup],
+    root_groups: &BTreeSet<MemoGroupId>,
+    implements: &mut Vec<MemoGroupId>,
+) {
     loop {
         let shared = implements[1..].iter().position(|a| {
-            let group = &groups[a.0 as usize];
-            !group.roots_of.is_empty() || group.parents.iter().any(|p| !implements.contains(p))
+            root_groups.contains(a)
+                || groups[a.0 as usize]
+                    .parents
+                    .iter()
+                    .any(|p| !implements.contains(p))
         });
         match shared {
             Some(i) => {
@@ -347,6 +356,7 @@ fn compose_alone<Id: Clone>(
                 target
             })
             .collect(),
+        pruned_ways_to_compute: Vec::new(),
     };
     let alone_choice: Vec<usize> = kept
         .iter()
@@ -618,8 +628,7 @@ mod tests {
         invalid_absorption.targets[0].fused_computation =
             Some(crate::pass1::per_computation_candidates::FusedComputation {
                 absorbed_targets: vec![missing],
-                candidates: Vec::new(),
-                pruned: Vec::new(),
+                ways_to_compute: Vec::new(),
             });
         assert!(matches!(try_populate_pass1(initial, &invalid_absorption),
             Err(CandidatePopulationError::InvalidAbsorption { target: 0, absorbed }) if absorbed == missing));
@@ -643,14 +652,10 @@ mod tests {
         .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let original_groups = initial.groups.clone();
+        let original_roots = initial.query_roots.clone();
         let inventory = generate_per_computation_candidates(roots).unwrap();
         let expanded = populate_pass1(initial.clone(), &inventory);
-        let restricted_inventory = inventory.without_unsupported_summaries(
-            &crate::deployment_capabilities::DeploymentCapabilities {
-                supported_summaries: Some(Vec::new()),
-                ..Default::default()
-            },
-        );
+        let restricted_inventory = inventory.without_unsupported_summaries(Some(&[]));
         let restricted = populate_pass1(initial, &restricted_inventory);
         for memo in [&expanded, &restricted] {
             assert_eq!(memo.groups.len(), original_groups.len());
@@ -659,8 +664,8 @@ mod tests {
                 assert_eq!(before.child_groups, after.child_groups);
                 assert_eq!(before.parents, after.parents);
                 assert_eq!(before.queries, after.queries);
-                assert_eq!(before.roots_of, after.roots_of);
             }
+            assert_eq!(memo.query_roots, original_roots);
             assert_ne!(
                 group_of_kind(memo, 0, "Aggregate"),
                 group_of_kind(memo, 1, "Aggregate")
@@ -686,11 +691,7 @@ mod tests {
     /// The group of the first node of `kind` reached from query `q`'s root,
     /// walking down the groups' first children.
     fn group_of_kind(memo: &CandidateMemo, q: usize, kind: &str) -> usize {
-        let mut g = memo
-            .groups
-            .iter()
-            .position(|group| group.roots_of.contains(&q))
-            .unwrap();
+        let mut g = memo.query_roots[q].as_operator().unwrap().0 as usize;
         while memo.groups[g].logical_node.operator.kind_name() != kind {
             g = memo.groups[g].child_groups[0].0 as usize;
         }
@@ -723,12 +724,11 @@ mod tests {
         assert_eq!(group_of_kind(&memo, 1, "Aggregate"), sum);
         let group = &memo.groups[sum];
         assert_eq!(group.queries, vec![0, 1]);
-        assert_eq!(group.roots_of, vec![0]);
-        let product = memo
-            .groups
-            .iter()
-            .position(|group| group.roots_of == vec![1])
-            .unwrap();
+        assert_eq!(
+            super::super::queries_rooted_at(&memo.query_roots, MemoGroupId(sum as u32)),
+            vec![0]
+        );
+        let product = memo.query_roots[1].as_operator().unwrap().0 as usize;
         assert_eq!(group.parents, vec![MemoGroupId(product as u32)]);
         assert_eq!(
             memo.groups[product].child_groups,
@@ -761,7 +761,7 @@ mod tests {
         assert!(algorithms(&candidates[1])[0].contains("Kll"));
         assert!(algorithms(&candidates[2])[0].contains("DDSketch"));
         for candidate in candidates {
-            assert_eq!(candidate.implements, vec![MemoGroupId(quantile as u32)]);
+            assert!(candidate.fused_groups.is_empty());
             assert_eq!(candidate.input_groups, input);
             assert_eq!(candidate.origin, OriginOfCandidateForMemoGroup::Pass1);
         }
@@ -783,11 +783,11 @@ mod tests {
         assert_eq!(candidates[0].input_groups, vec![sums]);
         let fused: Vec<_> = candidates
             .iter()
-            .filter(|c| c.implements.len() > 1)
+            .filter(|c| !c.fused_groups.is_empty())
             .collect();
         assert!(!fused.is_empty());
         for candidate in fused {
-            assert_eq!(candidate.implements, vec![MemoGroupId(topk as u32), sums]);
+            assert_eq!(candidate.fused_groups, vec![sums]);
             assert_eq!(candidate.input_groups, sums_input);
             assert!(algorithms(candidate)[0].contains("Heap"));
         }
@@ -848,8 +848,7 @@ mod tests {
             .targets
             .iter()
             .map(|t| {
-                t.choices
-                    .candidates
+                t.ways_to_compute
                     .iter()
                     .position(|c| {
                         matches!(c, HowToComputeAggregateMeasure::Summary(a) if format!("{a:?}") == algorithm)
@@ -896,11 +895,7 @@ mod tests {
         ];
         let target = AccuracyTarget::max_error(0.01);
         let memo = memo(&queries, target.clone());
-        let ratio = memo
-            .groups
-            .iter()
-            .position(|group| group.roots_of == vec![0])
-            .unwrap();
+        let ratio = memo.query_roots[0].as_operator().unwrap().0 as usize;
         let operand = memo.groups[ratio].child_groups[0].0 as usize;
         for operand in &memo.groups[ratio].child_groups {
             let shares: Vec<usize> = sketch_shares(&memo, operand.0 as usize)
@@ -909,11 +904,7 @@ mod tests {
                 .collect();
             assert_eq!(shares, vec![1, 2, 1, 2]);
         }
-        let plain = memo
-            .groups
-            .iter()
-            .position(|group| group.roots_of == vec![1])
-            .unwrap();
+        let plain = memo.query_roots[1].as_operator().unwrap().0 as usize;
         assert_eq!(plain, operand);
         let whole_kll = &sketch_shares(&memo, operand)[0];
         assert_eq!(whole_kll.1, 1);
@@ -931,11 +922,7 @@ mod tests {
         let queries = ["count by (job) (a) - count by (job) (b)"];
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let memo = memo(&queries, target.clone());
-        let difference = memo
-            .groups
-            .iter()
-            .position(|group| group.roots_of == vec![0])
-            .unwrap();
+        let difference = memo.query_roots[0].as_operator().unwrap().0 as usize;
         let operand = memo.groups[difference].child_groups[0].0 as usize;
         let half = sketch_shares(&memo, operand)
             .into_iter()
@@ -1184,15 +1171,15 @@ mod tests {
                         memo.candidates[g]
                             .iter()
                             .filter(|c| {
-                                c.accuracy_budget_parts == 1 && (c.implements.len() > 1) == fused
+                                c.accuracy_budget_parts == 1 && !c.fused_groups.is_empty() == fused
                             })
                             .count()
                     };
                     let fused = target
                         .fused_computation
                         .as_ref()
-                        .map_or(0, |f| f.candidates.len());
-                    if whole_budget(false) != target.choices.candidates.len()
+                        .map_or(0, |f| f.ways_to_compute.len());
+                    if whole_budget(false) != target.ways_to_compute.len()
                         || whole_budget(true) != fused
                     {
                         missing.push(format!("{gauges:?} seed {seed} target {t} candidates"));
@@ -1207,12 +1194,7 @@ mod tests {
                         }
                     }
                 }
-                let root_group = |q: usize| {
-                    memo.groups
-                        .iter()
-                        .position(|group| group.roots_of.contains(&q))
-                        .unwrap()
-                };
+                let root_group = |q: usize| memo.query_roots[q].as_operator().unwrap().0 as usize;
                 let mut combination = Combination {
                     memo: &memo,
                     matched: HashMap::new(),

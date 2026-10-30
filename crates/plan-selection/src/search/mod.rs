@@ -32,11 +32,12 @@ use asap_types::ir::OperatorNode;
 use asap_types::workload::parsed_workload::ParsedWorkload;
 use asap_types::workload::WorkloadError;
 
-use crate::accuracy::{
-    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, IgnoreAccuracyGuarantees,
-    NoAccuracyEvidence,
+use crate::accuracy::IgnoreAccuracyGuarantees;
+use crate::{Selection, SelectionError};
+use asap_accuracy::{
+    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, NoAccuracyEvidence,
 };
-use crate::{PlanSelectionSettings, Selection, SelectionError};
+use asap_cost::CostInputs;
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
 use asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidateError;
 
@@ -49,8 +50,8 @@ pub use pipeline::{
 static BUILTIN_ACCURACY_MODEL: BuiltinAccuracyModel = BuiltinAccuracyModel;
 static IGNORE_ACCURACY_GUARANTEES: IgnoreAccuracyGuarantees = IgnoreAccuracyGuarantees;
 static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
-static DEFAULT_PLAN_SELECTION: std::sync::LazyLock<PlanSelectionSettings> =
-    std::sync::LazyLock::new(PlanSelectionSettings::default);
+static DEFAULT_PLAN_SELECTION: std::sync::LazyLock<CostInputs> =
+    std::sync::LazyLock::new(CostInputs::default);
 static DEFAULT_DEPLOYMENT: std::sync::LazyLock<DeploymentCapabilities> =
     std::sync::LazyLock::new(DeploymentCapabilities::default);
 
@@ -70,7 +71,7 @@ pub struct PlanningModels<'a> {
     /// Decides whether a candidate's accuracy guarantee meets its query's
     /// target, and whether the deployment accepts an output regardless of
     /// its guarantee; [`BuiltinAccuracyModel`] by default.
-    /// [`PlanSelectionSettings::ignore_accuracy_guarantees`] overrides it.
+    /// [`CostInputs::ignore_accuracy_guarantees`] overrides it.
     pub accuracy: &'a dyn AccuracyModel,
     /// Deployment facts the guarantees need (operand domains, observed
     /// guarantees); [`NoAccuracyEvidence`] by default.
@@ -78,7 +79,7 @@ pub struct PlanningModels<'a> {
     /// The deployment's plan selection settings: the cost model (default
     /// cost model 1 with illustrative unit costs), the resource speed and
     /// the non-repeating query horizon.
-    pub plan_selection: &'a PlanSelectionSettings,
+    pub plan_selection: &'a CostInputs,
     /// What the deployment's executor can run and keep: the summaries it
     /// supports (Stage 1), whether it retains raw data (Stage 3) and
     /// whether it keeps query-time results across evaluations (Stage 2);
@@ -113,7 +114,7 @@ impl<'a> PlanningModels<'a> {
 
     /// The accuracy model planning uses: [`IgnoreAccuracyGuarantees`] when
     /// the plan selection settings set
-    /// [`PlanSelectionSettings::ignore_accuracy_guarantees`], overriding
+    /// [`CostInputs::ignore_accuracy_guarantees`], overriding
     /// `accuracy`; otherwise `accuracy`.
     pub(crate) fn effective_accuracy(&self) -> &'a dyn AccuracyModel {
         if self.plan_selection.ignore_accuracy_guarantees {
@@ -135,7 +136,7 @@ impl<'a> PlanningModels<'a> {
 
     /// These models with the deployment's plan selection settings (cost
     /// model, resource speed, non-repeating query horizon).
-    pub fn with_plan_selection(mut self, plan_selection: &'a PlanSelectionSettings) -> Self {
+    pub fn with_plan_selection(mut self, plan_selection: &'a CostInputs) -> Self {
         self.plan_selection = plan_selection;
         self
     }

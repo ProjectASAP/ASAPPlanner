@@ -712,8 +712,7 @@ fn ddsketch_ratio_selection(
         .iter()
         .map(|target| {
             target
-                .choices
-                .candidates
+                .ways_to_compute
                 .iter()
                 .position(|candidate| {
                     *candidate == HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch)
@@ -733,9 +732,8 @@ fn ddsketch_ratio_selection(
     }];
     // Pass 1 choices composed and implemented by Stage 2; one query, so no
     // sharing rule applies.
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, recompose_guarantees,
-    };
+    use asap_accuracy::propagation::recompose_guarantees;
+    use asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate;
     let models = asap_plan_selection::PlanningModels::builtin();
     let mut physical = Vec::new();
     for choice in [exact, dds] {
@@ -751,7 +749,7 @@ fn ddsketch_ratio_selection(
                 &roots,
                 &entries,
                 &data,
-                models.deployment_capabilities,
+                models.deployment_capabilities.query_time_results_retained,
             )
             .unwrap(),
         );

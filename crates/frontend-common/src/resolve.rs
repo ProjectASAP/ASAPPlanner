@@ -22,7 +22,6 @@ use thiserror::Error;
 
 use asap_types::ir::operator::operator_properties::ConcatDiscriminatorKey;
 use asap_types::ir::operator::{AggIntent, GroupKeys, Reduction};
-use asap_types::ir::scalar::column_resolution::resolve_group_keys_promql;
 use asap_types::ir::scalar::{resolve_column_ref, resolve_column_refs, ColumnRef, ResolveError};
 use asap_types::ir::schema::{ColumnId, Schema};
 use asap_types::ir::SchemaDerivationError;
@@ -43,7 +42,7 @@ pub enum ResolveDAGError {
     Schema(#[from] SchemaDerivationError),
 }
 
-use asap_types::ir::canonicalize::canonicalize;
+use crate::canonicalize::canonicalize;
 
 /// Resolve the whole tree rooted at `tree`: bind every `ColumnRef` to a
 /// `ColumnId` via the [`SchemaResolver`], then canonicalize the result.
@@ -588,6 +587,33 @@ fn resolve_group_keys(
     } else {
         GroupKeys::by(ids)
     })
+}
+
+/// Resolve PromQL aggregation grouping keys with the language's absent-label
+/// semantics (issue #53): a key not present in a **closed** schema is provably
+/// absent from every row, so all rows carry its empty value, grouping by it is
+/// the identity partition, and Prometheus omits the (empty) label from the
+/// aggregation output — so the key is **dropped** rather than rejected. This
+/// is what makes `sum(sum by (k) (m)) by (j)` lower: the inner cross-series
+/// aggregate freezes the schema to the closed `[k, sum]`, which provably lacks
+/// `j`.
+///
+/// Against an **open** schema an unresolved key is still an error: the label
+/// may exist at runtime, and PromQL leaves seed every referenced label via the
+/// SchemaResolver, so an unresolved key over an open schema indicates a resolution bug,
+/// not an absent label. (SQL is unaffected — its `GROUP BY` resolves through
+/// the strict [`resolve_column_refs`], and DataFusion has already validated
+/// the columns anyway.)
+fn resolve_group_keys_promql(
+    cols: &[ColumnRef],
+    schema: &Schema,
+) -> Result<Vec<ColumnId>, ResolveError> {
+    cols.iter()
+        .filter_map(|c| match resolve_column_ref(c, schema) {
+            Err(ResolveError::NotFound { .. }) if schema.closed => None,
+            other => Some(other),
+        })
+        .collect()
 }
 
 /// Resolve a name-based reduction. Uses [`resolve_group_keys_promql`] rather
@@ -1194,5 +1220,59 @@ mod tests {
             panic!("expected Aggregate");
         };
         assert!(reduction.expect_reduce().keys().is_empty());
+    }
+
+    /// The conventional PromQL leaf shape: `(ts: Timestamp, value: Float64)`.
+    fn ts_value_schema() -> Schema {
+        Schema::with_time_index(
+            vec![
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("value", DataType::Float64, false),
+            ],
+            0,
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn group_keys_promql_drops_absent_key_in_closed_schema() {
+        // The output of a nested cross-series aggregate: closed `[group, sum]`.
+        // `by (job)` — `job` is provably absent → dropped, not rejected (#53).
+        let s = Schema {
+            fields: vec![
+                Field::plain("group", DataType::Utf8, true),
+                Field::plain("sum", DataType::Float64, false),
+            ],
+            time_index: None,
+            unique_keys: vec![],
+            closed: true,
+        };
+        assert_eq!(
+            resolve_group_keys_promql(&[ColumnRef::Named("job".into())], &s),
+            Ok(vec![])
+        );
+        // Present keys still resolve positionally; absent ones drop around them.
+        assert_eq!(
+            resolve_group_keys_promql(
+                &[
+                    ColumnRef::Named("job".into()),
+                    ColumnRef::Named("group".into())
+                ],
+                &s
+            ),
+            Ok(vec![0])
+        );
+    }
+
+    #[test]
+    fn group_keys_promql_still_errors_on_open_schema() {
+        // An open schema can't prove absence — an unresolved key there is a
+        // resolution bug (the SchemaResolver seeds every referenced label), not an
+        // absent label. Keep the strict error.
+        let open = ts_value_schema(); // closed: false
+        assert!(matches!(
+            resolve_group_keys_promql(&[ColumnRef::Named("job".into())], &open),
+            Err(ResolveError::NotFound { .. })
+        ));
     }
 }

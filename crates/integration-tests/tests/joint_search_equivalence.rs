@@ -7,12 +7,12 @@
 
 use crate::planner_layering_common;
 
+use asap_accuracy::{AccuracyModel, BuiltinAccuracyModel};
+use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel, ResourceUnitCost};
 use asap_devtools::planning_stages::{lower_promql_roots, lower_sql_roots};
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
-    run_stage1_to_stage3_with, AccuracyModel, BuiltinAccuracyModel, ClusterLimits,
-    ClusterObjective, CostModel, PlanSelectionSettings, PlanningModels, ResourceUnitCost,
-    SearchAlgorithm, Stage1ToStage3Run, Stage1ToStage3Search,
+    run_stage1_to_stage3_with, PlanningModels, Stage1ToStage3Run, Stage1ToStage3Search,
 };
 use asap_types::ir::properties::{AccuracyGuarantee, AccuracyTarget};
 use asap_types::ir::QueryRoot;
@@ -84,7 +84,6 @@ fn run(
         data,
         models,
         Stage1ToStage3Search {
-            search: SearchAlgorithm::CandidateConnections,
             exhaustive,
             keep_every_candidate: exhaustive,
             milp_time_limit_ms: Some(budget_ms),
@@ -135,7 +134,7 @@ fn assert_valid(run: &Stage1ToStage3Run<usize>, queries: usize) {
 
 fn run_workload(
     workload: &PlanningWorkload,
-    settings: &PlanSelectionSettings,
+    settings: &CostInputs,
     deployment: &DeploymentCapabilities,
 ) -> Stage1ToStage3Run<usize> {
     let roots = lower_promql_roots(workload).unwrap();
@@ -155,7 +154,7 @@ fn run_workload(
     run
 }
 
-fn settings_for_every_objective() -> Vec<PlanSelectionSettings> {
+fn settings_for_every_objective() -> Vec<CostInputs> {
     let cluster = |objective| {
         CostModel::ClusterCapacity(ClusterLimits {
             memory_bytes: 1_000_000_000,
@@ -172,7 +171,7 @@ fn settings_for_every_objective() -> Vec<PlanSelectionSettings> {
         cluster(ClusterObjective::ParetoFront),
     ]
     .into_iter()
-    .map(|cost_model| PlanSelectionSettings {
+    .map(|cost_model| CostInputs {
         cost_model,
         ..Default::default()
     })
@@ -272,7 +271,7 @@ fn bounded_search_matches_complete_tiny_catalog_under_every_objective() {
 // Fixed-catalog terminal/producer scaling is tested in candidates::scopes.
 #[test]
 fn repeated_queries_preserve_all_outputs_and_exact_guarantees() {
-    let settings = PlanSelectionSettings::default();
+    let settings = CostInputs::default();
     let deployment = DeploymentCapabilities::default();
     for count in [2, 8] {
         let workload = workload_of(
@@ -305,7 +304,7 @@ fn different_windows_and_raw_retention_policies_produce_valid_plans() {
     for raw_data_retained in [true, false] {
         run_workload(
             &workload,
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
             &DeploymentCapabilities {
                 raw_data_retained,
                 ..Default::default()
@@ -326,7 +325,7 @@ fn fused_top_k_preserves_its_independently_requested_inner_sum() {
     );
     run_workload(
         &workload,
-        &PlanSelectionSettings::default(),
+        &CostInputs::default(),
         &DeploymentCapabilities::default(),
     );
 }
@@ -344,7 +343,7 @@ fn sketch_rollup_coexists_with_other_quantile_outputs() {
     );
     run_workload(
         &workload,
-        &PlanSelectionSettings::default(),
+        &CostInputs::default(),
         &DeploymentCapabilities::default(),
     );
 }
@@ -361,7 +360,7 @@ fn composed_quantile_and_sum_outputs_are_validated_together() {
     );
     run_workload(
         &workload,
-        &PlanSelectionSettings::default(),
+        &CostInputs::default(),
         &DeploymentCapabilities::default(),
     );
 }
@@ -401,7 +400,7 @@ fn custom_accuracy_policy_is_respected() {
 #[test]
 fn frozen_calibration_is_reported_and_preserved() {
     let workload = workload_of(&[("m", 60_000)], AccuracyTarget::exact());
-    let settings = PlanSelectionSettings {
+    let settings = CostInputs {
         frozen_calibration_factor: Some(2.0),
         ..Default::default()
     };
@@ -477,7 +476,7 @@ fn disjoint_sources_preserve_independent_components() {
     );
     let run = run_workload(
         &workload,
-        &PlanSelectionSettings::default(),
+        &CostInputs::default(),
         &DeploymentCapabilities::default(),
     );
     assert_eq!(
@@ -500,7 +499,7 @@ fn rootless_request_overhead_respects_capacity_and_latency() {
     let mut workload = workload_of(&[("1", 1)], AccuracyTarget::exact());
     let roots = lower_promql_roots(&workload).unwrap();
     for capacity in [true, false] {
-        let mut settings = PlanSelectionSettings::default();
+        let mut settings = CostInputs::default();
         settings.measured_operation_costs.ns_per_evaluation = 2_000_000.0;
         if capacity {
             settings.cost_model = CostModel::ClusterCapacity(ClusterLimits {
@@ -572,7 +571,7 @@ fn seeded_small_mixed_workloads_return_validated_plans() {
         );
         run_workload(
             &workload,
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
             &DeploymentCapabilities::default(),
         );
     }

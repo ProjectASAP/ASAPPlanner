@@ -315,7 +315,7 @@ are ignored, `stage_pipeline`'s default.
   names the cause the guarantee check would have rejected it with, or is
   null when its guarantee met the target) or
   `enforced` (`--enforce-accuracy-guarantees`, as `plan_installable` plans
-  with the default `PlanSelectionSettings`). The Stage 3 header shows it;
+  with the default `CostInputs`). The Stage 3 header shows it;
   an older document without it is still valid, any other value is not.
 - `search` is `candidate-connections`, or `exhaustive` for traversal of the
   same finite catalog with evaluated plans and rejections archived. Exhaustive
@@ -440,9 +440,9 @@ sections are still shown. If a check fails, it shows the problems instead.
   sharing, with the template's data facts (W-RangeHeavy: `data`, 10^4
   series sampled every 5 ms, 2 × 10^6 rows/s; W-RollupHeavy: `http`, 10^4
   series, every 5 ms, at most 10^6 distinct values per evaluation), raw
-  data retained, AWS Fargate prices and accuracy guarantees enforced. Their
-  `examples.json` entries name `"search": "candidate-connections"`, which server.py
-  passes as `--search`; their documents are committed under `examples/`.
+  data retained, AWS Fargate prices and accuracy guarantees enforced. They
+  are planned with the default search; their documents are committed under
+  `examples/`.
   `ratio-of-quantiles-5m.json` (one ratio of two equal per-series quantiles
   plus a third, every minute, ε = 0.01, δ = 0.001) shows the `memo`
   section: the memo after each step.

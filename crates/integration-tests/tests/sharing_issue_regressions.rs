@@ -1,7 +1,8 @@
 //! Original issue workloads against the production candidate-connection planner.
+use asap_cost::CostInputs;
 use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, FuzzWorkload, Planner};
 use asap_devtools::planning_stages::run_search_over;
-use asap_plan_selection::{PlanSelectionSettings, PlanningModels, Stage1ToStage3Search};
+use asap_plan_selection::{PlanningModels, Stage1ToStage3Search};
 use serde_json::json;
 use std::path::Path;
 
@@ -38,7 +39,7 @@ fn cost(w: &FuzzWorkload) -> f64 {
     let roots = Planner::new(FuzzSettings::default()).lower(w).unwrap();
     let planning = w.planning_workload();
     let entries: Vec<_> = planning.query_workload.entries().collect();
-    let settings = PlanSelectionSettings::default();
+    let settings = CostInputs::default();
     let deployment = w.deployment();
     let models = PlanningModels::builtin()
         .with_plan_selection(&settings)
@@ -128,7 +129,7 @@ fn sql_count_topk_has_a_fused_raw_row_heap() {
         .enumerate()
         .find(|(_, target)| target.fused_computation.is_some())
         .expect("SQL TopK must offer a fused raw-row heap");
-    for choice in target.choices.candidates.len()..target.choice_count() {
+    for choice in target.ways_to_compute.len()..target.choice_count() {
         let mut selected = vec![0; inventory.targets.len()];
         selected[index] = choice;
         let composed =
@@ -201,7 +202,6 @@ fn exact_rollup_catalog_crosses_identical_per_series_average() {
         pass2::memo::{
             candidates::{try_populate_pass1, OriginOfCandidateForMemoGroup},
             shared_configurations::PaneWidthDomain,
-            state_groups::expand_concrete_summary_state_groups_in_domain,
             DagOfLogicalMemoGroups,
         },
     };
@@ -215,15 +215,14 @@ fn exact_rollup_catalog_crosses_identical_per_series_average() {
     let inventory = generate_per_computation_candidates(roots).unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
     let expanded =
-        expand_concrete_summary_state_groups_in_domain(memo, PaneWidthDomain::SeedGrids).unwrap();
-    let owner = expanded
-        .memo
-        .groups
-        .iter()
-        .position(|g| g.roots_of.contains(&1))
+        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
+            memo,
+            PaneWidthDomain::SeedGrids,
+        )
         .unwrap();
+    let owner = expanded.query_roots[1].as_operator().unwrap().0 as usize;
     assert!(
-        expanded.memo.candidates[owner]
+        expanded.candidates[owner]
             .iter()
             .any(|c| c.origin == OriginOfCandidateForMemoGroup::Rollup),
         "coarse root has no rollup candidate"
@@ -242,7 +241,6 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
         pass2::memo::{
             candidates::{try_populate_pass1, OriginOfCandidateForMemoGroup},
             shared_configurations::PaneWidthDomain,
-            state_groups::expand_concrete_summary_state_groups_in_domain,
             DagOfLogicalMemoGroups,
         },
     };
@@ -257,15 +255,20 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
     let inventory = generate_per_computation_candidates(roots).unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
     let expanded =
-        expand_concrete_summary_state_groups_in_domain(memo, PaneWidthDomain::SeedGrids).unwrap();
-    let (owner, candidate) = expanded.memo.candidates.iter().enumerate().flat_map(|(owner, candidates)| candidates.iter().map(move |c| (owner,c)))
+        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
+            memo,
+            PaneWidthDomain::SeedGrids,
+        )
+        .unwrap();
+    let (owner, candidate) = expanded.candidates.iter().enumerate().flat_map(|(owner, candidates)| candidates.iter().map(move |c| (owner,c)))
         .find(|(_, c)| c.origin == OriginOfCandidateForMemoGroup::Rollup && matches!(c.root_node.non_asap(), Some(NonASAPOp::Aggregate { measures, child, .. })
             if matches!(measures.as_slice(), [AggIntent::Min { .. }]) && matches!(child.non_asap(), Some(NonASAPOp::Filter { .. }))))
         .expect("filtered group read candidate");
     // The same readout keeps a KLL's rank bound: it selects a whole group,
     // never predicates on an approximate value or combines populations.
+    use asap_accuracy::propagation::recompose_guarantees;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, recompose_guarantees, HowToComputeAggregateMeasure,
+        compose_logical_candidate, HowToComputeAggregateMeasure,
     };
     use asap_types::ir::{schema::SketchAlgorithm, QueryRoot};
     use std::rc::Rc;
@@ -279,8 +282,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
         .iter()
         .map(|target| {
             target
-                .choices
-                .candidates
+                .ways_to_compute
                 .iter()
                 .position(|c| {
                     matches!(
@@ -381,7 +383,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
         ],
     ] {
         let before = physical_common::execute_raw_rows_at(
-            &expanded.memo.groups[owner].logical_node,
+            &expanded.groups[owner].logical_node,
             rows.clone(),
             1000,
         );
@@ -400,7 +402,6 @@ fn sql_count_rollup_executes_with_integer_results() {
         pass2::memo::{
             candidates::{try_populate_pass1, OriginOfCandidateForMemoGroup},
             shared_configurations::PaneWidthDomain,
-            state_groups::expand_concrete_summary_state_groups_in_domain,
             DagOfLogicalMemoGroups,
         },
     };
@@ -424,10 +425,12 @@ fn sql_count_rollup_executes_with_integer_results() {
         let inventory = generate_per_computation_candidates(roots).unwrap();
         let memo = try_populate_pass1(initial, &inventory).unwrap();
         let expanded =
-            expand_concrete_summary_state_groups_in_domain(memo, PaneWidthDomain::SeedGrids)
-                .unwrap();
+            asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
+                memo,
+                PaneWidthDomain::SeedGrids,
+            )
+            .unwrap();
         let (owner, candidate) = expanded
-            .memo
             .candidates
             .iter()
             .enumerate()
@@ -462,10 +465,8 @@ fn sql_count_rollup_executes_with_integer_results() {
                 Value::Null,
             ],
         ];
-        let before = physical_common::execute_raw_rows(
-            &expanded.memo.groups[owner].logical_node,
-            rows.clone(),
-        );
+        let before =
+            physical_common::execute_raw_rows(&expanded.groups[owner].logical_node, rows.clone());
         let after = physical_common::execute_raw_rows(&candidate.root_node, rows);
         let sorted = |rows: Vec<Vec<Value>>| {
             let mut rows: Vec<_> = rows.iter().map(|row| format!("{row:?}")).collect();
@@ -477,7 +478,7 @@ fn sql_count_rollup_executes_with_integer_results() {
             .all(|row| matches!(row.last(), Some(Value::Int64(_)))));
         assert_eq!(sorted(before), sorted(after));
         let before_empty =
-            physical_common::execute_raw_rows(&expanded.memo.groups[owner].logical_node, vec![]);
+            physical_common::execute_raw_rows(&expanded.groups[owner].logical_node, vec![]);
         let after_empty = physical_common::execute_raw_rows(&candidate.root_node, vec![]);
         assert_eq!(sorted(before_empty), sorted(after_empty));
     }
@@ -530,7 +531,6 @@ fn sketch_rollup_crosses_inner_range_function() {
         pass2::memo::{
             candidates::{try_populate_pass1, OriginOfCandidateForMemoGroup},
             shared_configurations::PaneWidthDomain,
-            state_groups::expand_concrete_summary_state_groups_in_domain,
             DagOfLogicalMemoGroups,
         },
     };
@@ -550,14 +550,13 @@ fn sketch_rollup_crosses_inner_range_function() {
     let inventory = generate_per_computation_candidates(roots).unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
     let expanded =
-        expand_concrete_summary_state_groups_in_domain(memo, PaneWidthDomain::SeedGrids).unwrap();
-    let owner = expanded
-        .memo
-        .groups
-        .iter()
-        .position(|g| g.roots_of.contains(&1))
+        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
+            memo,
+            PaneWidthDomain::SeedGrids,
+        )
         .unwrap();
-    assert!(expanded.memo.candidates[owner]
+    let owner = expanded.query_roots[1].as_operator().unwrap().0 as usize;
+    assert!(expanded.candidates[owner]
         .iter()
         .any(|c| c.origin == OriginOfCandidateForMemoGroup::Rollup));
 }
@@ -574,16 +573,14 @@ fn sql_grouped_count_sketches_are_not_offered() {
     let roots = Planner::new(FuzzSettings::default()).lower(&w).unwrap();
     let inventory =
         generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
-    let target = inventory.targets.iter().find(|target| matches!(target.aggregate.non_asap(), Some(NonASAPOp::Aggregate { measures, .. }) if matches!(measures.as_slice(), [AggIntent::Count { .. }]))).unwrap();
+    let (index, target) = inventory.targets.iter().enumerate().find(|(_, target)| matches!(target.aggregate.non_asap(), Some(NonASAPOp::Aggregate { measures, .. }) if matches!(measures.as_slice(), [AggIntent::Count { .. }]))).unwrap();
     assert!(target
-        .choices
-        .candidates
+        .ways_to_compute
         .iter()
         .all(|candidate| !matches!(candidate, HowToComputeAggregateMeasure::Summary(_))));
     assert_eq!(
-        target
-            .choices
-            .pruned
+        inventory
+            .pruned_of_target(index, false)
             .iter()
             .filter(|(_, reason)| *reason == PruneReason::NoRelationalCountSketchRealization)
             .count(),

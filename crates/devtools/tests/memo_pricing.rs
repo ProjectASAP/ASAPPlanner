@@ -1,6 +1,7 @@
 //! Pricing a memo's enumerated choices: on small workloads every choice is
 //! priced, and none that is valid is cheaper than the plan the search
 //! selected.
+use asap_cost::CostInputs;
 use asap_devtools::memo_pricing::{price_choices, PricedChoice, SelectedBaseline};
 use asap_devtools::planner_layering_examples::example1;
 use asap_devtools::planning_stages::{lower_promql_roots, run_default_search_over};
@@ -9,7 +10,7 @@ use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_
 use asap_logical_asap_optimization::pass2::memo::candidates::{try_populate_pass1, CandidateMemo};
 use asap_logical_asap_optimization::pass2::memo::enumeration::enumerate;
 use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
-use asap_plan_selection::{PlanSelectionSettings, PlanningModels};
+use asap_plan_selection::PlanningModels;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::QueryRoot;
 use asap_types::workload::{
@@ -90,7 +91,7 @@ fn planned(workload: &PlanningWorkload, series_identity: bool) -> Planned {
 /// `stage_pipeline`'s models: the executor's summary families,
 /// `settings` (accuracy guarantees ignored unless enforced).
 fn models<'a>(
-    settings: &'a PlanSelectionSettings,
+    settings: &'a CostInputs,
     deployment: &'a DeploymentCapabilities,
 ) -> PlanningModels<'a> {
     PlanningModels::builtin()
@@ -105,10 +106,10 @@ fn deployment() -> DeploymentCapabilities {
     }
 }
 
-fn settings(enforce_accuracy_guarantees: bool) -> PlanSelectionSettings {
-    PlanSelectionSettings {
+fn settings(enforce_accuracy_guarantees: bool) -> CostInputs {
+    CostInputs {
         ignore_accuracy_guarantees: !enforce_accuracy_guarantees,
-        ..PlanSelectionSettings::default()
+        ..CostInputs::default()
     }
 }
 

@@ -15,10 +15,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+use asap_cost::CostInputs;
 use asap_devtools::planning_stages::{lower_promql_roots, run_default_search_over};
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
-use asap_plan_selection::PlanSelectionSettings;
 use asap_plan_selection::Selection;
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
@@ -38,7 +38,7 @@ pub fn run_promql(workload: &PlanningWorkload) -> Run {
 
 /// Lower and plan a PromQL workload, selecting under `settings` (a cost
 /// model other than the default).
-pub fn run_promql_under(workload: &PlanningWorkload, settings: &PlanSelectionSettings) -> Run {
+pub fn run_promql_under(workload: &PlanningWorkload, settings: &CostInputs) -> Run {
     run_stages_under(workload, lower_promql(workload), settings)
 }
 
@@ -48,7 +48,7 @@ pub fn run_promql_for(workload: &PlanningWorkload, deployment: &DeploymentCapabi
     run_stages_with(
         workload,
         lower_promql(workload),
-        &PlanSelectionSettings::default(),
+        &CostInputs::default(),
         deployment,
     )
 }
@@ -66,7 +66,7 @@ pub fn needs_merge(form: WindowForm, query_window_ms: u64) -> bool {
 /// expression rule, as the memo's group identity applies it).
 #[allow(dead_code)]
 pub fn share_identical(roots: &[QueryRoot]) -> Vec<QueryRoot> {
-    asap_types::ir::cse::share_common_sub_dags(
+    asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
         roots
             .iter()
             .enumerate()
@@ -218,14 +218,14 @@ fn logical(id: String, roots: Vec<QueryRoot>) -> Logical {
 /// and search diagnostics. Tests that require a particular algorithm or window
 /// use `run_explicit_candidates` instead of assuming it appears in the archive.
 pub fn run_stages(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
-    run_stages_under(workload, roots, &PlanSelectionSettings::default())
+    run_stages_under(workload, roots, &CostInputs::default())
 }
 
 /// [`run_stages`], selecting under `settings`.
 pub fn run_stages_under(
     workload: &PlanningWorkload,
     roots: Vec<QueryRoot>,
-    settings: &PlanSelectionSettings,
+    settings: &CostInputs,
 ) -> Run {
     run_stages_with(
         workload,
@@ -240,7 +240,7 @@ pub fn run_stages_under(
 pub fn run_stages_with(
     workload: &PlanningWorkload,
     roots: Vec<QueryRoot>,
-    settings: &PlanSelectionSettings,
+    settings: &CostInputs,
     deployment: &DeploymentCapabilities,
 ) -> Run {
     let models = asap_plan_selection::PlanningModels::builtin()
@@ -303,16 +303,17 @@ pub fn run_explicit_candidates(
 ) -> Run {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    let logical: Vec<_> =
-        candidates
-            .into_iter()
-            .enumerate()
-            .map(|(index, roots)| {
-                logical(format!("P{}", index + 1),
-            asap_logical_asap_optimization::pass1::per_computation_candidates::recompose_guarantees(&roots)
-                .expect("explicit fixture contracts compose"))
-            })
-            .collect();
+    let logical: Vec<_> = candidates
+        .into_iter()
+        .enumerate()
+        .map(|(index, roots)| {
+            logical(
+                format!("P{}", index + 1),
+                asap_accuracy::propagation::recompose_guarantees(&roots)
+                    .expect("explicit fixture contracts compose"),
+            )
+        })
+        .collect();
     let mut physical = Vec::new();
     for candidate in &logical {
         for (index, mut plan) in asap_physical_asap_optimization::optimize_physical_asap(
@@ -320,7 +321,7 @@ pub fn run_explicit_candidates(
             &candidate.roots,
             &entries,
             &data,
-            models.deployment_capabilities,
+            models.deployment_capabilities.query_time_results_retained,
         )
         .expect("explicit computation has executable physical configurations")
         .into_iter()
@@ -353,7 +354,7 @@ pub fn run_explicit_candidates(
 
 pub fn run_pattern_b_fixture(
     workload: &PlanningWorkload,
-    settings: &PlanSelectionSettings,
+    settings: &CostInputs,
     deployment: &DeploymentCapabilities,
 ) -> Run {
     run_explicit_candidates(
@@ -385,8 +386,7 @@ pub fn pattern_b_computations(workload: &PlanningWorkload) -> Vec<Vec<QueryRoot>
         "Pattern B has one quantile computation"
     );
     let kll = local.targets[0]
-        .choices
-        .candidates
+        .ways_to_compute
         .iter()
         .position(|candidate| {
             matches!(

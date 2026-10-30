@@ -474,10 +474,10 @@ fn default_search_and_installation_validate_the_nine_query_workload() {
 
     let text = std::fs::read_to_string(&path).unwrap();
     let workload: asap_types::workload::PlanningWorkload = serde_json::from_str(&text).unwrap();
-    let defaults = asap_plan_selection::PlanSelectionSettings::default();
-    let settings = asap_plan_selection::PlanSelectionSettings {
-        cost_model: asap_plan_selection::CostModel::UsageOverTime(
-            asap_plan_selection::ResourceUnitCost::aws_fargate_us_east_1(defaults.resource_speed),
+    let defaults = asap_cost::CostInputs::default();
+    let settings = asap_cost::CostInputs {
+        cost_model: asap_cost::CostModel::UsageOverTime(
+            asap_cost::ResourceUnitCost::aws_fargate_us_east_1(defaults.resource_speed),
         ),
         ..defaults
     };
@@ -504,10 +504,6 @@ fn default_search_and_installation_validate_the_nine_query_workload() {
     );
     let report = report.unwrap();
     assert!(report.queries_accepted_without_guarantee.is_empty());
-    assert_eq!(
-        report.search.algorithm,
-        asap_plan_selection::SearchAlgorithm::CandidateConnections
-    );
     assert!(report
         .cost_per_second
         .is_some_and(|cost| cost.is_finite() && cost > 0.0));
@@ -1099,8 +1095,6 @@ fn milp_final_bound_keeps_the_bound_an_earlier_round_proved() {
         "--cost-model",
         "aws-fargate-us-east-1",
         "--enforce-accuracy-guarantees",
-        "--search",
-        "candidate-connections",
     ]);
     std::fs::remove_file(&path).unwrap();
     let selection = &document["stage3_plan_selection"];
@@ -1167,8 +1161,9 @@ fn workload_file_with_a_range_evaluation_is_planned() {
     // priced under the same models. Its absolute cost is pinned in
     // integration-tests/tests/range_evaluation.rs.
     let kept_panes = {
+        use asap_accuracy::propagation::recompose_guarantees;
         use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-            compose_logical_candidate, generate_per_computation_candidates, recompose_guarantees,
+            compose_logical_candidate, generate_per_computation_candidates,
         };
         use asap_logical_asap_optimization::pass2::asap_aware_cse::{
             pane_candidates, window_composition_pass2_candidates,
@@ -1208,7 +1203,7 @@ fn workload_file_with_a_range_evaluation_is_planned() {
             &recompose_guarantees(&paned).unwrap(),
             &entries,
             &data,
-            &deployment,
+            deployment.query_time_results_retained,
         )
         .unwrap()
         .into_iter()
@@ -1222,7 +1217,7 @@ fn workload_file_with_a_range_evaluation_is_planned() {
             })
         })
         .expect("a plan keeps its panes across evaluations");
-        let settings = asap_plan_selection::PlanSelectionSettings::default();
+        let settings = asap_cost::CostInputs::default();
         let priced = asap_plan_selection::select_plan(
             std::slice::from_ref(&kept),
             &entries,
@@ -1267,9 +1262,9 @@ fn plan_selection_settings_flag_loads_the_settings_from_json() {
         "stage_pipeline_{}_plan_selection_settings.json",
         std::process::id()
     ));
-    let settings = asap_plan_selection::PlanSelectionSettings {
-        cost_model: asap_plan_selection::CostModel::ProvisionedCapacity(
-            asap_plan_selection::ResourceUnitCost::illustrative(),
+    let settings = asap_cost::CostInputs {
+        cost_model: asap_cost::CostModel::ProvisionedCapacity(
+            asap_cost::ResourceUnitCost::illustrative(),
         ),
         ..Default::default()
     };
@@ -1477,10 +1472,6 @@ fn check_workload_example(root: &std::path::Path, example: &Value) {
     };
     for table in &tables {
         args.extend(["--table", table.as_str()]);
-    }
-    let search = example.get("search").map(|s| s.as_str().unwrap());
-    if let Some(search) = search {
-        args.extend(["--search", search]);
     }
     let document = document_of(&args);
     let committed: Value = serde_json::from_str(
@@ -1805,7 +1796,7 @@ fn scans_projecting_different_labels_are_shared() {
     // Plans `roots` with identical sub-DAGs made one node, as the memo's
     // groups are, and a node read by several roots kept for the evaluation.
     let plan = |name: &str, roots: &[asap_types::ir::QueryRoot]| {
-        let shared: Vec<_> = asap_types::ir::cse::share_common_sub_dags(
+        let shared: Vec<_> = asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
             roots
                 .iter()
                 .enumerate()
@@ -1823,7 +1814,7 @@ fn scans_projecting_different_labels_are_shared() {
             &shared,
             &entries,
             data,
-            &asap_planner::DeploymentCapabilities::default(),
+            false,
             &mut |readers| {
                 Some(if readers.len() > 1 {
                     Materialization::MatAtQuery(Medium::Memory)
@@ -1905,26 +1896,26 @@ fn scans_projecting_different_labels_are_shared() {
     );
 }
 
-/// The public engine is candidate-connections; retired selectors are rejected.
+/// The default search is the candidate-connection search; its report has
+/// no legacy route.
 #[test]
-fn search_flag_picks_the_search_algorithm() {
-    let document = document_of(&["--promql", "sum(m)", "--search", "candidate-connections"]);
+fn default_search_reports_candidate_connections() {
+    let document = document_of(&["--promql", "sum(m)"]);
     assert_eq!(document["search"], "candidate-connections");
     let report = &document["stage3_plan_selection"]["search"];
     assert!(report["candidate_connections"].is_object(), "{report}");
     assert!(report.get("routed_to_legacy").is_none());
+    assert!(report.get("algorithm").is_none(), "{report}");
 }
 
-/// Unknown and retired engine names cannot silently fall back.
+/// There is one search: `--search` is not an option, so no engine name,
+/// current or retired, is accepted.
 #[test]
-fn search_flag_is_checked() {
-    for engine in ["legacy", "memo-milp", "memo-brute-force", "milp"] {
+fn search_flag_is_rejected() {
+    for engine in ["candidate-connections", "legacy", "memo-milp"] {
         let (status, stderr) = failure(&["--promql", "sum(m)", "--search", engine]);
         assert_eq!(status, Some(2));
-        assert!(
-            stderr.contains("expected candidate-connections"),
-            "{stderr}"
-        );
+        assert!(stderr.contains("unknown argument --search"), "{stderr}");
     }
 }
 
@@ -1959,8 +1950,6 @@ fn the_memo_search_document_names_the_selected_logical_candidate() {
         "quantile_over_time(0.9, data[5m])",
         "--sample-interval-ms",
         "15000",
-        "--search",
-        "candidate-connections",
     ]);
     assert_eq!(document["search"], "candidate-connections");
     let logical: HashSet<&str> = document["stage1_logical_asap_optimization"]["candidates"]
@@ -2417,8 +2406,8 @@ fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
 /// the same implementation.
 #[test]
 fn composed_selected_choice_is_the_selected_stage1_dag() {
+    use asap_accuracy::propagation::recompose_guarantees;
     use asap_devtools::planning_stages::run_default_search_over;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::recompose_guarantees;
     use asap_logical_asap_optimization::pass2::memo::enumeration::build_logical_asap_dags_from_chosen_candidates;
     use asap_types::ir::flat::flatten;
     let ratio: PlanningWorkload =
@@ -2442,7 +2431,7 @@ fn composed_selected_choice_is_the_selected_stage1_dag() {
             .map(|query| {
                 let (_, node) = composed
                     .iter()
-                    .find(|(group, _)| memo.groups[group.0 as usize].roots_of.contains(&query))
+                    .find(|(group, _)| memo.query_roots[query].operator_refs().contains(&group))
                     .unwrap();
                 QueryRoot::Operator(
                     asap_physical_asap_optimization::implement_candidate_operators(node, &[])

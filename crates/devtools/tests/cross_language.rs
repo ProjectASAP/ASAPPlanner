@@ -4,7 +4,7 @@
 //! canonical intent algebra**, so a post-ASAP binding rule matching on
 //! `AggIntent` sees one spelling regardless of source language. These tests
 //! are the executable spec
-//! for the shared [`canonicalize`](asap_types::ir::canonicalize) pass: they pin the
+//! for the shared `canonicalize` (`asap-frontend-common`) pass: they pin the
 //! canonical heavy-hitter shape and assert both front ends reach it.
 //!
 //! A literal `lower_sql(S) == lower_promql(P)` cannot hold — the two count

@@ -7,10 +7,10 @@
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use std::rc::Rc;
 
+use asap_accuracy::sizing::{default_size_params, DEFAULT_DELTA};
 use asap_frontend_promql::{lower_promql_query_workload, promql_metric_names};
 #[cfg(feature = "sql")]
 use asap_frontend_sql::SqlCatalog;
-use asap_logical_asap_optimization::pass1::realization::{default_size_params, DEFAULT_DELTA};
 use asap_plan_selection::pass::{PlanOutput, PlanningModels, QueryPlan};
 use asap_plan_selection::RejectionCause;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
@@ -116,8 +116,7 @@ fn composed_summary_candidates(
             .iter()
             .map(|target| {
                 target
-                    .choices
-                    .candidates
+                    .ways_to_compute
                     .iter()
                     .position(|candidate| {
                         *candidate == HowToComputeAggregateMeasure::Summary(family)
@@ -149,7 +148,7 @@ fn composed_summary_candidates(
                 &roots,
                 &entries,
                 data,
-                models.deployment_capabilities,
+                models.deployment_capabilities.query_time_results_retained,
                 &mut |_, _, _| asap_types::physical::Materialization::NotMaterialized,
             )
             .unwrap()
@@ -168,7 +167,6 @@ fn composed_summary_candidates(
 fn shared_kll_candidate(
     workload: &PlanningWorkload,
 ) -> asap_physical_asap_optimization::PhysicalWorkloadPlan {
-    use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
@@ -194,7 +192,7 @@ fn shared_kll_candidate(
         .map(|(_, root)| root)
         .collect();
     // Every identical sub-DAG of the two queries made one node.
-    let roots: Vec<_> = asap_types::ir::cse::share_common_sub_dags(
+    let roots: Vec<_> = asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
         roots
             .into_iter()
             .enumerate()
@@ -212,7 +210,7 @@ fn shared_kll_candidate(
         &roots,
         &workload.query_workload.entries().collect::<Vec<_>>(),
         workload.data_workload.as_ref().unwrap(),
-        &DeploymentCapabilities::default(),
+        false,
         &mut |_, _, _| Materialization::NotMaterialized,
     )
     .unwrap()

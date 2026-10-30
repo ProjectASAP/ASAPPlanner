@@ -11,7 +11,7 @@
 //!
 //! A *sharing candidate* ([`SharingCandidate`]) of a whole-workload
 //! candidate is a set of two or more of its nodes with identical input and
-//! computation semantics that are legal to share: the `ir::cse` interning
+//! computation semantics that are legal to share: the `pass2::cse` interning
 //! merges ASAP nodes and non-ASAP nodes that return the same rows for the
 //! same input rows.
 //! [`identical_expression_pass2_candidates`] returns one Pass 2 candidate
@@ -153,7 +153,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use asap_types::ir::cse::share_common_sub_dags;
+use crate::pass2::cse::share_common_sub_dags;
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{
@@ -167,10 +167,9 @@ use asap_types::ir::{
     TimeRangeKind,
 };
 
-use crate::accuracy::estimators::size_for_all_readers;
-use crate::pass1::per_computation_candidates::{
-    recompose_guarantees, PerComputationCandidateError,
-};
+use crate::pass1::per_computation_candidates::PerComputationCandidateError;
+use asap_accuracy::estimators::size_for_all_readers;
+use asap_accuracy::propagation::recompose_guarantees;
 
 /// A Pass 2 candidate of the identical-expression rule: the candidate's
 /// roots with each of `sharing_candidates` made one node.
@@ -376,7 +375,7 @@ pub fn with_union_scan_labels(
             ),
         });
     }
-    recompose_guarantees(&out).map(Some)
+    Ok(Some(recompose_guarantees(&out)?))
 }
 
 /// The source and schema of a time-series `Scan` without predicates.
@@ -1750,7 +1749,7 @@ fn in_panes(
             }
         });
     }
-    recompose_guarantees(&out)
+    Ok(recompose_guarantees(&out)?)
 }
 
 /// `roots` with the `SummaryMerge` `merge` (over one [`ASAPOp::PaneChain`]
@@ -1831,7 +1830,7 @@ pub fn with_pane_chain(
             }
         });
     }
-    recompose_guarantees(&out)
+    Ok(recompose_guarantees(&out)?)
 }
 
 /// `roots` with the summary build `build` (a `SummaryAgg` of `roots`)
@@ -1884,7 +1883,7 @@ pub fn with_resized_build(
             }
         });
     }
-    recompose_guarantees(&out)
+    Ok(recompose_guarantees(&out)?)
 }
 
 /// The [`ASAPOp::PaneChain`] of `candidate`'s panes, with the build's
@@ -2801,7 +2800,7 @@ fn replace_all(
             }
         });
     }
-    recompose_guarantees(&out)
+    Ok(recompose_guarantees(&out)?)
 }
 
 /// Exact top-k computations of one input and partition with at least two
@@ -3261,8 +3260,7 @@ mod tests {
             .targets
             .iter()
             .map(|t| {
-                t.choices
-                    .candidates
+                t.ways_to_compute
                     .iter()
                     .position(|c| *c == HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Cms))
                     .expect("Count-Min is offered for a count")
@@ -3326,8 +3324,7 @@ mod tests {
             .targets
             .iter()
             .map(|t| {
-                t.choices
-                    .candidates
+                t.ways_to_compute
                     .iter()
                     .position(&pick)
                     .expect("the family is a candidate")

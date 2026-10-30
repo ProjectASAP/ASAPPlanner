@@ -33,13 +33,14 @@ fn sql(queries: &[String]) -> FuzzWorkload {
 
 /// The selected plan's cost per second, with the default 30 s budget.
 fn cost(queries: &[String]) -> f64 {
+    use asap_cost::CostInputs;
     use asap_devtools::planning_stages::run_search_over;
-    use asap_plan_selection::{PlanSelectionSettings, PlanningModels, Stage1ToStage3Search};
+    use asap_plan_selection::{PlanningModels, Stage1ToStage3Search};
     let w = sql(queries);
     let roots = Planner::new(FuzzSettings::default()).lower(&w).unwrap();
     let planning = w.planning_workload();
     let entries: Vec<_> = planning.query_workload.entries().collect();
-    let settings = PlanSelectionSettings::default();
+    let settings = CostInputs::default();
     let deployment = w.deployment();
     let models = PlanningModels::builtin()
         .with_plan_selection(&settings)

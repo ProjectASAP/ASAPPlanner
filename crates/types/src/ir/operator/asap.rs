@@ -256,15 +256,6 @@ impl<C> ASAPOp<C> {
 }
 
 impl ASAPOp {
-    /// Reserved variants that are migrated but not implemented.
-    pub fn is_unimplemented(&self) -> bool {
-        use ASAPOp::*;
-        matches!(
-            self,
-            SummarySubtract { .. } | SummaryDelete { .. } | SummaryJoin { .. } | Extension { .. }
-        )
-    }
-
     fn unimplemented() -> SchemaDerivationError {
         SchemaDerivationError::InvalidScalarSignature(UNIMPLEMENTED_ASAP_OP.into())
     }
@@ -538,7 +529,7 @@ impl ASAPOp {
         })
     }
 
-    pub fn output_kind(&self) -> OperatorResultKind {
+    pub(crate) fn output_kind(&self) -> OperatorResultKind {
         use ASAPOp::*;
         match self {
             SummaryAgg { .. }

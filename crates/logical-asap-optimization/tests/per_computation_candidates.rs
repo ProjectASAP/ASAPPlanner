@@ -215,7 +215,7 @@ fn example_1_exact_q1_keeps_exact_accumulators_only() {
     let found: Vec<_> = candidates
         .targets
         .iter()
-        .map(|target| target.choices.candidates.clone())
+        .map(|target| target.ways_to_compute.clone())
         .collect();
     assert_eq!(
         found,
@@ -392,9 +392,9 @@ fn multi_measure_aggregate_has_one_target_per_measure() {
         vec![],
         None,
     );
-    let candidates = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(node))])
-        .unwrap()
-        .targets;
+    let inventory =
+        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(node))]).unwrap();
+    let candidates = &inventory.targets;
     assert_eq!(
         candidates
             .iter()
@@ -403,12 +403,12 @@ fn multi_measure_aggregate_has_one_target_per_measure() {
         vec![0, 1]
     );
     assert_eq!(
-        candidates[0].choices.candidates,
+        candidates[0].ways_to_compute,
         vec![HowToComputeAggregateMeasure::ExactAccumulator(vec![
             ExactKind::Sum
         ])]
     );
-    assert_sql_count_choices(&candidates[1].choices);
+    assert_sql_count_choices(&choices_of(&inventory, 1));
 }
 
 /// An aggregate with no realization besides exact execution is not a target.
@@ -439,16 +439,27 @@ fn filtered_measure_keeps_candidates_and_records_its_filter() {
         vec![Some(always()), None],
         None,
     );
-    let targets = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(filtered))])
-        .unwrap()
-        .targets;
+    let inventory =
+        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(filtered))]).unwrap();
+    let targets = &inventory.targets;
     assert_eq!(targets.len(), 2);
-    for target in &targets {
-        assert_sql_count_choices(&target.choices);
+    for (index, target) in targets.iter().enumerate() {
+        assert_sql_count_choices(&choices_of(&inventory, index));
         assert!(target.having_filters.is_empty());
     }
     assert_eq!(targets[0].measure_filter, Some(always()));
     assert_eq!(targets[1].measure_filter, None);
+}
+
+/// Target `target`'s own ways to compute and the ones Pass 1 pruned.
+fn choices_of(
+    inventory: &asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidates<usize>,
+    target: usize,
+) -> asap_logical_asap_optimization::pass1::per_computation_candidates::ComputationChoices {
+    asap_logical_asap_optimization::pass1::per_computation_candidates::ComputationChoices {
+        candidates: inventory.targets[target].ways_to_compute.clone(),
+        pruned: inventory.pruned_of_target(target, false),
+    }
 }
 
 fn assert_sql_count_choices(
@@ -526,9 +537,9 @@ fn equals(column: usize, value: ScalarValue) -> Predicate {
 fn key_only_having_is_pushed_below_and_keeps_candidates() {
     let node = grouped_count(None);
     let root = having_filter(node.clone(), equals(0, ScalarValue::Utf8("a".into())));
-    let targets = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root.clone()))])
-        .unwrap()
-        .targets;
+    let inventory =
+        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root.clone()))]).unwrap();
+    let targets = &inventory.targets;
     assert_eq!(targets.len(), 1);
     assert!(Rc::ptr_eq(&targets[0].aggregate, &node));
     assert_eq!(
@@ -539,7 +550,7 @@ fn key_only_having_is_pushed_below_and_keeps_candidates() {
             placement: HavingPlacement::BelowAggregate,
         }]
     );
-    assert_sql_count_choices(&targets[0].choices);
+    assert_sql_count_choices(&choices_of(&inventory, 0));
 }
 
 /// A `HAVING` over an aggregate value, as a `Filter` above or as the
@@ -547,24 +558,24 @@ fn key_only_having_is_pushed_below_and_keeps_candidates() {
 #[test]
 fn value_having_stays_above_output_and_keeps_candidates() {
     let value = || equals(1, ScalarValue::Int64(10));
-    let targets = generate_per_computation_candidates(vec![
+    let inventory = generate_per_computation_candidates(vec![
         (
             0,
             QueryRoot::Operator(having_filter(grouped_count(None), value())),
         ),
         (1, QueryRoot::Operator(grouped_count(Some(value())))),
     ])
-    .unwrap()
-    .targets;
+    .unwrap();
+    let targets = &inventory.targets;
     assert_eq!(targets.len(), 2);
-    for target in &targets {
+    for (index, target) in targets.iter().enumerate() {
         let placements: Vec<_> = target
             .having_filters
             .iter()
             .map(|entry| entry.placement)
             .collect();
         assert_eq!(placements, vec![HavingPlacement::AboveOutput]);
-        assert_sql_count_choices(&target.choices);
+        assert_sql_count_choices(&choices_of(&inventory, index));
     }
 }
 
@@ -573,7 +584,7 @@ fn value_having_stays_above_output_and_keeps_candidates() {
 #[test]
 fn avg_rewrites_to_sum_and_count_states() {
     let avg = || vec![AggIntent::Avg { col: None }];
-    let targets = generate_per_computation_candidates(vec![
+    let inventory = generate_per_computation_candidates(vec![
         (
             0,
             QueryRoot::Operator(aggregate_over(scan(false), avg(), vec![], None)),
@@ -583,21 +594,21 @@ fn avg_rewrites_to_sum_and_count_states() {
             QueryRoot::Operator(aggregate_over(scan(true), avg(), vec![], None)),
         ),
     ])
-    .unwrap()
-    .targets;
+    .unwrap();
+    let targets = &inventory.targets;
     assert_eq!(
-        targets[0].choices.candidates,
+        targets[0].ways_to_compute,
         vec![HowToComputeAggregateMeasure::ExactAccumulator(vec![
             ExactKind::Sum,
             ExactKind::Count
         ])]
     );
     assert_eq!(
-        targets[1].choices.candidates,
+        targets[1].ways_to_compute,
         vec![HowToComputeAggregateMeasure::Exact]
     );
     assert_eq!(
-        targets[1].choices.pruned,
+        inventory.pruned_of_target(1, false),
         vec![(
             HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Sum, ExactKind::Count]),
             PruneReason::NullableAvgInput
@@ -748,7 +759,8 @@ fn example_1_exact_q2_prunes_topk_heaps() {
     let found: Vec<_> = candidates
         .targets
         .iter()
-        .map(|target| target.choices.clone())
+        .enumerate()
+        .map(|(index, _)| choices_of(&candidates, index))
         .collect();
     let topk = found
         .iter()
@@ -1032,7 +1044,7 @@ fn summary_agg(node: &OperatorNode) -> &ASAPOp {
 /// measure's accuracy requirement.
 #[test]
 fn composed_summary_is_sized_for_its_measure() {
-    use asap_logical_asap_optimization::pass1::realization::default_size_params;
+    use asap_accuracy::sizing::default_size_params;
     let intent = quantile();
     let [root] = <[_; 1]>::try_from(composed(vec![aggregate(intent.clone())], &[1])).unwrap();
     let ASAPOp::SummaryAgg {
@@ -1370,7 +1382,7 @@ fn memo_cached_rules_preserve_occurrence_specific_having() {
         cached.targets[1].having_filters[0].placement
     );
     for (before, after) in baseline.targets.iter().zip(&cached.targets) {
-        assert_eq!(before.choices, after.choices);
+        assert_eq!(before.ways_to_compute, after.ways_to_compute);
         assert_eq!(before.having_filters, after.having_filters);
         assert_eq!(before.fused_computation, after.fused_computation);
     }

@@ -69,6 +69,7 @@ fn differing_supplier_statistics_keep_both_price_interfaces() {
         },
         configurations: (0..3)
             .map(|id| CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: PhysicalCandidateId(id),
                 materialization: Materialization::NotMaterialized,
                 timing: ExecutionTiming::QueryTime,
@@ -101,7 +102,7 @@ fn differing_supplier_statistics_keep_both_price_interfaces() {
         entries: &entries,
         data: &data,
         models: crate::PlanningModels::builtin(),
-        calibration: crate::CalibrationFit::default(),
+        calibration: asap_cost::CalibrationFit::default(),
     };
     let extracted = extract_price_options(&configured, &context)
         .unwrap()
@@ -258,6 +259,7 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
         },
         configurations: (0..3)
             .map(|id| CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: PhysicalCandidateId(id),
                 materialization: Materialization::NotMaterialized,
                 timing: ExecutionTiming::QueryTime,
@@ -295,6 +297,7 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
         .templates
         .push(Some(downstream.clone()));
     configured.configurations.push(CandidateConfiguration {
+        may_keep_with_sole_reader: Vec::new(),
         source_candidate: PhysicalCandidateId(3),
         materialization: Materialization::NotMaterialized,
         timing: ExecutionTiming::QueryTime,
@@ -326,7 +329,7 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
         entries: &entries,
         data: &data,
         models: crate::PlanningModels::builtin(),
-        calibration: crate::CalibrationFit::default(),
+        calibration: asap_cost::CalibrationFit::default(),
     };
     let extracted = extract_price_options(&configured, &context)
         .unwrap()
@@ -417,6 +420,7 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
             .map_children(|child| inputs.push(append(child.clone(), configured, ingestion, mode)));
         let id = PhysicalCandidateId(configured.configurations.len());
         configured.configurations.push(CandidateConfiguration {
+            may_keep_with_sole_reader: Vec::new(),
             source_candidate: id,
             materialization: if pane {
                 mode
@@ -455,8 +459,7 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         generate_per_computation_candidates(vec![(0, QueryRoot::Operator(original.clone()))])
             .unwrap();
     let choice = generated.targets[0]
-        .choices
-        .candidates
+        .ways_to_compute
         .iter()
         .position(|candidate| {
             matches!(
@@ -559,6 +562,7 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
     let projected_supplier = PhysicalCandidateId(configured.configurations.len());
     configured.inventory.templates.push(Some(projected));
     configured.configurations.push(CandidateConfiguration {
+        may_keep_with_sole_reader: Vec::new(),
         source_candidate: projected_supplier,
         materialization: Materialization::NotMaterialized,
         timing: ExecutionTiming::IngestionTime,
@@ -595,7 +599,7 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         entries: &entries,
         data: &data,
         models: crate::PlanningModels::builtin(),
-        calibration: crate::CalibrationFit::default(),
+        calibration: asap_cost::CalibrationFit::default(),
     };
     let initial = extract(&configured, &context).unwrap().unwrap();
     let raw_work: f64 = [raw_supplier.0, chain]
@@ -603,14 +607,14 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         .map(|id| initial.profile.nodes[id].work_seconds * 1000.0)
         .sum();
     assert!(raw_work > 0.0);
-    let mut settings = crate::PlanSelectionSettings::default();
+    let mut settings = asap_cost::CostInputs::default();
     settings.resource_speed.ms_per_cpu_op *= 850.0 / raw_work;
     settings.resource_speed.ms_per_scanned_byte *= 850.0 / raw_work;
     settings
         .measured_operation_costs
         .operators
-        .push(crate::cost::measured::OperatorCost {
-            operator: crate::OperatorKind::Project,
+        .push(asap_cost::measured::OperatorCost {
+            operator: asap_cost::OperatorKind::Project,
             phase: Some(ExecutionTiming::IngestionTime),
             sketch: None,
             exact: None,
@@ -763,6 +767,7 @@ fn mixed_schedule_joint_prices_match_the_real_evaluator() {
         },
         configurations: (0..3)
             .map(|id| CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: PhysicalCandidateId(id),
                 materialization: Materialization::NotMaterialized,
                 timing: ExecutionTiming::QueryTime,
@@ -821,7 +826,7 @@ fn mixed_schedule_joint_prices_match_the_real_evaluator() {
         entries: &entries,
         data: &data,
         models: crate::PlanningModels::builtin(),
-        calibration: crate::CalibrationFit::default(),
+        calibration: asap_cost::CalibrationFit::default(),
     };
     let profile = extract_price_options(&configured, &context)
         .unwrap()

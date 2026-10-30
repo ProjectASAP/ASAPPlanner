@@ -1,8 +1,8 @@
 //! Post-lowering canonicalization of the operator DAG.
 //!
 //! Rewrites equivalent spellings of a query into one shape, so that common
-//! sub-DAG sharing ([`super::cse`]) can match them by structural equality,
-//! whichever front end produced them.
+//! sub-DAG sharing (`asap_logical_asap_optimization::pass2::cse`) can match
+//! them by structural equality, whichever front end produced them.
 //!
 //! ## Heavy-hitter promotion
 //!
@@ -37,21 +37,25 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use super::scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
-use crate::ir::operator::agg_intent::{topk, AggIntent};
-use crate::ir::operator::node::{Operator, OperatorNode};
-use crate::ir::operator::non_asap::NonASAPOp;
-use crate::ir::operator::operator_properties::{GroupKeys, JoinKind, Reduction, WindowFuncKind};
-use crate::ir::properties::AccuracyTarget;
-use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
-use crate::ir::SchemaDerivationError;
+use asap_types::ir::operator::agg_intent::{topk, AggIntent};
+use asap_types::ir::operator::node::{Operator, OperatorNode};
+use asap_types::ir::operator::non_asap::NonASAPOp;
+use asap_types::ir::operator::operator_properties::{
+    GroupKeys, JoinKind, Reduction, WindowFuncKind,
+};
+use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
+use asap_types::ir::scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
+use asap_types::ir::SchemaDerivationError;
 
 /// Rewrite the DAG under `root` into its canonical form (bottom-up).
 /// Idempotent: an already-canonical DAG comes back as the same `Rc`. Only
 /// nodes that change (or whose inputs change) are rebuilt; every untouched
 /// sub-DAG keeps its pointer identity, and a shared sub-DAG that is rewritten
 /// stays shared.
-pub fn canonicalize(root: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
+pub(crate) fn canonicalize(
+    root: Rc<OperatorNode>,
+) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
     canon(
         &root,
         &mut NodeToCanonicalNodeCache::new(),
@@ -153,10 +157,11 @@ fn canon(
     {
         let after = children.first().map(|c| &c.schema);
         if discriminator_branch_schema_before.as_ref() != after {
-            current = OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Concat {
-                children: children.clone(),
-                discriminator_unique_key: None,
-            }))?;
+            current =
+                OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Concat {
+                    children: children.clone(),
+                    discriminator_unique_key: None,
+                }))?;
         }
     }
 
@@ -280,7 +285,7 @@ fn try_promote_additive_top_ranking(
     };
     // A heavy-hitter sketch ranks the raw update stream; a filtered measure
     // counts only part of it, and no binding rule applies the filter (#466).
-    if crate::ir::operator::non_asap::any_measure_filtered(filters) {
+    if asap_types::ir::operator::non_asap::any_measure_filtered(filters) {
         return Ok(None);
     }
     let [ranked_agg] = measures.as_slice() else {
@@ -317,7 +322,7 @@ fn try_promote_additive_top_ranking(
     // Outer heavy-hitter `TopK`, grouped by the ranking's partition (empty for
     // a global `ORDER BY … LIMIT k`; the `by` labels for a partitioned `topk
     // by`), over the unchanged inner additive aggregate.
-    OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Aggregate {
+    OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
         reduction: Reduction::by(partition),
         measures: vec![AggIntent::TopK { k: *k, accuracy }],
         output_names: Vec::new(),
@@ -552,7 +557,7 @@ fn try_lower_subquery_conjunct(
         ),
         _ => unreachable!("`is_join_conjunct` admitted a non-subquery conjunct"),
     };
-    let join = OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Join {
+    let join = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Join {
         kind,
         pred: join_pred,
         left: Rc::clone(child),
@@ -569,7 +574,7 @@ fn try_lower_subquery_conjunct(
         1 => rest.remove(0),
         _ => ScalarExpr::BoolAnd(rest),
     };
-    let out = OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Filter {
+    let out = OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Filter {
         pred: Predicate(rest),
         child: join,
     }))?;
@@ -585,12 +590,12 @@ fn contains_scalar_subquery(expr: &ScalarExpr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::operator::operator_properties::WindowFuncKind;
-    use crate::ir::operator::operator_properties::{
+    use asap_types::ir::operator::operator_properties::WindowFuncKind;
+    use asap_types::ir::operator::operator_properties::{
         ConcatDiscriminatorKey, GroupKeys, Source, WindowFrame, WindowFrameBound,
         WindowFrameOffset, WindowFrameUnits,
     };
-    use crate::ir::schema::{DataType, Field, Schema};
+    use asap_types::ir::schema::{DataType, Field, Schema};
 
     fn node(op: NonASAPOp) -> Rc<OperatorNode> {
         Rc::new(OperatorNode::new(Operator::NonASAP(op)).expect("fixture derives a schema"))
@@ -725,13 +730,13 @@ mod tests {
     // `COUNT(col)` over a nullable column.
     #[test]
     fn does_not_promote_a_filtered_count_ranking() {
-        use crate::ir::scalar::{CompareOpKind, ScalarValue};
-        use crate::ir::Predicate;
+        use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
+        use asap_types::ir::Predicate;
         let greater = Predicate(ScalarExpr::Compare {
             left: Box::new(ScalarExpr::Column(2)),
             op: CompareOpKind::Gt,
             right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(1.0))),
-            semantics: crate::ir::ExprSemantics::Sql,
+            semantics: asap_types::ir::ExprSemantics::Sql,
         });
         let not_null = Predicate(ScalarExpr::IsNotNull(Box::new(ScalarExpr::Column(2))));
         for filter in [greater, not_null] {

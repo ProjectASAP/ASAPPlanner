@@ -22,7 +22,7 @@
 //! query's latency bound, or than its repeat interval, is rejected as
 //! invalid too ("Latency" below).
 //! Every valid candidate's resource usage is measured node by node over its
-//! physical DAG ([`ResourceUsage`]), and the deployment's [`CostModel`]
+//! physical DAG ([`ResourceUsage`](asap_cost::ResourceUsage)), and the deployment's [`CostModel`](asap_cost::CostModel)
 //! chooses among them ("Cost models" below). The rest are reported valid
 //! but costlier (or slower, or larger).
 //! Candidate-connection MILP search selects and validates workload DAGs
@@ -31,16 +31,16 @@
 //!
 //! ## Cost model: cost per second of wall time
 //!
-//! A candidate's cost is what running it costs per second ([`COST_UNIT`]),
+//! A candidate's cost is what running it costs per second ([`COST_UNIT`](asap_cost::COST_UNIT)),
 //! so queries with different recurrences add up. A node here is one
 //! operator node of the candidate's physical plan DAG (`PhysicalASAPDAG`),
 //! not a machine. Each node's price for one
 //! computation is multiplied by how often it is computed per second
-//! ([`NodeCost::cost_per_second`]):
+//! ([`NodeCost::cost_per_second`](asap_cost::NodeCost::cost_per_second)):
 //!
 //! * A `NotMaterialized` node is recomputed for each consumer that reads it
 //!   and is not stored: it is charged once per consumer
-//!   ([`NodeCost::multiplier`]) at the sum of their rates. Its consumers are
+//!   ([`NodeCost::multiplier`](asap_cost::NodeCost::multiplier)) at the sum of their rates. Its consumers are
 //!   the queries whose sub-DAG reaches it and the materialized nodes above
 //!   it, counted without looking through a materialized node: a node below
 //!   one is computed when that node is. Stage 2 keeps a shared node one
@@ -64,7 +64,7 @@
 //!   (default 3600 s): `invocations / horizon` per second.
 //!
 //! Under cost model 1, memory is charged as bytes held per second
-//! ([`ResourceUsage::average_memory_bytes`]), at
+//! ([`ResourceUsage::average_memory_bytes`](asap_cost::ResourceUsage::average_memory_bytes)), at
 //! `cost_per_memory_byte_second` per byte per second. A `MatAtIngestion`
 //! node keeps its state every second: twice for a whole window (the window
 //! being built and the completed one queries read) and `N + 1` panes for a
@@ -85,7 +85,7 @@
 //! prices each and the cheaper wins.
 //!
 //! A query whose workload entry declares a range evaluation
-//! ([`RangeEvaluation`]: each request evaluates it at every `step_ms` over
+//! ([`RangeEvaluation`](asap_types::workload::RangeEvaluation): each request evaluates it at every `step_ms` over
 //! the last `span_ms`, as a dashboard's `query_range` does) is priced as
 //! `S = span_ms / step_ms + 1` evaluations per request (61 for a 1 h span
 //! at 1 min steps):
@@ -107,13 +107,13 @@
 //! Latency stays per evaluation (one step). Without a range evaluation
 //! `S = 1` and the retention is the window, so every price is as above.
 //! Memory a computation holds only while it runs counts in
-//! [`ResourceUsage::peak_memory_bytes`], which cost models 2 and 3 read, and
+//! [`ResourceUsage::peak_memory_bytes`](asap_cost::ResourceUsage::peak_memory_bytes), which cost models 2 and 3 read, and
 //! under cost model 1 for the time it is held, as above. (A `NotMaterialized`
 //! node computed at ingestion time is a streaming operator holding one row,
 //! and is not charged.)
 //!
-//! Prices come from [`crate::cost::analytical::estimate_operator`] over edge
-//! statistics derived from the [`DataWorkload`] and a fixed default group
+//! Prices come from [`asap_cost::analytical::estimate_operator`] over edge
+//! statistics derived from the [`DataWorkload`](asap_types::workload::DataWorkload) and a fixed default group
 //! count; summary build and estimation are priced as rows × sketch depth and
 //! groups × k. A query-time scan reads the longest window above it (a time
 //! shift moves a window without widening it); a time shift is free, and a
@@ -129,18 +129,18 @@
 //! illustrative, not calibrated: a binary, join or concat node is priced from
 //! its first input only (MVP; follow-up).
 //! A cost error on any candidate aborts selection; it is reachable only from
-//! bad declared rates or bad [`PlanSelectionSettings`].
+//! bad declared rates or bad [`CostInputs`](asap_cost::CostInputs).
 //!
 //! ## Measured operation costs
 //!
 //! A deployment whose runtime measured its own costs gives them per
-//! operator ([`PlanSelectionSettings::measured_operation_costs`],
-//! [`MeasuredOperationCosts`]): for an operator kind at ingestion or query
+//! operator ([`CostInputs::measured_operation_costs`](asap_cost::CostInputs::measured_operation_costs),
+//! [`MeasuredOperationCosts`](asap_cost::MeasuredOperationCosts)): for an operator kind at ingestion or query
 //! time (and, for a summary operator, its sketch or exact accumulator; for
 //! an aggregate, each measure), CPU ns per unit and per computation. A node
 //! with an entry takes `units × ns_per_unit + ns_per_invocation` per
 //! computation, its scanning included; the units are what the operator
-//! processes ([`OperatorKind`]: samples a scan reads, rows a build inserts,
+//! processes ([`OperatorKind`](asap_cost::OperatorKind): samples a scan reads, rows a build inserts,
 //! states a merge reads, groups an estimate reads, ...). A query-time scan
 //! is the fetch and decode of raw data samples from the database holding them,
 //! so a plan that reads raw data pays for it. A sketch whose parameters
@@ -165,29 +165,29 @@
 //! slow sketch's ratio make the exact rebuild look costlier than it is).
 //! Only a table covering every operator kind the candidates use makes the
 //! choice the measured one. Each node reports how it was priced
-//! ([`NodePriceSource`]).
-//! Measured times count as CPU operations of [`ResourceSpeed`], so latency
+//! ([`NodePriceSource`](asap_cost::NodePriceSource)).
+//! Measured times count as CPU operations of [`ResourceSpeed`](asap_cost::ResourceSpeed), so latency
 //! and all three cost models read them like any other operation.
 //!
 //! ## Cost models
 //!
-//! [`PlanSelectionSettings::cost_model`] (in [`PlanningModels`]) chooses how
+//! [`CostInputs::cost_model`](asap_cost::CostInputs::cost_model) (in [`PlanningModels`]) chooses how
 //! usage becomes a choice; the default is cost model 1 with
-//! [`ResourceUnitCost::illustrative`]:
+//! [`ResourceUnitCost::illustrative`](asap_cost::ResourceUnitCost::illustrative):
 //!
-//! * [`CostModel::UsageOverTime`] (cost model 1, pay-as-you-go): each
+//! * [`CostModel::UsageOverTime`](asap_cost::CostModel::UsageOverTime) (cost model 1, pay-as-you-go): each
 //!   node's CPU operations, scanned bytes and memory byte-seconds per second
 //!   (and disk bytes, unpriced by default) times their prices; the cheapest
 //!   candidate wins.
-//! * [`CostModel::ProvisionedCapacity`] (cost model 2): the candidate's peak
+//! * [`CostModel::ProvisionedCapacity`](asap_cost::CostModel::ProvisionedCapacity) (cost model 2): the candidate's peak
 //!   memory, peak CPU cores and disk times their prices per second; the
 //!   cheapest wins. Peak memory assumes every evaluation overlaps: kept
 //!   in-memory state plus each computation's working memory, once per
 //!   consumer that recomputes it. Peak cores are the ingestion work's cores
 //!   plus one per query evaluating at once.
-//! * [`CostModel::ClusterCapacity`] (cost model 3, own cluster): no prices.
+//! * [`CostModel::ClusterCapacity`](asap_cost::CostModel::ClusterCapacity) (cost model 3, own cluster): no prices.
 //!   A candidate over the cluster's memory, disk or cores is invalid, and
-//!   [`ClusterObjective`] chooses among the rest (lowest worst-query
+//!   [`ClusterObjective`](asap_cost::ClusterObjective) chooses among the rest (lowest worst-query
 //!   latency, least peak memory, or the Pareto front of the three in
 //!   [`Selection::front`]).
 //!
@@ -206,7 +206,7 @@
 //! window of an ingestion-time state it reads, then its own query-time
 //! work. Its own work is the sum, over every query-time node it reaches
 //! (shared ones included, each once), of one computation's CPU operations
-//! and scanned bytes timed by [`ResourceSpeed`]'s `ms_per_cpu_op` and
+//! and scanned bytes timed by [`ResourceSpeed`](asap_cost::ResourceSpeed)'s `ms_per_cpu_op` and
 //! `ms_per_scanned_byte`. A state whose ingestion work needs `k` cores keeps
 //! `k` partial copies of its newest window, and compacting them takes
 //! `(k − 1)` merges for each of its states per window, each one operation
@@ -225,73 +225,39 @@
 //! model gives each step a full core, so a request's steps may run in
 //! parallel. Run one after another they take `S` times as long, which this
 //! check does not assume.
-//! [`ResourceUsage::latency_per_query`] reports every query's latency.
+//! [`ResourceUsage::latency_per_query`](asap_cost::ResourceUsage::latency_per_query) reports every query's latency.
 //!
 //! No memory limit applies outside cost model 3, where the cluster's memory
-//! is declared ([`ClusterLimits::memory_bytes`]); without one, a selected
+//! is declared ([`ClusterLimits::memory_bytes`](asap_cost::ClusterLimits::memory_bytes)); without one, a selected
 //! plan whose peak memory is over [`LARGE_PEAK_MEMORY_BYTES`] gets a
 //! warning, which `stage_pipeline` reports ([`large_peak_memory_warning`]).
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::rc::Rc;
 
-use asap_types::ir::operator::operator_properties::{
-    BinaryOpKind, PromQLVectorSetOpKind, RelationalSetOpKind,
-};
-use asap_types::ir::operator::{
-    agg_has_exact_per_entity_kernel, AggIntent, GroupKeys, Reduction, Source,
-};
-use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
-use asap_types::ir::physical_export::{
-    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload, ScanWindow,
-};
-use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric, ExecutionTiming};
-use asap_types::ir::properties::{AccuracyScope, AccuracyTarget};
-use asap_types::ir::scalar::ScalarValue;
-use asap_types::ir::schema::sketch::KLL_MAX_K;
-use asap_types::ir::schema::{DataType, Schema};
-use asap_types::ir::schema::{
-    FieldDataType, GroupingStrategy, SketchAlgorithm, SketchParams, SketchStatistic, WeightDomain,
-    EXACT_ACCUMULATOR_STATE_BYTES,
-};
-use asap_types::ir::{
-    ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot,
-    ScalarExpr, SchemaDerivationError, TimeRangeKind,
-};
-use asap_types::physical::{Materialization, Medium};
 #[cfg(test)]
 use asap_types::workload::RepeatedDemand;
-use asap_types::workload::{
-    DataWorkload, MetricType, QueryRecurrence, QueryWorkloadEntry, RangeEvaluation,
-};
-use thiserror::Error;
 
-use crate::cost::analytical::{
-    estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceEstimate,
-};
-use crate::cost::operator_statistics::{
-    EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
-};
-use asap_logical_asap_optimization::accuracy::composition::{
-    parse_raw_data_samples_sign_statistic, parse_source_norm_statistic, INPUT_ROW_COUNT,
-    PRODUCT_OPERAND_DOMAINS, STREAM_L1_NORM,
-};
-use asap_logical_asap_optimization::accuracy::estimators::with_failure_probability;
-use asap_logical_asap_optimization::accuracy::estimators::{hll, univmon};
-use asap_logical_asap_optimization::accuracy::OperandDomain;
-use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilitiesError;
-use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    approximate_inputs, distinct_bound_source, operand_domain_statistic, operand_guarantee,
-    operand_of, project_column_guarantee, root_guarantee, with_resized_summaries,
-};
-use asap_physical_asap_optimization::PhysicalWorkloadPlan;
+use asap_cost::analytical::AnalyticalCostError;
+use asap_cost::state_bytes::{sketch_shape, summary_shape, StateInputRows};
 
-pub mod accuracy;
-pub use accuracy::{
-    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, NoAccuracyEvidence,
+mod accuracy;
+mod accuracy_binding;
+mod checks;
+mod pricing;
+mod report;
+mod selector;
+mod sizing;
+pub(crate) use accuracy_binding::bound_root_guarantee;
+pub use asap_types::workload::bounds::with_confirmed_weights;
+pub(crate) use checks::{accuracy_targets, guarantee_check};
+pub(crate) use pricing::{panes_of, price_node, trailing_window, PricedNode, ProducerOutput};
+pub use report::{
+    large_peak_memory_warning, AcceptedAccuracy, CandidateConnectionReport, Rejection,
+    RejectionCause, SearchReport, Selection, SelectionError, LARGE_PEAK_MEMORY_BYTES,
 };
-use cost::execution_demand::{computations, evaluation_rate, query_starts};
+pub(crate) use selector::{cheaper, checked_candidate, choose, Ranking};
+pub use selector::{select_plan, PlanSelector};
+pub use sizing::resize_for_failure_probability;
+pub(crate) use sizing::sized_for_failure_probability;
 
-pub mod cost;
 /// The Stage 1 to Stage 3 driver and the optimization-pass interface.
 pub mod search;
 pub use search as pass;
@@ -302,4897 +268,52 @@ pub use search::{
     Stage1ToStage3Search,
 };
 
-use cost::measured::{aggregate_lookup, lookup, StateFamily};
-pub use cost::measured::{
-    CostTableProvenance, MeasuredOperationCost, MeasuredOperationCosts, NodePriceSource,
-    OperatorCost, OperatorKind, SummaryOperation,
-};
-
-/// Cost per second of wall time; one unit is one CPU-millisecond under
-/// [`ResourceUnitCost::illustrative`].
-pub const COST_UNIT: &str = "cost_per_second";
-/// [`CandidateCost::source`] when every node is priced from the formulas.
-pub const COST_SOURCE: &str = "analytical-cost-v2 (illustrative statistics)";
-/// [`CandidateCost::source`] when every node is priced from the measured
-/// table.
-pub const MEASURED_COST_SOURCE: &str = "measured operation costs (illustrative statistics)";
-/// [`CandidateCost::source`] when some nodes are priced from the measured
-/// table and the others from the formulas.
-pub const MIXED_COST_SOURCE: &str =
-    "measured operation costs and analytical-cost-v2 (illustrative statistics)";
-
-/// Seconds over which non-repeating queries (one-off, scheduled and
-/// unknown) are spread by default: one hour.
-pub const DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS: f64 = 3_600.0;
-
-/// What one candidate uses, per second of wall time unless the name says
-/// otherwise, without prices: its nodes' CPU, scans, kept memory and disk
-/// added up, with the candidate's peak cores and per-query latency. Every [`CostModel`] reads
-/// it.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ResourceUsage {
-    /// CPU operations per second: ingestion-time and query-time work.
-    pub cpu_ops_per_second: f64,
-    /// Bytes scanned per second.
-    pub scanned_bytes_per_second: f64,
-    /// Memory held between computations, averaged over time: retained
-    /// byte-seconds per second (ingestion-time state always, query-time
-    /// state while its evaluation runs).
-    pub average_memory_bytes: f64,
-    /// The most memory live at once, assuming every evaluation overlaps:
-    /// in-memory kept state plus each computation's working memory, once
-    /// per consumer that recomputes it.
-    pub peak_memory_bytes: u64,
-    /// Bytes kept on disk: state materialized on `Medium::Disk`, plus the
-    /// raw data query-time scans read (the longest window of each source).
-    pub disk_bytes: u64,
-    /// CPU cores to provision for the peak: the ingestion work's cores plus
-    /// one per query evaluating at once.
-    pub peak_cpu_cores: u32,
-    /// One per query, in workload order: its latency per evaluation.
-    pub latency_per_query: Vec<QueryLatency>,
-}
-
-/// The price of one unit of each resource, per second of wall time. Cost
-/// model 1 reads the usage prices (CPU, scan, memory byte-seconds, disk);
-/// cost model 2 the provisioned prices (memory, CPU cores) and disk.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResourceUnitCost {
-    /// Price of one CPU operation.
-    pub cost_per_cpu_op: f64,
-    /// Price of scanning one byte.
-    pub cost_per_scanned_byte: f64,
-    /// Price of holding one byte of memory for one second (cost model 1).
-    pub cost_per_memory_byte_second: f64,
-    /// Price of provisioning one byte of memory for one second (cost model 2).
-    pub cost_per_provisioned_memory_byte_second: f64,
-    /// Price of provisioning one CPU core for one second (cost model 2).
-    pub cost_per_provisioned_cpu_core_second: f64,
-    /// Price of keeping one byte on disk for one second (both models).
-    pub cost_per_disk_byte_second: f64,
-}
-
-impl ResourceUnitCost {
-    /// The prices plan selection uses until a deployment is calibrated:
-    /// 1 ns of CPU per operation, 0.1 ns per scanned byte, 1 GB kept for a
-    /// second costs 1/8 vCPU (125 CPU-ms), held or provisioned alike; one
-    /// provisioned core-second is 1,000 CPU-ms. Disk is not priced (0).
-    pub fn illustrative() -> Self {
-        Self {
-            cost_per_cpu_op: 1e-6,
-            cost_per_scanned_byte: 1e-7,
-            cost_per_memory_byte_second: 1.25e-7,
-            cost_per_provisioned_memory_byte_second: 1.25e-7,
-            cost_per_provisioned_cpu_core_second: 1_000.0,
-            cost_per_disk_byte_second: 0.0,
-        }
-    }
-
-    /// AWS Fargate on-demand prices, US East (N. Virginia), Linux/x86, for
-    /// cost model 1 ([`CostModel::UsageOverTime`]); one cost unit is one
-    /// US dollar. Source: <https://aws.amazon.com/fargate/pricing/>, checked
-    /// 2026-10-18 (Pricing Example 1 there: $0.000011244 per vCPU-second,
-    /// $0.000001235 per GB-second of memory, $0.0000000308 per GB-second of
-    /// ephemeral storage beyond the 20 GB included). Prices change: re-check
-    /// the page before relying on them.
-    ///
-    /// `speed` is the deployment's [`PlanSelectionSettings::resource_speed`],
-    /// the speed Stage 3 uses for latency, so the CPU prices charge the core
-    /// time latency counts. At [`ResourceSpeed::illustrative`] (1e-6 ms per
-    /// CPU operation, i.e. 1e9 operations per core-second; 1e-7 ms per
-    /// scanned byte):
-    ///
-    /// * `cost_per_cpu_op` = $0.000011244 per vCPU-second ×
-    ///   `ms_per_cpu_op` / 1,000 (1e-9 s per operation) = $1.1244e-14.
-    /// * `cost_per_scanned_byte` = $0.000011244 per vCPU-second ×
-    ///   `ms_per_scanned_byte` / 1,000 (1e-10 s per byte) = $1.1244e-15:
-    ///   Fargate has no scan price, but a scan occupies the vCPU-seconds it
-    ///   bills, for the time latency charges.
-    /// * `cost_per_memory_byte_second` = $0.000001235 per GB-second ÷ 2^30
-    ///   bytes per GB ≈ $1.1502e-15: the page says "on this page GB =
-    ///   1024^3 bytes".
-    /// * `cost_per_disk_byte_second` = 0: Fargate bills only ephemeral
-    ///   storage configured beyond the 20 GB every task gets, which a
-    ///   per-byte price cannot express, and the disk bytes plan selection
-    ///   counts (the raw data query-time scans read) are held by the data
-    ///   source, not by the task.
-    /// * `cost_per_provisioned_memory_byte_second` and
-    ///   `cost_per_provisioned_cpu_core_second` = 0: they belong to cost
-    ///   model 2, and Fargate's per-task billing is cost model 1. Under
-    ///   [`CostModel::ProvisionedCapacity`] every price this preset gives
-    ///   is 0, which [`PlanSelectionSettings::validate`] refuses.
-    ///
-    /// Not expressed by these per-second prices: the 1-minute billing
-    /// minimum per task ("Pricing is calculated per second with a 1-minute
-    /// minimum"), and the fixed task sizes a task is billed for (from 0.25
-    /// vCPU with 0.5 GB up), which round usage up to the next size.
-    pub fn aws_fargate_us_east_1(speed: ResourceSpeed) -> Self {
-        // US dollars per vCPU-second and per GB-second of memory, from the
-        // page above.
-        const DOLLARS_PER_VCPU_SECOND: f64 = 0.000_011_244;
-        const DOLLARS_PER_MEMORY_GB_SECOND: f64 = 0.000_001_235;
-        const BYTES_PER_GIB: f64 = (1u64 << 30) as f64;
-        Self {
-            cost_per_cpu_op: DOLLARS_PER_VCPU_SECOND * speed.ms_per_cpu_op / 1_000.0,
-            cost_per_scanned_byte: DOLLARS_PER_VCPU_SECOND * speed.ms_per_scanned_byte / 1_000.0,
-            cost_per_memory_byte_second: DOLLARS_PER_MEMORY_GB_SECOND / BYTES_PER_GIB,
-            cost_per_provisioned_memory_byte_second: 0.0,
-            cost_per_provisioned_cpu_core_second: 0.0,
-            cost_per_disk_byte_second: 0.0,
-        }
-    }
-}
-
-/// How fast one core does work; the latency check reads it.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResourceSpeed {
-    /// Milliseconds one CPU operation takes on one core.
-    pub ms_per_cpu_op: f64,
-    /// Milliseconds scanning one byte takes on one core.
-    pub ms_per_scanned_byte: f64,
-}
-
-impl ResourceSpeed {
-    /// 1 ns per operation and 0.1 ns per scanned byte, the times
-    /// [`ResourceUnitCost::illustrative`] prices: one cost unit is one
-    /// millisecond of one core.
-    pub fn illustrative() -> Self {
-        Self {
-            ms_per_cpu_op: 1e-6,
-            ms_per_scanned_byte: 1e-7,
-        }
-    }
-}
-
-/// How plan selection turns each valid candidate's [`ResourceUsage`] into a
-/// choice. Chosen by the deployment ([`PlanSelectionSettings::cost_model`]).
-/// In JSON, `{"usage_over_time": {...}}`, `{"provisioned_capacity": {...}}`
-/// or `{"cluster_capacity": {...}}`.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CostModel {
-    /// Cost model 1, pay-as-you-go: Σ unit cost × usage per second (CPU
-    /// operations, scanned bytes, memory byte-seconds, disk byte-seconds);
-    /// the cheapest valid candidate wins.
-    UsageOverTime(ResourceUnitCost),
-    /// Cost model 2, provisioned: unit cost × peak memory, peak CPU cores
-    /// and disk, per second; the cheapest valid candidate wins.
-    ProvisionedCapacity(ResourceUnitCost),
-    /// Cost model 3, the deployment's own cluster: no prices; memory, disk
-    /// and (when set) CPU cores are hard limits, and the objective chooses
-    /// among the candidates that fit.
-    ClusterCapacity(ClusterLimits),
-}
-
-/// A fixed cluster's capacity (cost model 3) and how to choose within it.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClusterLimits {
-    /// Memory available; a candidate whose peak memory is above it is invalid.
-    pub memory_bytes: u64,
-    /// Disk available; a candidate keeping more on disk is invalid.
-    pub disk_bytes: u64,
-    /// CPU cores available; `None` leaves cores unchecked.
-    pub cpu_cores: Option<u32>,
-    /// How to choose among the candidates that fit.
-    pub objective: ClusterObjective,
-}
-
-/// What cost model 3 optimizes among the candidates that fit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClusterObjective {
-    /// The smallest worst-query latency; ties by peak memory, then disk.
-    LowestLatency,
-    /// The smallest peak memory; ties by disk, then worst-query latency.
-    LeastMemory,
-    /// Report every candidate no other beats on peak memory, disk and
-    /// worst-query latency at once ([`Selection::front`]); select the
-    /// front's lowest-latency member.
-    ParetoFront,
-}
-
-/// The deployment's choices for plan selection (Stage 3): the cost model,
-/// how fast a core works, and how long one-off queries are spread over.
-/// Loadable from JSON (`stage_pipeline --plan-selection-settings <file>`);
-/// an omitted field takes its default, an unknown one is refused.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct PlanSelectionSettings {
-    /// How candidates are compared; default cost model 1 with
-    /// [`ResourceUnitCost::illustrative`].
-    pub cost_model: CostModel,
-    /// Time per operation and per scanned byte, for latency and cores;
-    /// default [`ResourceSpeed::illustrative`].
-    pub resource_speed: ResourceSpeed,
-    /// Seconds one-off, scheduled and unknown queries are spread over
-    /// (`invocations / horizon` per second); default 3,600.
-    pub non_repeating_query_horizon_seconds: f64,
-    /// The deployment's measured CPU time per unit of each operator; a node
-    /// with an entry is priced from it, every other node from the formulas
-    /// scaled by the calibration factor (module doc, "Measured operation
-    /// costs"). Also loads the earlier array of [`MeasuredOperationCost`].
-    /// Default empty: every node is priced from the formulas.
-    pub measured_operation_costs: MeasuredOperationCosts,
-    /// Externally established formula-to-measurement scale, held constant across
-    /// candidates. Must be finite and positive. None fits the complete generated
-    /// candidate catalog before pricing, preserving the default calibration policy.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub frozen_calibration_factor: Option<f64>,
-    /// Accept every query output regardless of its accuracy guarantee:
-    /// planning uses an accuracy model that accepts every output in place
-    /// of [`PlanningModels::accuracy`]. This field is the one built-in way
-    /// to ignore guarantees.
-    /// For comparing candidates on cost alone, e.g. a benchmark of sketch
-    /// plans with no analytical guarantee. Executability checks still apply.
-    /// Each output accepted only because of it, i.e. whose guarantee check
-    /// fails, is marked in the report
-    /// ([`AcceptedAccuracy::guarantee_check_rejection`]). JSON:
-    /// `"ignore_accuracy_guarantees": true`. Default `false`.
-    pub ignore_accuracy_guarantees: bool,
-}
-
-impl Default for PlanSelectionSettings {
-    fn default() -> Self {
-        Self {
-            cost_model: CostModel::UsageOverTime(ResourceUnitCost::illustrative()),
-            resource_speed: ResourceSpeed::illustrative(),
-            non_repeating_query_horizon_seconds: DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS,
-            measured_operation_costs: MeasuredOperationCosts::default(),
-            frozen_calibration_factor: None,
-            ignore_accuracy_guarantees: false,
-        }
-    }
-}
-
-impl PlanSelectionSettings {
-    /// Bad input: a negative or non-finite speed, a horizon that is not
-    /// positive, a bad measured table ([`MeasuredOperationCosts`]: a
-    /// negative or non-finite time or size, an entry naming two families,
-    /// a duplicate entry, or `ms_per_cpu_op` 0), or a price the chosen cost model reads that is negative or
-    /// not finite, or every such price 0 (cost model 3 reads none).
-    pub fn validate(&self) -> Result<(), AnalyticalCostError> {
-        if let Some(factor) = self.frozen_calibration_factor {
-            CalibrationFit::from_factor(factor)?;
-        }
-        for (name, value) in [
-            ("ms_per_cpu_op", self.resource_speed.ms_per_cpu_op),
-            (
-                "ms_per_scanned_byte",
-                self.resource_speed.ms_per_scanned_byte,
-            ),
-        ] {
-            if !value.is_finite() || value < 0.0 {
-                return Err(AnalyticalCostError::InvalidCalibration(name, value));
-            }
-        }
-        let horizon = self.non_repeating_query_horizon_seconds;
-        if !horizon.is_finite() || horizon <= 0.0 {
-            return Err(AnalyticalCostError::InvalidCalibration(
-                "non_repeating_query_horizon_seconds",
-                horizon,
-            ));
-        }
-        cost::measured::validate(
-            &self.measured_operation_costs,
-            self.resource_speed.ms_per_cpu_op,
-        )?;
-        let read = match &self.cost_model {
-            CostModel::UsageOverTime(p) => vec![
-                ("cost_per_cpu_op", p.cost_per_cpu_op),
-                ("cost_per_scanned_byte", p.cost_per_scanned_byte),
-                ("cost_per_memory_byte_second", p.cost_per_memory_byte_second),
-                ("cost_per_disk_byte_second", p.cost_per_disk_byte_second),
-            ],
-            CostModel::ProvisionedCapacity(p) => vec![
-                (
-                    "cost_per_provisioned_memory_byte_second",
-                    p.cost_per_provisioned_memory_byte_second,
-                ),
-                (
-                    "cost_per_provisioned_cpu_core_second",
-                    p.cost_per_provisioned_cpu_core_second,
-                ),
-                ("cost_per_disk_byte_second", p.cost_per_disk_byte_second),
-            ],
-            CostModel::ClusterCapacity(_) => return Ok(()),
-        };
-        for &(name, value) in &read {
-            if !value.is_finite() || value < 0.0 {
-                return Err(AnalyticalCostError::InvalidCalibration(name, value));
-            }
-        }
-        if read.iter().all(|(_, value)| *value == 0.0) {
-            return Err(AnalyticalCostError::ZeroCalibration);
-        }
-        Ok(())
-    }
-}
-
-/// A cost per second for a rejection reason: three decimals, or three
-/// significant digits in scientific notation when it is nonzero and below
-/// 0.001 (e.g. "2.361e-8" under [`ResourceUnitCost::aws_fargate_us_east_1`]'s
-/// dollars), so small costs do not all read "0.000".
-fn display_cost(cost_per_second: f64) -> String {
-    if cost_per_second != 0.0 && cost_per_second.abs() < 1e-3 {
-        format!("{cost_per_second:.3e}")
-    } else {
-        format!("{cost_per_second:.3}")
-    }
-}
-
-/// One node's price per second of wall time, with how it was measured. A
-/// node is one operator node of the candidate's physical plan DAG
-/// (`PhysicalASAPDAG`), keyed by its [`PhysicalASAPNodeId`] in
-/// [`CandidateCost::per_node`]; not a machine.
-#[derive(Debug, Clone, PartialEq)]
-pub struct NodeCost {
-    /// Its operator, as the measured table names it.
-    pub operator: OperatorKind,
-    /// When it runs: ingestion or query time.
-    pub timing: ExecutionTiming,
-    /// Its price per second under cost model 1; `None` under cost models 2
-    /// and 3, which price (or limit) the whole candidate's peaks.
-    pub cost_per_second: Option<f64>,
-    /// Core-seconds of CPU it takes per second of wall time: its CPU
-    /// operations and scanned bytes timed by [`ResourceSpeed`], what a
-    /// runtime measures it against. A query's fixed per-request cost
-    /// ([`MeasuredOperationCosts::ns_per_evaluation`]) is counted on the
-    /// node the query reads first.
-    pub cpu_core_seconds_per_second: f64,
-    /// The number of consumers it is computed for (1 when materialized,
-    /// [`computations`]).
-    pub multiplier: u64,
-    /// How it was measured, e.g. "scan 1000 samples; x 1.0000/s; keeps
-    /// ... bytes": one computation's work, the times it is computed per
-    /// second and what it keeps.
-    pub detail: String,
-    /// Whether its CPU operations were priced from the measured table or
-    /// from the formulas.
-    pub price_source: NodePriceSource,
-}
-
-/// One candidate's usage and price over the whole workload: `usage` is
-/// the whole candidate's, `per_node` one price per operator node of its
-/// physical plan DAG.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CandidateCost {
-    pub usage: ResourceUsage,
-    /// Its price per second under cost model 1 or 2 (under cost model 1, the
-    /// sum of its nodes' charges plus request overhead for queries without
-    /// operator nodes); `None` under cost model 3.
-    pub cost_per_second: Option<f64>,
-    /// The unit of `cost_per_second`: always [`COST_UNIT`].
-    pub cost_unit: &'static str,
-    /// Where its prices came from, from its nodes' [`NodeCost::price_source`]:
-    /// [`COST_SOURCE`] (all formulas), [`MEASURED_COST_SOURCE`] (all
-    /// measured) or [`MIXED_COST_SOURCE`].
-    pub source: &'static str,
-    /// Each operator node of the candidate's physical plan DAG, by its id
-    /// in that DAG, with its price.
-    pub per_node: BTreeMap<PhysicalASAPNodeId, NodeCost>,
-}
-
-/// One query's latency per evaluation, its longest chain of work (module
-/// doc, "Latency"): the compaction of the newest window of a state it reads
-/// from ingestion time, then the query's own work, each on a full core.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct QueryLatency {
-    /// Milliseconds to merge the ingest workers' partial copies of the
-    /// newest window of the largest ingestion-time state the query reads;
-    /// 0 when ingestion fits on one core or the query reads none.
-    pub compaction_ms: f64,
-    /// Milliseconds of the query-time work the query reaches, each node
-    /// once.
-    pub query_ms: f64,
-}
-
-impl QueryLatency {
-    /// `compaction_ms + query_ms`: what is checked against the query's
-    /// `max_latency_ms`.
-    pub fn total_ms(&self) -> f64 {
-        self.compaction_ms + self.query_ms
-    }
-}
-
-/// The first query whose latency per evaluation is over its
-/// `max_latency_ms` bound or, with no bound broken, over its repeat
-/// interval (a query evaluated every `I` ms whose evaluation takes longer
-/// than `I` falls further behind with every evaluation), as a rejection
-/// cause and reason.
-fn latency_violation(
-    cost: &CandidateCost,
-    entries: &[QueryWorkloadEntry],
-) -> Option<(RejectionCause, String)> {
-    let per_query = || cost.usage.latency_per_query.iter().zip(entries).enumerate();
-    let latency_text = |query: usize, latency: &QueryLatency| {
-        format!(
-            "q{}: latency {:.1} ms per evaluation (compaction {:.1} ms + query {:.1} ms)",
-            query + 1,
-            latency.total_ms(),
-            latency.compaction_ms,
-            latency.query_ms
-        )
-    };
-    let over_bound =
-        per_query().find_map(
-            |(query, (latency, entry))| match entry.requirements.max_latency_ms {
-                Some(bound) if latency.total_ms() > bound => Some((
-                    RejectionCause::LatencyBoundExceeded,
-                    format!(
-                        "{} is over its {bound} ms bound",
-                        latency_text(query, latency)
-                    ),
-                )),
-                _ => None,
-            },
-        );
-    over_bound.or_else(|| {
-        per_query().find_map(|(query, (latency, entry))| {
-            match entry.recurrence.fixed_interval_ms() {
-                Some(interval_ms) if latency.total_ms() > interval_ms as f64 => Some((
-                    RejectionCause::LatencyOverRepeatInterval,
-                    format!(
-                        "{} is over its {interval_ms} ms repeat interval, so its evaluations \
-                         cannot keep up",
-                        latency_text(query, latency)
-                    ),
-                )),
-                _ => None,
-            }
-        })
-    })
-}
-
-/// Peak memory above which a candidate's report carries a warning when the
-/// deployment declares no memory capacity: 10^12 bytes (1 TB), more than
-/// one large machine holds.
-pub const LARGE_PEAK_MEMORY_BYTES: u64 = 1_000_000_000_000;
-
-/// A warning when `peak_memory_bytes` is over [`LARGE_PEAK_MEMORY_BYTES`]
-/// and `cost_model` declares no memory capacity (cost models 1 and 2). Under
-/// cost model 3 the cluster's memory is declared and a candidate over it is
-/// rejected ([`RejectionCause::OverClusterCapacity`]), so there is none.
-pub fn large_peak_memory_warning(peak_memory_bytes: u64, cost_model: &CostModel) -> Option<String> {
-    match cost_model {
-        CostModel::ClusterCapacity(_) => None,
-        CostModel::UsageOverTime(_) | CostModel::ProvisionedCapacity(_) => {
-            (peak_memory_bytes > LARGE_PEAK_MEMORY_BYTES).then(|| {
-                format!(
-                    "peak memory {} bytes is over {LARGE_PEAK_MEMORY_BYTES} bytes and the \
-                     deployment declares no memory capacity to check it against",
-                    peak_memory_bytes
-                )
-            })
-        }
-    }
-}
-
-/// Each entry's accuracy target, as the per-query targets Stage 3 checks.
-pub(crate) fn accuracy_targets(entries: &[QueryWorkloadEntry]) -> Vec<AccuracyTarget> {
-    entries
-        .iter()
-        .map(|entry| entry.requirements.accuracy.clone())
-        .collect()
-}
-
-/// A candidate that was not selected: its id, why it lost
-/// ([`RejectionCause`]) and a one-line reason with the numbers.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Rejection {
-    pub id: String,
-    pub cause: RejectionCause,
-    pub reason: String,
-}
-
-/// Why Stage 3 did not select a candidate. The first ten mean the
-/// candidate failed a check and is invalid ([`Self::failed_a_check`]); the
-/// rest mean it was valid and lost under the cost model. JSON: the
-/// snake_case variant name, e.g. `"costlier"`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RejectionCause {
-    /// Its summaries, resized for the queries' failure probabilities, do
-    /// not rebuild into a plan.
-    FailureProbabilityResizeFailed,
-    /// A query's accuracy target is not met: its output's guarantee misses
-    /// it and no deployment evidence meets it.
-    AccuracyTargetMissed,
-    /// A query's plan reads a Count-Min sketch whose update weights are not
-    /// proven non-negative (e.g. samples of a metric declared neither a
-    /// counter nor non-negative). The executor cannot run it, so the deployment's accuracy
-    /// model cannot accept it either.
-    CountMinWeightsNotProvenNonNegative,
-    /// It reduces each series' raw data samples with an exact aggregate the
-    /// executor has no kernel for (e.g. `stddev_over_time`), so the
-    /// executor cannot compile it
-    /// ([`asap_types::ir::operator::agg_has_exact_per_entity_kernel`]).
-    PerEntityAggregateNotExecutable,
-    /// A query's output has no accuracy guarantee (Stage 1 has no
-    /// analytical rule for it and the deployment's evidence supplies none),
-    /// and the deployment's accuracy model did not accept it directly
-    /// ([`AccuracyModel::accepts_output_regardless_of_guarantee`]).
-    NoAccuracyGuarantee,
-    /// It scans raw data at query time in a deployment that does not
-    /// retain raw data.
-    RawDataNotRetained,
-    /// A query's latency is over its `max_latency_ms` bound.
-    LatencyBoundExceeded,
-    /// A repeating query's latency per evaluation is over its repeat
-    /// interval, so its evaluations cannot keep up; checked whether or not
-    /// it has a latency bound.
-    LatencyOverRepeatInterval,
-    /// Under cost model 3, its usage is over one of the cluster's limits.
-    OverClusterCapacity,
-    /// Under cost models 1 and 2, its price is higher than the selected
-    /// candidate's.
-    Costlier,
-    /// Under cost model 3's `lowest-latency`, it is slower than the
-    /// selected candidate.
-    Slower,
-    /// Under cost model 3's `least-memory`, it uses more memory than the
-    /// selected candidate.
-    MoreMemory,
-    /// Under cost model 3's `pareto-front`, it is on the Pareto front but
-    /// not its lowest-latency member, which is selected.
-    NotLowestLatencyOnParetoFront,
-    /// Under cost model 3's `pareto-front`, another candidate dominates it.
-    Dominated,
-    /// It ties with the selected candidate and comes later in enumeration
-    /// order.
-    TiedLostOnEnumerationOrder,
-}
-
-impl RejectionCause {
-    /// Whether the candidate failed a check (executability, accuracy, raw
-    /// data, latency bound, repeat interval or cluster capacity) rather than losing under the
-    /// cost model.
-    pub fn failed_a_check(self) -> bool {
-        matches!(
-            self,
-            Self::FailureProbabilityResizeFailed
-                | Self::AccuracyTargetMissed
-                | Self::CountMinWeightsNotProvenNonNegative
-                | Self::PerEntityAggregateNotExecutable
-                | Self::NoAccuracyGuarantee
-                | Self::RawDataNotRetained
-                | Self::LatencyBoundExceeded
-                | Self::LatencyOverRepeatInterval
-                | Self::OverClusterCapacity
-        )
-    }
-}
-
-/// The accuracy Stage 3 accepted for one query of a valid candidate: the
-/// metric the query's target set (if any) and the metric of the guarantee
-/// that met it. With no metric set, any metric meeting the target's ε, δ
-/// and scope is accepted, so ε means different things across candidates
-/// (e.g. 0.01 of the true value vs 0.01 of the rank); this record makes
-/// the accepted metric visible.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AcceptedAccuracy {
-    /// The target's metric; `None` when the user did not set one.
-    pub target_metric: Option<AccuracyMetric>,
-    /// The metric the accepted guarantee is stated in; `None` for an exact
-    /// output, which meets every metric, and for one the deployment's model
-    /// accepted regardless of its guarantee (no guarantee was checked).
-    pub accepted_metric: Option<AccuracyMetric>,
-    /// Whether the deployment's accuracy model accepted the output directly,
-    /// whatever its guarantee says
-    /// ([`AccuracyModel::accepts_output_regardless_of_guarantee`]), as
-    /// every output is with `ignore_accuracy_guarantees`; `false` when its
-    /// guarantee was checked and met the target.
-    pub accepted_regardless_of_guarantee: bool,
-    /// When accepted regardless of its guarantee, the cause the guarantee
-    /// check would have rejected it with
-    /// ([`RejectionCause::NoAccuracyGuarantee`] or
-    /// [`RejectionCause::AccuracyTargetMissed`]): the output was accepted
-    /// only because of the accuracy model (e.g.
-    /// [`PlanSelectionSettings::ignore_accuracy_guarantees`]). `None` when
-    /// its guarantee meets the target.
-    pub guarantee_check_rejection: Option<RejectionCause>,
-    /// The sketch algorithms the query's output reads, in plan order
-    /// (e.g. `["Kll"]`); empty for an exact plan.
-    pub sketches: Vec<String>,
-}
-
-impl std::fmt::Display for AcceptedAccuracy {
-    /// E.g. `metric not set; accepted rank (Kll)`, or
-    /// `metric relative; accepted relative (DDSketch)`, or
-    /// `metric rank; accepted by the deployment's accuracy model regardless of guarantee (Kll)`.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = |metric: AccuracyMetric| {
-            serde_json::to_value(metric)
-                .ok()
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .unwrap_or_else(|| format!("{metric:?}"))
-        };
-        match self.target_metric {
-            None => write!(f, "metric not set; ")?,
-            Some(metric) => write!(f, "metric {}; ", name(metric))?,
-        }
-        match self.accepted_metric {
-            _ if self.accepted_regardless_of_guarantee => {
-                write!(
-                    f,
-                    "accepted by the deployment's accuracy model regardless of guarantee"
-                )?;
-                if let Some(cause) = self.guarantee_check_rejection {
-                    write!(f, ", ignoring a failed guarantee check ({cause:?})")?;
-                }
-            }
-            None => write!(f, "accepted exact")?,
-            Some(metric) => write!(f, "accepted {}", name(metric))?,
-        }
-        if !self.sketches.is_empty() {
-            write!(f, " ({})", self.sketches.join(", "))?;
-        }
-        Ok(())
-    }
-}
-
-/// Stage 3's result: the selected candidate and the plan to run, with
-/// what Stage 3 kept of the other candidates. Keeping every candidate
-/// ([`PlanSelector::new`]'s `keep_every_candidate`, [`select_plan`]),
-/// `costs` and `accepted` list every valid candidate and `rejected` every
-/// other one; otherwise only the selected candidate and, under
-/// [`ClusterObjective::ParetoFront`], the front are kept, and `rejected`
-/// holds the first rejection of each cause.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Selection {
-    pub selected: String,
-    /// The selected candidate's query roots with every weight requirement
-    /// Stage 3 confirmed made a proof ([`with_confirmed_weights`]): the plan
-    /// to run. The Stage 2 candidate keeps the open requirement.
-    pub plan: Vec<QueryRoot>,
-    pub costs: BTreeMap<String, CandidateCost>,
-    /// For each valid candidate, per query, the accuracy Stage 3 accepted.
-    pub accepted: BTreeMap<String, Vec<AcceptedAccuracy>>,
-    pub rejected: Vec<Rejection>,
-    /// Under [`ClusterObjective::ParetoFront`], the valid candidates no
-    /// other beats on peak memory, disk and worst-query latency at once, in
-    /// candidate order; empty under every other objective and cost model.
-    pub front: Vec<String>,
-    /// For each tumbling-pane chain of the selected candidate kept beyond
-    /// one evaluation (maintained at ingestion time, or built at query time
-    /// and kept across evaluations), by node id in its physical DAG: how
-    /// far back from the newest evaluation the runtime must keep its
-    /// completed panes, in milliseconds. It is how far its panes reach
-    /// back: the offset its newest pane ends before the evaluation (`[60m]
-    /// offset 10m`: 10 min), plus the chain's window, plus the longest
-    /// range-evaluation span of its readers, so the earliest step of the
-    /// next request still finds its panes; without an offset or range
-    /// evaluations, just the window. Empty when the plan keeps no panes.
-    pub pane_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
-    /// What the search behind this selection checked and discarded.
-    pub search: SearchReport,
-}
-
-/// What the search behind a selection checked and discarded, for the
-/// selection report.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct SearchReport {
-    /// The physical candidates Stage 3 checked, valid or not.
-    pub candidates_checked: u64,
-    /// Under cost models 1 and 2, the cost per second of the cheapest
-    /// valid candidate priced more than rounding (1e-12 of it) above the
-    /// cheapest: how close the selection came to a tie. Candidates within
-    /// rounding of the cheapest cost the same. `None` when every valid
-    /// candidate costs the same, under cost model 3, or for a combination
-    /// of components.
-    pub runner_up_cost_per_second: Option<f64>,
-    /// The joint candidate selection engine used for this run.
-    #[serde(default)]
-    pub algorithm: SearchAlgorithm,
-    /// The selected plan's cost per second (Stage 3's exact cost); `None`
-    /// when no plan was selected.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub incumbent_cost: Option<f64>,
-    /// Joint selection metrics. Optimality is limited to the generated finite
-    /// catalog and configured cost and constraint models.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub candidate_connections: Option<CandidateConnectionReport>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct CandidateConnectionReport {
-    /// Pane-width domain of the most recently reported complete inventory.
-    /// Inventory counts form one snapshot from this domain, even if a later
-    /// expansion timed out. This does not certify full-domain optimality.
-    #[serde(default)]
-    pub inventory_pane_width_domain: Option<String>,
-    /// Width domains attempted in order; state/physical catalogs are rebuilt per round.
-    #[serde(default)]
-    pub pane_width_rounds: Vec<String>,
-    /// Some legal widths remain unsearched; restricted optima are not global certificates.
-    #[serde(default)]
-    pub pane_widths_pending: bool,
-    /// Number of distinct allocated compatible-supplier lists.
-    #[serde(default)]
-    pub supplier_sets: usize,
-    /// Supplier IDs physically stored across shared lists (not logical edges).
-    #[serde(default)]
-    pub stored_supplier_ids: usize,
-    /// Conservative zero bounds used to stay within the solver coefficient range.
-    #[serde(default)]
-    pub rounded_down_cost_bounds: usize,
-    /// Time spent obtaining a validated incumbent from the seed width domain.
-    #[serde(default)]
-    pub seed_planning_ms: f64,
-    /// Post-seed expansion/selection wall time, including interrupted rounds.
-    #[serde(default)]
-    pub full_planning_ms: f64,
-    #[serde(default)]
-    pub seed_selected: bool,
-    /// Full-width generation completed; distinct from exhaustive assignment traversal.
-    #[serde(default)]
-    pub full_catalog_completed: bool,
-    #[serde(default)]
-    pub seed_fallback_reason: Option<String>,
-    #[serde(default)]
-    pub independent_components: usize,
-    #[serde(default)]
-    pub catalog_exhausted: Option<bool>,
-    #[serde(default)]
-    pub evaluation_complete: Option<bool>,
-    #[serde(default)]
-    pub structurally_removed_candidates: usize,
-    #[serde(default)]
-    pub structurally_removed_connections: usize,
-    pub catalog_scope: String,
-    pub status: String,
-    pub groups: usize,
-    pub logical_candidates: usize,
-    pub immediate_candidates: usize,
-    pub physical_configurations: usize,
-    pub compatible_connections: usize,
-    pub output_references: usize,
-    pub refinements: usize,
-    pub max_refinements: usize,
-    pub time_limit_ms: u64,
-    pub lower_bound: Option<f64>,
-    #[serde(default)]
-    pub objective: String,
-    #[serde(default)]
-    pub calibration_scope: String,
-    #[serde(default)]
-    pub calibration_factor: f64,
-    pub relative_gap: Option<f64>,
-    /// Memo population and concrete state sharing only; excludes frontend
-    /// lowering, initial memo identity, and Pass 1 local rule generation.
-    pub memo_expansion_ms: f64,
-    /// Initial memo construction and Pass 1 generation; absent when supplied by the caller.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local_candidate_generation_ms: Option<f64>,
-    pub inventory_construction_ms: f64,
-    pub search_and_validation_ms: f64,
-    pub model_construction_ms: f64,
-    pub solver_ms: f64,
-    pub validation_ms: f64,
-    pub solve_calls: usize,
-    /// Restricted query-time proposals priced completely inside the MILP.
-    #[serde(default)]
-    pub direct_cost_solve_calls: usize,
-    /// Direct solves jointly selecting supplier-dependent pricing options.
-    #[serde(default)]
-    pub joint_price_solve_calls: usize,
-    /// Feasible direct proposals whose objective agrees with the evaluator.
-    #[serde(default)]
-    pub direct_cost_validated_plans: usize,
-    #[serde(default)]
-    pub direct_cost_best_validated_cost: Option<f64>,
-    /// Direct-cost contexts rejected by numerical or modeling support checks.
-    #[serde(default)]
-    pub direct_cost_fallback_reasons: Vec<String>,
-    pub peak_milp_variables: usize,
-    pub peak_milp_constraints: usize,
-    #[serde(default)]
-    pub validation_rejection_counts: BTreeMap<String, usize>,
-    /// Proven query-local failures excluded across unrelated workload choices.
-    #[serde(default)]
-    pub certified_query_cuts: usize,
-    #[serde(default)]
-    pub early_query_pruning_ms: f64,
-    #[serde(default)]
-    pub early_query_pruning_counts: BTreeMap<String, usize>,
-    #[serde(default)]
-    pub early_query_pruning_examples: Vec<String>,
-    /// Up to eight representative failures, with bounded reason lengths.
-    #[serde(default)]
-    pub validation_rejection_examples: Vec<String>,
-}
-
-/// How the Stage 1 to Stage 3 search explores the plans
-/// ([`Stage1ToStage3Search::search`]).
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
-)]
-#[serde(rename_all = "kebab-case")]
-pub enum SearchAlgorithm {
-    /// Joint physical candidate activation and connection selection.
-    #[default]
-    CandidateConnections,
-}
-
-#[derive(Debug, Error)]
-pub enum SelectionError {
-    /// Evaluation stopped without proving feasibility or infeasibility.
-    #[error("candidate evaluation deadline exceeded")]
-    EvaluationDeadlineExceeded,
-    /// Bad input: the deployment's plan selection settings
-    /// ([`PlanSelectionSettings::validate`]).
-    #[error("plan selection settings: {0}")]
-    InvalidSettings(AnalyticalCostError),
-    /// Bad input: the caller gave a different number of workload entries
-    /// than the candidate has query roots.
-    #[error("candidate {candidate} has {roots} roots but {entries} workload entries were given")]
-    EntryCount {
-        candidate: String,
-        roots: usize,
-        entries: usize,
-    },
-    /// Bad input: the deployment's capabilities contradict the data
-    /// workload ([`asap_logical_asap_optimization::DeploymentCapabilities::validate`]).
-    #[error("deployment capabilities: {0}")]
-    InvalidDeploymentCapabilities(DeploymentCapabilitiesError),
-    #[error("candidate {candidate}, node {node:?}: {error}")]
-    Cost {
-        candidate: String,
-        node: PhysicalASAPNodeId,
-        error: AnalyticalCostError,
-    },
-    #[error("no valid candidate: {0:?}")]
-    NoValidCandidate(Vec<Rejection>),
-    /// The memo search's MILP solver failed.
-    #[error("MILP solver: {0}")]
-    Solver(String),
-}
-
-/// Stage 3 (plan selection): reject candidates that the executor cannot
-/// run or that miss a query's accuracy target or latency bound (or, under
-/// cost model 3, the cluster's capacity), measure the rest's resource
-/// usage per second and choose one under the deployment's cost model
-/// (`models.plan_selection`): the cheapest under cost models 1 and 2, the
-/// best by the cluster objective under cost model 3 (the first on ties). `entries[i]` is the workload
-/// entry of `candidate.roots[i]`: its accuracy target, its latency bound and
-/// how often it is evaluated. Every candidate is kept in the selection
-/// ([`PlanSelector`] with `keep_every_candidate`).
-pub fn select_plan(
-    cands: &[PhysicalWorkloadPlan],
-    entries: &[QueryWorkloadEntry],
-    data: &DataWorkload,
-    models: PlanningModels<'_>,
-) -> Result<Selection, SelectionError> {
-    let mut selector = PlanSelector::new(entries, data, models, true)?;
-    if selector.needs_calibration() {
-        let mut fit = CalibrationFit::default();
-        for candidate in cands {
-            fit.add(selector.calibration_fit(candidate)?);
-        }
-        selector.set_calibration(fit);
-    }
-    for candidate in cands {
-        selector.offer(candidate)?;
-    }
-    selector.finish().map(|(selection, _)| selection)
-}
-
-/// Stage 3 over candidates offered one at a time, in candidate order
-/// ([`select_plan`] over all of them at once). Each candidate is checked
-/// and priced as it is offered; only the best so far is kept (under
-/// [`ClusterObjective::ParetoFront`], the Pareto front so far), unless
-/// `keep_every_candidate`. Either way it selects what [`select_plan`]
-/// selects over the same candidates.
-pub struct PlanSelector<'a> {
-    entries: &'a [QueryWorkloadEntry],
-    data: &'a DataWorkload,
-    models: PlanningModels<'a>,
-    targets: Vec<AccuracyTarget>,
-    recurrence: Vec<QueryRecurrence>,
-    range_evaluations: Vec<Option<RangeEvaluation>>,
-    ranking: Ranking,
-    keep_every_candidate: bool,
-    candidates_checked: u64,
-    costs: BTreeMap<String, CandidateCost>,
-    accepted: BTreeMap<String, Vec<AcceptedAccuracy>>,
-    rejected: Vec<Rejection>,
-    /// The valid candidates kept, in candidate order: every one, the best
-    /// so far, or the Pareto front so far.
-    kept: Vec<KeptCandidate>,
-    /// The factor that calibrates the formulas' CPU time to the measured
-    /// table's ([`Self::set_calibration`]); 1 without a measured table.
-    formula_scale: f64,
-    /// Under a price ranking, the cheapest price of the valid candidates
-    /// offered, and the cheapest more than [`ROUNDING`] above it.
-    cheapest: Option<f64>,
-    runner_up: Option<f64>,
-}
-
-/// Prices within this fraction of each other are the same sum of charges
-/// rounded differently (Stage 3's tie tolerance is 1e-9).
-const ROUNDING: f64 = 1e-12;
-
-/// A valid candidate the selector keeps: as Stage 2 built it, and sized
-/// for its queries' failure probabilities as Stage 3 priced it.
-struct KeptCandidate {
-    built: PhysicalWorkloadPlan,
-    sized: PhysicalWorkloadPlan,
-}
-
-impl<'a> PlanSelector<'a> {
-    /// A selector for the workload `entries` over `data` under `models`.
-    /// Bad settings or deployment capabilities are an error here, before
-    /// any candidate.
-    pub fn new(
-        entries: &'a [QueryWorkloadEntry],
-        data: &'a DataWorkload,
-        models: PlanningModels<'a>,
-        keep_every_candidate: bool,
-    ) -> Result<Self, SelectionError> {
-        models
-            .plan_selection
-            .validate()
-            .map_err(SelectionError::InvalidSettings)?;
-        models
-            .deployment_capabilities
-            .validate(data)
-            .map_err(SelectionError::InvalidDeploymentCapabilities)?;
-        Ok(Self {
-            entries,
-            data,
-            models,
-            targets: accuracy_targets(entries),
-            recurrence: entries.iter().map(|e| e.recurrence.clone()).collect(),
-            range_evaluations: entries.iter().map(|e| e.range_evaluation).collect(),
-            ranking: Ranking::of(&models.plan_selection.cost_model),
-            keep_every_candidate,
-            candidates_checked: 0,
-            costs: BTreeMap::new(),
-            accepted: BTreeMap::new(),
-            rejected: Vec::new(),
-            kept: Vec::new(),
-            formula_scale: models
-                .plan_selection
-                .frozen_calibration_factor
-                .unwrap_or(1.0),
-            cheapest: None,
-            runner_up: None,
-        })
-    }
-
-    /// Whether the deployment's measured cost table prices some operator,
-    /// so the formulas' CPU time is calibrated to it: one factor for every
-    /// candidate, fitted over the nodes the table prices in every candidate
-    /// that passes the checks before pricing. The caller then gives every
-    /// candidate to [`Self::calibration_fit`], adds up the fits and passes
-    /// the sum to [`Self::set_calibration`] before the first
-    /// [`Self::offer`].
-    pub fn needs_calibration(&self) -> bool {
-        self.models
-            .plan_selection
-            .frozen_calibration_factor
-            .is_none()
-            && !self
-                .models
-                .plan_selection
-                .measured_operation_costs
-                .operators
-                .is_empty()
-    }
-
-    /// `candidate`'s part of the calibration fit: its measured nodes' CPU
-    /// time, as measured and as the formulas price it, when it passes the
-    /// checks before pricing; nothing otherwise.
-    pub fn calibration_fit(
-        &self,
-        candidate: &PhysicalWorkloadPlan,
-    ) -> Result<CalibrationFit, SelectionError> {
-        if candidate.roots.len() != self.entries.len() {
-            return Err(SelectionError::EntryCount {
-                candidate: candidate.id.clone(),
-                roots: candidate.roots.len(),
-                entries: self.entries.len(),
-            });
-        }
-        let Ok((sized, _)) = checked_candidate(candidate, &self.targets, self.data, &self.models)
-        else {
-            return Ok(CalibrationFit::default());
-        };
-        let nodes = node_map(&sized.dag);
-        let kept_chains = kept_pane_chains(&sized.dag);
-        if !self.models.deployment_capabilities.raw_data_retained
-            && raw_data_violation(&sized.dag, &kept_chains).is_some()
-        {
-            return Ok(CalibrationFit::default());
-        }
-        let (_, fit) = price_at_scale(
-            &sized.dag,
-            &nodes,
-            &kept_chains,
-            &self.recurrence,
-            &self.range_evaluations,
-            self.data,
-            self.models.plan_selection,
-            1.0,
-        )
-        .map_err(|(node, error)| SelectionError::Cost {
-            candidate: candidate.id.clone(),
-            node,
-            error,
-        })?;
-        Ok(fit)
-    }
-
-    /// Calibrate the formulas with `fit`, the sum of every candidate's
-    /// [`Self::calibration_fit`].
-    pub fn set_calibration(&mut self, fit: CalibrationFit) {
-        self.formula_scale = self
-            .models
-            .plan_selection
-            .frozen_calibration_factor
-            .unwrap_or_else(|| fit.factor());
-    }
-
-    /// Check and price `candidate`, the next in candidate order, and keep
-    /// it if it can still be selected.
-    pub fn offer(&mut self, candidate: &PhysicalWorkloadPlan) -> Result<(), SelectionError> {
-        self.offer_before(candidate, None)
-    }
-
-    /// A stopped compiler is not evidence that the candidate is invalid.
-    pub fn offer_before(
-        &mut self,
-        candidate: &PhysicalWorkloadPlan,
-        deadline: Option<std::time::Instant>,
-    ) -> Result<(), SelectionError> {
-        let check_deadline = || {
-            if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
-                Err(SelectionError::EvaluationDeadlineExceeded)
-            } else {
-                Ok(())
-            }
-        };
-        check_deadline()?;
-        if candidate.roots.len() != self.entries.len() {
-            return Err(SelectionError::EntryCount {
-                candidate: candidate.id.clone(),
-                roots: candidate.roots.len(),
-                entries: self.entries.len(),
-            });
-        }
-        self.candidates_checked += 1;
-        let (sized, accepted_accuracy) =
-            match checked_candidate(candidate, &self.targets, self.data, &self.models) {
-                Ok(checked) => checked,
-                Err(failed) => {
-                    self.reject(&candidate.id, failed.cause, failed.reason);
-                    return Ok(());
-                }
-            };
-        // Built once per candidate for the raw-data check and pricing.
-        let nodes = node_map(&sized.dag);
-        let kept_chains = kept_pane_chains(&sized.dag);
-        if !self.models.deployment_capabilities.raw_data_retained {
-            if let Some(reason) = raw_data_violation(&sized.dag, &kept_chains) {
-                self.reject(&candidate.id, RejectionCause::RawDataNotRetained, reason);
-                return Ok(());
-            }
-        }
-        let settings = self.models.plan_selection;
-        let (cost, _) = price_at_scale(
-            &sized.dag,
-            &nodes,
-            &kept_chains,
-            &self.recurrence,
-            &self.range_evaluations,
-            self.data,
-            settings,
-            self.formula_scale,
-        )
-        .map_err(|(node, error)| SelectionError::Cost {
-            candidate: candidate.id.clone(),
-            node,
-            error,
-        })?;
-        let violation =
-            latency_violation(&cost, self.entries).or_else(|| match &settings.cost_model {
-                CostModel::ClusterCapacity(limits) => capacity_violation(&cost.usage, limits)
-                    .map(|reason| (RejectionCause::OverClusterCapacity, reason)),
-                _ => None,
-            });
-        if let Some((cause, reason)) = violation {
-            self.reject(&candidate.id, cause, reason);
-            return Ok(());
-        }
-        self.track_runner_up(&cost);
-        if !self.keep_every_candidate {
-            let kept_cost = |kept: &KeptCandidate| &self.costs[&kept.built.id];
-            let selectable = match self.ranking {
-                // A candidate another dominates is never on the front, and
-                // one it dominates leaves it.
-                Ranking::Front => {
-                    let latency = worst_latency_ms(&cost.usage);
-                    let dominated_by = |kept: &KeptCandidate| {
-                        let usage = &kept_cost(kept).usage;
-                        dominates_at((usage, worst_latency_ms(usage)), (&cost.usage, latency))
-                    };
-                    !self.kept.iter().any(dominated_by)
-                }
-                // Ties keep the earlier candidate.
-                _ => self
-                    .kept
-                    .first()
-                    .is_none_or(|best| self.ranking.better(&cost, kept_cost(best))),
-            };
-            if !selectable {
-                return Ok(());
-            }
-        }
-        check_deadline()?;
-        if !self.keep_every_candidate {
-            let kept_cost = |kept: &KeptCandidate| &self.costs[&kept.built.id];
-            let dominated: Vec<bool> = self
-                .kept
-                .iter()
-                .map(|kept| match self.ranking {
-                    Ranking::Front => dominates(&cost.usage, &kept_cost(kept).usage),
-                    _ => true,
-                })
-                .collect();
-            let mut dominated = dominated.into_iter();
-            let (costs, accepted) = (&mut self.costs, &mut self.accepted);
-            self.kept.retain(|kept| {
-                let drop = dominated.next().unwrap_or(false);
-                if drop {
-                    costs.remove(&kept.built.id);
-                    accepted.remove(&kept.built.id);
-                }
-                !drop
-            });
-        }
-        self.costs.insert(candidate.id.clone(), cost);
-        self.accepted
-            .insert(candidate.id.clone(), accepted_accuracy);
-        self.kept.push(KeptCandidate {
-            built: candidate.clone(),
-            sized,
-        });
-        Ok(())
-    }
-
-    /// Whether a candidate Stage 1 candidate `from_logical` implements is
-    /// kept: it may still be selected (or every candidate is kept).
-    pub fn keeps_from_logical(&self, from_logical: &str) -> bool {
-        self.kept
-            .iter()
-            .any(|kept| kept.built.from_logical == from_logical)
-    }
-
-    /// The selection over every candidate offered, and the selected
-    /// candidate as Stage 2 built it (the selection's plan is it sized for
-    /// its queries' failure probabilities).
-    pub fn finish(mut self) -> Result<(Selection, PhysicalWorkloadPlan), SelectionError> {
-        let ranking = self.ranking;
-        let valid_costs: Vec<&CandidateCost> = self
-            .kept
-            .iter()
-            .map(|kept| &self.costs[&kept.built.id])
-            .collect();
-        let Some((best, front)) = choose(ranking, &valid_costs) else {
-            return Err(SelectionError::NoValidCandidate(self.rejected));
-        };
-        let id = |index: usize| self.kept[index].built.id.clone();
-        let selected = id(best);
-        let front: Vec<String> = front.into_iter().map(id).collect();
-        for kept in &self.kept {
-            let id = &kept.built.id;
-            if *id != selected {
-                let (cause, reason) = ranking.lost_reason(id, &selected, &self.costs, &front);
-                self.rejected.push(Rejection {
-                    id: id.clone(),
-                    cause,
-                    reason,
-                });
-            }
-        }
-        let KeptCandidate { built, sized } = self.kept.swap_remove(best);
-        let plan = with_confirmed_weights(&sized.roots, self.data);
-        let pane_retention_ms = pane_retention_ms(
-            &sized.dag,
-            &query_reach(&sized.dag, &node_map(&sized.dag)),
-            &self.range_evaluations,
-        );
-        let incumbent_cost = self.costs.get(&selected).and_then(|c| c.cost_per_second);
-        let selection = Selection {
-            selected,
-            plan,
-            costs: self.costs,
-            accepted: self.accepted,
-            rejected: self.rejected,
-            front,
-            pane_retention_ms,
-            search: SearchReport {
-                candidates_checked: self.candidates_checked,
-                runner_up_cost_per_second: self.runner_up,
-                incumbent_cost,
-                ..SearchReport::default()
-            },
-        };
-        Ok((selection, built))
-    }
-
-    /// Under a price ranking, fold the price of valid candidate `cost`
-    /// into the cheapest price and the runner-up ([`ROUNDING`]).
-    fn track_runner_up(&mut self, cost: &CandidateCost) {
-        let (Ranking::Price, Some(price)) = (self.ranking, cost.cost_per_second) else {
-            return;
-        };
-        let Some(cheapest) = self.cheapest else {
-            self.cheapest = Some(price);
-            return;
-        };
-        let rounding = ROUNDING * cheapest.abs();
-        let runner_up = if price < cheapest - rounding {
-            self.cheapest = Some(price);
-            cheapest
-        } else if price <= cheapest + rounding {
-            self.cheapest = Some(cheapest.min(price));
-            return;
-        } else {
-            price
-        };
-        self.runner_up = Some(self.runner_up.map_or(runner_up, |r| r.min(runner_up)));
-    }
-
-    /// Record that candidate `id` failed a check: every rejection when
-    /// keeping every candidate, otherwise the first of each cause.
-    fn reject(&mut self, id: &str, cause: RejectionCause, reason: String) {
-        if self.keep_every_candidate || !self.rejected.iter().any(|r| r.cause == cause) {
-            self.rejected.push(Rejection {
-                id: id.to_string(),
-                cause,
-                reason,
-            });
-        }
-    }
-}
-
-/// `candidate` sized for its queries' failure probabilities, with the
-/// accuracy Stage 3 accepted for each query, or the first check it fails
-/// that does not depend on its materialization or prices: its resized
-/// summaries do not rebuild, the executor cannot run a per-series
-/// aggregate it reads, or a query misses its accuracy target.
-pub(crate) fn checked_candidate(
-    candidate: &PhysicalWorkloadPlan,
-    targets: &[AccuracyTarget],
-    data: &DataWorkload,
-    models: &PlanningModels<'_>,
-) -> Result<(PhysicalWorkloadPlan, Vec<AcceptedAccuracy>), CheckFailure> {
-    let sized =
-        sized_for_failure_probability(candidate, targets, data).map_err(|reason| CheckFailure {
-            cause: RejectionCause::FailureProbabilityResizeFailed,
-            reason,
-            size_independent: false,
-        })?;
-    if let Some(reason) = per_entity_aggregate_violation(&sized.dag) {
-        // The aggregate is the plan's own exact per-series reduction, which
-        // no summary size changes.
-        return Err(CheckFailure {
-            cause: RejectionCause::PerEntityAggregateNotExecutable,
-            reason,
-            size_independent: true,
-        });
-    }
-    let accepted = accuracy_check(&sized, targets, data, models)?;
-    Ok((sized, accepted))
-}
-
-/// The index of the candidate `ranking` selects among `costs` (the first on
-/// ties) and, under [`Ranking::Front`], the indices of the Pareto front in
-/// order; `None` without candidates.
-fn choose(ranking: Ranking, costs: &[&CandidateCost]) -> Option<(usize, Vec<usize>)> {
-    let front: Vec<usize> = match ranking {
-        Ranking::Front => {
-            // Each candidate's worst latency once, not once per comparison.
-            let latencies: Vec<f64> = costs.iter().map(|c| worst_latency_ms(&c.usage)).collect();
-            (0..costs.len())
-                .filter(|&i| {
-                    !(0..costs.len()).any(|j| {
-                        dominates_at(
-                            (&costs[j].usage, latencies[j]),
-                            (&costs[i].usage, latencies[i]),
-                        )
-                    })
-                })
-                .collect()
-        }
-        _ => Vec::new(),
-    };
-    // Under the Pareto front, only a front member can be selected.
-    let pool: Vec<usize> = match ranking {
-        Ranking::Front => front.clone(),
-        _ => (0..costs.len()).collect(),
-    };
-    let best =
-        pool.into_iter().reduce(
-            |best, next| match ranking.better(costs[next], costs[best]) {
-                true => next,
-                false => best,
-            },
-        )?;
-    Some((best, front))
-}
-
-/// Whether `cost` is cheaper than `best`. Totals that differ only by
-/// floating-point rounding (summing the same charges in another grouping)
-/// tie, and a tie keeps the earlier candidate.
-fn cheaper(cost: f64, best: f64) -> bool {
-    cost < best - best.abs() * 1e-9
-}
-
-/// The worst latency per evaluation among a candidate's queries (0 with none).
-fn worst_latency_ms(usage: &ResourceUsage) -> f64 {
-    usage
-        .latency_per_query
-        .iter()
-        .map(QueryLatency::total_ms)
-        .fold(0.0, f64::max)
-}
-
-/// Under cost model 3, the first limit of the cluster `usage` is over, as a
-/// rejection reason.
-fn capacity_violation(usage: &ResourceUsage, limits: &ClusterLimits) -> Option<String> {
-    if usage.peak_memory_bytes > limits.memory_bytes {
-        return Some(format!(
-            "peak memory {} bytes is over the cluster's {} bytes",
-            usage.peak_memory_bytes, limits.memory_bytes
-        ));
-    }
-    if usage.disk_bytes > limits.disk_bytes {
-        return Some(format!(
-            "disk {} bytes is over the cluster's {} bytes",
-            usage.disk_bytes, limits.disk_bytes
-        ));
-    }
-    match limits.cpu_cores {
-        Some(cores) if usage.peak_cpu_cores > cores => Some(format!(
-            "{} CPU cores at peak is over the cluster's {cores}",
-            usage.peak_cpu_cores
-        )),
-        _ => None,
-    }
-}
-
-/// Whether `a` is at least as good as `b` on peak memory, disk and
-/// worst-query latency, and better on one of them.
-fn dominates(a: &ResourceUsage, b: &ResourceUsage) -> bool {
-    dominates_at((a, worst_latency_ms(a)), (b, worst_latency_ms(b)))
-}
-
-/// [`dominates`] with each usage's worst-query latency already computed.
-fn dominates_at((a, la): (&ResourceUsage, f64), (b, lb): (&ResourceUsage, f64)) -> bool {
-    a.peak_memory_bytes <= b.peak_memory_bytes
-        && a.disk_bytes <= b.disk_bytes
-        && !cheaper(lb, la)
-        && (a.peak_memory_bytes < b.peak_memory_bytes
-            || a.disk_bytes < b.disk_bytes
-            || cheaper(la, lb))
-}
-
-/// How a cost model orders valid candidates.
-#[derive(Clone, Copy)]
-enum Ranking {
-    /// Cost models 1 and 2: by price.
-    Price,
-    /// Latency, then peak memory, then disk.
-    Latency,
-    /// Peak memory, then disk, then latency.
-    Memory,
-    /// The Pareto front; the selected member by [`Ranking::Latency`].
-    Front,
-}
-
-impl Ranking {
-    fn of(model: &CostModel) -> Self {
-        match model {
-            CostModel::UsageOverTime(_) | CostModel::ProvisionedCapacity(_) => Ranking::Price,
-            CostModel::ClusterCapacity(limits) => match limits.objective {
-                ClusterObjective::LowestLatency => Ranking::Latency,
-                ClusterObjective::LeastMemory => Ranking::Memory,
-                ClusterObjective::ParetoFront => Ranking::Front,
-            },
-        }
-    }
-
-    /// Whether `cost` ranks strictly before `best`. Prices and latencies tie
-    /// within rounding ([`cheaper`]); peak memory and disk are whole bytes,
-    /// compared exactly, as [`dominates`] compares them.
-    fn better(self, cost: &CandidateCost, best: &CandidateCost) -> bool {
-        use std::cmp::Ordering;
-        let rounded = |a: f64, b: f64| match (cheaper(a, b), cheaper(b, a)) {
-            (true, _) => Ordering::Less,
-            (_, true) => Ordering::Greater,
-            _ => Ordering::Equal,
-        };
-        let (a, b) = (&cost.usage, &best.usage);
-        let latency = || rounded(worst_latency_ms(a), worst_latency_ms(b));
-        let memory = || a.peak_memory_bytes.cmp(&b.peak_memory_bytes);
-        let disk = || a.disk_bytes.cmp(&b.disk_bytes);
-        let order = match self {
-            Ranking::Price => rounded(
-                cost.cost_per_second.unwrap_or(f64::INFINITY),
-                best.cost_per_second.unwrap_or(f64::INFINITY),
-            ),
-            Ranking::Latency | Ranking::Front => latency().then_with(memory).then_with(disk),
-            Ranking::Memory => memory().then_with(disk).then_with(latency),
-        };
-        order == Ordering::Less
-    }
-
-    /// Why valid candidate `id` was not `selected`, and the reason with
-    /// its numbers.
-    fn lost_reason(
-        self,
-        id: &str,
-        selected: &str,
-        costs: &BTreeMap<String, CandidateCost>,
-        front: &[String],
-    ) -> (RejectionCause, String) {
-        let (cost, best) = (&costs[id], &costs[selected]);
-        if !self.better(best, cost) {
-            let tied = match self {
-                Ranking::Price => format!(
-                    "{} {COST_UNIT}",
-                    display_cost(cost.cost_per_second.unwrap_or_default())
-                ),
-                _ => describe_usage(&cost.usage),
-            };
-            return (
-                RejectionCause::TiedLostOnEnumerationOrder,
-                format!(
-                    "tied with the selected candidate {selected} at {tied}; lost on enumeration order"
-                ),
-            );
-        }
-        match self {
-            Ranking::Price => (
-                RejectionCause::Costlier,
-                format!(
-                    "costlier: {} vs {} {COST_UNIT}",
-                    display_cost(cost.cost_per_second.unwrap_or_default()),
-                    display_cost(best.cost_per_second.unwrap_or_default())
-                ),
-            ),
-            Ranking::Latency => (
-                RejectionCause::Slower,
-                format!(
-                    "slower: {} vs {}",
-                    describe_usage(&cost.usage),
-                    describe_usage(&best.usage)
-                ),
-            ),
-            Ranking::Memory => (
-                RejectionCause::MoreMemory,
-                format!(
-                    "more memory: {} vs {}",
-                    describe_usage(&cost.usage),
-                    describe_usage(&best.usage)
-                ),
-            ),
-            Ranking::Front if front.iter().any(|f| f == id) => (
-                RejectionCause::NotLowestLatencyOnParetoFront,
-                format!(
-                    "on the Pareto front, not its lowest-latency member: {} vs {}",
-                    describe_usage(&cost.usage),
-                    describe_usage(&best.usage)
-                ),
-            ),
-            Ranking::Front => {
-                let by = front
-                    .iter()
-                    .find(|f| dominates(&costs[f.as_str()].usage, &cost.usage))
-                    .map_or(selected, String::as_str);
-                (
-                    RejectionCause::Dominated,
-                    format!(
-                        "dominated by {by}: {} vs {}",
-                        describe_usage(&cost.usage),
-                        describe_usage(&costs[by].usage)
-                    ),
-                )
-            }
-        }
-    }
-}
-
-/// E.g. `latency 126.0 ms, peak memory 9648000000 bytes, disk 480000000 bytes`.
-fn describe_usage(usage: &ResourceUsage) -> String {
-    format!(
-        "latency {:.1} ms, peak memory {} bytes, disk {} bytes",
-        worst_latency_ms(usage),
-        usage.peak_memory_bytes,
-        usage.disk_bytes
-    )
-}
-
-/// A scan source's name: its PromQL metric or SQL table.
-fn source_name(source: &Source) -> &str {
-    match source {
-        Source::TimeSeries { metric } => metric,
-        Source::Table { table_ref } => table_ref,
-    }
-}
-
-/// An upper bound on the rows one node and the operators below it see or
-/// return per evaluation, in terms of the sources they read:
-/// `copies_per_source[s]` times the series of `s`, plus `constant_rows`.
-#[derive(Debug, Clone, Default, PartialEq)]
-struct RowBound {
-    copies_per_source: BTreeMap<String, u64>,
-    constant_rows: u64,
-}
-
-impl RowBound {
-    /// The bound of a node that returns at most as many rows as its largest
-    /// input, source by source: a fold, a join, a filter.
-    fn largest(inputs: &[RowBound]) -> Self {
-        let mut bound = RowBound::default();
-        for input in inputs {
-            for (source, copies) in &input.copies_per_source {
-                let entry = bound.copies_per_source.entry(source.clone()).or_default();
-                *entry = (*entry).max(*copies);
-            }
-            bound.constant_rows = bound.constant_rows.max(input.constant_rows);
-        }
-        bound
-    }
-
-    /// The bound of a union, which returns every row of each input.
-    fn sum(inputs: &[RowBound]) -> Self {
-        let mut bound = RowBound::default();
-        for input in inputs {
-            for (source, copies) in &input.copies_per_source {
-                *bound.copies_per_source.entry(source.clone()).or_default() += copies;
-            }
-            bound.constant_rows += input.constant_rows;
-        }
-        bound
-    }
-}
-
-/// [`RowBound`] of `node`: a scan returns its source's series once; a union
-/// (PromQL `or`, SQL `UNION`, `Concat`) the rows of all its branches; a
-/// constant vector one row and `VALUES` its rows; any other operator at
-/// most as many as its largest input. `cache` holds the shared nodes' bounds.
-fn row_bound(
-    node: &Rc<OperatorNode>,
-    cache: &mut HashMap<*const OperatorNode, RowBound>,
-) -> RowBound {
-    if let Some(bound) = cache.get(&Rc::as_ptr(node)) {
-        return bound.clone();
-    }
-    let inputs: Vec<RowBound> = node
-        .children()
-        .into_iter()
-        .map(|child| row_bound(child, cache))
-        .collect();
-    let bound = match node.non_asap() {
-        Some(NonASAPOp::Scan { source, .. }) => RowBound {
-            copies_per_source: [(source_name(source).to_string(), 1)].into(),
-            constant_rows: 0,
-        },
-        Some(NonASAPOp::Values { rows, .. }) => RowBound {
-            constant_rows: rows.len() as u64,
-            ..RowBound::largest(&inputs)
-        },
-        // One row out, but the operators below still read their sources'
-        // rows, which the bound keeps; `at_most_one_row` makes `G` of a
-        // `vector()` root 1.
-        Some(NonASAPOp::PromqlVectorFromScalar(_)) => {
-            let mut bound = RowBound::largest(&inputs);
-            bound.constant_rows = bound.constant_rows.max(1);
-            bound
-        }
-        Some(
-            NonASAPOp::SetOp {
-                kind: RelationalSetOpKind::Union,
-                ..
-            }
-            | NonASAPOp::Concat { .. },
-        ) => RowBound::sum(&inputs),
-        Some(NonASAPOp::BinaryOp { operator, .. })
-            if operator.kind == BinaryOpKind::Set(PromQLVectorSetOpKind::Or) =>
-        {
-            RowBound::sum(&inputs)
-        }
-        _ => RowBound::largest(&inputs),
-    };
-    cache.insert(Rc::as_ptr(node), bound.clone());
-    bound
-}
-
-/// An upper bound on the rows any operator of `root` sees or returns in one
-/// evaluation ([`row_bound`]), from the series count each source it reads
-/// declares: the input row count of its folds, and `G` for a PromQL
-/// instant vector ([`values_per_result`]). A join or fold of one source
-/// counts it once; an `or` counts each branch. `None` when `root` reads no
-/// source, or a source it reads declares no series count.
-fn series_read(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
-    let mut cache = HashMap::new();
-    let inputs: Vec<RowBound> = root_operators(root)
-        .into_iter()
-        .map(|node| row_bound(node, &mut cache))
-        .collect();
-    let bound = RowBound::largest(&inputs);
-    if bound.copies_per_source.is_empty() {
-        return None;
-    }
-    let mut rows = bound.constant_rows;
-    for (source, copies) in &bound.copies_per_source {
-        rows += copies * data.sources.get(source)?.series_count?;
-    }
-    Some(rows)
-}
-
-/// How many values one evaluation of `root` returns at most (`G`): one for
-/// a scalar root and for a root of at most one row ([`at_most_one_row`]),
-/// provable from the query. Otherwise the smaller of two bounds, either
-/// alone when the other is unknown: `series_read` ([`series_read`]) for a
-/// PromQL instant vector, which bounds the values it can return (each
-/// branch of an `or` adds its own), and, for a grouped root of any
-/// language, the groups its keys' declared distinct values allow
-/// ([`declared_group_bound`]), at most `series_read`. `None` when neither
-/// applies: an ungrouped SQL result, a grouping with an undeclared key, a
-/// range vector.
-fn values_per_result(
-    root: &QueryRoot,
-    series_read: Option<u64>,
-    data: &DataWorkload,
-) -> Option<u64> {
-    let node = match root {
-        QueryRoot::Scalar(_) => return Some(1),
-        QueryRoot::Operator(node) if at_most_one_row(node) => return Some(1),
-        QueryRoot::Operator(node) => node,
-    };
-    let by_series = (node.result_kind == OperatorResultKind::InstantVector)
-        .then_some(series_read)
-        .flatten();
-    // Each group holds at least one row read, so the series read also
-    // bound the groups.
-    let by_groups = declared_group_bound(node, data)
-        .map(|groups| series_read.map_or(groups, |series| groups.min(series)));
-    by_groups.or(by_series).map(|values| values.max(1))
-}
-
-/// An upper bound on the groups `node` returns, from the distinct values
-/// the sources it reads declare for its group keys
-/// (`SourceFacts::distinct_values_per_label` and
-/// `distinct_values_per_label_set`): the smallest product of declared counts
-/// covering the keys ([`declared_distinct_combinations`]). The grouping is
-/// found below operators that only keep, drop or reorder rows, and through
-/// a summary's estimate (not a top-k, which returns several rows per
-/// group), merge and finalization. `None` when no such grouping is found,
-/// it is a `without (...)`, or a key is not a source column passed through
-/// unchanged covered by declared counts: the declared counts are upper
-/// bounds, never defaults.
-fn declared_group_bound(node: &OperatorNode, data: &DataWorkload) -> Option<u64> {
-    let grouped = |reduction: &Reduction, input: &OperatorNode| -> Option<u64> {
-        let Reduction::Reduce(keys) = reduction else {
-            return None;
-        };
-        if keys.is_without() {
-            return None;
-        }
-        declared_distinct_combinations(input, keys.keys(), data)
-    };
-    match &node.operator {
-        Operator::NonASAP(NonASAPOp::Aggregate {
-            reduction,
-            measures,
-            child,
-            ..
-        }) if !measures
-            .iter()
-            .any(|m| matches!(m, AggIntent::TopK { .. } | AggIntent::CountValues { .. })) =>
-        {
-            grouped(reduction, child)
-        }
-        Operator::ASAP(
-            ASAPOp::SummaryAgg {
-                reduction, child, ..
-            }
-            | ASAPOp::PaneChain {
-                reduction, child, ..
-            },
-        ) => grouped(reduction, child),
-        // A merge's children are states of one definition: its first
-        // build's grouping stands for all of them.
-        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => match node.summary_build() {
-            Some(
-                ASAPOp::SummaryAgg {
-                    reduction, child, ..
-                }
-                | ASAPOp::PaneChain {
-                    reduction, child, ..
-                },
-            ) => grouped(reduction, child),
-            _ => None,
-        },
-        Operator::ASAP(ASAPOp::SummaryEstimate {
-            summary_input,
-            query,
-        }) if !matches!(query, SketchStatistic::TopK { .. }) => {
-            declared_group_bound(summary_input, data)
-        }
-        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child })
-        | Operator::NonASAP(
-            NonASAPOp::Project { child, .. }
-            | NonASAPOp::Filter { child, .. }
-            | NonASAPOp::Sort { child, .. }
-            | NonASAPOp::Limit { child, .. }
-            | NonASAPOp::Dedup { child, .. },
-        ) => declared_group_bound(child, data),
-        _ => None,
-    }
-}
-
-/// The distinct combinations of values columns `columns` of `node` take
-/// together at most, when each is a source column passed through
-/// unchanged: traced down through operators that keep their input's
-/// columns (filter, sort, limit, time range and shift), a projection that
-/// selects them, a grouped aggregate's keys, a per-series reduction's other
-/// columns, and each branch of a union (whose combinations add), to the
-/// scans, where the source's declared label and label-set counts bound them
-/// ([`SourceFacts::declared_distinct_combinations`]). A join is not traced:
-/// it can pair values of different rows. `None` when a column is computed
-/// or relabeled on the way (its values are no longer the source's), or a
-/// source's declared counts do not cover the columns.
-///
-/// [`SourceFacts::declared_distinct_combinations`]: asap_types::workload::SourceFacts::declared_distinct_combinations
-fn declared_distinct_combinations(
-    node: &OperatorNode,
-    columns: &[usize],
-    data: &DataWorkload,
-) -> Option<u64> {
-    match node.non_asap()? {
-        NonASAPOp::Scan { source, .. } => {
-            let labels = columns
-                .iter()
-                .map(|&column| Some(node.schema.fields.get(column)?.name.as_str()))
-                .collect::<Option<Vec<_>>>()?;
-            data.sources
-                .get(source_name(source))?
-                .declared_distinct_combinations(&labels)
-        }
-        NonASAPOp::Filter { child, .. }
-        | NonASAPOp::Sort { child, .. }
-        | NonASAPOp::Limit { child, .. }
-        | NonASAPOp::TimeRange { child, .. }
-        | NonASAPOp::TimeShift { child, .. } => {
-            declared_distinct_combinations(child, columns, data)
-        }
-        // A grouped aggregate returns its keys first, unchanged; but a
-        // `count_values` label named like a key takes that key's place
-        // with the stringified sample values.
-        NonASAPOp::Aggregate {
-            reduction: Reduction::Reduce(keys),
-            measures,
-            child,
-            ..
-        } if !keys.is_without()
-            && !measures
-                .iter()
-                .any(|m| matches!(m, AggIntent::CountValues { .. })) =>
-        {
-            let inputs = columns
-                .iter()
-                .map(|&column| keys.keys().get(column).copied())
-                .collect::<Option<Vec<_>>>()?;
-            declared_distinct_combinations(child, &inputs, data)
-        }
-        // A per-series reduction keeps every column but the one it reduces.
-        NonASAPOp::Aggregate {
-            reduction: Reduction::PerEntity,
-            measures,
-            child,
-            ..
-        } => {
-            let reduced = match measures.first()?.input_cols().first() {
-                Some(&input) => input,
-                None => asap_types::ir::scalar::column_resolution::resolve_column_ref(
-                    &asap_types::ir::scalar::ColumnRef::SampleValue,
-                    &child.schema,
-                )
-                .ok()?,
-            };
-            (!columns.contains(&reduced))
-                .then(|| declared_distinct_combinations(child, columns, data))
-                .flatten()
-        }
-        NonASAPOp::Project { cols, child, .. } => {
-            let inputs = columns
-                .iter()
-                .map(|&column| match cols.get(column)?.expr {
-                    ScalarExpr::Column(input) => Some(input),
-                    _ => None,
-                })
-                .collect::<Option<Vec<_>>>()?;
-            declared_distinct_combinations(child, &inputs, data)
-        }
-        NonASAPOp::SetOp {
-            kind: RelationalSetOpKind::Union,
-            left,
-            right,
-            ..
-        } => Some(
-            declared_distinct_combinations(left, columns, data)?
-                .saturating_add(declared_distinct_combinations(right, columns, data)?),
-        ),
-        NonASAPOp::Concat { children, .. } => children.iter().try_fold(0u64, |total, child| {
-            Some(total.saturating_add(declared_distinct_combinations(child, columns, data)?))
-        }),
-        _ => None,
-    }
-}
-
-/// Whether `node` returns at most one row whatever its input: a global
-/// aggregate or summary (a reduction with no group keys), `vector(s)`, and
-/// above one only operators that keep or drop its rows, or join two such
-/// inputs without adding unmatched rows of both sides.
-fn at_most_one_row(node: &OperatorNode) -> bool {
-    let global = |reduction: &asap_types::ir::operator::Reduction| {
-        reduction
-            .group_keys()
-            .is_some_and(|by| !by.is_without() && by.keys().is_empty())
-    };
-    match &node.operator {
-        // A top-k or `count_values` returns several rows per group.
-        Operator::NonASAP(NonASAPOp::Aggregate {
-            reduction,
-            measures,
-            ..
-        }) => {
-            global(reduction)
-                && !measures
-                    .iter()
-                    .any(|m| matches!(m, AggIntent::TopK { .. } | AggIntent::CountValues { .. }))
-        }
-        Operator::ASAP(ASAPOp::SummaryAgg { reduction, .. }) => global(reduction),
-        // A rollup to no keys gives one state.
-        Operator::ASAP(ASAPOp::SummaryMerge {
-            group_by: Some(keys),
-            ..
-        }) => keys.is_empty(),
-        // A merge gives one state per group, whatever the panes it merges.
-        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => matches!(
-            node.summary_build(),
-            Some(
-                ASAPOp::SummaryAgg { reduction, .. } | ASAPOp::PaneChain { reduction, .. }
-            ) if global(reduction)
-        ),
-        Operator::ASAP(ASAPOp::SummaryEstimate {
-            summary_input,
-            query,
-        }) => !matches!(query, SketchStatistic::TopK { .. }) && at_most_one_row(summary_input),
-        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => at_most_one_row(child),
-        // `vector(s)` turns one scalar into one row.
-        Operator::NonASAP(NonASAPOp::PromqlVectorFromScalar(_)) => true,
-        Operator::NonASAP(
-            NonASAPOp::Project { child, .. }
-            | NonASAPOp::Filter { child, .. }
-            | NonASAPOp::Sort { child, .. }
-            | NonASAPOp::Limit { child, .. }
-            | NonASAPOp::Dedup { child, .. },
-        ) => at_most_one_row(child),
-        Operator::NonASAP(NonASAPOp::Join {
-            kind, left, right, ..
-        }) => {
-            use asap_types::ir::operator::operator_properties::JoinKind;
-            match kind {
-                JoinKind::Semi | JoinKind::Anti => at_most_one_row(left),
-                JoinKind::Full => false,
-                _ => at_most_one_row(left) && at_most_one_row(right),
-            }
-        }
-        Operator::NonASAP(NonASAPOp::BinaryOp { lhs, rhs, .. }) => {
-            at_most_one_row(lhs) && at_most_one_row(rhs)
-        }
-        _ => false,
-    }
-}
-
-/// `candidate` with each summary's per-value failure probability enlarged
-/// for its queries' targets (#669b), before pricing, so that cost reflects
-/// the deeper sketch. A query with a target with failure probability `δ`,
-/// over `n` approximate inputs ([`approximate_inputs`]) and covering `V`
-/// values per evaluation ([`AccuracyScope::max_values_covered`]: 1 for a
-/// per-value target, at most `⌊1 / share⌋` for one over the groups holding
-/// a record share, `G` ([`values_per_result`]) for the whole result), needs
-/// each input to fail with probability at most `δ / (n · V)`: `n · V` such
-/// failures union-bound to `δ` over the values the target covers. A summary
-/// several queries read takes the smallest `δ / (n · V)` among them. The
-/// parameters that depend on it are enlarged ([`with_failure_probability`];
-/// classic HLL's precision from its source's distinct bound), and the
-/// guarantees above are composed again. A query whose `V` is unbound (a
-/// whole-result target of an unbound `G`) enlarges nothing: its target
-/// stays unmet. Stage 1 sizes for ε and reads no data workload; only this
-/// stage binds `G`. `Err` is the reason the candidate is rejected when its
-/// resized summaries do not rebuild into a plan.
-pub(crate) fn sized_for_failure_probability(
-    candidate: &PhysicalWorkloadPlan,
-    targets: &[AccuracyTarget],
-    data: &DataWorkload,
-) -> Result<PhysicalWorkloadPlan, String> {
-    let resize_failed = |error: &dyn std::fmt::Display| {
-        format!("resizing for the failure probability failed: {error}")
-    };
-    let roots = resize_for_failure_probability(&candidate.roots, targets, data)
-        .map_err(|error| resize_failed(&error))?;
-    if roots
-        .iter()
-        .zip(&candidate.roots)
-        .all(|(sized, root)| sized == root)
-    {
-        return Ok(candidate.clone());
-    }
-    let mut dag = compile_physical_asap_workload_with_node_ids(&roots)
-        .map_err(|error| resize_failed(&error))?
-        .dag;
-    // The DAG has the same nodes, so each keeps the placement Stage 2 gave it.
-    if dag.nodes.len() == candidate.dag.nodes.len() {
-        for (node, placed) in dag.nodes.iter_mut().zip(&candidate.dag.nodes) {
-            if node.id == placed.id {
-                node.output_state = placed.output_state;
-                node.materialization = placed.materialization;
-            }
-        }
-    }
-    Ok(PhysicalWorkloadPlan {
-        roots,
-        dag,
-        ..candidate.clone()
-    })
-}
-
-/// `roots` with their summaries enlarged as [`sized_for_failure_probability`]
-/// says: the plan plan selection prices and runs, for the logical roots of
-/// the selected candidate too.
-pub fn resize_for_failure_probability(
-    roots: &[QueryRoot],
-    targets: &[AccuracyTarget],
-    data: &DataWorkload,
-) -> Result<Vec<QueryRoot>, SchemaDerivationError> {
-    let mut required: HashMap<*const OperatorNode, f64> = HashMap::new();
-    for (root, target) in roots.iter().zip(targets) {
-        let Some((target, delta)) = target
-            .failure_probability
-            .map(|delta| (target, delta))
-            .filter(|(t, delta)| !t.is_exact() && *delta > 0.0)
-        else {
-            continue;
-        };
-        let values = target.accuracy_scope.max_values_covered(values_per_result(
-            root,
-            series_read(root, data),
-            data,
-        ));
-        let Some(values) = values else { continue };
-        let inputs = approximate_inputs(root);
-        let per_input_failure_probability = delta / (inputs.len() as f64 * values as f64);
-        for state in &inputs {
-            let entry = required
-                .entry(Rc::as_ptr(state))
-                .or_insert(per_input_failure_probability);
-            *entry = entry.min(per_input_failure_probability);
-        }
-    }
-    if required.is_empty() {
-        return Ok(roots.to_vec());
-    }
-    let resize = |state: &OperatorNode, params: &SketchParams| {
-        let delta = *required.get(&std::ptr::from_ref(state))?;
-        Some(match params {
-            SketchParams::Hll {
-                precision,
-                relative_error,
-            } => {
-                let source = distinct_bound_source(state)?;
-                let bound = data.sources.get(&source)?.max_distinct_per_evaluation?;
-                // The guarantee keeps the relative error Pass 1 sized for.
-                let relative_error = hll::classic_relative_error(*precision, *relative_error);
-                SketchParams::Hll {
-                    precision: hll::min_precision(relative_error, delta, bound, *precision),
-                    relative_error: Some(relative_error),
-                }
-            }
-            params => with_failure_probability(params, delta),
-        })
-    };
-    with_resized_summaries(roots, &resize)
-}
-
-/// What Stage 3 accepted for each query ([`AcceptedAccuracy`]), or the
-/// first query whose output is not shown to meet its target, as a reason. An output meets its target when its theoretical root guarantee
-/// (composed in Stage 1 with the built-in model) satisfies it, or when the
-/// deployment's empirical evidence shows that this candidate's output does
-/// ([`AccuracyEvidenceProvider::output_guarantee`]). A
-/// certified estimate inside the plan is not enough on its own: a difference
-/// or ratio of certified estimates can be unbounded. The root guarantee's
-/// symbolic statistics are bound first ([`bound_root_guarantee`]); one still
-/// unknown leaves the target unmet. Count-Min is admitted only over update
-/// weights proven non-negative, which its bound and the executor assume: an open
-/// [`WeightDomain::RawDataSamplesOfMetric`] requirement is met when `data` declares
-/// the metric a counter or non-negative ([`confirmed_weights`]), and unmet
-/// otherwise.
-///
-/// A target that sets no metric accepts a guarantee in any metric that meets
-/// its ε, δ and scope ([`AccuracyModel::satisfies`]); one that sets a metric
-/// accepts only guarantees in it (or convertible to it).
-///
-/// The Count-Min weight check runs first and rejects as
-/// [`RejectionCause::CountMinWeightsNotProvenNonNegative`]: the executor
-/// cannot run such a plan. Then the deployment's accuracy model is asked
-/// ([`AccuracyModel::accepts_output_regardless_of_guarantee`], through
-/// [`PlanningModels::effective_accuracy`]): an output it accepts is accepted
-/// whatever its guarantee says, and the guarantee check's rejection, if any,
-/// is only recorded ([`AcceptedAccuracy::guarantee_check_rejection`]).
-/// Otherwise, an output with no guarantee from either
-/// source (Stage 1 had no rule, and the evidence has none) is rejected as
-/// [`RejectionCause::NoAccuracyGuarantee`], and any other miss as
-/// [`RejectionCause::AccuracyTargetMissed`].
-fn accuracy_check(
-    candidate: &PhysicalWorkloadPlan,
-    targets: &[AccuracyTarget],
-    data: &DataWorkload,
-    models: &PlanningModels<'_>,
-) -> Result<Vec<AcceptedAccuracy>, CheckFailure> {
-    let mut accepted = Vec::with_capacity(targets.len());
-    for (query, (root, target)) in candidate.roots.iter().zip(targets).enumerate() {
-        let query = query + 1;
-        let mut sketches: Vec<String> = Vec::new();
-        for node in root_operators(root)
-            .iter()
-            .flat_map(|node| OperatorNode::reachable(node))
-        {
-            let Operator::ASAP(
-                ASAPOp::SummaryAgg { family, input, .. } | ASAPOp::PaneChain { family, input, .. },
-            ) = &node.operator
-            else {
-                continue;
-            };
-            if let FieldDataType::Sketch(kind, _) = family {
-                let name = format!("{:?}", kind.algorithm());
-                if !sketches.contains(&name) {
-                    sketches.push(name);
-                }
-            }
-            if matches!(family, FieldDataType::Sketch(kind, _)
-                    if matches!(kind.algorithm(), SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap))
-                && !matches!(
-                    confirmed_weights(&input.weight_domain, data),
-                    WeightDomain::NonNegative { .. }
-                )
-            {
-                let unconfirmed = match &input.weight_domain {
-                    WeightDomain::RawDataSamplesOfMetric { metric } => format!(
-                        " (samples of `{metric}`, which is not declared a counter or \
-                         non-negative)"
-                    ),
-                    WeightDomain::CounterDerivativeOfMetric { metric } => format!(
-                        " (rates or increases of `{metric}`, which is not declared a counter)"
-                    ),
-                    _ => String::new(),
-                };
-                // Count-Min (plain, CmsWithHeap or Hydra Count-Min) over
-                // weights not proven non-negative does not run: the executor
-                // refuses CmsWithHeap and HydraCms when it builds the plan,
-                // and plain Count-Min adds a negative weight, which voids its
-                // never-underestimate bound. So
-                // this rejects the plan whatever the deployment's accuracy
-                // model accepts.
-                return Err(CheckFailure {
-                    cause: RejectionCause::CountMinWeightsNotProvenNonNegative,
-                    reason: format!(
-                        "q{query}: {} needs non-negative update weights, and these are not \
-                         proven non-negative{unconfirmed}",
-                        family_name(family)
-                    ),
-                    size_independent: true,
-                });
-            }
-        }
-        // The guarantee check: the theoretical guarantee, then the
-        // deployment's evidence.
-        let checked = guarantee_check(query, root, target, data, models);
-        // The deployment's model may accept the output directly, whatever
-        // its guarantee says; the check's result is then only recorded.
-        if models
-            .effective_accuracy()
-            .accepts_output_regardless_of_guarantee(root, target)
-        {
-            accepted.push(AcceptedAccuracy {
-                target_metric: target.accuracy_metric,
-                accepted_metric: None,
-                accepted_regardless_of_guarantee: true,
-                guarantee_check_rejection: checked.err().map(|failure| failure.cause),
-                sketches,
-            });
-            continue;
-        }
-        accepted.push(AcceptedAccuracy {
-            target_metric: target.accuracy_metric,
-            accepted_metric: checked?,
-            accepted_regardless_of_guarantee: false,
-            guarantee_check_rejection: None,
-            sketches,
-        });
-    }
-    Ok(accepted)
-}
-
-/// A check a candidate failed: why, with its numbers, and whether every
-/// size of the same plan's summaries fails it too.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CheckFailure {
-    pub(crate) cause: RejectionCause,
-    pub(crate) reason: String,
-    /// `true` when no other size of the plan's summaries can pass the check
-    /// (e.g. no rule composes a guarantee, or a bound stays unknown) and the
-    /// deployment's accuracy model and evidence cannot judge another size
-    /// otherwise; `false` when that is not proven.
-    pub(crate) size_independent: bool,
-}
-
-/// Whether query `query`'s output `root` meets `target` by its theoretical
-/// root guarantee or, failing that, the deployment's evidence
-/// ([`accuracy_check`]): the metric of the guarantee that met it (`None`
-/// for an exact output), or why not, as
-/// [`RejectionCause::NoAccuracyGuarantee`] or
-/// [`RejectionCause::AccuracyTargetMissed`].
-fn guarantee_check(
-    query: usize,
-    root: &QueryRoot,
-    target: &AccuracyTarget,
-    data: &DataWorkload,
-    models: &PlanningModels<'_>,
-) -> Result<Option<AccuracyMetric>, CheckFailure> {
-    // A guarantee per value is stated over the values the target's scope
-    // covers: the whole result's `G`, or at most `⌊1 / share⌋` groups.
-    let series = series_read(root, data);
-    let values = values_per_result(root, series, data);
-    let over_scope = |g: AccuracyGuarantee| g.over_scope(target.accuracy_scope, values);
-    let guarantee = bound_root_guarantee(root, series, data, models).map(over_scope);
-    let meets = |g: &AccuracyGuarantee| models.effective_accuracy().satisfies(g, target);
-    // The deployment's evidence is read only when the theoretical
-    // guarantee does not meet the target.
-    let evidence = || models.evidence.output_guarantee(root).map(over_scope);
-    let (met, evidence) = match guarantee.clone().filter(meets) {
-        Some(met) => (Some(met), None),
-        None => {
-            let evidence = evidence();
-            (evidence.clone().filter(meets), evidence)
-        }
-    };
-    if let Some(met) = met {
-        return Ok((!met.is_exact()).then_some(met.spec.accuracy_metric));
-    }
-    // Whether the deployment's model or evidence may judge another size of
-    // the plan's summaries otherwise.
-    let model_or_evidence_may_judge = models
-        .effective_accuracy()
-        .may_accept_regardless_of_guarantee()
-        || models.evidence.may_provide_evidence();
-    if guarantee.is_none() && evidence.is_none() {
-        return Err(CheckFailure {
-            cause: RejectionCause::NoAccuracyGuarantee,
-            reason: format!(
-                "q{query}: the output has no guarantee, and the deployment has no evidence \
-                 for it, so it cannot meet target {target:?}"
-            ),
-            // No rule composes one, whatever the sizes.
-            size_independent: !model_or_evidence_may_judge,
-        });
-    }
-    // A bound or failure probability that stays unknown once bound is
-    // unknown at every size; a known one may shrink with larger summaries.
-    let unknown = |g: &AccuracyGuarantee| {
-        g.spec.error.evaluate().is_none()
-            || (target.failure_probability.is_some()
-                && g.spec.failure_probability.evaluate().is_none())
-    };
-    let size_independent = evidence.is_none()
-        && guarantee.as_ref().is_some_and(unknown)
-        && !model_or_evidence_may_judge;
-    Err(CheckFailure {
-        cause: RejectionCause::AccuracyTargetMissed,
-        size_independent,
-        reason: match guarantee {
-            Some(g)
-                if values.is_none()
-                    && target.accuracy_scope == AccuracyScope::WholeResult
-                    && target.failure_probability.is_some()
-                    && g.spec.failure_probability.evaluate().is_none() =>
-            {
-                format!(
-                    "q{query}: the output's guarantee holds for each value, and the number \
-                     of values one evaluation returns is not bound (no declared series \
-                     count for a source a PromQL vector reads, and no declared \
-                     `distinct_values_per_label` for every group key nor a \
-                     `distinct_values_per_label_set` covering them, or a key that is not \
-                     an unchanged source column), so it does not meet \
-                     whole-result target {target:?}, and \
-                     the deployment has no evidence that it meets it (a target on the groups \
-                     holding a share of the records, `groups_with_record_share_at_least`, \
-                     covers a bound number of values)"
-                )
-            }
-            Some(g) => format!(
-                "q{query}: the output guarantees a {:?} bound {:?}, failure probability \
-                 {:?}, which misses target {target:?}, and the deployment has no evidence \
-                 that it meets it",
-                g.spec.accuracy_metric,
-                g.spec.error.evaluate(),
-                g.spec.failure_probability.evaluate(),
-            ),
-            None => format!(
-                "q{query}: the output has no guarantee, and the deployment has no \
-                 evidence that it meets target {target:?}"
-            ),
-        },
-    })
-}
-
-/// `domain` with an open requirement answered from `data`'s declared source
-/// facts ([`WeightDomain::confirmed`]): samples are proven when the metric is
-/// declared a counter or non-negative, a counter derivative only when it is
-/// declared a counter; unknown otherwise. No type is inferred from a name.
-pub fn confirmed_weights(domain: &WeightDomain, data: &DataWorkload) -> WeightDomain {
-    domain.confirmed(
-        |metric| declared_counter(data, metric),
-        |metric| declared_non_negative(data, metric),
-    )
-}
-
-/// Whether `data` declares every sample of `metric` non-negative: the
-/// metric is declared a counter, or a metric (a gauge, say) with
-/// [`SourceFacts::values_non_negative`](asap_types::workload::SourceFacts::values_non_negative).
-fn declared_non_negative(data: &DataWorkload, metric: &str) -> bool {
-    declared_counter(data, metric)
-        || data
-            .sources
-            .get(metric)
-            .is_some_and(|facts| facts.values_non_negative)
-}
-
-/// Whether `data` declares `metric` a counter. A declared type does not
-/// expire, so its evidence is not checked.
-fn declared_counter(data: &DataWorkload, metric: &str) -> bool {
-    data.sources
-        .get(metric)
-        .is_some_and(|facts| facts.metric_type == Some(MetricType::Counter))
-}
-
-/// `roots` with every open [`WeightDomain::RawDataSamplesOfMetric`] requirement
-/// replaced by its answer from `data` ([`confirmed_weights`]): the form of a
-/// selected plan the executor runs, which reads no data workload. The same
-/// `Rc` where nothing changes.
-pub fn with_confirmed_weights(roots: &[QueryRoot], data: &DataWorkload) -> Vec<QueryRoot> {
-    fn confirm(
-        node: &Rc<OperatorNode>,
-        data: &DataWorkload,
-        cache: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-    ) -> Rc<OperatorNode> {
-        if let Some(done) = cache.get(&Rc::as_ptr(node)) {
-            return Rc::clone(done);
-        }
-        let mut changed = false;
-        let mut operator = node.operator.map_children(|child| {
-            let rebuilt = confirm(child, data, cache);
-            changed |= !Rc::ptr_eq(&rebuilt, child);
-            rebuilt
-        });
-        if let Operator::ASAP(ASAPOp::SummaryAgg { input, .. } | ASAPOp::PaneChain { input, .. }) =
-            &mut operator
-        {
-            let confirmed = confirmed_weights(&input.weight_domain, data);
-            if confirmed != input.weight_domain {
-                input.weight_domain = confirmed;
-                changed = true;
-            }
-        }
-        let rebuilt = if changed {
-            Rc::new(
-                OperatorNode::with_schema(operator, node.schema.clone())
-                    .with_guarantee(node.guarantee.clone())
-                    .with_timing(node.timing)
-                    .with_materialization(node.materialization),
-            )
-        } else {
-            Rc::clone(node)
-        };
-        cache.insert(Rc::as_ptr(node), Rc::clone(&rebuilt));
-        rebuilt
-    }
-    let mut cache = HashMap::new();
-    roots
-        .iter()
-        .map(|root| match root {
-            QueryRoot::Operator(n) => QueryRoot::Operator(confirm(n, data, &mut cache)),
-            QueryRoot::Scalar(expr) => {
-                QueryRoot::Scalar(expr.map_operator_refs(&mut |n| confirm(n, data, &mut cache)))
-            }
-        })
-        .collect()
-}
-
-/// The operator nodes a query root reads.
-fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
-    match root {
-        QueryRoot::Operator(node) => vec![node],
-        QueryRoot::Scalar(expr) => expr.operator_refs(),
-    }
-}
-
-/// [`root_guarantee`] with the statistics Stage 1 left symbolic bound:
-/// - the input row count, `series` ([`series_read`] of `root`);
-/// - each source's stream norm ([`source_norm_statistic`]), from the data
-///   workload's per-source `stream_norms`;
-/// - classic HLL's failure probability and the chance a UnivMon's top layer
-///   is incomplete, from the data workload's per-source
-///   `max_distinct_per_evaluation`;
-/// - a product's or quotient's bound, from the deployment's enforced
-///   operand domains ([`operand_domain_bounds`]).
-///
-/// Every data-workload fact is declared: the caller drops facts that no
-/// longer hold before planning. Any other statistic stays unknown, and an
-/// unknown statistic never meets a target.
-fn bound_root_guarantee(
-    root: &QueryRoot,
-    series: Option<u64>,
-    data: &DataWorkload,
-    models: &PlanningModels<'_>,
-) -> Option<AccuracyGuarantee> {
-    let domains = operand_domain_bounds(root, series, data, models);
-    let bind = |guarantee: &AccuracyGuarantee| {
-        bind_statistics(guarantee, &|statistic| {
-            workload_statistic(statistic, series, data)
-                .or_else(|| domains.get(statistic).copied().flatten())
-        })
-    };
-    match root_guarantee(root) {
-        Some(guarantee) => Some(bind(&guarantee)),
-        None => asap_logical_asap_optimization::pass1::per_computation_candidates::bind_guarantees(
-            root, &bind,
-        ),
-    }
-}
-
-/// `guarantee` with the statistics `value` supplies bound. A sign gate
-/// ([`raw_data_samples_sign_statistic`](asap_logical_asap_optimization::accuracy::composition::raw_data_samples_sign_statistic))
-/// is an indicator that only 1 (proven) opens: any other value leaves it
-/// unbound, so it can never read as a perfect bound.
-fn bind_statistics(
-    guarantee: &AccuracyGuarantee,
-    value: &dyn Fn(&str) -> Option<f64>,
-) -> AccuracyGuarantee {
-    guarantee.bind(&|statistic| {
-        let supplied = value(statistic);
-        match parse_raw_data_samples_sign_statistic(statistic) {
-            Some(_) => supplied.filter(|v| *v == 1.0),
-            None => supplied,
-        }
-    })
-}
-
-/// A data-workload statistic Stage 1 left symbolic: the input row count
-/// (`series`, the series of the sources the query reads), one source's
-/// stream norm, or classic HLL's failure probability or a UnivMon's
-/// incomplete-top-layer probability given one source's distinct bound,
-/// from source facts that hold at any planning time, or the sign of one
-/// metric's samples, from its declared type.
-fn workload_statistic(statistic: &str, series: Option<u64>, data: &DataWorkload) -> Option<f64> {
-    // The sign of one metric's samples: proven (1) when the metric is
-    // declared a counter or declared non-negative; nothing is inferred from
-    // its name.
-    if let Some(metric) = parse_raw_data_samples_sign_statistic(statistic) {
-        return declared_non_negative(data, metric).then_some(1.0);
-    }
-    if statistic == INPUT_ROW_COUNT {
-        return series.map(|rows| rows as f64);
-    }
-    if let Some((precision, relative_error, source)) =
-        hll::parse_classic_failure_statistic(statistic)
-    {
-        let bound = data.sources.get(source)?.max_distinct_per_evaluation?;
-        return Some(hll::classic_failure_probability(
-            precision,
-            relative_error,
-            bound,
-        ));
-    }
-    if let Some((heap_size, layers, source)) =
-        univmon::parse_incomplete_top_layer_statistic(statistic)
-    {
-        let bound = data.sources.get(source)?.max_distinct_per_evaluation?;
-        return Some(univmon::incomplete_top_layer_probability(
-            heap_size, layers, bound,
-        ));
-    }
-    let (norm, source) = parse_source_norm_statistic(statistic)?;
-    let norms = data.sources.get(source)?.stream_norms?;
-    match norm {
-        STREAM_L1_NORM => norms.l1,
-        _ => norms.l2,
-    }
-}
-
-/// One operand of a product or quotient, as Stage 3 finds its domain.
-enum DomainOperand<'a> {
-    /// A planned operator: the deployment's `OperandDomain` for it.
-    Node(&'a Rc<OperatorNode>),
-    /// A literal: itself.
-    Literal(f64),
-    /// Anything else: no domain.
-    Other,
-}
-
-impl<'a> DomainOperand<'a> {
-    fn of(expr: &'a ScalarExpr) -> Self {
-        match expr {
-            ScalarExpr::PromqlScalarFromVector(node) | ScalarExpr::ScalarSubquery(node) => {
-                Self::Node(node)
-            }
-            ScalarExpr::Literal(ScalarValue::Float64(value)) => Self::Literal(*value),
-            ScalarExpr::Literal(ScalarValue::Int64(value)) => Self::Literal(*value as f64),
-            _ => Self::Other,
-        }
-    }
-
-    fn domain(&self, models: &PlanningModels<'_>) -> Option<OperandDomain> {
-        match self {
-            Self::Node(node) => models.evidence.operand_domain(node),
-            Self::Literal(value) => Some(OperandDomain {
-                lower: *value,
-                upper: *value,
-            }),
-            Self::Other => None,
-        }
-    }
-}
-
-/// A product or quotient whose bound Stage 1 left symbolic on its operands'
-/// domains ([`operand_domain_statistic`]).
-struct DomainOperation<'a> {
-    statistic: &'static str,
-    operands: [(DomainOperand<'a>, AccuracyGuarantee); 2],
-}
-
-/// Each operand-domain statistic in `root`, bound to the largest bound
-/// among the operations that leave it symbolic, or `None` (unbound) when
-/// any of them has no bound. Operations are found where the bound
-/// originates (the same rule Stage 1 uses), in vector arithmetic, a scalar
-/// root, and projection expressions. `series` is the root's input row
-/// count ([`series_read`]).
-fn operand_domain_bounds(
-    root: &QueryRoot,
-    series: Option<u64>,
-    data: &DataWorkload,
-    models: &PlanningModels<'_>,
-) -> HashMap<&'static str, Option<f64>> {
-    let mut operations = Vec::new();
-    if let QueryRoot::Scalar(expr) = root {
-        scalar_domain_operations(expr, &|_| None, &mut operations);
-    }
-    let nodes: Vec<Rc<OperatorNode>> = root_operators(root)
-        .iter()
-        .flat_map(|node| OperatorNode::reachable(node))
-        .collect();
-    for node in &nodes {
-        match node.non_asap() {
-            Some(NonASAPOp::BinaryOp {
-                operator:
-                    BinaryOperator {
-                        kind: BinaryOpKind::Arithmetic(op),
-                        ..
-                    },
-                lhs,
-                rhs,
-                ..
-            }) => {
-                let (Some(l), Some(r)) = (operand_guarantee(lhs), operand_guarantee(rhs)) else {
-                    continue;
-                };
-                if let Some(statistic) = operand_domain_statistic(op, &l, &r) {
-                    operations.push(DomainOperation {
-                        statistic,
-                        operands: [(DomainOperand::Node(lhs), l), (DomainOperand::Node(rhs), r)],
-                    });
-                }
-            }
-            Some(NonASAPOp::Project { cols, child, .. }) => {
-                for item in cols {
-                    scalar_domain_operations(
-                        &item.expr,
-                        &|column| project_column_guarantee(child, column),
-                        &mut operations,
-                    );
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut bounds: HashMap<&'static str, Option<f64>> = HashMap::new();
-    for operation in &operations {
-        let bound = domain_bound(operation, series, data, models);
-        let entry = bounds.entry(operation.statistic).or_insert(Some(0.0));
-        *entry = entry.zip(bound).map(|(a, b)| a.max(b));
-    }
-    bounds
-}
-
-/// The operations in `expr` (and its sub-expressions) whose bound Stage 1
-/// left symbolic on operand domains.
-fn scalar_domain_operations<'a>(
-    expr: &'a ScalarExpr,
-    column: &dyn Fn(usize) -> Option<AccuracyGuarantee>,
-    operations: &mut Vec<DomainOperation<'a>>,
-) {
-    if let ScalarExpr::Arithmetic {
-        op, left, right, ..
-    } = expr
-    {
-        if let (Some(l), Some(r)) = (operand_of(left, column), operand_of(right, column)) {
-            if let Some(statistic) = operand_domain_statistic(op, &l, &r) {
-                operations.push(DomainOperation {
-                    statistic,
-                    operands: [(DomainOperand::of(left), l), (DomainOperand::of(right), r)],
-                });
-            }
-        }
-    }
-    for child in expr.children() {
-        scalar_domain_operations(child, column, operations);
-    }
-}
-
-/// The bound of one product or quotient from its operands' domains:
-/// - a product: `|x|·e_y + |y|·e_x + e_x·e_y`;
-/// - a quotient: `(|x|·e_y + |y|·e_x) / (m·(m − e_y))` with `m` the least
-///   `|y|`, which must exceed `e_y` (the denominator's domain is bounded
-///   away from zero).
-///
-/// `|x|`, `|y|` are the domains' largest magnitudes, and `e` each
-/// operand's absolute error (a relative or cardinality bound times that
-/// magnitude) after binding its data-workload statistics (`series`, the
-/// root's input row count). `None` when an operand has no domain or an
-/// unbound error.
-fn domain_bound(
-    operation: &DomainOperation<'_>,
-    series: Option<u64>,
-    data: &DataWorkload,
-    models: &PlanningModels<'_>,
-) -> Option<f64> {
-    let [(x, gx), (y, gy)] = &operation.operands;
-    let (dx, dy) = (x.domain(models)?, y.domain(models)?);
-    let bind =
-        |g: &AccuracyGuarantee| g.bind(&|statistic| workload_statistic(statistic, series, data));
-    let (gx, gy) = (bind(gx), bind(gy));
-    let valid =
-        |d: &OperandDomain| d.lower.is_finite() && d.upper.is_finite() && d.lower <= d.upper;
-    if !(valid(&dx) && valid(&dy)) {
-        return None;
-    }
-    let magnitude = |d: &OperandDomain| d.lower.abs().max(d.upper.abs());
-    let (mx, my) = (magnitude(&dx), magnitude(&dy));
-    let error = |g: &AccuracyGuarantee, m: f64| {
-        let bound = g.spec.error.evaluate()?;
-        match g.spec.accuracy_metric {
-            _ if g.is_exact() => Some(0.0),
-            AccuracyMetric::ABSOLUTE => Some(bound),
-            AccuracyMetric::Relative => Some(bound * m),
-            _ => None,
-        }
-    };
-    let (ex, ey) = (error(&gx, mx)?, error(&gy, my)?);
-    let bound = if operation.statistic == PRODUCT_OPERAND_DOMAINS {
-        mx * ey + my * ex + ex * ey
-    } else {
-        let least = if dy.lower > 0.0 {
-            dy.lower
-        } else if dy.upper < 0.0 {
-            -dy.upper
-        } else {
-            return None;
-        };
-        if least <= ey {
-            return None;
-        }
-        (mx * ey + my * ex) / (least * (least - ey))
-    };
-    bound.is_finite().then_some(bound)
-}
-
-fn family_name(family: &FieldDataType) -> String {
-    match family {
-        // A shared (Hydra) structure is named by its Hydra kind, e.g. `HydraCms`.
-        FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
-            format!("{kind:?}")
-        }
-        FieldDataType::Sketch(kind, _) => format!("{:?}", kind.algorithm()),
-        FieldDataType::ExactAggregate(kind, _) => format!("exact {kind:?} accumulator"),
-        other => format!("{other:?}"),
-    }
-}
-
-/// Rows per millisecond the sources in `sources` receive together, each
-/// at its own rate: `series_count` series each sampled every
-/// `sample_interval`, or, for a source that does not declare both, its
-/// share of the workload's `rows_per_second` by series count when every
-/// source declares one, else all of it (no source receives more). A node
-/// reading no source sees the whole `rows_per_second`. `None` when a
-/// source's rate has neither (the arrival declares no rate).
-fn source_rows_per_ms(sources: &BTreeSet<&str>, data: &DataWorkload) -> Option<f64> {
-    let workload_rows_per_ms = data.arrival.rows_per_second().map(|rows| rows / 1_000.0);
-    if sources.is_empty() {
-        return workload_rows_per_ms;
-    }
-    let mut every_source: BTreeSet<&str> = data.sources.keys().map(String::as_str).collect();
-    every_source.extend(sources.iter().copied());
-    let every_source_series = declared_series(&every_source, data);
-    // Sources with a rate of their own, and the share of the workload's
-    // rate the others receive together (all of it at most).
-    let (mut own, mut shared) = (0.0, 0.0);
-    for source in sources {
-        let facts = data.sources.get(*source);
-        match facts.and_then(|facts| facts.series_count.zip(facts.sample_interval)) {
-            Some((series, interval)) if interval.0 > 0 => {
-                own += series as f64 / interval.0 as f64;
-            }
-            _ => {
-                let workload_rows_per_ms = workload_rows_per_ms?;
-                let series = facts.and_then(|facts| facts.series_count);
-                shared += match (series, every_source_series) {
-                    (Some(series), Some(every)) => {
-                        workload_rows_per_ms * series as f64 / every.max(1) as f64
-                    }
-                    _ => workload_rows_per_ms,
-                };
-            }
-        }
-    }
-    Some(own + workload_rows_per_ms.map_or(shared, |all| shared.min(all)))
-}
-
-/// The names of `node`'s output columns that still hold one source row's
-/// label (or column) values unchanged, given each producer's: every column
-/// of a scan; through operators that keep their input's rows and columns
-/// (filter, sort, limit, dedup, time range and shift), a projection or
-/// grouping key that passes a column on under its own name, a per-series
-/// reduction's other columns, a union's columns unchanged in every branch,
-/// and a summary's grouping columns. Any other operator (a join or binary
-/// operator pairing rows, a relabeling, a computed column) gives none, so a
-/// declared label set never bounds values it does not describe.
-/// `producers` are each producer's output schema and unchanged columns.
-fn unchanged_source_columns<'a>(
-    node: &'a asap_types::ir::physical_export::PhysicalASAPDAGNode,
-    producers: &[(&'a Schema, &BTreeSet<&'a str>)],
-) -> BTreeSet<&'a str> {
-    let output_names = || node.output_schema.fields.iter().map(|f| f.name.as_str());
-    let first = || {
-        producers
-            .first()
-            .map(|&(schema, unchanged)| (unchanged, schema))
-    };
-    // The output columns passing input column `input[i]` on as itself.
-    let passed_on = |inputs: &mut dyn Iterator<Item = Option<usize>>| -> BTreeSet<&'a str> {
-        let Some((unchanged, schema)) = first() else {
-            return BTreeSet::new();
-        };
-        output_names()
-            .zip(inputs)
-            .filter(|(name, input)| {
-                input
-                    .and_then(|input| schema.fields.get(input))
-                    .is_some_and(|field| field.name == *name && unchanged.contains(*name))
-            })
-            .map(|(name, _)| name)
-            .collect()
-    };
-    let kept = || -> BTreeSet<&'a str> {
-        first().map_or_else(BTreeSet::new, |(unchanged, _)| {
-            output_names()
-                .filter(|name| unchanged.contains(name))
-                .collect()
-        })
-    };
-    match &node.payload {
-        Payload::NonASAP(operator) => match operator {
-            NonASAPOp::Scan { .. } => output_names().collect(),
-            NonASAPOp::Filter { .. }
-            | NonASAPOp::Sort { .. }
-            | NonASAPOp::Limit { .. }
-            | NonASAPOp::Dedup { .. }
-            | NonASAPOp::TimeRange { .. }
-            | NonASAPOp::TimeShift { .. } => kept(),
-            NonASAPOp::Project { cols, .. } => {
-                passed_on(&mut cols.iter().map(|col| match col.expr {
-                    ScalarExpr::Column(input) => Some(input),
-                    _ => None,
-                }))
-            }
-            // A `count_values` label named like a key replaces it.
-            NonASAPOp::Aggregate {
-                reduction: Reduction::Reduce(keys),
-                measures,
-                ..
-            } if !keys.is_without()
-                && !measures
-                    .iter()
-                    .any(|m| matches!(m, AggIntent::CountValues { .. })) =>
-            {
-                passed_on(&mut keys.keys().iter().map(|&key| Some(key)))
-            }
-            // A per-series reduction keeps every column but the ones it
-            // reduces and the ones it names.
-            NonASAPOp::Aggregate {
-                reduction: Reduction::PerEntity,
-                measures,
-                output_names: measure_names,
-                ..
-            } => {
-                let Some((_, schema)) = first() else {
-                    return BTreeSet::new();
-                };
-                let mut columns = kept();
-                for measure in measures {
-                    for input in measure.input_cols() {
-                        if let Some(field) = schema.fields.get(input) {
-                            columns.remove(field.name.as_str());
-                        }
-                    }
-                }
-                for name in measure_names {
-                    columns.remove(name.as_str());
-                }
-                columns
-            }
-            NonASAPOp::SetOp {
-                kind: RelationalSetOpKind::Union,
-                ..
-            }
-            | NonASAPOp::Concat { .. } => {
-                let mut columns = kept();
-                for (_, unchanged) in producers {
-                    columns.retain(|name| unchanged.contains(name));
-                }
-                columns
-            }
-            _ => BTreeSet::new(),
-        },
-        Payload::ASAP(
-            ASAPOp::SummaryAgg { .. }
-            | ASAPOp::PaneChain { .. }
-            | ASAPOp::SummaryMerge { .. }
-            | ASAPOp::SummaryEstimate { .. }
-            | ASAPOp::FinalizeExactAccumulator { .. },
-        ) => kept(),
-        _ => BTreeSet::new(),
-    }
-}
-
-/// The groups (or partitions) a `by (keys)` over rows of schema `input`
-/// from `sources` is priced at, from declared or derivable facts only: the
-/// smallest of
-/// - when the keys read one source and are all in
-///   `unchanged_input_columns` (one source row's labels, unchanged), the
-///   smallest product of the counts it declares in
-///   `distinct_values_per_label` and `distinct_values_per_label_set` that
-///   covers the keys
-///   ([`SourceFacts::declared_distinct_combinations`](asap_types::workload::SourceFacts::declared_distinct_combinations));
-///   otherwise (several sources, a join pairing labels of different rows,
-///   or a relabeled key) the product of each key's
-///   `distinct_values_per_label` count summed over the sources (a union
-///   holds at most the sum, while a join matching on the key is
-///   over-counted), when every key has one;
-/// - the series (PromQL) or groups of rows (SQL) the sources declare in
-///   `series_count`, when they all do (their product over several
-///   sources): each is in one group;
-/// - `rows_read`, the rows the grouping reads per evaluation: each row is
-///   in at most one group.
-fn group_count_bound(
-    keys: &GroupKeys,
-    input: Option<&Schema>,
-    sources: &BTreeSet<&str>,
-    unchanged_input_columns: &BTreeSet<&str>,
-    data: &DataWorkload,
-    rows_read: u64,
-) -> u64 {
-    let labels = || -> Option<Vec<&str>> {
-        keys.keys()
-            .iter()
-            .map(|key| Some(input?.fields.get(*key)?.name.as_str()))
-            .collect()
-    };
-    let label_count = |label: &str| -> Option<u64> {
-        sources.iter().try_fold(0u64, |total, source| {
-            let count = data
-                .sources
-                .get(*source)?
-                .distinct_values_per_label
-                .get(label)?;
-            Some(total.saturating_add(*count))
-        })
-    };
-    let declared = || -> Option<u64> {
-        if keys.is_without() || sources.is_empty() {
-            return None;
-        }
-        let labels = labels()?;
-        // Keys that are one source row's unchanged labels: the source's
-        // declared label sets bound their combinations.
-        if let (1, Some(source)) = (sources.len(), sources.first()) {
-            if labels
-                .iter()
-                .all(|label| unchanged_input_columns.contains(label))
-            {
-                return data
-                    .sources
-                    .get(*source)?
-                    .declared_distinct_combinations(&labels);
-            }
-        }
-        labels.into_iter().try_fold(1u64, |product, label| {
-            Some(product.saturating_mul(label_count(label)?))
-        })
-    };
-    // Over several sources a group combines one series (or group of rows)
-    // of each at most, as a join does; a union's groups are fewer.
-    let declared_series = if sources.is_empty() {
-        None
-    } else {
-        sources.iter().try_fold(1u64, |product, source| {
-            Some(product.saturating_mul(data.sources.get(*source)?.series_count?))
-        })
-    };
-    [declared(), declared_series, Some(rows_read)]
-        .into_iter()
-        .flatten()
-        .min()
-        .unwrap_or(rows_read)
-        .max(1)
-}
-
-/// The series (or groups of rows) the sources in `sources` declare
-/// together, when every one declares `series_count`; `None` otherwise and
-/// for a node that reads no source.
-fn declared_series(sources: &BTreeSet<&str>, data: &DataWorkload) -> Option<u64> {
-    if sources.is_empty() {
-        return None;
-    }
-    sources.iter().try_fold(0u64, |total, source| {
-        Some(total.saturating_add(data.sources.get(*source)?.series_count?))
-    })
-}
-
-/// Measure every node of `dag` per second of wall time (module doc, "Cost
-/// model") and price it under `settings.cost_model`. Nodes are exported
-/// children first, so each node's input statistics are known when it is
-/// reached. A query-time node is measured per computation over the rows its
-/// time ranges keep, times how often it is computed per second
-/// ([`computations`]); an ingestion-time node over one second of arriving
-/// rows. A materialized node's kept state is counted in byte-seconds per
-/// second; a pane chain kept beyond one evaluation keeps the panes its
-/// retention covers ([`pane_retention_ms`]). `nodes` and `kept_chains` are
-/// `dag`'s ([`node_map`], [`kept_pane_chains`]); `recurrence[q]` and
-/// `range_evaluations[q]` say how often query `q` runs and how many steps
-/// each run evaluates (one when missing).
-#[allow(clippy::too_many_arguments)]
-fn price_at_scale(
-    dag: &PhysicalASAPDAG,
-    nodes: &NodeMap<'_>,
-    kept_chains: &HashSet<PhysicalASAPNodeId>,
-    recurrence: &[QueryRecurrence],
-    range_evaluations: &[Option<RangeEvaluation>],
-    data: &DataWorkload,
-    settings: &PlanSelectionSettings,
-    formula_scale: f64,
-) -> Result<(CandidateCost, CalibrationFit), (PhysicalASAPNodeId, AnalyticalCostError)> {
-    let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
-    let table = &settings.measured_operation_costs;
-    let mut fit = CalibrationFit::default();
-    let speed = settings.resource_speed;
-    // Cost model 1 prices each node as it is measured.
-    let usage_prices = match &settings.cost_model {
-        CostModel::UsageOverTime(prices) => Some(prices),
-        _ => None,
-    };
-    let EachNodePriced {
-        priced,
-        multipliers,
-        reach,
-    } = price_each_node(
-        dag,
-        nodes,
-        kept_chains,
-        recurrence,
-        range_evaluations,
-        data,
-        settings,
-        formula_scale,
-        None,
-        None,
-    )?;
-    let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();
-    let mut per_node = BTreeMap::new();
-    // The candidate's usage, accumulated node by node; peak cores and
-    // latency are filled in once every node is measured.
-    let mut usage = ResourceUsage::default();
-    // Each node's work in ms on one core: one computation at query time,
-    // one second of arriving rows at ingestion time.
-    let mut work_ms: HashMap<PhysicalASAPNodeId, f64> = HashMap::new();
-    // Query-time memory held only while one evaluation runs, a MatAtQuery
-    // state in memory or a NotMaterialized node's working memory: (bytes,
-    // per second, whether each reading query computes its own copy),
-    // counted once the evaluations' latencies are known, in node order so
-    // the sum is the same in every run.
-    let mut held: BTreeMap<PhysicalASAPNodeId, (u64, f64, bool)> = BTreeMap::new();
-    // The raw data query-time scans read, kept on disk: per source, the
-    // largest scan's (bytes, node).
-    let mut raw_data: HashMap<&Source, (u64, PhysicalASAPNodeId)> = HashMap::new();
-    // Each in-memory ingestion-time state's bytes per window (what it keeps
-    // for one window, its output or an exact aggregate's values).
-    let mut maintained: Vec<(PhysicalASAPNodeId, u64)> = Vec::new();
-    // Each summary node's state family, to look up in the measured table:
-    // a build's own (one sketch instance per group; a shared Hydra
-    // structure is not that sketch), inherited by the merges, estimates and
-    // finalizations over it.
-    let mut family_of: HashMap<PhysicalASAPNodeId, StateFamily<'_>> = HashMap::new();
-    let sketch_size =
-        |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN).1 as f64;
-    for node in &dag.nodes {
-        let node_priced = &priced[&node.id];
-        usage.cpu_ops_per_second += node_priced.cpu_ops_per_second;
-        usage.scanned_bytes_per_second += node_priced.scanned_bytes_per_second;
-        usage.average_memory_bytes += node_priced.average_memory_bytes;
-        usage.peak_memory_bytes = usage
-            .peak_memory_bytes
-            .saturating_add(node_priced.peak_memory_bytes);
-        usage.disk_bytes = usage.disk_bytes.saturating_add(node_priced.disk_bytes);
-        fit.add(node_priced.fit);
-        work_ms.insert(node.id, node_priced.work_ms);
-        output.insert(node.id, node_priced.output);
-        if node_priced.family != StateFamily::None {
-            family_of.insert(node.id, node_priced.family);
-        }
-        if let Some(entry) = node_priced.held {
-            held.insert(node.id, entry);
-        }
-        if let Some(window) = node_priced.maintained {
-            maintained.push((node.id, window));
-        }
-        if let Some((source, bytes)) = node_priced.raw_scan {
-            let largest = raw_data.entry(source).or_insert((bytes, node.id));
-            if bytes > largest.0 {
-                *largest = (bytes, node.id);
-            }
-        }
-        per_node.insert(node.id, node_priced.cost.clone());
-    }
-    // The runtime's fixed cost per query request, charged to the node the
-    // query reads first and added to its latency below.
-    let evaluation_ms = table.ns_per_evaluation * 1e-6;
-    let starts = query_starts(dag);
-    let mut evaluation_ms_per_query = vec![0.0; starts.len()];
-    let mut request_ms_per_second = 0.0;
-    // Literal-only roots have no operator to own their fee. Keep that charge
-    // at plan level while preserving existing attribution for operator queries.
-    let mut unattached_request_cost = 0.0;
-    let mut has_unattached_request_overhead = false;
-    for (query, start) in starts.iter().enumerate() {
-        if evaluation_ms <= 0.0 {
-            continue;
-        }
-        let diagnostic_node = start.first().copied().unwrap_or(first);
-        let requests_per_second = evaluation_rate(
-            recurrence.get(query).map(|r| (r, None)),
-            settings.non_repeating_query_horizon_seconds,
-        )
-        .map_err(|error| (diagnostic_node, error))?;
-        let ops_per_second = evaluation_ms / speed.ms_per_cpu_op * requests_per_second;
-        usage.cpu_ops_per_second += ops_per_second;
-        request_ms_per_second += evaluation_ms * requests_per_second;
-        if !usage.cpu_ops_per_second.is_finite() || !request_ms_per_second.is_finite() {
-            return Err((diagnostic_node, AnalyticalCostError::Overflow));
-        }
-        evaluation_ms_per_query[query] = evaluation_ms;
-        let Some(&first_read) = start.first() else {
-            has_unattached_request_overhead = true;
-            if let Some(prices) = usage_prices {
-                unattached_request_cost += prices.cost_per_cpu_op * ops_per_second;
-                if !unattached_request_cost.is_finite() {
-                    return Err((diagnostic_node, AnalyticalCostError::Overflow));
-                }
-            }
-            continue;
-        };
-        let node = per_node
-            .get_mut(&first_read)
-            .expect("every node is measured");
-        node.cpu_core_seconds_per_second += evaluation_ms * requests_per_second / 1_000.0;
-        if !node.cpu_core_seconds_per_second.is_finite() {
-            return Err((first_read, AnalyticalCostError::Overflow));
-        }
-        node.detail += &format!(
-            "; q{} request overhead {:.3} ns x {requests_per_second:.4}/s",
-            query + 1,
-            table.ns_per_evaluation
-        );
-        if let (Some(cost), Some(prices)) = (&mut node.cost_per_second, usage_prices) {
-            *cost += prices.cost_per_cpu_op * ops_per_second;
-            if !cost.is_finite() {
-                return Err((first_read, AnalyticalCostError::Overflow));
-            }
-        }
-    }
-    for (bytes, id) in raw_data.into_values() {
-        let node = per_node.get_mut(&id).expect("every node is measured");
-        usage.disk_bytes = usage.disk_bytes.saturating_add(bytes);
-        node.detail += &format!("; keeps {bytes} bytes of raw data on disk");
-        if let (Some(cost), Some(prices)) = (&mut node.cost_per_second, usage_prices) {
-            *cost += prices.cost_per_disk_byte_second * bytes as f64;
-        }
-    }
-    // With k ingest workers, each of the k − 1 beyond the first builds its
-    // own partial copy of an in-memory ingestion-time state's newest window
-    // (merged at query time, [`query_latencies`]), held at the peak too.
-    for (id, window) in maintained {
-        let copies = ingest_workers(dag, &work_ms, id) - 1;
-        if copies == 0 {
-            continue;
-        }
-        let bytes = copies.saturating_mul(window);
-        let measured = per_node.get_mut(&id).expect("every node is measured");
-        usage.peak_memory_bytes = usage.peak_memory_bytes.saturating_add(bytes);
-        measured.detail +=
-            &format!("; {copies} partial copies of its newest window, {bytes} bytes");
-    }
-    // Milliseconds of one merge of each state with a measured query-time
-    // merge entry (measured ns · 10⁻⁶), for the newest window's compaction.
-    let merge_ms: HashMap<PhysicalASAPNodeId, f64> = family_of
-        .iter()
-        .filter_map(|(id, family)| {
-            lookup(
-                table,
-                OperatorKind::SummaryMerge,
-                ExecutionTiming::QueryTime,
-                *family,
-                sketch_size,
-            )
-            .map(|unit| (*id, (unit.ns_per_unit + unit.ns_per_invocation) * 1e-6))
-        })
-        .collect();
-    let mut latency = query_latencies(
-        dag,
-        nodes,
-        &output,
-        &work_ms,
-        &merge_ms,
-        speed.ms_per_cpu_op * formula_scale,
-    );
-    for (latency, evaluation_ms) in latency.iter_mut().zip(evaluation_ms_per_query) {
-        latency.query_ms += evaluation_ms;
-    }
-    // Query-time memory is held for one evaluation: a MatAtQuery state from
-    // its build until the longest query reading it finishes, about that
-    // query's latency; a NotMaterialized node's copy for each reading query
-    // for that query's latency, so its rate-weighted mean.
-    for (id, (state, per_second, computed_per_reader)) in held {
-        let readers = reach
-            .iter()
-            .enumerate()
-            .zip(&latency)
-            .filter(|((_, reached), _)| reached.contains(&id));
-        let longest_ms = readers
-            .clone()
-            .map(|(_, l)| l.total_ms())
-            .fold(0.0, f64::max);
-        let mut rate_weighted_ms = 0.0;
-        let mut evaluations_per_second = 0.0;
-        if computed_per_reader {
-            for ((query, _), l) in readers {
-                let rate = evaluation_rate(
-                    recurrence
-                        .get(query)
-                        .map(|r| (r, range_evaluations.get(query).copied().flatten())),
-                    settings.non_repeating_query_horizon_seconds,
-                )
-                .map_err(|error| (id, error))?;
-                rate_weighted_ms += rate * l.total_ms();
-                evaluations_per_second += rate;
-            }
-        }
-        let evaluation_ms = match evaluations_per_second > 0.0 {
-            true => rate_weighted_ms / evaluations_per_second,
-            false => longest_ms,
-        };
-        let byte_seconds = state as f64 * evaluation_ms / 1_000.0 * per_second;
-        let node = per_node.get_mut(&id).expect("every node is measured");
-        usage.average_memory_bytes += byte_seconds;
-        node.detail += &format!("; holds {state} bytes for {evaluation_ms:.1} ms");
-        if let (Some(cost), Some(prices)) = (&mut node.cost_per_second, usage_prices) {
-            *cost += prices.cost_per_memory_byte_second * byte_seconds;
-            if !cost.is_finite() {
-                return Err((id, AnalyticalCostError::Overflow));
-            }
-        }
-    }
-    usage.peak_cpu_cores = peak_cpu_cores(
-        dag,
-        nodes,
-        &work_ms,
-        &multipliers,
-        &latency,
-        request_ms_per_second,
-    );
-    usage.latency_per_query = latency;
-    let cost = match &settings.cost_model {
-        CostModel::UsageOverTime(_) => {
-            let node_cost: Option<f64> = per_node.values().map(|node| node.cost_per_second).sum();
-            let total = node_cost.map(|cost| cost + unattached_request_cost);
-            if total.is_some_and(|cost| !cost.is_finite()) {
-                return Err((first, AnalyticalCostError::Overflow));
-            }
-            total
-        }
-        CostModel::ProvisionedCapacity(prices) => {
-            let cost = prices.cost_per_provisioned_memory_byte_second
-                * usage.peak_memory_bytes as f64
-                + prices.cost_per_provisioned_cpu_core_second * f64::from(usage.peak_cpu_cores)
-                + prices.cost_per_disk_byte_second * usage.disk_bytes as f64;
-            if !cost.is_finite() {
-                return Err((first, AnalyticalCostError::Overflow));
-            }
-            Some(cost)
-        }
-        CostModel::ClusterCapacity(_) => None,
-    };
-    Ok((
-        CandidateCost {
-            usage,
-            cost_per_second: cost,
-            cost_unit: COST_UNIT,
-            source: if has_unattached_request_overhead {
-                if per_node
-                    .values()
-                    .all(|node| node.price_source == NodePriceSource::Measured)
-                {
-                    MEASURED_COST_SOURCE
-                } else {
-                    MIXED_COST_SOURCE
-                }
-            } else {
-                cost_source(&per_node)
-            },
-            per_node,
-        },
-        fit,
-    ))
-}
-
-/// Every node of a physical DAG priced ([`price_each_node`]), with each
-/// node's `(multiplier, per_second)` ([`computations`]) and the nodes each
-/// query reaches at query time ([`query_reach`]).
-pub(crate) struct EachNodePriced<'a> {
-    pub(crate) priced: HashMap<PhysicalASAPNodeId, PricedNode<'a>>,
-    pub(crate) multipliers: HashMap<PhysicalASAPNodeId, (u64, f64)>,
-    pub(crate) reach: Vec<HashSet<PhysicalASAPNodeId>>,
-}
-
-/// [`price_node`] over every node of `dag`, children first, with the
-/// arguments of [`price_at_scale`]. `root_scan_lookback_ms` is the
-/// look-back of a query-time scan no window above it in `dag` bounds (a
-/// scan priced without its consumers); `None` when the scan has no
-/// window, so it reads the source's `rows_held` or fails with
-/// `MissingSourceFact`, as Stage 3 does. `root_rates`, when given, are
-/// the computations per second of each root's consumer in place of its
-/// query's own rate ([`computations`]).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn price_each_node<'a>(
-    dag: &'a PhysicalASAPDAG,
-    nodes: &NodeMap<'a>,
-    kept_chains: &HashSet<PhysicalASAPNodeId>,
-    recurrence: &[QueryRecurrence],
-    range_evaluations: &[Option<RangeEvaluation>],
-    data: &DataWorkload,
-    settings: &'a PlanSelectionSettings,
-    formula_scale: f64,
-    root_scan_lookback_ms: Option<u64>,
-    root_rates: Option<&[f64]>,
-) -> Result<EachNodePriced<'a>, (PhysicalASAPNodeId, AnalyticalCostError)> {
-    let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
-    let multipliers = computations(
-        dag,
-        recurrence,
-        range_evaluations,
-        settings.non_repeating_query_horizon_seconds,
-        root_rates,
-    )
-    .map_err(|error| (first, error))?;
-    let reach = query_reach(dag, nodes);
-    let retention_ms = pane_retention_ms(dag, &reach, range_evaluations);
-    let mut producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
-    for e in &dag.edges {
-        producers_of.entry(e.consumer).or_default().push(e.producer);
-    }
-    let mut priced: HashMap<PhysicalASAPNodeId, PricedNode<'a>> = HashMap::new();
-    for node in &dag.nodes {
-        let views: Vec<ProducerOutput<'a>> = producers_of
-            .get(&node.id)
-            .map_or(&[][..], Vec::as_slice)
-            .iter()
-            .map(|p| {
-                let produced: &PricedNode<'a> = &priced[p];
-                ProducerOutput {
-                    payload: &nodes[p].payload,
-                    output_schema: &nodes[p].output_schema,
-                    output: produced.output,
-                    sources: produced.sources.clone(),
-                    family: produced.family,
-                    unchanged_columns: produced.unchanged_columns.clone(),
-                }
-            })
-            .collect();
-        let scan_window = match (&node.payload, node.output_state.timing) {
-            (Payload::NonASAP(NonASAPOp::Scan { .. }), ExecutionTiming::QueryTime) => {
-                match dag.scan_window(node.id, kept_chains) {
-                    // Priced as before #955 decides `@` anchors and
-                    // unwindowed readers: the widest window read.
-                    ScanWindow::Unbounded => trailing_window(
-                        widest_window_read_ms(dag, nodes, node.id, kept_chains)
-                            .or(root_scan_lookback_ms),
-                    ),
-                    window => window,
-                }
-            }
-            _ => ScanWindow::Unbounded,
-        };
-        let node_priced = price_node(
-            node,
-            &views,
-            multipliers[&node.id],
-            scan_window,
-            retained_panes(node, &retention_ms),
-            (node.output_state.timing == ExecutionTiming::IngestionTime)
-                .then(|| maintained_window_ms(node.id, nodes, &producers_of))
-                .flatten(),
-            data,
-            settings,
-            formula_scale,
-        )
-        .map_err(|error| (node.id, error))?;
-        priced.insert(node.id, node_priced);
-    }
-    Ok(EachNodePriced {
-        priced,
-        multipliers,
-        reach,
-    })
-}
-
-/// The state family of a node with `payload` whose first producer has
-/// `producer_family`: a build's own (one sketch instance per group; a
-/// shared Hydra structure is not that sketch), inherited by the merges,
-/// estimates and finalizations over it, none otherwise.
-fn state_family<'a>(
-    payload: &'a Payload,
-    producer_family: Option<StateFamily<'a>>,
-) -> StateFamily<'a> {
-    match payload {
-        Payload::ASAP(
-            ASAPOp::SummaryAgg {
-                family, grouping, ..
-            }
-            | ASAPOp::PaneChain {
-                family, grouping, ..
-            },
-        ) => match family {
-            FieldDataType::Sketch(kind, _)
-                if *grouping == GroupingStrategy::PerSubpopulationInstance =>
-            {
-                StateFamily::Sketch(kind.params())
-            }
-            FieldDataType::ExactAggregate(kind, _) => StateFamily::Exact(kind),
-            _ => StateFamily::None,
-        },
-        Payload::ASAP(
-            ASAPOp::SummaryMerge { .. }
-            | ASAPOp::SummaryEstimate { .. }
-            | ASAPOp::FinalizeExactAccumulator { .. },
-        ) => producer_family.unwrap_or(StateFamily::None),
-        _ => StateFamily::None,
-    }
-}
-
-/// One producer of a node being priced ([`price_node`]): its payload and
-/// schema, its output statistics, the sources it reads and its state
-/// family.
-#[derive(Debug, Clone)]
-pub(crate) struct ProducerOutput<'a> {
-    pub(crate) payload: &'a Payload,
-    pub(crate) output_schema: &'a Schema,
-    pub(crate) output: EdgeStatistics,
-    pub(crate) sources: BTreeSet<&'a str>,
-    pub(crate) family: StateFamily<'a>,
-    /// Its output columns that still hold one source row's label (or
-    /// column) values unchanged ([`unchanged_source_columns`]).
-    pub(crate) unchanged_columns: BTreeSet<&'a str>,
-}
-
-/// What one node costs and outputs ([`price_node`]): its output statistics,
-/// sources and state family for its consumers; its work for one
-/// computation in ms on one core; its usage per second; what is charged
-/// once the whole plan is known (memory held for a query's evaluation, an
-/// in-memory ingestion window's partial copies, the raw data a query-time
-/// scan keeps on disk); its calibration fit and its [`NodeCost`].
-#[derive(Debug, Clone)]
-pub(crate) struct PricedNode<'a> {
-    pub(crate) output: EdgeStatistics,
-    pub(crate) sources: BTreeSet<&'a str>,
-    pub(crate) family: StateFamily<'a>,
-    /// Its output columns that still hold one source row's label (or
-    /// column) values unchanged ([`unchanged_source_columns`]).
-    pub(crate) unchanged_columns: BTreeSet<&'a str>,
-    pub(crate) work_ms: f64,
-    pub(crate) cpu_ops_per_second: f64,
-    pub(crate) scanned_bytes_per_second: f64,
-    pub(crate) average_memory_bytes: f64,
-    pub(crate) peak_memory_bytes: u64,
-    pub(crate) disk_bytes: u64,
-    /// Query-time memory held while an evaluation runs: (bytes, computations
-    /// per second, whether each reading query computes its own copy).
-    pub(crate) held: Option<(u64, f64, bool)>,
-    /// An in-memory ingestion-time state's bytes per window.
-    pub(crate) maintained: Option<u64>,
-    /// A query-time scan's source and the raw bytes it reads.
-    pub(crate) raw_scan: Option<(&'a Source, u64)>,
-    pub(crate) fit: CalibrationFit,
-    pub(crate) cost: NodeCost,
-}
-
-/// Measure and price one node of a physical DAG (one step of
-/// [`price_at_scale`]): `producers` are its producers in edge order,
-/// `rate` its `(multiplier, per_second)` ([`computations`]), `scan_window`
-/// the raw rows a query-time scan reads ([`PhysicalASAPDAG::scan_window`];
-/// read only for scans: it reads `width_ms` of rows and keeps them back to
-/// [`ScanWindow::lookback_ms`]), `retained_pane_count` the panes a pane chain keeps
-/// completed ([`retained_panes`]), and `ingestion_window_ms` the window an
-/// ingestion-time node maintains ([`maintained_window_ms`]).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn price_node<'a>(
-    node: &'a asap_types::ir::physical_export::PhysicalASAPDAGNode,
-    producers: &[ProducerOutput<'a>],
-    rate: (u64, f64),
-    scan_window: ScanWindow,
-    retained_pane_count: u64,
-    ingestion_window_ms: Option<u64>,
-    data: &DataWorkload,
-    settings: &'a PlanSelectionSettings,
-    formula_scale: f64,
-) -> Result<PricedNode<'a>, AnalyticalCostError> {
-    let table = &settings.measured_operation_costs;
-    let speed = settings.resource_speed;
-    let usage_prices = match &settings.cost_model {
-        CostModel::UsageOverTime(prices) => Some(prices),
-        _ => None,
-    };
-    let sketch_size =
-        |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN).1 as f64;
-    let mut fit = CalibrationFit::default();
-    let mut held = None;
-    let mut maintained = None;
-    let mut raw_scan = None;
-    // A query-time scan's raw rows kept ([`ScanWindow::lookback_ms`]).
-    let mut raw_kept_rows = None;
-    let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
-    let inputs: Vec<EdgeStatistics> = producers.iter().map(|p| p.output).collect();
-    let sources: BTreeSet<&str> = match &node.payload {
-        Payload::NonASAP(NonASAPOp::Scan { source, .. }) => [source_name(source)].into(),
-        _ => producers
-            .iter()
-            .flat_map(|p| p.sources.iter().copied())
-            .collect(),
-    };
-    // The series its sources declare, when they all do.
-    let series = declared_series(&sources, data);
-    // The rows per ms its sources receive, which its scans and time
-    // ranges read, when the data declares an arrival rate.
-    let rows_per_ms = source_rows_per_ms(&sources, data);
-    // The fact a rate needs, named when it is missing.
-    let missing_rate = |source: &str| AnalyticalCostError::MissingSourceFact {
-        source_name: source.to_string(),
-        missing: "an arrival rate (the arrival's rows_per_second, or the \
-                  source's series_count with sample_interval)",
-    };
-    let family = state_family(&node.payload, producers.first().map(|p| p.family));
-    let unchanged_columns = unchanged_source_columns(
-        node,
-        &producers
-            .iter()
-            .map(|p| (p.output_schema, &p.unchanged_columns))
-            .collect::<Vec<_>>(),
-    );
-    let operator = OperatorKind::of(&node.payload);
-    let unit_price = match &node.payload {
-        Payload::NonASAP(NonASAPOp::Aggregate { measures, .. }) => {
-            aggregate_lookup(table, node.output_state.timing, measures)
-        }
-        _ => lookup(
-            table,
-            operator,
-            node.output_state.timing,
-            family,
-            sketch_size,
-        ),
-    };
-    // The kernel's measured bytes per state, when the table has them.
-    let measured_state_bytes = unit_price
-        .and_then(|p| p.memory_bytes_per_state)
-        .map(|bytes| bytes.round() as u64);
-    let mut price_source = NodePriceSource::Analytical;
-    let input = inputs
-        .first()
-        .copied()
-        .unwrap_or(EdgeStatistics { rows: 1, bytes: 1 });
-    let width = row_bytes(&node.output_schema);
-    let edge = |rows: u64| -> Result<EdgeStatistics, AnalyticalCostError> {
-        Ok(EdgeStatistics {
-            rows,
-            bytes: rows
-                .checked_mul(width)
-                .ok_or(AnalyticalCostError::Overflow)?,
-        })
-    };
-    // Whether a summary built here sees raw data samples (its producer a
-    // scan or a time range) of sources all declared non-negative.
-    let raw_data_samples_non_negative = || {
-        let raw = producers.first().is_some_and(|producer| {
-            matches!(
-                producer.payload,
-                Payload::NonASAP(NonASAPOp::Scan { .. } | NonASAPOp::TimeRange { .. })
-            )
-        });
-        raw && sources
-            .iter()
-            .all(|source| declared_non_negative(data, source))
-    };
-    let unary = |output| UnaryEdgeStatistics {
-        input,
-        output,
-        promql: None,
-    };
-    // The schema the node's group and partition keys index.
-    let input_schema = producers.first().map(|p| p.output_schema);
-    // The rows a grouping reads per evaluation: its input at query
-    // time; at ingestion time, the arriving rows of the window it
-    // maintains (one second of them does not bound its groups).
-    // Query time always has its input rows; an ingestion-time grouping
-    // with no window below it is an error (Stage 2 builds none).
-    let rows_read = || match ingestion {
-        false => Ok(input.rows.max(1)),
-        true => {
-            let window_ms =
-                ingestion_window_ms.ok_or(AnalyticalCostError::IngestionGroupingWithoutWindow)?;
-            // Name a source with no rate of its own.
-            let rows_per_ms = rows_per_ms.ok_or_else(|| {
-                let unrated = sources
-                    .iter()
-                    .find(|source| source_rows_per_ms(&[**source].into(), data).is_none());
-                missing_rate(unrated.copied().unwrap_or("(none)"))
-            })?;
-            Ok(((rows_per_ms * window_ms as f64).round() as u64).max(1))
-        }
-    };
-    let estimated_groups = |keys: &GroupKeys| {
-        let rows_read = rows_read()?;
-        Ok(group_count_bound(
-            keys,
-            input_schema,
-            &sources,
-            producers
-                .first()
-                .map_or(&BTreeSet::new(), |producer| &producer.unchanged_columns),
-            data,
-            rows_read,
-        ))
-    };
-    let groups = |reduction: &Reduction| match reduction {
-        Reduction::Reduce(keys) if keys.keys().is_empty() && !keys.is_without() => Ok(1),
-        Reduction::Reduce(keys) => estimated_groups(keys),
-        // One group per series: the declared series (at query time at
-        // most the rows read), else the rows read, each series having at
-        // least one.
-        Reduction::PerEntity => match (ingestion, series) {
-            (true, Some(series)) => Ok(series.max(1)),
-            (false, Some(series)) => Ok(series.min(input.rows).max(1)),
-            (_, None) => rows_read(),
-        },
-    };
-    let (out, estimate, detail) = match &node.payload {
-        Payload::NonASAP(operator) => match operator {
-            NonASAPOp::Scan { source, .. } => {
-                // At ingestion time, one second of arriving rows; at
-                // query time, the arriving rows of the window read above
-                // it, at most the rows the source holds (all of them
-                // without a window).
-                let source = source_name(source);
-                let rows_held = data.sources.get(source).and_then(|facts| facts.rows_held);
-                let window_width_ms = match scan_window {
-                    ScanWindow::Within { width_ms, .. } => {
-                        Some(u64::try_from(width_ms).unwrap_or(0))
-                    }
-                    ScanWindow::Unbounded => None,
-                };
-                let lookback = match ingestion {
-                    true => Some(1_000),
-                    false => window_width_ms,
-                };
-                let by_rate = |lookback: Option<u64>| {
-                    rows_per_ms.zip(lookback).map(|(rows_per_ms, lookback)| {
-                        (rows_per_ms * lookback as f64).round() as u64
-                    })
-                };
-                // The raw rows kept for a query-time scan: back to the
-                // oldest row it reads, `end_offset + width` (an offset
-                // window keeps more than it reads), at most those held.
-                if !ingestion {
-                    let kept_rows = match (by_rate(scan_window.lookback_ms()), rows_held) {
-                        (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
-                        (by_rate, rows_held) => by_rate.or(rows_held),
-                    };
-                    raw_kept_rows = kept_rows.map(|rows| rows.max(1));
-                }
-                let by_rate = by_rate(lookback);
-                let rows = match (ingestion, by_rate, rows_held) {
-                    (true, by_rate, _) => by_rate.ok_or_else(|| missing_rate(source))?,
-                    (false, Some(by_rate), Some(rows_held)) => by_rate.min(rows_held),
-                    (false, by_rate, rows_held) => by_rate.or(rows_held).ok_or_else(|| {
-                        AnalyticalCostError::MissingSourceFact {
-                            source_name: source.to_string(),
-                            missing: match lookback {
-                                Some(_) => {
-                                    "an arrival rate (the arrival's rows_per_second, or the \
-                                     source's series_count with sample_interval) or its \
-                                     rows_held"
-                                }
-                                None => "its rows_held (the scan has no window, so it reads every row held)",
-                            },
-                        }
-                    })?,
-                };
-                let out = edge(rows.max(1))?;
-                let estimate = estimate_operator(
-                    PhysicalOperator::Scan,
-                    OperatorStatistics::Scan {
-                        edges: UnaryEdgeStatistics {
-                            input: out,
-                            output: out,
-                            promql: None,
-                        },
-                        source_read_bytes: out.bytes,
-                    },
-                );
-                (out, estimate, format!("scan {} samples", out.rows))
-            }
-            NonASAPOp::Aggregate {
-                reduction,
-                measures,
-                ..
-            } => {
-                let group_count = groups(reduction)?;
-                let keys = match reduction {
-                    Reduction::Reduce(keys) => keys.keys().len() as u64,
-                    _ => 1,
-                };
-                let out = edge(group_count)?;
-                let held = input.rows.div_ceil(group_count.max(1));
-                let estimate = estimate_operator(
-                    PhysicalOperator::HashAggregate {
-                        grouping_key_count: keys,
-                        accumulator_count: measures.len().max(1) as u64,
-                    },
-                    OperatorStatistics::HashAggregate {
-                        edges: unary(out),
-                        group_count,
-                        key_bytes: keys.checked_mul(16).ok_or(AnalyticalCostError::Overflow)?,
-                        accumulator_bytes_per_group: measures
-                            .iter()
-                            .try_fold(0_u64, |total, measure| {
-                                let values = if keeps_every_value(measure) { held } else { 1 };
-                                total
-                                    .checked_add(
-                                        values
-                                            .checked_mul(8)
-                                            .ok_or(AnalyticalCostError::Overflow)?,
-                                    )
-                                    .ok_or(AnalyticalCostError::Overflow)
-                            })?
-                            .max(8),
-                    },
-                );
-                (
-                    out,
-                    estimate,
-                    format!(
-                        "hash aggregate {} rows into {group_count} groups",
-                        input.rows
-                    ),
-                )
-            }
-            NonASAPOp::Sort {
-                keys, partition_by, ..
-            } => {
-                let partitions = if partition_by.keys().is_empty() {
-                    1
-                } else {
-                    estimated_groups(partition_by)?
-                };
-                let estimate = estimate_operator(
-                    PhysicalOperator::InMemoryComparisonSort {
-                        ordering_key_count: keys.len() as u64,
-                        partitioned: partitions > 1,
-                    },
-                    OperatorStatistics::InMemoryComparisonSort {
-                        edges: unary(input),
-                        input_partitioning: split(input, partitions),
-                    },
-                );
-                (
-                    input,
-                    estimate,
-                    format!("sort {} rows in {partitions} partitions", input.rows),
-                )
-            }
-            NonASAPOp::Limit {
-                n,
-                offset,
-                partition_by,
-                ..
-            } => {
-                let partitions = if partition_by.keys().is_empty() {
-                    1
-                } else {
-                    estimated_groups(partition_by)?
-                };
-                let limit = n.map_or(u64::MAX, |n| (n as u64).saturating_mul(partitions));
-                let offset = (*offset as u64).saturating_mul(partitions);
-                let out = edge(input.rows.saturating_sub(offset).min(limit))?;
-                let estimate = estimate_operator(
-                    PhysicalOperator::Limit { limit, offset },
-                    OperatorStatistics::Limit { edges: unary(out) },
-                );
-                (out, estimate, format!("limit to {} rows", out.rows))
-            }
-            NonASAPOp::TimeShift { .. } => (
-                input,
-                estimate_operator(
-                    PhysicalOperator::TimeShift,
-                    OperatorStatistics::PassThrough {
-                        edges: unary(input),
-                    },
-                ),
-                format!("time shift: pass {} rows, free", input.rows),
-            ),
-            NonASAPOp::TimeRange { range, kind, .. } => {
-                // A range keeps its window's samples; an instant
-                // selector the latest sample of each series.
-                // Unknown rate or series: no fewer than its input.
-                let kept = match kind {
-                    TimeRangeKind::Range => rows_per_ms.map_or(input.rows, |rows_per_ms| {
-                        (rows_per_ms * range.as_millis() as f64).round() as u64
-                    }),
-                    TimeRangeKind::Instant => series.unwrap_or(input.rows),
-                };
-                let out = edge(input.rows.min(kept.max(1)))?;
-                let out = EdgeStatistics {
-                    rows: out.rows,
-                    bytes: out.bytes.min(input.bytes),
-                };
-                let estimate = estimate_operator(
-                    PhysicalOperator::TimeRange,
-                    OperatorStatistics::PassThrough { edges: unary(out) },
-                );
-                (
-                    out,
-                    estimate,
-                    format!(
-                        "time range {range:?}: keep {} of {} rows",
-                        out.rows, input.rows
-                    ),
-                )
-            }
-            _ => {
-                let estimate = estimate_operator(
-                    PhysicalOperator::PassThrough,
-                    OperatorStatistics::PassThrough {
-                        edges: unary(input),
-                    },
-                );
-                (
-                    input,
-                    estimate,
-                    format!("operator: pass {} rows", input.rows),
-                )
-            }
-        },
-        Payload::ASAP(ASAPOp::SummaryAgg {
-            family, reduction, ..
-        }) => {
-            let group_count = groups(reduction)?;
-            // At query time, each state sees its group's input rows; at
-            // ingestion time, the rows of a window one second of
-            // arriving rows does not bound.
-            let input_rows = StateInputRows {
-                rows_per_state: (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
-                non_negative: raw_data_samples_non_negative(),
-            };
-            let (depth, state_bytes) = summary_shape(family, input_rows);
-            let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
-            let out = EdgeStatistics {
-                rows: group_count,
-                bytes: group_count
-                    .checked_mul(state_bytes)
-                    .ok_or(AnalyticalCostError::Overflow)?,
-            };
-            (
-                out,
-                Ok(ResourceEstimate::new(
-                    input.rows as f64 * depth,
-                    out.bytes,
-                    0,
-                )),
-                format!(
-                    "build {} into {group_count} states: {} rows x depth {depth}",
-                    family_name(family),
-                    input.rows
-                ),
-            )
-        }
-        Payload::ASAP(ASAPOp::PaneChain {
-            family,
-            reduction,
-            pane_width_ms,
-            pane_count,
-            ..
-        }) => {
-            // Each input row is kept by the one pane its time falls in,
-            // as a time range keeps it (one operation), and updates
-            // that pane.
-            let group_count = groups(reduction)?;
-            let states = group_count
-                .checked_mul(u64::from(*pane_count))
-                .ok_or(AnalyticalCostError::Overflow)?;
-            // Each pane's state sees its group's rows in one pane: of
-            // one second's rows at ingestion time, of the rows read at
-            // query time (all of them for a chain kept across
-            // evaluations, whose scan Stage 2 bounds to its newest pane,
-            // the only one it builds).
-            let rows_per_pane = match (ingestion, node.materialization) {
-                (true, _) => u64::try_from(
-                    (u128::from(input.rows) * u128::from(*pane_width_ms)).div_ceil(1_000),
-                )
-                .map_err(|_| AnalyticalCostError::Overflow)?,
-                (false, Materialization::MatAtQueryKeptAcrossEvaluations(_)) => input.rows,
-                (false, _) => input.rows.div_ceil(u64::from(*pane_count).max(1)),
-            };
-            let input_rows = StateInputRows {
-                rows_per_state: Some(rows_per_pane.div_ceil(group_count.max(1))),
-                non_negative: raw_data_samples_non_negative(),
-            };
-            let (depth, state_bytes) = summary_shape(family, input_rows);
-            let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
-            let out = EdgeStatistics {
-                rows: states,
-                bytes: states
-                    .checked_mul(state_bytes)
-                    .ok_or(AnalyticalCostError::Overflow)?,
-            };
-            (
-                out,
-                Ok(ResourceEstimate::new(
-                    input.rows as f64 * (depth + 1.0),
-                    out.bytes,
-                    0,
-                )),
-                format!(
-                    "build {} in {pane_count} panes of {pane_width_ms} ms for \
-                     {group_count} groups: {} rows x (1 + depth {depth})",
-                    family_name(family),
-                    input.rows
-                ),
-            )
-        }
-        Payload::ASAP(ASAPOp::SummaryMerge {
-            newest_panes,
-            group_by,
-            ..
-        }) => {
-            // One operation per input state read; one state per group
-            // out, each pane of a chain being a state of its group. A
-            // merge of a chain's newest `n` panes reads `n` per group. A
-            // rollup's groups are those of its keys, at most its input
-            // groups.
-            let mut group_count = 0;
-            for producer in producers {
-                let panes = match producer.payload {
-                    Payload::ASAP(ASAPOp::PaneChain { pane_count, .. }) => u64::from(*pane_count),
-                    _ => 1,
-                };
-                group_count = group_count.max(producer.output.rows / panes.max(1));
-            }
-            let states = merged_states(*newest_panes, producers)?;
-            if let Some(keys) = group_by {
-                group_count = group_count.min(groups(&Reduction::by(keys.clone()))?);
-            }
-            let out = EdgeStatistics {
-                rows: group_count,
-                bytes: input
-                    .bytes
-                    .div_ceil(input.rows.max(1))
-                    .checked_mul(group_count)
-                    .ok_or(AnalyticalCostError::Overflow)?,
-            };
-            (
-                out,
-                Ok(ResourceEstimate::new(states as f64, out.bytes, 0)),
-                format!("merge {states} states into {group_count}"),
-            )
-        }
-        Payload::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
-            let per_group = match query {
-                SketchStatistic::TopK { k } => *k as u64,
-                _ => 1,
-            };
-            let out = edge(
-                input
-                    .rows
-                    .checked_mul(per_group)
-                    .ok_or(AnalyticalCostError::Overflow)?,
-            )?;
-            (
-                out,
-                Ok(ResourceEstimate::new(out.rows as f64, 0, 0)),
-                format!("estimate {} groups x {per_group}", input.rows),
-            )
-        }
-        Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => (
-            edge(input.rows)?,
-            Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
-            format!("finalize {} accumulators", input.rows),
-        ),
-        _ => (
-            edge(input.rows)?,
-            Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
-            format!("{} rows", input.rows),
-        ),
-    };
-    let estimate = estimate?;
-    let (multiplier, per_second) = rate;
-    let formula_ms = estimate.cpu_ops() * speed.ms_per_cpu_op
-        + estimate.scan_bytes() as f64 * speed.ms_per_scanned_byte;
-    // What one computation processes, the unit its entry is priced per
-    // ([`OperatorKind`]): the samples a scan reads, the states a merge
-    // reads, otherwise the rows of its (first) input.
-    let units = match &node.payload {
-        Payload::NonASAP(NonASAPOp::Scan { .. }) => out.rows,
-        Payload::ASAP(ASAPOp::SummaryMerge { newest_panes, .. }) => {
-            merged_states(*newest_panes, producers)?
-        }
-        _ => input.rows,
-    };
-    let mut detail = detail;
-    // A node with an entry takes its measured time, scanning included;
-    // any other node its formulas' CPU operations times the calibration
-    // factor, its scanned bytes unscaled (scaling only the CPU keeps it
-    // non-negative whatever the factor).
-    let estimate = match unit_price {
-        Some(unit) => {
-            price_source = NodePriceSource::Measured;
-            let measured_ms = (units as f64 * unit.ns_per_unit + unit.ns_per_invocation) * 1e-6;
-            fit.measured_ms_per_second += measured_ms * per_second;
-            fit.formula_ms_per_second += formula_ms * per_second;
-            detail += &format!(
-                "; measured {units} x {:.3} ns + {:.3} ns",
-                unit.ns_per_unit, unit.ns_per_invocation
-            );
-            ResourceEstimate::new(
-                measured_ms / speed.ms_per_cpu_op,
-                estimate.peak_memory_bytes(),
-                0,
-            )
-        }
-        None if formula_scale != 1.0 => {
-            detail += &format!("; formula x {formula_scale:.3} (calibration)");
-            ResourceEstimate::new(
-                estimate.cpu_ops() * formula_scale,
-                estimate.peak_memory_bytes(),
-                estimate.scan_bytes(),
-            )
-        }
-        None => estimate,
-    };
-    let node_ms = estimate.cpu_ops() * speed.ms_per_cpu_op
-        + estimate.scan_bytes() as f64 * speed.ms_per_scanned_byte;
-
-    // What this node keeps: memory averaged over time (byte-seconds per
-    // second), its peak memory and its disk bytes, added to the
-    // candidate's usage below.
-    let mut average_memory_bytes = 0.0;
-    let mut peak_memory_bytes = 0u64;
-    let mut disk_bytes = 0u64;
-    let mut detail = format!("{detail}; x {per_second:.4}/s");
-    // State kept between computations: at ingestion time, the window
-    // being built and the completed ones queries read (a chain of N
-    // panes keeps N + 1), every second. At query time the output is
-    // reused only within one evaluation, so it is held only while that
-    // evaluation runs (counted below, once latencies are known). The
-    // state is what the node holds: its output, or the values an exact
-    // aggregate keeps per group when that is more. A computation that
-    // keeps nothing holds its working memory while it runs, once per
-    // consumer that recomputes it; at query time, that is held for the
-    // evaluation too (counted below, as a MatAtQuery state is).
-    let state = out.bytes.max(estimate.peak_memory_bytes());
-    let (kept, medium) = match (node.materialization, &node.payload) {
-        (Materialization::NotMaterialized, _) => {
-            let working_memory_bytes = estimate.peak_memory_bytes();
-            peak_memory_bytes = working_memory_bytes.saturating_mul(multiplier);
-            if !ingestion && working_memory_bytes > 0 {
-                held = Some((working_memory_bytes, per_second, true));
-            }
-            (0, Medium::Memory)
-        }
-        // A pane chain kept across evaluations holds the panes its
-        // retention covers ([`pane_retention_ms`]: N, plus one per pane
-        // width of the readers' range-evaluation span), all but the
-        // newest between evaluations and all while one runs.
-        (Materialization::MatAtQueryKeptAcrossEvaluations(medium), _) => {
-            let panes = panes_of(node);
-            let retained = retained_pane_count;
-            let between = (state / panes)
-                .checked_mul(
-                    retained
-                        .checked_sub(1)
-                        .ok_or(AnalyticalCostError::Overflow)?,
-                )
-                .ok_or(AnalyticalCostError::Overflow)?;
-            match medium {
-                Medium::Memory => {
-                    average_memory_bytes = between as f64;
-                    peak_memory_bytes = match retained == panes {
-                        true => state,
-                        false => (state / panes)
-                            .checked_mul(retained)
-                            .ok_or(AnalyticalCostError::Overflow)?,
-                    };
-                }
-                Medium::Disk => disk_bytes = between,
-            }
-            detail += &format!("; keeps {between} bytes across evaluations");
-            (0, medium)
-        }
-        (Materialization::MatAtQuery(medium), _) => {
-            match medium {
-                Medium::Memory => {
-                    held = Some((state, per_second, false));
-                    peak_memory_bytes = state;
-                }
-                Medium::Disk => disk_bytes = state,
-            }
-            (0, medium)
-        }
-        // The retained panes and the one being built.
-        (Materialization::MatAtIngestion(medium), Payload::ASAP(ASAPOp::PaneChain { .. })) => {
-            let panes = panes_of(node);
-            (
-                (state / panes)
-                    .checked_mul(
-                        retained_pane_count
-                            .checked_add(1)
-                            .ok_or(AnalyticalCostError::Overflow)?,
-                    )
-                    .ok_or(AnalyticalCostError::Overflow)?,
-                medium,
-            )
-        }
-        (Materialization::MatAtIngestion(medium), _) => (
-            state.checked_mul(2).ok_or(AnalyticalCostError::Overflow)?,
-            medium,
-        ),
-    };
-    if node.materialization == Materialization::MatAtIngestion(Medium::Memory) {
-        maintained = Some(state / panes_of(node));
-    }
-    if kept > 0 {
-        match medium {
-            Medium::Memory => {
-                average_memory_bytes = kept as f64;
-                peak_memory_bytes = kept;
-            }
-            Medium::Disk => disk_bytes = kept,
-        }
-        detail += &format!("; keeps {kept} bytes");
-    }
-    if let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload {
-        if !ingestion {
-            let kept = match raw_kept_rows {
-                Some(rows) => edge(rows)?.bytes,
-                None => out.bytes,
-            };
-            raw_scan = Some((source, kept));
-        }
-    }
-    // One computation's CPU and scan price times its rate, then the
-    // kept state's.
-    let cost = usage_prices.map(|prices| {
-        (estimate.cpu_ops() * prices.cost_per_cpu_op
-            + estimate.scan_bytes() as f64 * prices.cost_per_scanned_byte)
-            * per_second
-            + prices.cost_per_memory_byte_second * average_memory_bytes
-            + prices.cost_per_disk_byte_second * disk_bytes as f64
-    });
-    if cost.is_some_and(|cost| !cost.is_finite()) {
-        return Err(AnalyticalCostError::Overflow);
-    }
-    Ok(PricedNode {
-        output: out,
-        sources,
-        family,
-        unchanged_columns,
-        work_ms: node_ms,
-        cpu_ops_per_second: estimate.cpu_ops() * per_second,
-        scanned_bytes_per_second: estimate.scan_bytes() as f64 * per_second,
-        average_memory_bytes,
-        peak_memory_bytes,
-        disk_bytes,
-        held,
-        maintained,
-        raw_scan,
-        fit,
-        cost: NodeCost {
-            operator,
-            timing: node.output_state.timing,
-            cost_per_second: cost,
-            cpu_core_seconds_per_second: node_ms * per_second / 1_000.0,
-            multiplier,
-            detail,
-            price_source,
-        },
-    })
-}
-
-/// [`price_at_scale`] of one candidate alone, its calibration factor fitted
-/// over its own measured nodes (as [`select_plan`] fits it over all).
-#[cfg(test)]
-fn price(
-    dag: &PhysicalASAPDAG,
-    nodes: &NodeMap<'_>,
-    kept_chains: &HashSet<PhysicalASAPNodeId>,
-    recurrence: &[QueryRecurrence],
-    range_evaluations: &[Option<RangeEvaluation>],
-    data: &DataWorkload,
-    settings: &PlanSelectionSettings,
-) -> Result<CandidateCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
-    let at = |formula_scale| {
-        price_at_scale(
-            dag,
-            nodes,
-            kept_chains,
-            recurrence,
-            range_evaluations,
-            data,
-            settings,
-            formula_scale,
-        )
-    };
-    let (_, fit) = at(1.0)?;
-    Ok(at(fit.factor())?.0)
-}
-
-/// The CPU time of the nodes priced from the measured table, per second of
-/// wall time: as measured, and as the formulas would price them. Their
-/// ratio is the calibration factor for the nodes without an entry.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct CalibrationFit {
-    measured_ms_per_second: f64,
-    formula_ms_per_second: f64,
-}
-
-impl CalibrationFit {
-    /// A validated externally established scale, without fitting candidate data.
-    pub fn from_factor(factor: f64) -> Result<Self, AnalyticalCostError> {
-        if !factor.is_finite() || factor <= 0.0 {
-            return Err(AnalyticalCostError::InvalidCalibration(
-                "frozen_calibration_factor",
-                factor,
-            ));
-        }
-        Ok(Self {
-            measured_ms_per_second: factor,
-            formula_ms_per_second: 1.0,
-        })
-    }
-
-    /// Add `other`'s CPU time to this fit.
-    pub fn add(&mut self, other: CalibrationFit) {
-        self.measured_ms_per_second += other.measured_ms_per_second;
-        self.formula_ms_per_second += other.formula_ms_per_second;
-    }
-
-    /// Measured ÷ formula time, 1 without measured nodes (or with only
-    /// nodes the formulas price free).
-    pub(crate) fn factor(self) -> f64 {
-        match self.formula_ms_per_second > 0.0 && self.measured_ms_per_second > 0.0 {
-            true => self.measured_ms_per_second / self.formula_ms_per_second,
-            false => 1.0,
-        }
-    }
-}
-
-/// [`CandidateCost::source`] for nodes priced as `per_node` says.
-fn cost_source(per_node: &BTreeMap<PhysicalASAPNodeId, NodeCost>) -> &'static str {
-    let measured = |node: &NodeCost| node.price_source == NodePriceSource::Measured;
-    if !per_node.values().any(measured) {
-        COST_SOURCE
-    } else if per_node.values().all(measured) {
-        MEASURED_COST_SOURCE
-    } else {
-        MIXED_COST_SOURCE
-    }
-}
-
-/// The CPU cores a candidate needs at its peak: enough for its
-/// ingestion-time work every second (none without any), plus one per
-/// query with query-time work, all evaluating at once; at least the cores
-/// its average query-time work fills.
-fn peak_cpu_cores(
-    dag: &PhysicalASAPDAG,
-    nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
-    work_ms: &HashMap<PhysicalASAPNodeId, f64>,
-    multipliers: &HashMap<PhysicalASAPNodeId, (u64, f64)>,
-    latency: &[QueryLatency],
-    request_ms_per_second: f64,
-) -> u32 {
-    let mut ingestion_ms_per_second = 0.0;
-    // Request overhead is attributed in per_node reports, not work_ms, and so
-    // must enter the throughput floor separately (including literal queries).
-    let mut query_ms_per_second = request_ms_per_second;
-    for node in &dag.nodes {
-        let per_second = multipliers[&node.id].1;
-        if nodes[&node.id].output_state.timing == ExecutionTiming::IngestionTime {
-            ingestion_ms_per_second += work_ms[&node.id] * per_second;
-        } else {
-            query_ms_per_second += work_ms[&node.id] * per_second;
-        }
-    }
-    let cores = |ms_per_second: f64| (ms_per_second / 1_000.0).ceil() as u32;
-    let evaluating = latency.iter().filter(|l| l.query_ms > 0.0).count() as u32;
-    cores(ingestion_ms_per_second) + evaluating.max(cores(query_ms_per_second))
-}
-
-/// Each query's latency per evaluation (module doc, "Latency"): the sum of
-/// the query-time work it reaches, each node once, plus the longest
-/// compaction among the ingestion-time states it reads. Compacting a
-/// state's newest window merges, for each of its `I` states per window,
-/// the `k` ingest workers' partial copies, `(k − 1)·I` merges, where `k`
-/// is the cores its ingestion work takes, at least one. Each merge takes
-/// the state's measured merge time (`merge_ms`) when the measured table has
-/// one, and one operation otherwise.
-fn query_latencies(
-    dag: &PhysicalASAPDAG,
-    nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
-    output: &HashMap<PhysicalASAPNodeId, EdgeStatistics>,
-    work_ms: &HashMap<PhysicalASAPNodeId, f64>,
-    merge_ms: &HashMap<PhysicalASAPNodeId, f64>,
-    formula_merge_ms: f64,
-) -> Vec<QueryLatency> {
-    let inputs = |id: PhysicalASAPNodeId| {
-        dag.edges
-            .iter()
-            .filter(move |e| e.consumer == id)
-            .map(|e| e.producer)
-    };
-    let at_ingestion =
-        |id: PhysicalASAPNodeId| nodes[&id].output_state.timing == ExecutionTiming::IngestionTime;
-    let compaction_ms = |state: PhysicalASAPNodeId| {
-        let workers = ingest_workers(dag, work_ms, state) as f64;
-        let states = (output[&state].rows / panes_of(nodes[&state])) as f64;
-        let per_merge_ms = merge_ms.get(&state).copied().unwrap_or(formula_merge_ms);
-        (workers - 1.0) * states * per_merge_ms
-    };
-    query_starts(dag)
-        .into_iter()
-        .map(|start| {
-            let mut latency = QueryLatency {
-                compaction_ms: 0.0,
-                query_ms: 0.0,
-            };
-            let mut seen = HashSet::new();
-            let mut stack = start;
-            while let Some(id) = stack.pop() {
-                if !seen.insert(id) {
-                    continue;
-                }
-                if at_ingestion(id) {
-                    latency.compaction_ms = latency.compaction_ms.max(compaction_ms(id));
-                    continue;
-                }
-                latency.query_ms += work_ms[&id];
-                stack.extend(inputs(id));
-            }
-            latency
-        })
-        .collect()
-}
-
-/// The cores `state`'s ingestion work takes, at least one: the ingest
-/// workers that each build a partial copy of its newest window.
-fn ingest_workers(
-    dag: &PhysicalASAPDAG,
-    work_ms: &HashMap<PhysicalASAPNodeId, f64>,
-    state: PhysicalASAPNodeId,
-) -> u64 {
-    let mut ingest_ms_per_s = 0.0;
-    let mut seen = HashSet::new();
-    let mut stack = vec![state];
-    while let Some(id) = stack.pop() {
-        if seen.insert(id) {
-            ingest_ms_per_s += work_ms[&id];
-            stack.extend(
-                dag.edges
-                    .iter()
-                    .filter(|e| e.consumer == id)
-                    .map(|e| e.producer),
-            );
-        }
-    }
-    (ingest_ms_per_s / 1_000.0).ceil().max(1.0) as u64
-}
-
-/// For each tumbling-pane chain of `dag` kept beyond one evaluation (at
-/// ingestion time, or at query time across evaluations), how far back
-/// from the newest evaluation its completed panes must be kept, in
-/// milliseconds: how long before the evaluation its newest pane ends (the
-/// offset of its input, [`chain_input_offset_ms`]), plus its window
-/// `pane_count · pane_width_ms`, plus the longest
-/// `span_ms` ([`RangeEvaluation`]) among the queries reaching it,
-/// whose earliest step reads that much further back. `reach` is
-/// [`query_reach`] of `dag`; `range_evaluations[q]` is query `q`'s (none
-/// when missing). Without range evaluations, each chain's window.
-fn pane_retention_ms(
-    dag: &PhysicalASAPDAG,
-    reach: &[HashSet<PhysicalASAPNodeId>],
-    range_evaluations: &[Option<RangeEvaluation>],
-) -> BTreeMap<PhysicalASAPNodeId, u64> {
-    let nodes = node_map(dag);
-    dag.nodes
-        .iter()
-        .filter_map(|node| match (&node.payload, node.materialization) {
-            (
-                Payload::ASAP(ASAPOp::PaneChain {
-                    child,
-                    pane_width_ms,
-                    pane_count,
-                    ..
-                }),
-                Materialization::MatAtIngestion(_)
-                | Materialization::MatAtQueryKeptAcrossEvaluations(_),
-            ) => {
-                let span_ms = reach
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, reached)| reached.contains(&node.id))
-                    .filter_map(|(q, _)| range_evaluations.get(q).copied().flatten())
-                    .map(|range| range.span_ms)
-                    .max()
-                    .unwrap_or(0);
-                let end_offset_ms = chain_input_offset_ms(*child, &nodes);
-                Some((
-                    node.id,
-                    end_offset_ms + pane_width_ms * u64::from(*pane_count) + span_ms,
-                ))
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-/// How long before the evaluation a chain's newest pane ends: the offsets
-/// of the `TimeShift`s (without an `@` anchor) directly below the chain,
-/// added up; 0 for a negative total.
-fn chain_input_offset_ms(
-    input: PhysicalASAPNodeId,
-    nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
-) -> u64 {
-    let mut offset_ms: i64 = 0;
-    let mut current = input;
-    while let Some(Payload::NonASAP(NonASAPOp::TimeShift { shift, child })) =
-        nodes.get(&current).map(|node| &node.payload)
-    {
-        if shift.at.is_some() {
-            break;
-        }
-        offset_ms = offset_ms.saturating_add(shift.offset_ms);
-        current = *child;
-    }
-    u64::try_from(offset_ms).unwrap_or(0)
-}
-
-/// The input states a `SummaryMerge` over `producers` reads: every row of
-/// each, or of the one pane chain whose newest `newest_panes` it merges,
-/// that many panes' states per group.
-fn merged_states(
-    newest_panes: Option<u32>,
-    producers: &[ProducerOutput<'_>],
-) -> Result<u64, AnalyticalCostError> {
-    producers.iter().try_fold(0_u64, |total, producer| {
-        let rows = match (newest_panes, producer.payload) {
-            (Some(count), Payload::ASAP(ASAPOp::PaneChain { pane_count, .. })) => {
-                (producer.output.rows / u64::from(*pane_count).max(1))
-                    .checked_mul(u64::from(count))
-                    .ok_or(AnalyticalCostError::Overflow)?
-            }
-            _ => producer.output.rows,
-        };
-        total.checked_add(rows).ok_or(AnalyticalCostError::Overflow)
-    })
-}
-
-/// The panes a chain in `retention_ms` ([`pane_retention_ms`]) keeps
-/// completed: its retention over its pane width, at least its pane count.
-fn retained_panes(
-    node: &asap_types::ir::physical_export::PhysicalASAPDAGNode,
-    retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
-) -> u64 {
-    match (&node.payload, retention_ms.get(&node.id)) {
-        (Payload::ASAP(ASAPOp::PaneChain { pane_width_ms, .. }), Some(&retention)) => {
-            (retention / pane_width_ms.max(&1)).max(panes_of(node))
-        }
-        _ => panes_of(node),
-    }
-}
-
-/// A node's panes: a pane chain's count, 1 for any other node.
-fn panes_of(node: &asap_types::ir::physical_export::PhysicalASAPDAGNode) -> u64 {
-    match &node.payload {
-        Payload::ASAP(ASAPOp::PaneChain { pane_count, .. }) => u64::from(*pane_count).max(1),
-        _ => 1,
-    }
-}
-
-/// The nodes each query reaches at query time, in workload order: its walk
-/// from its roots, stopping at (and including) ingestion-time nodes.
-fn query_reach(
-    dag: &PhysicalASAPDAG,
-    nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
-) -> Vec<HashSet<PhysicalASAPNodeId>> {
-    query_starts(dag)
-        .into_iter()
-        .map(|mut stack| {
-            let mut seen = HashSet::new();
-            while let Some(id) = stack.pop() {
-                if seen.insert(id)
-                    && nodes[&id].output_state.timing != ExecutionTiming::IngestionTime
-                {
-                    stack.extend(
-                        dag.edges
-                            .iter()
-                            .filter(|e| e.consumer == id)
-                            .map(|e| e.producer),
-                    );
-                }
-            }
-            seen
-        })
-        .collect()
-}
-
-/// The window an ingestion-time grouping `node` maintains: a pane chain's
-/// panes, or the time range below it (through filters, projections and
-/// time shifts). `None` when there is none.
-fn maintained_window_ms(
-    node: PhysicalASAPNodeId,
-    nodes: &NodeMap<'_>,
-    producers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
-) -> Option<u64> {
-    match &nodes[&node].payload {
-        Payload::ASAP(ASAPOp::PaneChain {
-            pane_width_ms,
-            pane_count,
-            ..
-        }) => return Some(pane_width_ms.saturating_mul(u64::from(*pane_count))),
-        Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
-            return Some(range.as_millis() as u64)
-        }
-        _ => {}
-    }
-    let producer = *producers_of.get(&node)?.first()?;
-    match &nodes[&producer].payload {
-        Payload::NonASAP(
-            NonASAPOp::TimeRange { .. }
-            | NonASAPOp::Filter { .. }
-            | NonASAPOp::Project { .. }
-            | NonASAPOp::TimeShift { .. },
-        ) => maintained_window_ms(producer, nodes, producers_of),
-        _ => None,
-    }
-}
-
-/// The raw data the query-time scan `scan` reads, in milliseconds back from
-/// the evaluation: `end_offset_ms + width_ms` of its readers' window
-/// ([`PhysicalASAPDAG::scan_window`], with each chain in `kept_chains`
-/// reading one pane); `None` when that window is unbounded (the scan reads
-/// every row its source holds).
-fn query_time_lookback_ms(
-    dag: &PhysicalASAPDAG,
-    scan: PhysicalASAPNodeId,
-    kept_chains: &HashSet<PhysicalASAPNodeId>,
-) -> Option<u64> {
-    dag.scan_window(scan, kept_chains).lookback_ms()
-}
-
-/// The window of a scan reading the `lookback_ms` up to the evaluation
-/// (`Unbounded` for `None`).
-pub(crate) fn trailing_window(lookback_ms: Option<u64>) -> ScanWindow {
-    lookback_ms.map_or(ScanWindow::Unbounded, |width_ms| ScanWindow::Within {
-        end_offset_ms: 0,
-        width_ms: i64::try_from(width_ms).unwrap_or(i64::MAX),
-    })
-}
-
-/// The nodes of `dag` by id.
-fn node_map(dag: &PhysicalASAPDAG) -> NodeMap<'_> {
-    dag.nodes.iter().map(|n| (n.id, n)).collect()
-}
-
-/// The nodes of a physical DAG by id.
-type NodeMap<'a> =
-    HashMap<PhysicalASAPNodeId, &'a asap_types::ir::physical_export::PhysicalASAPDAGNode>;
-
-/// The tumbling-pane chains of `dag` kept across evaluations
-/// (`MatAtQueryKeptAcrossEvaluations`, which Stage 2 offers only when the
-/// deployment keeps query-time results and every reader builds one new
-/// pane per evaluation). Each evaluation builds the newest pane, and the
-/// older ones, which complete the readers' look-back, are kept from
-/// earlier evaluations.
-fn kept_pane_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASAPNodeId> {
-    dag.nodes
-        .iter()
-        .filter(|node| {
-            matches!(
-                (&node.payload, node.materialization),
-                (
-                    Payload::ASAP(ASAPOp::PaneChain { .. }),
-                    Materialization::MatAtQueryKeptAcrossEvaluations(_),
-                )
-            )
-        })
-        .map(|node| node.id)
-        .collect()
-}
-
-/// For a deployment that does not retain raw data, every query-time scan
-/// of `dag` with the window it would read, as a rejection reason (`None`
-/// without one). Raw data samples are then not kept after they arrive, so no
-/// window of them is there to scan at query time: only ingestion-time work
-/// reads raw rows. `kept_chains` are `dag`'s ([`kept_pane_chains`]).
-fn raw_data_violation(
-    dag: &PhysicalASAPDAG,
-    kept_chains: &HashSet<PhysicalASAPNodeId>,
-) -> Option<String> {
-    let scans: Vec<String> = dag
-        .nodes
-        .iter()
-        .filter_map(|node| match &node.payload {
-            Payload::NonASAP(NonASAPOp::Scan { source, .. })
-                if node.output_state.timing != ExecutionTiming::IngestionTime =>
-            {
-                Some(match query_time_lookback_ms(dag, node.id, kept_chains) {
-                    Some(lookback) => format!("{lookback} ms of raw {}", source_name(source)),
-                    None => format!("all raw {}", source_name(source)),
-                })
-            }
-            _ => None,
-        })
-        .collect();
-    (!scans.is_empty()).then(|| {
-        format!(
-            "scans {} at query time, but the deployment does not retain raw data",
-            scans.join(", ")
-        )
-    })
-}
-
-/// Why the executor cannot compile `dag`, if it cannot: an exact per-entity
-/// `Aggregate` (a per-series range reduction over raw data samples) the executor
-/// does not run. It runs one with a single measure that has an exact
-/// per-entity kernel ([`agg_has_exact_per_entity_kernel`]), no measure
-/// filter and no `HAVING`.
-fn per_entity_aggregate_violation(dag: &PhysicalASAPDAG) -> Option<String> {
-    dag.nodes.iter().find_map(|node| match &node.payload {
-        Payload::NonASAP(NonASAPOp::Aggregate {
-            reduction: Reduction::PerEntity,
-            measures,
-            filters,
-            having,
-            ..
-        }) => {
-            let one_kernel = match measures.as_slice() {
-                [measure] => agg_has_exact_per_entity_kernel(measure),
-                _ => false,
-            };
-            let executable = one_kernel && filters.iter().all(Option::is_none) && having.is_none();
-            (!executable).then(|| {
-                format!(
-                    "node {}: the executor has no exact per-series aggregate {measures:?} \
-                     over raw samples",
-                    node.id
-                )
-            })
-        }
-        _ => None,
-    })
-}
-
-/// The widest window, in milliseconds, read above the scan `scan` at query
-/// time, ignoring readers that read it outside a window and the anchors of
-/// shifts: each range `TimeRange` and `PaneChain` (its whole window, or
-/// one pane for a chain in `kept_chains`) reached through time shifts.
-/// Prices a scan whose [`PhysicalASAPDAG::scan_window`] is unbounded as
-/// Stage 3 did before; #955 decides `@` anchors.
-fn widest_window_read_ms(
-    dag: &PhysicalASAPDAG,
-    nodes: &NodeMap<'_>,
-    scan: PhysicalASAPNodeId,
-    kept_chains: &HashSet<PhysicalASAPNodeId>,
-) -> Option<u64> {
-    let mut widest = None;
-    let mut stack = vec![scan];
-    let mut seen = HashSet::new();
-    while let Some(id) = stack.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
-        for edge in dag.edges.iter().filter(|e| e.producer == id) {
-            let width_ms = match &nodes[&edge.consumer].payload {
-                Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => range.as_millis() as u64,
-                Payload::ASAP(ASAPOp::PaneChain { pane_width_ms, .. })
-                    if kept_chains.contains(&edge.consumer) =>
-                {
-                    *pane_width_ms
-                }
-                Payload::ASAP(ASAPOp::PaneChain {
-                    pane_width_ms,
-                    pane_count,
-                    ..
-                }) => pane_width_ms.saturating_mul(u64::from(*pane_count)),
-                Payload::NonASAP(NonASAPOp::TimeShift { .. }) => {
-                    stack.push(edge.consumer);
-                    continue;
-                }
-                _ => continue,
-            };
-            widest = widest.max(Some(width_ms));
-        }
-    }
-    widest
-}
-
-/// `input` split as evenly as integers allow into `partitions` parts.
-fn split(input: EdgeStatistics, partitions: u64) -> PartitionStatistics {
-    let part = |total: u64, i: u64| total / partitions + u64::from(i < total % partitions);
-    PartitionStatistics {
-        partitions: (0..partitions)
-            .map(|i| EdgeStatistics {
-                rows: part(input.rows, i),
-                bytes: part(input.bytes, i),
-            })
-            .collect(),
-    }
-}
-
-/// Plain values are 8 bytes, strings 16; summary columns are sized apart.
-fn row_bytes(schema: &Schema) -> u64 {
-    schema
-        .fields
-        .iter()
-        .map(|f| match &f.dtype {
-            FieldDataType::Plain(DataType::Utf8) => 16,
-            _ => 8,
-        })
-        .sum::<u64>()
-        .max(1)
-}
-
-/// Exact state that keeps every value or item of its group, so grows with
-/// the data; other exact accumulators are fixed-size.
-fn keeps_every_value(measure: &AggIntent) -> bool {
-    matches!(
-        measure,
-        AggIntent::Quantile { .. }
-            | AggIntent::TopK { .. }
-            | AggIntent::Cardinality { .. }
-            | AggIntent::FrequencyL2 { .. }
-            | AggIntent::FrequencyEntropy { .. }
-    )
-}
-
-/// Update operations per input row and bytes per state, from the sketch's
-/// parameters and `input_rows` (the rows one state folds). The bytes are
-/// `asap_sketchlib`'s `estimated_memory_bytes` for the type the executor
-/// builds (Count-Min and Count Sketch over `f64` counters), given what the
-/// state is assumed to hold:
-/// - a Count-Min / Count Sketch top-k heap full of keys of
-///   [`ASSUMED_HEAP_KEY_BYTES`]; each UnivMon layer's heap full of keys of
-///   [`ASSUMED_VALUE_KEY_BYTES`];
-/// - DDSketch and KMV: the rows the state folds, at least one (any number
-///   when unknown), each a distinct item for KMV; a DDSketch's values span
-///   [`DDSKETCH_ASSUMED_VALUE_RANGE`] and fill its negative store too
-///   unless proven non-negative.
-///
-/// KLL is priced without the library's estimate: its fixed bytes
-/// ([`kll_fixed_bytes`]: the struct and its level array) plus the 8-byte
-/// item array as `asap_sketchlib` grows it for the rows the state folds, at
-/// most its full capacity ([`kll_buffer_items`]).
-///
-/// An exact accumulator's state is the executor's per-group state,
-/// [`EXACT_ACCUMULATOR_STATE_BYTES`] for every kind.
-///
-/// Update operations per input row: one counter per row of depth for
-/// Count-Min and Count-Sketch, plus one heap update for their top-k variants;
-/// for UnivMon, the same per layer it updates ([`univmon_expected_layers`]);
-/// 1 for every other sketch.
-fn summary_shape(family: &FieldDataType, input_rows: StateInputRows) -> (f64, u64) {
-    match family {
-        FieldDataType::Sketch(kind, _) => sketch_shape(kind.params(), input_rows),
-        FieldDataType::ExactAggregate(..) => (1.0, EXACT_ACCUMULATOR_STATE_BYTES),
-        _ => (1.0, 8),
-    }
-}
-
-/// What one summary state's bytes depend on besides its parameters (only
-/// a KLL's, a DDSketch's and a KMV's do): the input rows it folds and the
-/// sign of their values.
-/// The rows are whatever its producer emits (raw data samples, rates, sums),
-/// not a summary sample.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct StateInputRows {
-    /// Input rows one state folds, the average over its states rounded up;
-    /// `None` when unknown, which sizes it for every value it can be assumed
-    /// to see.
-    rows_per_state: Option<u64>,
-    /// Whether every value folded is proven non-negative (raw data samples of
-    /// sources declared non-negative), so a DDSketch fills no negative store.
-    non_negative: bool,
-}
-
-impl StateInputRows {
-    /// Unknown rows of unknown sign: the most a state is assumed to hold.
-    const UNKNOWN: Self = Self {
-        rows_per_state: None,
-        non_negative: false,
-    };
-}
-
-/// [`summary_shape`] of one sketch: its update operations per row and its
-/// bytes per state. With [`StateInputRows::UNKNOWN`], the bytes are also the
-/// size the measured table interpolates between
-/// ([`cost::measured`]).
-fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, u64) {
-    use asap_sketchlib::{
-        Classic, CountMinF64, CountMinSketchWithHeap, CountSketch, CountSketchWithHeap, DataInput,
-        DdSketch, HyperLogLog, Kmv, RegularPath, UnivMon, Vector2D,
-    };
-    let heap_key = DataInput::Bytes(&[0; ASSUMED_HEAP_KEY_BYTES]);
-    let rows = input_rows.rows_per_state.map_or(usize::MAX, |rows| {
-        usize::try_from(rows.max(1)).unwrap_or(usize::MAX)
-    });
-    match params {
-        SketchParams::Cms { width, depth } => (
-            f64::from(*depth),
-            CountMinF64::estimated_memory_bytes(*depth as usize, *width as usize) as u64,
-        ),
-        SketchParams::CountSketch { width, depth } => (
-            f64::from(*depth),
-            CountSketch::<Vector2D<f64>, RegularPath>::estimated_memory_bytes(
-                *depth as usize,
-                *width as usize,
-            ) as u64,
-        ),
-        SketchParams::CmsWithHeap {
-            width,
-            depth,
-            heap_size,
-        } => (
-            f64::from(*depth) + 1.0,
-            CountMinSketchWithHeap::<Vector2D<f64>, RegularPath>::estimated_memory_bytes(
-                *depth as usize,
-                *width as usize,
-                *heap_size as usize,
-                &heap_key,
-            ) as u64,
-        ),
-        SketchParams::CountSketchWithHeap {
-            width,
-            depth,
-            heap_size,
-        } => (
-            f64::from(*depth) + 1.0,
-            CountSketchWithHeap::<Vector2D<f64>, RegularPath>::estimated_memory_bytes(
-                *depth as usize,
-                *width as usize,
-                *heap_size as usize,
-                &heap_key,
-            ) as u64,
-        ),
-        SketchParams::Kll { k, .. } => (
-            1.0,
-            kll_fixed_bytes() + 8 * kll_buffer_items(*k, input_rows),
-        ),
-        // The executor builds no DDSketch outside α in (0, 1), where
-        // sketchlib's estimate panics: priced as an empty one.
-        SketchParams::DDSketch { alpha } if !(*alpha > 0.0 && *alpha < 1.0) => {
-            (1.0, std::mem::size_of::<DdSketch>() as u64)
-        }
-        SketchParams::DDSketch { alpha } => (
-            1.0,
-            DdSketch::estimated_memory_bytes(
-                *alpha,
-                rows,
-                1.0,
-                DDSKETCH_ASSUMED_VALUE_RANGE,
-                !input_rows.non_negative,
-            ) as u64,
-        ),
-        SketchParams::Hll { precision, .. } => (
-            1.0,
-            HyperLogLog::<Classic>::estimated_memory_bytes(usize::from(*precision)) as u64,
-        ),
-        SketchParams::Kmv { k, .. } => (1.0, Kmv::estimated_memory_bytes(*k as usize, rows) as u64),
-        SketchParams::UnivMon {
-            heap_size,
-            sketch_rows,
-            sketch_cols,
-            layers,
-            ..
-        } => (
-            univmon_expected_layers(*layers) * (f64::from(*sketch_rows) + 1.0),
-            UnivMon::estimated_memory_bytes(
-                *heap_size as usize,
-                *sketch_rows as usize,
-                *sketch_cols as usize,
-                usize::from(*layers),
-                &DataInput::Bytes(&[0; ASSUMED_VALUE_KEY_BYTES]),
-            ) as u64,
-        ),
-    }
-}
-
-/// Levels `asap_sketchlib`'s KLL has room for (`MAX_LEVELS`).
-const KLL_MAX_LEVELS: usize = 61;
-
-/// Bytes every `asap_sketchlib` KLL state holds whatever its samples: the
-/// struct and the 8-byte level-boundary array of `KLL_MAX_LEVELS + 1` entries it
-/// allocates on creation (`Kll::init_internal`). 744 bytes, an empty
-/// sketch's `memory_bytes()`.
-fn kll_fixed_bytes() -> u64 {
-    (std::mem::size_of::<asap_sketchlib::Kll<f64>>() + 8 * (KLL_MAX_LEVELS + 1)) as u64
-}
-
-/// The most items `asap_sketchlib`'s KLL holds for `k`, the capacity its item
-/// array grows to (`Kll::init_internal` → `compute_max_capacity(k, 8)`): over its
-/// [`KLL_MAX_LEVELS`] levels,
-/// `max(ceil(k · (2/3)^i), 8)` each, with `k` capped at [`KLL_MAX_K`] as the
-/// library caps it. 1,206 items at `k` = 269.
-fn kll_capacity_items(k: u32) -> u64 {
-    const MIN_LEVEL_CAPACITY: f64 = 8.0;
-    let k = f64::from(k.min(KLL_MAX_K));
-    let mut scale = 1.0_f64;
-    let mut total = 0;
-    for _ in 0..KLL_MAX_LEVELS {
-        total += (k * scale).ceil().max(MIN_LEVEL_CAPACITY) as u64;
-        scale *= 2.0 / 3.0;
-    }
-    total
-}
-
-/// Items `asap_sketchlib`'s KLL for `k` allocates over `input_rows`: its
-/// item array starts empty and grows when full, to at least twice its
-/// length and at least 16 items (`INITIAL_BUFFER_ITEMS`), at most its full
-/// capacity ([`kll_capacity_items`]). So `n` rows take the smallest
-/// `16 · 2^j` ≥ `n`, capped at the capacity: exactly what the library holds
-/// up to `max(k, 8)` rows, before anything compacts; 16 items for one row,
-/// the capacity when the rows are unknown. Past that, compaction keeps the
-/// array within this size, but the library also holds merge scratch space,
-/// not modelled here, that adds up to about a fifth. A state is assumed to
-/// fold at least one row, as a DDSketch's is.
-fn kll_buffer_items(k: u32, input_rows: StateInputRows) -> u64 {
-    const INITIAL_BUFFER_ITEMS: u64 = 16;
-    let capacity = kll_capacity_items(k);
-    match input_rows.rows_per_state {
-        None => capacity,
-        Some(rows_per_state) => {
-            let grown = rows_per_state
-                .max(1)
-                .div_ceil(INITIAL_BUFFER_ITEMS)
-                .next_power_of_two();
-            grown.saturating_mul(INITIAL_BUFFER_ITEMS).min(capacity)
-        }
-    }
-}
-
-/// Bytes of the key one Count-Min / Count Sketch top-k heap slot holds: an
-/// assumption, since the workload declares no label sizes. Such a key is a
-/// label set in the executor's tuple-key encoding, a tag byte and a 4-byte
-/// length before each value; this assumes three labels of 16 bytes, the
-/// size [`row_bytes`] gives a string.
-const ASSUMED_HEAP_KEY_BYTES: usize = 3 * (1 + 4 + 16);
-
-/// Bytes of the key one UnivMon heap slot holds: an assumption, since the
-/// workload declares no label sizes. UnivMon counts the values of one
-/// column, the executor keys each by its type tag and bytes, and a label
-/// value is assumed to be 16 bytes, the size [`row_bytes`] gives a string.
-/// A sample value's key owns no bytes, so this bounds it too.
-const ASSUMED_VALUE_KEY_BYTES: usize = 1 + 16;
-
-/// Layers a UnivMon row updates in expectation. `asap_sketchlib` updates
-/// layers `0..=b`, with bottom layer `b` the index of the first zero among
-/// hash bits `1..layers`, capped at `layers - 1`; so it reaches layer `j`
-/// with probability `2^-j`, and the expectation is
-/// `sum_{j < layers} 2^-j = 2 - 2^(1 - layers)`.
-fn univmon_expected_layers(layers: u8) -> f64 {
-    2.0 - 2f64.powi(1 - i32::from(layers.max(1)))
-}
-
-/// Ratio of the largest to the smallest value magnitude a DDSketch is
-/// assumed to see: nine decades, e.g. latencies from 1 ns to 1 s, priced as
-/// magnitudes in `[1, 1e9]` (its bins depend on the ratio alone). An
-/// assumption, not workload evidence: the data workload declares no value
-/// range.
-const DDSKETCH_ASSUMED_VALUE_RANGE: f64 = 1e9;
+use asap_cost::measured::{lookup, StateFamily};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accuracy_binding::{bind_statistics, root_operators, workload_statistic};
+    use crate::checks::{accuracy_check, CheckFailure};
+    use crate::pricing::{kept_pane_chains, node_map, price_at_scale};
+    use asap_accuracy::composition::INPUT_ROW_COUNT;
+    use asap_accuracy::estimators::hll;
+    use asap_accuracy::propagation::root_guarantee;
+    use asap_cost::execution_demand::evaluation_rate;
+    use asap_cost::{
+        CalibrationFit, CandidateCost, ClusterLimits, ClusterObjective, CostInputs, CostModel,
+        NodePriceSource, OperatorKind, ResourceUsage, COST_SOURCE, MEASURED_COST_SOURCE,
+        MIXED_COST_SOURCE,
+    };
+    use asap_cost::{MeasuredOperationCosts, OperatorCost, ResourceUnitCost};
+    use asap_physical_asap_optimization::PhysicalWorkloadPlan;
+    use asap_types::ir::operator::{AggIntent, Reduction};
+    use asap_types::ir::physical_export::{
+        PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
+    };
+    use asap_types::ir::properties::{AccuracyGuarantee, AccuracyScope, ExecutionTiming};
+    use asap_types::ir::scalar::ScalarValue;
+    use asap_types::ir::schema::DataType;
+    use asap_types::ir::schema::{
+        FieldDataType, Schema, SketchAlgorithm, SketchParams, WeightDomain,
+    };
+    use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
+    use asap_types::physical::{Materialization, Medium};
+    use asap_types::workload::bounds::{declared_series, series_read, values_per_result};
+    use asap_types::workload::{
+        DataWorkload, QueryRecurrence, QueryWorkloadEntry, RangeEvaluation,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::rc::Rc;
 
-    /// [`super::price`] with `dag`'s node map and kept pane chains.
+    /// [`crate::pricing::price`] with `dag`'s node map and kept pane chains.
     fn price(
         dag: &PhysicalASAPDAG,
         recurrence: &[QueryRecurrence],
         data: &DataWorkload,
-        settings: &PlanSelectionSettings,
+        settings: &CostInputs,
     ) -> Result<CandidateCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
-        super::price(
+        crate::pricing::price(
             dag,
             &node_map(dag),
             &kept_pane_chains(dag),
@@ -5202,7 +323,9 @@ mod tests {
             settings,
         )
     }
-    use crate::AccuracyEvidenceProvider;
+    use asap_accuracy::{
+        AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, NoAccuracyEvidence,
+    };
     use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
     use asap_logical_asap_optimization::test_support::{entry, entry_with, lower_promql};
     use asap_physical_asap_optimization::optimize_physical_asap;
@@ -5212,55 +335,6 @@ mod tests {
     use asap_types::ir::schema::{GroupingStrategy, SketchKind};
     use asap_types::ir::{ExprSemantics, ScalarExpr};
     use asap_types::workload::{DataArrival, LabelSetDistinctValues, MetricType, SourceFacts};
-
-    /// The AWS Fargate preset holds the page's prices converted as its doc
-    /// says at the given speed: per vCPU-second × seconds per operation or
-    /// per scanned byte (1e-9 and 1e-10 at the illustrative speed; twice
-    /// that at half the speed), per GB-second ÷ 2^30; disk and the
-    /// provisioned prices 0. It validates under cost model 1 and is
-    /// refused under cost model 2, where every price it gives is 0.
-    #[test]
-    fn aws_fargate_us_east_1_converts_the_page_prices() {
-        let preset = ResourceUnitCost::aws_fargate_us_east_1(ResourceSpeed::illustrative());
-        let close = |actual: f64, expected: f64| {
-            assert!(
-                ((actual - expected) / expected).abs() < 1e-12,
-                "{actual} != {expected}"
-            )
-        };
-        close(preset.cost_per_cpu_op, 1.1244e-14);
-        close(preset.cost_per_scanned_byte, 1.1244e-15);
-        close(
-            preset.cost_per_memory_byte_second,
-            1.235e-6 / 1_073_741_824.0,
-        );
-        assert_eq!(preset.cost_per_disk_byte_second, 0.0);
-        assert_eq!(preset.cost_per_provisioned_memory_byte_second, 0.0);
-        assert_eq!(preset.cost_per_provisioned_cpu_core_second, 0.0);
-        // A core twice as slow takes twice the vCPU-seconds per operation and per byte.
-        let slower = ResourceUnitCost::aws_fargate_us_east_1(ResourceSpeed {
-            ms_per_cpu_op: 2e-6,
-            ms_per_scanned_byte: 2e-7,
-        });
-        close(slower.cost_per_cpu_op, 2.2488e-14);
-        close(slower.cost_per_scanned_byte, 2.2488e-15);
-        close(
-            slower.cost_per_memory_byte_second,
-            preset.cost_per_memory_byte_second,
-        );
-        let settings = |cost_model| PlanSelectionSettings {
-            cost_model,
-            ..PlanSelectionSettings::default()
-        };
-        assert_eq!(
-            settings(CostModel::UsageOverTime(preset.clone())).validate(),
-            Ok(())
-        );
-        assert_eq!(
-            settings(CostModel::ProvisionedCapacity(preset)).validate(),
-            Err(AnalyticalCostError::ZeroCalibration)
-        );
-    }
 
     /// `G` of `root` over `data` ([`values_per_result`]).
     fn values_of(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
@@ -5393,7 +467,7 @@ mod tests {
                     &roots,
                     &[],
                     &data(),
-                    &DeploymentCapabilities::default(),
+                    false,
                 )
                 .unwrap()
                 .remove(0);
@@ -5435,20 +509,6 @@ mod tests {
             );
             assert!(!selection.costs.contains_key(*id));
         }
-    }
-
-    /// Totals that differ only by rounding tie, so the earlier candidate is
-    /// kept; a real difference is cheaper.
-    #[test]
-    fn totals_differing_by_rounding_tie() {
-        // One unit in the last place apart, as the same charges summed in
-        // another grouping can be.
-        let separate = 0.336006_f64;
-        let together = f64::from_bits(separate.to_bits() - 1);
-        assert!(!cheaper(separate, together));
-        assert!(!cheaper(together, separate));
-        assert!(cheaper(0.3, 0.4));
-        assert!(!cheaper(0.4, 0.3));
     }
 
     /// For a query with a target, Count-Min over weights not proven
@@ -5690,7 +750,7 @@ mod tests {
     /// reading as a perfect bound. Other statistics pass through.
     #[test]
     fn the_sign_gate_opens_only_at_one() {
-        use asap_logical_asap_optimization::accuracy::composition::raw_data_samples_sign_statistic;
+        use asap_accuracy::composition::raw_data_samples_sign_statistic;
         let gated = AccuracyGuarantee::new(
             AccuracyMetric::Relative,
             BoundExpr::Product {
@@ -5737,7 +797,7 @@ mod tests {
     /// name.
     #[test]
     fn sign_of_counter_raw_data_samples_is_bound_from_the_declared_type() {
-        use asap_logical_asap_optimization::accuracy::composition::raw_data_samples_sign_statistic;
+        use asap_accuracy::composition::raw_data_samples_sign_statistic;
         let gated = AccuracyGuarantee::new(
             AccuracyMetric::Relative,
             BoundExpr::Product {
@@ -5808,9 +868,9 @@ mod tests {
             cluster(ClusterObjective::LeastMemory),
             cluster(ClusterObjective::ParetoFront),
         ] {
-            let settings = PlanSelectionSettings {
+            let settings = CostInputs {
                 cost_model,
-                ..PlanSelectionSettings::default()
+                ..CostInputs::default()
             };
             let models = PlanningModels::builtin().with_plan_selection(&settings);
             let all = select_plan(candidates, &entries, &data, models).unwrap();
@@ -5988,7 +1048,7 @@ mod tests {
             &[QueryRoot::Operator(outer), QueryRoot::Operator(inner)],
             &[],
             &data(),
-            &DeploymentCapabilities::default(),
+            false,
         )
         .unwrap()
         .remove(0);
@@ -6045,7 +1105,7 @@ mod tests {
             &[QueryRoot::Operator(outer), QueryRoot::Operator(inner)],
             &[],
             &data(),
-            &DeploymentCapabilities::default(),
+            false,
         )
         .unwrap()
         .remove(0);
@@ -6112,7 +1172,7 @@ mod tests {
                     &roots,
                     &[],
                     &data(),
-                    &DeploymentCapabilities::default(),
+                    false,
                 )
                 .unwrap()
                 .remove(0);
@@ -6516,38 +1576,6 @@ mod tests {
         assert_eq!(declared_series(&BTreeSet::new(), &declared), None);
     }
 
-    /// A source's rows per ms: its series over its sample interval when it
-    /// declares both, else its series share of the workload's rate.
-    #[test]
-    fn each_source_arrives_at_its_own_rate() {
-        let data = DataWorkload {
-            arrival: DataArrival::Ingesting {
-                rows_per_second: 4_000.0,
-            },
-            sources: [("a", Some(100)), ("b", Some(300)), ("c", None)]
-                .into_iter()
-                .map(|(metric, interval)| {
-                    let facts = SourceFacts {
-                        series_count: Some(if metric == "a" { 1_000 } else { 3_000 }),
-                        sample_interval: interval.map(asap_types::workload::DurationMs),
-                        ..SourceFacts::default()
-                    };
-                    (metric.to_string(), facts)
-                })
-                .collect(),
-        };
-        // 1 000 series every 100 ms; 3 000 series every 300 ms.
-        assert_eq!(source_rows_per_ms(&["a"].into(), &data), Some(10.0));
-        assert_eq!(source_rows_per_ms(&["a", "b"].into(), &data), Some(20.0));
-        // No interval: 3 000 of the 7 000 declared series, of 4 rows per ms.
-        assert_eq!(
-            source_rows_per_ms(&["c"].into(), &data),
-            Some(4.0 * 3_000.0 / 7_000.0)
-        );
-        // A node reading no source sees the whole rate.
-        assert_eq!(source_rows_per_ms(&BTreeSet::new(), &data), Some(4.0));
-    }
-
     /// The exact physical DAG of `queries` planned together, over `data`.
     fn exact_dag(queries: &[&str], data: &DataWorkload) -> PhysicalASAPDAG {
         let roots = queries
@@ -6569,7 +1597,7 @@ mod tests {
             .into_iter()
             .map(|(_, root)| root)
             .collect();
-        optimize_physical_asap("L1", &roots, &[], data, &DeploymentCapabilities::default())
+        optimize_physical_asap("L1", &roots, &[], data, false)
             .unwrap()
             .remove(0)
             .dag
@@ -6602,7 +1630,7 @@ mod tests {
             &exact_dag(&["sum(rate(m[5m]))"], &data),
             &recurrences(1),
             &data,
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
         )
         .unwrap_err()
         .1;
@@ -6623,13 +1651,7 @@ mod tests {
         let scan_of = |query: &str| {
             let dag = exact_dag(&[query], &data());
             let scan = node_of(&dag, is_scan);
-            let cost = price(
-                &dag,
-                &recurrences(1),
-                &data(),
-                &PlanSelectionSettings::default(),
-            )
-            .unwrap();
+            let cost = price(&dag, &recurrences(1), &data(), &CostInputs::default()).unwrap();
             let detail = &cost.per_node[&scan].detail;
             let kept_bytes: u64 = detail
                 .split("; keeps ")
@@ -6670,7 +1692,7 @@ mod tests {
             &exact_dag(&["sum(rate(m[5m]))"], &data),
             &recurrences(1),
             &data,
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
         )
         .unwrap();
         let details: Vec<String> = node_prices(&cost)
@@ -6698,7 +1720,7 @@ mod tests {
             &exact_dag(&["sum(rate(m[5m]))"], &data),
             &recurrences(1),
             &data,
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
         )
         .unwrap();
         let details: Vec<String> = node_prices(&cost)
@@ -6733,7 +1755,7 @@ mod tests {
                 })
                 .collect(),
         };
-        let settings = PlanSelectionSettings::default();
+        let settings = CostInputs::default();
         let on_a = "sum(sum_over_time(a[1m]))";
         let alone = ingesting(100_000.0);
         let alone = price(
@@ -6781,7 +1803,7 @@ mod tests {
                 &exact_dag(&["topk by (job) (3, m)"], &data),
                 &recurrences(1),
                 &data,
-                &PlanSelectionSettings::default(),
+                &CostInputs::default(),
             )
             .unwrap();
             node_prices(&cost)
@@ -6863,7 +1885,7 @@ mod tests {
                 &exact_dag(&[query], &data),
                 &recurrences(1),
                 &data,
-                &PlanSelectionSettings::default(),
+                &CostInputs::default(),
             )
             .unwrap();
             node_prices(&cost)
@@ -7212,9 +2234,9 @@ mod tests {
             .failure_probability(0.001)
             .accuracy_metric(AccuracyMetric::ABSOLUTE_STREAM_L1);
         let gauge = with_metric_types(data(), &[("m", MetricType::Gauge)]);
-        let settings = PlanSelectionSettings {
+        let settings = CostInputs {
             ignore_accuracy_guarantees: true,
-            ..PlanSelectionSettings::default()
+            ..CostInputs::default()
         };
         let selection = select_plan(
             &candidates(),
@@ -7243,9 +2265,9 @@ mod tests {
             .failure_probability(0.001)
             .accuracy_metric(AccuracyMetric::ABSOLUTE);
         let entries = [entry_with(target, repeating(10_000))];
-        let settings = PlanSelectionSettings {
+        let settings = CostInputs {
             ignore_accuracy_guarantees: true,
-            ..PlanSelectionSettings::default()
+            ..CostInputs::default()
         };
         let builtin =
             select_plan(&candidates(), &entries, &data(), PlanningModels::builtin()).unwrap();
@@ -7565,567 +2587,6 @@ mod tests {
             aggregate_cost("l2_over_time(x[5m])"),
             aggregate_cost("quantile_over_time(0.99, x[5m])")
         );
-    }
-
-    /// An exact accumulator's state is priced at the executor's per-group
-    /// state, 56 bytes for every kind (a counter's state alone is 48), so a
-    /// pane chain of exact sums keeps 56 bytes per pane and group.
-    #[test]
-    fn exact_state_is_priced_at_the_executors_state_size() {
-        use asap_types::ir::schema::{ExactKind, ExactParams};
-        for (kind, params) in [
-            (ExactKind::Sum, ExactParams::Sum),
-            (ExactKind::Increase, ExactParams::Increase),
-            (ExactKind::Rate, ExactParams::Rate),
-        ] {
-            assert_eq!(
-                summary_shape(
-                    &FieldDataType::ExactAggregate(kind, params),
-                    StateInputRows::UNKNOWN
-                ),
-                (1.0, 56)
-            );
-        }
-        assert_eq!(asap_types::ir::schema::EXACT_ACCUMULATOR_STATE_BYTES, 56);
-    }
-
-    /// The bytes `asap_sketchlib`'s DDSketch holds after adding `values`.
-    fn library_ddsketch_bytes(alpha: f64, values: &[f64]) -> u64 {
-        let mut sketch = asap_sketchlib::sketches::DdSketch::new(alpha);
-        for value in values {
-            sketch.add(value);
-        }
-        sketch.memory_bytes() as u64
-    }
-
-    /// A DDSketch is priced for what `asap_sketchlib` can hold after its
-    /// rows: at least what it holds for a few samples, for samples of either
-    /// sign, and for many samples over nine decades; a store less for values
-    /// declared non-negative. Many rows are priced as unknown ones.
-    #[test]
-    fn ddsketch_state_bytes_bound_the_library() {
-        let alpha = 0.05;
-        let priced = |rows_per_state, non_negative| {
-            sketch_shape(
-                &SketchParams::DDSketch { alpha },
-                StateInputRows {
-                    rows_per_state,
-                    non_negative,
-                },
-            )
-            .1
-        };
-        // Ten Pareto(2) samples (scale 1), one 1 s pane of a 10 Hz series.
-        let pareto: Vec<f64> = (0..10)
-            .map(|i| (1.0 - (f64::from(i) + 0.5) / 10.0).powf(-0.5))
-            .collect();
-        let signed: Vec<f64> = pareto.iter().map(|v| -v).chain(pareto.clone()).collect();
-        let decades: Vec<f64> = (0..10_000)
-            .map(|i| 10f64.powf(9.0 * f64::from((i * 7_919) % 10_000) / 10_000.0))
-            .collect();
-        let signed_decades: Vec<f64> = decades
-            .iter()
-            .enumerate()
-            .map(|(i, v)| if i % 2 == 0 { -v } else { *v })
-            .collect();
-        for (values, non_negative) in [
-            (&pareto[..], true),
-            (&[-2.0][..], false),
-            (&[2.0][..], false),
-            (&[-2.0, 2.0][..], false),
-            (&signed[..], false),
-            (&decades[..], true),
-            (&signed_decades[..], false),
-        ] {
-            let rows = Some(values.len() as u64);
-            assert!(
-                library_ddsketch_bytes(alpha, values) <= priced(rows, non_negative),
-                "{} values, non-negative: {non_negative}",
-                values.len()
-            );
-        }
-        assert!(priced(Some(10_000), true) < priced(Some(10_000), false));
-        assert_eq!(priced(Some(10_000), false), priced(None, false));
-    }
-
-    /// DDSketch state grows as its relative accuracy α tightens.
-    #[test]
-    fn ddsketch_state_grows_as_alpha_shrinks() {
-        let bytes = |alpha| {
-            summary_shape(
-                &FieldDataType::Sketch(
-                    SketchKind::new(SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }),
-                    GroupingStrategy::default(),
-                ),
-                StateInputRows::UNKNOWN,
-            )
-            .1
-        };
-        assert!(
-            bytes(0.1) < bytes(0.01),
-            "{} vs {}",
-            bytes(0.1),
-            bytes(0.01)
-        );
-        assert!(
-            bytes(0.01) < bytes(0.001),
-            "{} vs {}",
-            bytes(0.01),
-            bytes(0.001)
-        );
-    }
-
-    /// Every sketch family's state is sized from its parameters, as
-    /// `asap_sketchlib` allocates it: an HLL's registers, a KMV's `k`
-    /// hashes once it has seen `k` distinct items, and a UnivMon's layers
-    /// once keys of the assumed size have churned through every heap.
-    #[test]
-    fn summary_state_is_sized_from_sketch_params() {
-        use asap_sketchlib::DataInput;
-        let bytes = |algorithm, params| {
-            summary_shape(
-                &FieldDataType::Sketch(
-                    SketchKind::new(algorithm, params),
-                    GroupingStrategy::default(),
-                ),
-                StateInputRows::UNKNOWN,
-            )
-            .1
-        };
-        assert_eq!(
-            bytes(
-                SketchAlgorithm::Hll,
-                SketchParams::Hll {
-                    precision: 14,
-                    relative_error: None
-                }
-            ),
-            asap_sketchlib::HyperLogLog::<asap_sketchlib::Classic>::new().memory_bytes() as u64
-        );
-        let mut kmv: asap_sketchlib::Kmv = asap_sketchlib::Kmv::new(1_000);
-        for i in 0..2_000u64 {
-            kmv.update(&DataInput::U64(i));
-        }
-        assert_eq!(
-            bytes(
-                SketchAlgorithm::Kmv,
-                SketchParams::Kmv {
-                    k: 1_000,
-                    relative_error: None
-                }
-            ),
-            kmv.memory_bytes() as u64
-        );
-        let mut univmon = asap_sketchlib::UnivMon::new(8, 3, 64, 2);
-        for i in 0..10_000u64 {
-            let mut key = [0; ASSUMED_VALUE_KEY_BYTES];
-            key[..8].copy_from_slice(&i.to_le_bytes());
-            univmon.update_weighted(&DataInput::Bytes(&key), 1);
-        }
-        assert_eq!(
-            bytes(
-                SketchAlgorithm::UnivMon,
-                SketchParams::UnivMon {
-                    heap_size: 8,
-                    sketch_rows: 3,
-                    sketch_cols: 64,
-                    layers: 2,
-                    distinct_failure_probability: None,
-                }
-            ),
-            univmon.memory_bytes() as u64
-        );
-    }
-
-    /// KLL state whose samples are unknown is charged its fixed 744 bytes
-    /// and the item array at the capacity `asap_sketchlib` grows it to:
-    /// `compute_max_capacity(k, 8)` 8-byte items, with `k` capped at 26 602.
-    #[test]
-    fn kll_state_is_sized_as_asap_sketchlib_allocates_it() {
-        let bytes = |k| {
-            summary_shape(
-                &FieldDataType::Sketch(
-                    SketchKind::new(
-                        SketchAlgorithm::Kll,
-                        SketchParams::Kll {
-                            k,
-                            failure_probability: None,
-                        },
-                    ),
-                    GroupingStrategy::default(),
-                ),
-                StateInputRows::UNKNOWN,
-            )
-            .1
-        };
-        assert_eq!(bytes(269), 744 + 8 * 1_206);
-        assert_eq!(bytes(26_602), 744 + 8 * 80_118);
-        assert_eq!(bytes(30_000), 744 + 8 * 80_118);
-    }
-
-    /// A KLL state is charged what `asap_sketchlib` allocates for the
-    /// samples it sees, not its full capacity: its fixed struct and level
-    /// array, plus the item array the library starts empty and doubles from
-    /// 16 items as samples arrive, up to `compute_max_capacity(k, 8)`. E.g.
-    /// a 10 s pane of a series sampled every 15 s sees one sample: 744 + 128
-    /// = 872 bytes, where the full capacity at `k` = 269 is 1,206 items.
-    #[test]
-    fn kll_state_bytes_grow_with_the_samples_it_sees() {
-        let k = 269;
-        // The library's bytes after `n` samples.
-        let library_bytes = |n: u32| {
-            let mut sketch = asap_sketchlib::Kll::<f64>::with_k(k as i32);
-            for i in 0..n {
-                sketch.update(&f64::from(i));
-            }
-            sketch.memory_bytes() as u64
-        };
-        let model_bytes = |rows_per_state| {
-            sketch_shape(
-                &SketchParams::Kll {
-                    k,
-                    failure_probability: None,
-                },
-                StateInputRows {
-                    rows_per_state,
-                    non_negative: true,
-                },
-            )
-            .1
-        };
-        // An empty sketch holds its fixed bytes; one sample adds 16 items.
-        assert_eq!(library_bytes(0), kll_fixed_bytes());
-        assert_eq!(library_bytes(0), 744);
-        assert_eq!(library_bytes(1), 872);
-        // Up to `k` samples nothing compacts, so the library holds exactly
-        // the fixed bytes and the grown array (and no merge scratch space).
-        for n in [1, 4, 16, 17, 100, k] {
-            assert_eq!(
-                model_bytes(Some(u64::from(n))),
-                library_bytes(n),
-                "{n} samples"
-            );
-        }
-        // Many samples are charged the full capacity, the most the array
-        // grows to.
-        assert_eq!(model_bytes(Some(5_000)), 744 + 8 * 1_206);
-        // A state assumed to see no sample holds at least one, as a
-        // DDSketch's does; unknown samples fill the full capacity.
-        assert_eq!(model_bytes(Some(0)), 872);
-        assert_eq!(model_bytes(None), 744 + 8 * 1_206);
-    }
-
-    /// Plan selection prices each state the executor builds per group at
-    /// what the executor charges for it (#947). Each family is built
-    /// through the executor's factory and fed `n` rows shaped as the
-    /// pricing assumes: signed values over [`DDSKETCH_ASSUMED_VALUE_RANGE`],
-    /// label values of [`ASSUMED_VALUE_KEY_BYTES`] keys for UnivMon, or
-    /// keyed rows whose tuple keys are [`ASSUMED_HEAP_KEY_BYTES`] long. The
-    /// heap families' shapes are dominated by their heaps. The charge is
-    /// the sketch's bytes plus the accumulator's own fields, named per
-    /// family. It equals the priced bytes where `asap_sketchlib`'s estimate
-    /// is exact (Count-Min, Count Sketch, HLL, KMV at `n` distinct items) and
-    /// for KLL up to `k` rows. For DDSketch, the heap sketches and UnivMon
-    /// the price bounds it, by at most 1.5 times once the state is full;
-    /// UnivMon's price also bounds the bytes its sketch holds.
-    /// KLL past `k` rows is checked only loosely: the planner's formula
-    /// leaves out the compaction scratch space, a known gap until a
-    /// sketchlib estimate without the CDF cache can price KLL.
-    ///
-    /// HydraCms is left out: plan selection prices an independent Count-Min
-    /// per group, the executor one shared grid, so the two agree only at
-    /// about 79 groups for a 5 × 32 grid of 64 × 3 cells (a follow-up).
-    #[test]
-    fn state_bytes_bound_the_executors_charge() {
-        use asap_executor::factory::create_planner_accumulator;
-        use asap_executor::summary_kernels::univmon::UnivMonAccumulator;
-        use asap_executor::summary_kernels::weighted_frequency::WeightedFrequency;
-        use asap_executor::summary_kernels::HllSketchAccumulator;
-        use asap_executor::values::Value;
-        use asap_types::ir::scalar::expr_ir::ColumnRef;
-        use asap_types::ir::schema::{
-            NonNegativeWeightProof, SummaryInputExpr, SummaryUpdate, WeightDomain,
-        };
-        use std::mem::{align_of, size_of};
-        use SketchAlgorithm as A;
-        /// How the priced bytes relate to the sketch's.
-        enum Priced {
-            Exact,
-            /// Exact up to `k` rows; past them at most the formula's
-            /// missing compaction scratch space over it.
-            Kll {
-                k: u32,
-            },
-            /// At least, and at most 1.5 times once the state is full.
-            Bound,
-        }
-        /// The rows a family is fed.
-        enum Rows {
-            /// Signed values over the assumed range.
-            Values,
-            /// One label value a row, as Pass 1 feeds UnivMon a column.
-            Labels,
-            /// A label set and a weight a row.
-            Keyed,
-        }
-        // (family, parameters, rows fed, how it is priced, the
-        // accumulator's own fields, rows at which the state is full: four
-        // times the heap for the heap sketches, so each heap churns).
-        //
-        // The accumulators' own fields, beside the sketch each wraps:
-        // Count-Min / Count Sketch's width, depth and capacity, padded to
-        // the struct's alignment; HLL's precision tag; UnivMon's two key
-        // bounds.
-        let weighted_frequency_shape =
-            (3 * size_of::<usize>()).next_multiple_of(align_of::<WeightedFrequency>());
-        let hll_precision_tag = size_of::<HllSketchAccumulator>()
-            - size_of::<asap_sketchlib::HyperLogLog<asap_sketchlib::Classic>>();
-        let univmon_key_bounds = 2 * size_of::<usize>();
-        let families = [
-            (
-                A::Kll,
-                SketchParams::Kll {
-                    k: 200,
-                    failure_probability: None,
-                },
-                Rows::Values,
-                Priced::Kll { k: 200 },
-                0,
-                10_000,
-            ),
-            (
-                A::DDSketch,
-                SketchParams::DDSketch { alpha: 0.01 },
-                Rows::Values,
-                Priced::Bound,
-                0,
-                10_000,
-            ),
-            (
-                A::Cms,
-                SketchParams::Cms {
-                    width: 1_024,
-                    depth: 5,
-                },
-                Rows::Keyed,
-                Priced::Exact,
-                0,
-                10_000,
-            ),
-            (
-                A::CountSketch,
-                SketchParams::CountSketch {
-                    width: 1_024,
-                    depth: 5,
-                },
-                Rows::Keyed,
-                Priced::Exact,
-                weighted_frequency_shape,
-                10_000,
-            ),
-            (
-                A::CmsWithHeap,
-                SketchParams::CmsWithHeap {
-                    width: 16,
-                    depth: 1,
-                    heap_size: 256,
-                },
-                Rows::Keyed,
-                Priced::Bound,
-                weighted_frequency_shape,
-                1_024,
-            ),
-            (
-                A::CountSketchWithHeap,
-                SketchParams::CountSketchWithHeap {
-                    width: 16,
-                    depth: 1,
-                    heap_size: 256,
-                },
-                Rows::Keyed,
-                Priced::Bound,
-                weighted_frequency_shape,
-                1_024,
-            ),
-            (
-                A::Hll,
-                SketchParams::Hll {
-                    precision: 12,
-                    relative_error: None,
-                },
-                Rows::Values,
-                Priced::Exact,
-                hll_precision_tag,
-                10_000,
-            ),
-            (
-                A::Kmv,
-                SketchParams::Kmv {
-                    k: 1_024,
-                    relative_error: None,
-                },
-                Rows::Values,
-                Priced::Exact,
-                0,
-                10_000,
-            ),
-            // Its top layer sees one row in eight: 4 096 labels fill and
-            // churn every layer's heap.
-            (
-                A::UnivMon,
-                SketchParams::UnivMon {
-                    heap_size: 256,
-                    sketch_rows: 1,
-                    sketch_cols: 16,
-                    layers: 4,
-                    distinct_failure_probability: None,
-                },
-                Rows::Labels,
-                Priced::Bound,
-                univmon_key_bounds,
-                4_096,
-            ),
-        ];
-        let value = SummaryUpdate::column(ColumnRef::SampleValue);
-        let item = Some(SummaryInputExpr::Column(ColumnRef::Named("item".into())));
-        let keyed = SummaryUpdate {
-            item: item.clone(),
-            ..value.clone()
-        };
-        let labeled = SummaryUpdate {
-            item,
-            weight: SummaryInputExpr::Constant(1.0),
-            weight_domain: WeightDomain::NonNegative {
-                proof: NonNegativeWeightProof::UnitCount,
-            },
-        };
-        // A 16-byte label value: its key has the assumed size.
-        let label = |i: u32| format!("{i:016}");
-        assert_eq!(
-            Value::Utf8(label(0).into()).key().unwrap().len(),
-            ASSUMED_VALUE_KEY_BYTES
-        );
-        // Three 16-byte labels: a tuple key of the assumed size.
-        let labels = |i: u32| {
-            [
-                label(i),
-                "service-frontend".to_string(),
-                "region-us-east-1".to_string(),
-            ]
-        };
-        let key = asap_sketchlib::TupleKey::new(
-            labels(0)
-                .into_iter()
-                .map(asap_sketchlib::KeyColumn::String)
-                .collect(),
-        );
-        assert_eq!(key.to_bytes().unwrap().len(), ASSUMED_HEAP_KEY_BYTES);
-        for (algorithm, params, rows, priced_as, fields, full) in &families {
-            for n in [1, 100, *full] {
-                let family = FieldDataType::Sketch(
-                    SketchKind::new(*algorithm, params.clone()),
-                    GroupingStrategy::default(),
-                );
-                let input = match rows {
-                    Rows::Values => &value,
-                    Rows::Labels => &labeled,
-                    Rows::Keyed => &keyed,
-                };
-                let mut updater =
-                    create_planner_accumulator(&family, input, &GroupingStrategy::default())
-                        .unwrap();
-                for i in 0..n {
-                    match rows {
-                        // Distinct magnitudes over the assumed range, in a
-                        // scrambled order, alternating in sign.
-                        Rows::Values => {
-                            let at = f64::from(i * 7_919 % n) / f64::from(n);
-                            let magnitude = DDSKETCH_ASSUMED_VALUE_RANGE.powf(at);
-                            let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
-                            updater.update_single(sign * magnitude, 0).unwrap();
-                        }
-                        Rows::Labels => updater
-                            .update_value(&Value::Utf8(label(i).into()), 0)
-                            .unwrap(),
-                        Rows::Keyed => updater.update_keyed(&labels(i), 1.0, 0).unwrap(),
-                    }
-                }
-                let state = updater.into_accumulator();
-                let charged = state.approx_memory_bytes();
-                let priced = fields
-                    + sketch_shape(
-                        params,
-                        StateInputRows {
-                            rows_per_state: Some(u64::from(n)),
-                            non_negative: false,
-                        },
-                    )
-                    .1 as usize;
-                let context = format!("{algorithm:?} after {n} rows: {priced} priced");
-                match priced_as {
-                    Priced::Exact => assert_eq!(charged, priced, "{context}"),
-                    Priced::Kll { k } if n <= *k => assert_eq!(charged, priced, "{context}"),
-                    // sketchlib bounds KLL's compaction scratch space at
-                    // 2 (k - 1) items.
-                    Priced::Kll { k } => assert!(
-                        charged <= priced + 8 * 2 * (*k as usize - 1),
-                        "{context}, {charged} charged"
-                    ),
-                    Priced::Bound => {
-                        assert!(charged <= priced, "{context}, {charged} charged");
-                        if n == *full {
-                            assert!(
-                                priced as f64 <= 1.5 * charged as f64,
-                                "{context}, {charged} charged"
-                            );
-                        }
-                    }
-                }
-                // UnivMon charges sketchlib's estimate itself, since its
-                // `memory_bytes` walks the heaps: the sketch holds no more.
-                // The estimate is a heap whose digest index has grown once
-                // more under churn, which the test's labels do not reach: a
-                // full heap holds about two thirds of it (1.52 times less
-                // here), so this bound is 1.6 times rather than 1.5.
-                if let Some(univmon) = state.as_any().downcast_ref::<UnivMonAccumulator>() {
-                    let held = fields + univmon.sketch().memory_bytes();
-                    assert!(held <= charged, "{context}, {held} held");
-                    if n == *full {
-                        assert!(priced as f64 <= 1.6 * held as f64, "{context}, {held} held");
-                    }
-                }
-            }
-        }
-    }
-
-    /// A UnivMon row updates layers `0..=b`, where its bottom layer `b` is
-    /// geometric (`asap_sketchlib`'s `bottom_layer_for_hash`), so
-    /// `2 - 2^(1 - layers)` layers in expectation; each updates one counter
-    /// per sketch row and its heap.
-    #[test]
-    fn univmon_update_cost_is_expected_layers_times_rows_and_heap() {
-        let ops = |layers| {
-            summary_shape(
-                &FieldDataType::Sketch(
-                    SketchKind::new(
-                        SketchAlgorithm::UnivMon,
-                        SketchParams::UnivMon {
-                            heap_size: 256,
-                            sketch_rows: 5,
-                            sketch_cols: 1_024,
-                            layers,
-                            distinct_failure_probability: None,
-                        },
-                    ),
-                    GroupingStrategy::default(),
-                ),
-                StateInputRows::UNKNOWN,
-            )
-            .0
-        };
-        assert_eq!(ops(1), 6.0);
-        assert_eq!(ops(2), 1.5 * 6.0);
-        assert_eq!(ops(16), (2.0 - 2f64.powi(-15)) * 6.0);
     }
 
     /// Kept exact distinct-count state keeps every item of its group: over
@@ -8650,8 +3111,7 @@ mod tests {
             .iter()
             .map(|target| {
                 target
-                    .choices
-                    .candidates
+                    .ways_to_compute
                     .iter()
                     .position(|candidate| {
                         *candidate
@@ -8664,7 +3124,7 @@ mod tests {
             .targets
             .iter()
             .zip(&choices)
-            .any(|(target, &choice)| target.choices.candidates[choice]
+            .any(|(target, &choice)| target.ways_to_compute[choice]
                 == pcc::HowToComputeAggregateMeasure::Summary(SketchAlgorithm::DDSketch)));
         let outputs = pcc::compose_logical_candidate(&inventory, &choices).unwrap();
         let output = &outputs[0].1;
@@ -8719,11 +3179,8 @@ mod tests {
     struct BoundedOperands;
 
     impl AccuracyEvidenceProvider for BoundedOperands {
-        fn operand_domain(
-            &self,
-            _operand: &OperatorNode,
-        ) -> Option<asap_logical_asap_optimization::accuracy::OperandDomain> {
-            Some(asap_logical_asap_optimization::accuracy::OperandDomain {
+        fn operand_domain(&self, _operand: &OperatorNode) -> Option<asap_accuracy::OperandDomain> {
+            Some(asap_accuracy::OperandDomain {
                 lower: 1.0,
                 upper: 1_000.0,
             })
@@ -8992,8 +3449,7 @@ mod tests {
             .targets
             .iter()
             .map(|t| {
-                t.choices
-                    .candidates
+                t.ways_to_compute
                     .iter()
                     .position(|c| {
                         *c == asap_logical_asap_optimization::pass1::per_computation_candidates::HowToComputeAggregateMeasure::Summary(
@@ -9045,16 +3501,10 @@ mod tests {
             .into_iter()
             .map(|(_, root)| root)
             .collect();
-        optimize_physical_asap(
-            "L1",
-            &roots,
-            &[],
-            &data(),
-            &DeploymentCapabilities::default(),
-        )
-        .unwrap()
-        .remove(0)
-        .dag
+        optimize_physical_asap("L1", &roots, &[], &data(), false)
+            .unwrap()
+            .remove(0)
+            .dag
     }
 
     /// A time shift is free and does not change what the scan below it
@@ -9105,16 +3555,16 @@ mod tests {
     }
 
     fn priced(dag: &PhysicalASAPDAG, recurrence: &[QueryRecurrence]) -> CandidateCost {
-        price(dag, recurrence, &data(), &PlanSelectionSettings::default()).unwrap()
+        price(dag, recurrence, &data(), &CostInputs::default()).unwrap()
     }
 
     /// The default settings with cost model 1's unit costs edited.
-    fn unit_costs(edit: impl FnOnce(&mut ResourceUnitCost)) -> PlanSelectionSettings {
+    fn unit_costs(edit: impl FnOnce(&mut ResourceUnitCost)) -> CostInputs {
         let mut prices = ResourceUnitCost::illustrative();
         edit(&mut prices);
-        PlanSelectionSettings {
+        CostInputs {
             cost_model: CostModel::UsageOverTime(prices),
-            ..PlanSelectionSettings::default()
+            ..CostInputs::default()
         }
     }
 
@@ -9231,16 +3681,11 @@ mod tests {
         .into_iter()
         .map(|query| {
             let root = lower_promql(query, AccuracyTarget::exact());
-            let dag = optimize_physical_asap(
-                "L",
-                &[QueryRoot::Operator(root)],
-                &[],
-                &data(),
-                &DeploymentCapabilities::default(),
-            )
-            .unwrap()
-            .remove(0)
-            .dag;
+            let dag =
+                optimize_physical_asap("L", &[QueryRoot::Operator(root)], &[], &data(), false)
+                    .unwrap()
+                    .remove(0)
+                    .dag;
             (query.to_string(), dag)
         })
         .collect();
@@ -9272,16 +3717,11 @@ mod tests {
     fn kept_exact_state_is_charged_by_the_values_it_keeps() {
         let kept = |query: &str| {
             let root = lower_promql(query, AccuracyTarget::exact());
-            let mut dag = optimize_physical_asap(
-                "L",
-                &[QueryRoot::Operator(root)],
-                &[],
-                &data(),
-                &DeploymentCapabilities::default(),
-            )
-            .unwrap()
-            .remove(0)
-            .dag;
+            let mut dag =
+                optimize_physical_asap("L", &[QueryRoot::Operator(root)], &[], &data(), false)
+                    .unwrap()
+                    .remove(0)
+                    .dag;
             let aggregate = dag
                 .nodes
                 .iter_mut()
@@ -9321,7 +3761,7 @@ mod tests {
             &[QueryRoot::Operator(root.clone())],
             &[],
             &data(),
-            &DeploymentCapabilities::default(),
+            false,
         )
         .unwrap()
         .remove(0)
@@ -9331,7 +3771,7 @@ mod tests {
             &[QueryRoot::Operator(root.clone()), QueryRoot::Operator(root)],
             &[],
             &data(),
-            &DeploymentCapabilities::default(),
+            false,
         )
         .unwrap()
         .remove(0)
@@ -9417,17 +3857,11 @@ mod tests {
     #[test]
     fn one_off_recurrence_is_spread_over_the_horizon() {
         let root = lower_promql("sum by (job) (rate(m[1m]))", AccuracyTarget::exact());
-        let dag = optimize_physical_asap(
-            "L",
-            &[QueryRoot::Operator(root)],
-            &[],
-            &data(),
-            &DeploymentCapabilities::default(),
-        )
-        .unwrap()
-        .remove(0)
-        .dag;
-        let horizon = PlanSelectionSettings::default().non_repeating_query_horizon_seconds;
+        let dag = optimize_physical_asap("L", &[QueryRoot::Operator(root)], &[], &data(), false)
+            .unwrap()
+            .remove(0)
+            .dag;
+        let horizon = CostInputs::default().non_repeating_query_horizon_seconds;
         assert_eq!(horizon, 3_600.0);
         let per_evaluation = priced(&dag, &[repeating(1_000)]).cost_per_second.unwrap();
         let once = priced(
@@ -9456,7 +3890,7 @@ mod tests {
     #[test]
     fn invalid_settings_are_rejected() {
         let candidates = pane_candidates(10_000.0);
-        let select = |settings: &PlanSelectionSettings| {
+        let select = |settings: &CostInputs| {
             select_plan(
                 &candidates,
                 &[every_minute()],
@@ -9474,9 +3908,9 @@ mod tests {
         for settings in [
             unit_costs(|c| c.cost_per_memory_byte_second = -1.0),
             under(CostModel::UsageOverTime(only_provisioned.clone())),
-            PlanSelectionSettings {
+            CostInputs {
                 non_repeating_query_horizon_seconds: 0.0,
-                ..PlanSelectionSettings::default()
+                ..CostInputs::default()
             },
         ] {
             assert!(
@@ -9544,8 +3978,7 @@ mod tests {
         )
         .unwrap();
         let kll = inventory.targets[0]
-            .choices
-            .candidates
+            .ways_to_compute
             .iter()
             .position(|c| {
                 matches!(
@@ -9585,7 +4018,7 @@ mod tests {
             &roots,
             &[every_minute()],
             &arriving(rows_per_s),
-            deployment,
+            deployment.query_time_results_retained,
         )
         .unwrap();
         for (k, c) in candidates.iter_mut().enumerate() {
@@ -9645,7 +4078,7 @@ mod tests {
             ))
         );
         let recurrence = [repeating(MINUTE)];
-        let settings = PlanSelectionSettings::default();
+        let settings = CostInputs::default();
         let kept = price(b3, &recurrence, &arriving(10_000.0), &settings).unwrap();
         let rebuilt = price(b2, &recurrence, &arriving(10_000.0), &settings).unwrap();
         let scan = node_of(b3, is_scan);
@@ -9764,15 +4197,9 @@ mod tests {
             .into_iter()
             .map(|(_, root)| root)
             .collect();
-        let mut candidate = optimize_physical_asap(
-            "L1",
-            &roots,
-            &[],
-            &data(),
-            &DeploymentCapabilities::default(),
-        )
-        .unwrap()
-        .remove(0);
+        let mut candidate = optimize_physical_asap("L1", &roots, &[], &data(), false)
+            .unwrap()
+            .remove(0);
         candidate.id = "P1".into();
         let entries = [entry(repeating(MINUTE)), entry(repeating(MINUTE))];
         let no_raw_data = DeploymentCapabilities {
@@ -9888,7 +4315,7 @@ mod tests {
             dag,
             &recurrence,
             &arriving(10_000.0),
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
         )
         .unwrap()
         .per_node[&chain];
@@ -9916,7 +4343,7 @@ mod tests {
                 &c.dag,
                 &[repeating(MINUTE)],
                 &arriving(10_000.0),
-                &PlanSelectionSettings::default(),
+                &CostInputs::default(),
             )
             .unwrap();
             cost.usage.latency_per_query[0]
@@ -9966,7 +4393,7 @@ mod tests {
                 &c.dag,
                 &[repeating(MINUTE)],
                 &arriving(rows_per_s),
-                &PlanSelectionSettings::default(),
+                &CostInputs::default(),
             )
             .unwrap()
             .usage
@@ -10071,34 +4498,6 @@ mod tests {
         );
     }
 
-    /// Without a declared memory capacity nothing rejects a candidate for
-    /// its memory, so a peak over [`LARGE_PEAK_MEMORY_BYTES`] is reported
-    /// as a warning (the eval's 24 h quantiles plan peaked at 1.43 TB).
-    /// Under cost model 3 the cluster's memory is declared and its capacity
-    /// check applies instead, so there is no warning.
-    #[test]
-    fn a_very_large_peak_memory_is_warned_about_only_without_a_declared_capacity() {
-        let usage_over_time = CostModel::UsageOverTime(ResourceUnitCost::illustrative());
-        assert_eq!(
-            large_peak_memory_warning(1_430_000_000_000, &usage_over_time).as_deref(),
-            Some(
-                "peak memory 1430000000000 bytes is over 1000000000000 bytes and the deployment \
-                 declares no memory capacity to check it against"
-            )
-        );
-        assert_eq!(
-            large_peak_memory_warning(LARGE_PEAK_MEMORY_BYTES, &usage_over_time),
-            None
-        );
-        let cluster = CostModel::ClusterCapacity(ClusterLimits {
-            memory_bytes: u64::MAX,
-            disk_bytes: u64::MAX,
-            cpu_cores: None,
-            objective: ClusterObjective::LowestLatency,
-        });
-        assert_eq!(large_peak_memory_warning(1_430_000_000_000, &cluster), None);
-    }
-
     /// When a maintained state's ingestion work needs more than one core,
     /// its `k` workers' partial copies of the newest window are merged
     /// before the query reads it: `(k − 1)` merges of one operation for
@@ -10111,7 +4510,7 @@ mod tests {
                 &candidates[1].dag,
                 &[repeating(MINUTE)],
                 &arriving(rows_per_s),
-                &PlanSelectionSettings::default(),
+                &CostInputs::default(),
             )
             .unwrap()
             .usage
@@ -10171,11 +4570,11 @@ mod tests {
 
     // ── Cost models ──────────────────────────────────────────────────────
 
-    /// [`PlanSelectionSettings`] with `cost_model`.
-    fn under(cost_model: CostModel) -> PlanSelectionSettings {
-        PlanSelectionSettings {
+    /// [`CostInputs`] with `cost_model`.
+    fn under(cost_model: CostModel) -> CostInputs {
+        CostInputs {
             cost_model,
-            ..PlanSelectionSettings::default()
+            ..CostInputs::default()
         }
     }
 
@@ -10195,9 +4594,9 @@ mod tests {
                 cost_per_disk_byte_second: 0.0,
             };
             set(&mut prices);
-            PlanSelectionSettings {
+            CostInputs {
                 cost_model: CostModel::UsageOverTime(prices),
-                ..PlanSelectionSettings::default()
+                ..CostInputs::default()
             }
         };
         // Each resource's unit price and the candidate's usage of it.
@@ -10325,16 +4724,10 @@ mod tests {
                 .iter()
                 .map(|q| QueryRoot::Operator(lower_promql(q, AccuracyTarget::exact())))
                 .collect();
-            let dag = optimize_physical_asap(
-                "L",
-                &roots,
-                &[],
-                &data(),
-                &DeploymentCapabilities::default(),
-            )
-            .unwrap()
-            .remove(0)
-            .dag;
+            let dag = optimize_physical_asap("L", &roots, &[], &data(), false)
+                .unwrap()
+                .remove(0)
+                .dag;
             priced(&dag, &recurrences(queries.len())).usage.disk_bytes
         };
         let five_minutes = disk(&["sum_over_time(m[5m])"]);
@@ -10343,23 +4736,6 @@ mod tests {
             disk(&["sum_over_time(m[1m])", "sum_over_time(m[5m])"]),
             five_minutes
         );
-    }
-
-    /// One candidate dominates another only when it is no worse on peak
-    /// memory, disk and latency and better on one; equal usage does not.
-    #[test]
-    fn dominance_needs_one_strictly_better_resource() {
-        let usage = |memory, latency_ms| ResourceUsage {
-            peak_memory_bytes: memory,
-            latency_per_query: vec![QueryLatency {
-                compaction_ms: 0.0,
-                query_ms: latency_ms,
-            }],
-            ..ResourceUsage::default()
-        };
-        assert!(dominates(&usage(1, 5.0), &usage(2, 5.0)));
-        assert!(!dominates(&usage(1, 5.0), &usage(1, 5.0)));
-        assert!(!dominates(&usage(1, 6.0), &usage(2, 5.0)));
     }
 
     /// Cost model 3's disk limit: B2 reads its 5-minute window of raw data
@@ -10539,8 +4915,7 @@ mod tests {
             .iter()
             .map(|target| {
                 target
-                    .choices
-                    .candidates
+                    .ways_to_compute
                     .iter()
                     .position(|c| {
                         matches!(
@@ -10582,7 +4957,7 @@ mod tests {
                 ..entry_with(p99_target(), repeating(interval_ms))
             }),
             &arriving(rows_per_s),
-            &DeploymentCapabilities::default(),
+            false,
         )
         .unwrap()
         .into_iter()
@@ -10613,7 +4988,7 @@ mod tests {
             .collect();
         assert_eq!(chains.len(), 1);
         let recurrence = [repeating(MINUTE), repeating(MINUTE)];
-        let settings = PlanSelectionSettings::default();
+        let settings = CostInputs::default();
         let cost = price(&shared.dag, &recurrence, &arriving(rows_per_s), &settings).unwrap();
         let states_read = |newest: Option<u32>| -> u64 {
             let merge = shared
@@ -10674,7 +5049,7 @@ mod tests {
             })
         ));
         let recurrence = [repeating(MINUTE), repeating(5 * MINUTE)];
-        let settings = PlanSelectionSettings::default();
+        let settings = CostInputs::default();
         let cost = price(&shared.dag, &recurrence, &arriving(rows_per_s), &settings).unwrap();
         let separate = shared_windows_at_ingestion(queries, false, rows_per_s);
         let separate_cost =
@@ -10736,7 +5111,7 @@ mod tests {
         ));
         let separate = shared_windows_at_ingestion(queries, false, rows_per_s);
         let recurrence = [repeating(MINUTE), repeating(45_000)];
-        let settings = PlanSelectionSettings::default();
+        let settings = CostInputs::default();
         let price_of = |candidate: &PhysicalWorkloadPlan| {
             price(
                 &candidate.dag,
@@ -10769,7 +5144,7 @@ mod tests {
             &b1.dag,
             &[repeating(MINUTE)],
             &arriving(rows_per_s),
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
         )
         .unwrap();
         let detail = &cost.per_node[&chain].detail;
@@ -10794,42 +5169,6 @@ mod tests {
         // averaged memory beside negligible query-time holds.
         assert!(cost.usage.peak_memory_bytes >= kept + bytes);
         assert!(cost.usage.average_memory_bytes < (kept + bytes) as f64);
-    }
-
-    /// A candidate with the given latency, peak memory and disk under cost
-    /// model 3.
-    fn cluster_cost(latency_ms: f64, peak_memory_bytes: u64, disk_bytes: u64) -> CandidateCost {
-        CandidateCost {
-            usage: ResourceUsage {
-                peak_memory_bytes,
-                disk_bytes,
-                latency_per_query: vec![QueryLatency {
-                    compaction_ms: 0.0,
-                    query_ms: latency_ms,
-                }],
-                ..ResourceUsage::default()
-            },
-            cost_per_second: None,
-            cost_unit: COST_UNIT,
-            source: COST_SOURCE,
-            per_node: BTreeMap::new(),
-        }
-    }
-
-    /// Peak memory and disk are compared exactly, as dominance compares
-    /// them: 100 bytes less at 124 GB is less memory, not a tie. Under the
-    /// Pareto front the selected candidate is a front member, and under
-    /// least memory the smaller one wins.
-    #[test]
-    fn memory_differing_by_a_few_bytes_is_compared_exactly() {
-        let larger = cluster_cost(7.0, 124_000_000_100, 0);
-        let smaller = cluster_cost(7.0, 124_000_000_000, 0);
-        let costs = [&larger, &smaller];
-        let (best, front) = choose(Ranking::Front, &costs).unwrap();
-        assert_eq!(front, [1]);
-        assert_eq!(best, 1, "the selection is on the front");
-        assert_eq!(choose(Ranking::Memory, &costs).unwrap().0, 1);
-        assert_eq!(choose(Ranking::Latency, &costs).unwrap().0, 1);
     }
 
     /// The KLL build of a `quantile_over_time` candidate, with its sketch
@@ -10889,13 +5228,13 @@ mod tests {
     }
 
     /// Settings pricing from `operators`.
-    fn measured(operators: Vec<OperatorCost>) -> PlanSelectionSettings {
-        PlanSelectionSettings {
+    fn measured(operators: Vec<OperatorCost>) -> CostInputs {
+        CostInputs {
             measured_operation_costs: MeasuredOperationCosts {
                 operators,
                 ..MeasuredOperationCosts::default()
             },
-            ..PlanSelectionSettings::default()
+            ..CostInputs::default()
         }
     }
 
@@ -10910,7 +5249,7 @@ mod tests {
         let (candidate, build, sketch) = kll_build();
         // Scanning is free here, so each node's time is its CPU, which the
         // factor scales (it leaves scanned bytes unscaled).
-        let cpu_time_only = |mut settings: PlanSelectionSettings| {
+        let cpu_time_only = |mut settings: CostInputs| {
             settings.resource_speed.ms_per_scanned_byte = 0.0;
             settings
         };
@@ -10918,7 +5257,7 @@ mod tests {
             &candidate.dag,
             &recurrences(1),
             &data(),
-            &cpu_time_only(PlanSelectionSettings::default()),
+            &cpu_time_only(CostInputs::default()),
         )
         .unwrap();
         let settings = cpu_time_only(measured(vec![sketch_entry(
@@ -11060,14 +5399,9 @@ mod tests {
             .into_iter()
             .map(|(_, root)| root)
             .collect();
-            let candidates = optimize_physical_asap(
-                "L",
-                &roots,
-                &[every_minute()],
-                &arriving(10_000.0),
-                &DeploymentCapabilities::default(),
-            )
-            .unwrap();
+            let candidates =
+                optimize_physical_asap("L", &roots, &[every_minute()], &arriving(10_000.0), false)
+                    .unwrap();
             for (k, mut candidate) in candidates.into_iter().enumerate() {
                 candidate.id = format!("P{}-m{k}", choice + 1);
                 out.push(candidate);
@@ -11115,8 +5449,8 @@ mod tests {
 
     /// Cost model 1 pricing CPU only (1 per ms of one core): the tests
     /// below compare plans by the CPU their tables price.
-    fn cpu_only(operators: Vec<OperatorCost>) -> PlanSelectionSettings {
-        PlanSelectionSettings {
+    fn cpu_only(operators: Vec<OperatorCost>) -> CostInputs {
+        CostInputs {
             cost_model: CostModel::UsageOverTime(ResourceUnitCost {
                 cost_per_cpu_op: 1e-6,
                 cost_per_scanned_byte: 1e-7,
@@ -11131,10 +5465,7 @@ mod tests {
 
     /// The candidate Stage 3 selects among `candidates` for one p99 every
     /// minute over 10,000 rows per second.
-    fn selected(
-        candidates: &[PhysicalWorkloadPlan],
-        settings: &PlanSelectionSettings,
-    ) -> Selection {
+    fn selected(candidates: &[PhysicalWorkloadPlan], settings: &CostInputs) -> Selection {
         select_plan(
             candidates,
             &[every_minute()],
@@ -11146,10 +5477,7 @@ mod tests {
 
     /// The candidate cheapest when every node without an entry keeps its
     /// formulas' price (no calibration), as Stage 3 priced before.
-    fn cheapest_uncalibrated(
-        candidates: &[PhysicalWorkloadPlan],
-        settings: &PlanSelectionSettings,
-    ) -> String {
+    fn cheapest_uncalibrated(candidates: &[PhysicalWorkloadPlan], settings: &CostInputs) -> String {
         let cost = |candidate: &PhysicalWorkloadPlan| {
             price_at_scale(
                 &candidate.dag,
@@ -11297,7 +5625,7 @@ mod tests {
             &candidate.dag,
             &recurrences(1),
             &data(),
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
         )
         .unwrap();
         let settings = measured(vec![sketch_entry(OperatorKind::SummaryAgg, sketch, 0.01)]);
@@ -11325,7 +5653,7 @@ mod tests {
         let (candidate, _, _) = kll_build();
         let free_memory = unit_costs(|c| c.cost_per_memory_byte_second = 0.0);
         let before = price(&candidate.dag, &recurrences(1), &data(), &free_memory).unwrap();
-        let settings = PlanSelectionSettings {
+        let settings = CostInputs {
             measured_operation_costs: MeasuredOperationCosts {
                 ns_per_evaluation: 1e6,
                 ..MeasuredOperationCosts::default()
@@ -11368,17 +5696,11 @@ mod tests {
             valid_for: None,
         }));
         let entries = [entry_with(AccuracyTarget::exact(), recurrence.clone())];
-        let candidate = optimize_physical_asap(
-            "literal",
-            &roots,
-            &entries,
-            &data(),
-            &DeploymentCapabilities::default(),
-        )
-        .unwrap()
-        .remove(0);
+        let candidate = optimize_physical_asap("literal", &roots, &entries, &data(), false)
+            .unwrap()
+            .remove(0);
         assert!(candidate.dag.nodes.is_empty());
-        let mut settings = PlanSelectionSettings::default();
+        let mut settings = CostInputs::default();
         settings.measured_operation_costs.ns_per_evaluation = 2_000_000.0;
         for range in [
             None,
@@ -11387,7 +5709,7 @@ mod tests {
                 span_ms: 3000,
             }),
         ] {
-            let cost = super::price(
+            let cost = crate::pricing::price(
                 &candidate.dag,
                 &node_map(&candidate.dag),
                 &kept_pane_chains(&candidate.dag),
@@ -11523,7 +5845,7 @@ mod tests {
     /// an update both a `SummaryAgg` and a `PaneChain` entry.
     #[test]
     fn the_earlier_table_format_still_loads() {
-        let settings: PlanSelectionSettings = serde_json::from_str(
+        let settings: CostInputs = serde_json::from_str(
             r#"{"measured_operation_costs": [
                  {"sketch": {"Kll": {"k": 200}}, "operation": "update", "cpu_ns_per_operation": 120.0},
                  {"sketch": {"Kll": {"k": 200}}, "operation": "merge", "cpu_ns_per_operation": 900.0}]}"#,
@@ -11574,7 +5896,7 @@ mod tests {
             &candidate.dag,
             &recurrences(1),
             &data(),
-            &PlanSelectionSettings::default(),
+            &CostInputs::default(),
         )
         .unwrap();
         let other = measured(vec![
@@ -11636,7 +5958,7 @@ mod tests {
             validate(vec![entry(1.0)], 0.0),
             Err(AnalyticalCostError::MeasuredCostsWithoutCpuSpeed(0.0))
         );
-        let mut empty = PlanSelectionSettings::default();
+        let mut empty = CostInputs::default();
         empty.resource_speed.ms_per_cpu_op = 0.0;
         assert!(
             empty.validate().is_ok(),

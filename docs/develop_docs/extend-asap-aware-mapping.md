@@ -26,17 +26,17 @@ A new sketch that Pass 1 can offer for an intent.
 3. **Offer and size.** Place it in `realization::FAMILY_PREFERENCE`
    (`crates/logical-asap-optimization`): `summary_candidates` offers it, in
    that order, for every intent whose statistic its capability row answers.
-   Size it in `realization::default_size_params`.
+   Size it in `asap_accuracy::sizing::default_size_params`.
 4. **Accuracy.** Add its error model under
-   `crates/logical-asap-optimization/src/accuracy/estimators/` and return
-   it from `DefaultAccuracyModel`'s `local_guarantee`, by inverting the same
+   `crates/accuracy/src/estimators/` and return
+   it from `BuiltinAccuracyModel`'s `local_guarantee`, by inverting the same
    sizing formulas. Without a guarantee, every candidate that uses it is
    rejected.
 5. **Cost.** Give it a state size (the library's `estimated_memory_bytes`
    for the type the executor builds; KLL keeps the planner's own formula)
    and per-operation CPU in `sketch_shape`
-   (`crates/plan-selection/src/lib.rs`), and accept its parameters in
-   `crates/plan-selection/src/cost/measured.rs` if deployments measure it.
+   (`crates/cost/src/state_bytes.rs`), and accept its parameters in
+   `crates/cost/src/measured.rs` if deployments measure it.
 6. **Executor.** Wrap the `asap_sketchlib` implementation in
    `crates/executor/src/summary_kernels/` and register it in
    `factory.rs` and `capability.rs`. Gaps in the library are fixed upstream,
@@ -82,7 +82,7 @@ contains the candidate and that Stage 3 prices it.
    `MaterializationCandidate` options), after the existing options so default
    candidate ids stay the same, and gate it on the deployment input that
    allows it.
-3. Price it in `crates/plan-selection/src/lib.rs`: what it keeps in memory or on
+3. Price it in `crates/plan-selection/src/pricing.rs`: what it keeps in memory or on
    disk, and what each evaluation rebuilds.
 
 Tests: Stage 2 unit tests for when the option is offered;
@@ -96,9 +96,11 @@ tests in `planner_layering_example4.rs`.
   `RejectionCause` variant (listed in `RejectionCause::failed_a_check`); it never fails the whole selection
   unless the input itself is bad (a new `SelectionError` variant, documented
   as bad input).
-- A new pricing input goes in `PlanSelectionSettings` (validated in its
+- A new pricing input goes in `CostInputs` (validated in its
   `validate`); a new statement about the executor goes in
-  `DeploymentCapabilities`. Both reach every stage through `PlanningModels`.
+  `DeploymentCapabilities`. Both reach the stages through `PlanningModels`;
+  a stage function takes only the field it reads (Stage 2 takes
+  `query_time_results_retained: bool`, not the whole struct).
 - Expose it in `stage_pipeline` and in the
   [Stage Viewer guide](../user_guide_docs/stage-viewer.md).
 

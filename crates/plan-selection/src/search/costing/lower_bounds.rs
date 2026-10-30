@@ -10,7 +10,8 @@ use asap_types::physical::Materialization;
 
 use crate::search::candidates::configurations::CandidateConfigurationInventory;
 use crate::search::refinement::planner::CandidatePlanningContext;
-use crate::{price_node, CostModel, PricedNode, ProducerOutput, StateFamily};
+use crate::{price_node, PricedNode, ProducerOutput, StateFamily};
+use asap_cost::CostModel;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(in crate::search) struct LowerBoundMetrics {
@@ -51,7 +52,7 @@ pub(in crate::search) fn apply(
                 .entries
                 .iter()
                 .try_fold(f64::INFINITY, |minimum, entry| {
-                    crate::cost::execution_demand::evaluation_rate(
+                    asap_cost::execution_demand::evaluation_rate(
                         [(&entry.recurrence, None)],
                         context
                             .models
@@ -96,7 +97,7 @@ pub(in crate::search) fn apply(
         let common_reader_window_ms = common_reader_windows(configured);
         let nodes: Vec<_> = (0..count)
             .map(|id| {
-                let configuration = configured.configurations[id];
+                let configuration = &configured.configurations[id];
                 let template = configured.inventory.templates[id].as_ref()?;
                 let state = if configuration.timing == ExecutionTiming::QueryTime {
                     if retained_ancestor[id] {
@@ -369,7 +370,7 @@ fn template_price_is_a_floor(build: &ASAPOp, context: &CandidatePlanningContext<
 /// above it get a size-based bound.
 fn measured_family(
     params: &SketchParams,
-    table: &crate::cost::measured::MeasuredOperationCosts,
+    table: &asap_cost::measured::MeasuredOperationCosts,
 ) -> bool {
     table.operators.iter().any(|entry| {
         entry.sketch.as_ref().is_some_and(|measured| {
@@ -623,10 +624,9 @@ fn certified_price<'a>(
                         asap_types::ir::Operator::NonASAP(
                             NonASAPOp::Scan { .. } | NonASAPOp::TimeRange { .. }
                         )
-                    ) && priced
-                        .sources
-                        .iter()
-                        .all(|source| crate::declared_non_negative(context.data, source))
+                    ) && priced.sources.iter().all(|source| {
+                        asap_types::workload::bounds::declared_non_negative(context.data, source)
+                    })
                 });
                 // Producer pane counts, family, schema fields, statistics and
                 // provenance must agree; upstream work is charged separately.
@@ -747,7 +747,8 @@ mod tests {
     use crate::search::candidates::inventory::CandidateInventory;
     use crate::search::candidates::physical::materialize_selected_candidates;
     use crate::search::milp::model::{solve_candidate_proposal, ObservedAssignment};
-    use crate::{CalibrationFit, PlanSelector, PlanningModels};
+    use crate::{PlanSelector, PlanningModels};
+    use asap_cost::CalibrationFit;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::asap_aware_cse::{
         pane_candidates, window_composition_pass2_candidates,
@@ -811,11 +812,7 @@ mod tests {
                 &generate_per_computation_candidates(roots_with_ids).unwrap(),
             )
             .unwrap();
-            let root_group = memo
-                .groups
-                .iter()
-                .position(|group| group.roots_of.contains(&0))
-                .unwrap();
+            let root_group = memo.query_roots[0].as_operator().unwrap().0 as usize;
             let candidate = memo.candidates[root_group].iter().find(|candidate|
                 OperatorNode::reachable(&candidate.root_node).iter().any(|node| if exact {
                     matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(..), child, .. }) if !grouped || matches!(child.non_asap(), Some(NonASAPOp::TimeRange { .. })))
@@ -858,6 +855,7 @@ mod tests {
             let pane = matches!(node.asap(), Some(ASAPOp::PaneChain { .. }));
             let scan = matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }));
             configured.configurations.push(CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: PhysicalCandidateId(id),
                 timing: if pane || scan {
                     ExecutionTiming::IngestionTime
@@ -1002,6 +1000,7 @@ mod tests {
             for node in [range, project] {
                 let id = PhysicalCandidateId(configured.configurations.len());
                 configured.configurations.push(CandidateConfiguration {
+                    may_keep_with_sole_reader: Vec::new(),
                     source_candidate: id,
                     materialization: Materialization::NotMaterialized,
                     timing: ExecutionTiming::IngestionTime,
@@ -1079,6 +1078,7 @@ mod tests {
                 .unwrap();
             let id = PhysicalCandidateId(configured.configurations.len());
             configured.configurations.push(CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: id,
                 materialization: Materialization::NotMaterialized,
                 timing: ExecutionTiming::IngestionTime,
@@ -1141,7 +1141,7 @@ mod tests {
                 &roots,
                 &entries,
                 &data,
-                models.deployment_capabilities,
+                models.deployment_capabilities.query_time_results_retained,
             )
             .unwrap();
             let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
@@ -1248,7 +1248,7 @@ mod tests {
                     step_ms: 120_000,
                 });
             }
-            let mut settings = crate::PlanSelectionSettings::default();
+            let mut settings = asap_cost::CostInputs::default();
             if measured {
                 settings.measured_operation_costs = serde_json::from_value(serde_json::json!({"operators": [{"operator": "PaneChain", "phase": "ingestion_time", "sketch": {"DDSketch": {"alpha": 0.1}}, "ns_per_unit": 300.0, "ns_per_invocation": 200.0, "memory_bytes_per_state": 1000.0}, {"operator": "SummaryMerge", "phase": "query_time", "sketch": {"DDSketch": {"alpha": 0.1}}, "ns_per_unit": 500.0, "ns_per_invocation": 100.0}, {"operator": "SummaryEstimate", "phase": "query_time", "sketch": {"DDSketch": {"alpha": 0.1}}, "ns_per_unit": 900.0, "ns_per_invocation": 400.0}]})).unwrap();
             }
@@ -1260,10 +1260,7 @@ mod tests {
                 ]})).unwrap();
             }
             let models = PlanningModels::builtin().with_plan_selection(&settings);
-            let calibration = CalibrationFit {
-                measured_ms_per_second: 2.0,
-                formula_ms_per_second: 1.0,
-            };
+            let calibration = CalibrationFit::from_factor(2.0).unwrap();
             let context = CandidatePlanningContext {
                 deadline: None,
                 refine_materialization: false,
@@ -1317,7 +1314,7 @@ mod tests {
                     &roots,
                     &entries,
                     &data,
-                    models.deployment_capabilities,
+                    models.deployment_capabilities.query_time_results_retained,
                 )
                 .unwrap();
                 let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
@@ -1454,7 +1451,7 @@ mod tests {
         queries: &[&str],
         built_for: AccuracyTarget,
         evaluated_for: AccuracyTarget,
-        settings: &crate::PlanSelectionSettings,
+        settings: &asap_cost::CostInputs,
         pick: fn(&OperatorNode) -> bool,
     ) -> (CandidateConfigurationInventory, f64, f64) {
         let roots_with_ids: Vec<_> = queries
@@ -1474,11 +1471,7 @@ mod tests {
         .unwrap();
         let picked: Vec<_> = (0..queries.len())
             .map(|query| {
-                let root_group = memo
-                    .groups
-                    .iter()
-                    .position(|group| group.roots_of.contains(&query))
-                    .unwrap();
+                let root_group = memo.query_roots[query].as_operator().unwrap().0 as usize;
                 memo.candidates[root_group]
                     .iter()
                     .find(|candidate| {
@@ -1516,6 +1509,7 @@ mod tests {
             });
             let id = configured.inventory.templates.len();
             configured.configurations.push(CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: PhysicalCandidateId(id),
                 timing: ExecutionTiming::QueryTime,
                 materialization: Materialization::NotMaterialized,
@@ -1604,7 +1598,7 @@ mod tests {
             &roots,
             &entries,
             &data,
-            models.deployment_capabilities,
+            models.deployment_capabilities.query_time_results_retained,
         )
         .unwrap();
         let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
@@ -1644,7 +1638,7 @@ mod tests {
                 &[query],
                 AccuracyTarget::exact(),
                 AccuracyTarget::exact(),
-                &crate::PlanSelectionSettings::default(),
+                &asap_cost::CostInputs::default(),
                 |node| {
                     matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(..), child, .. })
                         if matches!(child.non_asap(), Some(NonASAPOp::TimeRange { .. })))
@@ -1694,7 +1688,7 @@ mod tests {
                 queries,
                 AccuracyTarget::exact(),
                 AccuracyTarget::exact(),
-                &crate::PlanSelectionSettings::default(),
+                &asap_cost::CostInputs::default(),
                 pick,
             );
             let scans = configured
@@ -1735,7 +1729,7 @@ mod tests {
                 &["quantile_over_time(0.9, latency[5m])"],
                 built_for.clone(),
                 AccuracyTarget::max_error(0.01).failure_probability(failure_probability),
-                &crate::PlanSelectionSettings::default(),
+                &asap_cost::CostInputs::default(),
                 is_kll_build,
             );
             assert!(bound_of(&configured, is_kll_build) > 0.0);
@@ -1755,7 +1749,7 @@ mod tests {
     // measured entries gets no certified bound.
     #[test]
     fn a_measured_kll_build_is_not_certified() {
-        let settings = crate::PlanSelectionSettings {
+        let settings = asap_cost::CostInputs {
             measured_operation_costs: serde_json::from_value(serde_json::json!({"operators": [
             {"operator": "SummaryAgg", "phase": "query_time", "sketch": {"Kll": {"k": 200}}, "ns_per_unit": 300.0, "ns_per_invocation": 200.0}
         ]}))
@@ -1778,7 +1772,7 @@ mod tests {
     // stays below the evaluated cost.
     #[test]
     fn a_measured_kll_estimate_keeps_the_bound_below_the_cost() {
-        let settings = crate::PlanSelectionSettings {
+        let settings = asap_cost::CostInputs {
             measured_operation_costs: serde_json::from_value(serde_json::json!({"operators": [
             {"operator": "SummaryEstimate", "phase": "query_time", "sketch": {"Kll": {"k": 8}}, "ns_per_unit": 0.0, "ns_per_invocation": 5.0e9},
             {"operator": "SummaryEstimate", "phase": "query_time", "sketch": {"Kll": {"k": 20000}}, "ns_per_unit": 0.0, "ns_per_invocation": 1.0}

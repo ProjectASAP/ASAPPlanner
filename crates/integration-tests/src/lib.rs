@@ -259,7 +259,7 @@ pub mod planning {
         };
         let local =
             generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
-        let choices = local.targets.iter().map(|target| target.choices.candidates.iter()
+        let choices = local.targets.iter().map(|target| target.ways_to_compute.iter()
             .position(|candidate| matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == family)).unwrap_or(0)).collect::<Vec<_>>();
         match compose_logical_candidate(&local, &choices)
             .expect("explicit family choices compose")
@@ -311,16 +311,17 @@ pub mod planning {
         use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
         use asap_logical_asap_optimization::pass2::memo::{
             candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
-            state_groups::expand_concrete_summary_state_groups_in_domain,
             window_candidates::add_local_window_composition, DagOfLogicalMemoGroups,
         };
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = generate_per_computation_candidates(roots).unwrap();
         let mut memo = try_populate_pass1(initial, &inventory).unwrap();
         add_local_window_composition(&mut memo, entries);
-        expand_concrete_summary_state_groups_in_domain(memo, PaneWidthDomain::SeedGrids)
-            .unwrap()
-            .memo
+        asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
+            memo,
+            PaneWidthDomain::SeedGrids,
+        )
+        .unwrap()
     }
 
     /// One plan of `memo`'s first `queries` queries (`memo::enumeration::build_logical_asap_dags_from_chosen_candidates`):
@@ -344,7 +345,7 @@ pub mod planning {
             .map(|query| {
                 let (_, root) = roots
                     .iter()
-                    .find(|(group, _)| memo.groups[group.0 as usize].roots_of.contains(&query))
+                    .find(|(group, _)| memo.query_roots[query].operator_refs().contains(&group))
                     .expect("the query's root group");
                 Rc::clone(root)
             })
@@ -367,17 +368,14 @@ pub mod planning {
         for (name, roots) in variants {
             // Composed nodes lose their guarantees; recompose them as
             // `run_explicit_candidates` does.
-            let roots =
-                asap_logical_asap_optimization::pass1::per_computation_candidates::recompose_guarantees(
-                    roots,
-                )
+            let roots = asap_accuracy::propagation::recompose_guarantees(roots)
                 .unwrap_or_else(|error| panic!("{name} composes guarantees: {error}"));
             let mut plans = asap_physical_asap_optimization::optimize_physical_asap(
                 name,
                 &roots,
                 entries,
                 data,
-                models.deployment_capabilities,
+                models.deployment_capabilities.query_time_results_retained,
             )
             .unwrap_or_else(|error| panic!("Stage 2 implements {name}: {error}"));
             for (index, plan) in plans.iter_mut().enumerate() {
@@ -414,7 +412,7 @@ pub mod planning {
             .candidates
             .iter()
             .enumerate()
-            .filter(|(group, _)| memo.groups[*group].queries == [q])
+            .filter(|(group, _)| memo.groups[*group].reached_by_queries() == [q])
             .flat_map(|(group, candidates)| {
                 candidates
                     .iter()
@@ -431,7 +429,11 @@ pub mod planning {
             .groups
             .iter()
             .enumerate()
-            .filter(|(_, group)| group.roots_of.contains(&q))
+            .filter(|(group, _)| {
+                memo.query_roots[q].operator_refs().contains(
+                    &&asap_logical_asap_optimization::pass2::memo::MemoGroupId(*group as u32),
+                )
+            })
             .map(|(group, _)| (group, 0))
             .collect();
         while let Some((group, d)) = pending.pop_front() {
@@ -495,7 +497,7 @@ pub mod planning {
             })
             .collect();
         for (state, group) in memo.groups.iter().enumerate() {
-            if !is_build(&group.logical_node) || group.queries.len() < queries {
+            if !is_build(&group.logical_node) || group.reached_by_queries().len() < queries {
                 continue;
             }
             let reading: Option<std::collections::BTreeMap<usize, usize>> = (0..queries)
@@ -589,7 +591,7 @@ pub mod planning {
         entries: &[asap_types::workload::QueryWorkloadEntry],
         data: &asap_types::workload::DataWorkload,
     ) -> asap_plan_selection::Stage1ToStage3Run<usize> {
-        use asap_logical_asap_optimization::pass1::per_computation_candidates::recompose_guarantees;
+        use asap_accuracy::propagation::recompose_guarantees;
         use asap_logical_asap_optimization::pass2::workload_candidates::stage1_candidates_of_choice;
         use asap_plan_selection::{search::LogicalCandidate, PlanningModels, Stage1ToStage3Run};
         let mut logical = Vec::new();
@@ -606,7 +608,9 @@ pub mod planning {
                         &roots,
                         entries,
                         data,
-                        PlanningModels::builtin().deployment_capabilities,
+                        PlanningModels::builtin()
+                            .deployment_capabilities
+                            .query_time_results_retained,
                     )
                     .expect("explicit rewrite is executable"),
                 );

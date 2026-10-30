@@ -16,7 +16,7 @@ use crate::pass2::memo::{MemoGroup, MemoGroupId};
 
 /// Preserve local implementations and append readers over union-label inputs.
 /// Parent/query reachability is rebuilt by the enclosing state-group expansion.
-pub(in crate::pass2::memo) fn add_scan_label_candidates(
+pub(crate) fn add_scan_label_candidates(
     memo: &mut CandidateMemo,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {
@@ -199,10 +199,9 @@ fn intern_inputs(
         {
             Rc::clone(&existing.logical_node)
         } else {
-            let group = MemoGroupId(
-                u32::try_from(memo.groups.len())
-                    .map_err(|_| StateGroupExpansionError::TooManyGroups)?,
-            );
+            // The new group's id must fit a `MemoGroupId`.
+            u32::try_from(memo.groups.len())
+                .map_err(|_| StateGroupExpansionError::TooManyGroups)?;
             let mut seen = HashSet::new();
             let inputs: Vec<_> = rewritten
                 .children()
@@ -223,10 +222,9 @@ fn intern_inputs(
                 child_groups: inputs.clone(),
                 parents: Vec::new(),
                 queries: queries.to_vec(),
-                roots_of: Vec::new(),
             });
             memo.candidates.push(vec![CandidateForMemoGroup {
-                implements: vec![group],
+                fused_groups: Vec::new(),
                 root_node: Rc::clone(&rewritten),
                 input_groups: inputs,
                 origin: OriginOfCandidateForMemoGroup::WidenedScans,

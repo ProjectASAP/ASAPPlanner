@@ -36,6 +36,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             .map_children(|child| inputs.push(append(child.clone(), configured, ingestion, mode)));
         let id = PhysicalCandidateId(configured.configurations.len());
         configured.configurations.push(CandidateConfiguration {
+            may_keep_with_sole_reader: Vec::new(),
             source_candidate: id,
             materialization: if pane {
                 mode
@@ -78,8 +79,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             generate_per_computation_candidates(vec![(0, QueryRoot::Operator(original.clone()))])
                 .unwrap();
         let choice = generated.targets[0]
-            .choices
-            .candidates
+            .ways_to_compute
             .iter()
             .position(|candidate| {
                 matches!(
@@ -158,7 +158,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
                 range_evaluation: Some(RangeEvaluation { span_ms, step_ms }),
             })
             .collect();
-        let mut settings = crate::PlanSelectionSettings::default();
+        let mut settings = asap_cost::CostInputs::default();
         settings.resource_speed.ms_per_cpu_op *= 1000.0;
         settings.resource_speed.ms_per_scanned_byte *= 1000.0;
         settings.measured_operation_costs.ns_per_evaluation = 1_000_000.0;
@@ -166,6 +166,12 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             query_time_results_retained: true,
             ..Default::default()
         };
+        crate::search::candidates::configurations::fill_may_keep_with_sole_reader(
+            &mut configured,
+            &entries,
+            &data,
+            deployment.query_time_results_retained,
+        );
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
@@ -178,7 +184,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
                 deployment_capabilities: &deployment,
                 ..crate::PlanningModels::builtin()
             },
-            calibration: crate::CalibrationFit::default(),
+            calibration: asap_cost::CalibrationFit::default(),
         };
         let profile = extract_price_options(&configured, &context)
             .unwrap()

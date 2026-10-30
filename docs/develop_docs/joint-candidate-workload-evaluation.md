@@ -144,7 +144,7 @@ CARGO_BUILD_JOBS=4 cargo build -p asap-devtools --bin stage_pipeline
   --out run.json
 ```
 
-The historical baseline binaries accepted `--search legacy` and `--search memo-milp`. These flags are removed from the current implementation; reproduce historical comparisons only with the recorded revision/binary, not the current CLI.
+The historical baseline binaries accepted `--search legacy` and `--search memo-milp`. These flags are removed from the current implementation; reproduce historical comparisons only with the recorded revision/binary, not the current CLI. The current `stage_pipeline` has no `--search` option at all (the candidate-connection search is its only search): drop `--search candidate-connections` from the command above when running a current binary.
 
 Local artifacts: `/tmp/asap-workload-benchmark-20261024/`. Saved executables reside in `/mydata/asap-workload-benchmark-20261024-binaries/`, linked from the artifact directory; final runs use `stage_pipeline-contract-baseline`. This directory contains original result JSON, timing/RSS logs, stderr, exact command arrays, runner scripts, the unchanged subset manifest, summary JSON, and saved baseline binaries. `before-coverage-pruning/`, `before-shared-panes/`, and `before-metadata-preserving-boundaries/` preserve earlier restricted-route runs; those runs motivated further coverage/pruning work and must not be presented as successful workload coverage.
 

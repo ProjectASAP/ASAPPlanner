@@ -12,6 +12,7 @@
 //!   schemaless (PromQL) leaf from the names the query references.
 //! - [`resolve`] — [`resolve_root`]: the bottom-up binding walk.
 
+pub(crate) mod canonicalize;
 pub mod resolve;
 pub mod schema_resolver;
 pub mod unresolved;

@@ -10,7 +10,6 @@ use asap_logical_asap_optimization::{
             try_populate_pass1, CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup,
         },
         shared_configurations::PaneWidthDomain,
-        state_groups::expand_concrete_summary_state_groups_in_domain,
         DagOfLogicalMemoGroups,
     },
 };
@@ -58,9 +57,11 @@ fn expanded(queries: &[String]) -> CandidateMemo {
     let initial = DagOfLogicalMemoGroups::from_roots(&roots);
     let inventory = generate_per_computation_candidates(roots).unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
-    expand_concrete_summary_state_groups_in_domain(memo, PaneWidthDomain::SeedGrids)
-        .unwrap()
-        .memo
+    asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
+        memo,
+        PaneWidthDomain::SeedGrids,
+    )
+    .unwrap()
 }
 
 /// The aggregate group of query `query` alone and its rollup candidates.
@@ -69,7 +70,7 @@ fn rollups(memo: &CandidateMemo, query: usize) -> (usize, Vec<&CandidateForMemoG
         .groups
         .iter()
         .position(|group| {
-            group.queries == [query]
+            group.reached_by_queries() == [query]
                 && matches!(
                     group.logical_node.non_asap(),
                     Some(NonASAPOp::Aggregate { .. })
@@ -299,12 +300,13 @@ fn narrower_finer_aggregate_has_no_read() {
 
 /// The selected plan's cost per second for `queries`.
 fn cost(queries: &[String]) -> f64 {
-    use asap_plan_selection::{PlanSelectionSettings, PlanningModels, Stage1ToStage3Search};
+    use asap_cost::CostInputs;
+    use asap_plan_selection::{PlanningModels, Stage1ToStage3Search};
     let w = workload(queries);
     let roots = Planner::new(FuzzSettings::default()).lower(&w).unwrap();
     let planning = w.planning_workload();
     let entries: Vec<_> = planning.query_workload.entries().collect();
-    let settings = PlanSelectionSettings::default();
+    let settings = CostInputs::default();
     let deployment = w.deployment();
     let models = PlanningModels::builtin()
         .with_plan_selection(&settings)

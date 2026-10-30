@@ -55,7 +55,7 @@ pub struct FlattenDeadlineExceeded;
 
 /// The same pointer-preserving export, cooperatively bounded while visiting
 /// nodes. A timeout returns no partially flattened DAG.
-pub fn flatten_before(
+pub(crate) fn flatten_before(
     roots: &[QueryRoot],
     deadline: Option<std::time::Instant>,
 ) -> Result<(FlatDag, Vec<Rc<OperatorNode>>), FlattenDeadlineExceeded> {

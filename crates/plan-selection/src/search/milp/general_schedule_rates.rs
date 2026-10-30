@@ -1,8 +1,8 @@
 //! Exact finite demand atoms for the evaluator's recurrence accounting policy.
 //! Different fixed intervals add; an unknown phase joins the first selected
 //! known phase, estimated rates add, and nonrepeating demand takes a maximum.
-use crate::cost::execution_demand::evaluation_rate;
 use crate::search::candidates::graph::CandidateSelectionError;
+use asap_cost::execution_demand::evaluation_rate;
 use asap_types::workload::{QueryRecurrence, QueryWorkloadEntry, RangeEvaluation, RepeatedDemand};
 use good_lp::{constraint, variable, Constraint, ProblemVariables, Variable};
 use std::collections::BTreeMap;
@@ -148,7 +148,7 @@ fn arithmetic_coverage(
             .filter(|(bit, _)| mask & (1 << bit) != 0)
             .map(|(_, (geometry, _))| *geometry)
             .collect();
-        *count = crate::cost::execution_demand::offset_intersection_count(&intersection);
+        *count = asap_cost::execution_demand::offset_intersection_count(&intersection);
     }
     // Superset Möbius inversion changes intersection counts into counts of
     // offsets covered by exactly each geometry subset.

@@ -16,7 +16,8 @@ use crate::search::refinement::search::{
     search_candidates_with_direct_feedback, CandidateEvaluation, CandidateSearchLimits,
     CandidateSearchResult, CandidateSearchStatus, DirectPriceModel, EvaluatedCandidate,
 };
-use crate::{CalibrationFit, CostModel, PlanSelector, PlanningModels, Selection, SelectionError};
+use crate::{PlanSelector, PlanningModels, Selection, SelectionError};
+use asap_cost::{CalibrationFit, CostModel};
 
 /// The share of a search's time a search spends before a final validation
 /// it must still afford: a search runs until its time is spent, so the rest
@@ -608,7 +609,7 @@ fn seed_dds_budgets(
     context: &CandidatePlanningContext<'_>,
     output_queries: &[usize],
 ) -> Vec<f64> {
-    use asap_logical_asap_optimization::accuracy::budget::per_input_target;
+    use asap_accuracy::budget::per_input_target;
     use asap_types::ir::{
         operator::AggIntent, properties::AccuracyMetric, NonASAPOp, OperatorNode,
     };
@@ -787,7 +788,7 @@ fn accuracy_baseline(
                         .max(estimated_costs[id])
                         .max(retained_pane_priority_cost(
                             node,
-                            configured.configurations[id],
+                            &configured.configurations[id],
                             context,
                         ))
                 })
@@ -861,7 +862,7 @@ fn accuracy_baseline(
                         let root = QueryRoot::Operator(std::rc::Rc::clone(node));
                         crate::bound_root_guarantee(
                             &root,
-                            crate::series_read(&root, context.data),
+                            asap_types::workload::bounds::series_read(&root, context.data),
                             context.data,
                             &context.models,
                         ).is_none_or(|guarantee| {
@@ -945,7 +946,7 @@ fn raw_scan_with_shifts(node: &asap_types::ir::OperatorNode) -> bool {
 // Group/cardinality and supplier choices remain authoritative after selection.
 fn retained_pane_priority_cost(
     node: &std::rc::Rc<asap_types::ir::OperatorNode>,
-    configuration: crate::search::candidates::configurations::CandidateConfiguration,
+    configuration: &crate::search::candidates::configurations::CandidateConfiguration,
     context: &CandidatePlanningContext<'_>,
 ) -> f64 {
     use asap_types::ir::{ASAPOp, NonASAPOp};
@@ -973,7 +974,9 @@ fn retained_pane_priority_cost(
     let sources: std::collections::BTreeSet<_> = reachable
         .iter()
         .filter_map(|node| match node.non_asap() {
-            Some(NonASAPOp::Scan { source, .. }) => Some(crate::source_name(source)),
+            Some(NonASAPOp::Scan { source, .. }) => {
+                Some(asap_types::workload::bounds::source_name(source))
+            }
             _ => None,
         })
         .collect();
@@ -983,18 +986,18 @@ fn retained_pane_priority_cost(
         {
             1
         }
-        _ => crate::declared_series(&sources, context.data)
+        _ => asap_types::workload::bounds::declared_series(&sources, context.data)
             .unwrap_or(1)
             .max(1),
     };
-    let rows_per_state = crate::source_rows_per_ms(&sources, context.data)
+    let rows_per_state = asap_types::workload::bounds::source_rows_per_ms(&sources, context.data)
         .map(|rate| (rate * *pane_width_ms as f64 / groups as f64).ceil() as u64);
     let non_negative = matches!(
         child.non_asap(),
         Some(NonASAPOp::Scan { .. } | NonASAPOp::TimeRange { .. })
     ) && sources
         .iter()
-        .all(|source| crate::declared_non_negative(context.data, source));
+        .all(|source| asap_types::workload::bounds::declared_non_negative(context.data, source));
     let (_, bytes) = crate::summary_shape(
         family,
         crate::StateInputRows {
@@ -1054,7 +1057,10 @@ pub(in crate::search) fn materialize_configured_candidate_with_diagnostics(
         context.original_roots,
         context.entries,
         context.data,
-        context.models.deployment_capabilities,
+        context
+            .models
+            .deployment_capabilities
+            .query_time_results_retained,
     ) {
         Ok(realized) => realized,
         Err(PhysicalCandidateError::RejectedAssignment(reason)) => {
@@ -1211,8 +1217,9 @@ mod tests {
     use asap_logical_asap_optimization::pass2::memo::candidates::{
         try_populate_pass1, OriginOfCandidateForMemoGroup,
     };
-    use asap_logical_asap_optimization::pass2::memo::state_groups::expand_concrete_summary_state_groups;
-    use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};
+    use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
+    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
+    use asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
@@ -1246,21 +1253,14 @@ mod tests {
             .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let outputs: Vec<_> = (0..2)
-            .map(|q| {
-                MemoGroupId(
-                    initial
-                        .groups
-                        .iter()
-                        .position(|g| g.roots_of.contains(&q))
-                        .unwrap() as u32,
-                )
-            })
+            .map(|q| *initial.query_roots[q].as_operator().unwrap())
             .collect();
         let generated = generate_per_computation_candidates(roots.clone()).unwrap();
-        let mut memo =
-            expand_concrete_summary_state_groups(try_populate_pass1(initial, &generated).unwrap())
-                .unwrap()
-                .memo;
+        let mut memo = sharing_rules_and_shared_state_groups(
+            try_populate_pass1(initial, &generated).unwrap(),
+            PaneWidthDomain::Complete,
+        )
+        .unwrap();
         // Keep the real generated shared KLL readers to bound this evaluator
         // integration test; materialization configurations still remain choices.
         for candidates in &mut memo.candidates {
@@ -1440,13 +1440,7 @@ mod tests {
         let roots = vec![original[0].clone(), original[0].clone()];
         let identified: Vec<_> = roots.iter().cloned().enumerate().collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&identified);
-        let output = MemoGroupId(
-            initial
-                .groups
-                .iter()
-                .position(|group| group.roots_of.contains(&0))
-                .unwrap() as u32,
-        );
+        let output = *initial.query_roots[0].as_operator().unwrap();
         let generated = generate_per_computation_candidates(identified).unwrap();
         let mut memo = try_populate_pass1(initial, &generated).unwrap();
         entries[0].recurrence =
@@ -1549,18 +1543,13 @@ mod tests {
         ));
         let identified = vec![(0, root.clone())];
         let initial = DagOfLogicalMemoGroups::from_roots(&identified);
-        let output = MemoGroupId(
-            initial
-                .groups
-                .iter()
-                .position(|g| g.roots_of.contains(&0))
-                .unwrap() as u32,
-        );
+        let output = *initial.query_roots[0].as_operator().unwrap();
         let generated = generate_per_computation_candidates(identified).unwrap();
-        let memo =
-            expand_concrete_summary_state_groups(try_populate_pass1(initial, &generated).unwrap())
-                .unwrap()
-                .memo;
+        let memo = sharing_rules_and_shared_state_groups(
+            try_populate_pass1(initial, &generated).unwrap(),
+            PaneWidthDomain::Complete,
+        )
+        .unwrap();
         let source = build_candidate_inventory(&memo, &[output], |_| Ok(0.0)).unwrap();
         let (_, _, _, mut data) = fixture();
         for facts in data.sources.values_mut() {
@@ -1618,7 +1607,7 @@ mod tests {
             "both whole and composed capacities remain in the catalog"
         );
         assert_eq!(configured.inventory.graph.candidates.len(), original_count);
-        let settings = crate::PlanSelectionSettings {
+        let settings = asap_cost::CostInputs {
             ignore_accuracy_guarantees: true,
             ..Default::default()
         };
@@ -1647,15 +1636,7 @@ mod tests {
         .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let outputs: Vec<_> = (0..roots.len())
-            .map(|query| {
-                MemoGroupId(
-                    initial
-                        .groups
-                        .iter()
-                        .position(|group| group.roots_of.contains(&query))
-                        .unwrap() as u32,
-                )
-            })
+            .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect();
         let generated = generate_per_computation_candidates(roots.clone()).unwrap();
         let mut memo = try_populate_pass1(initial, &generated).unwrap();
@@ -1674,7 +1655,7 @@ mod tests {
         asap_logical_asap_optimization::pass2::memo::window_candidates::add_local_window_composition(
             &mut memo, &entries,
         );
-        let memo = expand_concrete_summary_state_groups(memo).unwrap().memo;
+        let memo = sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap();
         let source = build_candidate_inventory(&memo, &outputs, |_| Ok(0.0)).unwrap();
         let deployment = asap_logical_asap_optimization::DeploymentCapabilities {
             raw_data_retained: false,
@@ -1756,7 +1737,7 @@ mod tests {
         // A deployment may acquire evidence at another shared summary size.
         // Reuse the original predicate's conservative guard, not a new model.
         struct PotentialEvidence;
-        impl crate::AccuracyEvidenceProvider for PotentialEvidence {}
+        impl asap_accuracy::AccuracyEvidenceProvider for PotentialEvidence {}
         let evidence = PotentialEvidence;
         let evidence_context = CandidatePlanningContext {
             deadline: None,
@@ -1851,7 +1832,7 @@ mod tests {
             configured.inventory.templates.push(Some(template));
             configured
                 .configurations
-                .push(configured.configurations[supplier.0]);
+                .push(configured.configurations[supplier.0].clone());
             projected.push(id);
         }
         let context = CandidatePlanningContext {
@@ -1868,7 +1849,7 @@ mod tests {
         assert!(excluded.contains(&projected[0]));
         assert!(!excluded.contains(&projected[1]));
         assert!(!excluded.contains(&source));
-        let ignored = crate::PlanSelectionSettings {
+        let ignored = asap_cost::CostInputs {
             ignore_accuracy_guarantees: true,
             ..Default::default()
         };
@@ -1898,7 +1879,7 @@ mod tests {
     #[test]
     fn accuracy_policy_does_not_penalize_summary_candidates() {
         let (configured, roots, entries, data) = fixture();
-        let settings = crate::PlanSelectionSettings {
+        let settings = asap_cost::CostInputs {
             ignore_accuracy_guarantees: true,
             ..Default::default()
         };
@@ -2161,7 +2142,7 @@ mod tests {
     fn real_kll_search_cost_matches_independent_plan_selector_evaluation() {
         let (configured, roots, entries, data) = fixture();
         for provisioned in [false, true] {
-            let mut settings = crate::PlanSelectionSettings::default();
+            let mut settings = asap_cost::CostInputs::default();
             if provisioned {
                 let CostModel::UsageOverTime(prices) = settings.cost_model.clone() else {
                     unreachable!()
@@ -2372,12 +2353,12 @@ mod tests {
     #[test]
     fn scalar_price_search_does_not_scalarize_cluster_objectives() {
         let (configured, roots, entries, data) = fixture();
-        let settings = crate::PlanSelectionSettings {
-            cost_model: CostModel::ClusterCapacity(crate::ClusterLimits {
+        let settings = asap_cost::CostInputs {
+            cost_model: CostModel::ClusterCapacity(asap_cost::ClusterLimits {
                 memory_bytes: u64::MAX,
                 disk_bytes: u64::MAX,
                 cpu_cores: None,
-                objective: crate::ClusterObjective::ParetoFront,
+                objective: asap_cost::ClusterObjective::ParetoFront,
             }),
             ..Default::default()
         };

@@ -303,7 +303,7 @@ impl PhysicalASAPDAG {
     /// IR properties of a plan file's node from, such as its
     /// [`SummaryCoverage`](crate::ir::properties::summary_coverage::SummaryCoverage).
     /// Shared inputs stay shared. Validates the DAG first.
-    pub fn operator_nodes(
+    pub(crate) fn operator_nodes(
         &self,
     ) -> Result<HashMap<PhysicalASAPNodeId, Rc<OperatorNode>>, PhysicalASAPDAGValidationError> {
         self.validate()?;

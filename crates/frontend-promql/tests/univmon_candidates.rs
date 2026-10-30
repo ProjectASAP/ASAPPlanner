@@ -1,9 +1,9 @@
 use std::rc::Rc;
 
 use crate::support;
-use asap_logical_asap_optimization::accuracy::estimators::local_guarantee;
-use asap_logical_asap_optimization::accuracy::satisfies;
-use asap_types::ir::cse::share_common_sub_dags;
+use asap_accuracy::estimators::local_guarantee;
+use asap_accuracy::satisfies;
+use asap_logical_asap_optimization::pass2::cse::share_common_sub_dags;
 use asap_types::ir::properties::AccuracyMetric;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr};

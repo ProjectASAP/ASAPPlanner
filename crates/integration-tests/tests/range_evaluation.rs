@@ -51,8 +51,7 @@ fn run_explicit_for(workload: &PlanningWorkload, deployment: &DeploymentCapabili
     };
     let mut candidates = vec![compose(0)];
     if let Some(choice) = inventory.targets[0]
-        .choices
-        .candidates
+        .ways_to_compute
         .iter()
         .position(|candidate| {
             matches!(
@@ -78,7 +77,7 @@ fn run_explicit_for(workload: &PlanningWorkload, deployment: &DeploymentCapabili
             .roots
             .unwrap(),
     );
-    let settings = asap_plan_selection::PlanSelectionSettings::default();
+    let settings = asap_cost::CostInputs::default();
     run_explicit_candidates(
         workload,
         roots,

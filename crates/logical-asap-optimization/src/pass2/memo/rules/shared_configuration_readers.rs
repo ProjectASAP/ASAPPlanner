@@ -95,7 +95,7 @@ struct SummaryStates {
     requests: HashSet<(usize, usize)>,
 }
 
-pub(in crate::pass2::memo) fn add_state_configuration_candidates_in_domain(
+pub(crate) fn add_state_configuration_candidates_in_domain(
     memo: &mut CandidateMemo,
     domain: PaneWidthDomain,
     deadline: Option<Instant>,
@@ -384,7 +384,7 @@ fn assign_normalized_layouts(
             previous == &flat
                 && previous_candidate.origin == original.origin
                 && previous_candidate.input_groups == original.input_groups
-                && previous_candidate.implements == original.implements
+                && previous_candidate.fused_groups == original.fused_groups
                 && previous_candidate.accuracy_budget_parts == original.accuracy_budget_parts
         });
         reader.need.normalized_layout = Some(existing.unwrap_or_else(|| {

@@ -11,9 +11,11 @@ edition = "2021"
 # a developer-tools crate. Everything below the frontend boundary lives in the
 # stage crates (`asap-logical-asap-optimization`, `asap-physical-asap-optimization`,
 # `asap-plan-selection`), so a third party writing an optimization pass (issue
-# #430) depends on `asap-plan-selection` alone and never pulls in DataFusion.
+# #430) depends on `asap-plan-selection` (plus `asap-accuracy` to supply its own
+# accuracy model or evidence) and never pulls in DataFusion.
 [dependencies]
 asap-types = { path = "../types" }
+asap-cost = { path = "../cost" }
 asap-plan-selection = { path = "../plan-selection" }
 asap-frontend-sql = { path = "../frontend-sql", optional = true }
 asap-frontend-promql = { path = "../frontend-promql", optional = true }
@@ -43,6 +45,8 @@ test-support = []
 # The tests compare installed plans with `test_support::query_time_reference`.
 asap-planner = { path = ".", features = ["test-support"] }
 asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
+# The deployment accuracy model tests implement `AccuracyModel`.
+asap-accuracy = { path = "../accuracy" }
 # The SQL frontend plans through DataFusion, which is async; `e2e_plan` is
 # therefore async and its tests need a runtime.
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

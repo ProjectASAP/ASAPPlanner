@@ -4,9 +4,9 @@
 
 use crate::planner_layering_common;
 
+use asap_cost::CostInputs;
 use asap_devtools::planning_stages::lower_sql_roots;
 use asap_logical_asap_optimization::{DeploymentCapabilities, SupportedSummary};
-use asap_plan_selection::PlanSelectionSettings;
 use asap_types::ir::flat::FlatDag;
 use asap_types::ir::schema::{SketchAlgorithm, StatisticKind};
 use asap_types::ir::{ASAPOp, Operator};
@@ -89,7 +89,9 @@ fn assert_removes_exactly(
         result
     };
     let unrestricted = enumerate_local(&local);
-    let restricted = enumerate_local(&local.without_unsupported_summaries(deployment));
+    let restricted = enumerate_local(
+        &local.without_unsupported_summaries(deployment.supported_summaries.as_deref()),
+    );
     let expected = unrestricted
         .iter()
         .filter(|dag| {
@@ -143,8 +145,7 @@ fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
         .iter()
         .map(|target| {
             target
-                .choices
-                .candidates
+                .ways_to_compute
                 .iter()
                 .position(|candidate| {
                     matches!(
@@ -156,7 +157,7 @@ fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
         })
         .collect::<Vec<_>>();
     let composed = compose_logical_candidate(&local, &choices).unwrap();
-    let shared = asap_types::ir::cse::share_common_sub_dags(
+    let shared = asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
         composed
             .into_iter()
             .map(|(id, root)| match root {
@@ -175,7 +176,7 @@ fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
         .remove(0)
         .roots
         .unwrap();
-    let settings = PlanSelectionSettings::default();
+    let settings = CostInputs::default();
     run_explicit_candidates(
         &workload,
         original,

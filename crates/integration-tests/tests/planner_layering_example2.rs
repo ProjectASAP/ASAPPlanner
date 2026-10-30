@@ -320,11 +320,11 @@ fn memo_pipeline() -> Run {
         }
     }
     for (state, group) in memo.groups.iter().enumerate() {
-        if !is_univmon(&group.logical_node) || group.queries.len() < 2 {
+        if !is_univmon(&group.logical_node) || group.reached_by_queries().len() < 2 {
             continue;
         }
         let reading: Option<BTreeMap<_, _>> = group
-            .queries
+            .reached_by_queries()
             .iter()
             .map(|&q| {
                 own(q, &|c| {

@@ -8,7 +8,8 @@ use crate::search::candidates::configurations::CandidateConfigurationInventory;
 use crate::search::candidates::graph::PhysicalCandidateId;
 use crate::search::milp::direct_cost::{DirectCostProfile, NodeCostProfile, QueryScheduleRates};
 use crate::search::refinement::planner::CandidatePlanningContext;
-use crate::{CostModel, PricedNode, ProducerOutput};
+use crate::{PricedNode, ProducerOutput};
+use asap_cost::CostModel;
 use asap_types::ir::physical_export::PhysicalASAPDAGNode;
 use asap_types::ir::properties::execution_data_state::{DataPrimitive, ExecutionDataState};
 use asap_types::ir::properties::{AccuracyScope, ExecutionTiming};
@@ -128,7 +129,7 @@ fn prepare_profile(
         .entries
         .iter()
         .map(|entry| {
-            crate::cost::execution_demand::evaluation_rate(
+            asap_cost::execution_demand::evaluation_rate(
                 [(&entry.recurrence, entry.range_evaluation)],
                 settings.non_repeating_query_horizon_seconds,
             )
@@ -148,7 +149,7 @@ fn prepare_profile(
         .entries
         .iter()
         .map(|entry| {
-            crate::cost::execution_demand::evaluation_rate(
+            asap_cost::execution_demand::evaluation_rate(
                 [(&entry.recurrence, None)],
                 settings.non_repeating_query_horizon_seconds,
             )
@@ -189,11 +190,21 @@ fn prepare_profile(
                     && (requires_source_sizing(node) || stable_size(node, delta))
                     && match configuration.timing {
                         ExecutionTiming::QueryTime => {
-                            matches!(configuration.materialization, Materialization::NotMaterialized | Materialization::MatAtQuery(Medium::Memory))
-                                || (configuration.materialization == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
-                                    && matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
-                                    && context.models.deployment_capabilities.query_time_results_retained
-                                    && (0..context.entries.len()).any(|reader| asap_physical_asap_optimization::summary_materialization_eligibility(node, &[reader], context.entries, context.data, context.models.deployment_capabilities).is_ok_and(|eligibility| eligibility.may_keep_across_evaluations)))
+                            matches!(
+                                configuration.materialization,
+                                Materialization::NotMaterialized
+                                    | Materialization::MatAtQuery(Medium::Memory)
+                            ) || (configuration.materialization
+                                == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
+                                && matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+                                && context
+                                    .models
+                                    .deployment_capabilities
+                                    .query_time_results_retained
+                                && configuration
+                                    .may_keep_with_sole_reader
+                                    .iter()
+                                    .any(|&may_keep| may_keep))
                         }
                         ExecutionTiming::IngestionTime => match node.asap() {
                             Some(ASAPOp::PaneChain { .. }) => {
@@ -214,7 +225,6 @@ fn prepare_profile(
                             }
                         },
                     }
-
             })
             .map(|node| {
                 let mut position = 0;
@@ -623,7 +633,7 @@ fn price<'a>(
         }
         let raw_source = match &node.payload {
             asap_types::ir::Operator::NonASAP(NonASAPOp::Scan { source, .. }) => {
-                Some(crate::source_name(source).to_string())
+                Some(asap_types::workload::bounds::source_name(source).to_string())
             }
             asap_types::ir::Operator::NonASAP(
                 NonASAPOp::Filter { .. } | NonASAPOp::TimeRange { .. },
@@ -787,7 +797,8 @@ fn failure_budget(
                 };
                 for node in asap_types::ir::OperatorNode::reachable(root) {
                     if let Some(NonASAPOp::Scan { source, .. }) = node.non_asap() {
-                        sources.insert(crate::source_name(source).to_string());
+                        sources
+                            .insert(asap_types::workload::bounds::source_name(source).to_string());
                     }
                 }
             }
@@ -892,7 +903,7 @@ fn hll_size_certified(
     delta: f64,
     distinct: u64,
 ) -> bool {
-    use asap_logical_asap_optimization::accuracy::estimators::hll;
+    use asap_accuracy::estimators::hll;
     let error = hll::classic_relative_error(precision, relative_error);
     // Unsupported populations can make min_precision return its input unchanged.
     // The actual confidence certificate is essential, not merely size equality.
@@ -927,10 +938,7 @@ fn stable_size(node: &asap_types::ir::OperatorNode, delta: Option<f64>) -> bool 
         return false;
     }
     let Some(delta) = delta else { return false };
-    let sized = asap_logical_asap_optimization::accuracy::estimators::with_failure_probability(
-        kind.params(),
-        delta,
-    );
+    let sized = asap_accuracy::estimators::with_failure_probability(kind.params(), delta);
     match (rmp_serde::to_vec(kind.params()), rmp_serde::to_vec(&sized)) {
         (Ok(before), Ok(after)) => before == after,
         _ => false,
@@ -988,7 +996,7 @@ fn state_compaction_seconds(
     let settings = context.models.plan_selection;
     let measured = crate::lookup(
         &settings.measured_operation_costs,
-        crate::OperatorKind::SummaryMerge,
+        asap_cost::OperatorKind::SummaryMerge,
         ExecutionTiming::QueryTime,
         priced.family,
         |params| crate::sketch_shape(params, crate::StateInputRows::UNKNOWN).1 as f64,
@@ -1094,9 +1102,7 @@ mod tests {
             k: 2,
             relative_error: Some(0.05),
         };
-        let sized = asap_logical_asap_optimization::accuracy::estimators::with_failure_probability(
-            &small, 0.05,
-        );
+        let sized = asap_accuracy::estimators::with_failure_probability(&small, 0.05);
         let set = |node: &mut OperatorNode, params| {
             let Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) = &mut node.operator else {
                 panic!("summary fixture")
@@ -1131,7 +1137,7 @@ mod tests {
             .find(|node| matches!(node.non_asap(), Some(NonASAPOp::Aggregate { .. })))
             .unwrap();
         let mut summary = asap_logical_asap_optimization::test_support::cms_summary("count(m)");
-        let params = asap_logical_asap_optimization::accuracy::estimators::with_failure_probability(
+        let params = asap_accuracy::estimators::with_failure_probability(
             &SketchParams::Kmv {
                 k: 2,
                 relative_error: Some(0.05),
@@ -1188,6 +1194,7 @@ mod tests {
                 .map_children(|child| inputs.push(append(child.clone(), configured)));
             let id = PhysicalCandidateId(configured.configurations.len());
             configured.configurations.push(CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: id,
                 materialization: Materialization::NotMaterialized,
                 timing: ExecutionTiming::QueryTime,
@@ -1243,7 +1250,7 @@ mod tests {
             entries: &entries,
             data: &data,
             models: crate::PlanningModels::builtin(),
-            calibration: crate::CalibrationFit::default(),
+            calibration: asap_cost::CalibrationFit::default(),
         };
         let extracted = extract(&configured, &context).unwrap().unwrap();
         assert!(extracted.supported[exact_id.0] && extracted.supported[estimate_id.0]);
@@ -1272,6 +1279,7 @@ mod tests {
                 .map_children(|child| inputs.push(append(child.clone(), configured)));
             let id = PhysicalCandidateId(configured.configurations.len());
             configured.configurations.push(CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: id,
                 materialization: Materialization::NotMaterialized,
                 timing: ExecutionTiming::QueryTime,
@@ -1317,7 +1325,7 @@ mod tests {
                     QueryRoot::Operator(original.clone()),
                 )])
                 .unwrap();
-                let choice = generated.targets[0].choices.candidates.iter().position(|candidate|
+                let choice = generated.targets[0].ways_to_compute.iter().position(|candidate|
                     matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == algorithm)).unwrap();
                 let roots: Vec<_> = compose_logical_candidate(&generated, &[choice])
                     .unwrap()
@@ -1375,7 +1383,7 @@ mod tests {
                     entries: &entries,
                     data: &data,
                     models: crate::PlanningModels::builtin(),
-                    calibration: crate::CalibrationFit::default(),
+                    calibration: asap_cost::CalibrationFit::default(),
                 };
                 let extracted = extract(&configured, &context).unwrap().unwrap();
                 assert!(
@@ -1505,6 +1513,7 @@ mod tests {
             });
             let id = PhysicalCandidateId(configured.configurations.len());
             configured.configurations.push(CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: id,
                 materialization: if pane {
                     mode
@@ -1566,7 +1575,7 @@ mod tests {
                         QueryRoot::Operator(original.clone()),
                     )])
                     .unwrap();
-                    let choice = generated.targets[0].choices.candidates.iter().position(|candidate|
+                    let choice = generated.targets[0].ways_to_compute.iter().position(|candidate|
                     matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == algorithm)).unwrap();
                     let roots: Vec<_> = compose_logical_candidate(&generated, &[choice])
                         .unwrap()
@@ -1631,7 +1640,7 @@ mod tests {
                         range_evaluation,
                     }];
                     entries.push(entries[0].clone());
-                    let mut settings = crate::PlanSelectionSettings::default();
+                    let mut settings = asap_cost::CostInputs::default();
                     if range_evaluation.is_some() {
                         settings.measured_operation_costs.ns_per_evaluation = 1_000_000.0;
                     }
@@ -1641,6 +1650,12 @@ mod tests {
                         query_time_results_retained: true,
                         ..Default::default()
                     };
+                    crate::search::candidates::configurations::fill_may_keep_with_sole_reader(
+                        &mut configured,
+                        &entries,
+                        &data,
+                        deployment.query_time_results_retained,
+                    );
                     let context = CandidatePlanningContext {
                         deadline: None,
                         refine_materialization: false,
@@ -1652,7 +1667,7 @@ mod tests {
                             deployment_capabilities: &deployment,
                             ..crate::PlanningModels::builtin().with_plan_selection(&settings)
                         },
-                        calibration: crate::CalibrationFit::default(),
+                        calibration: asap_cost::CalibrationFit::default(),
                     };
                     let extracted = extract(&configured, &context).unwrap().unwrap();
                     assert!(
@@ -1800,8 +1815,8 @@ mod tests {
                             };
                             let mut measured = settings.clone();
                             measured.measured_operation_costs.operators.push(
-                                crate::cost::measured::OperatorCost {
-                                    operator: crate::OperatorKind::SummaryMerge,
+                                asap_cost::measured::OperatorCost {
+                                    operator: asap_cost::OperatorKind::SummaryMerge,
                                     phase: Some(ExecutionTiming::QueryTime),
                                     sketch: Some(kind.params().clone()),
                                     exact: None,
@@ -1855,6 +1870,7 @@ mod tests {
                         // domains distinct, and validate each selected binding.
                         let normal_chain = PhysicalCandidateId(configured.configurations.len());
                         configured.configurations.push(CandidateConfiguration {
+                            may_keep_with_sole_reader: Vec::new(),
                             source_candidate: normal_chain,
                             timing: ExecutionTiming::QueryTime,
                             materialization: Materialization::MatAtQuery(Medium::Memory),
@@ -2029,6 +2045,7 @@ mod tests {
                 .map_children(|child| children.push(append(child.clone(), inventory)));
             let id = PhysicalCandidateId(inventory.configurations.len());
             inventory.configurations.push(CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: id,
                 timing: ExecutionTiming::QueryTime,
                 materialization: if matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })) {
@@ -2073,7 +2090,7 @@ mod tests {
                     originals.iter().cloned().enumerate().collect(),
                 )
                 .unwrap();
-                let choices: Vec<_> = generated.targets.iter().map(|target| target.choices.candidates.iter().position(|candidate|
+                let choices: Vec<_> = generated.targets.iter().map(|target| target.ways_to_compute.iter().position(|candidate|
                     matches!(candidate,HowToComputeAggregateMeasure::Summary(found) if *found==algorithm)).unwrap()).collect();
                 let roots: Vec<_> = compose_logical_candidate(&generated, &choices)
                     .unwrap()
@@ -2081,19 +2098,20 @@ mod tests {
                     .map(|(_, root)| root)
                     .collect();
                 // Identical sub-DAGs made one node, as the memo's groups are.
-                let shared: Vec<_> = asap_types::ir::cse::share_common_sub_dags(
-                    roots
-                        .iter()
-                        .enumerate()
-                        .map(|(id, root)| match root {
-                            QueryRoot::Operator(node) => (id, Rc::clone(node)),
-                            QueryRoot::Scalar(_) => panic!("operator root"),
-                        })
-                        .collect(),
-                )
-                .into_iter()
-                .map(|(_, node)| QueryRoot::Operator(node))
-                .collect();
+                let shared: Vec<_> =
+                    asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
+                        roots
+                            .iter()
+                            .enumerate()
+                            .map(|(id, root)| match root {
+                                QueryRoot::Operator(node) => (id, Rc::clone(node)),
+                                QueryRoot::Scalar(_) => panic!("operator root"),
+                            })
+                            .collect(),
+                    )
+                    .into_iter()
+                    .map(|(_, node)| QueryRoot::Operator(node))
+                    .collect();
                 let mut configured = CandidateConfigurationInventory {
                     inventory: CandidateInventory {
                         graph: CandidateDependencyGraph::default(),
@@ -2157,7 +2175,7 @@ mod tests {
                     entries: &entries,
                     data: &data,
                     models: crate::PlanningModels::builtin(),
-                    calibration: crate::CalibrationFit::default(),
+                    calibration: asap_cost::CalibrationFit::default(),
                 };
                 let extracted = extract(&configured, &context).unwrap().unwrap();
                 assert!(extracted.supported.iter().all(|supported| *supported));
@@ -2266,6 +2284,7 @@ mod tests {
             },
             configurations: (0..3)
                 .map(|id| CandidateConfiguration {
+                    may_keep_with_sole_reader: Vec::new(),
                     source_candidate: PhysicalCandidateId(id),
                     materialization: Materialization::NotMaterialized,
                     timing: ExecutionTiming::QueryTime,
@@ -2297,7 +2316,7 @@ mod tests {
             entries: &entries,
             data: &data,
             models: crate::PlanningModels::builtin(),
-            calibration: crate::CalibrationFit::default(),
+            calibration: asap_cost::CalibrationFit::default(),
         };
         let extracted = extract(&configured, &context).unwrap().unwrap();
         assert_eq!(extracted.supported, vec![true, true, true]);

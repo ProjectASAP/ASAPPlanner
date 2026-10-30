@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::pass1::per_computation_candidates::recompose_guarantees;
+use asap_accuracy::propagation::recompose_guarantees;
 use asap_types::ir::{OperatorNode, QueryRoot};
 
 use crate::search::candidates::graph::{

@@ -6,11 +6,10 @@
 //! reader.
 use super::candidates::{try_populate_pass1, CandidateMemo, OriginOfCandidateForMemoGroup};
 use super::shared_configurations::PaneWidthDomain;
-use super::state_groups::expand_concrete_summary_state_groups_in_domain;
 use super::window_candidates::add_local_window_composition;
 use super::DagOfLogicalMemoGroups;
 use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-use crate::test_support::{entry_with, lower_promql};
+use crate::test_support::{entry_with, lower_promql, sharing_rules_and_shared_state_groups};
 use asap_types::ir::flat::flatten;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::QueryRoot;
@@ -53,9 +52,7 @@ fn expanded(queries: &[(&str, f64)], step_ms: u32) -> CandidateMemo {
         })
         .collect();
     add_local_window_composition(&mut memo, &entries);
-    expand_concrete_summary_state_groups_in_domain(memo, PaneWidthDomain::SeedGrids)
-        .unwrap()
-        .memo
+    sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::SeedGrids).unwrap()
 }
 
 /// Whether one `sum_over_time` group (an aggregate directly over a window
@@ -84,7 +81,7 @@ fn signature(node: &Rc<asap_types::ir::OperatorNode>) -> String {
 /// order: the search's tie-breaks depend on that order too.
 fn fingerprint(memo: &CandidateMemo) -> (usize, u64) {
     let mut entries: Vec<String> = Vec::new();
-    for (group, candidates) in memo.groups.iter().zip(&memo.candidates) {
+    for (index, (group, candidates)) in memo.groups.iter().zip(&memo.candidates).enumerate() {
         let own: Vec<String> = candidates
             .iter()
             .map(|candidate| {
@@ -92,7 +89,9 @@ fn fingerprint(memo: &CandidateMemo) -> (usize, u64) {
                     "{:?}|{}|{:?}|{:?}|{}",
                     candidate.origin,
                     candidate.accuracy_budget_parts,
-                    candidate.implements,
+                    std::iter::once(super::MemoGroupId(index as u32))
+                        .chain(candidate.fused_groups.iter().copied())
+                        .collect::<Vec<_>>(),
                     candidate.input_groups,
                     signature(&candidate.root_node)
                 )
@@ -104,7 +103,7 @@ fn fingerprint(memo: &CandidateMemo) -> (usize, u64) {
             group.child_groups,
             group.parents,
             group.queries,
-            group.roots_of,
+            super::queries_rooted_at(&memo.query_roots, super::MemoGroupId(index as u32)),
             own
         ));
     }

@@ -5,11 +5,13 @@ edition = "2021"
 
 # #509 Stage 1, logical ASAP-aware optimization: Pass 1 per-computation
 # candidates and Pass 2 ASAP-aware CSE over asap-types' operator DAG, with
-# the analytical accuracy model. Depends on no later stage, and on no
-# query-language frontend except through the `test-support` feature.
+# the shared analytical accuracy model (`asap-accuracy`). Depends on no
+# later stage, and on no query-language frontend except through the
+# `test-support` feature.
 [dependencies]
 asap_sketchlib = { workspace = true }
 asap-types = { path = "../types" }
+asap-accuracy = { path = "../accuracy" }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -22,4 +24,5 @@ asap-frontend-promql = { path = "../frontend-promql", optional = true }
 test-support = ["dep:asap-frontend-promql"]
 
 [dev-dependencies]
+asap-accuracy = { path = "../accuracy", features = ["test-support"] }
 asap-frontend-promql = { path = "../frontend-promql" }

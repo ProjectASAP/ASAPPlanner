@@ -43,6 +43,7 @@ fn append(
         });
     inventory.inventory.templates.push(Some(node.clone()));
     inventory.configurations.push(CandidateConfiguration {
+        may_keep_with_sole_reader: Vec::new(),
         source_candidate: id,
         materialization: Materialization::NotMaterialized,
         timing: ExecutionTiming::QueryTime,
@@ -102,7 +103,7 @@ fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
             entries: &entries,
             data: &data,
             models: crate::PlanningModels::builtin(),
-            calibration: crate::CalibrationFit::default(),
+            calibration: asap_cost::CalibrationFit::default(),
         };
         let profile = extract_price_options(&configured, &context)
             .unwrap()
@@ -192,8 +193,7 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
         .iter()
         .map(|target| {
             target
-                .choices
-                .candidates
+                .ways_to_compute
                 .iter()
                 .position(|choice| {
                     matches!(
@@ -258,7 +258,7 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
         entries: &entries,
         data: &data,
         models: crate::PlanningModels::builtin(),
-        calibration: crate::CalibrationFit::default(),
+        calibration: asap_cost::CalibrationFit::default(),
     };
     let profile = extract_price_options(&configured, &context)
         .unwrap()

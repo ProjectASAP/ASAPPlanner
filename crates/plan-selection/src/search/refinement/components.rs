@@ -22,7 +22,8 @@ use crate::search::refinement::planner::{
 use crate::search::refinement::search::{
     CandidateSearchLimits, CandidateSearchResult, CandidateSearchStatus, EvaluatedCandidate,
 };
-use crate::{CostModel, PlanSelector};
+use crate::PlanSelector;
+use asap_cost::CostModel;
 
 #[derive(Debug)]
 struct Component {
@@ -369,10 +370,24 @@ fn project(
                 })
                 .collect(),
         },
+        // The component is planned over its own queries only, so per-query
+        // facts are re-indexed to `component.queries`.
         configurations: component
             .candidates
             .iter()
-            .map(|&id| configured.configurations[id])
+            .map(|&id| {
+                let mut configuration = configured.configurations[id].clone();
+                if !configuration.may_keep_with_sole_reader.is_empty() {
+                    configuration.may_keep_with_sole_reader = component
+                        .queries
+                        .iter()
+                        .map(|&query| {
+                            configured.configurations[id].may_keep_with_sole_reader[query]
+                        })
+                        .collect();
+                }
+                configuration
+            })
             .collect(),
     }
 }
@@ -774,7 +789,8 @@ mod tests {
         PhysicalCandidate, QueryRootCandidates, ResourceBudget,
     };
     use crate::search::milp::model::{solve_candidate_proposal, ObservedAssignment};
-    use crate::{CalibrationFit, PlanSelectionSettings, PlanningModels, ResourceUnitCost};
+    use crate::PlanningModels;
+    use asap_cost::{CalibrationFit, CostInputs, ResourceUnitCost};
     use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
@@ -873,7 +889,7 @@ mod tests {
     #[test]
     fn independent_components_match_unsplit_exhaustive_optimum() {
         let (configured, roots, entries, data) = fixture(true);
-        let mut settings = PlanSelectionSettings::default();
+        let mut settings = CostInputs::default();
         settings.measured_operation_costs.ns_per_evaluation = 2_000_000.0;
         let context = CandidatePlanningContext {
             deadline: None,
@@ -883,10 +899,7 @@ mod tests {
             entries: &entries,
             data: &data,
             models: PlanningModels::builtin().with_plan_selection(&settings),
-            calibration: CalibrationFit {
-                measured_ms_per_second: 2.0,
-                formula_ms_per_second: 1.0,
-            },
+            calibration: CalibrationFit::from_factor(2.0).unwrap(),
         };
         let parts = components(&configured, &context).unwrap();
         assert_eq!(
@@ -943,7 +956,7 @@ mod tests {
     #[test]
     fn source_retention_alternative_dependencies_and_global_limits_prevent_split() {
         let (mut configured, roots, entries, data) = fixture(false);
-        let mut retention_settings = PlanSelectionSettings::default();
+        let mut retention_settings = CostInputs::default();
         let CostModel::UsageOverTime(prices) = &mut retention_settings.cost_model else {
             unreachable!()
         };
@@ -977,7 +990,7 @@ mod tests {
             *node = Rc::new(changed);
         }
         assert_eq!(components(&configured, &context).unwrap().len(), 1);
-        let mut free_disk = PlanSelectionSettings::default();
+        let mut free_disk = CostInputs::default();
         let CostModel::UsageOverTime(prices) = &mut free_disk.cost_model else {
             unreachable!()
         };
@@ -999,7 +1012,7 @@ mod tests {
             });
         assert_eq!(components(&configured, &independent).unwrap().len(), 1);
         configured.inventory.graph.resource_budgets.clear();
-        let provisioned = PlanSelectionSettings {
+        let provisioned = CostInputs {
             cost_model: CostModel::ProvisionedCapacity(ResourceUnitCost::illustrative()),
             ..Default::default()
         };

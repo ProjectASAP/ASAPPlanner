@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 
-pub(in crate::pass2::memo) fn factor_summary_results(
+pub(crate) fn factor_summary_results(
     memo: &mut CandidateMemo,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {

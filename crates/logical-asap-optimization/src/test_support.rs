@@ -11,11 +11,49 @@ use asap_types::workload::{
     QueryRequirements, QueryWorkload,
 };
 
+/// Pass 2 after local window composition, on a memo the test composed
+/// itself (or not at all): rules 2–9 for `domain`, then
+/// [`add_shared_summary_state_groups`](crate::pass2::memo::state_groups::add_shared_summary_state_groups).
+/// Production runs these through
+/// [`generate_logical_asap_memo_candidates`](crate::pass2::logical_memo_candidates::generate_logical_asap_memo_candidates).
+pub fn sharing_rules_and_shared_state_groups(
+    mut memo: crate::pass2::memo::candidates::CandidateMemo,
+    domain: crate::pass2::memo::shared_configurations::PaneWidthDomain,
+) -> Result<
+    crate::pass2::memo::candidates::CandidateMemo,
+    crate::pass2::memo::state_groups::StateGroupExpansionError,
+> {
+    crate::pass2::logical_memo_candidates::apply_sharing_rules(&mut memo, domain, None)?;
+    crate::pass2::memo::state_groups::add_shared_summary_state_groups(&mut memo, None)?;
+    Ok(memo)
+}
+
+/// The groups [`add_shared_summary_state_groups`](crate::pass2::memo::state_groups::add_shared_summary_state_groups)
+/// added to an expanded memo, in order: each has one candidate, the
+/// shared build (origin `SharedBuild`); no other group's candidates are
+/// only that.
+pub fn shared_summary_state_groups(
+    memo: &crate::pass2::memo::candidates::CandidateMemo,
+) -> Vec<crate::pass2::memo::MemoGroupId> {
+    memo.candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidates)| {
+            matches!(
+                candidates.as_slice(),
+                [only] if only.origin
+                    == crate::pass2::memo::candidates::OriginOfCandidateForMemoGroup::SharedBuild
+            )
+        })
+        .map(|(group, _)| crate::pass2::memo::MemoGroupId(group as u32))
+        .collect()
+}
+
 /// The statistic classic HLL's failure probability at `precision` and
 /// `relative_error` over `source` is left as, for Stage 3 tests that bind
 /// it. The estimator keeps the format crate-private.
 pub fn hll_classic_failure_statistic(precision: u8, relative_error: f64, source: &str) -> String {
-    crate::accuracy::estimators::hll::classic_failure_statistic(precision, relative_error, source)
+    asap_accuracy::estimators::hll::classic_failure_statistic(precision, relative_error, source)
 }
 
 pub fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
@@ -192,7 +230,6 @@ pub fn at_ingestion(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
 
 /// The Count-Min summary of a Stage 1 candidate of `query`.
 pub fn cms_summary(query: &str) -> OperatorNode {
-    use crate::deployment_capabilities::DeploymentCapabilities;
     use crate::pass1::per_computation_candidates::compose_logical_candidate;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
@@ -202,7 +239,7 @@ pub fn cms_summary(query: &str) -> OperatorNode {
     // Inspect each local computation choice under the built-in deployment.
     let per_computation = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))])
         .unwrap()
-        .without_unsupported_summaries(&DeploymentCapabilities::default());
+        .without_unsupported_summaries(None);
     let summary = per_computation
         .targets
         .iter()

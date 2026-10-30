@@ -10,6 +10,8 @@ asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-sql = { path = "../frontend-sql" }
 asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
 asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
+asap-accuracy = { path = "../accuracy" }
+asap-cost = { path = "../cost" }
 asap-plan-selection = { path = "../plan-selection" }
 
 [dev-dependencies]

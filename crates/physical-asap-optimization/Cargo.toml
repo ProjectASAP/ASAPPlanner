@@ -4,12 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 # #509 Stage 2, physical ASAP-aware optimization: materialization and
-# physical operator implementation of each Stage 1 candidate. Depends on
-# Stage 1, never on plan selection or the executor.
+# physical operator implementation of each Stage 1 candidate. Depends only
+# on asap-types (the IR Stage 1 emits), never on Stage 1's crate, plan
+# selection or the executor. Tests build their inputs with Stage 1.
 [dependencies]
 asap-types = { path = "../types" }
-asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 
 [dev-dependencies]
 asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
+serde_json = "1"

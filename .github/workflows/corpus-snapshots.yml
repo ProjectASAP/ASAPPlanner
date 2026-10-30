@@ -27,22 +27,11 @@ jobs:
       with:
         toolchain: stable
 
-    # sccache alone: caching the release target as well would duplicate it.
-    - name: Run sccache-cache
-      uses: mozilla-actions/sccache-action@v0.0.4
-
-    - name: Cache cargo registry
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+    # Caches the registry and compiled dependencies, keyed per job.
+    - uses: Swatinem/rust-cache@v2
 
     - name: Check planner snapshots
       run: cargo test --release --locked -p asap-devtools --test corpus_snapshots -- --include-ignored
-      env:
-        RUSTC_WRAPPER: sccache
 
     - name: Upload regenerated snapshots
       if: failure()

@@ -1,7 +1,7 @@
 # Analytical resource cost model
 
 > Status: implemented model with explicit support limits. The
-> [analytical estimator](../../../../crates/plan-selection/src/cost/analytical.rs)
+> [analytical estimator](../../../../crates/cost/src/analytical.rs)
 > is what Stage 3 measures resource usage with. The physical-plan adapter and
 > the legacy `CostModel` described below have been removed; Stage 3's cost
 > models 1–3 replace them.
@@ -130,7 +130,7 @@ required: the result cache is filled by evaluations in this horizon. Buffer
 residency is a steady-state capacity/working-set model; it does not model
 cold-start warming or access order.
 
-`asap_types::workload::resources` is the single definition site for `CacheProfile`,
+`asap_cost::resources` is the single definition site for `CacheProfile`,
 `CacheEvidence`, and `CacheCapacityEvidence` (implemented in `resources/cache.rs`).
 These schemas describe cache assumptions, not additive CPU or byte consumption.
 The mapping module re-exports the same types for existing import paths, while

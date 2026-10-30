@@ -59,15 +59,15 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-use crate::ir::operator::node::{Operator, OperatorNode};
-use crate::ir::NonASAPOp;
+use asap_types::ir::operator::node::{Operator, OperatorNode};
+use asap_types::ir::NonASAPOp;
 
 /// [`structural_hash`]'s memoization cache: an already-hashed node's `Rc`
 /// pointer to its hash. A fresh cache is always correct; what matters is
 /// letting it persist across every node of one bottom-up pass rather than
 /// starting a new one per call. The caller must keep every cached node alive
 /// for the cache's lifetime, or a reused address would alias a stale entry.
-pub type NodeToStructuralHashCache = HashMap<*const OperatorNode, u64>;
+pub(crate) type NodeToStructuralHashCache = HashMap<*const OperatorNode, u64>;
 
 /// The operator with every child (operator inputs and the operator nodes
 /// referenced from its scalar expressions alike) replaced by `()`. What
@@ -99,7 +99,7 @@ fn own_fields(node: &OperatorNode) -> Operator<()> {
 /// descendant once per parent would cost `O(sub-DAG)` per node instead of
 /// `O(1)` beyond the children's already-known hashes. A non-finite `f64`
 /// serializes as `null`, merely widening one (still equality-checked) bucket.
-pub fn structural_hash(node: &OperatorNode, cache: &mut NodeToStructuralHashCache) -> u64 {
+pub(crate) fn structural_hash(node: &OperatorNode, cache: &mut NodeToStructuralHashCache) -> u64 {
     fn child_hash(child: &Rc<OperatorNode>, cache: &mut NodeToStructuralHashCache) -> u64 {
         let ptr = Rc::as_ptr(child);
         if let Some(&h) = cache.get(&ptr) {
@@ -286,22 +286,24 @@ pub fn share_common_sub_dags<Id>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::operator::agg_intent::AggIntent;
-    use crate::ir::operator::asap::ASAPOp;
-    use crate::ir::operator::operator_properties::{BinaryOpKind, GroupKeys, Reduction, Source};
-    use crate::ir::properties::guarantee::AccuracyGuarantee;
-    use crate::ir::scalar::expr_ir::{ColumnRef, CompareOpKind};
-    use crate::ir::schema::sketch::{
+    use asap_types::ir::operator::agg_intent::AggIntent;
+    use asap_types::ir::operator::asap::ASAPOp;
+    use asap_types::ir::operator::operator_properties::{
+        BinaryOpKind, GroupKeys, Reduction, Source,
+    };
+    use asap_types::ir::properties::guarantee::AccuracyGuarantee;
+    use asap_types::ir::scalar::expr_ir::{ColumnRef, CompareOpKind};
+    use asap_types::ir::schema::sketch::{
         GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
     };
-    use crate::ir::schema::{DataType, Field, FieldDataType, Schema};
-    use crate::ir::ScalarExpr;
-    use crate::ir::{BinaryOperator, NonASAPOp};
+    use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
+    use asap_types::ir::ScalarExpr;
+    use asap_types::ir::{BinaryOperator, NonASAPOp};
 
-    use crate::ir::properties::AccuracyTarget;
+    use asap_types::ir::properties::AccuracyTarget;
 
     fn node(op: NonASAPOp) -> Rc<OperatorNode> {
-        OperatorNode::new_shared(crate::ir::Operator::NonASAP(op)).unwrap()
+        OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(op)).unwrap()
     }
 
     /// `[ts, service, value, latency]`, no unique key.
@@ -374,8 +376,8 @@ mod tests {
     // compute different values, so structural sharing keeps them apart.
     #[test]
     fn filtered_and_unfiltered_aggregates_do_not_merge() {
-        use crate::ir::scalar::ScalarValue;
-        use crate::ir::Predicate;
+        use asap_types::ir::scalar::ScalarValue;
+        use asap_types::ir::Predicate;
         let unfiltered = quantile_agg(vec![1], Some(2), 0.5);
         let filtered = node(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![1]),
@@ -389,7 +391,7 @@ mod tests {
                 left: Box::new(ScalarExpr::Column(3)),
                 op: CompareOpKind::Gt,
                 right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(1.0))),
-                semantics: crate::ir::ExprSemantics::Sql,
+                semantics: asap_types::ir::ExprSemantics::Sql,
             }))],
             having: None,
             child: scan(),
@@ -648,7 +650,7 @@ mod tests {
 
     #[test]
     fn evaluations_share_their_producer_but_not_each_other() {
-        use crate::ir::schema::sketch::SketchStatistic;
+        use asap_types::ir::schema::sketch::SketchStatistic;
         let evaluation = |q: f64| {
             Rc::new(OperatorNode::with_schema(
                 Operator::ASAP(ASAPOp::SummaryEstimate {
@@ -752,7 +754,7 @@ mod tests {
                 offset: 0,
                 partition_by: GroupKeys::default(),
                 child: node(NonASAPOp::Sort {
-                    keys: vec![crate::ir::scalar::SortKey {
+                    keys: vec![asap_types::ir::scalar::SortKey {
                         expr: ScalarExpr::column(2),
                         ascending: false,
                         nulls_first: false,
@@ -855,11 +857,11 @@ mod tests {
         });
         node(NonASAPOp::Project {
             cols: vec![
-                crate::ir::ProjectItem {
+                asap_types::ir::ProjectItem {
                     alias: None,
                     expr: ScalarExpr::Column(1),
                 },
-                crate::ir::ProjectItem {
+                asap_types::ir::ProjectItem {
                     alias: Some("v".into()),
                     expr: ScalarExpr::literal_f64(value),
                 },

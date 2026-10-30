@@ -6,7 +6,7 @@
 //! measures the numbers (e.g. ASAPQuery-backend's `measure_costs`, or
 //! sketch-bench's `rqe_atomic_costs.json` converted by `asap-devtools`'
 //! `convert_rqe_atomic_costs`) and puts the table in
-//! [`PlanSelectionSettings::measured_operation_costs`]. The planner reads
+//! [`CostInputs::measured_operation_costs`]. The planner reads
 //! only this table, never a benchmark file.
 //!
 //! Each [`OperatorCost`] prices one operator kind at one phase (ingestion
@@ -20,7 +20,7 @@
 //! formula-priced nodes stay on one scale. The factor is a global
 //! heuristic: a partial table can still mis-rank plans, and only a table
 //! covering every operator kind the plans use makes the choice the
-//! measured one (module doc of the crate, "Measured operation costs").
+//! measured one (plan selection's module doc, "Measured operation costs").
 //!
 //! A measured time enters [`ResourceUsage`] as CPU operations: `t` ns is
 //! `t · 10⁻⁶ / ms_per_cpu_op` operations of [`ResourceSpeed`], so latency
@@ -31,7 +31,7 @@
 //! (one sketch operation each), still loads: each entry becomes the
 //! [`OperatorCost`] of its operator at both phases.
 //!
-//! [`PlanSelectionSettings::measured_operation_costs`]: crate::PlanSelectionSettings::measured_operation_costs
+//! [`CostInputs::measured_operation_costs`]: crate::CostInputs::measured_operation_costs
 //! [`ResourceUsage`]: crate::ResourceUsage
 //! [`ResourceSpeed`]: crate::ResourceSpeed
 
@@ -44,15 +44,15 @@ use asap_types::ir::schema::{ExactKind, SketchParams};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use serde::{Deserialize, Serialize};
 
-use crate::cost::analytical::AnalyticalCostError;
+use crate::analytical::AnalyticalCostError;
 
 /// The deployment's measured cost table
-/// ([`PlanSelectionSettings::measured_operation_costs`]). In JSON, an object
+/// ([`CostInputs::measured_operation_costs`]). In JSON, an object
 /// with these fields, or (the format of earlier versions) an array of
 /// [`MeasuredOperationCost`]. Default: empty, every node priced from the
 /// formulas.
 ///
-/// [`PlanSelectionSettings::measured_operation_costs`]: crate::PlanSelectionSettings::measured_operation_costs
+/// [`CostInputs::measured_operation_costs`]: crate::CostInputs::measured_operation_costs
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct MeasuredOperationCosts {
     /// One entry per (operator, phase, family) the runtime measured.
@@ -206,7 +206,7 @@ impl OperatorKind {
 
 /// The state family a summary node works on, which selects its entries.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum StateFamily<'a> {
+pub enum StateFamily<'a> {
     /// No family: a non-summary operator, or a shared (Hydra) structure.
     None,
     Sketch(&'a SketchParams),
@@ -215,7 +215,7 @@ pub(crate) enum StateFamily<'a> {
 
 /// A node's unit price, from its entry or interpolated between two.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct UnitPrice {
+pub struct UnitPrice {
     pub ns_per_unit: f64,
     pub ns_per_invocation: f64,
     pub memory_bytes_per_state: Option<f64>,
@@ -228,7 +228,7 @@ pub(crate) struct UnitPrice {
 /// two whose sizes (`size_of`: the bytes one state allocates) are nearest
 /// below and above the node's are interpolated linearly in log size, and a
 /// size outside the measured ones takes the nearest entry's price.
-pub(crate) fn lookup(
+pub fn lookup(
     table: &MeasuredOperationCosts,
     operator: OperatorKind,
     phase: ExecutionTiming,
@@ -301,7 +301,7 @@ pub(crate) fn lookup(
 /// The price of an `Aggregate` at `phase` per input row: the sum over its
 /// measures, when each has an entry (one for its own phase winning over
 /// one for both).
-pub(crate) fn aggregate_lookup(
+pub fn aggregate_lookup(
     table: &MeasuredOperationCosts,
     phase: ExecutionTiming,
     measures: &[AggIntent],

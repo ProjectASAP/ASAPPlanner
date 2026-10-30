@@ -54,13 +54,12 @@ cargo run --release -p asap-devtools --bin stage_pipeline -- \
   --deployment-capabilities '{"raw_data_retained":true,"query_time_results_retained":false}' \
   --cost-model aws-fargate-us-east-1 \
   --enforce-accuracy-guarantees \
-  --search candidate-connections \
   --milp-time-limit-s 280 \
   --out rangeheavy-plan.json
 ```
 
-`candidate-connections` is the default engine; the explicit `--search` option
-can be omitted. `memo-milp` is not an accepted CLI value.
+`stage_pipeline` has one search engine, `candidate-connections` (the
+document's `search` field names it); there is no `--search` option.
 
 The deployment declaration allows retained raw data but does not allow query-time
 results to be kept across evaluations. Set capabilities to match your deployment.
@@ -80,7 +79,7 @@ for workload, source-fact, and SQL examples.
 | `--milp-time-limit-s 280` | Set the planning time budget in seconds. A timeout may return a validated incumbent or no selected plan; it does not establish optimality. |
 | `--cost-model aws-fargate-us-east-1` | Compare plans using the configured AWS Fargate pricing model. Other supported names are `usage-over-time`, `provisioned-capacity`, and `cluster-capacity`. |
 | `--max-displayed 64` | Limit candidates shown in the document; this is not a search budget. |
-| `--exhaustive --max-combinations 10000` | Archive evaluated plans and rejections using the same engine, with an assignment budget. This does not guarantee enumeration of all candidates before a time or assignment limit. Do not combine with `--search`. |
+| `--exhaustive --max-combinations 10000` | Archive evaluated plans and rejections using the same engine, with an assignment budget. This does not guarantee enumeration of all candidates before a time or assignment limit. |
 | `--plan-selection-settings settings.json` | Load selection settings instead of `--cost-model`, cluster flags, or `--measured-operation-costs`. |
 | `--no-memo` | Leave out the `memo` section (the memo after each step and the enumerated candidate DAGs), for a smaller document. |
 | `--price-enumerated 50` | Cost the first 50 enumerated candidate DAGs through Stage 2 and Stage 3, and flag any cheaper than the selected plan. Off by default. |
@@ -117,8 +116,9 @@ execution times or an actual cloud bill.
 
 - **`stage_pipeline: command not found`:** use `cargo run ... -- ...`, or the
   binary's explicit path after building. Building does not add it to `PATH`.
-- **`unknown argument` / `expected candidate-connections`:** check that your
-  branch and binary are current. Use `candidate-connections`, not `memo-milp`.
+- **`unknown argument --search`:** the option was removed; drop it. The
+  candidate-connection search is the only search. For any other
+  `unknown argument`, check that your branch and binary are current.
 - **`--out is required`:** supply an output JSON path; create its parent directory
   first if needed.
 - **Cannot read the workload:** paths are relative to your working directory;

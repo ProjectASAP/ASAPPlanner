@@ -25,7 +25,6 @@
 // four planner stages, using the joint candidate-connection engine. The default
 // document keeps the selected plan; `--exhaustive` archives evaluated plans
 // and rejections from the same finite catalog, not an independent optimizer.
-// `--search candidate-connections` explicitly names this engine.
 // `--milp-time-limit-s` bounds planning in either mode; a timeout reports a
 // partial result, never an optimality claim for unexplored candidates.
 // Unlike `plan_installable`'s default settings, Stage 3 ignores accuracy
@@ -228,7 +227,7 @@
 // others from the formulas times the calibration factor, and each node's
 // `price_source` says `measured` or `analytical`.
 // `--plan-selection-settings <file>` reads all of Stage 3's settings from
-// one JSON file (`PlanSelectionSettings`: `cost_model`, e.g.
+// one JSON file (`CostInputs`: `cost_model`, e.g.
 // `{"usage_over_time": {"cost_per_cpu_op": 1e-6, ...}}` with the
 // deployment's own unit costs, `resource_speed`,
 // `non_repeating_query_horizon_seconds` and `measured_operation_costs`;
@@ -241,7 +240,7 @@
 // alone; executability checks still apply. `--enforce-accuracy-guarantees`
 // clears it, and Stage 3 rejects an output whose guarantee does not meet
 // its query's target, as `plan_installable` does with the default
-// `PlanSelectionSettings`. The document's top-level `accuracy_guarantees` is
+// `CostInputs`. The document's top-level `accuracy_guarantees` is
 // `"ignored"` or `"enforced"`.
 // `--sample-interval-ms` is the sample interval declared for every metric the
 // PromQL queries read (default 15000). `--series-count <n>`,
@@ -261,6 +260,10 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
+use asap_cost::{
+    ClusterLimits, ClusterObjective, CostInputs, CostModel, MeasuredOperationCosts,
+    ResourceUnitCost, ResourceUsage,
+};
 use asap_devtools::candidate_labels::{candidate_labels, computation_label, query_of_each_target};
 use asap_devtools::memo_pricing::{price_choices, SelectedBaseline};
 use asap_devtools::planner_layering_examples::{
@@ -281,12 +284,11 @@ use asap_logical_asap_optimization::pass2::memo::candidates::{
 use asap_logical_asap_optimization::pass2::memo::enumeration::{
     build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
 };
-use asap_logical_asap_optimization::pass2::memo::MemoGroupId;
+use asap_logical_asap_optimization::pass2::memo::{queries_rooted_at, MemoGroupId};
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{
-    large_peak_memory_warning, ClusterLimits, ClusterObjective, CostModel, MeasuredOperationCosts,
-    PlanSelectionSettings, PlanningModels, Rejection, ResourceUnitCost, ResourceUsage,
-    SearchAlgorithm, Selection, SelectionError, Stage1ToStage3Search,
+    large_peak_memory_warning, PlanningModels, Rejection, Selection, SelectionError,
+    Stage1ToStage3Search,
 };
 use asap_planner::installable_plan_of;
 use asap_types::ir::flat::{flatten, FlatDag, FlatNode, NodeId};
@@ -305,9 +307,8 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>] [--series-count <u64>] [--rows-per-second <f64>] [--rows-held <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory|pareto-front]] \
-[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>] | --search candidate-connections] [--milp-time-limit-s <f64>] [--max-displayed <n>] \
-[--no-memo] [--max-memo-candidates <n>] [--memo-enumeration-limit <n>] [--max-enumerated <n>] [--price-enumerated <n>] --out <file>\n\
---search candidate-connections is the default search.";
+[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>]] [--milp-time-limit-s <f64>] [--max-displayed <n>] \
+[--no-memo] [--max-memo-candidates <n>] [--memo-enumeration-limit <n>] [--max-enumerated <n>] [--price-enumerated <n>] --out <file>";
 
 /// Default evaluator-assignment budget for an exhaustive archive run.
 const MAX_COMBINATIONS: usize = 10_000;
@@ -395,9 +396,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut plan_selection_settings_path: Option<String> = None;
     let mut enforce_accuracy_guarantees = false;
     let mut exhaustive = false;
-    // `--search` explicitly names the candidate-connection engine;
     // `--milp-time-limit-s` limits the MILP search.
-    let mut search_algorithm: Option<SearchAlgorithm> = None;
     let mut milp_time_limit_ms: Option<u64> = None;
     let mut max_combinations_given = false;
     let mut write_memo = true;
@@ -481,16 +480,6 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--price-enumerated" => {
                 memo_caps.choices_to_price = value()?.parse().map_err(|e| format!("{e}"))?
             }
-            "--search" => {
-                search_algorithm = Some(match value()?.as_str() {
-                    "candidate-connections" => SearchAlgorithm::CandidateConnections,
-                    other => {
-                        return Err(
-                            format!("--search {other}: expected candidate-connections").into()
-                        )
-                    }
-                })
-            }
             "--milp-time-limit-s" => {
                 let seconds: f64 = value()?
                     .parse()
@@ -519,12 +508,6 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     if max_combinations_given && !exhaustive {
         return Err("--max-combinations limits the exhaustive search: it needs --exhaustive (bounds evaluated assignments)".into());
     }
-    if exhaustive && search_algorithm.is_some() {
-        return Err(
-            "--search picks the default search's algorithm: drop it with --exhaustive".into(),
-        );
-    }
-    let search_algorithm = search_algorithm.unwrap_or(SearchAlgorithm::CandidateConnections);
     if plan_selection_settings_path.is_some()
         && (cost_model.is_some()
             || cluster_memory.is_some()
@@ -542,7 +525,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let cluster = (cluster_memory, cluster_disk, cluster_objective.as_deref());
     // The settings every flag below leaves at its default; the Fargate
     // preset converts its prices at their `resource_speed`.
-    let default_settings = PlanSelectionSettings::default();
+    let default_settings = CostInputs::default();
     let cost_model = match (cost_model.as_deref(), cluster) {
         (None | Some("usage-over-time"), (None, None, None)) if cluster_cores.is_none() => {
             CostModel::UsageOverTime(ResourceUnitCost::illustrative())
@@ -589,14 +572,14 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         }
         None => MeasuredOperationCosts::default(),
     };
-    let mut plan_selection: PlanSelectionSettings = match &plan_selection_settings_path {
+    let mut plan_selection: CostInputs = match &plan_selection_settings_path {
         Some(path) => {
             let text = std::fs::read_to_string(path)
                 .map_err(|e| format!("--plan-selection-settings {path}: {e}"))?;
             serde_json::from_str(&text)
                 .map_err(|e| format!("--plan-selection-settings {path}: {e}"))?
         }
-        None => PlanSelectionSettings {
+        None => CostInputs {
             cost_model,
             measured_operation_costs,
             ..default_settings
@@ -756,7 +739,6 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         &data,
         models,
         Stage1ToStage3Search {
-            search: search_algorithm,
             exhaustive,
             keep_every_candidate: exhaustive,
             max_evaluations: exhaustive.then_some(max_combinations),
@@ -807,9 +789,10 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     }
     document["workload"]["data_workload"] =
         serde_json::to_value(&data).map_err(|e| e.to_string())?;
-    document["search"] = json!(match (exhaustive, search_algorithm) {
-        (true, _) => "exhaustive",
-        (false, SearchAlgorithm::CandidateConnections) => "candidate-connections",
+    document["search"] = json!(if exhaustive {
+        "exhaustive"
+    } else {
+        "candidate-connections"
     });
     document["accuracy_guarantees"] = json!(if enforce_accuracy_guarantees {
         "enforced"
@@ -1202,19 +1185,17 @@ fn pass1_pruned_json(inventory: &PerComputationCandidates<usize>) -> Vec<Value> 
         .targets
         .iter()
         .enumerate()
-        .filter_map(|(index, target)| {
-            let fused_pruned = target
-                .fused_computation
-                .as_ref()
-                .map_or(&[][..], |f| &f.pruned[..]);
-            if target.choices.pruned.is_empty() && fused_pruned.is_empty() {
+        .filter_map(|(index, _)| {
+            let pruned = inventory.pruned_of_target(index, false);
+            let fused_pruned = inventory.pruned_of_target(index, true);
+            if pruned.is_empty() && fused_pruned.is_empty() {
                 return None;
             }
             Some(json!({
                 "target": index,
                 "query": format!("Q{}", query_of_target[index] + 1),
-                "pruned": pruned_json(&target.choices.pruned),
-                "fused_pruned": pruned_json(fused_pruned),
+                "pruned": pruned_json(&pruned),
+                "fused_pruned": pruned_json(&fused_pruned),
             }))
         })
         .collect()
@@ -1746,7 +1727,9 @@ fn memo_groups_json(
                         .collect();
                     json!({
                         "index": index,
-                        "implements": ids(&candidate.implements),
+                        "implements": std::iter::once(id as u32)
+                            .chain(candidate.fused_groups.iter().map(|g| g.0))
+                            .collect::<Vec<_>>(),
                         "children": ids(&candidate.input_groups),
                         "origin": origin_name(&candidate.origin),
                         "budget_share": candidate.accuracy_budget_parts,
@@ -1764,9 +1747,9 @@ fn memo_groups_json(
                 "id": id,
                 "label": node_label(&table.nodes[node]),
                 "children": ids(&group.child_groups),
-                "parents": ids(&group.parents),
-                "queries": group.queries,
-                "roots_of": group.roots_of,
+                "parents": ids(group.parent_groups()),
+                "queries": group.reached_by_queries(),
+                "roots_of": queries_rooted_at(&memo.query_roots, MemoGroupId(id as u32)),
                 "node": node,
                 "candidate_count": candidates.len(),
                 "candidate_count_by_origin": by_origin,

@@ -18,7 +18,7 @@ selected.
 | `PlanningWorkload.query_workload` | Query language and one-time/repeating query workloads | Yes |
 | `PlanningWorkload.data_workload` | How the data arrives, and facts about each source | No implicit default. Set `None` when unavailable; a PromQL query with a bare instant selector needs a nonzero `sample_interval` on the metric it reads. |
 | Frontend-specific dependencies (outside `PlanningWorkload`) | `SqlCatalog` for SQL; when needed, `HistogramCatalog` for PromQL | `SqlCatalog` is required for SQL lowering |
-| `PlanningModels` | Accuracy model and evidence, `PlanSelectionSettings` (cost model 1, 2 or 3, resource speed, measured operation costs), `DeploymentCapabilities` | `PlanningModels::builtin()` uses `DefaultAccuracyModel`, no evidence, cost model 1 with illustrative unit costs, and a deployment that supports everything |
+| `PlanningModels` | Accuracy model and evidence, `CostInputs` (cost model 1, 2 or 3, resource speed, measured operation costs), `DeploymentCapabilities` | `PlanningModels::builtin()` uses `BuiltinAccuracyModel`, no evidence, cost model 1 with illustrative unit costs, and a deployment that supports everything |
 
 Frontend lowering (Stage 0) and Stages 1–3 run inside the workflow; they are
 not additional inputs. See [Inputs](#inputs) for the nested workload fields
@@ -248,17 +248,17 @@ They are explicit frontend function arguments, not one generic
 ### Planning evidence inputs
 
 **A model is planning logic; evidence is a scoped fact used by that logic.**
-For example, `DefaultAccuracyModel` knows how to combine error bounds, while
+For example, `BuiltinAccuracyModel` knows how to combine error bounds, while
 an operand-domain contract tells it whether a particular product or quotient
 of absolute-error estimates has a bound. The former can be provided by a built-in default; the
 latter cannot be fabricated by one.
 
 | Input | Where it enters / default | Why it matters |
 |---|---|---|
-| Accuracy model | `PlanningModels` (`AccuracyModel`; `DefaultAccuracyModel` by default) | Composes candidate guarantees and checks them against requested accuracy. The model does not itself provide missing data-domain facts. |
+| Accuracy model | `PlanningModels` (`AccuracyModel`; `BuiltinAccuracyModel` by default) | Composes candidate guarantees and checks them against requested accuracy. The model does not itself provide missing data-domain facts. |
 | Accuracy/domain evidence | `PlanningModels` (`AccuracyEvidenceProvider`; `NoAccuracyEvidence` by default) | Input ranges, nonempty populations and similar facts can certify or rule out particular approximations. Missing facts remain unknown. |
-| Cost model | `PlanSelectionSettings.cost_model` (cost model 1 by default) | Turns each valid candidate's resource usage into a choice. The illustrative unit costs are not a measured deployment cost. |
-| Measured cost evidence | `PlanSelectionSettings.measured_operation_costs` | Measured CPU time per unit of each operator kind, at ingestion or query time, replaces the formulas for the nodes it prices (a sketch interpolated between measured sizes); the other nodes' formulas are scaled by one calibration factor fitted from the measured ones. |
+| Cost model | `CostInputs.cost_model` (cost model 1 by default) | Turns each valid candidate's resource usage into a choice. The illustrative unit costs are not a measured deployment cost. |
+| Measured cost evidence | `CostInputs.measured_operation_costs` | Measured CPU time per unit of each operator kind, at ingestion or query time, replaces the formulas for the nodes it prices (a sketch interpolated between measured sizes); the other nodes' formulas are scaled by one calibration factor fitted from the measured ones. |
 | Runtime capabilities | `DeploymentCapabilities` (`supported_summaries`, `raw_data_retained`, `query_time_results_retained`) | Prevents choosing a summary, raw-data scan or kept state the intended executor cannot provide. |
 
 For example, the query `quantile_over_time(0.9, data[5m]) /

@@ -309,6 +309,7 @@ mod tests {
         let count = inventory.graph.candidates.len();
         let configurations = (0..count)
             .map(|id| CandidateConfiguration {
+                may_keep_with_sole_reader: Vec::new(),
                 source_candidate: PhysicalCandidateId(id),
                 timing: if id < 2 {
                     ExecutionTiming::IngestionTime

@@ -148,14 +148,6 @@ impl<C> ScalarExpr<C> {
         }
     }
 
-    /// If this expression is a `BoolOr`, its elements; otherwise `self` alone.
-    pub fn disjuncts(&self) -> &[ScalarExpr<C>] {
-        match self {
-            ScalarExpr::BoolOr(v) => v.as_slice(),
-            _ => std::slice::from_ref(self),
-        }
-    }
-
     /// The direct scalar sub-expressions.
     pub fn children(&self) -> Vec<&ScalarExpr<C>> {
         match self {

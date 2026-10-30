@@ -12,10 +12,11 @@ use asap_executor::physical_planner::compile;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, Value};
 use asap_planner::{
-    plan_installable, DeploymentCapabilities, FrontendInput, InstallablePlan, InstallablePlanError,
-    MaterializedView, MaterializedViewRefresh, OperatorKind, OptimizationInput, OptimizationPass,
-    OptimizeError, PhysicalASAPDAG, PlanOutput, PlanSelectionSettings, PlanningModels,
-    PlanningWorkload, SelectedPlanReport, SelectionBox, Stage1ToStage3Pass, UserInput,
+    plan_installable, CostInputs, DeploymentCapabilities, FrontendInput, InstallablePlan,
+    InstallablePlanError, MaterializedView, MaterializedViewRefresh, OperatorKind,
+    OptimizationInput, OptimizationPass, OptimizeError, PhysicalASAPDAG, PlanOutput,
+    PlanningModels, PlanningWorkload, SelectedPlanReport, SelectionBox, Stage1ToStage3Pass,
+    UserInput,
 };
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::ir::{
@@ -219,7 +220,7 @@ async fn plan_with_report_for(
     capabilities: &DeploymentCapabilities,
 ) -> (InstallablePlan, Option<SelectedPlanReport>) {
     // The deployment's Stage 3 prices, from its JSON file: cost model 1.
-    let settings: PlanSelectionSettings = serde_json::from_str(
+    let settings: CostInputs = serde_json::from_str(
         r#"{"cost_model": {"usage_over_time": {
               "cost_per_cpu_op": 1e-6, "cost_per_scanned_byte": 1e-7,
               "cost_per_memory_byte_second": 1.25e-7,
@@ -1789,10 +1790,7 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
         .find(|node| node.id == root)
         .and_then(|node| node.guarantee.clone())
         .expect("the query's guarantee");
-    let sign =
-        asap_logical_asap_optimization::accuracy::composition::raw_data_samples_sign_statistic(
-            "data",
-        );
+    let sign = asap_accuracy::composition::raw_data_samples_sign_statistic("data");
     let bound = guarantee.bind(&|statistic| match statistic {
         "input_row_count" => Some(1_000.0),
         _ => (statistic == sign).then_some(1.0),
@@ -2039,7 +2037,7 @@ async fn ignoring_accuracy_guarantees_selects_a_sketch_plan_that_runs() {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    let plan = |settings: PlanSelectionSettings| {
+    let plan = |settings: CostInputs| {
         let workload = workload.clone();
         let capabilities = capabilities.clone();
         async move {
@@ -2054,7 +2052,7 @@ async fn ignoring_accuracy_guarantees_selects_a_sketch_plan_that_runs() {
         }
     };
     // Without the setting, no candidate is valid.
-    let error = plan(PlanSelectionSettings::default())
+    let error = plan(CostInputs::default())
         .await
         .expect_err("no candidate is valid without the setting");
     assert!(
@@ -2064,7 +2062,7 @@ async fn ignoring_accuracy_guarantees_selects_a_sketch_plan_that_runs() {
         "{error}"
     );
     // With it, loaded from JSON as a deployment passes it.
-    let settings: PlanSelectionSettings =
+    let settings: CostInputs =
         serde_json::from_str(r#"{"ignore_accuracy_guarantees": true}"#).unwrap();
     assert!(settings.ignore_accuracy_guarantees);
     let (installed, report) = plan(settings).await.expect("a sketch plan is selected");
@@ -2136,9 +2134,9 @@ async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    let settings = PlanSelectionSettings {
+    let settings = CostInputs {
         ignore_accuracy_guarantees: true,
-        ..PlanSelectionSettings::default()
+        ..CostInputs::default()
     };
     let (plan, report) = plan_installable(UserInput::new(
         &p99_avg_workload(false),
@@ -2175,9 +2173,9 @@ async fn plan_p99(
             .then(|| only_summary_family(SketchAlgorithm::DDSketch)),
         ..DeploymentCapabilities::default()
     };
-    let settings = PlanSelectionSettings {
+    let settings = CostInputs {
         ignore_accuracy_guarantees: ignore_accuracy,
-        ..PlanSelectionSettings::default()
+        ..CostInputs::default()
     };
     let models = PlanningModels::builtin()
         .with_deployment_capabilities(&capabilities)
@@ -2401,9 +2399,9 @@ async fn ignoring_guarantees_counter_topk_plans_compile_and_answer_exactly() {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    let settings = PlanSelectionSettings {
+    let settings = CostInputs {
         ignore_accuracy_guarantees: true,
-        ..PlanSelectionSettings::default()
+        ..CostInputs::default()
     };
     for (function, seconds) in [("increase", 300.0), ("rate", 1.0)] {
         let plan = plan_installable(UserInput::new(
@@ -2665,7 +2663,7 @@ fn only_summary_family(family: SketchAlgorithm) -> Vec<asap_planner::SupportedSu
 /// the heap would.
 struct HeapPlansOnly(SketchAlgorithm);
 
-impl asap_plan_selection::AccuracyModel for HeapPlansOnly {
+impl asap_accuracy::AccuracyModel for HeapPlansOnly {
     fn satisfies(
         &self,
         _guarantee: &asap_types::ir::properties::AccuracyGuarantee,
@@ -2704,9 +2702,9 @@ async fn plan_ignoring_guarantees(
     };
     // The settings' override accepts every output, so a forced heap goes
     // through the accuracy model instead.
-    let settings = PlanSelectionSettings {
+    let settings = CostInputs {
         ignore_accuracy_guarantees: heap.is_none(),
-        ..PlanSelectionSettings::default()
+        ..CostInputs::default()
     };
     let heap_only = heap.map(HeapPlansOnly);
     let models = PlanningModels::builtin()

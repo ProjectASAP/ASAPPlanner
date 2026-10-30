@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
 use asap_physical_asap_optimization::{optimize_physical_asap_chosen, PhysicalWorkloadPlan};
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::physical::Materialization;
@@ -54,7 +53,7 @@ pub(in crate::search) fn materialize_selected_candidates(
     original_roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
-    deployment: &DeploymentCapabilities,
+    query_time_results_retained: bool,
 ) -> Result<SelectedPhysicalCandidate, PhysicalCandidateError> {
     if entries.len() != original_roots.len() {
         return Err("workload entries and query roots differ in length".into());
@@ -84,7 +83,7 @@ pub(in crate::search) fn materialize_selected_candidates(
         &roots,
         entries,
         data,
-        deployment,
+        query_time_results_retained,
         &mut |logical, _, options| {
             let requested = if let Some(&id) = ids_by_pointer.get(&logical) {
                 seen[id] = true;
@@ -204,11 +203,13 @@ mod tests {
     use super::*;
     use crate::search::candidates::inventory::build_candidate_inventory;
     use crate::search::milp::model::select_candidates;
+    use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::state_groups::expand_concrete_summary_state_groups;
+    use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
     use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};
     use asap_logical_asap_optimization::test_support::lower_promql;
+    use asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::{ASAPOp, NonASAPOp};
@@ -240,21 +241,14 @@ mod tests {
             .collect::<Vec<_>>();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let output_groups = (0..2)
-            .map(|query| {
-                MemoGroupId(
-                    initial
-                        .groups
-                        .iter()
-                        .position(|group| group.roots_of.contains(&query))
-                        .unwrap() as u32,
-                )
-            })
+            .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect::<Vec<_>>();
         let candidates = generate_per_computation_candidates(roots.clone()).unwrap();
-        let memo =
-            expand_concrete_summary_state_groups(try_populate_pass1(initial, &candidates).unwrap())
-                .unwrap()
-                .memo;
+        let memo = sharing_rules_and_shared_state_groups(
+            try_populate_pass1(initial, &candidates).unwrap(),
+            PaneWidthDomain::Complete,
+        )
+        .unwrap();
         let inventory = build_candidate_inventory(&memo, &output_groups, |node| {
             Ok(if is_kll(node) {
                 8.0
@@ -405,7 +399,7 @@ mod tests {
             &roots,
             &entries,
             &data,
-            &deployment,
+            deployment.query_time_results_retained,
         )
         .unwrap();
         assert_eq!(physical.physical.dag.nodes.len(), 1);
@@ -437,7 +431,7 @@ mod tests {
                 &roots,
                 &entries,
                 &DataWorkload::default(),
-                &DeploymentCapabilities::default()
+                false
             ),
             Err(PhysicalCandidateError::RejectedAssignment(_))
         ));
@@ -464,13 +458,7 @@ mod tests {
             }
             modes[build] = Some(mode);
             let result = materialize_selected_candidates(
-                &inventory,
-                &selected,
-                &modes,
-                &roots,
-                &entries,
-                &data,
-                &DeploymentCapabilities::default(),
+                &inventory, &selected, &modes, &roots, &entries, &data, false,
             )
             .unwrap();
             assert_eq!(
@@ -513,13 +501,7 @@ mod tests {
             });
         }
         let result = materialize_selected_candidates(
-            &inventory,
-            &selected,
-            &modes,
-            &roots,
-            &entries,
-            &data,
-            &DeploymentCapabilities::default(),
+            &inventory, &selected, &modes, &roots, &entries, &data, false,
         );
         assert!(
             matches!(result, Err(PhysicalCandidateError::RejectedAssignment(error)) if error.contains("not offered"))

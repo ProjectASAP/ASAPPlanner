@@ -41,10 +41,11 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use asap_cost::CostInputs;
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_physical_asap_optimization::optimize_physical_asap;
 use asap_plan_selection::pass::Stage1ToStage3Search;
-use asap_plan_selection::{select_plan, PlanSelectionSettings, PlanningModels, SearchAlgorithm};
+use asap_plan_selection::{select_plan, PlanningModels};
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::sketch::SketchAlgorithm;
 use asap_types::ir::QueryRoot;
@@ -398,10 +399,10 @@ impl Planner {
         }
     }
 
-    fn plan_selection_settings(&self) -> PlanSelectionSettings {
-        PlanSelectionSettings {
+    fn plan_selection_settings(&self) -> CostInputs {
+        CostInputs {
             ignore_accuracy_guarantees: !self.settings.enforce_accuracy_guarantees,
-            ..PlanSelectionSettings::default()
+            ..CostInputs::default()
         }
     }
 
@@ -452,10 +453,7 @@ impl Planner {
                 &entries,
                 &data,
                 models,
-                Stage1ToStage3Search {
-                    search: SearchAlgorithm::CandidateConnections,
-                    ..Stage1ToStage3Search::default()
-                },
+                Stage1ToStage3Search::default(),
             ),
         }
         .map_err(|e| e.to_string())?;
@@ -505,9 +503,8 @@ impl Planner {
             root.validate_structure()
                 .map_err(|e| format!("witness validation: {e}"))?;
         }
-        let mut roots =
-            asap_logical_asap_optimization::pass1::per_computation_candidates::recompose_guarantees(roots)
-                .map_err(|e| format!("witness guarantees: {e}"))?;
+        let mut roots = asap_accuracy::propagation::recompose_guarantees(roots)
+            .map_err(|e| format!("witness guarantees: {e}"))?;
         if let (true, Some(last)) = (last_root_is_key_filter, roots.last_mut()) {
             let filter = last.as_operator().ok_or("a scalar root")?;
             let input = filter.operator.children()[0].guarantee.clone();
@@ -520,9 +517,14 @@ impl Planner {
         let models = PlanningModels::builtin()
             .with_plan_selection(&plan_selection)
             .with_deployment_capabilities(&deployment);
-        let mut candidates =
-            optimize_physical_asap("witness", &roots, &entries, &workload.data, &deployment)
-                .map_err(|e| format!("witness Stage 2: {e}"))?;
+        let mut candidates = optimize_physical_asap(
+            "witness",
+            &roots,
+            &entries,
+            &workload.data,
+            deployment.query_time_results_retained,
+        )
+        .map_err(|e| format!("witness Stage 2: {e}"))?;
         for (index, candidate) in candidates.iter_mut().enumerate() {
             candidate.id = format!("witness-m{index}");
         }

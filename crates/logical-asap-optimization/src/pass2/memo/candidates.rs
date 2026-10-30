@@ -5,7 +5,7 @@
 
 use std::rc::Rc;
 
-use asap_types::ir::OperatorNode;
+use asap_types::ir::{OperatorNode, QueryRoot};
 
 pub use super::groups::try_populate_pass1;
 use super::{MemoGroup, MemoGroupId};
@@ -14,6 +14,10 @@ use super::{MemoGroup, MemoGroupId};
 #[derive(Debug, Clone, Default)]
 pub struct CandidateMemo {
     pub groups: Vec<MemoGroup>,
+    /// Each query's root over groups, by index in the workload
+    /// ([`super::DagOfLogicalMemoGroups::query_roots`]); groups added later
+    /// are never a query's root.
+    pub query_roots: Vec<QueryRoot<MemoGroupId>>,
     /// Each group's implementation candidates, by group index.
     pub candidates: Vec<Vec<CandidateForMemoGroup>>,
 }
@@ -22,9 +26,10 @@ pub struct CandidateMemo {
 /// child groups.
 #[derive(Debug, Clone)]
 pub struct CandidateForMemoGroup {
-    /// The groups it implements: one, or several for a fused computation
-    /// (the topmost first).
-    pub implements: Vec<MemoGroupId>,
+    /// The groups a fused computation also implements, beyond the group
+    /// whose candidate it is (its owner, implicit from its position in
+    /// [`CandidateMemo::candidates`]); empty otherwise.
+    pub fused_groups: Vec<MemoGroupId>,
     /// The implementation's own node(s): its root node, whose descendants
     /// down to [`Self::input_groups`] are its private nodes.
     pub root_node: Rc<OperatorNode>,

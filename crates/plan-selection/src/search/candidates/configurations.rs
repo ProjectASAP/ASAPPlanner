@@ -23,11 +23,51 @@ use crate::search::candidates::graph::{
 };
 use crate::search::candidates::inventory::CandidateInventory;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(in crate::search) struct CandidateConfiguration {
     pub source_candidate: PhysicalCandidateId,
     pub materialization: Materialization,
     pub timing: ExecutionTiming,
+    /// One entry per workload query, in the order of the planning context's
+    /// `entries`: whether Stage 2 lets this pane chain be kept across
+    /// evaluations when that query is its only reader. Filled only for a
+    /// `MatAtQueryKeptAcrossEvaluations(Memory)` pane chain in a deployment
+    /// that keeps query-time results (see [`may_keep_with_sole_reader`]);
+    /// empty otherwise. Stage 3 pricing reads it instead of asking Stage 2.
+    pub may_keep_with_sole_reader: Vec<bool>,
+}
+
+/// [`CandidateConfiguration::may_keep_with_sole_reader`] for `node` configured
+/// with `materialization`: for each query in `entries`, whether
+/// [`summary_materialization_eligibility`] with that query as the only reader
+/// allows keeping it across evaluations. Empty unless `node` is a pane chain,
+/// `materialization` is `MatAtQueryKeptAcrossEvaluations(Memory)` and the
+/// deployment keeps query-time results.
+pub(in crate::search) fn may_keep_with_sole_reader(
+    node: &OperatorNode,
+    materialization: Materialization,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    query_time_results_retained: bool,
+) -> Vec<bool> {
+    if materialization != Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
+        || !matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+        || !query_time_results_retained
+    {
+        return Vec::new();
+    }
+    (0..entries.len())
+        .map(|reader| {
+            summary_materialization_eligibility(
+                node,
+                &[reader],
+                entries,
+                data,
+                query_time_results_retained,
+            )
+            .is_ok_and(|eligibility| eligibility.may_keep_across_evaluations)
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -174,7 +214,7 @@ pub(in crate::search) fn enumerate_candidate_configurations_before(
                     Materialization::MatAtIngestion(Medium::Memory),
                     entries,
                     data,
-                    deployment,
+                    deployment.query_time_results_retained,
                 )
             }) {
                 modes.push((
@@ -190,7 +230,7 @@ pub(in crate::search) fn enumerate_candidate_configurations_before(
                         Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory),
                         entries,
                         data,
-                        deployment,
+                        deployment.query_time_results_retained,
                     )
                 })
             {
@@ -228,6 +268,13 @@ pub(in crate::search) fn enumerate_candidate_configurations_before(
                 source_candidate: PhysicalCandidateId(source_id),
                 materialization,
                 timing,
+                may_keep_with_sole_reader: may_keep_with_sole_reader(
+                    node,
+                    materialization,
+                    entries,
+                    data,
+                    deployment.query_time_results_retained,
+                ),
             });
             result.inventory.templates.push(Some(Rc::clone(node)));
             result.inventory.graph.candidates.push(PhysicalCandidate {
@@ -263,7 +310,7 @@ pub(in crate::search) fn enumerate_candidate_configurations_before(
                             materialization,
                             entries,
                             data,
-                            deployment,
+                            deployment.query_time_results_retained,
                         )
                     })
                     .collect::<Vec<_>>();
@@ -290,7 +337,7 @@ pub(in crate::search) fn enumerate_candidate_configurations_before(
                             materialization,
                             entries,
                             data,
-                            deployment,
+                            deployment.query_time_results_retained,
                         ) {
                             for &left_output in &query_outputs[left] {
                                 for &right_output in &query_outputs[right] {
@@ -483,6 +530,33 @@ pub(in crate::search) fn enumerate_candidate_configurations_before(
     )
 }
 
+/// Test fixtures build configurations by hand; this fills each one's
+/// [`CandidateConfiguration::may_keep_with_sole_reader`] from its template as
+/// [`enumerate_candidate_configurations_before`] does.
+#[cfg(test)]
+pub(in crate::search) fn fill_may_keep_with_sole_reader(
+    configured: &mut CandidateConfigurationInventory,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    query_time_results_retained: bool,
+) {
+    for (configuration, template) in configured
+        .configurations
+        .iter_mut()
+        .zip(&configured.inventory.templates)
+    {
+        configuration.may_keep_with_sole_reader = template.as_ref().map_or_else(Vec::new, |node| {
+            may_keep_with_sole_reader(
+                node,
+                configuration.materialization,
+                entries,
+                data,
+                query_time_results_retained,
+            )
+        });
+    }
+}
+
 fn compatible_timing(consumer_timing: ExecutionTiming, producer: &CandidateConfiguration) -> bool {
     consumer_timing == producer.timing
         || (consumer_timing == ExecutionTiming::QueryTime
@@ -495,11 +569,15 @@ fn summary_mode_allowed(
     mode: Materialization,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
-    deployment: &DeploymentCapabilities,
+    query_time_results_retained: bool,
 ) -> bool {
-    let Ok(eligibility) =
-        summary_materialization_eligibility(node, readers, entries, data, deployment)
-    else {
+    let Ok(eligibility) = summary_materialization_eligibility(
+        node,
+        readers,
+        entries,
+        data,
+        query_time_results_retained,
+    ) else {
         return false;
     };
     eligibility.range_compatibility.is_ok()
@@ -519,9 +597,10 @@ mod tests {
     use crate::search::milp::model::select_candidates;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::state_groups::expand_concrete_summary_state_groups;
+    use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
     use asap_logical_asap_optimization::pass2::memo::{DagOfLogicalMemoGroups, MemoGroupId};
     use asap_logical_asap_optimization::test_support::lower_promql;
+    use asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::QueryRoot;
@@ -560,21 +639,14 @@ mod tests {
             .collect::<Vec<_>>();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let outputs = (0..2)
-            .map(|query| {
-                MemoGroupId(
-                    initial
-                        .groups
-                        .iter()
-                        .position(|group| group.roots_of.contains(&query))
-                        .unwrap() as u32,
-                )
-            })
+            .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect::<Vec<_>>();
         let candidates = generate_per_computation_candidates(roots).unwrap();
-        let memo =
-            expand_concrete_summary_state_groups(try_populate_pass1(initial, &candidates).unwrap())
-                .unwrap()
-                .memo;
+        let memo = sharing_rules_and_shared_state_groups(
+            try_populate_pass1(initial, &candidates).unwrap(),
+            PaneWidthDomain::Complete,
+        )
+        .unwrap();
         let source = build_candidate_inventory(&memo, &outputs, |_| Ok(7.0)).unwrap();
         let entries = queries
             .iter()
@@ -828,7 +900,7 @@ mod tests {
             &original_roots,
             &entries,
             &data,
-            &deployment,
+            deployment.query_time_results_retained,
         )
         .unwrap();
         physical.physical.dag.validate().unwrap();

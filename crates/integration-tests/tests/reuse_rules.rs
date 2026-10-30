@@ -20,7 +20,7 @@ use asap_integration_tests::planning::{
 use asap_logical_asap_optimization::pass2::memo::candidates::{
     CandidateMemo, OriginOfCandidateForMemoGroup,
 };
-use asap_plan_selection::PlanningModels;
+use asap_logical_asap_optimization::pass2::memo::{root_groups, MemoGroupId};
 use asap_types::ir::physical_export::compile_physical_asap_dag;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{
@@ -167,12 +167,14 @@ fn candidates_of<'a>(
     memo: &'a CandidateMemo,
     origins: &'a [OriginOfCandidateForMemoGroup],
 ) -> impl Iterator<Item = (usize, &'a Rc<OperatorNode>)> + 'a {
+    let root_groups = root_groups(&memo.query_roots);
     memo.candidates
         .iter()
         .enumerate()
-        .filter(|(group, _)| {
+        .filter(move |(group, _)| {
+            let is_root = root_groups.contains(&MemoGroupId(*group as u32));
             let group = &memo.groups[*group];
-            !group.roots_of.is_empty()
+            is_root
                 || matches!(
                     group.logical_node.non_asap(),
                     Some(NonASAPOp::Aggregate { .. })
@@ -369,7 +371,7 @@ fn execute_implemented(node: &Rc<OperatorNode>, entry: &QueryWorkloadEntry) -> V
         &[QueryRoot::Operator(Rc::clone(node))],
         std::slice::from_ref(entry),
         &data(),
-        PlanningModels::builtin().deployment_capabilities,
+        false,
     )
     .expect("Stage 2 implements the candidate");
     match &plans[0].roots[0] {
@@ -426,7 +428,7 @@ fn reuse_answers_alike_in(
         ],
     ) {
         if memo.groups[group]
-            .queries
+            .reached_by_queries()
             .iter()
             .any(|&q| q >= first_approximate_query)
         {
@@ -485,7 +487,7 @@ fn execute_plan(
         &roots,
         entries,
         &data(),
-        PlanningModels::builtin().deployment_capabilities,
+        false,
     )
     .expect("Stage 2 implements the plan");
     match &plans[0].roots[q] {
@@ -522,8 +524,8 @@ fn a_rollup_over_a_shared_summary_candidate_answers_as_without_it() {
         .groups
         .iter()
         .find(|group| {
-            group.queries.len() > 1
-                && group.queries.iter().all(|&q| q >= 2)
+            group.reached_by_queries().len() > 1
+                && group.reached_by_queries().iter().all(|&q| q >= 2)
                 && matches!(group.logical_node.asap(), Some(ASAPOp::SummaryAgg { .. }))
         })
         .map(|group| Rc::clone(&group.logical_node))
@@ -535,7 +537,7 @@ fn a_rollup_over_a_shared_summary_candidate_answers_as_without_it() {
             memo.candidates
                 .iter()
                 .enumerate()
-                .filter(|(group, _)| memo.groups[*group].queries == [q])
+                .filter(|(group, _)| memo.groups[*group].reached_by_queries() == [q])
                 .flat_map(|(group, candidates)| {
                     candidates
                         .iter()
@@ -554,7 +556,7 @@ fn a_rollup_over_a_shared_summary_candidate_answers_as_without_it() {
     let without = compose_memo_plan(&memo, queries.len(), &sharing);
     let (group, index) = choices(&memo, &[OriginOfCandidateForMemoGroup::Rollup])
         .into_iter()
-        .find(|(group, _)| memo.groups[*group].queries == [0])
+        .find(|(group, _)| memo.groups[*group].reached_by_queries() == [0])
         .expect("a rollup of the coarse sum");
     sharing.insert(group, index);
     let with = compose_memo_plan(&memo, queries.len(), &sharing);
