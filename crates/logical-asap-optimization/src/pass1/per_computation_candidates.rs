@@ -123,14 +123,14 @@ use asap_types::physical::Materialization;
 use thiserror::Error;
 
 use asap_accuracy::composition::parse_raw_data_samples_sign_statistic;
-use asap_accuracy::metric_meets;
 use asap_accuracy::propagation::{
     approximate_inputs, bind_guarantees, raw_data_samples_of_metric, root_guarantee,
     with_guarantees,
 };
 use asap_accuracy::sizing::{accuracy_budget, sized, sizing_target, sketch_statistic};
+use asap_accuracy::AccuracyModel;
 use asap_types::ir::properties::AccuracyGuarantee;
-use asap_types::workload::bounds::declared_non_negative;
+use asap_types::workload::bounds::{declared_non_negative, series_read, values_per_result};
 use asap_types::workload::DataWorkload;
 
 use crate::deployment_capabilities::{summary_supported, SupportedSummary};
@@ -537,11 +537,18 @@ impl PerComputationCandidates {
     /// whose root reaches the target's aggregate,
     /// [`output_can_meet_target`] says no: the query's output, composed
     /// with that summary and every other target exact, has no error bound
-    /// that can meet the query's target (`query_targets[q]`) at any size.
-    /// Every other target exact is the most favorable combination: an
-    /// approximate input never adds a guarantee. A summary some query can
-    /// use is kept, even when another query reaching the group cannot; plan
-    /// selection rejects it for that query. Exact candidates are never
+    /// that can meet the query's target (`query_targets[q]`) at any size,
+    /// as `model` judges metrics. Every other target exact is the most
+    /// favorable combination: an approximate input never adds a guarantee.
+    /// A summary some query can use is kept, even when another query
+    /// reaching the group cannot; plan selection rejects it for that query.
+    ///
+    /// Pass 1 cannot see Pass 2's reuse of one group's summary by another
+    /// group (rollup, window rollup, finer-aggregate reuse, top-k reuse), so
+    /// a summary is also kept whenever another target, over another
+    /// aggregate reading one of the same sources, offers the same family:
+    /// Pass 2 may build that target's state from this one. This keeps more
+    /// than those rules' preconditions need. Exact candidates are never
     /// pruned, and with every fused summary pruned the fusion is not
     /// offered. A summary whose composition fails is kept.
     ///
@@ -551,6 +558,7 @@ impl PerComputationCandidates {
         mut self,
         query_targets: &[AccuracyTarget],
         data: &DataWorkload,
+        model: &dyn AccuracyModel,
     ) -> Self {
         // The aggregates each query's root reaches.
         let reached: Vec<HashSet<*const OperatorNode>> = self
@@ -565,6 +573,33 @@ impl PerComputationCandidates {
                     .collect()
             })
             .collect();
+        // Each target's sources, and every family it offers.
+        let sources: Vec<Vec<Source>> = self
+            .targets
+            .iter()
+            .map(|target| sources_read(self.aggregate(target)))
+            .collect();
+        let families = |target: &ComputationTarget| -> Vec<SketchAlgorithm> {
+            (0..target.choice_count())
+                .filter_map(|choice| match target.computation_for(choice) {
+                    Some((HowToComputeAggregateMeasure::Summary(family), _)) => Some(*family),
+                    _ => None,
+                })
+                .collect()
+        };
+        let offered: Vec<Vec<SketchAlgorithm>> = self.targets.iter().map(families).collect();
+        // Whether Pass 2 may reuse target `index`'s `family` for another
+        // target's aggregate.
+        let reusable = |index: usize, family: &SketchAlgorithm| {
+            let aggregate = self.targets[index].aggregate_group;
+            self.targets.iter().enumerate().any(|(other, target)| {
+                target.aggregate_group != aggregate
+                    && offered[other].contains(family)
+                    && sources[other]
+                        .iter()
+                        .any(|source| sources[index].contains(source))
+            })
+        };
         let mut unusable: Vec<(usize, usize)> = Vec::new();
         for (index, target) in self.targets.iter().enumerate() {
             let aggregate = Rc::as_ptr(self.aggregate(target));
@@ -576,11 +611,14 @@ impl PerComputationCandidates {
             }
             let roots: Vec<QueryRoot> = queries.iter().map(|&q| self.roots[q].clone()).collect();
             for choice in 0..target.choice_count() {
-                let Some((HowToComputeAggregateMeasure::Summary(_), _)) =
+                let Some((HowToComputeAggregateMeasure::Summary(family), _)) =
                     target.computation_for(choice)
                 else {
                     continue;
                 };
+                if reusable(index, family) {
+                    continue;
+                }
                 let mut choices = vec![0; self.targets.len()];
                 choices[index] = choice;
                 let Ok(composed) = compose_with_budget_share(&self, &roots, &choices, Some(1))
@@ -590,7 +628,7 @@ impl PerComputationCandidates {
                 if !queries
                     .iter()
                     .zip(&composed)
-                    .any(|(&q, root)| output_can_meet_target(root, &query_targets[q], data))
+                    .any(|(&q, root)| output_can_meet_target(root, &query_targets[q], data, model))
                 {
                     unusable.push((index, choice));
                 }
@@ -643,21 +681,40 @@ impl PerComputationCandidates {
     }
 }
 
+/// The sources every scan below `node` reads, each once.
+fn sources_read(node: &Rc<OperatorNode>) -> Vec<Source> {
+    let mut sources = Vec::new();
+    for node in OperatorNode::reachable(node) {
+        if let Some(NonASAPOp::Scan { source, .. }) = node.non_asap() {
+            if !sources.contains(source) {
+                sources.push(source.clone());
+            }
+        }
+    }
+    sources
+}
+
 /// Whether a query's composed output `root` can meet `target` at some size
 /// of its summaries: its guarantee is exact, or it has one in a metric
-/// `target` accepts ([`metric_meets`]; an exact target accepts only exact)
-/// whose error, and failure probability when `target` sets one, are known
-/// once the statistics Pass 1 left symbolic are bound. The sign of a
+/// `model` says can meet `target` ([`AccuracyModel::metric_can_meet`]; an
+/// exact target accepts only exact) whose error, and failure probability
+/// when `target` sets one, are known once the statistics Pass 1 left
+/// symbolic are bound and the guarantee is stated over the values the
+/// target's scope covers, as plan selection states it. The sign of a
 /// metric's samples is bound as plan selection binds it, proven only when
 /// `data` declares the metric a counter or non-negative
 /// ([`declared_non_negative`]); every other statistic (row and series
 /// counts, stream norms, distinct bounds, operand domains) is assumed
 /// bindable, so no candidate is pruned for one plan selection may bind.
-/// The scope's number of values is not checked.
+/// The number of values a whole-result target covers is `data`'s
+/// ([`values_per_result`]): when it is not bound, a per-value guarantee
+/// that may fail never meets a whole-result failure probability, whatever
+/// the size (sizing splits δ over those values).
 pub fn output_can_meet_target(
     root: &QueryRoot,
     target: &AccuracyTarget,
     data: &DataWorkload,
+    model: &dyn AccuracyModel,
 ) -> bool {
     let bind = |guarantee: &AccuracyGuarantee| {
         guarantee.bind(
@@ -677,10 +734,9 @@ pub fn output_can_meet_target(
     if guarantee.is_exact() {
         return true;
     }
-    !target.is_exact()
-        && target
-            .accuracy_metric
-            .is_none_or(|metric| metric_meets(guarantee.spec.accuracy_metric, metric))
+    let values = values_per_result(root, series_read(root, data), data);
+    let guarantee = guarantee.over_scope(target.accuracy_scope, values);
+    model.metric_can_meet(guarantee.spec.accuracy_metric, target)
         && guarantee.spec.error.evaluate().is_some()
         && (target.failure_probability.is_none()
             || guarantee.spec.failure_probability.evaluate().is_some())
@@ -4761,7 +4817,11 @@ mod tests {
             &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
         )
         .unwrap()
-        .without_summaries_no_query_can_use(&targets, data)
+        .without_summaries_no_query_can_use(
+            &targets,
+            data,
+            &asap_accuracy::BuiltinAccuracyModel,
+        )
     }
 
     /// A per-value target at ε 0.05, δ 0.01 in `metric`.
@@ -4893,5 +4953,44 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    /// A summary another aggregate over the same source also offers is
+    /// kept, though no query reading its own group can use it: Pass 2 may
+    /// build the other group's state from it (a rollup or window rollup),
+    /// which Pass 1 does not see.
+    #[test]
+    fn a_summary_pass2_may_reuse_for_another_aggregate_is_kept() {
+        let rank = target_in(AccuracyMetric::Rank);
+        let reason = PruneReason::NoErrorBoundForQueryTarget;
+        let with_other = usable_inventory(
+            &[
+                ("avg(quantile_over_time(0.99, x[5m]))", rank.clone()),
+                ("quantile_over_time(0.99, x[10m])", rank),
+            ],
+            &x_data(false),
+        );
+        let (pruned, _) = pruned_and_offered(&with_other, reason);
+        assert!(!pruned.contains(&SketchAlgorithm::Kll), "{pruned:?}");
+    }
+
+    /// A whole-result target with a failure probability over a number of
+    /// values the data does not bound cannot be met by a per-value
+    /// guarantee that may fail, whatever its size: KLL is pruned. With the
+    /// series count declared, it is kept. DDSketch's relative bound never
+    /// fails, so it is not pruned for the scope (only for the metric under
+    /// a rank target).
+    #[test]
+    fn a_whole_result_target_over_unbound_values_prunes_a_failing_guarantee() {
+        let whole = target_in(AccuracyMetric::Rank)
+            .accuracy_scope(asap_types::ir::properties::AccuracyScope::WholeResult);
+        let query = "quantile_over_time(0.99, x[5m])";
+        let reason = PruneReason::NoErrorBoundForQueryTarget;
+        let unbound = usable_inventory(&[(query, whole.clone())], &x_data(false));
+        let (pruned, _) = pruned_and_offered(&unbound, reason);
+        assert!(pruned.contains(&SketchAlgorithm::Kll), "{pruned:?}");
+        let bound = usable_inventory(&[(query, whole)], &x_data(false).with_series_count(10_000));
+        let (pruned, offered) = pruned_and_offered(&bound, reason);
+        assert!(offered.contains(&SketchAlgorithm::Kll), "{pruned:?}");
     }
 }

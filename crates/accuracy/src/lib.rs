@@ -84,7 +84,7 @@ pub(crate) fn satisfies(guarantee: &AccuracyGuarantee, target: &AccuracyTarget) 
 /// error has no distribution-free value error), which the default model
 /// does not make: it does not satisfy. The scope is compared separately
 /// ([`scope_meets`]).
-pub fn metric_meets(guarantee: AccuracyMetric, target: AccuracyMetric) -> bool {
+pub(crate) fn metric_meets(guarantee: AccuracyMetric, target: AccuracyMetric) -> bool {
     guarantee == target
         || (guarantee == AccuracyMetric::ABSOLUTE_STREAM_L2
             && target == AccuracyMetric::ABSOLUTE_STREAM_L1)

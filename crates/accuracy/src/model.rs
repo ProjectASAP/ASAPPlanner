@@ -11,7 +11,7 @@
 //! guarantee says.
 
 use crate::OperandDomain;
-use asap_types::ir::properties::{AccuracyGuarantee, AccuracyTarget};
+use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric, AccuracyTarget};
 use asap_types::ir::{OperatorNode, QueryRoot};
 
 /// The deployment's accuracy decisions in plan selection: whether a
@@ -66,6 +66,20 @@ pub trait AccuracyModel {
     /// is `true`, which keeps every such candidate.
     fn may_accept_regardless_of_guarantee(&self) -> bool {
         true
+    }
+
+    /// Whether a guarantee stated in `metric` can meet `target` with some
+    /// error bound and failure probability, however small: Pass 1 prunes a
+    /// summary with which no reading query's output can. The default is
+    /// [`Self::satisfies`]'s built-in rule: an exact target accepts only an
+    /// exact output, and a target that sets a metric only a bound in that
+    /// metric (or an L2-scaled bound for an L1-scaled target). A model that
+    /// converts between metrics overrides it.
+    fn metric_can_meet(&self, metric: AccuracyMetric, target: &AccuracyTarget) -> bool {
+        !target.is_exact()
+            && target
+                .accuracy_metric
+                .is_none_or(|wanted| crate::metric_meets(metric, wanted))
     }
 }
 

@@ -226,7 +226,8 @@ pub fn run_planning(
             .iter()
             .map(|entry| entry.requirements.accuracy.clone())
             .collect();
-        per_computation = per_computation.without_summaries_no_query_can_use(&targets, data);
+        per_computation =
+            per_computation.without_summaries_no_query_can_use(&targets, data, accuracy.model);
     }
     let mut report = PlanningReport {
         time_limit_ms,

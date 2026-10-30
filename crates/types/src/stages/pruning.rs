@@ -57,9 +57,14 @@ pub enum PruneReason {
     /// (e.g. a rank error through `avg`, or a value `HAVING` above an
     /// estimate), its bound stays unknown once the data workload's
     /// declarations are applied (e.g. a relative error through `avg` over
-    /// samples not declared non-negative), or its bound is in a metric the
-    /// target does not accept. Pruned only when the deployment's accuracy
-    /// model and evidence cannot accept an output without its guarantee.
+    /// samples not declared non-negative), its bound is in a metric the
+    /// target does not accept (the deployment's accuracy model decides), or
+    /// its failure probability is per value and the target's is over a
+    /// whole result whose number of values the data does not bound. Kept
+    /// when another aggregate over the same source offers the same family,
+    /// which Pass 2 may build from it. Pruned only when the deployment's
+    /// accuracy model and evidence cannot accept an output without its
+    /// guarantee.
     NoErrorBoundForQueryTarget,
     /// Stage 2: the executor cannot run its operator node, an exact
     /// per-entity `Aggregate` (a per-series range reduction over raw data
