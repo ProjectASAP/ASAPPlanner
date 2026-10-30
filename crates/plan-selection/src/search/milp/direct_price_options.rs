@@ -28,13 +28,14 @@ pub(crate) struct JointPriceProfile {
 
 use super::direct_cost::DirectCostProfile;
 use super::model::{CandidateProposal, CandidateSolveMetrics, ObservedAssignment};
+use crate::search::candidates::dag::*;
 use asap_types::stages::*;
 use good_lp::{constraint, variable, Constraint, Expression, ProblemVariables, Variable};
 
 /// Internal option nodes share an original physical identity. At most one may
 /// activate, so two readers cannot obtain incompatible views of one producer.
 pub(super) struct PriceOptionProjection<'a> {
-    graph: &'a CandidateDependencyGraph,
+    graph: &'a DagOfPhysicalCandidatesWithCosts,
     origins: Vec<PhysicalCandidateId>,
     options: Vec<Vec<PhysicalCandidateId>>,
     observations: &'a [ObservedAssignment],
@@ -219,7 +220,7 @@ impl PriceOptionProjection<'_> {
 }
 
 pub(crate) fn solve_joint_price_proposal_with_metrics(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     observations: &[ObservedAssignment],
     remaining_seconds: Option<f64>,
     metrics: &mut CandidateSolveMetrics,
@@ -243,7 +244,7 @@ pub(crate) fn solve_joint_price_proposal_with_metrics(
         range_contexts: Vec::new(),
         query_spans: &profile.query_range_spans_ms,
     };
-    let mut expanded = CandidateDependencyGraph::default();
+    let mut expanded = DagOfPhysicalCandidatesWithCosts::default();
     let mut nodes = Vec::new();
     for (id, options) in profile.candidates.iter().enumerate() {
         let mut ids = Vec::new();
@@ -251,7 +252,7 @@ pub(crate) fn solve_joint_price_proposal_with_metrics(
             ids.push(PhysicalCandidateId(nodes.len()));
             projection.origins.push(PhysicalCandidateId(id));
             nodes.push(option.profile.clone());
-            expanded.candidates.push(PhysicalCandidate {
+            expanded.candidates.push(PhysicalCandidateWithCost {
                 producer_requirements: Vec::new(),
                 ..graph.candidates[id].clone()
             });
@@ -466,11 +467,9 @@ pub(crate) fn solve_joint_price_proposal_with_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::stages::MemoGroupId;
 
-    fn candidate(inputs: &[usize]) -> PhysicalCandidate {
-        PhysicalCandidate {
-            group: MemoGroupId(0),
+    fn candidate(inputs: &[usize]) -> PhysicalCandidateWithCost {
+        PhysicalCandidateWithCost {
             local_cost: 0.0,
             producer_requirements: if inputs.is_empty() {
                 vec![]
@@ -508,8 +507,8 @@ mod tests {
                 .collect(),
         }
     }
-    fn fixture() -> (CandidateDependencyGraph, JointPriceProfile) {
-        let graph = CandidateDependencyGraph {
+    fn fixture() -> (DagOfPhysicalCandidatesWithCosts, JointPriceProfile) {
+        let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![
                 candidate(&[]),
                 candidate(&[]),
@@ -654,7 +653,7 @@ mod tests {
         consumer
             .producer_requirements
             .push(consumer.producer_requirements[0].clone());
-        let graph = CandidateDependencyGraph {
+        let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![candidate(&[]), candidate(&[]), consumer],
             query_roots: vec![QueryRootCandidates {
                 compatible_candidates: vec![PhysicalCandidateId(2)],

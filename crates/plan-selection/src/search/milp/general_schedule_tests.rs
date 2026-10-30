@@ -27,9 +27,8 @@ fn fixed(interval: u32, evaluations: u64) -> QueryWorkloadEntry {
         evaluations,
     )
 }
-fn node(id: usize, input: Option<usize>) -> PhysicalCandidate {
-    PhysicalCandidate {
-        group: asap_types::stages::MemoGroupId(id as u32),
+fn node(input: Option<usize>) -> PhysicalCandidateWithCost {
+    PhysicalCandidateWithCost {
         local_cost: 0.0,
         producer_requirements: input
             .into_iter()
@@ -50,9 +49,9 @@ fn check_cost(
         assert!((actual - expected).abs() < 1e-12);
     }
     let schedule = general;
-    let mut candidates = vec![node(0, None), node(1, Some(0))];
-    candidates.extend((0..entries.len()).map(|q| node(q + 2, Some(1))));
-    let graph = CandidateDependencyGraph {
+    let mut candidates = vec![node(None), node(Some(0))];
+    candidates.extend((0..entries.len()).map(|_| node(Some(1))));
+    let graph = DagOfPhysicalCandidatesWithCosts {
         candidates,
         query_roots: (0..entries.len())
             .map(|q| QueryRootCandidates {
@@ -180,13 +179,8 @@ fn zero_rate_readers_preserve_materialized_and_unmaterialized_lifetimes() {
             })
             .collect();
         let general = QueryScheduleRates::new(&entries, 60.0, None).unwrap();
-        let graph = CandidateDependencyGraph {
-            candidates: vec![
-                node(0, None),
-                node(1, Some(0)),
-                node(2, Some(1)),
-                node(3, Some(1)),
-            ],
+        let graph = DagOfPhysicalCandidatesWithCosts {
+            candidates: vec![node(None), node(Some(0)), node(Some(1)), node(Some(1))],
             query_roots: vec![
                 QueryRootCandidates {
                     compatible_candidates: vec![PhysicalCandidateId(2)],

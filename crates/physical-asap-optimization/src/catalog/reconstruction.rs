@@ -8,10 +8,7 @@ use std::rc::Rc;
 use asap_accuracy::propagation::recompose_guarantees;
 use asap_types::ir::{OperatorNode, QueryRoot};
 
-use asap_types::stages::{
-    validate_selected_graph, CandidateDependencyGraph, CandidateOperatorTemplates,
-    PhysicalCandidateId, SelectedCandidateGraph,
-};
+use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, SelectedCandidateGraph};
 
 /// Enumerate in exactly the traversal order used when rebinding. `children()`
 /// puts direct children before scalar references; `map_children` follows fields.
@@ -58,18 +55,20 @@ pub struct ReconstructedCandidates {
     pub nodes_by_candidate: Vec<Option<Rc<OperatorNode>>>,
 }
 
+/// The selected candidates of `physical` rebuilt over their selected
+/// suppliers, with guarantees recomposed. Checks the selection's structure,
+/// not its cost.
 pub fn reconstruct_selected_candidates(
-    graph: &CandidateDependencyGraph,
+    physical: &PhysicalASAPMemoCandidates,
     selected: &SelectedCandidateGraph,
-    templates: &CandidateOperatorTemplates,
 ) -> Result<ReconstructedCandidates, String> {
-    graph.validate().map_err(|e| e.to_string())?;
-    validate_selected_graph(graph, selected)?;
-    let count = graph.candidates.len();
-    let mut inputs = graph
+    super::validate_candidates(physical)?;
+    super::validate_selected_graph(physical, selected)?;
+    let count = physical.candidates.len();
+    let mut inputs = physical
         .candidates
         .iter()
-        .map(|candidate| vec![None; candidate.producer_requirements.len()])
+        .map(|candidate| vec![None; candidate.supplier_candidates_per_input.len()])
         .collect::<Vec<_>>();
     let mut consumers = vec![Vec::new(); count];
     for connection in &selected.connections {
@@ -79,10 +78,7 @@ pub fn reconstruct_selected_candidates(
     let mut remaining = inputs.iter().map(Vec::len).collect::<Vec<_>>();
     let mut ready = Vec::new();
     for &PhysicalCandidateId(id) in &selected.selected_candidates {
-        let template = templates
-            .get(id)
-            .and_then(Option::as_ref)
-            .ok_or_else(|| format!("candidate {id} has no operator template"))?;
+        let template = physical.physical_node(PhysicalCandidateId(id));
         if template.children().len() != inputs[id].len() {
             return Err(format!(
                 "candidate {id} template inputs do not match producer requirements"
@@ -94,7 +90,7 @@ pub fn reconstruct_selected_candidates(
     }
     let mut rebuilt: Vec<Option<Rc<OperatorNode>>> = vec![None; count];
     while let Some(id) = ready.pop() {
-        let template = templates[id].as_ref().unwrap();
+        let template = physical.physical_node(PhysicalCandidateId(id));
         let expected = ordered_inputs(template);
         let mut producers = Vec::with_capacity(inputs[id].len());
         for (position, producer) in inputs[id].iter().enumerate() {
@@ -128,7 +124,7 @@ pub fn reconstruct_selected_candidates(
             }
         }
     }
-    let mut roots = vec![None; graph.query_roots.len()];
+    let mut roots = vec![None; physical.output_reference_count()];
     for root in &selected.query_roots {
         roots[root.query_root] = Some(QueryRoot::Operator(Rc::clone(
             rebuilt[root.candidate.0].as_ref().unwrap(),

@@ -2,10 +2,8 @@
 use super::*;
 use asap_logical_asap_optimization::test_support::lower_promql;
 use asap_types::ir::{properties::AccuracyTarget, OperatorNode};
-use asap_types::stages::CandidateConfiguration;
-use asap_types::stages::CandidateInventory;
-use asap_types::stages::MemoGroupId;
-use asap_types::stages::*;
+
+use crate::search::candidates::dag::*;
 use asap_types::workload::{
     DataWorkload, Predictability, Query, QueryRequirements, QueryWorkloadEntry, RepetitionInterval,
 };
@@ -13,68 +11,44 @@ use std::rc::Rc;
 
 fn append(
     node: &Rc<OperatorNode>,
-    inventory: &mut CandidateConfigurationInventory,
+    inventory: &mut PhysicalCandidatesWithCosts,
 ) -> PhysicalCandidateId {
     // Exact fixture expressions can be interned safely; repeated operands must
     // share one producer while keeping their two ordered input positions.
-    if let Some(id) = inventory.inventory.templates.iter().position(|known| {
-        known
-            .as_ref()
-            .is_some_and(|known| known.as_ref() == node.as_ref())
-    }) {
+    if let Some(id) = (0..inventory.physical.candidates.len())
+        .position(|known| inventory.node(known).as_ref() == node.as_ref())
+    {
         return PhysicalCandidateId(id);
     }
     let mut inputs = Vec::new();
     node.operator
         .map_children(|child| inputs.push(append(child, inventory)));
-    let id = PhysicalCandidateId(inventory.configurations.len());
-    inventory
-        .inventory
-        .graph
-        .candidates
-        .push(PhysicalCandidate {
-            group: MemoGroupId(id.0 as u32),
-            local_cost: 0.0,
-            producer_requirements: inputs
-                .into_iter()
-                .map(|producer| ProducerRequirement {
-                    compatible_producers: vec![producer].into(),
-                })
-                .collect(),
-        });
-    inventory.inventory.templates.push(Some(node.clone()));
-    inventory.configurations.push(CandidateConfiguration {
-        may_keep_with_sole_reader: Vec::new(),
-        source_candidate: id,
-        materialization: Materialization::NotMaterialized,
-        timing: ExecutionTiming::QueryTime,
-    });
-    id
+    inventory.push_for_tests(
+        node.clone(),
+        ExecutionTiming::QueryTime,
+        Materialization::NotMaterialized,
+        0.0,
+        inputs
+            .into_iter()
+            .map(|producer| ProducerRequirement {
+                compatible_producers: vec![producer].into(),
+            })
+            .collect(),
+    )
 }
 
 #[test]
 fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
     for query in ["m + n", "m + m", "m or n"] {
         let logical = lower_promql(query, AccuracyTarget::exact());
-        let mut configured = CandidateConfigurationInventory {
-            inventory: CandidateInventory {
-                graph: Default::default(),
-                templates: vec![],
-                group_candidates: vec![],
-            },
-            configurations: vec![],
-        };
+        let mut configured = PhysicalCandidatesWithCosts::empty_for_tests();
         let root = append(&logical, &mut configured);
-        configured
-            .inventory
-            .graph
-            .query_roots
-            .push(QueryRootCandidates {
-                compatible_candidates: vec![root],
-            });
+        configured.dag.query_roots.push(QueryRootCandidates {
+            compatible_candidates: vec![root],
+        });
+        configured.sync_physical_for_tests();
         assert!(configured
-            .inventory
-            .graph
+            .dag
             .candidates
             .iter()
             .any(|candidate| candidate.producer_requirements.len() == 2));
@@ -115,7 +89,7 @@ fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
         );
         let proposal =
             crate::search::milp::direct_price_options::solve_joint_price_proposal_with_metrics(
-                &configured.inventory.graph,
+                &configured.dag,
                 &[],
                 None,
                 &mut Default::default(),
@@ -145,8 +119,7 @@ fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
         );
         if query == "m + m" {
             let binary = configured
-                .inventory
-                .graph
+                .dag
                 .candidates
                 .iter()
                 .enumerate()
@@ -222,22 +195,12 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
     let QueryRoot::Operator(root) = &sized[0] else {
         panic!("operator root")
     };
-    let mut configured = CandidateConfigurationInventory {
-        inventory: CandidateInventory {
-            graph: Default::default(),
-            templates: vec![],
-            group_candidates: vec![],
-        },
-        configurations: vec![],
-    };
+    let mut configured = PhysicalCandidatesWithCosts::empty_for_tests();
     let id = append(root, &mut configured);
-    configured
-        .inventory
-        .graph
-        .query_roots
-        .push(QueryRootCandidates {
-            compatible_candidates: vec![id],
-        });
+    configured.dag.query_roots.push(QueryRootCandidates {
+        compatible_candidates: vec![id],
+    });
+    configured.sync_physical_for_tests();
     let original = vec![QueryRoot::Operator(original)];
     let entries = vec![QueryWorkloadEntry {
         query: Query(query.into()),
@@ -270,7 +233,7 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
     );
     let proposal =
         crate::search::milp::direct_price_options::solve_joint_price_proposal_with_metrics(
-            &configured.inventory.graph,
+            &configured.dag,
             &[],
             None,
             &mut Default::default(),

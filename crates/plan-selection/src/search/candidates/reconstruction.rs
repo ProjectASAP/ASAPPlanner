@@ -2,37 +2,55 @@
 //! (`asap_physical_asap_optimization::catalog`) that select with the solver.
 use std::rc::Rc;
 
+use crate::search::candidates::dag::{
+    DagOfPhysicalCandidatesWithCosts, PhysicalCandidatesWithCosts,
+};
 use asap_physical_asap_optimization::catalog::reconstruct_selected_candidates;
 use asap_physical_asap_optimization::catalog::test_support::{
     ordered_inputs, output_contract_satisfied, paired_node_identities,
 };
 use asap_types::ir::OperatorNode;
-use asap_types::stages::{
-    CandidateDependencyGraph, CandidateOperatorTemplates, PhysicalCandidateId,
-    SelectedCandidateGraph,
-};
+use asap_types::stages::{PhysicalCandidateId, SelectedCandidateGraph};
 
-/// Operator output references in `graph.query_roots` order. A caller with scalar
-/// roots must map these references back into its original scalar expressions
-/// (and preserve literal-only roots); an output reference is not a whole query.
-/// Templates' timing/materialization are deliberately discarded: Stage 2 must
-/// apply the selected materialization policy to the reconstructed connections.
+/// Operator output references in `graph.query_roots` order, candidate `i`
+/// running `nodes[i]`, after Stage 3 validated `selected` against `graph`. A
+/// caller with scalar roots must map these references back into its original
+/// scalar expressions (and preserve literal-only roots); an output reference
+/// is not a whole query. Nodes' timing/materialization are deliberately
+/// discarded: Stage 2 must apply the selected materialization policy to the
+/// reconstructed connections.
 #[cfg(test)]
 pub(in crate::search) fn reconstruct_candidate_outputs(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     selected: &SelectedCandidateGraph,
-    templates: &CandidateOperatorTemplates,
+    nodes: &[Rc<OperatorNode>],
 ) -> Result<Vec<Rc<OperatorNode>>, String> {
-    Ok(reconstruct_selected_candidates(graph, selected, templates)?.outputs)
+    use asap_types::ir::properties::ExecutionTiming;
+    use asap_types::physical::Materialization;
+    let configured = PhysicalCandidatesWithCosts::from_dag_for_tests(
+        graph.clone(),
+        nodes
+            .iter()
+            .map(|node| {
+                (
+                    Rc::clone(node),
+                    (ExecutionTiming::QueryTime, Materialization::NotMaterialized),
+                )
+            })
+            .collect(),
+    );
+    configured.validate_selected(selected)?;
+    Ok(reconstruct_selected_candidates(&configured.physical, selected)?.outputs)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::candidates::dag::{
+        PhysicalCandidateWithCost, ProducerRequirement, QueryRootCandidates,
+    };
     use crate::search::milp::model::select_candidates;
     use asap_logical_asap_optimization::test_support::lower_promql;
-    use asap_types::stages::MemoGroupId;
-    use asap_types::stages::{PhysicalCandidate, ProducerRequirement, QueryRootCandidates};
 
     // Physical identity is reflexive for NaN, without equating different
     // non-finite quantile parameters that JSON would serialize as null.
@@ -70,16 +88,15 @@ mod tests {
         assert!(output_contract_satisfied(&expected, &supplied).unwrap());
     }
 
-    fn catalog(root: Rc<OperatorNode>) -> (CandidateDependencyGraph, CandidateOperatorTemplates) {
+    fn catalog(
+        root: Rc<OperatorNode>,
+    ) -> (DagOfPhysicalCandidatesWithCosts, Vec<Rc<OperatorNode>>) {
         fn add(
             node: &Rc<OperatorNode>,
-            graph: &mut CandidateDependencyGraph,
-            templates: &mut CandidateOperatorTemplates,
+            graph: &mut DagOfPhysicalCandidatesWithCosts,
+            templates: &mut Vec<Rc<OperatorNode>>,
         ) -> PhysicalCandidateId {
-            if let Some(id) = templates
-                .iter()
-                .position(|t| t.as_ref().is_some_and(|t| Rc::ptr_eq(t, node)))
-            {
+            if let Some(id) = templates.iter().position(|t| Rc::ptr_eq(t, node)) {
                 return PhysicalCandidateId(id);
             }
             let producer_requirements = ordered_inputs(node)
@@ -89,15 +106,14 @@ mod tests {
                 })
                 .collect();
             let id = templates.len();
-            templates.push(Some(Rc::clone(node)));
-            graph.candidates.push(PhysicalCandidate {
-                group: MemoGroupId(id as u32),
+            templates.push(Rc::clone(node));
+            graph.candidates.push(PhysicalCandidateWithCost {
                 local_cost: 1.0,
                 producer_requirements,
             });
             PhysicalCandidateId(id)
         }
-        let mut graph = CandidateDependencyGraph::default();
+        let mut graph = DagOfPhysicalCandidatesWithCosts::default();
         let mut templates = Vec::new();
         let root = add(&root, &mut graph, &mut templates);
         graph.query_roots.push(QueryRootCandidates {
@@ -146,12 +162,12 @@ mod tests {
         graph.candidates.push(graph.candidates[first.0].clone());
         templates.push(templates[first.0].clone());
         // Both template positions name the same expected child. Connections may differ.
-        let template = templates[root].as_ref().unwrap();
+        let template = &templates[root];
         let child = Rc::clone(template.children()[0]);
-        templates[root] = Some(Rc::new(OperatorNode::with_schema(
+        templates[root] = Rc::new(OperatorNode::with_schema(
             template.operator.map_children(|_| Rc::clone(&child)),
             template.schema.clone(),
-        )));
+        ));
         graph.candidates[root].producer_requirements[0].compatible_producers = vec![first].into();
         graph.candidates[root].producer_requirements[1].compatible_producers =
             vec![duplicate].into();
@@ -161,29 +177,24 @@ mod tests {
         assert!(!Rc::ptr_eq(children[0], children[1]));
     }
 
-    // Invalid template metadata must fail before returning reconstructed roots.
+    // Invalid node metadata must fail before returning reconstructed roots.
     #[test]
-    fn missing_template_and_incompatible_input_schema_are_rejected() {
+    fn incompatible_input_schema_is_rejected() {
         let (graph, mut templates) = catalog(lower_promql(
             "sum(metric)",
             asap_types::ir::properties::AccuracyTarget::exact(),
         ));
         let selected = select_candidates(&graph).unwrap().unwrap();
-        let saved = templates[0].take();
-        assert!(reconstruct_candidate_outputs(&graph, &selected, &templates)
-            .unwrap_err()
-            .contains("no operator template"));
-        templates[0] = saved;
         let root = templates.len() - 1;
-        let template = templates[root].as_ref().unwrap();
+        let template = &templates[root];
         let wrong = lower_promql(
             "sum(other)",
             asap_types::ir::properties::AccuracyTarget::exact(),
         );
-        templates[root] = Some(Rc::new(OperatorNode::with_schema(
+        templates[root] = Rc::new(OperatorNode::with_schema(
             template.operator.map_children(|_| Rc::clone(&wrong)),
             template.schema.clone(),
-        )));
+        ));
         assert!(reconstruct_candidate_outputs(&graph, &selected, &templates)
             .unwrap_err()
             .contains("incompatible schema"));
@@ -227,11 +238,7 @@ mod tests {
             PhysicalCandidateId(
                 templates
                     .iter()
-                    .position(|template| {
-                        template
-                            .as_ref()
-                            .is_some_and(|template| Rc::ptr_eq(template, node))
-                    })
+                    .position(|template| Rc::ptr_eq(template, node))
                     .unwrap(),
             )
         };

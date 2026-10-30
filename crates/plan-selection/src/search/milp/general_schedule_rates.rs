@@ -1,8 +1,8 @@
 //! Exact finite demand atoms for the evaluator's recurrence accounting policy.
 //! Different fixed intervals add; an unknown phase joins the first selected
 //! known phase, estimated rates add, and nonrepeating demand takes a maximum.
+use crate::search::candidates::dag::CandidateSelectionError;
 use asap_cost::execution_demand::evaluation_rate;
-use asap_types::stages::CandidateSelectionError;
 use asap_types::workload::{QueryRecurrence, QueryWorkloadEntry, RangeEvaluation, RepeatedDemand};
 use good_lp::{constraint, variable, Constraint, ProblemVariables, Variable};
 use std::collections::BTreeMap;

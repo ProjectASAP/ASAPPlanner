@@ -1,18 +1,17 @@
 //! Restricted proposals over the same finite catalog, preserving computations
 //! and producer bindings while changing one query-time materialization choice.
+use crate::search::candidates::dag::DagOfPhysicalCandidatesWithCosts;
+use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
 use asap_types::physical::Materialization;
-use asap_types::stages::CandidateConfigurationInventory;
-use asap_types::stages::{
-    CandidateDependencyGraph, PhysicalCandidateId, ReaderConstraint, SelectedCandidateGraph,
-};
+use asap_types::stages::{PhysicalCandidateId, ReaderConstraint, SelectedCandidateGraph};
 
 pub(super) fn counterparts(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     deadline: Option<std::time::Instant>,
 ) -> Vec<(PhysicalCandidateId, PhysicalCandidateId)> {
     let expired = || deadline.is_some_and(|limit| std::time::Instant::now() >= limit);
     let mut materialized = std::collections::HashMap::new();
-    for (id, configuration) in configured.configurations.iter().enumerate() {
+    for (id, configuration) in configured.physical.candidates.iter().enumerate() {
         if expired() {
             break;
         }
@@ -21,17 +20,17 @@ pub(super) fn counterparts(
             Materialization::MatAtQuery(_)
         ) {
             materialized
-                .entry((configuration.source_candidate, configuration.timing))
+                .entry((configuration.operator_node, configuration.timing))
                 .or_insert(PhysicalCandidateId(id));
         }
     }
     let mut changes = Vec::new();
-    for (from, current) in configured.configurations.iter().enumerate() {
+    for (from, current) in configured.physical.candidates.iter().enumerate() {
         if expired() {
             break;
         }
         if current.materialization == Materialization::NotMaterialized {
-            if let Some(&to) = materialized.get(&(current.source_candidate, current.timing)) {
+            if let Some(&to) = materialized.get(&(current.operator_node, current.timing)) {
                 changes.push((PhysicalCandidateId(from), to));
             }
         }
@@ -40,12 +39,12 @@ pub(super) fn counterparts(
 }
 
 pub(super) fn restrict(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     selected: &SelectedCandidateGraph,
     from: PhysicalCandidateId,
     to: PhysicalCandidateId,
     deadline: std::time::Instant,
-) -> Option<CandidateDependencyGraph> {
+) -> Option<DagOfPhysicalCandidatesWithCosts> {
     if std::time::Instant::now() >= deadline
         || !selected.selected_candidates.contains(&from)
         || selected.selected_candidates.contains(&to)
@@ -107,26 +106,26 @@ pub(super) fn restrict(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::candidates::dag::{
+        PhysicalCandidateWithCost, ProducerRequirement, QueryRootCandidates,
+    };
     use crate::search::refinement::search::{
         search_candidates_with_restricted_feedback, CandidateEvaluation, CandidateSearchLimits,
         CandidateSearchStatus,
     };
-    use asap_types::stages::MemoGroupId;
-    use asap_types::stages::{PhysicalCandidate, ProducerRequirement, QueryRootCandidates};
+
     use std::time::Duration;
 
-    fn graph(readers: usize) -> CandidateDependencyGraph {
-        let mut graph = CandidateDependencyGraph::default();
+    fn graph(readers: usize) -> DagOfPhysicalCandidatesWithCosts {
+        let mut graph = DagOfPhysicalCandidatesWithCosts::default();
         for _ in 0..2 {
-            graph.candidates.push(PhysicalCandidate {
-                group: MemoGroupId(0),
+            graph.candidates.push(PhysicalCandidateWithCost {
                 local_cost: 0.0,
                 producer_requirements: vec![],
             });
         }
         for query in 0..readers {
-            graph.candidates.push(PhysicalCandidate {
-                group: MemoGroupId(query as u32 + 1),
+            graph.candidates.push(PhysicalCandidateWithCost {
                 local_cost: 0.0,
                 producer_requirements: vec![ProducerRequirement {
                     compatible_producers: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)]

@@ -6,6 +6,8 @@ use std::time::Instant;
 
 use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 
+use crate::search::candidates::dag::CandidateSelectionError;
+use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
 use crate::search::costing::calibration::CandidateCalibration;
 use crate::search::milp::model::{
     solve_candidate_proposal_with_metrics, CandidateSolveMetrics, ObservedAssignment,
@@ -18,8 +20,7 @@ use crate::search::refinement::planner::{
 use crate::search::refinement::search::{CandidateSearchLimits, CandidateSearchStatus};
 use crate::{PlanSelector, Selection, SelectionError};
 use asap_cost::CalibrationFit;
-use asap_types::stages::CandidateConfigurationInventory;
-use asap_types::stages::{CandidateSelectionError, SelectedCandidateGraph};
+use asap_types::stages::SelectedCandidateGraph;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(in crate::search) struct ObjectiveSearchOptions {
@@ -60,7 +61,7 @@ pub(in crate::search) struct ObjectivePlanningResult {
 /// Complete-catalog calibration must finish before any calibrated plan is returned.
 #[cfg(test)]
 pub(in crate::search) fn optimize_objective_candidates(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
     limits: CandidateSearchLimits,
     calibration: CandidateCalibration,
@@ -75,7 +76,7 @@ pub(in crate::search) fn optimize_objective_candidates(
 }
 
 pub(in crate::search) fn optimize_objective_candidates_with_options(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
     limits: CandidateSearchLimits,
     calibration: CandidateCalibration,
@@ -95,9 +96,9 @@ pub(in crate::search) fn optimize_objective_candidates_with_options(
         ),
         ..*context
     };
-    let original = &configured.inventory.graph;
+    let original = &configured.dag;
     original.validate().map_err(|error| error.to_string())?;
-    if configured.configurations.len() != original.candidates.len()
+    if configured.physical.candidates.len() != original.candidates.len()
         || context.original_roots.len() != context.entries.len()
     {
         return Err("objective search configuration and query dimensions disagree".into());
@@ -411,7 +412,7 @@ mod tests {
     use std::time::Duration;
 
     fn fixture() -> (
-        CandidateConfigurationInventory,
+        PhysicalCandidatesWithCosts,
         Vec<QueryRoot>,
         Vec<QueryWorkloadEntry>,
         DataWorkload,
@@ -468,10 +469,10 @@ mod tests {
     // Independently enumerate using zero costs, then use the pre-existing
     // batch selector as the ranking and calibration reference.
     fn reference_catalog(
-        configured: &CandidateConfigurationInventory,
+        configured: &PhysicalCandidatesWithCosts,
         context: &CandidatePlanningContext<'_>,
     ) -> Vec<PhysicalWorkloadPlan> {
-        let graph = &configured.inventory.graph;
+        let graph = &configured.dag;
         let mut observations = Vec::new();
         let mut catalog = Vec::new();
         for index in 1..=256 {
@@ -813,9 +814,8 @@ mod tests {
             assert!(rejected.from_logical.starts_with("joint-logical-"));
             let rebuilt =
                 asap_physical_asap_optimization::catalog::reconstruct_selected_candidates(
-                    &configured.inventory.graph,
+                    &configured.physical,
                     &rejected.selected_graph,
-                    &configured.inventory.templates,
                 )
                 .unwrap();
             assert_eq!(rebuilt.outputs.len(), roots.len());

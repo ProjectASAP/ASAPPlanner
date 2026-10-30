@@ -20,9 +20,8 @@ fn initialized(
     }
 }
 
+use crate::search::candidates::dag::*;
 use crate::search::candidates::graph::RejectedQuerySubgraph;
-#[cfg(test)]
-use asap_types::stages::MemoGroupId;
 use asap_types::stages::*;
 use good_lp::solvers::highs::highs;
 use good_lp::solvers::{ResolutionError, SolutionStatus};
@@ -34,7 +33,7 @@ use good_lp::{
 /// variables. Activation symmetry is independent of readers. A corridor starts
 /// at a constrained producer and follows possible consumers back toward roots.
 fn required_reader_reach(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     all_outputs: bool,
     check_deadline: impl Fn() -> Result<(), CandidateSelectionError>,
 ) -> Result<Vec<Vec<bool>>, CandidateSelectionError> {
@@ -131,7 +130,7 @@ fn required_reader_reach(
 /// incumbent fallback is implied by this fixed-context core.
 #[cfg(test)]
 pub(crate) fn select_candidates(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
 ) -> Result<Option<SelectedCandidateGraph>, CandidateSelectionError> {
     let proposal = solve_candidate_proposal(graph, &[], None)?;
     proposal
@@ -187,7 +186,7 @@ pub(crate) struct CandidateSolveMetrics {
 /// Feasible stopped solves may return proposals without a certified bound.
 #[cfg(test)]
 pub(crate) fn solve_candidate_proposal(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     observations: &[ObservedAssignment],
     remaining_seconds: Option<f64>,
 ) -> Result<Option<CandidateProposal>, CandidateSelectionError> {
@@ -200,7 +199,7 @@ pub(crate) fn solve_candidate_proposal(
 }
 
 pub(crate) fn solve_candidate_proposal_with_metrics(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     observations: &[ObservedAssignment],
     remaining_seconds: Option<f64>,
     metrics: &mut CandidateSolveMetrics,
@@ -209,7 +208,7 @@ pub(crate) fn solve_candidate_proposal_with_metrics(
 }
 
 pub(crate) fn solve_direct_cost_proposal_with_metrics(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     observations: &[ObservedAssignment],
     remaining_seconds: Option<f64>,
     metrics: &mut CandidateSolveMetrics,
@@ -226,7 +225,7 @@ pub(crate) fn solve_direct_cost_proposal_with_metrics(
 }
 
 pub(super) fn validate_observations(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     observations: &[ObservedAssignment],
 ) -> Result<(), CandidateSelectionError> {
     for observation in observations {
@@ -255,7 +254,7 @@ pub(super) fn validate_observations(
 }
 
 pub(super) fn solve_with_objective(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     observations: &[ObservedAssignment],
     remaining_seconds: Option<f64>,
     metrics: &mut CandidateSolveMetrics,
@@ -950,7 +949,7 @@ fn validate_binary_value(value: f64) -> Result<(), CandidateSelectionError> {
 }
 
 fn decoded_proposal(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     selected: SelectedCandidateGraph,
     status: SolutionStatus,
     objective: f64,
@@ -975,7 +974,7 @@ mod tests {
     // A feasible stopped incumbent is usable, but its objective is not a dual bound.
     #[test]
     fn stopped_proposal_keeps_valid_graph_without_certifying_objective() {
-        let graph = dependency_graph(vec![candidate(0, 2.0, &[])], &[&[0]]);
+        let graph = dependency_graph(vec![candidate(2.0, &[])], &[&[0]]);
         let selected = select_candidates(&graph).unwrap().unwrap();
         for status in [SolutionStatus::GapLimit, SolutionStatus::TimeLimit] {
             let proposal = decoded_proposal(&graph, selected.clone(), status, 50.0).unwrap();
@@ -1004,11 +1003,11 @@ mod tests {
     fn resource_limits_price_shared_state_once_and_change_the_selected_plan() {
         let mut graph = dependency_graph(
             vec![
-                candidate(0, 8.0, &[]),
-                candidate(1, 1.0, &[&[0]]),
-                candidate(2, 1.0, &[&[0]]),
-                candidate(1, 12.0, &[]),
-                candidate(2, 12.0, &[]),
+                candidate(8.0, &[]),
+                candidate(1.0, &[&[0]]),
+                candidate(1.0, &[&[0]]),
+                candidate(12.0, &[]),
+                candidate(12.0, &[]),
             ],
             &[&[1, 3], &[2, 4]],
         );
@@ -1036,9 +1035,9 @@ mod tests {
     fn unsupported_resource_dynamic_range_is_explicitly_rejected() {
         let mut graph = dependency_graph(
             vec![
-                candidate(0, 2.0, &[]),
-                candidate(0, 1.0, &[]),
-                candidate(1, 1.0, &[]),
+                candidate(2.0, &[]),
+                candidate(1.0, &[]),
+                candidate(1.0, &[]),
             ],
             &[&[0, 1]],
         );
@@ -1058,7 +1057,7 @@ mod tests {
     #[test]
     fn activation_prefix_needs_no_reader_flow_variables() {
         let mut graph = dependency_graph(
-            vec![candidate(0, 1.0, &[]), candidate(0, 1.0, &[])],
+            vec![candidate(1.0, &[]), candidate(1.0, &[])],
             &[&[0], &[1]],
         );
         let mut plain = CandidateSolveMetrics::default();
@@ -1085,11 +1084,11 @@ mod tests {
     fn reader_legality_depends_on_selected_transitive_connections() {
         let mut graph = dependency_graph(
             vec![
-                candidate(0, 2.0, &[]),
-                candidate(0, 5.0, &[]),
-                candidate(1, 1.0, &[&[0, 1]]),
-                candidate(2, 1.0, &[&[0, 1]]),
-                candidate(3, 0.0, &[&[2]]),
+                candidate(2.0, &[]),
+                candidate(5.0, &[]),
+                candidate(1.0, &[&[0, 1]]),
+                candidate(1.0, &[&[0, 1]]),
+                candidate(0.0, &[&[2]]),
             ],
             &[&[4], &[3]],
         );
@@ -1124,7 +1123,7 @@ mod tests {
     #[test]
     fn minimum_readers_count_queries_not_output_references() {
         let mut graph = dependency_graph(
-            vec![candidate(0, 1.0, &[]), candidate(0, 5.0, &[])],
+            vec![candidate(1.0, &[]), candidate(5.0, &[])],
             &[&[0, 1], &[0, 1]],
         );
         graph
@@ -1167,7 +1166,7 @@ mod tests {
             vec![vec![0, 2]],
             vec![vec![0], vec![1, 1]],
         ] {
-            let mut graph = dependency_graph(vec![candidate(0, 1.0, &[])], &[&[0], &[0]]);
+            let mut graph = dependency_graph(vec![candidate(1.0, &[])], &[&[0], &[0]]);
             graph
                 .reader_constraints
                 .push(ReaderConstraint::MinimumQueryReaders {
@@ -1186,11 +1185,11 @@ mod tests {
     fn certified_query_cut_ignores_unrelated_queries_but_allows_repaired_input() {
         let graph = dependency_graph(
             vec![
-                candidate(0, 1.0, &[]),
-                candidate(0, 4.0, &[]),
-                candidate(1, 1.0, &[&[0, 1]]),
-                candidate(2, 1.0, &[]),
-                candidate(2, 2.0, &[]),
+                candidate(1.0, &[]),
+                candidate(4.0, &[]),
+                candidate(1.0, &[&[0, 1]]),
+                candidate(1.0, &[]),
+                candidate(2.0, &[]),
             ],
             &[&[2], &[3, 4]],
         );
@@ -1237,10 +1236,7 @@ mod tests {
 
     #[test]
     fn certified_query_cut_rejects_incomplete_or_foreign_closure() {
-        let graph = dependency_graph(
-            vec![candidate(0, 1.0, &[]), candidate(1, 1.0, &[&[0]])],
-            &[&[1]],
-        );
+        let graph = dependency_graph(vec![candidate(1.0, &[]), candidate(1.0, &[&[0]])], &[&[1]]);
         let selected = select_candidates(&graph).unwrap().unwrap();
         let mut witness = RejectedQuerySubgraph::from_query_outputs(&selected, &[0]).unwrap();
         witness.connections.clear();
@@ -1259,9 +1255,9 @@ mod tests {
     fn query_cut_contains_every_requested_scalar_output_closure() {
         let graph = dependency_graph(
             vec![
-                candidate(0, 1.0, &[]),
-                candidate(1, 1.0, &[&[0]]),
-                candidate(2, 1.0, &[]),
+                candidate(1.0, &[]),
+                candidate(1.0, &[&[0]]),
+                candidate(1.0, &[]),
             ],
             &[&[1], &[2]],
         );
@@ -1281,10 +1277,10 @@ mod tests {
         for currency_scale in [1e-6, 1.0, 1e6] {
             let graph = dependency_graph(
                 vec![
-                    candidate(0, 0.0, &[]),
-                    candidate(1, 0.0, &[&[0]]),
-                    candidate(1, 0.0, &[&[0]]),
-                    candidate(1, 16.800072 * currency_scale, &[]),
+                    candidate(0.0, &[]),
+                    candidate(0.0, &[&[0]]),
+                    candidate(0.0, &[&[0]]),
+                    candidate(16.800072 * currency_scale, &[]),
                 ],
                 &[&[1, 2, 3], &[1, 2, 3]],
             );
@@ -1328,9 +1324,9 @@ mod tests {
     fn complete_warm_start_preserves_oracle_optimum_and_reader_constraints() {
         let mut graph = dependency_graph(
             vec![
-                candidate(0, 3.0, &[]),
-                candidate(1, 1.0, &[&[0]]),
-                candidate(2, 1.0, &[&[0]]),
+                candidate(3.0, &[]),
+                candidate(1.0, &[&[0]]),
+                candidate(1.0, &[&[0]]),
             ],
             &[&[1], &[1], &[2]],
         );
@@ -1364,10 +1360,7 @@ mod tests {
     // differs; conflicting full-assignment observations also cannot seed HiGHS.
     #[test]
     fn warm_start_filters_rejections_and_uses_strongest_matching_cost() {
-        let graph = dependency_graph(
-            vec![candidate(0, 1.0, &[]), candidate(0, 2.0, &[])],
-            &[&[0, 1]],
-        );
+        let graph = dependency_graph(vec![candidate(1.0, &[]), candidate(2.0, &[])], &[&[0, 1]]);
         let selected = compare_with_oracle(&graph).unwrap();
         let mut observations = vec![
             ObservedAssignment {
@@ -1419,9 +1412,9 @@ mod tests {
     fn warm_start_checks_partial_rejection_closures() {
         let graph = dependency_graph(
             vec![
-                candidate(0, 1.0, &[]),
-                candidate(1, 1.0, &[]),
-                candidate(1, 2.0, &[]),
+                candidate(1.0, &[]),
+                candidate(1.0, &[]),
+                candidate(2.0, &[]),
             ],
             &[&[0], &[1, 2]],
         );
@@ -1456,10 +1449,10 @@ mod tests {
     fn highest_shared_materialization_matches_selected_connections() {
         let mut graph = dependency_graph(
             vec![
-                candidate(0, 1.0, &[]),
-                candidate(0, 5.0, &[]),
-                candidate(1, 1.0, &[&[0, 1]]),
-                candidate(2, 1.0, &[&[0, 1]]),
+                candidate(1.0, &[]),
+                candidate(5.0, &[]),
+                candidate(1.0, &[&[0, 1]]),
+                candidate(1.0, &[&[0, 1]]),
             ],
             &[&[2], &[2]],
         );
@@ -1485,9 +1478,8 @@ mod tests {
             .is_some());
     }
 
-    fn candidate(group: u32, cost: f64, inputs: &[&[usize]]) -> PhysicalCandidate {
-        PhysicalCandidate {
-            group: MemoGroupId(group),
+    fn candidate(cost: f64, inputs: &[&[usize]]) -> PhysicalCandidateWithCost {
+        PhysicalCandidateWithCost {
             local_cost: cost,
             producer_requirements: inputs
                 .iter()
@@ -1503,10 +1495,10 @@ mod tests {
     }
 
     fn dependency_graph(
-        candidates: Vec<PhysicalCandidate>,
+        candidates: Vec<PhysicalCandidateWithCost>,
         roots: &[&[usize]],
-    ) -> CandidateDependencyGraph {
-        CandidateDependencyGraph {
+    ) -> DagOfPhysicalCandidatesWithCosts {
+        DagOfPhysicalCandidatesWithCosts {
             candidates,
             resource_budgets: Vec::new(),
             reader_constraints: Vec::new(),
@@ -1525,7 +1517,7 @@ mod tests {
 
     /// Independent small-input oracle: enumerate roots and edges, then traverse
     /// their reachable graph. It uses DFS cycle detection, not rank constraints.
-    fn exhaustive_cost(graph: &CandidateDependencyGraph) -> Option<f64> {
+    fn exhaustive_cost(graph: &DagOfPhysicalCandidatesWithCosts) -> Option<f64> {
         let edges: Vec<_> = graph
             .candidates
             .iter()
@@ -1575,7 +1567,7 @@ mod tests {
             }
             fn visit(
                 candidate: usize,
-                graph: &CandidateDependencyGraph,
+                graph: &DagOfPhysicalCandidatesWithCosts,
                 dependencies: &[Vec<(usize, usize)>],
                 marks: &mut [u8],
             ) -> bool {
@@ -1705,7 +1697,9 @@ mod tests {
         best
     }
 
-    fn compare_with_oracle(graph: &CandidateDependencyGraph) -> Option<SelectedCandidateGraph> {
+    fn compare_with_oracle(
+        graph: &DagOfPhysicalCandidatesWithCosts,
+    ) -> Option<SelectedCandidateGraph> {
         let expected = exhaustive_cost(graph);
         let actual = select_candidates(graph).unwrap();
         match (&actual, expected) {
@@ -1723,11 +1717,11 @@ mod tests {
     fn shared_build_cost_is_owned_once() {
         let graph = dependency_graph(
             vec![
-                candidate(0, 8.0, &[]),
-                candidate(1, 1.0, &[&[0]]),
-                candidate(2, 1.0, &[&[0]]),
-                candidate(1, 9.0, &[]),
-                candidate(2, 9.0, &[]),
+                candidate(8.0, &[]),
+                candidate(1.0, &[&[0]]),
+                candidate(1.0, &[&[0]]),
+                candidate(9.0, &[]),
+                candidate(9.0, &[]),
             ],
             &[&[1, 3], &[2, 4]],
         );
@@ -1745,20 +1739,21 @@ mod tests {
     fn one_group_can_have_multiple_selected_candidates() {
         let graph = dependency_graph(
             vec![
-                candidate(0, 3.0, &[]),
-                candidate(0, 5.0, &[]),
-                candidate(1, 1.0, &[&[0]]),
-                candidate(2, 1.0, &[&[1]]),
+                candidate(3.0, &[]),
+                candidate(5.0, &[]),
+                candidate(1.0, &[&[0]]),
+                candidate(1.0, &[&[1]]),
             ],
             &[&[2], &[3]],
         );
         let selected = compare_with_oracle(&graph).unwrap();
         assert_eq!(selected.modeled_cost, 10.0);
+        // Candidates 0 and 1 are both the first group's.
         assert_eq!(
             selected
                 .selected_candidates
                 .iter()
-                .filter(|c| graph.candidates[c.0].group == MemoGroupId(0))
+                .filter(|c| c.0 < 2)
                 .count(),
             2
         );
@@ -1768,7 +1763,7 @@ mod tests {
     #[test]
     fn every_requirement_has_a_producer() {
         let graph = dependency_graph(
-            vec![candidate(0, 2.0, &[]), candidate(1, 1.0, &[&[0], &[0]])],
+            vec![candidate(2.0, &[]), candidate(1.0, &[&[0], &[0]])],
             &[&[1]],
         );
         let selected = compare_with_oracle(&graph).unwrap();
@@ -1781,7 +1776,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 1]
         );
-        let impossible = dependency_graph(vec![candidate(0, 1.0, &[&[]])], &[&[0]]);
+        let impossible = dependency_graph(vec![candidate(1.0, &[&[]])], &[&[0]]);
         assert!(compare_with_oracle(&impossible).is_none());
     }
 
@@ -1790,10 +1785,10 @@ mod tests {
     fn cycles_and_unused_nodes_are_excluded() {
         let graph = dependency_graph(
             vec![
-                candidate(0, 0.0, &[]),
-                candidate(1, 0.0, &[&[2]]),
-                candidate(2, 0.0, &[&[1]]),
-                candidate(3, 0.0, &[]),
+                candidate(0.0, &[]),
+                candidate(0.0, &[&[2]]),
+                candidate(0.0, &[&[1]]),
+                candidate(0.0, &[]),
             ],
             &[&[0]],
         );
@@ -1801,7 +1796,7 @@ mod tests {
         assert_eq!(selected.selected_candidates, vec![PhysicalCandidateId(0)]);
         let cyclic = dependency_graph(graph.candidates, &[&[1]]);
         assert!(compare_with_oracle(&cyclic).is_none());
-        let self_cycle = dependency_graph(vec![candidate(0, 0.0, &[&[0]])], &[&[0]]);
+        let self_cycle = dependency_graph(vec![candidate(0.0, &[&[0]])], &[&[0]]);
         assert!(compare_with_oracle(&self_cycle).is_none());
     }
 
@@ -1812,12 +1807,12 @@ mod tests {
             for local_cost in [0.5, 3.0, 8.0] {
                 let graph = dependency_graph(
                     vec![
-                        candidate(0, build_cost, &[]),
-                        candidate(0, 2.0, &[]),
-                        candidate(1, 0.25, &[&[0, 1]]),
-                        candidate(1, local_cost, &[]),
-                        candidate(2, 0.25, &[&[0, 1]]),
-                        candidate(2, local_cost, &[]),
+                        candidate(build_cost, &[]),
+                        candidate(2.0, &[]),
+                        candidate(0.25, &[&[0, 1]]),
+                        candidate(local_cost, &[]),
+                        candidate(0.25, &[&[0, 1]]),
+                        candidate(local_cost, &[]),
                     ],
                     &[&[2, 3], &[4, 5]],
                 );
@@ -1830,7 +1825,7 @@ mod tests {
     #[test]
     fn small_uniform_cost_units_preserve_selection() {
         let graph = dependency_graph(
-            vec![candidate(0, 3e-15, &[]), candidate(0, 1e-15, &[])],
+            vec![candidate(3e-15, &[]), candidate(1e-15, &[])],
             &[&[0, 1]],
         );
         let selected = select_candidates(&graph).unwrap().unwrap();
@@ -1843,9 +1838,9 @@ mod tests {
     fn unsupported_cost_dynamic_range_is_rejected() {
         let graph = dependency_graph(
             vec![
-                candidate(0, 1e300, &[]),
-                candidate(1, 1e-300, &[]),
-                candidate(1, 2e-300, &[]),
+                candidate(1e300, &[]),
+                candidate(1e-300, &[]),
+                candidate(2e-300, &[]),
             ],
             &[&[1, 2]],
         );
@@ -1860,9 +1855,9 @@ mod tests {
     fn decoded_graph_is_checked_independently_of_solver_values() {
         let graph = dependency_graph(
             vec![
-                candidate(0, 2.0, &[]),
-                candidate(1, 1.0, &[&[0]]),
-                candidate(2, 0.0, &[]),
+                candidate(2.0, &[]),
+                candidate(1.0, &[&[0]]),
+                candidate(0.0, &[]),
             ],
             &[&[1]],
         );
@@ -1884,15 +1879,15 @@ mod tests {
     fn malformed_graphs_return_errors() {
         for cost in [f64::NAN, f64::INFINITY, -1.0] {
             assert!(matches!(
-                select_candidates(&dependency_graph(vec![candidate(0, cost, &[])], &[&[0]])),
+                select_candidates(&dependency_graph(vec![candidate(cost, &[])], &[&[0]])),
                 Err(CandidateSelectionError::InvalidGraph(_))
             ));
         }
         for invalid in [
-            dependency_graph(vec![candidate(0, 1.0, &[&[1]])], &[&[0]]),
-            dependency_graph(vec![candidate(0, 1.0, &[])], &[&[1]]),
-            dependency_graph(vec![candidate(0, 1.0, &[&[0, 0]])], &[&[0]]),
-            dependency_graph(vec![candidate(0, 1.0, &[])], &[&[0, 0]]),
+            dependency_graph(vec![candidate(1.0, &[&[1]])], &[&[0]]),
+            dependency_graph(vec![candidate(1.0, &[])], &[&[1]]),
+            dependency_graph(vec![candidate(1.0, &[&[0, 0]])], &[&[0]]),
+            dependency_graph(vec![candidate(1.0, &[])], &[&[0, 0]]),
         ] {
             assert!(matches!(
                 select_candidates(&invalid),
@@ -1900,7 +1895,7 @@ mod tests {
             ));
         }
         assert_eq!(
-            select_candidates(&CandidateDependencyGraph::default())
+            select_candidates(&DagOfPhysicalCandidatesWithCosts::default())
                 .unwrap()
                 .unwrap()
                 .modeled_cost,

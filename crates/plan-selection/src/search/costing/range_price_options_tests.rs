@@ -7,12 +7,8 @@ use asap_logical_asap_optimization::test_support::lower_promql;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::ir::OperatorNode;
-use asap_types::stages::CandidateConfiguration;
-use asap_types::stages::CandidateInventory;
-use asap_types::stages::MemoGroupId;
-use asap_types::stages::{
-    CandidateDependencyGraph, PhysicalCandidate, ProducerRequirement, QueryRootCandidates,
-};
+
+use crate::search::candidates::dag::{ProducerRequirement, QueryRootCandidates};
 use asap_types::workload::{
     DataWorkload, Predictability, Query, QueryRequirements, QueryWorkloadEntry, RangeEvaluation,
     RepetitionInterval,
@@ -23,7 +19,7 @@ use std::rc::Rc;
 fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
     fn append(
         node: Rc<OperatorNode>,
-        configured: &mut CandidateConfigurationInventory,
+        configured: &mut PhysicalCandidatesWithCosts,
         ingestion: bool,
         mode: Materialization,
     ) -> PhysicalCandidateId {
@@ -34,36 +30,27 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
         let mut inputs = Vec::new();
         node.operator
             .map_children(|child| inputs.push(append(child.clone(), configured, ingestion, mode)));
-        let id = PhysicalCandidateId(configured.configurations.len());
-        configured.configurations.push(CandidateConfiguration {
-            may_keep_with_sole_reader: Vec::new(),
-            source_candidate: id,
-            materialization: if pane {
-                mode
-            } else {
-                Materialization::NotMaterialized
-            },
-            timing: if ingestion {
+        let id = PhysicalCandidateId(configured.physical.candidates.len());
+        configured.push_for_tests(
+            node,
+            if ingestion {
                 ExecutionTiming::IngestionTime
             } else {
                 ExecutionTiming::QueryTime
             },
-        });
-        configured.inventory.templates.push(Some(node));
-        configured
-            .inventory
-            .graph
-            .candidates
-            .push(PhysicalCandidate {
-                group: MemoGroupId(id.0 as u32),
-                local_cost: 0.0,
-                producer_requirements: inputs
-                    .into_iter()
-                    .map(|supplier| ProducerRequirement {
-                        compatible_producers: vec![supplier].into(),
-                    })
-                    .collect(),
-            });
+            if pane {
+                mode
+            } else {
+                Materialization::NotMaterialized
+            },
+            0.0,
+            inputs
+                .into_iter()
+                .map(|supplier| ProducerRequirement {
+                    compatible_producers: vec![supplier].into(),
+                })
+                .collect(),
+        );
         id
     }
 
@@ -114,24 +101,18 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
         let sized =
             crate::resize_for_failure_probability(&roots, std::slice::from_ref(&target), &data)
                 .unwrap();
-        let mut configured = CandidateConfigurationInventory {
-            inventory: CandidateInventory {
-                graph: CandidateDependencyGraph::default(),
-                templates: vec![],
-                group_candidates: vec![],
-            },
-            configurations: vec![],
-        };
+        let mut configured = PhysicalCandidatesWithCosts::empty_for_tests();
         let QueryRoot::Operator(root) = &sized[0] else {
             panic!("operator")
         };
         let root_id = append(root.clone(), &mut configured, false, mode);
-        configured.inventory.graph.query_roots = vec![
+        configured.dag.query_roots = vec![
             QueryRootCandidates {
                 compatible_candidates: vec![root_id]
             };
             2
         ];
+        configured.sync_physical_for_tests();
         let originals = vec![
             QueryRoot::Operator(original.clone()),
             QueryRoot::Operator(original),
@@ -189,14 +170,8 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
         let profile = extract_price_options(&configured, &context)
             .unwrap()
             .unwrap();
-        let chain = configured
-            .inventory
-            .templates
-            .iter()
-            .position(|node| {
-                node.as_ref()
-                    .is_some_and(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
-            })
+        let chain = (0..configured.physical.candidates.len())
+            .position(|id| matches!(configured.node(id).asap(), Some(ASAPOp::PaneChain { .. })))
             .unwrap();
         let tiers: Vec<_> = profile.candidates[chain]
             .iter()
@@ -224,7 +199,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
                 == (mode == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory))));
         let proposal =
             crate::search::milp::direct_price_options::solve_joint_price_proposal_with_metrics(
-                &configured.inventory.graph,
+                &configured.dag,
                 &[],
                 None,
                 &mut Default::default(),
@@ -240,7 +215,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
         }
         assert!(
             crate::search::milp::direct_price_options::solve_joint_price_proposal_with_metrics(
-                &configured.inventory.graph,
+                &configured.dag,
                 &[],
                 None,
                 &mut Default::default(),

@@ -17,7 +17,7 @@
 //! - [`stages`] — the types one planning stage hands the next: the Stage 1
 //!   → Stage 2 memo of groups and implementation candidates
 //!   ([`stages::LogicalASAPMemoCandidates`]) and the Stage 2 → Stage 3
-//!   physical candidate catalog ([`stages::CandidateConfigurationInventory`]).
+//!   physical candidates ([`stages::PhysicalASAPMemoCandidates`]).
 //!
 //! No execution logic lives in this crate (issue #190).
 pub mod ir;

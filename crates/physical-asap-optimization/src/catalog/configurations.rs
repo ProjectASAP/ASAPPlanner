@@ -8,7 +8,6 @@
 //! checks highest-shared eligibility on the selected graph, not all possible consumers.
 use asap_types::stages::{SupplierCandidates, SupplierSetInterner};
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use crate::summary_materialization_eligibility;
 use asap_types::ir::properties::ExecutionTiming;
@@ -16,13 +15,14 @@ use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use asap_types::physical::{Materialization, Medium};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
+use super::inventory::CandidateInventory;
+use asap_types::ir::QueryRoot;
 use asap_types::stages::{
-    CandidateConfiguration, CandidateConfigurationInventory, CandidateDependencyGraph,
-    CandidateInventory, PhysicalCandidate, PhysicalCandidateId, ProducerRequirement,
-    QueryRootCandidates, ReaderConstraint,
+    MemoGroupId, OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates,
+    PhysicalCandidate, PhysicalCandidateId, ReaderConstraint,
 };
 
-/// [`CandidateConfiguration::may_keep_with_sole_reader`] for `node` configured
+/// [`PhysicalCandidate::may_keep_across_evaluations_per_sole_reader_query`] for `node` configured
 /// with `materialization`: for each query in `entries`, whether
 /// [`summary_materialization_eligibility`] with that query as the only reader
 /// allows keeping it across evaluations. Empty unless `node` is a pane chain,
@@ -61,79 +61,84 @@ pub enum ConfigurationError {
     DeadlineExceeded(#[from] asap_types::stages::CandidateGenerationTimeout),
     #[error("invalid source candidate inventory: {0}")]
     InvalidInventory(String),
-    #[error("source resource constraints require configuration-specific accounting")]
-    UnpricedResources,
     #[error("candidate {candidate} already has timing or materialization assigned")]
     AssignedExecution { candidate: usize },
 }
 
+/// The output reference queries of `query_roots`: for each group
+/// reference, in order (a scalar query's in `map_operator_refs` order), the
+/// query whose root it is.
+pub fn output_reference_queries(query_roots: &[QueryRoot<MemoGroupId>]) -> Vec<usize> {
+    let mut queries = Vec::new();
+    for (query, root) in query_roots.iter().enumerate() {
+        match root {
+            QueryRoot::Operator(_) => queries.push(query),
+            QueryRoot::Scalar(expression) => {
+                expression.map_operator_refs(&mut |_| queries.push(query));
+            }
+        }
+    }
+    queries
+}
+
+/// Each operator node of `source` with every timing and materialization
+/// Stage 2 allows, and its execution-scope copies. `query_roots` are the
+/// memo's; their group references are `source`'s output references.
 pub fn enumerate_candidate_configurations_before(
     source: &CandidateInventory,
-    output_queries: &[usize],
+    query_roots: &[QueryRoot<MemoGroupId>],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     query_time_results_retained: bool,
     raw_data_retained: bool,
     deadline: Option<std::time::Instant>,
-) -> Result<CandidateConfigurationInventory, ConfigurationError> {
+) -> Result<PhysicalASAPMemoCandidates, ConfigurationError> {
     super::check_deadline(deadline)?;
     let invalid = |message: &str| ConfigurationError::InvalidInventory(message.into());
-    source
-        .graph
-        .validate()
-        .map_err(|error| invalid(&error.to_string()))?;
-    if !source.graph.resource_budgets.is_empty() {
-        return Err(ConfigurationError::UnpricedResources);
-    }
-    if source.templates.len() != source.graph.candidates.len()
-        || output_queries.len() != source.graph.query_roots.len()
+    source.validate().map_err(|error| invalid(&error))?;
+    let output_queries = output_reference_queries(query_roots);
+    let source_count = source.operator_nodes_of_candidates_for_memo_groups.len();
+    if output_queries.len() != source.query_output_nodes.len()
         || output_queries.iter().any(|&query| query >= entries.len())
     {
         return Err(invalid("template or output/query mapping is incomplete"));
     }
     if source
-        .group_candidates
+        .implementation_roots_of_group
         .iter()
         .flatten()
-        .any(|id| id.0 >= source.graph.candidates.len())
+        .any(|id| id.0 >= source_count)
     {
         return Err(invalid("group references missing source candidate"));
     }
     let mut query_outputs = vec![Vec::new(); entries.len()];
-    let mut potential = vec![vec![false; entries.len()]; source.graph.candidates.len()];
+    let mut potential = vec![vec![false; entries.len()]; source_count];
+    let mut may_produce_query_output = vec![false; source_count];
     for (output, &query) in output_queries.iter().enumerate() {
         super::check_deadline(deadline)?;
         query_outputs[query].push(output);
-        let mut pending = source.graph.query_roots[output]
-            .compatible_candidates
-            .clone();
+        let mut pending = source.query_output_nodes[output].clone();
+        for root in &pending {
+            may_produce_query_output[root.0] = true;
+        }
         while let Some(candidate) = pending.pop() {
             super::check_deadline(deadline)?;
             if !potential[candidate.0][query] {
                 potential[candidate.0][query] = true;
                 pending.extend(
-                    source.graph.candidates[candidate.0]
-                        .producer_requirements
+                    source.supplier_nodes_per_input[candidate.0]
                         .iter()
-                        .flat_map(|input| input.compatible_producers.iter().copied()),
+                        .flat_map(|input| input.iter().copied()),
                 );
             }
         }
     }
-    let mut result = CandidateConfigurationInventory {
-        inventory: CandidateInventory {
-            graph: CandidateDependencyGraph::default(),
-            templates: Vec::new(),
-            group_candidates: vec![Vec::new(); source.group_candidates.len()],
-        },
-        configurations: Vec::new(),
-    };
-    let mut source_configurations = vec![Vec::new(); source.graph.candidates.len()];
-    for (source_id, source_candidate) in source.graph.candidates.iter().enumerate() {
+    let mut candidates = Vec::new();
+    let mut reader_constraints = Vec::new();
+    let mut source_configurations = vec![Vec::new(); source_count];
+    for source_id in 0..source_count {
         super::check_deadline(deadline)?;
-        let node = source.templates[source_id]
-            .as_ref()
-            .ok_or_else(|| invalid("candidate has no immediate operator template"))?;
+        let node = &source.operator_nodes_of_candidates_for_memo_groups[source_id].physical_node;
         if node.timing.is_some() || node.materialization != Materialization::NotMaterialized {
             return Err(ConfigurationError::AssignedExecution {
                 candidate: source_id,
@@ -216,13 +221,16 @@ pub fn enumerate_candidate_configurations_before(
             modes.retain(|(_, timing)| *timing == ExecutionTiming::IngestionTime);
         }
         for (materialization, timing) in modes {
-            let id = PhysicalCandidateId(result.configurations.len());
+            let id = PhysicalCandidateId(candidates.len());
             source_configurations[source_id].push(id);
-            result.configurations.push(CandidateConfiguration {
-                source_candidate: PhysicalCandidateId(source_id),
-                materialization,
+            candidates.push(PhysicalCandidate {
+                operator_node: OperatorNodeOfCandidateForMemoGroupId(source_id),
                 timing,
-                may_keep_with_sole_reader: may_keep_with_sole_reader(
+                materialization,
+                supplier_candidates_per_input: Vec::new(),
+                may_produce_query_output: may_produce_query_output[source_id]
+                    && timing == ExecutionTiming::QueryTime,
+                may_keep_across_evaluations_per_sole_reader_query: may_keep_with_sole_reader(
                     node,
                     materialization,
                     entries,
@@ -230,28 +238,18 @@ pub fn enumerate_candidate_configurations_before(
                     query_time_results_retained,
                 ),
             });
-            result.inventory.templates.push(Some(Rc::clone(node)));
-            result.inventory.graph.candidates.push(PhysicalCandidate {
-                group: source_candidate.group,
-                local_cost: 0.0,
-                producer_requirements: Vec::new(),
-            });
             if materialization == Materialization::MatAtQuery(Medium::Memory) {
                 if !summary {
-                    result.inventory.graph.reader_constraints.push(
-                        ReaderConstraint::HighestSharedQueryMaterialization {
-                            candidate: id,
-                            query_outputs: query_outputs.clone(),
-                        },
-                    );
-                }
-                result.inventory.graph.reader_constraints.push(
-                    ReaderConstraint::MinimumQueryReaders {
+                    reader_constraints.push(ReaderConstraint::HighestSharedQueryMaterialization {
                         candidate: id,
                         query_outputs: query_outputs.clone(),
-                        minimum: 2,
-                    },
-                );
+                    });
+                }
+                reader_constraints.push(ReaderConstraint::MinimumQueryReaders {
+                    candidate: id,
+                    query_outputs: query_outputs.clone(),
+                    minimum: 2,
+                });
             }
             if summary {
                 let eligible = queries
@@ -272,14 +270,10 @@ pub fn enumerate_candidate_configurations_before(
                     .iter()
                     .flat_map(|&query| query_outputs[query].iter().copied())
                     .collect();
-                result
-                    .inventory
-                    .graph
-                    .reader_constraints
-                    .push(ReaderConstraint::AllowedOutputs {
-                        candidate: id,
-                        outputs,
-                    });
+                reader_constraints.push(ReaderConstraint::AllowedOutputs {
+                    candidate: id,
+                    outputs,
+                });
                 // The current Stage 2 rules require common intervals/phases,
                 // whose conflicts are pairwise. No arbitrary set predicate is
                 // approximated by this encoding.
@@ -295,7 +289,7 @@ pub fn enumerate_candidate_configurations_before(
                         ) {
                             for &left_output in &query_outputs[left] {
                                 for &right_output in &query_outputs[right] {
-                                    result.inventory.graph.reader_constraints.push(
+                                    reader_constraints.push(
                                         ReaderConstraint::IncompatibleOutputs {
                                             candidate: id,
                                             left: left_output,
@@ -325,7 +319,7 @@ pub fn enumerate_candidate_configurations_before(
             let mut compatible = Vec::new();
             for &producer in configurations {
                 super::check_deadline(deadline)?;
-                if compatible_timing(timing, &result.configurations[producer.0]) {
+                if compatible_timing(timing, &candidates[producer.0]) {
                     compatible.push(producer);
                 }
             }
@@ -335,22 +329,20 @@ pub fn enumerate_candidate_configurations_before(
     }
     let mut input_cache: HashMap<(SupplierCandidates, ExecutionTiming), SupplierCandidates> =
         HashMap::new();
-    for (id, configuration) in result.configurations.iter().enumerate() {
+    for candidate in &mut candidates {
         super::check_deadline(deadline)?;
         let mut requirements = Vec::new();
-        for input in
-            &source.graph.candidates[configuration.source_candidate.0].producer_requirements
-        {
-            let key = (input.compatible_producers.clone(), configuration.timing);
+        for input in &source.supplier_nodes_per_input[candidate.operator_node.0] {
+            let key = (input.clone(), candidate.timing);
             let compatible_producers = if let Some(suppliers) = input_cache.get(&key) {
                 suppliers.clone()
             } else {
-                let timing = match configuration.timing {
+                let timing = match candidate.timing {
                     ExecutionTiming::QueryTime => 0,
                     ExecutionTiming::IngestionTime => 1,
                 };
                 let mut compatible = Vec::new();
-                for producer in &input.compatible_producers {
+                for producer in input {
                     super::check_deadline(deadline)?;
                     compatible.extend(timing_index[producer.0][timing].iter().copied());
                 }
@@ -358,116 +350,42 @@ pub fn enumerate_candidate_configurations_before(
                 input_cache.insert(key, suppliers.clone());
                 suppliers
             };
-            requirements.push(ProducerRequirement {
-                compatible_producers,
-            });
+            requirements.push(compatible_producers);
         }
-        result.inventory.graph.candidates[id].producer_requirements = requirements;
+        candidate.supplier_candidates_per_input = requirements;
     }
-    for (group, candidates) in source.group_candidates.iter().enumerate() {
-        result.inventory.group_candidates[group] = candidates
-            .iter()
-            .flat_map(|source| source_configurations[source.0].iter().copied())
-            .collect();
-    }
-    for output in &source.graph.query_roots {
-        result
-            .inventory
-            .graph
-            .query_roots
-            .push(QueryRootCandidates {
-                compatible_candidates: output
-                    .compatible_candidates
-                    .iter()
-                    .flat_map(|source| source_configurations[source.0].iter().copied())
-                    .filter(|id| result.configurations[id.0].timing == ExecutionTiming::QueryTime)
-                    .collect(),
-            });
-    }
-    for constraint in &source.graph.reader_constraints {
-        super::check_deadline(deadline)?;
-        let source_candidate = match constraint {
-            ReaderConstraint::ActivationRequires { .. } => {
-                return Err(invalid(
-                    "source inventory must precede execution-scope expansion",
-                ))
-            }
-            ReaderConstraint::AllowedOutputs { candidate, .. }
-            | ReaderConstraint::IncompatibleOutputs { candidate, .. }
-            | ReaderConstraint::HighestSharedQueryMaterialization { candidate, .. }
-            | ReaderConstraint::MinimumQueryReaders { candidate, .. } => candidate,
-        };
-        for &candidate in &source_configurations[source_candidate.0] {
-            result
-                .inventory
-                .graph
-                .reader_constraints
-                .push(match constraint {
-                    ReaderConstraint::ActivationRequires { .. } => {
-                        return Err(invalid(
-                            "source inventory must precede execution-scope expansion",
-                        ))
-                    }
-                    ReaderConstraint::AllowedOutputs { outputs, .. } => {
-                        ReaderConstraint::AllowedOutputs {
-                            candidate,
-                            outputs: outputs.clone(),
-                        }
-                    }
-                    ReaderConstraint::IncompatibleOutputs { left, right, .. } => {
-                        ReaderConstraint::IncompatibleOutputs {
-                            candidate,
-                            left: *left,
-                            right: *right,
-                        }
-                    }
-                    ReaderConstraint::HighestSharedQueryMaterialization {
-                        query_outputs, ..
-                    } => ReaderConstraint::HighestSharedQueryMaterialization {
-                        candidate,
-                        query_outputs: query_outputs.clone(),
-                    },
-                    ReaderConstraint::MinimumQueryReaders {
-                        query_outputs,
-                        minimum,
-                        ..
-                    } => ReaderConstraint::MinimumQueryReaders {
-                        candidate,
-                        query_outputs: query_outputs.clone(),
-                        minimum: *minimum,
-                    },
-                });
-        }
-    }
-    result
-        .inventory
-        .graph
-        .validate()
-        .map_err(|error| invalid(&error.to_string()))?;
+    let result = PhysicalASAPMemoCandidates::new(
+        source.operator_nodes_of_candidates_for_memo_groups.clone(),
+        candidates,
+        query_roots.to_vec(),
+        reader_constraints,
+    );
+    super::validate_candidates(&result).map_err(|error| invalid(&error))?;
     // Repeated identical workload entries and identical logical outputs have
     // identical timing, accuracy and pricing requirements. Their request counts
     // remain in the evaluator, but they do not require distinct binding scopes.
     let mut context_ids = std::collections::HashMap::new();
     let mut output_contexts = Vec::new();
-    for (output, root) in source.graph.query_roots.iter().enumerate() {
-        let suppliers: Vec<_> = root.compatible_candidates.iter().map(|id| id.0).collect();
+    for (output, root) in source.query_output_nodes.iter().enumerate() {
+        let suppliers: Vec<_> = root.iter().map(|id| id.0).collect();
         let key = serde_json::to_string(&(&entries[output_queries[output]], suppliers))
             .map_err(|error| invalid(&error.to_string()))?;
         let next = context_ids.len();
         output_contexts.push(*context_ids.entry(key).or_insert(next));
     }
-    let mut uses = vec![std::collections::HashSet::new(); source.graph.candidates.len()];
-    for candidate in &source.graph.candidates {
+    let mut uses = vec![std::collections::HashSet::new(); source_count];
+    for (consumer, inputs) in source.supplier_nodes_per_input.iter().enumerate() {
         super::check_deadline(deadline)?;
-        for (position, input) in candidate.producer_requirements.iter().enumerate() {
-            for producer in &input.compatible_producers {
-                uses[producer.0].insert((candidate.group, position));
+        let group = source.operator_nodes_of_candidates_for_memo_groups[consumer].group();
+        for (position, input) in inputs.iter().enumerate() {
+            for producer in input {
+                uses[producer.0].insert((group, position));
             }
         }
     }
-    let mut root_uses = vec![std::collections::HashSet::new(); source.graph.candidates.len()];
-    for (output, root) in source.graph.query_roots.iter().enumerate() {
-        for candidate in &root.compatible_candidates {
+    let mut root_uses = vec![std::collections::HashSet::new(); source_count];
+    for (output, root) in source.query_output_nodes.iter().enumerate() {
+        for candidate in root {
             root_uses[candidate.0].insert(output_contexts[output]);
         }
     }
@@ -484,10 +402,7 @@ pub fn enumerate_candidate_configurations_before(
     )
 }
 
-pub fn compatible_timing(
-    consumer_timing: ExecutionTiming,
-    producer: &CandidateConfiguration,
-) -> bool {
+pub fn compatible_timing(consumer_timing: ExecutionTiming, producer: &PhysicalCandidate) -> bool {
     consumer_timing == producer.timing
         || (consumer_timing == ExecutionTiming::QueryTime
             && matches!(producer.materialization, Materialization::MatAtIngestion(_)))

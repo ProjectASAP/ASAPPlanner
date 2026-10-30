@@ -11,31 +11,29 @@ use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 use asap_types::physical::Materialization;
 
+use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
 use crate::search::refinement::planner::CandidatePlanningContext;
 use crate::{price_node, PricedNode, ProducerOutput};
-use asap_types::stages::CandidateConfigurationInventory;
 
 /// Partial heuristic estimates are harmless: unknown or interrupted entries
 /// remain zero, and the surrounding search still enforces its shared deadline.
 pub(in crate::search) fn estimate_costs(
-    configured: &CandidateConfigurationInventory,
+    configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
 ) -> Vec<f64> {
-    let mut estimates = vec![0.0; configured.inventory.graph.candidates.len()];
+    let mut estimates = vec![0.0; configured.dag.candidates.len()];
     let mut templates = TemplateCatalog::default();
     let mut roots = vec![None; estimates.len()];
-    for (id, configuration) in configured.configurations.iter().enumerate() {
+    for (id, configuration) in configured.physical.candidates.iter().enumerate() {
         if expired(context.deadline) {
             break;
         }
         if configuration.timing != ExecutionTiming::QueryTime
-            || configured.inventory.graph.candidates[id].local_cost > 0.0
+            || configured.dag.candidates[id].local_cost > 0.0
         {
             continue;
         }
-        if let Some(node) = &configured.inventory.templates[id] {
-            roots[id] = templates.append(node, None, context.deadline);
-        }
+        roots[id] = templates.append(configured.node(id), None, context.deadline);
     }
     // A singleton request rate gives a consistent initial priority. Actual
     // selected-reader unions, retained lifetimes and shared resources are priced
@@ -216,7 +214,6 @@ mod tests {
         let scan = inventory
             .templates
             .iter()
-            .flatten()
             .find(|node| matches!(node.non_asap(), Some(NonASAPOp::Scan { .. })))
             .unwrap();
         let mut contexts = TemplateCatalog::default();
@@ -264,20 +261,16 @@ mod tests {
         let estimates = estimate_costs(&configured, &context);
         let mut exact = Vec::new();
         let mut kll = Vec::new();
-        for (id, template) in configured.inventory.templates.iter().enumerate() {
-            if configured.configurations[id].timing != ExecutionTiming::QueryTime {
+        for (id, template) in configured.nodes_for_tests().iter().enumerate() {
+            if configured.physical.candidates[id].timing != ExecutionTiming::QueryTime {
                 continue;
             }
-            match template.as_ref().unwrap().asap() {
+            match template.asap() {
                 Some(ASAPOp::SummaryAgg {
                     family: FieldDataType::Sketch(kind, _),
                     ..
                 }) if *kind.algorithm() == SketchAlgorithm::Kll => kll.push(estimates[id]),
-                _ if matches!(
-                    template.as_ref().unwrap().non_asap(),
-                    Some(NonASAPOp::Aggregate { .. })
-                ) =>
-                {
+                _ if matches!(template.non_asap(), Some(NonASAPOp::Aggregate { .. })) => {
                     exact.push(estimates[id])
                 }
                 _ => {}
@@ -290,8 +283,7 @@ mod tests {
                 < exact.iter().copied().fold(f64::INFINITY, f64::min)
         );
         assert!(configured
-            .inventory
-            .graph
+            .dag
             .candidates
             .iter()
             .all(|candidate| candidate.local_cost == 0.0));
@@ -299,20 +291,16 @@ mod tests {
         // source. Price it compactly; a missing horizon previously made every
         // pane estimate zero and wrongly favored it over priced whole builds.
         let pane_id = configured
-            .inventory
-            .templates
+            .nodes_for_tests()
             .iter()
             .enumerate()
             .find_map(|(id, node)| {
-                (configured.configurations[id].timing == ExecutionTiming::QueryTime
-                    && matches!(
-                        node.as_ref().unwrap().asap(),
-                        Some(ASAPOp::SummaryAgg { .. })
-                    ))
+                (configured.physical.candidates[id].timing == ExecutionTiming::QueryTime
+                    && matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })))
                 .then_some(id)
             })
             .unwrap();
-        let build = configured.inventory.templates[pane_id].as_ref().unwrap();
+        let build = configured.node(pane_id);
         let Some(ASAPOp::SummaryAgg {
             child,
             family,
@@ -338,16 +326,13 @@ mod tests {
             pane_count: 300,
         }))
         .unwrap();
-        configured.inventory.templates[pane_id] = Some(pane);
+        configured.set_node_for_tests(pane_id, pane);
         let pane_estimates = estimate_costs(&configured, &context);
         assert!(
             pane_estimates[pane_id] > 0.0,
             "query-time pane build must not look free"
         );
-        assert_eq!(
-            configured.inventory.graph.candidates[pane_id].local_cost,
-            0.0
-        );
+        assert_eq!(configured.dag.candidates[pane_id].local_cost, 0.0);
 
         // Deadline cancellation merely omits advisory priorities; no inventory
         // or feasibility fact is changed by incomplete heuristic work.

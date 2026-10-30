@@ -16,14 +16,13 @@ pub(in crate::search) enum DirectPriceModel<'a> {
 }
 use std::time::{Duration, Instant};
 
+use crate::search::candidates::dag::{CandidateSelectionError, DagOfPhysicalCandidatesWithCosts};
 use crate::search::candidates::graph::RejectedQuerySubgraph;
 use crate::search::milp::model::{
     solve_candidate_proposal_with_metrics, solve_direct_cost_proposal_with_metrics,
     CandidateProposal, CandidateSolveMetrics, ObservedAssignment,
 };
-use asap_types::stages::{
-    CandidateDependencyGraph, CandidateSelectionError, PhysicalCandidateId, SelectedCandidateGraph,
-};
+use asap_types::stages::{PhysicalCandidateId, SelectedCandidateGraph};
 
 #[derive(Debug, Default)]
 pub(in crate::search) struct CandidateEvaluation {
@@ -91,7 +90,7 @@ pub(in crate::search) struct CandidateSearchResult {
 struct SeedRestrictions<'a> {
     excluded: &'a [PhysicalCandidateId],
     materialization_changes: &'a [(PhysicalCandidateId, PhysicalCandidateId)],
-    direct: &'a [(&'a CandidateDependencyGraph, DirectPriceModel<'a>)],
+    direct: &'a [(&'a DagOfPhysicalCandidatesWithCosts, DirectPriceModel<'a>)],
 }
 
 /// The callback returns an actual total cost for a validated feasible plan, or
@@ -103,7 +102,7 @@ struct SeedRestrictions<'a> {
 /// Time bounds are cooperative: a blocking evaluator cannot be preempted here.
 #[cfg(test)]
 pub(in crate::search) fn search_candidates(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     limits: CandidateSearchLimits,
     mut evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<Option<f64>, String>,
 ) -> Result<CandidateSearchResult, String> {
@@ -122,7 +121,7 @@ pub(in crate::search) fn search_candidates(
 /// or lower bound. Its proposals undergo the same evaluator and exact cuts.
 #[cfg(test)]
 pub(in crate::search) fn search_candidates_with_baseline(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     limits: CandidateSearchLimits,
     evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<Option<f64>, String>,
 ) -> Result<CandidateSearchResult, String> {
@@ -132,7 +131,7 @@ pub(in crate::search) fn search_candidates_with_baseline(
 /// Optional weights order baseline proposals only; they never modify cost bounds.
 #[cfg(test)]
 pub(in crate::search) fn search_candidates_with_weighted_baseline(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     limits: CandidateSearchLimits,
     weights: Option<&[f64]>,
     evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<Option<f64>, String>,
@@ -145,7 +144,7 @@ pub(in crate::search) fn search_candidates_with_weighted_baseline(
 
 #[cfg(test)]
 pub(in crate::search) fn search_candidates_with_feedback(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     limits: CandidateSearchLimits,
     weights: Option<&[f64]>,
     evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
@@ -162,7 +161,7 @@ pub(in crate::search) fn search_candidates_with_feedback(
 
 #[cfg(test)]
 pub(in crate::search) fn search_candidates_with_restricted_feedback(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     limits: CandidateSearchLimits,
     weights: &[f64],
     excluded_from_seed: &[PhysicalCandidateId],
@@ -181,12 +180,12 @@ pub(in crate::search) fn search_candidates_with_restricted_feedback(
 }
 
 pub(in crate::search) fn search_candidates_with_direct_feedback(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     limits: CandidateSearchLimits,
     weights: &[f64],
     excluded_from_seed: &[PhysicalCandidateId],
     materialization_changes: &[(PhysicalCandidateId, PhysicalCandidateId)],
-    direct: &[(&CandidateDependencyGraph, DirectPriceModel<'_>)],
+    direct: &[(&DagOfPhysicalCandidatesWithCosts, DirectPriceModel<'_>)],
     evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
 ) -> Result<CandidateSearchResult, String> {
     search_with_structural_baseline(
@@ -204,7 +203,7 @@ pub(in crate::search) fn search_candidates_with_direct_feedback(
 }
 
 fn search_with_structural_baseline(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     limits: CandidateSearchLimits,
     structural_baseline: bool,
     baseline_weights: Option<&[f64]>,
@@ -223,14 +222,14 @@ fn search_with_structural_baseline(
 }
 
 fn search_with_solver(
-    graph: &CandidateDependencyGraph,
+    graph: &DagOfPhysicalCandidatesWithCosts,
     limits: CandidateSearchLimits,
     structural_baseline: bool,
     baseline_weights: Option<&[f64]>,
     restrictions: SeedRestrictions<'_>,
     mut evaluate: impl FnMut(&SelectedCandidateGraph) -> Result<CandidateEvaluation, String>,
     mut propose: impl FnMut(
-        &CandidateDependencyGraph,
+        &DagOfPhysicalCandidatesWithCosts,
         &[ObservedAssignment],
         Option<f64>,
         &mut CandidateSolveMetrics,
@@ -407,8 +406,11 @@ fn search_with_solver(
             let admitted = observations
                 .iter()
                 .filter(|observation: &&ObservedAssignment| {
-                    asap_types::stages::validate_selected_graph(restricted, &observation.selected)
-                        .is_ok()
+                    crate::search::candidates::dag::validate_selected_graph(
+                        restricted,
+                        &observation.selected,
+                    )
+                    .is_ok()
                 })
                 .cloned()
                 .map(|mut observation| {
@@ -753,18 +755,17 @@ fn same_assignment(left: &SelectedCandidateGraph, right: &SelectedCandidateGraph
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::stages::MemoGroupId;
-    use asap_types::stages::{
-        PhysicalCandidate, PhysicalCandidateId, ProducerRequirement, QueryRootCandidates,
+    use crate::search::candidates::dag::{
+        PhysicalCandidateWithCost, ProducerRequirement, QueryRootCandidates,
     };
 
-    fn choices(costs: &[f64]) -> CandidateDependencyGraph {
-        CandidateDependencyGraph {
+    use asap_types::stages::PhysicalCandidateId;
+
+    fn choices(costs: &[f64]) -> DagOfPhysicalCandidatesWithCosts {
+        DagOfPhysicalCandidatesWithCosts {
             candidates: costs
                 .iter()
-                .enumerate()
-                .map(|(id, &local_cost)| PhysicalCandidate {
-                    group: MemoGroupId(id as u32),
+                .map(|&local_cost| PhysicalCandidateWithCost {
                     local_cost,
                     producer_requirements: vec![],
                 })
@@ -938,7 +939,8 @@ mod tests {
     // the earlier certified bound or falsely closing the optimality gap.
     #[test]
     fn nonoptimal_proposal_preserves_bound_and_improves_incumbent() {
-        use asap_types::stages::{validate_selected_graph, QueryRootAssignment};
+        use crate::search::candidates::dag::validate_selected_graph;
+        use asap_types::stages::QueryRootAssignment;
         let graph = choices(&[2.0, 3.0]);
         let mut round = 0;
         let result = search_with_solver(
