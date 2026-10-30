@@ -1215,12 +1215,7 @@ fn info_selector(expr: &Expr) -> Result<Vec<InfoMatcher>> {
             .iter()
             .map(|m| InfoMatcher {
                 label: m.name.clone(),
-                op: match &m.op {
-                    MatchOp::Equal => CompareOpKind::Eq,
-                    MatchOp::NotEqual => CompareOpKind::Ne,
-                    MatchOp::Re(_) => CompareOpKind::Regex,
-                    MatchOp::NotRe(_) => CompareOpKind::NotRegex,
-                },
+                op: compare_op(&m.op),
                 value: m.value.clone(),
             })
             .collect()),
@@ -1904,16 +1899,19 @@ fn system_time_ms(t: SystemTime) -> Result<i64> {
     })
 }
 
-fn matcher_to_compare(m: &Matcher) -> Scalar {
-    let op = match &m.op {
+fn compare_op(op: &MatchOp) -> CompareOpKind {
+    match op {
         MatchOp::Equal => CompareOpKind::Eq,
         MatchOp::NotEqual => CompareOpKind::Ne,
         MatchOp::Re(_) => CompareOpKind::Regex,
         MatchOp::NotRe(_) => CompareOpKind::NotRegex,
-    };
+    }
+}
+
+fn matcher_to_compare(m: &Matcher) -> Scalar {
     Scalar::Compare {
         left: Box::new(Scalar::Column(ColumnRef::Named(m.name.clone()))),
-        op,
+        op: compare_op(&m.op),
         right: Box::new(Scalar::Literal(ScalarValue::Utf8(m.value.clone()))),
         semantics: PROMQL,
     }
