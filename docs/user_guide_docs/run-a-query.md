@@ -54,7 +54,7 @@ holds the selected plan's `cost_per_second`. For this query the selected plan
 is the exact plan. The Count-Min top-k plan is not selected because the
 command declares no metric type, so the samples are not proven non-negative,
 and the CountSketch top-k plan because its output has no guarantee. Under
-`--exhaustive`, `reference_pricing.rejected` gives each plan's `cause`
+`--exhaustive`, `reference_pricing.pruned_candidates` gives each plan's `cause`
 (`count_min_weights_not_proven_non_negative`, `no_accuracy_guarantee`) and
 reason.
 Open the document in the [Stage Viewer](stage-viewer.md) to see every

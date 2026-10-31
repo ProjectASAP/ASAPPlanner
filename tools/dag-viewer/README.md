@@ -268,12 +268,12 @@ are ignored, `stage_pipeline`'s default.
                                     "pass2_ms": 1.2, "stage2_ms": 3.4, "stage3_ms": 150.0,
                                     "search_report": { "...": "..." }, "error": null }] },
   "reference_pricing": {
-    "costs": { "E1-0": { "...": "as stage3_plan_selection.cost" } },
-    "accepted": { "E1-0": [{ "...": "as accepted_accuracy_per_query" }] },
-    "selected": "E1-0",
-    "rejected": [{ "id": "E2-0", "cause": "costlier", "reason": "..." }],
-    "search_rejected": [],
-    "rejected_by_cause": { "accuracy_target_missed": 533, "costlier": 12 },
+    "cost_per_candidate": { "E1-0": { "...": "as stage3_plan_selection.cost" } },
+    "accepted_accuracy_per_candidate": { "E1-0": [{ "...": "as accepted_accuracy_per_query" }] },
+    "selected_candidate": "E1-0",
+    "pruned_candidates": [{ "candidate": "E2-0", "cause": "costlier", "reason": "..." }],
+    "pruned_candidates_not_enumerated": [],
+    "pruned_candidate_count_by_cause": { "accuracy_target_missed": 533, "costlier": 12 },
     "pane_retention_ms": {}
   }
 }
@@ -308,10 +308,12 @@ are ignored, `stage_pipeline`'s default.
   Stage 3's search report or error; `selected_round` and whether some pane
   widths were not searched (`pane_widths_pending`).
 - `reference_pricing` (only with `--exhaustive`) is the reference pricer
-  over the enumerated memo choices (`E<n>` logical, `E<n>-<k>` physical):
-  per shown candidate its cost and accepted accuracy, its pick `selected`,
-  the rejections and `rejected_by_cause`. The page lists these candidates
-  after `P1`, with the reference pricer's pick marked.
+  over the enumerated memo choices (`E<n>` logical, `E<n>-<k>` physical),
+  with keys named as Stage 3's `Selection` names its fields: per shown
+  candidate its cost (`cost_per_candidate`) and accepted accuracy
+  (`accepted_accuracy_per_candidate`), its pick `selected_candidate`, the
+  `pruned_candidates` and `pruned_candidate_count_by_cause`. The page lists
+  these candidates after `P1`, with the reference pricer's pick marked.
 - `deployment_capabilities` repeats the run's `--deployment-capabilities`
   inputs with defaults filled in. Each stage's
   `pruned_candidates` lists what that stage removed, one entry per removed
@@ -330,7 +332,8 @@ are ignored, `stage_pipeline`'s default.
   names `plan_installable`'s predicted usage gives them. A candidate's
   `cpu_core_seconds_per_second` is its nodes' sum. These CPU fields are
   report-only: prices do not read them back.
-- Each `reference_pricing.rejected` entry has a `cause`: a failed check
+- Each `reference_pricing.pruned_candidates` entry names its `candidate`
+  and has a `reason` and a `cause`: a failed check
   (`accuracy_target_missed`,
   `count_min_weights_not_proven_non_negative`,
   `no_accuracy_guarantee`, `latency_bound_exceeded`,
@@ -363,8 +366,8 @@ are ignored, `stage_pipeline`'s default.
   plan's peak memory when over 10^12 bytes and the cost model declares no
   memory capacity; absent when there are none. The candidate list's header
   shows them.
-- `reference_pricing.search_rejected` lists the reference pricer's
-  rejections that name no candidate the document holds. The page lists
+- `reference_pricing.pruned_candidates_not_enumerated` lists the reference
+  pricer's rejections that name no enumerated candidate. The page lists
   them after the other rows, not clickable.
 - `workload.data_workload` is the `DataWorkload` the run planned with
   (`arrival`, and per source exactly the `SourceFacts` fields). Labels,
@@ -381,14 +384,16 @@ are ignored, `stage_pipeline`'s default.
   nodes (a pane chain's panes, newest first) and `installed_count` their
   number. Empty without a selection; `materialized_views_error` says why when
   the plan is not installable.
-- `rejected_by_cause` counts the rejections by cause: every candidate's
-  under `--exhaustive`, the recorded ones under the default search.
+- `pruned_candidate_count_by_cause` counts the pruned candidates by cause,
+  over every enumerated candidate; the header lists the counts.
 - Under `--exhaustive` the document shows at most `--max-displayed`
   physical candidates: the selected one, the other valid ones cheapest
   first, then the rejected ones taking each cause in turn, and the Stage 1
   candidates they come from.
-- When Pass 1 fails, Stage 1 has `error` and no candidates. When selection
-  fails, `selected` is null, with the rejections or with `error`.
+- When Pass 1 fails, Stage 1 has `error` and no candidates. When Stage 3
+  selects no plan, `stage3_plan_selection` has `selected_dag: null` and
+  `error`; when the reference pricer selects none, its
+  `selected_candidate` is null, with the `pruned_candidates` or `error`.
 - `memo` (left out with `--no-memo`) is the memo the search built, from
   the planning round whose plan was selected: `nodes`, one node table for
   the whole section (each distinct logical node once, as in a flat logical

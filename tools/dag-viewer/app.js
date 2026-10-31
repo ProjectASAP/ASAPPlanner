@@ -230,7 +230,7 @@
     $('pick2').value = id;
     const c = physicalById.get(id);
     const selection = selectionTable(doc);
-    const cost = selection.costs[id];
+    const cost = selection.cost_per_candidate[id];
     render(2, c.dag, true, cost ? cost.per_node : null);
     const row = rows.find((r) => rowKey(r) === `P:${id}`);
     const priced = rows.filter((r) => r.rank !== null).length;
@@ -281,10 +281,10 @@
     $('counts').innerHTML = `Candidates per stage: <b>1</b> logical DAG → <b>${logical.combinations}</b> logical ASAP` +
       (logical.capped ? ` (<b>${logical.candidates.length}</b> shown)` : '') +
       ` → <b>${physicalById.size}</b> physical` +
-      (selection.selected ? ` → <b>1</b> selected (${count('rejected')} invalid, ${count('costlier')} valid but costlier)` : ' → none selected');
+      (selection.selected_candidate ? ` → <b>1</b> selected (${count('rejected')} invalid, ${count('costlier')} valid but costlier)` : ' → none selected');
     $('rank-meta').textContent = [stageCandidateHeader(doc), accuracyGuaranteesText(doc), searchText(doc)].filter(Boolean).join(' · ');
     renderDataWorkload();
-    const sel = selection.selected ? selection.costs[selection.selected] : null;
+    const sel = selection.selected_candidate ? selection.cost_per_candidate[selection.selected_candidate] : null;
     $('cost-unit').textContent = sel ? sel.cost_unit.replace(/_/g, ' ') : '';
 
     $('pick1').innerHTML = logical.candidates.map((c) => `<option value="${esc(c.id)}">${esc(c.id)} · ${esc(c.display_name)}</option>`).join('');
@@ -334,7 +334,7 @@
   // chain's panes listed inside its row); a row selects its Stage 2 node.
   function renderMaterializedViews() {
     const selection = selectionTable(doc);
-    if (!selection.selected) {
+    if (!selection.selected_candidate) {
       $('views-meta').textContent = 'no plan selected';
       $('materializedViews').innerHTML = '';
       return;
@@ -348,7 +348,7 @@
     const count = groups.reduce((n, g) => n + g.panes.length, 0);
     $('views-meta').innerHTML = selection.materialized_views_error
       ? `<span class="error">no installable plan: ${esc(selection.materialized_views_error)}</span>`
-      : `<b>${count}</b> materialized view${count === 1 ? '' : 's'} in <b>${groups.length}</b> group${groups.length === 1 ? '' : 's'} of <b>${esc(selection.selected)}</b>` +
+      : `<b>${count}</b> materialized view${count === 1 ? '' : 's'} in <b>${groups.length}</b> group${groups.length === 1 ? '' : 's'} of <b>${esc(selection.selected_candidate)}</b>` +
         (count ? '' : ': nothing is kept across evaluations; every query computes at query time');
     const panes = (g) => (g.panes.length > 1
       ? `<details><summary>${esc(g.panes.length)} installed nodes</summary><ul>${g.panes.map((p) => `<li>node ${esc(p.nodeId)} · ${esc(p.pane)} · window ${esc(p.window)} · kept ${esc(p.retention)}</li>`).join('')}</ul></details>`
@@ -383,7 +383,7 @@
 
   // Show the selected plan in the Stage 2 lane and select its node `id`.
   function selectStage2Node(id) {
-    const selected = selectionTable(doc).selected;
+    const selected = selectionTable(doc).selected_candidate;
     if (current.physical !== selected) selectPhysical(selected);
     const cy = cys[2];
     if (!cy) return;

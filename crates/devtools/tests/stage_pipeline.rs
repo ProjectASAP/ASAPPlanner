@@ -154,11 +154,11 @@ fn example1_document_preserves_workload_and_validates_archived_plans() {
     // the enumerated plans and rejects every other one.
     assert!(selects_a_plan(&document["stage3_plan_selection"]));
     let reference = &document["reference_pricing"];
-    let costs = reference["costs"].as_object().unwrap();
-    let selected = reference["selected"].as_str().unwrap();
+    let costs = reference["cost_per_candidate"].as_object().unwrap();
+    let selected = reference["selected_candidate"].as_str().unwrap();
     let mut accounted = HashSet::from([SELECTED, selected]);
-    for rejection in reference["rejected"].as_array().unwrap() {
-        let id = rejection["id"].as_str().unwrap();
+    for rejection in reference["pruned_candidates"].as_array().unwrap() {
+        let id = rejection["candidate"].as_str().unwrap();
         assert!(accounted.insert(id), "{id} accounted for once");
         assert!(!rejection["reason"].as_str().unwrap().is_empty());
         // A candidate that failed a check is not priced; one that lost
@@ -202,8 +202,10 @@ fn display_cap_is_recorded_and_keeps_the_selection() {
         document["stage3_plan_selection"]
     );
     let reference = &document["reference_pricing"];
-    let reference_selected = reference["selected"].as_str().unwrap();
-    assert!(reference["costs"].get(reference_selected).is_some());
+    let reference_selected = reference["selected_candidate"].as_str().unwrap();
+    assert!(reference["cost_per_candidate"]
+        .get(reference_selected)
+        .is_some());
     // One enumerated plan shown, the reference pricer's pick, beside the
     // selected plan.
     let physical = document["stage2_physical_asap_optimization"]["candidates"]
@@ -281,8 +283,10 @@ fn example3a_archive_and_viewer_select_consistently() {
     let document = generate_example("planner-layering-3a", &[]);
     assert!(selects_a_plan(&document["stage3_plan_selection"]));
     let reference = &document["reference_pricing"];
-    let reference_selected = reference["selected"].as_str().unwrap();
-    assert!(reference["costs"].get(reference_selected).is_some());
+    let reference_selected = reference["selected_candidate"].as_str().unwrap();
+    assert!(reference["cost_per_candidate"]
+        .get(reference_selected)
+        .is_some());
     let physical = document["stage2_physical_asap_optimization"]["candidates"]
         .as_array()
         .unwrap();
@@ -790,7 +794,7 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
         let selection = &document["stage3_plan_selection"];
         assert!(selects_a_plan(selection), "{selection}");
         // Every valid enumerated plan, as the reference pricer accepted it.
-        document["reference_pricing"]["accepted"]
+        document["reference_pricing"]["accepted_accuracy_per_candidate"]
             .as_object()
             .unwrap()
             .values()
@@ -1299,7 +1303,7 @@ fn accuracy_guarantees_are_ignored_by_default_and_enforced_on_request() {
         .collect();
     assert!(!no_bound.is_empty(), "{enforced}");
     assert!(
-        !enforced["reference_pricing"]["rejected"]
+        !enforced["reference_pricing"]["pruned_candidates"]
             .as_array()
             .unwrap()
             .iter()
@@ -1308,7 +1312,7 @@ fn accuracy_guarantees_are_ignored_by_default_and_enforced_on_request() {
     );
     let document = document_of(&args);
     assert_eq!(document["accuracy_guarantees"], "ignored");
-    let accepted = &document["reference_pricing"]["accepted"];
+    let accepted = &document["reference_pricing"]["accepted_accuracy_per_candidate"];
     assert!(accepted.as_object().unwrap().values().any(|queries| {
         queries.as_array().unwrap().iter().any(|query| {
             query["accepted_regardless_of_guarantee"] == true
@@ -1562,7 +1566,7 @@ fn promql_queries_carry_their_sampled_data_workload() {
 
 /// Under `--exhaustive` with a display cap, the document shows the selected
 /// candidate first, then the other valid ones cheapest first, then the
-/// rejected ones, each cause in turn; `rejected_by_cause` counts every
+/// rejected ones, each cause in turn; `pruned_candidate_count_by_cause` counts every
 /// rejection.
 #[test]
 fn display_cap_shows_the_selected_then_valid_cheapest_then_each_cause() {
@@ -1575,14 +1579,16 @@ fn display_cap_shows_the_selected_then_valid_cheapest_then_each_cause() {
     assert_eq!(physical.len(), 7);
     let ids: HashSet<&str> = physical.iter().map(|p| p["id"].as_str().unwrap()).collect();
     assert!(ids.contains(SELECTED));
-    assert!(ids.contains(selection["selected"].as_str().unwrap()));
-    let counts = selection["rejected_by_cause"].as_object().unwrap();
+    assert!(ids.contains(selection["selected_candidate"].as_str().unwrap()));
+    let counts = selection["pruned_candidate_count_by_cause"]
+        .as_object()
+        .unwrap();
     let total: u64 = counts.values().map(|n| n.as_u64().unwrap()).sum();
     // 2,187 candidates: one selected, the rest rejected for a failed check
     // or a loss under the cost model.
     assert!(total >= physical.len().saturating_sub(1) as u64);
     // The shown valid ones (priced) are the cheapest of all valid ones.
-    let costs = selection["costs"].as_object().unwrap();
+    let costs = selection["cost_per_candidate"].as_object().unwrap();
     assert!(costs.len() >= 2, "{costs:?}");
 }
 
@@ -1665,7 +1671,9 @@ fn exact_grouped_quantile_plans_compile_and_are_compared() {
     assert!(selects_a_plan(&document["stage3_plan_selection"]));
     let selection = &document["reference_pricing"];
     assert_eq!(document["accuracy_guarantees"], "enforced");
-    let by_cause = selection["rejected_by_cause"].as_object().unwrap();
+    let by_cause = selection["pruned_candidate_count_by_cause"]
+        .as_object()
+        .unwrap();
     assert!(
         by_cause.keys().all(|cause| [
             "costlier",
@@ -1677,7 +1685,9 @@ fn exact_grouped_quantile_plans_compile_and_are_compared() {
     );
     assert!(by_cause.contains_key("costlier"), "{by_cause:?}");
     // Accepted plans passed the guarantee check (the selected one among them).
-    let accepted = selection["accepted"].as_object().unwrap();
+    let accepted = selection["accepted_accuracy_per_candidate"]
+        .as_object()
+        .unwrap();
     // Accepted plans include ones that answer Q3 and Q4 without a sketch.
     let exact_q3_q4 = accepted
         .values()
