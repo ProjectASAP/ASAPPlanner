@@ -39,10 +39,11 @@
 //!
 //! ## Refresh groups
 //!
-//! Views refreshed in an ingestion run are refreshed by **refresh group**:
-//! the views whose windows have one width `W` and end at one offset modulo
-//! `W` (their **refresh window**; a view with an unbounded window is a group
-//! of its own). A runtime refreshes a group in one ingestion run, compiled
+//! Views refreshed in an ingestion run are refreshed by **refresh group**
+//! ([`PhysicalASAPDAG::ingestion_refresh_groups`]): the views whose windows
+//! have one width `W` and end at one offset modulo `W` (their
+//! [`RefreshWindow`]; a view with an unbounded window is a group of its
+//! own). A runtime refreshes a group in one ingestion run, compiled
 //! once with every view of the group as a root and only views of other
 //! groups as materialized view slots; a view of the group that another view
 //! of the group reads is computed in the run. A node several of the roots
@@ -244,6 +245,30 @@ pub enum MaterializedViewRefresh {
     OnFirstRead,
 }
 
+/// The windows an ingestion run refreshes for a view
+/// ([`PhysicalASAPDAG::refresh_window`]): those `width_ms` wide that end
+/// `phase_ms` (`< width_ms`) after a multiple of `width_ms`, relative to the
+/// evaluation time. Views refreshed at ingestion with one refresh window
+/// are refreshed together, in one ingestion run per window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RefreshWindow {
+    /// Width of each window.
+    pub width_ms: u64,
+    /// Where each window ends, modulo `width_ms`.
+    pub phase_ms: u64,
+}
+
+/// The views refreshed at ingestion that a runtime refreshes in one
+/// ingestion run ([`PhysicalASAPDAG::ingestion_refresh_groups`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct IngestionRefreshGroup {
+    /// The refresh window of every view of the group; `None` for a view
+    /// whose window is unbounded, which is a group of its own.
+    pub refresh_window: Option<RefreshWindow>,
+    /// The views, in dependency order.
+    pub views: Vec<MaterializedView>,
+}
+
 /// How far back from the evaluation time a runtime keeps a raw-data source
 /// for the DAG's query-time scans ([`PhysicalASAPDAG::raw_data_retention`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,6 +410,153 @@ impl PhysicalASAPDAG {
             reach_ms_by_node.insert(view.node_id, reach_ms);
         }
         Ok(views)
+    }
+
+    /// The views refreshed at ingestion, by refresh group: the views with
+    /// one [`RefreshWindow`] ([`Self::refresh_window`]) form one group,
+    /// which a runtime refreshes in one ingestion run per window, compiled
+    /// once with every view of the group as a root. Each group lists its
+    /// views in dependency order and comes after the groups whose views it
+    /// reads. Errs as [`Self::materialized_views`].
+    pub fn ingestion_refresh_groups(
+        &self,
+    ) -> Result<Vec<IngestionRefreshGroup>, InstallableDagError> {
+        let views: Vec<MaterializedView> = self
+            .materialized_views()?
+            .into_iter()
+            .filter(|view| view.refresh == MaterializedViewRefresh::AtIngestion)
+            .collect();
+        let refresh_windows = self.refresh_windows(views.iter().map(|view| view.node_id));
+        let mut groups: Vec<IngestionRefreshGroup> = Vec::new();
+        let mut group_by_window: HashMap<RefreshWindow, usize> = HashMap::new();
+        let mut group_by_view: HashMap<PhysicalASAPNodeId, usize> = HashMap::new();
+        for view in views {
+            let refresh_window = refresh_windows[&view.node_id];
+            let group = match refresh_window.and_then(|window| group_by_window.get(&window)) {
+                Some(&group) => group,
+                None => {
+                    groups.push(IngestionRefreshGroup {
+                        refresh_window,
+                        views: Vec::new(),
+                    });
+                    if let Some(window) = refresh_window {
+                        group_by_window.insert(window, groups.len() - 1);
+                    }
+                    groups.len() - 1
+                }
+            };
+            group_by_view.insert(view.node_id, group);
+            groups[group].views.push(view);
+        }
+        // The other groups each group reads views of.
+        let reads: Vec<Vec<usize>> = groups
+            .iter()
+            .enumerate()
+            .map(|(group, of)| {
+                of.views
+                    .iter()
+                    .flat_map(|view| &view.inputs.materialized_views)
+                    .filter_map(|read| group_by_view.get(read).copied())
+                    .filter(|&read| read != group)
+                    .collect()
+            })
+            .collect();
+        // Each group after those it reads: a depth-first postorder. A view's
+        // window holds the windows of the views it reads, all ending where
+        // it ends, so two groups never read each other.
+        fn visit(group: usize, reads: &[Vec<usize>], placed: &mut [bool], order: &mut Vec<usize>) {
+            if std::mem::replace(&mut placed[group], true) {
+                return;
+            }
+            for &read in &reads[group] {
+                visit(read, reads, placed, order);
+            }
+            order.push(group);
+        }
+        let mut placed = vec![false; groups.len()];
+        let mut order = Vec::with_capacity(groups.len());
+        for group in 0..groups.len() {
+            visit(group, &reads, &mut placed, &mut order);
+        }
+        let mut groups: Vec<Option<IngestionRefreshGroup>> = groups.into_iter().map(Some).collect();
+        Ok(order
+            .into_iter()
+            .filter_map(|group| groups[group].take())
+            .collect())
+    }
+
+    /// The refresh window of `node` ([`RefreshWindow`]): for a `PaneChain`
+    /// (a DAG with its chains unexpanded), its newest pane's, `(pane_width,
+    /// s mod pane_width)` with `s` the sum of the offsets of the `TimeShift`s
+    /// below it; for any other node, `(W, o mod W)` for its window
+    /// `(T - o - W, T - o]` ([`Self::view_windows`]). A chain and each of its
+    /// expanded panes have the same one. `None` when the window is
+    /// unbounded or empty. O(nodes + edges).
+    pub fn refresh_window(&self, node: PhysicalASAPNodeId) -> Option<RefreshWindow> {
+        self.refresh_windows([node])[&node]
+    }
+
+    /// [`Self::refresh_window`] of each of `nodes`, by id, with the DAG
+    /// indexed once for all of them.
+    pub fn refresh_windows(
+        &self,
+        nodes: impl IntoIterator<Item = PhysicalASAPNodeId>,
+    ) -> HashMap<PhysicalASAPNodeId, Option<RefreshWindow>> {
+        let payloads = self.payloads_by_id();
+        let (chains, others): (Vec<_>, Vec<_>) = nodes.into_iter().partition(|id| {
+            matches!(
+                payloads.get(id),
+                Some(Operator::ASAP(ASAPOp::PaneChain { .. }))
+            )
+        });
+        // The window `(T - end_offset_ms - width_ms, T - end_offset_ms]`'s refresh window.
+        let of_window = |end_offset_ms: i64, width_ms: i64| {
+            let width_ms = u64::try_from(width_ms).ok().filter(|&width| width > 0)?;
+            let phase_ms = end_offset_ms.rem_euclid(i64::try_from(width_ms).ok()?);
+            Some(RefreshWindow {
+                width_ms,
+                phase_ms: u64::try_from(phase_ms).ok()?,
+            })
+        };
+        let mut windows: HashMap<PhysicalASAPNodeId, Option<RefreshWindow>> = self
+            .view_windows(others)
+            .into_iter()
+            .map(|(id, window)| {
+                let refresh_window = match window {
+                    ScanWindow::Within {
+                        end_offset_ms,
+                        width_ms,
+                    } => of_window(end_offset_ms, width_ms),
+                    ScanWindow::Unbounded => None,
+                };
+                (id, refresh_window)
+            })
+            .collect();
+        for chain in chains {
+            let Some(Operator::ASAP(ASAPOp::PaneChain {
+                child,
+                pane_width_ms,
+                ..
+            })) = payloads.get(&chain)
+            else {
+                continue;
+            };
+            // The newest pane ends at the offsets of the shifts below the chain.
+            let mut end_offset_ms = Some(0i64);
+            let mut below = payloads.get(child);
+            while let Some(Operator::NonASAP(NonASAPOp::TimeShift { shift, child })) = below {
+                end_offset_ms = end_offset_ms
+                    .filter(|_| shift.at.is_none())
+                    .and_then(|offset| offset.checked_add(shift.offset_ms));
+                below = payloads.get(child);
+            }
+            let width_ms = i64::try_from(*pane_width_ms).unwrap_or(0);
+            windows.insert(
+                chain,
+                end_offset_ms.and_then(|offset| of_window(offset, width_ms)),
+            );
+        }
+        windows
     }
 
     /// Sets `retention_ms` on every materialized view and every query-time
