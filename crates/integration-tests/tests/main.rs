@@ -7,6 +7,7 @@ mod planner_layering_common;
 
 mod aggregate;
 mod binary_op;
+mod crate_graph;
 mod declared_group_counts;
 mod deployment_capabilities;
 mod exact_composition;
