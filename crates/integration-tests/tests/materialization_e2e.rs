@@ -117,8 +117,8 @@ fn floats(result: &[Vec<Batch>]) -> Vec<f64> {
 }
 
 /// Execute a timed DAG over one raw-source batch per `Scan`
-/// (`batch(schema, metric)`): each materialized view refreshed in an
-/// ingestion run over `ingestion`, then the query at `evaluation_time_ms`
+/// (`batch(schema, metric)`): each refresh group of materialized views
+/// refreshed in one ingestion run over `ingestion`, then the query at `evaluation_time_ms`
 /// reading the views' states. Returns the root's values and the views.
 fn execute(
     dag: &PhysicalASAPDAG,
@@ -138,12 +138,16 @@ fn execute(
             batch(schema, metric).to_rows()
         })
     };
-    // Each view's ingestion run refreshes it from the raw data.
+    // Each refresh group's ingestion run refreshes its views from the raw
+    // data, compiled once with all of them as roots.
     let mut store = raw(&dag);
-    for view in &views {
-        let refresh = compile(&dag, &[], &[view.node_id as u64]).unwrap();
-        let states = physical_common::execute(&refresh, raw(&dag), ingestion.clone()).remove(0);
-        store = store.with_materialized_view(view.node_id, states).unwrap();
+    for group in dag.ingestion_refresh_groups().unwrap() {
+        let roots: Vec<u64> = group.views.iter().map(|view| view.node_id as u64).collect();
+        let refresh = compile(&dag, &[], &roots).unwrap();
+        let states = physical_common::execute(&refresh, raw(&dag), ingestion.clone());
+        for (view, states) in group.views.iter().zip(states) {
+            store = store.with_materialized_view(view.node_id, states).unwrap();
+        }
     }
     let query = compile(&dag, &views, &[dag.roots[0] as u64]).unwrap();
     let result = physical_common::execute(&query, store, Scope::Query { evaluation_time_ms });
