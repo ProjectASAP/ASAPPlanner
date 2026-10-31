@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use asap_cost::execution_demand::computations;
-use asap_types::ir::operator::operator_properties::{Reduction, Source};
+use asap_types::ir::operator::operator_properties::{Reduction, Source, TimeShift};
 use asap_types::ir::physical_export::{compile_physical_asap_workload, PhysicalASAPDAG};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
@@ -99,16 +99,37 @@ fn dag_of(summaries: &[Rc<OperatorNode>], materialization: Materialization) -> P
 
 /// `(multiplier, per_second)` of `dag`'s `Scan`, each query every 10 s.
 fn scan_computations(dag: &PhysicalASAPDAG) -> (u64, f64) {
+    computations_of(dag, |op| matches!(op, NonASAPOp::Scan { .. }))
+}
+
+/// `(multiplier, per_second)` of the one node of `dag` whose operator
+/// `is_node` picks, each query every 10 s.
+fn computations_of(
+    dag: &PhysicalASAPDAG,
+    is_node: impl Fn(&NonASAPOp<usize>) -> bool,
+) -> (u64, f64) {
     let every_10_s =
         QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(10_000)));
     let recurrence = vec![every_10_s; dag.roots.len()];
     let times = computations(dag, &recurrence, &[], 3600.0, None).unwrap();
-    let scan = dag
+    let node = dag
         .nodes
         .iter()
-        .find(|node| matches!(node.payload, Operator::NonASAP(NonASAPOp::Scan { .. })))
+        .find(|node| matches!(&node.payload, Operator::NonASAP(op) if is_node(op)))
         .unwrap();
-    times[&scan.id]
+    times[&node.id]
+}
+
+/// `child` evaluated `offset_ms` earlier.
+fn shifted(child: &Rc<OperatorNode>, offset_ms: i64) -> Rc<OperatorNode> {
+    OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
+        shift: TimeShift {
+            offset_ms,
+            at: None,
+        },
+        child: Rc::clone(child),
+    }))
+    .unwrap()
 }
 
 const AT_INGESTION: Materialization = Materialization::MatAtIngestion(Medium::Memory);
@@ -177,4 +198,92 @@ fn query_consumers_still_count_once_each() {
         Materialization::NotMaterialized,
     );
     assert_eq!(scan_computations(&dag), (2, 0.2));
+}
+
+/// Two 10 s chains and a 60 s chain over one `Scan`: two refresh windows,
+/// two ingestion runs.
+#[test]
+fn a_scan_under_chains_of_10_10_and_60_s_is_computed_for_each_width() {
+    let scan = scan();
+    let dag = dag_of(
+        &[
+            chain(&scan, SketchAlgorithm::Kll, 10_000, 6),
+            chain(&scan, SketchAlgorithm::DDSketch, 10_000, 30),
+            chain(&scan, SketchAlgorithm::Kll, 60_000, 5),
+        ],
+        AT_INGESTION,
+    );
+    assert_eq!(scan_computations(&dag), (2, 2.0));
+}
+
+/// A 10 s chain over the `Scan` and a 10 s chain over the `Scan` shifted by
+/// 5 s end their panes on different grids (phases 0 and 5 s): two runs.
+#[test]
+fn chains_of_one_width_and_two_phases_are_computed_apart() {
+    let scan = scan();
+    let dag = dag_of(
+        &[
+            chain(&scan, SketchAlgorithm::Kll, 10_000, 6),
+            chain(
+                &shifted(&scan, 5_000),
+                SketchAlgorithm::DDSketch,
+                10_000,
+                30,
+            ),
+        ],
+        AT_INGESTION,
+    );
+    assert_eq!(scan_computations(&dag), (2, 2.0));
+}
+
+/// Two 10 s chains over one `TimeShift(10 s)` of the `Scan` (phase 0 for
+/// both): the shift and the `Scan` below it run once per run.
+#[test]
+fn nodes_below_a_shared_intermediate_node_are_computed_once_per_run() {
+    let shift = shifted(&scan(), 10_000);
+    let dag = dag_of(
+        &[
+            chain(&shift, SketchAlgorithm::Kll, 10_000, 6),
+            chain(&shift, SketchAlgorithm::DDSketch, 10_000, 30),
+        ],
+        AT_INGESTION,
+    );
+    assert_eq!(scan_computations(&dag), (1, 1.0));
+    assert_eq!(
+        computations_of(&dag, |op| matches!(op, NonASAPOp::TimeShift { .. })),
+        (1, 1.0)
+    );
+}
+
+/// Two summaries kept at ingestion over rows with no time window
+/// (`Values`) have no refresh window: each counts alone.
+#[test]
+fn consumers_of_unbounded_windows_count_alone() {
+    let rows = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Values {
+        rows: vec![],
+        schema: scan().schema.clone(),
+    }))
+    .unwrap();
+    let build = |algorithm| {
+        OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+            child: Rc::clone(&rows),
+            family: quantile_sketch(algorithm),
+            input: SummaryUpdate::column(ColumnRef::Named("value".into())),
+            reduction: Reduction::by(vec![2]),
+            grouping: GroupingStrategy::default(),
+            filter: None,
+        }))
+        .unwrap()
+    };
+    let dag = dag_of(
+        &[
+            build(SketchAlgorithm::Kll),
+            build(SketchAlgorithm::DDSketch),
+        ],
+        AT_INGESTION,
+    );
+    assert_eq!(
+        computations_of(&dag, |op| matches!(op, NonASAPOp::Values { .. })),
+        (2, 2.0)
+    );
 }

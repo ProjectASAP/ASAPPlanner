@@ -490,10 +490,7 @@ fn profile_for_priced(
             asap_types::ir::Operator::ASAP(ASAPOp::PaneChain { pane_width_ms, .. })
                 if node.materialization == Materialization::MatAtIngestion(Medium::Memory) =>
             {
-                Some(RefreshWindow {
-                    width_ms: *pane_width_ms,
-                    phase_ms: 0,
-                })
+                RefreshWindow::of_window(0, i64::try_from(*pane_width_ms).unwrap_or(0))
             }
             _ => None,
         },
@@ -1918,8 +1915,6 @@ mod tests {
         }
     }
 
-    // Real shared KLL/DDS plans verify schedule unions and held-memory lifetime,
-    // including two equal frequencies whose different phases cannot coalesce.
     /// A KLL chain (p90 over a minute) and a DDSketch chain (p99 over five
     /// minutes) kept at ingestion over one `Scan`, each in panes of its
     /// query's interval. With equal pane widths, one ingestion run per pane
@@ -2153,6 +2148,8 @@ mod tests {
         )
     }
 
+    // Real shared KLL/DDS plans verify schedule unions and held-memory lifetime,
+    // including two equal frequencies whose different phases cannot coalesce.
     #[test]
     fn heterogeneous_shared_sketch_profiles_match_the_real_evaluator() {
         use asap_logical_asap_optimization::test_support::{
