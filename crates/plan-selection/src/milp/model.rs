@@ -5,7 +5,7 @@
 //!
 //! | Family | Meaning |
 //! |---|---|
-//! | `p[ctx, c]` | in context `ctx`, candidate `c` gives its result slot (binary): computed there, or read across the boundary (a shareable candidate, or a candidate of `I`) |
+//! | `p[ctx, c]` | in context `ctx`, candidate `c` gives its result slot (binary): computed there, or read across the boundary (a shareable candidate, or a candidate of an ingestion pipeline `I_r`) |
 //! | `x[m]` | shareable candidate `m` is selected (binary) |
 //! | `a[q, m]` | query `q` depends on shareable `m` (continuous, exact at integral binaries) |
 //! | `y[q, m, c]` | `AND(a[q, m], p[m, c])`, for reach from above and accuracy (continuous) |
@@ -22,9 +22,10 @@
 //! 2. One candidate per result slot per context: `Σ_{c ∈ slot} p[ctx, c] ≤ 1`.
 //! 3. Validity: `Σ_{c' ∈ compat(c, n)} p[ctx, c'] ≥ p[ctx, c]` for each `c`
 //!    computed in `ctx`; `≥ x[m]` for `m`'s own inputs in its context;
-//!    `p[ctx, m] ≤ x[m]`, `p[ctx, c] ≤ p[I, c]` for reads across a
-//!    boundary.
-//! 4. Used only if read, per context.
+//!    `p[ctx, m] ≤ x[m]`, `p[m, c] ≤ p[I_r(m), c]` for reads across a
+//!    boundary (`r(m)` the refresh window of ingestion-time `m`).
+//! 4. Used only if read, per context; a candidate of `I_r` is also read
+//!    by `p[m, c]` for each `m` with `r(m) = r`.
 //! 5. Sharing: `x[m] ≤ Σ_ctx p[ctx, m]`.
 //! 6. Reach: `a[q, m] ≥ p[q, m]`, `a[q, c] ≥ a[q, m] + p[m, c] − 1`; from
 //!    above, where a reader constraint counts queries.
@@ -86,7 +87,7 @@ pub(crate) struct SelectionMilpOptions {
 }
 
 /// Which part of the model a variable or row belongs to, for the size
-/// report: the query contexts, `I`, the shareable candidates' contexts
+/// report: the query contexts, the `I_r`, the shareable candidates' contexts
 /// (with their `x`, reach and schedule terms), or the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub(crate) enum Scope {
@@ -334,9 +335,10 @@ impl<'a> SelectionMilp<'a> {
         self.physical.query_roots.len()
     }
 
-    /// The index of `I` among the contexts.
-    pub(crate) fn ingestion_context(&self) -> usize {
-        self.query_count()
+    /// The context where `context` reads a candidate of an `I_r`
+    /// ([`MilpInputs::ingestion_context_read_by`]).
+    pub(crate) fn ingestion_context_read_by(&self, context: usize) -> Option<usize> {
+        self.inputs.ingestion_context_read_by(context)
     }
 
     /// The context of shareable candidate `m`.
@@ -401,7 +403,7 @@ impl<'a> SelectionMilp<'a> {
     pub(crate) fn scope_of(&self, context: usize) -> Scope {
         match self.inputs.contexts[context].kind {
             ContextKind::Query(_) => Scope::Queries,
-            ContextKind::Ingestion => Scope::Ingestion,
+            ContextKind::Ingestion(_) => Scope::Ingestion,
             ContextKind::Shared(_) => Scope::SharedContexts,
         }
     }
@@ -585,7 +587,7 @@ fn choice_variables(milp: &mut SelectionMilp<'_>) {
                     }
                 }
             }
-            ContextKind::Ingestion => {}
+            ContextKind::Ingestion(_) => {}
         }
         for &reader in &options {
             if !data.computes(inputs.kind[reader.0]) {
@@ -635,7 +637,15 @@ fn choice_variables(milp: &mut SelectionMilp<'_>) {
 fn structural_rows(milp: &mut SelectionMilp<'_>) {
     let inputs = milp.inputs;
     let output_refs = output_references(&milp.physical.query_roots);
-    let ingestion = milp.ingestion_context();
+    // Per `I_r`, the contexts of the ingestion-time shareable candidates of
+    // refresh window `r`.
+    let mut readers_of_ingestion: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (m, &at) in &inputs.ingestion_context_of_shareable {
+        readers_of_ingestion
+            .entry(at)
+            .or_default()
+            .push(inputs.context_of_shareable[m]);
+    }
     // 1. Coverage.
     milp.builder.scope = Scope::Queries;
     for (reference, (query, _)) in output_refs.iter().enumerate() {
@@ -687,7 +697,9 @@ fn structural_rows(milp: &mut SelectionMilp<'_>) {
                             .row("3 validity (boundary)", constraint!(variable <= selected));
                     }
                     RunKind::Ingestion => {
-                        let source = milp.choice[ingestion].get(&option).copied();
+                        let source = milp
+                            .ingestion_context_read_by(context)
+                            .and_then(|ingestion| milp.choice[ingestion].get(&option).copied());
                         match source {
                             Some(source) => milp
                                 .builder
@@ -763,13 +775,11 @@ fn structural_rows(milp: &mut SelectionMilp<'_>) {
                     }
                 }
             }
-            if data.kind == ContextKind::Ingestion {
-                for other in 0..inputs.contexts.len() {
-                    if other != context {
-                        if let Some(&read) = milp.choice[other].get(&option) {
-                            reads += read;
-                        }
-                    }
+            // A candidate of `I_r` is also read by the contexts of the
+            // ingestion-time shareable candidates of refresh window `r`.
+            for &other in readers_of_ingestion.get(&context).into_iter().flatten() {
+                if let Some(&read) = milp.choice[other].get(&option) {
+                    reads += read;
                 }
             }
             milp.builder
@@ -848,40 +858,50 @@ fn acyclic_rows(milp: &mut SelectionMilp<'_>) {
 }
 
 /// Order ranks across contexts: on the graph whose nodes are the shareable
-/// candidates' own runs and the runs of `I`, with an edge from a run to
-/// each shareable candidate or candidate of `I` its context may read (for
-/// a run of `I`, its producers in `I`). Rows 3–5 alone admit a cycle of
-/// reads across contexts that justifies itself with no output above it
-/// (two shareable candidates of one memo group, each listed among the
-/// other's producers); only edges inside a cyclic component get a row.
+/// candidates' own runs and the runs of each `I_r`, with an edge from a run
+/// to each shareable candidate or candidate of an `I_r` its context may
+/// read (for a run of `I_r`, its producers there). Rows 3–5 alone admit a
+/// cycle of reads across contexts that justifies itself with no output
+/// above it (two shareable candidates of one memo group, each listed among
+/// the other's producers); only edges inside a cyclic component get a row.
 fn acyclic_context_rows(milp: &mut SelectionMilp<'_>) {
     let inputs = milp.inputs;
-    let ingestion = milp.ingestion_context();
     // Nodes: (context of the run, candidate).
     let mut nodes: Vec<(usize, PhysicalCandidateId)> = Vec::new();
     for (&m, &context) in &inputs.context_of_shareable {
         nodes.push((context, m));
     }
-    for &c in milp.choice[ingestion].keys() {
-        if milp.computes(ingestion, c) {
-            nodes.push((ingestion, c));
+    for (context, data) in inputs.contexts.iter().enumerate() {
+        if let ContextKind::Ingestion(_) = data.kind {
+            for &c in milp.choice[context].keys() {
+                if milp.computes(context, c) {
+                    nodes.push((context, c));
+                }
+            }
         }
     }
-    let index: HashMap<PhysicalCandidateId, usize> = nodes
-        .iter()
-        .enumerate()
-        .map(|(i, &(_, c))| (c, i))
-        .collect();
+    let index: HashMap<(usize, PhysicalCandidateId), usize> =
+        nodes.iter().enumerate().map(|(i, &run)| (run, i)).collect();
+    // The node a read of `option` in `context` resolves to.
+    let node_read = |context: usize, option: PhysicalCandidateId| -> Option<usize> {
+        let run_context = match inputs.kind[option.0] {
+            RunKind::Shareable => milp.context_of(option)?,
+            RunKind::Ingestion => milp.ingestion_context_read_by(context)?,
+            RunKind::PerContext => return None,
+        };
+        index.get(&(run_context, option)).copied()
+    };
     // Edges with their activity: `(from, to, indicators that must all be 1)`.
     let mut edges: Vec<(usize, usize, Vec<Variable>)> = Vec::new();
     for (from, &(context, candidate)) in nodes.iter().enumerate() {
-        if context == ingestion {
-            let reader = milp.choice[ingestion][&candidate];
+        if let ContextKind::Ingestion(_) = inputs.contexts[context].kind {
+            let reader = milp.choice[context][&candidate];
             for producers in &inputs.producer_candidates_per_input[candidate.0] {
-                for producer in producers {
-                    if let (Some(&to), Some(&read)) =
-                        (index.get(producer), milp.choice[ingestion].get(producer))
-                    {
+                for &producer in producers {
+                    if let (Some(to), Some(&read)) = (
+                        node_read(context, producer),
+                        milp.choice[context].get(&producer),
+                    ) {
                         if to != from {
                             edges.push((from, to, vec![reader, read]));
                         }
@@ -890,10 +910,8 @@ fn acyclic_context_rows(milp: &mut SelectionMilp<'_>) {
             }
         } else {
             for (&option, &read) in &milp.choice[context] {
-                if let Some(&to) = index.get(&option) {
-                    if inputs.kind[option.0] != RunKind::PerContext {
-                        edges.push((from, to, vec![read]));
-                    }
+                if let Some(to) = node_read(context, option) {
+                    edges.push((from, to, vec![read]));
                 }
             }
         }
@@ -1204,7 +1222,7 @@ fn bucket_queries(query_of_reference: &[usize], query_outputs: &[Vec<usize>]) ->
 /// Row 9: reader constraints, on every node of the constrained candidate.
 /// A node in a query's context is reached by that query alone; a node in
 /// shareable `m`'s context, and `m` itself, by the queries that depend on
-/// `m`. Reads into `I` and per-output-reference reach inside one query
+/// `m`. Reads into an `I_r` and per-output-reference reach inside one query
 /// are not modeled: the constraint is then applied to every reference of
 /// the query (conservative, counted as inexact).
 fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
@@ -1261,9 +1279,9 @@ fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
                         let count = match inputs.contexts[context].kind {
                             ContextKind::Query(_) => Expression::from(1.0),
                             ContextKind::Shared(m) => reach_count(milp, &queries, m).0,
-                            ContextKind::Ingestion => {
+                            ContextKind::Ingestion(_) => {
                                 milp.note_inexact(
-                                    "minimum readers of a candidate of I (forbidden)",
+                                    "minimum readers of a candidate of an I_r (forbidden)",
                                 );
                                 Expression::from(0.0)
                             }
@@ -1322,9 +1340,9 @@ fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
                                     constraint!(count <= 1.0 + slack * (1.0 - used)),
                                 );
                             }
-                            ContextKind::Ingestion => {
+                            ContextKind::Ingestion(_) => {
                                 milp.note_inexact(
-                                    "highest shared materialization in I (forbidden)",
+                                    "highest shared materialization in an I_r (forbidden)",
                                 );
                                 milp.builder
                                     .row("9 reader constraints", constraint!(used <= 0.0));
@@ -1409,8 +1427,8 @@ fn forbid_reach(
                         .row("9 reader constraints", constraint!(reach + used <= 1.0));
                 }
             }
-            ContextKind::Ingestion => {
-                milp.note_inexact("a reader constraint on a candidate of I (forbidden)");
+            ContextKind::Ingestion(_) => {
+                milp.note_inexact("a reader constraint on a candidate of an I_r (forbidden)");
                 milp.builder
                     .row("9 reader constraints", constraint!(used <= 0.0));
             }
@@ -1608,8 +1626,8 @@ fn accuracy_rows(milp: &mut SelectionMilp<'_>) {
                     }
                     None => None,
                 },
-                ContextKind::Ingestion => {
-                    milp.note_inexact("an approximate candidate of I (forbidden)");
+                ContextKind::Ingestion(_) => {
+                    milp.note_inexact("an approximate candidate of an I_r (forbidden)");
                     let p = milp.choice[context][&candidate];
                     milp.builder.row("8 accuracy", constraint!(p <= 0.0));
                     None
@@ -1700,7 +1718,7 @@ pub(crate) struct IndependentPart {
 
 /// The independent parts of `milp`, in order of their first query (the
 /// part without a query last). Queries fall into one part when they may
-/// share a shareable candidate, a run of `I`, a source's raw retention or
+/// share a shareable candidate, a run of an `I_r`, a source's raw retention or
 /// anything else a row joins.
 pub(crate) fn independent_parts(milp: &SelectionMilp<'_>) -> Vec<IndependentPart> {
     let column_of: HashMap<Variable, usize> = milp

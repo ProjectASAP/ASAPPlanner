@@ -106,6 +106,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use asap_cost::{CostInputs, NodeUsage, ProducerOutput};
+use asap_types::ir::materialized_view::RefreshWindow;
 use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId, ScanWindow,
 };
@@ -147,11 +148,15 @@ pub(crate) struct MilpInputs {
     /// Indexed by [`PhysicalCandidateId`]: the result it gives.
     pub(crate) slot: Vec<ResultSlot>,
     /// The execution contexts: one per query (`0..Q`, in workload order),
-    /// then the ingestion pipeline `I` (index `Q`), then one per shareable
-    /// candidate some context may read, ascending by candidate.
+    /// then the ingestion pipelines `I_r` some context reads, ascending by
+    /// [`IngestionPipeline`], then one per shareable candidate some context
+    /// may read, ascending by candidate.
     pub(crate) contexts: Vec<ExecutionContext>,
     /// Per shareable candidate with a context, its index in `contexts`.
     pub(crate) context_of_shareable: BTreeMap<PhysicalCandidateId, usize>,
+    /// Per ingestion-time shareable candidate whose context reads a
+    /// candidate of an `I_r`: the index of that `I_r` in `contexts`.
+    pub(crate) ingestion_context_of_shareable: BTreeMap<PhysicalCandidateId, usize>,
     /// Per query: `w(q, k)` for each approximate candidate `k` whose values
     /// reach its output.
     pub(crate) accuracy_weights: Vec<BTreeMap<PhysicalCandidateId, AccuracyWeight>>,
@@ -341,7 +346,8 @@ pub(crate) enum RunKind {
     /// inputs) that selects it.
     PerContext,
     /// `NotMaterialized` at ingestion time: runs in the ingestion pipeline
-    /// `I`, once per second of arriving data for every reader.
+    /// `I_r` of its readers' refresh window `r`, once per second of
+    /// arriving data for all of them.
     Ingestion,
     /// Materialized (`MatAtIngestion`, `MatAtQuery`,
     /// `MatAtQueryKeptAcrossEvaluations`): selected once, its own execution
@@ -531,15 +537,18 @@ pub(crate) fn prepare_milp_inputs_with(
     let unpruned_links = producer_candidates_left(links, &all_alive);
     let unpruned_outputs = output_candidates(physical, &all_alive);
     let unpruned_reach = queries_reaching(physical, &unpruned_links, &unpruned_outputs);
+    let refresh_windows = refresh_windows(physical, links);
     // Every context before pruning, for the windows each scan may be read
     // at within one context.
-    let (all_contexts, _) = execution_contexts(
+    let all_contexts = execution_contexts(
         physical,
         &links.kind,
         &unpruned_links,
         &unpruned_outputs,
+        &refresh_windows,
         |_| true,
-    );
+    )
+    .contexts;
     let candidate_data = candidate_data(
         physical,
         links,
@@ -563,11 +572,16 @@ pub(crate) fn prepare_milp_inputs_with(
     let kind = links.kind.clone();
     let slot = result_slots(physical);
     let usable = |class: PhysicalCandidateId| candidate_data[class.0].usage.is_ok();
-    let (contexts, context_of_shareable) = execution_contexts(
+    let ExecutionContexts {
+        contexts,
+        context_of_shareable,
+        ingestion_context_of_shareable,
+    } = execution_contexts(
         physical,
         &kind,
         &producer_candidates_per_input,
         &output_candidates,
+        &refresh_windows,
         usable,
     );
     let AccuracyPositions {
@@ -591,6 +605,7 @@ pub(crate) fn prepare_milp_inputs_with(
         slot,
         contexts,
         context_of_shareable,
+        ingestion_context_of_shareable,
         accuracy_weights,
         accuracy_excluded_pairs,
     }
@@ -672,13 +687,122 @@ fn queries_reaching(
     reaching
 }
 
-/// Which execution context (#1095 §2.0): a query evaluation, the
-/// ingestion pipeline `I`, or a shareable candidate's own inputs.
+/// Which execution context (#1095 §2.0): a query evaluation, an ingestion
+/// pipeline `I_r`, or a shareable candidate's own inputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum ContextKind {
     Query(usize),
-    Ingestion,
+    Ingestion(IngestionPipeline),
     Shared(PhysicalCandidateId),
+}
+
+/// Which ingestion pipeline `I_r` (#1095 §2.5 O3(b)): the deployment
+/// refreshes the ingestion-time views of one refresh window in one run, so
+/// `asap_cost::execution_demand::computations` charges a `NotMaterialized`
+/// ingestion-time node once per refresh window of the views reading it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum IngestionPipeline {
+    /// The views of this refresh window.
+    Window(RefreshWindow),
+    /// An ingestion-time shareable candidate whose window is unbounded or
+    /// empty: refreshed alone.
+    Alone(PhysicalCandidateId),
+}
+
+/// The [`IngestionPipeline`] of ingestion-time shareable candidate
+/// `shareable`, from its refresh window ([`refresh_windows`]).
+pub(crate) fn ingestion_pipeline(
+    shareable: PhysicalCandidateId,
+    refresh_windows: &HashMap<PhysicalCandidateId, Option<RefreshWindow>>,
+) -> IngestionPipeline {
+    match refresh_windows.get(&shareable) {
+        Some(Some(window)) => IngestionPipeline::Window(*window),
+        _ => IngestionPipeline::Alone(shareable),
+    }
+}
+
+/// Each ingestion-time shareable candidate's refresh window, as
+/// `asap_cost::execution_demand::computations` computes it on the realized
+/// plan ([`PhysicalASAPDAG::refresh_windows`]): on the DAG of the candidates
+/// below it, each input read from its first producer candidate. That is
+/// exact when the producer candidates of each input read one window, which
+/// is debug-asserted ([`producer_window_disagreements`]).
+fn refresh_windows(
+    physical: &PhysicalASAPMemoCandidates,
+    links: &CandidateLinks,
+) -> HashMap<PhysicalCandidateId, Option<RefreshWindow>> {
+    let views: Vec<PhysicalCandidateId> = (0..physical.candidates.len())
+        .map(PhysicalCandidateId)
+        .filter(|&class| {
+            links.is_shareable(class)
+                && physical.candidates[class.0].timing == ExecutionTiming::IngestionTime
+        })
+        .collect();
+    let dag = dag_below(physical, links, &views);
+    debug_assert!(
+        producer_window_disagreements(links, &dag).is_empty(),
+        "producer candidates of one input read different windows: {:?}",
+        producer_window_disagreements(links, &dag)
+    );
+    dag.refresh_windows(views.iter().map(|view| view.0))
+        .into_iter()
+        .map(|(id, window)| (PhysicalCandidateId(id), window))
+        .collect()
+}
+
+/// The DAG of `tops` and every candidate below them, without edges: each
+/// candidate a node ([`catalog_node`]) whose inputs are its first producer
+/// candidates.
+fn dag_below(
+    physical: &PhysicalASAPMemoCandidates,
+    links: &CandidateLinks,
+    tops: &[PhysicalCandidateId],
+) -> PhysicalASAPDAG {
+    let mut nodes = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack = tops.to_vec();
+    while let Some(class) = stack.pop() {
+        if seen.insert(class) {
+            nodes.push(catalog_node(physical, links, class));
+            stack.extend(links.producers_per_input[class.0].iter().flatten());
+        }
+    }
+    let nodes: Vec<&PhysicalASAPDAGNode> = nodes.iter().collect();
+    nodes_dag(&nodes)
+}
+
+/// The `(candidate, input)` pairs of `dag`'s candidates
+/// ([`dag_below`]) whose producer candidates have different view windows
+/// ([`PhysicalASAPDAG::view_windows`]).
+fn producer_window_disagreements(
+    links: &CandidateLinks,
+    dag: &PhysicalASAPDAG,
+) -> Vec<(PhysicalCandidateId, usize)> {
+    let windows = dag.view_windows(dag.nodes.iter().map(|node| node.id));
+    let mut disagreements = Vec::new();
+    for node in &dag.nodes {
+        for (input, producers) in links.producers_per_input[node.id].iter().enumerate() {
+            let mut read = producers.iter().map(|producer| windows[&producer.0]);
+            if let Some(first) = read.next() {
+                if read.any(|window| window != first) {
+                    disagreements.push((PhysicalCandidateId(node.id), input));
+                }
+            }
+        }
+    }
+    disagreements
+}
+
+/// [`producer_window_disagreements`] over every candidate of `physical`.
+#[cfg(test)]
+pub(crate) fn producer_window_disagreements_of_all(
+    physical: &PhysicalASAPMemoCandidates,
+) -> Vec<(PhysicalCandidateId, usize)> {
+    let links = CandidateLinks::new(physical);
+    let all: Vec<PhysicalCandidateId> = (0..physical.candidates.len())
+        .map(PhysicalCandidateId)
+        .collect();
+    producer_window_disagreements(&links, &dag_below(physical, &links, &all))
 }
 
 /// One execution context and the candidates that may give a result in it.
@@ -690,7 +814,7 @@ pub(crate) struct ExecutionContext {
     pub(crate) at_query_time: bool,
     /// The candidates that may give a result slot in it, ascending: each
     /// computed in it ([`ExecutionContext::computes`]) or read across its
-    /// boundary (a shareable candidate, or a candidate of `I`).
+    /// boundary (a shareable candidate, or a candidate of an `I_r`).
     pub(crate) options: Vec<PhysicalCandidateId>,
 }
 
@@ -700,15 +824,37 @@ impl ExecutionContext {
     pub(crate) fn computes(&self, kind: RunKind) -> bool {
         match kind {
             RunKind::PerContext => self.at_query_time,
-            RunKind::Ingestion => self.kind == ContextKind::Ingestion,
+            RunKind::Ingestion => matches!(self.kind, ContextKind::Ingestion(_)),
             RunKind::Shareable => false,
         }
     }
 }
 
+impl MilpInputs {
+    /// The context where context `context` reads a candidate of an `I_r`:
+    /// itself for an `I_r`, `I_{r(m)}` for ingestion-time shareable `m`'s
+    /// context; `None` for any other context (it reads none).
+    pub(crate) fn ingestion_context_read_by(&self, context: usize) -> Option<usize> {
+        match self.contexts[context].kind {
+            ContextKind::Ingestion(_) => Some(context),
+            ContextKind::Shared(m) => self.ingestion_context_of_shareable.get(&m).copied(),
+            ContextKind::Query(_) => None,
+        }
+    }
+}
+
+/// [`execution_contexts`]' result (see [`MilpInputs`] for each field).
+pub(crate) struct ExecutionContexts {
+    pub(crate) contexts: Vec<ExecutionContext>,
+    pub(crate) context_of_shareable: BTreeMap<PhysicalCandidateId, usize>,
+    pub(crate) ingestion_context_of_shareable: BTreeMap<PhysicalCandidateId, usize>,
+}
+
 /// The execution contexts and their options (module documentation): from
 /// each query's output candidates, each shareable candidate's producers
-/// and every candidate of `I` read across a boundary, expanded through the
+/// and, per ingestion pipeline `I_r`, every candidate of `I_r` an
+/// ingestion-time shareable candidate of refresh window `r`
+/// (`refresh_windows`) reads across its boundary, expanded through the
 /// inputs of the candidates each context computes. Candidates `usable`
 /// rejects (no usage) are left out. A query-time `PerContext` candidate
 /// that only an ingestion-time context could read is left out too: it
@@ -718,8 +864,9 @@ pub(crate) fn execution_contexts(
     kind: &[RunKind],
     producer_candidates_per_input: &[Vec<Vec<PhysicalCandidateId>>],
     output_candidates: &[Vec<PhysicalCandidateId>],
+    refresh_windows: &HashMap<PhysicalCandidateId, Option<RefreshWindow>>,
     usable: impl Fn(PhysicalCandidateId) -> bool,
-) -> (Vec<ExecutionContext>, BTreeMap<PhysicalCandidateId, usize>) {
+) -> ExecutionContexts {
     let query_count = physical.query_roots.len();
     let output_refs = output_references(&physical.query_roots);
     // Expands `seeds` in a context: the options and, through the candidates
@@ -763,48 +910,62 @@ pub(crate) fn execution_contexts(
         context.options = expand(&context, seeds);
         contexts.push(context);
     }
-    // Shareable contexts, discovered from the options, then `I` from every
-    // candidate of `I` read across a boundary; repeated until nothing new.
+    // Shareable contexts, discovered from the options, then each `I_r` from
+    // every candidate of `I_r` read across a boundary; repeated until
+    // nothing new.
     let mut context_of_shareable: BTreeMap<PhysicalCandidateId, usize> = BTreeMap::new();
     let mut shared: Vec<ExecutionContext> = Vec::new();
-    let mut ingestion = ExecutionContext {
-        kind: ContextKind::Ingestion,
-        at_query_time: false,
-        options: Vec::new(),
-    };
-    let mut ingestion_seeds: BTreeSet<PhysicalCandidateId> = BTreeSet::new();
+    // Per `I_r`: its context and its seeds.
+    let mut ingestion: BTreeMap<
+        IngestionPipeline,
+        (ExecutionContext, BTreeSet<PhysicalCandidateId>),
+    > = BTreeMap::new();
     let mut scanned = 0;
     loop {
         let mut pending: Vec<PhysicalCandidateId> = Vec::new();
-        let mut new_ingestion = false;
-        {
-            let all = contexts
-                .iter()
-                .chain(shared.iter())
-                .chain(std::iter::once(&ingestion));
-            for (index, context) in all.enumerate() {
-                if index < scanned && context.kind != ContextKind::Ingestion {
-                    continue;
+        let mut seeds: Vec<(IngestionPipeline, PhysicalCandidateId)> = Vec::new();
+        let unscanned = contexts.iter().chain(shared.iter()).skip(scanned);
+        for context in unscanned.chain(ingestion.values().map(|(context, _)| context)) {
+            // Only an ingestion-time shareable candidate reads a candidate
+            // of an `I_r` (Stage 2's timing rule).
+            let pipeline = match context.kind {
+                ContextKind::Shared(m) if !context.at_query_time => {
+                    Some(ingestion_pipeline(m, refresh_windows))
                 }
-                for &class in &context.options {
-                    match kind[class.0] {
-                        RunKind::Shareable => {
-                            if !context_of_shareable.contains_key(&class)
-                                && !pending.contains(&class)
-                            {
-                                pending.push(class);
-                            }
+                _ => None,
+            };
+            for &class in &context.options {
+                match kind[class.0] {
+                    RunKind::Shareable => {
+                        if !context_of_shareable.contains_key(&class) && !pending.contains(&class) {
+                            pending.push(class);
                         }
-                        RunKind::Ingestion if context.kind != ContextKind::Ingestion => {
-                            new_ingestion |= ingestion_seeds.insert(class);
-                        }
-                        _ => {}
                     }
+                    RunKind::Ingestion => {
+                        if let Some(pipeline) = pipeline {
+                            seeds.push((pipeline, class));
+                        }
+                    }
+                    RunKind::PerContext => {}
                 }
             }
         }
         scanned = contexts.len() + shared.len();
-        if pending.is_empty() && !new_ingestion {
+        let mut grown: BTreeSet<IngestionPipeline> = BTreeSet::new();
+        for (pipeline, class) in seeds {
+            let (_, known) = ingestion.entry(pipeline).or_insert_with(|| {
+                let context = ExecutionContext {
+                    kind: ContextKind::Ingestion(pipeline),
+                    at_query_time: false,
+                    options: Vec::new(),
+                };
+                (context, BTreeSet::new())
+            });
+            if known.insert(class) {
+                grown.insert(pipeline);
+            }
+        }
+        if pending.is_empty() && grown.is_empty() {
             break;
         }
         pending.sort_unstable();
@@ -826,19 +987,35 @@ pub(crate) fn execution_contexts(
             context_of_shareable.insert(class, usize::MAX);
             shared.push(context);
         }
-        if new_ingestion {
-            ingestion.options = expand(&ingestion, ingestion_seeds.iter().copied().collect());
+        for pipeline in grown {
+            let (context, known) = ingestion.get_mut(&pipeline).expect("seeded above");
+            context.options = expand(context, known.iter().copied().collect());
         }
     }
     shared.sort_by_key(|context| context.kind);
-    contexts.push(ingestion);
+    let mut context_of_pipeline: BTreeMap<IngestionPipeline, usize> = BTreeMap::new();
+    for (pipeline, (context, _)) in ingestion {
+        context_of_pipeline.insert(pipeline, contexts.len());
+        contexts.push(context);
+    }
+    let mut ingestion_context_of_shareable = BTreeMap::new();
     for context in shared {
         if let ContextKind::Shared(class) = context.kind {
             context_of_shareable.insert(class, contexts.len());
+            if !context.at_query_time {
+                let pipeline = ingestion_pipeline(class, refresh_windows);
+                if let Some(&at) = context_of_pipeline.get(&pipeline) {
+                    ingestion_context_of_shareable.insert(class, at);
+                }
+            }
         }
         contexts.push(context);
     }
-    (contexts, context_of_shareable)
+    ExecutionContexts {
+        contexts,
+        context_of_shareable,
+        ingestion_context_of_shareable,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1015,7 +1192,7 @@ fn scan_window_options(
         }
         let read_whole = match context.kind {
             ContextKind::Query(_) => output_candidates.iter().any(|out| out.contains(&scan)),
-            ContextKind::Shared(_) | ContextKind::Ingestion => false,
+            ContextKind::Shared(_) | ContextKind::Ingestion(_) => false,
         };
         if read_whole && !kinds.contains(&ScanWindow::Unbounded) {
             kinds.push(ScanWindow::Unbounded);

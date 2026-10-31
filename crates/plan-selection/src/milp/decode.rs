@@ -3,7 +3,7 @@
 //!
 //! - A candidate computed in a context (`p[ctx, c] = 1`, a `NotMaterialized`
 //!   query-time candidate in a query's or a shareable candidate's context,
-//!   or a `NotMaterialized` ingestion-time candidate in `I`) is one node per
+//!   or a `NotMaterialized` ingestion-time candidate in an `I_r`) is one node per
 //!   context: selected in two contexts, it is two nodes; read by two
 //!   readers in one context, it is one.
 //! - A selected shareable candidate (`x[m] = 1`) is one node, whoever reads
@@ -11,7 +11,7 @@
 //! - In each context, input `n` of a computed node (or of `m`'s own node in
 //!   `m`'s context) reads the context's selected candidate among its
 //!   producers: the node computed there, the shareable candidate's node, or
-//!   the candidate's node in `I`.
+//!   the candidate's node in `I_r(m)` (read in ingestion-time `m`'s context).
 //! - Output reference `r` is the selected output candidate in `r`'s query
 //!   context.
 //!
@@ -56,7 +56,6 @@ pub(crate) fn decode(
     inputs: &MilpInputs,
     chosen: &ChosenCandidates,
 ) -> Result<DagOfSelectedCandidates, String> {
-    let ingestion = physical.query_roots.len();
     // The node a read of `producer` in `context` resolves to.
     let run_of = |context: usize, producer: PhysicalCandidateId| -> Option<Run> {
         if !chosen.chosen[context].contains(&producer) {
@@ -71,9 +70,10 @@ pub(crate) fn decode(
                 .selected
                 .contains(&producer)
                 .then_some(Run::Shared(producer)),
-            RunKind::Ingestion => chosen.chosen[ingestion]
-                .contains(&producer)
-                .then_some(Run::Computed(ingestion, producer)),
+            RunKind::Ingestion => inputs
+                .ingestion_context_read_by(context)
+                .filter(|&ingestion| chosen.chosen[ingestion].contains(&producer))
+                .map(|ingestion| Run::Computed(ingestion, producer)),
             RunKind::PerContext => None,
         }
     };
