@@ -8,9 +8,12 @@ code. For the public types and their rules, read the
 
 ## Crates
 
-One crate per planning stage, so Cargo enforces the one-way stage flow: a
-stage crate depends only on `asap-types` and the stages before it, and none
-depends on the executor.
+One crate per planning stage. A stage crate depends only on `asap-types` and
+the shared models (`asap-accuracy`, `asap-cost`), never on another stage crate
+or on the executor: the types one stage hands the next are in
+`asap_types::stages`, and the planner facade calls each stage in turn. A test
+in `asap-integration-tests` (`crate_graph`) checks these edges with
+`cargo metadata`.
 
 | Crate | Role |
 | --- | --- |
@@ -27,8 +30,8 @@ depends on the executor.
 
 ```text
 asap-types ◄── frontends (Stage 0)
-asap-types ◄── asap-cost (shared cost model) ◄── asap-plan-selection
-asap-types ◄── asap-accuracy (shared accuracy model) ◄── asap-logical-asap-optimization, asap-plan-selection
+asap-types ◄── asap-cost (shared cost model) ◄── asap-physical-asap-optimization, asap-plan-selection
+asap-types ◄── asap-accuracy (shared accuracy model) ◄── asap-logical-asap-optimization, asap-physical-asap-optimization, asap-plan-selection
 asap-types ◄── asap-logical-asap-optimization (Stage 1) ◄── asap-planner
 asap-types ◄── asap-physical-asap-optimization (Stage 2) ◄── asap-planner
 asap-plan-selection (Stage 3) ◄── asap-planner (also depends on the frontends)
@@ -40,14 +43,14 @@ asap-types ◄── asap-executor (Stage 4; no stage crate depends on it)
 ```text
 QueryRoots (Stage 0)
   │  generate_dag_of_logical_memo_groups → DagOfLogicalMemoGroups, then
-  │  pass1::logical_memo_candidates::generate_per_computation_logical_memo_candidates
+  │  generate_per_computation_logical_memo_candidates
   ▼                                                                     Stage 1, Pass 1
 PerComputationLogicalMemoCandidates (MemoCandidates + pruned_candidates)
-  │  pass2::logical_memo_candidates::generate_logical_asap_memo_candidates
+  │  generate_logical_asap_memo_candidates
   │    the memo rules (pass2/memo/rules/) over the candidate memo       Stage 1, Pass 2
   ▼
 LogicalASAPMemoCandidates
-  │  asap_physical_asap_optimization::catalog::generate_physical_asap_memo_candidates  Stage 2
+  │  asap_physical_asap_optimization::generate_physical_asap_memo_candidates  Stage 2
   ▼
 PhysicalASAPMemoCandidates (operator nodes per timing/materialization + pruned_candidates)
   │  asap_plan_selection::select_plan (with Stage 2's AssignmentRealizer) Stage 3

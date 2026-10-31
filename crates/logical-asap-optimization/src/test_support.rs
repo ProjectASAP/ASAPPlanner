@@ -30,7 +30,7 @@ use asap_types::workload::{
 
 /// Pass 2 after local window composition, on a memo the test composed
 /// itself (or not at all): rules 2–9 for `domain`, then
-/// [`add_shared_summary_state_groups`](crate::pass2::memo::state_groups::add_shared_summary_state_groups).
+/// `add_shared_summary_state_groups`.
 /// Production runs these through
 /// [`generate_logical_asap_memo_candidates`](crate::pass2::logical_memo_candidates::generate_logical_asap_memo_candidates).
 pub fn sharing_rules_and_shared_state_groups(
@@ -45,7 +45,7 @@ pub fn sharing_rules_and_shared_state_groups(
     Ok(memo)
 }
 
-/// The groups [`add_shared_summary_state_groups`](crate::pass2::memo::state_groups::add_shared_summary_state_groups)
+/// The groups `add_shared_summary_state_groups`
 /// added to an expanded memo, in order: each has one candidate, the
 /// shared build (origin `SharedBuild`); no other group's candidates are
 /// only that.

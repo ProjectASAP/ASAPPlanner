@@ -22,7 +22,7 @@ pub fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
     propagation::composed_guarantee(node)
 }
 
-/// [`propagation::scalar_guarantee`].
+/// `propagation::scalar_guarantee`.
 pub fn scalar_guarantee(
     expr: &ScalarExpr,
     column: &dyn Fn(usize) -> Option<AccuracyGuarantee>,
@@ -30,22 +30,22 @@ pub fn scalar_guarantee(
     propagation::scalar_guarantee(expr, column)
 }
 
-/// [`propagation::stream_norm`].
+/// `propagation::stream_norm`.
 pub fn stream_norm(node: &Rc<OperatorNode>) -> Option<StreamNorm> {
     propagation::stream_norm(node)
 }
 
-/// [`propagation::fold_stats`].
+/// `propagation::fold_stats`.
 pub fn fold_stats(reduction: &Reduction, input: &Rc<OperatorNode>) -> Option<PropagationStats> {
     propagation::fold_stats(reduction, input)
 }
 
-/// [`propagation::estimates_raw_data_samples_of`].
+/// `propagation::estimates_raw_data_samples_of`.
 pub fn estimates_raw_data_samples_of(node: &OperatorNode) -> Option<String> {
     propagation::estimates_raw_data_samples_of(node)
 }
 
-/// [`propagation::estimate_has_bound`].
+/// `propagation::estimate_has_bound`.
 pub fn estimate_has_bound(
     family: &FieldDataType,
     update: &SummaryUpdate,
@@ -54,7 +54,7 @@ pub fn estimate_has_bound(
     propagation::estimate_has_bound(family, update, query)
 }
 
-/// [`propagation::estimate_bound_over_raw_data_samples`].
+/// `propagation::estimate_bound_over_raw_data_samples`.
 pub fn estimate_bound_over_raw_data_samples(
     family: &FieldDataType,
     update: &SummaryUpdate,
@@ -63,7 +63,7 @@ pub fn estimate_bound_over_raw_data_samples(
     propagation::estimate_bound_over_raw_data_samples(family, update, query)
 }
 
-/// [`propagation::source_distinct_guarantee`].
+/// `propagation::source_distinct_guarantee`.
 pub fn source_distinct_guarantee(
     family: &FieldDataType,
     query: &SketchStatistic,

@@ -52,7 +52,7 @@ use asap_types::stages::{
 
 /// Populate implementation candidates without changing initial group identities.
 /// The inventory must have walked `initial`'s groups
-/// ([`PerComputationCandidates::walked`]); its targets name them by id.
+/// (`PerComputationCandidates::walked`); its targets name them by id.
 pub fn try_populate_pass1(
     initial: DagOfLogicalMemoGroups,
     per_computation: &PerComputationCandidates,

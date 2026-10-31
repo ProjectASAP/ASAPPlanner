@@ -9,7 +9,7 @@ use asap_frontend_common::ResolveDAGError;
 ///
 /// Carries no PromQL type — the SQL front end never depends on the PromQL
 /// parser. The language-neutral variants (`UnsupportedFeature` / `WrongLanguage`
-/// / `Convert`) are mirrored by [`asap_frontend_promql::PromqlError`] rather
+/// / `Convert`) are mirrored by `asap_frontend_promql::PromqlError` rather
 /// than shared, so neither front end pulls the other's parser.
 #[derive(Debug)]
 pub enum SqlError {

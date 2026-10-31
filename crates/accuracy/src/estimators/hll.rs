@@ -231,7 +231,7 @@ impl ClassicHllConfidence {
 /// to 18 is. Pass 1's sizing for a failure probability
 /// (`sizing::sized_for_failure_probability`)
 /// applies this rule to the source's bound, its sizing for `ε`
-/// ([`hll_precision`]) to a bound of `⌈1/ε⌉`.
+/// (`hll_precision`) to a bound of `⌈1/ε⌉`.
 pub fn min_precision(
     relative_error: f64,
     failure_probability: f64,

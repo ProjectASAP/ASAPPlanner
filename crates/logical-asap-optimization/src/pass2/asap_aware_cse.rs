@@ -132,7 +132,7 @@ use asap_accuracy::propagation::recompose_guarantees;
 /// metric without predicates projects the union of the labels its scans
 /// project, in the order the walk meets them (before the series identity,
 /// with the unique keys moved along).
-/// The nodes that pass the labels on ([`passes_labels_on`]) keep the wider
+/// The nodes that pass the labels on (`passes_labels_on`) keep the wider
 /// rows above a widened scan; any other consumer reads them through a
 /// `Project` that keeps the columns it read, by name. `None` when every metric's scans already
 /// agree, when two of them give one label different types or one is closed
@@ -585,13 +585,13 @@ fn pane_window_ms(build: &OperatorNode) -> Option<u64> {
 /// its panes; every other build is untouched. A subset whose builds can
 /// share chains is followed by one Pass 2 candidate per shared grid, in
 /// which each group reads one shared chain, each member merging its newest
-/// panes: the finest member's panes ([`nested_window_groups`]), then the
+/// panes: the finest member's panes (`nested_window_groups`), then the
 /// gcd of the members' widths when that groups them differently
-/// ([`gcd_window_groups`]); and by one error candidate per group whose
+/// (`gcd_window_groups`); and by one error candidate per group whose
 /// sizing fails. Each grid groups every build of a subset at once: a
 /// shared gcd grid over only some of the builds that could share it is not
 /// listed. An error only for more than
-/// [`MAX_PANE_CANDIDATES`] pane candidates; a Pass 2 candidate whose
+/// `MAX_PANE_CANDIDATES` pane candidates; a Pass 2 candidate whose
 /// composition fails carries its own error.
 pub fn window_composition_pass2_candidates(
     roots: &[QueryRoot],
@@ -1352,7 +1352,7 @@ pub(crate) fn rollup_kind(family: &FieldDataType) -> Option<ExactKind> {
 /// finalized value, with its coarsest finer build of the same family over
 /// the same rows that the candidate finalizes; then each coarse sketch build
 /// read only by estimates, with the finest build of its algorithm over the
-/// same rows whose keys include its own ([`sketch_rollup_candidates`]).
+/// same rows whose keys include its own (`sketch_rollup_candidates`).
 #[cfg(any(test, feature = "test-support"))]
 pub fn rollup_candidates(roots: &[QueryRoot]) -> Vec<RollupCandidate> {
     rollup_candidates_of(roots, None)
@@ -1953,12 +1953,12 @@ fn is_sketch_build(node: &OperatorNode) -> bool {
 
 /// Every Pass 2 candidate of the rollup rule for the candidate with query
 /// roots `roots` and rollup candidates `candidates` ([`rollup_candidates`]):
-/// one per non-empty subset of their choices ([`rollup_choices`]), in
+/// one per non-empty subset of their choices (`rollup_choices`), in
 /// binary-counter order (the first the lowest bit). A chosen sketch choice
 /// resizes its finest build for every reader, its own and each coarse
-/// build's ([`sized_for_all`]: the strictest consumer's size), and each
+/// build's (`sized_for_all`: the strictest consumer's size), and each
 /// coarse build becomes the regrouping merge of the resized build's
-/// states. An error only for more than [`MAX_REUSE_CANDIDATES`] choices; a
+/// states. An error only for more than `MAX_REUSE_CANDIDATES` choices; a
 /// Pass 2 candidate whose composition fails carries its own error.
 pub fn rollup_pass2_candidates(
     roots: &[QueryRoot],

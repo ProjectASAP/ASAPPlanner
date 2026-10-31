@@ -41,8 +41,10 @@
 //!   computes the group's own rows.
 //!
 //! The input must be a logical DAG: ASAP operators, execution timing or a
-//! materialization are rejected. No cost or accuracy model is used; ranking
-//! and discarding valid candidates belong to Stage 3.
+//! materialization are rejected. No cost model is used. The accuracy model
+//! is used only to prune summaries no query reading them can use
+//! ([`PerComputationCandidates::without_summaries_no_query_can_use`]);
+//! ranking and discarding valid candidates belong to Stage 3.
 //!
 //! # Whole-workload candidates (logical ASAP-aware optimization, end of Pass 1)
 //!
@@ -408,7 +410,7 @@ impl PerComputationCandidates {
     /// its fused computation's) is moved to its pruned candidates with
     /// [`PruneReason::NoErrorBoundForQueryTarget`] when, for every query
     /// whose root reaches the target's aggregate,
-    /// [`output_can_meet_target`] says no: the query's output, composed
+    /// `output_can_meet_target` says no: the query's output, composed
     /// with that summary and every other target exact, has no error bound
     /// that can meet the query's target (`query_targets[q]`) at any size,
     /// as `model` judges metrics. Every other target exact is the most
@@ -427,8 +429,9 @@ impl PerComputationCandidates {
     /// pruned, and with every fused summary pruned the fusion is not
     /// offered. A summary whose composition fails is kept.
     ///
-    /// The facade calls it only when the deployment's accuracy model and
-    /// evidence cannot accept an output without its guarantee.
+    /// Pass 1's entry (`generate_per_computation_logical_memo_candidates`)
+    /// calls it only when the deployment's accuracy model and evidence
+    /// cannot accept an output without its guarantee.
     pub fn without_summaries_no_query_can_use(
         mut self,
         query_targets: &[AccuracyTarget],
@@ -685,7 +688,7 @@ pub enum PerComputationCandidateError {
     #[error("logical candidate input already contains ASAP operators")]
     ContainsAsap,
     /// `root` (the query's index in the workload) and `measure` locate the target;
-    /// [`computation_candidates_for_intent`] alone leaves them `None`.
+    /// `computation_candidates_for_intent` alone leaves them `None`.
     #[error(
         "approximate accuracy of root {}, measure {} requires epsilon and delta in (0, 1)",
         root.as_deref().unwrap_or("?"),
@@ -1403,7 +1406,7 @@ fn with_raw_data_samples_requirement(
 /// aggregate; several measures are joined back on the group keys. A summary
 /// is sized here for its measure's accuracy requirement; Pass 1 leaves it
 /// unsized; several approximate inputs of one query share its budget
-/// equally ([`accuracy_budget_parts_per_measure`]). A measure filter becomes `SummaryAgg.filter`;
+/// equally (`accuracy_budget_parts_per_measure`). A measure filter becomes `SummaryAgg.filter`;
 /// `HAVING` is applied as its target records. A sub-DAG shared between roots
 /// stays shared. Every node carries the guarantee `asap_accuracy::propagation::composed_guarantee`
 /// gives it.

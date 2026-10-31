@@ -55,7 +55,7 @@ pub enum PerComputationLogicalMemoCandidatesError {
 /// its guarantee, the summaries no query reading them can use (a query
 /// `q`'s target is `accuracy_targets[q]`). It then attaches each group's
 /// candidates, each with its summaries sized for its readers' failure
-/// probabilities ([`size_for_failure_probability`]): one sized candidate
+/// probabilities (`size_for_failure_probability`): one sized candidate
 /// per accuracy-budget split. Every pruned way to compute a measure is in
 /// the output's `pruned_candidates`. Stops with
 /// [`PerComputationLogicalMemoCandidatesError::Timeout`] once `deadline`

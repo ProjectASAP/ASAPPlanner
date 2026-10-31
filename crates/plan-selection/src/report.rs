@@ -173,7 +173,7 @@ impl std::fmt::Display for AcceptedAccuracy {
     }
 }
 
-/// The whole-plan selector's result ([`PlanSelector`](crate::selector::PlanSelector)):
+/// The whole-plan selector's result (`PlanSelector`):
 /// the selected candidate among whole physical plans and the plan to run,
 /// with what it kept of the other candidates. Today's engine evaluates each
 /// proposed plan with it, and the reference pricer (feature

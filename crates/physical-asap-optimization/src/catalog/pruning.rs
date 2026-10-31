@@ -8,7 +8,7 @@ use asap_types::stages::{
 use asap_types::stages::{ProducerCandidates, ProducerSetInterner};
 use std::collections::HashMap;
 
-/// `configured` without the candidates [`prune_reasons`] rules out, its
+/// `configured` without the candidates `prune_reasons` rules out, its
 /// IDs renumbered densely in their order; each removed one is appended to
 /// its `pruned_candidates` with the reason.
 pub fn prune(configured: PhysicalASAPMemoCandidates) -> Result<PhysicalASAPMemoCandidates, String> {
