@@ -83,6 +83,7 @@ fn run(
         models,
         PlanSearchSettings {
             time_limit_ms: Some(budget_ms),
+            inspect: false,
         },
     )
     .unwrap()

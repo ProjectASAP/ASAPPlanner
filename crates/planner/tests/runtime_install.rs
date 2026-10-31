@@ -1946,6 +1946,7 @@ fn pass1_pruned_for_no_error_bound(
         models,
         PlanSearchSettings {
             time_limit_ms: Some(5_000),
+            inspect: true,
         },
     )
     .unwrap();

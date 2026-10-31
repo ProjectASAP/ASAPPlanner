@@ -59,15 +59,19 @@ pub struct PlanSearchSettings {
     /// stage stops at its round's deadline (an evaluation in progress may
     /// overrun it).
     pub time_limit_ms: Option<u64>,
+    /// Keep each stage's memo for inspection (`stage_pipeline`, the DAG
+    /// viewer): [`PlanningRun::per_computation_candidates`] and
+    /// [`PlanningRun::memo_steps`]. Default off: production planning copies
+    /// no memo.
+    pub inspect: bool,
 }
 
 /// The memo after each step of the planning round whose plan was selected
-/// (or of the last round when none was).
+/// (or of the last round when none was), kept with
+/// [`PlanSearchSettings::inspect`]. Stage 0's groups are the groups of
+/// [`PlanningRun::per_computation_candidates`], without candidates.
 #[derive(Debug, Clone)]
 pub struct MemoSteps {
-    /// After hash-consing the frontends' roots: groups, no candidates.
-    /// (The memo after Pass 1 is [`PlanningRun::per_computation_candidates`].)
-    pub stage0: MemoCandidates,
     /// After local window composition (pane candidates).
     pub pass2: MemoCandidates,
     /// After concrete summary-state group expansion: the memo Stage 2
@@ -155,7 +159,7 @@ pub struct PlanningReport {
 pub struct PlanningRun {
     /// Stage 1, Pass 1's output: the memo groups with their per-computation
     /// candidates, the computation targets and the pruned candidates.
-    /// `None` when Pass 1 failed.
+    /// `None` when Pass 1 failed or without [`PlanSearchSettings::inspect`].
     pub per_computation_candidates: Option<PerComputationLogicalMemoCandidates>,
     /// The selected round's Pass 2 output (the last round's when none is
     /// selected).
@@ -171,7 +175,7 @@ pub struct PlanningRun {
     /// Stage 3 made applied.
     pub selected_plan: Option<Vec<QueryRoot>>,
     /// The memo after each step of the selected round, and the selected
-    /// plan's choice over it.
+    /// plan's choice over it; only with [`PlanSearchSettings::inspect`].
     pub memo_steps: Option<MemoSteps>,
     pub report: PlanningReport,
 }
@@ -181,7 +185,8 @@ struct Round {
     index: usize,
     logical: LogicalASAPMemoCandidates,
     physical: PhysicalASAPMemoCandidates,
-    pass2: MemoCandidates,
+    /// The memo after local window composition, only when inspecting.
+    pass2: Option<MemoCandidates>,
     selection: Result<Selection, SelectionError>,
 }
 
@@ -203,11 +208,6 @@ pub fn run_planning(
     }
     // Stage 0: the memo of logical groups.
     let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-    let stage0 = MemoCandidates {
-        candidates: vec![Vec::new(); initial.groups.len()],
-        groups: initial.groups.clone(),
-        query_roots: initial.query_roots.clone(),
-    };
     let has_pane_window = has_pane_window(&initial);
     let has_groups = !initial.groups.is_empty();
     // Pass 1: the per-computation candidates the deployment can run and
@@ -239,7 +239,7 @@ pub fn run_planning(
         ..PlanningReport::default()
     };
     let mut run = PlanningRun {
-        per_computation_candidates: pass1.as_ref().ok().cloned(),
+        per_computation_candidates: pass1.as_ref().ok().filter(|_| settings.inspect).cloned(),
         logical_asap_candidates: None,
         physical_asap_candidates: None,
         selection: Err(SelectionError::DeadlineReached),
@@ -289,7 +289,15 @@ pub fn run_planning(
      -> RoundEnd {
         let index = report.rounds.len();
         let outcome = plan_round(
-            state, domain, deadline, entries, data, &models, &realizer, index,
+            state,
+            domain,
+            deadline,
+            entries,
+            data,
+            &models,
+            &realizer,
+            index,
+            settings.inspect,
         );
         report.rounds.push(outcome.report);
         let Some(round) = outcome.round else {
@@ -398,9 +406,8 @@ pub fn run_planning(
         run.report = report;
         return Ok(run);
     };
-    let mut memo_steps = MemoSteps {
-        stage0,
-        pass2: round.pass2,
+    let mut memo_steps = round.pass2.map(|pass2| MemoSteps {
+        pass2,
         concrete_states: round.logical.memo.clone(),
         stage2_operator_nodes: round
             .physical
@@ -408,14 +415,16 @@ pub fn run_planning(
             .clone(),
         stage2_pruned_candidates: round.physical.pruned_candidates.clone(),
         selected_chosen_candidates: Err("no plan was selected".into()),
-    };
+    });
     if let (true, Ok(selection)) = (selected, round.selection) {
         report.selected_round = Some(round.index);
-        memo_steps.selected_chosen_candidates = selected_chosen_candidates(
-            &round.logical.memo,
-            &round.physical,
-            &selection.selected_dag,
-        );
+        if let Some(memo_steps) = &mut memo_steps {
+            memo_steps.selected_chosen_candidates = selected_chosen_candidates(
+                &round.logical.memo,
+                &round.physical,
+                &selection.selected_dag,
+            );
+        }
         match realizer.realize(&round.physical, &selection.selected_dag) {
             Ok(realized) => {
                 let proven: HashSet<*const OperatorNode> = selection
@@ -435,7 +444,7 @@ pub fn run_planning(
             Err(error) => run.selection = Err(SelectionError::Realization(error)),
         }
     }
-    run.memo_steps = Some(memo_steps);
+    run.memo_steps = memo_steps;
     run.logical_asap_candidates = Some(round.logical);
     run.physical_asap_candidates = Some(round.physical);
     run.report = report;
@@ -460,7 +469,8 @@ struct RoundOutcome {
 
 /// One pane-width round: Pass 2 over `state` for `domain`, Stage 2, then
 /// Stage 3, each stopping at `deadline`. A Pass 2 timeout in local window
-/// composition leaves `state` unusable, so it is dropped.
+/// composition leaves `state` unusable, so it is dropped. With `inspect`,
+/// the round keeps a copy of the memo after local window composition.
 #[allow(clippy::too_many_arguments)]
 fn plan_round(
     state: &mut Option<Pass2RoundState>,
@@ -471,6 +481,7 @@ fn plan_round(
     models: &PlanningModels<'_>,
     realizer: &dyn AssignmentRealizer,
     index: usize,
+    inspect: bool,
 ) -> RoundOutcome {
     let mut report = PlanningRoundReport {
         pane_width_domain: format!("{domain:?}"),
@@ -516,7 +527,7 @@ fn plan_round(
             return stopped(report, fatal);
         }
     };
-    let pass2 = round_state.unexpanded_memo().clone();
+    let pass2 = inspect.then(|| round_state.unexpanded_memo().clone());
     report.memo_groups = logical.memo.groups.len();
     report.logical_candidates = logical.memo.candidates.iter().map(Vec::len).sum();
     let started = Instant::now();

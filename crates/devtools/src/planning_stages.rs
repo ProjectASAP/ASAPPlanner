@@ -188,7 +188,11 @@ pub fn run_planning_stages_over(
         entries,
         data,
         models,
-        PlanSearchSettings::default(),
+        // The reference enumeration reads the selected round's memo.
+        PlanSearchSettings {
+            inspect: true,
+            ..PlanSearchSettings::default()
+        },
         Some(max_combinations.unwrap_or(DEFAULT_REFERENCE_CHOICES)),
     )
 }

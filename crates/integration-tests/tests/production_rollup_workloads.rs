@@ -81,6 +81,7 @@ fn production(
         PlanningModels::builtin().with_plan_selection(&settings),
         PlanSearchSettings {
             time_limit_ms: Some(30_000),
+            inspect: false,
         },
     )
     .unwrap()
