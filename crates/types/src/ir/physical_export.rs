@@ -318,6 +318,25 @@ pub fn time_range_window<'a>(
     }
 }
 
+/// How long before the evaluation time `node` is evaluated: the sum of the
+/// offsets of the `TimeShift`s from `node` down; `None` when one of them has
+/// an `@` anchor or the sum overflows.
+pub(crate) fn offset_below<'a>(
+    node: PhysicalASAPNodeId,
+    payload_of: impl Fn(PhysicalASAPNodeId) -> Option<&'a PhysicalASAPOperatorPayload>,
+) -> Option<i64> {
+    let mut end_offset_ms = 0i64;
+    let mut below = payload_of(node);
+    while let Some(Operator::NonASAP(NonASAPOp::TimeShift { shift, child })) = below {
+        if shift.at.is_some() {
+            return None;
+        }
+        end_offset_ms = end_offset_ms.checked_add(shift.offset_ms)?;
+        below = payload_of(*child);
+    }
+    Some(end_offset_ms)
+}
+
 /// Why `PhysicalASAPDAG::with_every_node_at_query_time` failed.
 #[derive(Debug, Error)]
 pub enum ReferencePlanError {
@@ -468,10 +487,11 @@ impl PhysicalASAPDAG {
 
     /// The interval of data the output of `node` summarizes, back from the
     /// evaluation time `T`: the union of the windows
-    /// ([`time_range_window`]) of every `TimeRange` below it. For an
-    /// expanded pane, its pane; for a view built from panes, all of them.
-    /// `Unbounded` when no `TimeRange` is below it or one of them is
-    /// unbounded (a whole SQL table, an `@` anchor). O(nodes + edges).
+    /// ([`time_range_window`]) of every `TimeRange` below it, and of every
+    /// unexpanded `PaneChain` (all its panes). For an expanded pane, its
+    /// pane; for a view built from panes, all of them. `Unbounded` when no
+    /// `TimeRange` or chain is below it or one of them is unbounded (a whole
+    /// SQL table, an `@` anchor). O(nodes + edges).
     #[cfg(any(test, feature = "test-support"))]
     pub fn view_window(&self, node: PhysicalASAPNodeId) -> ScanWindow {
         self.view_windows([node])[&node]
@@ -496,12 +516,34 @@ impl PhysicalASAPDAG {
                 if !seen.insert(id) {
                     continue;
                 }
-                if let Some(Operator::NonASAP(NonASAPOp::TimeRange { .. })) = payloads.get(&id) {
-                    let read = time_range_window(id, |id| payloads.get(&id).copied());
-                    window = Some(window.map_or(read, |window| window.union(read)));
-                    continue;
-                }
-                pending.extend(inputs.get(&id).into_iter().flatten());
+                let read = match payloads.get(&id) {
+                    Some(Operator::NonASAP(NonASAPOp::TimeRange { .. })) => {
+                        time_range_window(id, |id| payloads.get(&id).copied())
+                    }
+                    Some(Operator::ASAP(ASAPOp::PaneChain {
+                        child,
+                        pane_width_ms,
+                        pane_count,
+                        ..
+                    })) => {
+                        let width_ms = pane_width_ms.checked_mul(u64::from(*pane_count));
+                        match (
+                            offset_below(*child, |id| payloads.get(&id).copied()),
+                            width_ms,
+                        ) {
+                            (Some(end_offset_ms), Some(width_ms)) => ScanWindow::Within {
+                                end_offset_ms,
+                                width_ms: i64::try_from(width_ms).unwrap_or(i64::MAX),
+                            },
+                            _ => ScanWindow::Unbounded,
+                        }
+                    }
+                    _ => {
+                        pending.extend(inputs.get(&id).into_iter().flatten());
+                        continue;
+                    }
+                };
+                window = Some(window.map_or(read, |window| window.union(read)));
             }
             window.unwrap_or(ScanWindow::Unbounded)
         };

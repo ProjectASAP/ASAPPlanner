@@ -429,3 +429,60 @@ fn views_of_unbounded_windows_are_groups_of_their_own() {
         assert_eq!(group.views.len(), 1);
     }
 }
+
+/// A rollup across jobs of a pane, both kept at ingestion, reads the pane's
+/// window: one refresh group, the pane listed before the rollup that reads
+/// it, so a run whose roots hold both computes the pane in the run.
+#[test]
+fn a_view_reading_a_view_of_its_group_follows_it() {
+    let scan = scan_m();
+    let pane = pane(&scan, 0);
+    let rollup = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![Rc::clone(&pane)],
+        newest_panes: None,
+        group_by: Some(vec![]),
+    }))
+    .unwrap();
+    let mut assignment = MaterializationAssignment::default();
+    for view in [&pane, &rollup] {
+        assignment.set(view, Materialization::MatAtIngestion(Medium::Memory));
+    }
+    let timed = apply_materialization_timings_to_roots(
+        &[QueryRoot::Operator(Rc::clone(&rollup))],
+        &assignment,
+    )
+    .unwrap();
+    let mut dag = compile_physical_asap_workload(&timed).unwrap();
+    dag.set_retention(&HashMap::new(), &HashMap::new(), None)
+        .unwrap();
+    let groups = dag.ingestion_refresh_groups().unwrap();
+    assert_eq!(groups.len(), 1);
+    let [pane_view, rollup_view] = groups[0].views.as_slice() else {
+        panic!("{groups:#?}")
+    };
+    assert_eq!(rollup_view.node_id, dag.roots[0]);
+    assert_eq!(rollup_view.inputs.materialized_views, [pane_view.node_id]);
+    assert_eq!(
+        groups[0].refresh_window,
+        Some(RefreshWindow {
+            width_ms: 60_000,
+            phase_ms: 0
+        })
+    );
+}
+
+/// On the DAG Stage 3 costs (chains unexpanded), a node above a chain has
+/// the window of all the chain's panes: a merge of six 10 s panes, refreshed
+/// at ingestion, has refresh window (60 s, 0).
+#[test]
+fn a_node_above_an_unexpanded_chain_has_the_window_of_its_panes() {
+    let (unexpanded, _) = three_chains_over_one_scan();
+    let merge_of_kll_10s = unexpanded.roots[0];
+    assert_eq!(
+        unexpanded.refresh_window(merge_of_kll_10s),
+        Some(RefreshWindow {
+            width_ms: 60_000,
+            phase_ms: 0
+        })
+    );
+}
