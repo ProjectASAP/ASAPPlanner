@@ -19,7 +19,7 @@
 //! timings or materializations) build the same node, so they are checked
 //! once, together. What a check builds is kept for the later checks
 //! ([`BuiltBefore`]).
-use std::cell::{OnceCell, RefCell};
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
@@ -78,7 +78,7 @@ pub(crate) fn accuracy_positions(
     let exact_stand_ins: Vec<OnceCell<Rc<OperatorNode>>> = (0..physical.candidates.len())
         .map(|_| OnceCell::new())
         .collect();
-    let built_before = RefCell::new(BuiltBefore::default());
+    let mut built_before = BuiltBefore::default();
     let mut positions = AccuracyPositions::default();
     for (query, root) in physical.query_roots.iter().enumerate() {
         let references: Vec<usize> = (0..output_refs.len())
@@ -97,7 +97,6 @@ pub(crate) fn accuracy_positions(
         let checker = Checker {
             physical,
             exact_stand_ins: &exact_stand_ins,
-            built_before: &built_before,
             producer_candidates_per_input,
             output_candidates,
             below: &below,
@@ -120,7 +119,7 @@ pub(crate) fn accuracy_positions(
         let mut weights = BTreeMap::new();
         let mut usable: Vec<&[usize]> = Vec::new();
         for group in groups.values() {
-            let weight = match checker.check(group) {
+            let weight = match checker.check(group, &mut built_before) {
                 Outcome::Exact => continue,
                 Outcome::Meets => {
                     usable.push(group);
@@ -168,7 +167,7 @@ pub(crate) fn accuracy_positions(
                 .chain(usable[second])
                 .copied()
                 .collect();
-            if let Outcome::Fails(_) = checker.check(&both) {
+            if let Outcome::Fails(_) = checker.check(&both, &mut built_before) {
                 for &one in usable[first] {
                     for &other in usable[second] {
                         excluded.push((
@@ -285,8 +284,6 @@ struct Checker<'a> {
     physical: &'a PhysicalASAPMemoCandidates,
     /// Per candidate, its node with an exact guarantee, built once.
     exact_stand_ins: &'a [OnceCell<Rc<OperatorNode>>],
-    /// What earlier checks built, for every query.
-    built_before: &'a RefCell<BuiltBefore>,
     producer_candidates_per_input: &'a [Vec<Vec<PhysicalCandidateId>>],
     output_candidates: &'a [Vec<PhysicalCandidateId>],
     below: &'a [BTreeSet<usize>],
@@ -318,30 +315,42 @@ struct BuiltBefore {
 
 #[cfg(test)]
 thread_local! {
-    /// Set by a test to build every check from scratch, as before the
-    /// outputs were kept across checks ([`BuiltBefore`]).
+    /// Set by a test to check with no kept builds: every check builds
+    /// from scratch ([`BuiltBefore`] cleared) and builds every output
+    /// candidate (no exact stand-in skipped).
     pub(crate) static FRESH_BUILDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// One check's walk: per candidate built, its outputs and whether they
-/// were built across a cycle; the candidates being built; and how many
-/// cycle reads the walk has made.
+/// One check's walk.
 #[derive(Default)]
 struct Walk {
-    built: HashMap<usize, (Built, bool)>,
+    /// Per candidate built in this check.
+    built: HashMap<usize, BuiltInWalk>,
+    /// The candidates being built.
     visiting: Vec<usize>,
+    /// How many reads of a candidate still being built the walk has made.
     cycle_reads: usize,
+}
+
+/// A candidate's outputs in one check, and whether they were built across
+/// a cycle of links (then they are not kept in [`BuiltBefore`]).
+struct BuiltInWalk {
+    outputs: Built,
+    across_cycle: bool,
 }
 
 impl Checker<'_> {
     /// Checks the query's outputs with exactly `approximate` approximate.
-    fn check(&self, approximate: &[usize]) -> Outcome {
+    /// `before` holds what earlier checks built, for every query.
+    fn check(&self, approximate: &[usize], before: &mut BuiltBefore) -> Outcome {
         #[cfg(test)]
-        if FRESH_BUILDS.with(std::cell::Cell::get) {
-            *self.built_before.borrow_mut() = BuiltBefore::default();
+        let fresh = FRESH_BUILDS.with(std::cell::Cell::get);
+        #[cfg(not(test))]
+        let fresh = false;
+        if fresh {
+            *before = BuiltBefore::default();
         }
         let mut walk = Walk::default();
-        let before = &mut *self.built_before.borrow_mut();
         let mut per_reference: Vec<Vec<Rc<OperatorNode>>> = Vec::new();
         for &reference in self.references {
             let mut outputs: Vec<Rc<OperatorNode>> = Vec::new();
@@ -352,7 +361,8 @@ impl Checker<'_> {
                 let reaches = approximate
                     .iter()
                     .any(|member| self.below[class.0].contains(member));
-                if !reaches
+                if !fresh
+                    && !reaches
                     && self.physical.physical_node(class).result_kind != OperatorResultKind::State
                     && std::mem::replace(&mut exact_value_stand_in, true)
                 {
@@ -436,9 +446,9 @@ impl Checker<'_> {
         walk: &mut Walk,
         before: &mut BuiltBefore,
     ) -> Built {
-        if let Some((done, across_cycle)) = walk.built.get(&class) {
-            walk.cycle_reads += usize::from(*across_cycle);
-            return done.clone();
+        if let Some(done) = walk.built.get(&class) {
+            walk.cycle_reads += usize::from(done.across_cycle);
+            return done.outputs.clone();
         }
         if walk.visiting.contains(&class) {
             walk.cycle_reads += 1;
@@ -460,7 +470,13 @@ impl Checker<'_> {
         members.sort_unstable();
         let key = (class, members);
         if let Some(done) = before.outputs.get(&key) {
-            walk.built.insert(class, (done.clone(), false));
+            walk.built.insert(
+                class,
+                BuiltInWalk {
+                    outputs: done.clone(),
+                    across_cycle: false,
+                },
+            );
             return done.clone();
         }
         let cycle_reads = walk.cycle_reads;
@@ -509,7 +525,13 @@ impl Checker<'_> {
         if !across_cycle {
             before.outputs.insert(key, built.clone());
         }
-        walk.built.insert(class, (built.clone(), across_cycle));
+        walk.built.insert(
+            class,
+            BuiltInWalk {
+                outputs: built.clone(),
+                across_cycle,
+            },
+        );
         built
     }
 }
@@ -635,4 +657,134 @@ fn key_and_settled(node: &Rc<OperatorNode>, keys: &mut Keys) -> (u64, bool) {
     };
     keys.insert(Rc::as_ptr(node), (known.0, known.1, node.clone()));
     known
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::groups::tests::{candidate, catalog, reader_of, relative, root, values_node};
+    use asap_logical_asap_optimization::test_support::entry_with;
+    use asap_types::ir::properties::AccuracyTarget;
+    use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
+
+    /// The depth of each output of `built`.
+    fn depths(built: &Built) -> Vec<usize> {
+        fn depth(node: &OperatorNode) -> usize {
+            1 + node
+                .children()
+                .into_iter()
+                .map(|child| depth(child))
+                .max()
+                .unwrap_or(0)
+        }
+        built
+            .as_ref()
+            .expect("built")
+            .iter()
+            .map(|node| depth(node))
+            .collect()
+    }
+
+    // A two-candidate link cycle above an approximate member: `A` reads
+    // the leaf or `B`; `B` reads `A` or a second leaf. Walking from the
+    // top enters the cycle at `A`, so `B` is built there with `A` cut off
+    // (a cycle read), over the second leaf only. Such outputs are not
+    // kept: a later walk that starts at `B` builds it in full, over `A`,
+    // as with no kept builds, for one member and for a pair.
+    #[test]
+    fn outputs_built_across_a_cycle_are_not_kept() {
+        let approximate_leaf = |value: f64, error: f64| {
+            Rc::new(
+                (*values_node(value))
+                    .clone()
+                    .with_guarantee(Some(relative(error, 0.01))),
+            )
+        };
+        let leaf = approximate_leaf(1.0, 0.01);
+        let other_leaf = approximate_leaf(2.0, 0.02);
+        let a = reader_of(&leaf);
+        let b = reader_of(&leaf);
+        let top = reader_of(&a);
+        let physical = catalog(
+            vec![(leaf, 0), (a, 1), (b, 2), (top, 3), (other_leaf, 4)],
+            vec![
+                candidate(0, &[], false),
+                candidate(1, &[&[0, 2]], false),
+                candidate(2, &[&[1, 4]], false),
+                candidate(3, &[&[1]], true),
+                candidate(4, &[], false),
+            ],
+            vec![root(3)],
+        );
+        let producers: Vec<Vec<Vec<PhysicalCandidateId>>> = physical
+            .candidates
+            .iter()
+            .map(|candidate| {
+                candidate
+                    .producer_candidates_per_input
+                    .iter()
+                    .map(|producers| producers.iter().copied().collect())
+                    .collect()
+            })
+            .collect();
+        // Leaves 0 and 4 stand for approximate candidates.
+        let below: Vec<BTreeSet<usize>> = vec![
+            BTreeSet::from([0]),
+            BTreeSet::from([0, 4]),
+            BTreeSet::from([0, 4]),
+            BTreeSet::from([0, 4]),
+            BTreeSet::from([4]),
+        ];
+        let exact_stand_ins: Vec<OnceCell<Rc<OperatorNode>>> = (0..physical.candidates.len())
+            .map(|_| OnceCell::new())
+            .collect();
+        let entry = entry_with(
+            AccuracyTarget::max_error(0.01).failure_probability(0.01),
+            QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(60_000))),
+        );
+        let data = DataWorkload::default();
+        let cost_inputs = asap_cost::CostInputs::default();
+        let models = SelectionModels {
+            accuracy: &asap_accuracy::BuiltinAccuracyModel,
+            evidence: &asap_accuracy::NoAccuracyEvidence,
+            cost_inputs: &cost_inputs,
+        };
+        let output_candidates = vec![vec![PhysicalCandidateId(3)]];
+        let checker = Checker {
+            physical: &physical,
+            exact_stand_ins: &exact_stand_ins,
+            producer_candidates_per_input: &producers,
+            output_candidates: &output_candidates,
+            below: &below,
+            query: 0,
+            root: &physical.query_roots[0],
+            references: &[0],
+            entry: &entry,
+            data: &data,
+            models: &models,
+        };
+        for approximate in [&[0][..], &[0, 4]] {
+            let mut kept = BuiltBefore::default();
+            // From the top: `B` is built with `A` cut off, over the second
+            // leaf alone (depth 2).
+            let mut walk = Walk::default();
+            checker
+                .built(3, approximate, &mut walk, &mut kept)
+                .expect("built");
+            assert!(walk.cycle_reads > 0);
+            assert!(walk.built[&2].across_cycle);
+            assert_eq!(depths(&walk.built[&2].outputs)[0], 2, "{approximate:?}");
+            // From `B`: in full, its first output reads `A` over the leaf
+            // (depth 3), with kept builds as with none.
+            let from_b = checker.built(2, approximate, &mut Walk::default(), &mut kept);
+            let fresh = checker.built(
+                2,
+                approximate,
+                &mut Walk::default(),
+                &mut BuiltBefore::default(),
+            );
+            assert_eq!(depths(&from_b), depths(&fresh), "{approximate:?}");
+            assert_eq!(depths(&fresh)[0], 3, "{approximate:?}");
+        }
+    }
 }
