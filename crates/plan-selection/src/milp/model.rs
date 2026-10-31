@@ -80,6 +80,9 @@ pub(crate) struct SelectionMilpOptions {
     /// Write the accuracy rows (row 8); off when the facade ignores
     /// accuracy guarantees.
     pub(crate) enforce_accuracy: bool,
+    /// Solve each independent part alone ([`independent_parts`]); off only
+    /// to compare with one solve in tests.
+    pub(crate) split_into_parts: bool,
 }
 
 /// Which part of the model a variable or row belongs to, for the size
@@ -262,6 +265,8 @@ pub(crate) struct SelectionMilp<'a> {
     /// producer in the other slot is not justified by `r`.
     pub(crate) slot_links:
         BTreeMap<(usize, PhysicalCandidateId, usize), Vec<(ResultSlot, Variable)>>,
+    /// [`SelectionMilpOptions::split_into_parts`].
+    pub(crate) split_into_parts: bool,
 }
 
 /// Variables and rows of one model.
@@ -304,6 +309,8 @@ pub(crate) struct SelectionMilpSolution {
     /// slot it reads.
     pub(crate) slot_reads: BTreeMap<(usize, PhysicalCandidateId, usize), ResultSlot>,
     pub(crate) size: SelectionMilpSize,
+    /// Per independent part, how its solve went, in part order.
+    pub(crate) parts: Vec<PartSolve>,
     pub(crate) build_ms: u64,
     /// Building the warm start, HiGHS's first incumbent.
     pub(crate) warm_start_ms: u64,
@@ -489,6 +496,7 @@ pub(crate) fn build_selection_milp<'a>(
         producer_gives: HashMap::new(),
         window_cache: HashMap::new(),
         slot_links: BTreeMap::new(),
+        split_into_parts: options.split_into_parts,
     };
     choice_variables(&mut milp);
     structural_rows(&mut milp);
@@ -1654,8 +1662,154 @@ fn accuracy_rows(milp: &mut SelectionMilp<'_>) {
     }
 }
 
-/// Solves `milp` once with HiGHS, with the time left before `deadline` as
-/// its time limit, from the warm start.
+/// One independent part of the model (#1095 §5, 3a): a connected component
+/// of the graph joining the variables of each row, or all components
+/// without a query together. Parts share no variable and no row, and the
+/// objective is a sum over variables, so solving each alone and joining
+/// their solutions solves the whole model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IndependentPart {
+    /// The queries whose output references it covers, ascending.
+    pub(crate) queries: Vec<usize>,
+    /// Its columns (variables in creation order), ascending.
+    pub(crate) columns: Vec<usize>,
+    /// Its rows, ascending.
+    pub(crate) rows: Vec<usize>,
+}
+
+/// The independent parts of `milp`, in order of their first query (the
+/// part without a query last). Queries fall into one part when they may
+/// share a shareable candidate, a run of `I`, a source's raw retention or
+/// anything else a row joins.
+pub(crate) fn independent_parts(milp: &SelectionMilp<'_>) -> Vec<IndependentPart> {
+    let column_of: HashMap<Variable, usize> = milp
+        .builder
+        .variables
+        .iter_variables_with_def()
+        .enumerate()
+        .map(|(column, (variable, _))| (variable, column))
+        .collect();
+    let count = column_of.len();
+    // Union-find over the columns, joined along each row.
+    let mut parent: Vec<usize> = (0..count).collect();
+    fn root(parent: &mut [usize], mut node: usize) -> usize {
+        while parent[node] != node {
+            parent[node] = parent[parent[node]];
+            node = parent[node];
+        }
+        node
+    }
+    for row in &milp.builder.rows {
+        let mut first: Option<usize> = None;
+        for (variable, _) in row.expression().linear_coefficients() {
+            let column = root(&mut parent, column_of[&variable]);
+            match first {
+                None => first = Some(column),
+                Some(known) if known != column => parent[column] = known,
+                Some(_) => {}
+            }
+        }
+    }
+    let output_refs = output_references(&milp.physical.query_roots);
+    let mut query_of_component: BTreeMap<usize, usize> = BTreeMap::new();
+    for (reference, &(query, _)) in output_refs.iter().enumerate() {
+        for out in &milp.inputs.output_candidates[reference] {
+            if let Some(variable) = milp.choice[query].get(out) {
+                let component = root(&mut parent, column_of[variable]);
+                query_of_component.entry(component).or_insert(query);
+            }
+        }
+    }
+    // The part of each component: its first query's, or the last.
+    let part_of = |component: usize| query_of_component.get(&component).copied();
+    let mut parts: BTreeMap<Option<usize>, IndependentPart> = BTreeMap::new();
+    let mut part_of_column = Vec::with_capacity(count);
+    for column in 0..count {
+        let key = part_of(root(&mut parent, column));
+        part_of_column.push(key);
+        parts
+            .entry(key)
+            .or_insert_with(|| IndependentPart {
+                queries: Vec::new(),
+                columns: Vec::new(),
+                rows: Vec::new(),
+            })
+            .columns
+            .push(column);
+    }
+    for (reference, &(query, _)) in output_refs.iter().enumerate() {
+        let Some(variable) = milp.inputs.output_candidates[reference]
+            .iter()
+            .find_map(|out| milp.choice[query].get(out))
+        else {
+            continue;
+        };
+        let key = part_of_column[column_of[variable]];
+        let queries = &mut parts.get_mut(&key).expect("its column's part").queries;
+        if !queries.contains(&query) {
+            queries.push(query);
+        }
+    }
+    for (index, row) in milp.builder.rows.iter().enumerate() {
+        // A row without a variable is a constant check: kept in the first
+        // part.
+        let key = row
+            .expression()
+            .linear_coefficients()
+            .next()
+            .map(|(variable, _)| part_of_column[column_of[&variable]])
+            .unwrap_or_else(|| *parts.keys().next().expect("a part"));
+        parts.get_mut(&key).expect("a part").rows.push(index);
+    }
+    // `None` sorts first; the part without a query goes last.
+    let mut parts: Vec<(Option<usize>, IndependentPart)> = parts.into_iter().collect();
+    parts.sort_by_key(|(key, _)| key.unwrap_or(usize::MAX));
+    parts
+        .into_iter()
+        .map(|(_, mut part)| {
+            part.queries.sort_unstable();
+            part
+        })
+        .collect()
+}
+
+/// How one part's solve went, for the report.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub(crate) struct PartSolve {
+    pub(crate) queries: usize,
+    pub(crate) variables: usize,
+    pub(crate) binaries: usize,
+    pub(crate) rows: usize,
+    pub(crate) status: String,
+    pub(crate) solve_ms: u64,
+    /// HiGHS's dual bound on the part's objective (cost per second).
+    pub(crate) dual_bound_per_second: f64,
+}
+
+/// One part's model ready for HiGHS: its variables, rows and objective
+/// terms, renamed to its own columns when the model has several parts.
+struct PartModel {
+    variables: ProblemVariables,
+    rows: Vec<Constraint>,
+    objective_terms: Vec<(Variable, f64)>,
+    /// Per column of the part, the column in the whole model.
+    columns: Vec<usize>,
+    queries: usize,
+}
+
+/// A part solved: its columns' values, the HiGHS objective and dual bound
+/// (cost per second), and the status.
+struct SolvedPart {
+    status: SelectionMilpStatus,
+    columns: Vec<f64>,
+    objective_per_second: f64,
+    dual_bound_per_second: f64,
+    report: PartSolve,
+}
+
+/// Solves `milp` with HiGHS, one solve per independent part
+/// ([`independent_parts`]) when `split_into_parts`, each part from the warm
+/// start with its share of the time left before `deadline` (by variables).
 pub(crate) fn solve_selection_milp(
     milp: SelectionMilp<'_>,
     deadline: Option<Instant>,
@@ -1672,21 +1826,18 @@ pub(crate) fn solve_selection_milp(
     let start = warm_start::warm_start(&milp, &completion, Some(search_budget));
     let warm_start_ms = warm_started.elapsed().as_millis() as u64;
     let warm_start_cost_per_second = start.as_ref().map(|start| start.cost_per_second);
-    let scale = objective_scale(
-        &milp.objective_terms,
-        start.as_ref().map(|start| start.values.as_slice()),
-    );
-    let objective: Expression = milp
-        .objective_terms
-        .iter()
-        .map(|&(variable, coefficient)| coefficient * scale * variable)
-        .sum();
+    let parts = if milp.split_into_parts {
+        independent_parts(&milp)
+    } else {
+        Vec::new()
+    };
     let SelectionMilp {
         builder,
         choice,
         selected,
         slot_links,
         request_cost_per_second,
+        objective_terms,
         ..
     } = milp;
     let ModelBuilder {
@@ -1697,10 +1848,216 @@ pub(crate) fn solve_selection_milp(
         .enumerate()
         .map(|(column, (variable, _))| (variable, column))
         .collect();
-    let problem = variables
-        .minimise(objective.clone())
-        .using(highs)
-        .with_all(rows);
+    let column_count = column_of.len();
+    let start_columns: Option<Vec<f64>> = start.map(|start| {
+        let mut columns = vec![0.0; column_count];
+        for (variable, value) in start.values {
+            columns[column_of[&variable]] = value;
+        }
+        columns
+    });
+    let models: Vec<PartModel> = if parts.len() <= 1 {
+        vec![PartModel {
+            variables,
+            rows,
+            objective_terms,
+            columns: (0..column_count).collect(),
+            queries: parts.first().map_or(0, |part| part.queries.len()),
+        }]
+    } else {
+        let definitions: Vec<_> = variables
+            .iter_variables_with_def()
+            .map(|(_, definition)| definition.clone())
+            .collect();
+        let mut part_of_column = vec![0; column_count];
+        let mut renamed: Vec<Option<Variable>> = vec![None; column_count];
+        let mut models: Vec<PartModel> = parts
+            .iter()
+            .enumerate()
+            .map(|(index, part)| {
+                let mut variables = ProblemVariables::new();
+                for &column in &part.columns {
+                    part_of_column[column] = index;
+                    renamed[column] = Some(variables.add(definitions[column].clone()));
+                }
+                PartModel {
+                    variables,
+                    rows: Vec::with_capacity(part.rows.len()),
+                    objective_terms: Vec::new(),
+                    columns: part.columns.clone(),
+                    queries: part.queries.len(),
+                }
+            })
+            .collect();
+        let rename = |variable: Variable| renamed[column_of[&variable]].expect("in a part");
+        for (index, part) in parts.iter().enumerate() {
+            for &row in &part.rows {
+                let row = &rows[row];
+                let mut expression = Expression::from(row.expression().constant());
+                for (variable, coefficient) in row.expression().linear_coefficients() {
+                    expression.add_mul(coefficient, rename(variable));
+                }
+                models[index].rows.push(if row.is_equality() {
+                    constraint!(expression == 0.0)
+                } else {
+                    constraint!(expression <= 0.0)
+                });
+            }
+        }
+        for (variable, coefficient) in objective_terms {
+            let column = column_of[&variable];
+            models[part_of_column[column]]
+                .objective_terms
+                .push((rename(variable), coefficient));
+        }
+        models
+    };
+    // Smallest first: time a small part leaves goes to the larger ones.
+    let mut order: Vec<usize> = (0..models.len()).collect();
+    order.sort_by_key(|&index| models[index].columns.len());
+    let mut remaining_columns: usize = models.iter().map(|model| model.columns.len()).sum();
+    let mut models: Vec<Option<PartModel>> = models.into_iter().map(Some).collect();
+    let mut columns = vec![0.0; column_count];
+    let mut solved_parts: Vec<Option<SolvedPart>> = (0..models.len()).map(|_| None).collect();
+    let started = Instant::now();
+    for index in order {
+        let model = models[index].take().expect("solved once");
+        let share = model.columns.len().max(1) as f64 / remaining_columns.max(1) as f64;
+        remaining_columns -= model.columns.len();
+        let part_deadline = deadline.map(|deadline| {
+            Instant::now()
+                + deadline
+                    .saturating_duration_since(Instant::now())
+                    .mul_f64(share)
+        });
+        let start = start_columns.as_ref().map(|start| {
+            model
+                .columns
+                .iter()
+                .map(|&column| start[column])
+                .collect::<Vec<f64>>()
+        });
+        let part_columns = model.columns.clone();
+        let solved = solve_part(model, start, part_deadline)?;
+        for (&column, &value) in part_columns.iter().zip(&solved.columns) {
+            columns[column] = value;
+        }
+        solved_parts[index] = Some(solved);
+    }
+    let solve_ms = started.elapsed().as_millis() as u64;
+    let solved_parts: Vec<SolvedPart> = solved_parts
+        .into_iter()
+        .map(|part| part.expect("every part solved"))
+        .collect();
+    let status = if solved_parts
+        .iter()
+        .all(|part| part.status == SelectionMilpStatus::Optimal)
+    {
+        SelectionMilpStatus::Optimal
+    } else {
+        SelectionMilpStatus::TimeLimit
+    };
+    let highs_objective: f64 = solved_parts
+        .iter()
+        .map(|part| part.objective_per_second)
+        .sum();
+    let dual_bound: f64 = solved_parts
+        .iter()
+        .map(|part| part.dual_bound_per_second)
+        .sum();
+    let relative_gap = match status {
+        SelectionMilpStatus::Optimal => 0.0,
+        SelectionMilpStatus::TimeLimit => {
+            (highs_objective - dual_bound) / highs_objective.abs().max(f64::MIN_POSITIVE)
+        }
+    };
+    // The objective of the integral plan: the incumbent's binaries,
+    // rounded, with every continuous variable at its cheapest value (the
+    // solver's own value carries its tolerances, relative to the scaled
+    // objective). At the deadline, HiGHS's incumbent objective (an upper
+    // bound) when the completion does not apply.
+    let objective_value = match completion.complete_columns(&columns) {
+        Ok(completed) => completed.cost_per_second,
+        Err(reason) => {
+            warm_start::debug(|| format!("completion of the incumbent failed: {reason}"));
+            highs_objective
+        }
+    };
+    warm_start::debug(|| {
+        format!("objective: HiGHS {highs_objective:e}, completed {objective_value:e}")
+    });
+    let on = |variable: Variable| columns[column_of[&variable]] > 0.5;
+    Ok(SelectionMilpSolution {
+        status,
+        cost_per_second: objective_value,
+        request_cost_per_second,
+        cost_lower_bound_per_second: dual_bound,
+        relative_gap,
+        chosen: choice
+            .iter()
+            .map(|options| {
+                options
+                    .iter()
+                    .filter(|(_, &variable)| on(variable))
+                    .map(|(&candidate, _)| candidate)
+                    .collect()
+            })
+            .collect(),
+        selected: selected
+            .iter()
+            .filter(|(_, &variable)| on(variable))
+            .map(|(&candidate, _)| candidate)
+            .collect(),
+        slot_reads: slot_links
+            .iter()
+            .filter_map(|(&key, links)| {
+                links
+                    .iter()
+                    .find(|(_, link)| on(*link))
+                    .map(|&(slot, _)| (key, slot))
+            })
+            .collect(),
+        size,
+        parts: solved_parts.into_iter().map(|part| part.report).collect(),
+        build_ms,
+        warm_start_ms,
+        warm_start_cost_per_second,
+        solve_ms,
+    })
+}
+
+/// Solves one part once with HiGHS, from `start` (its columns' values) when
+/// given, with the time left before `deadline` as its time limit.
+fn solve_part(
+    model: PartModel,
+    start: Option<Vec<f64>>,
+    deadline: Option<Instant>,
+) -> Result<SolvedPart, SelectionMilpError> {
+    let PartModel {
+        variables,
+        rows,
+        objective_terms,
+        columns: part_columns,
+        queries,
+    } = model;
+    let start_values: Option<Vec<(Variable, f64)>> = start.as_ref().map(|start| {
+        variables
+            .iter_variables_with_def()
+            .map(|(variable, _)| variable)
+            .zip(start.iter().copied())
+            .collect()
+    });
+    let scale = objective_scale(&objective_terms, start_values.as_deref());
+    let objective: Expression = objective_terms
+        .iter()
+        .map(|&(variable, coefficient)| coefficient * scale * variable)
+        .sum();
+    let binaries = variables
+        .iter_variables_with_def()
+        .filter(|(_, definition)| definition.is_integer())
+        .count();
+    let row_count = rows.len();
+    let problem = variables.minimise(objective).using(highs).with_all(rows);
     let mut model = problem
         .try_into_inner()
         .map_err(|error| SelectionMilpError::Solver(error.to_string()))?;
@@ -1711,13 +2068,9 @@ pub(crate) fn solve_selection_milp(
     // gigabytes of address space on a large host (#1036 under 8 GB).
     model.set_option("threads", HIGHS_THREADS);
     let started_with_plan = start.is_some();
-    if let Some(start) = start {
-        let mut columns = vec![0.0; column_of.len()];
-        for (variable, value) in start.values {
-            columns[column_of[&variable]] = value;
-        }
+    if let Some(start) = &start {
         model
-            .try_set_solution(Some(&columns), None, None, None)
+            .try_set_solution(Some(start), None, None, None)
             .map_err(|status| SelectionMilpError::Solver(format!("warm start: {status:?}")))?;
     }
     let mut only_read_back = false;
@@ -1757,70 +2110,24 @@ pub(crate) fn solve_selection_milp(
             status: format!("{:?}", solved.status()),
         });
     }
-    let relative_gap = match status {
-        SelectionMilpStatus::Optimal => 0.0,
-        SelectionMilpStatus::TimeLimit => solved.mip_gap(),
-    };
     let dual_bound = solved
         .double_info_value(c"mip_dual_bound")
-        .unwrap_or(f64::NAN);
-    let solution = solved.get_solution();
-    let columns = solution.columns();
-    // The objective of the integral plan: the incumbent's binaries,
-    // rounded, with every continuous variable at its cheapest value (the
-    // solver's own value carries its tolerances, relative to the scaled
-    // objective). At the deadline, HiGHS's incumbent objective (an upper
-    // bound) when the completion does not apply.
-    let objective_value = match completion.complete_columns(columns) {
-        Ok(completed) => completed.cost_per_second * scale,
-        Err(reason) => {
-            warm_start::debug(|| format!("completion of the incumbent failed: {reason}"));
-            solved.objective_value()
-        }
-    };
-    warm_start::debug(|| {
-        format!(
-            "objective: HiGHS {:e}, completed {:e}",
-            solved.objective_value() / scale,
-            objective_value / scale
-        )
-    });
-    let on = |variable: Variable| columns[column_of[&variable]] > 0.5;
-    Ok(SelectionMilpSolution {
+        .unwrap_or(f64::NAN)
+        / scale;
+    Ok(SolvedPart {
         status,
-        cost_per_second: objective_value / scale,
-        request_cost_per_second,
-        cost_lower_bound_per_second: dual_bound / scale,
-        relative_gap,
-        chosen: choice
-            .iter()
-            .map(|options| {
-                options
-                    .iter()
-                    .filter(|(_, &variable)| on(variable))
-                    .map(|(&candidate, _)| candidate)
-                    .collect()
-            })
-            .collect(),
-        selected: selected
-            .iter()
-            .filter(|(_, &variable)| on(variable))
-            .map(|(&candidate, _)| candidate)
-            .collect(),
-        slot_reads: slot_links
-            .iter()
-            .filter_map(|(&key, links)| {
-                links
-                    .iter()
-                    .find(|(_, link)| on(*link))
-                    .map(|&(slot, _)| (key, slot))
-            })
-            .collect(),
-        size,
-        build_ms,
-        warm_start_ms,
-        warm_start_cost_per_second,
-        solve_ms,
+        columns: solved.get_solution().columns().to_vec(),
+        objective_per_second: solved.objective_value() / scale,
+        dual_bound_per_second: dual_bound,
+        report: PartSolve {
+            queries,
+            variables: part_columns.len(),
+            binaries,
+            rows: row_count,
+            status: format!("{status:?}"),
+            solve_ms,
+            dual_bound_per_second: dual_bound,
+        },
     })
 }
 
