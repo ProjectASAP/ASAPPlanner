@@ -3,7 +3,7 @@
 //! CandidateLogicalASAPDAGs.
 //!
 //! Identical-sub-DAG sharing over the logical DAG (Stage 0, the `cse`
-//! module, behind [`DagOfLogicalMemoGroups::from_roots`]) runs before the
+//! module, behind [`generate_dag_of_logical_memo_groups`]) runs before the
 //! stages; Stage 1 adds the ASAP-aware sharing that is invisible at the
 //! logical level (Pass 2, the `asap_aware_cse` module), e.g.
 //! `Quantile(x, 0.99)` and `Quantile(x, 0.95)` reading one built sketch.
@@ -68,13 +68,14 @@ pub mod test_support;
 pub use deployment_capabilities::{
     DeploymentCapabilities, DeploymentCapabilitiesError, SupportedSummary,
 };
-// Stage 0: the memo groups of the workload's query roots.
-pub use pass2::memo::DagOfLogicalMemoGroups;
-// Pass 1: its entry, its output and the types the output holds.
+// Stage 0: the memo groups of the workload's query roots
+// (`asap_types::stages::DagOfLogicalMemoGroups`).
+pub use pass2::memo::generate_dag_of_logical_memo_groups;
+// Pass 1: its entry and its errors. Its output and the types the output
+// holds are in `asap_types::stages`.
 pub use pass1::{
-    generate_per_computation_logical_memo_candidates, ComputationTarget, FusedComputation,
-    HavingEntry, HavingPlacement, HowToComputeAggregateMeasure, PerComputationCandidateError,
-    PerComputationLogicalMemoCandidates, PerComputationLogicalMemoCandidatesError,
+    generate_per_computation_logical_memo_candidates, PerComputationCandidateError,
+    PerComputationLogicalMemoCandidatesError,
 };
 // Pass 2: its entry, the state it keeps between pane-width rounds, and the
 // pane-width domain of a round.

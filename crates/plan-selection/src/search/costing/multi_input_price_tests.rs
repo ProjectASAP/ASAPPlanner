@@ -143,12 +143,12 @@ fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
 // budgets; pricing may not silently resize either state after selection.
 #[test]
 fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
-    use asap_logical_asap_optimization::{
-        test_support::{compose_logical_candidate, generate_per_computation_candidates},
-        HowToComputeAggregateMeasure,
+    use asap_logical_asap_optimization::test_support::{
+        compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_types::ir::properties::{AccuracyMetric, AccuracyScope};
     use asap_types::ir::schema::SketchAlgorithm;
+    use asap_types::stages::HowToComputeAggregateMeasure;
     let query = "quantile_over_time(0.99, m[5m]) / quantile_over_time(0.5, n[5m])";
     let target = AccuracyTarget::max_error(0.05)
         .accuracy_metric(AccuracyMetric::Relative)
@@ -160,7 +160,7 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
         .accuracy_scope(AccuracyScope::PerValue);
     let original = lower_promql(query, planned);
     let generated = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
             QueryRoot::Operator(original.clone()),
         ]),
     )

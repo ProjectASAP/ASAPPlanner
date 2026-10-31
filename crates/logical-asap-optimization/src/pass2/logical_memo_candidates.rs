@@ -4,7 +4,6 @@
 
 use std::time::Instant;
 
-use crate::pass1::logical_memo_candidates::PerComputationLogicalMemoCandidates;
 use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::rules::{
     finer_aggregate, rollup, scan_labels, shared_configuration_readers, summary_inputs,
@@ -16,6 +15,7 @@ use crate::pass2::memo::state_groups::{
 };
 use crate::pass2::memo::window_candidates::extend_local_window_composition;
 use asap_types::stages::MemoCandidates;
+use asap_types::stages::PerComputationLogicalMemoCandidates;
 use asap_types::stages::{CandidateGenerationTimeout, LogicalASAPMemoCandidates};
 use asap_types::workload::QueryWorkloadEntry;
 

@@ -17,11 +17,11 @@ mod tests {
     use super::*;
     use crate::search::candidates::inventory::{build_candidate_inventory, InventoryForTests};
     use crate::search::milp::model::select_candidates;
+    use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
     use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups;
     use asap_logical_asap_optimization::test_support::try_populate_pass1;
-    use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
     use asap_logical_asap_optimization::DeploymentCapabilities;
     use asap_logical_asap_optimization::PaneWidthDomain;
     use asap_types::ir::properties::AccuracyTarget;
@@ -54,13 +54,13 @@ mod tests {
             .iter()
             .map(|query| QueryRoot::Operator(lower_promql(query, target.clone())))
             .collect::<Vec<_>>();
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+        let initial = generate_dag_of_logical_memo_groups(&roots);
         let output_groups = (0..2)
             .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect::<Vec<_>>();
-        let candidates = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots.clone()),
-        )
+        let candidates = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(
+            &roots.clone(),
+        ))
         .unwrap();
         let memo = sharing_rules_and_shared_state_groups(
             try_populate_pass1(initial, &candidates).unwrap(),

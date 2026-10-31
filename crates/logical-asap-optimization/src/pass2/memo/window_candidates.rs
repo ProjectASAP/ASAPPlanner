@@ -343,7 +343,8 @@ fn candidate_signature(candidate: &CandidateForMemoGroup) -> Result<String, serd
 mod tests {
     use super::*;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::{groups::try_populate_pass1, DagOfLogicalMemoGroups};
+    use crate::pass2::memo::generate_dag_of_logical_memo_groups;
+    use crate::pass2::memo::groups::try_populate_pass1;
     use crate::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
@@ -418,11 +419,10 @@ mod tests {
             .iter()
             .map(|_| QueryRoot::Operator(Rc::clone(&root)))
             .collect();
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let generated = generate_per_computation_candidates(
-            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
-        )
-        .unwrap();
+        let initial = generate_dag_of_logical_memo_groups(&roots);
+        let generated =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap();
         let memo = try_populate_pass1(initial, &generated).unwrap();
         let entries = recurrences
             .iter()

@@ -461,8 +461,8 @@ fn replace_node(
 mod tests {
     use super::*;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
+    use crate::pass2::memo::generate_dag_of_logical_memo_groups;
     use crate::pass2::memo::groups::try_populate_pass1;
-    use crate::pass2::memo::DagOfLogicalMemoGroups;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::QueryRoot;
 
@@ -589,11 +589,10 @@ mod tests {
                 QueryRoot::Operator(root)
             })
             .collect();
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let inventory = generate_per_computation_candidates(
-            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
-        )
-        .unwrap();
+        let initial = generate_dag_of_logical_memo_groups(&roots);
+        let inventory =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap();
         try_populate_pass1(initial, &inventory).unwrap()
     }
 
@@ -1314,11 +1313,10 @@ mod tests {
                 time_range(std::time::Duration::from_secs(1200), scan()),
             )),
         ];
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let generated = generate_per_computation_candidates(
-            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
-        )
-        .unwrap();
+        let initial = generate_dag_of_logical_memo_groups(&roots);
+        let generated =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap();
         let memo = with_local_panes(
             try_populate_pass1(initial, &generated).unwrap(),
             &[10_000, 10_000],

@@ -152,7 +152,7 @@ fn local_computation_candidates(root: Rc<OperatorNode>) -> Result<Vec<Rc<Operato
     };
     use asap_types::ir::QueryRoot;
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
             QueryRoot::Operator(root),
         ]),
     )

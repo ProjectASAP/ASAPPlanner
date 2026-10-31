@@ -2,7 +2,9 @@
 use asap_cost::CostInputs;
 use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, FuzzWorkload, Planner};
 use asap_devtools::planning_stages::run_search_over;
+use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
 use asap_planner::{PlanSearchSettings, PlanningModels};
+use asap_types::stages::HowToComputeAggregateMeasure;
 use serde_json::json;
 use std::path::Path;
 
@@ -124,7 +126,7 @@ fn sql_count_topk_has_a_fused_raw_row_heap() {
         .lower(&workload(886))
         .unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
     let (index, target) = inventory
@@ -202,7 +204,7 @@ fn sql_count_topk_has_a_fused_raw_row_heap() {
 fn exact_rollup_catalog_crosses_identical_per_series_average() {
     use asap_logical_asap_optimization::{
         test_support::{generate_per_computation_candidates, try_populate_pass1},
-        DagOfLogicalMemoGroups, PaneWidthDomain,
+        PaneWidthDomain,
     };
     use asap_types::stages::OriginOfCandidateForMemoGroup;
     let roots: Vec<_> = Planner::new(FuzzSettings::default())
@@ -210,9 +212,9 @@ fn exact_rollup_catalog_crosses_identical_per_series_average() {
         .unwrap()
         .into_iter()
         .collect();
-    let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+    let initial = generate_dag_of_logical_memo_groups(&roots);
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
@@ -240,7 +242,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
     use asap_executor::values::Value;
     use asap_logical_asap_optimization::{
         test_support::{generate_per_computation_candidates, try_populate_pass1},
-        DagOfLogicalMemoGroups, PaneWidthDomain,
+        PaneWidthDomain,
     };
     use asap_types::ir::{operator::AggIntent, NonASAPOp};
     use asap_types::stages::OriginOfCandidateForMemoGroup;
@@ -249,9 +251,9 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
         .unwrap()
         .into_iter()
         .collect();
-    let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+    let initial = generate_dag_of_logical_memo_groups(&roots);
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
@@ -268,15 +270,13 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
     // The same readout keeps a KLL's rank bound: it selects a whole group,
     // never predicates on an approximate value or combines populations.
     use asap_accuracy::propagation::recompose_guarantees;
-    use asap_logical_asap_optimization::{
-        test_support::compose_logical_candidate, HowToComputeAggregateMeasure,
-    };
+    use asap_logical_asap_optimization::test_support::compose_logical_candidate;
     use asap_types::ir::{schema::SketchAlgorithm, QueryRoot};
     use std::rc::Rc;
     let filter = candidate.root_node.children()[0];
     let grouped = filter.children()[0];
     let inv = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
             QueryRoot::Operator(Rc::clone(grouped)),
         ]),
     )
@@ -400,7 +400,7 @@ fn sql_count_rollup_executes_with_integer_results() {
     use asap_executor::values::Value;
     use asap_logical_asap_optimization::{
         test_support::{generate_per_computation_candidates, try_populate_pass1},
-        DagOfLogicalMemoGroups, PaneWidthDomain,
+        PaneWidthDomain,
     };
     use asap_types::ir::ASAPOp;
     use asap_types::stages::OriginOfCandidateForMemoGroup;
@@ -418,9 +418,9 @@ fn sql_count_rollup_executes_with_integer_results() {
             .unwrap()
             .into_iter()
             .collect();
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+        let initial = generate_dag_of_logical_memo_groups(&roots);
         let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
+            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
         )
         .unwrap();
         let memo = try_populate_pass1(initial, &inventory).unwrap();
@@ -528,7 +528,7 @@ fn sql_sum_shares_nested_windows_and_slower_readers() {
 fn sketch_rollup_crosses_inner_range_function() {
     use asap_logical_asap_optimization::{
         test_support::{generate_per_computation_candidates, try_populate_pass1},
-        DagOfLogicalMemoGroups, PaneWidthDomain,
+        PaneWidthDomain,
     };
     use asap_types::stages::OriginOfCandidateForMemoGroup;
     let mut w = workload(923);
@@ -542,9 +542,9 @@ fn sketch_rollup_crosses_inner_range_function() {
         .unwrap()
         .into_iter()
         .collect();
-    let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+    let initial = generate_dag_of_logical_memo_groups(&roots);
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
@@ -564,15 +564,13 @@ fn sketch_rollup_crosses_inner_range_function() {
 /// the exact counter and separately typed raw-row TopK fusion remain available.
 #[test]
 fn sql_grouped_count_sketches_are_not_offered() {
-    use asap_logical_asap_optimization::{
-        test_support::generate_per_computation_candidates, HowToComputeAggregateMeasure,
-    };
+    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
     use asap_types::ir::{operator::AggIntent, NonASAPOp};
     use asap_types::stages::PruneReason;
     let w = workload(886);
     let roots = Planner::new(FuzzSettings::default()).lower(&w).unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
     let (index, target) = inventory.targets.iter().enumerate().find(|(_, target)| matches!(inventory.aggregate(target).non_asap(), Some(NonASAPOp::Aggregate { measures, .. }) if matches!(measures.as_slice(), [AggIntent::Count { .. }]))).unwrap();

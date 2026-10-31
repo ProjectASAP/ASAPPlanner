@@ -99,14 +99,14 @@ fn composed_summary_candidates(
     Vec<asap_types::physical::PhysicalWorkloadPlan>,
     WholePlanSelection,
 ) {
-    use asap_logical_asap_optimization::{
-        test_support::{compose_logical_candidate, generate_per_computation_candidates},
-        HowToComputeAggregateMeasure,
+    use asap_logical_asap_optimization::test_support::{
+        compose_logical_candidate, generate_per_computation_candidates,
     };
+    use asap_types::stages::HowToComputeAggregateMeasure;
     let workload = promql_workload(queries);
     let roots = lower_promql_query_workload(&workload).expect("lowers");
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
     let mut assignments = vec![vec![0; inventory.targets.len()]];
@@ -168,7 +168,7 @@ fn shared_kll_candidate(workload: &PlanningWorkload) -> asap_types::physical::Ph
     use asap_types::physical::Materialization;
     let roots = lower_promql_query_workload(workload).unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
     let mut choices = vec![0; inventory.targets.len()];

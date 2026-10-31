@@ -2338,14 +2338,13 @@ mod tests {
     fn a_count_from_count_min_panes_keeps_its_guarantee() {
         use crate::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates,
-            HowToComputeAggregateMeasure,
         };
         let root = lower_promql(
             "count_over_time(m[5m])",
             asap_types::ir::properties::AccuracyTarget::max_error(0.01).failure_probability(0.001),
         );
         let inventory = generate_per_computation_candidates(
-            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[QueryRoot::Operator(
+            &crate::pass2::memo::generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(
                 with_promql_series_identity(&root).unwrap(),
             )]),
         )
@@ -2356,7 +2355,11 @@ mod tests {
             .map(|t| {
                 t.ways_to_compute
                     .iter()
-                    .position(|c| *c == HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Cms))
+                    .position(|c| {
+                        *c == asap_types::stages::HowToComputeAggregateMeasure::Summary(
+                            SketchAlgorithm::Cms,
+                        )
+                    })
                     .expect("Count-Min is offered for a count")
             })
             .collect();
@@ -2378,7 +2381,7 @@ mod tests {
     /// The composed candidate of `queries` (each at its own ε, δ = 0.01)
     /// in which every target chose `family`.
     fn chose(queries: &[(&str, f64)], family: SketchAlgorithm) -> Vec<QueryRoot> {
-        use crate::pass1::per_computation_candidates::HowToComputeAggregateMeasure;
+        use asap_types::stages::HowToComputeAggregateMeasure;
         chose_where(queries, |c| {
             *c == HowToComputeAggregateMeasure::Summary(family)
         })
@@ -2388,7 +2391,7 @@ mod tests {
     /// in which every target chose the first candidate `pick` accepts.
     fn chose_where(
         queries: &[(&str, f64)],
-        pick: impl Fn(&crate::pass1::per_computation_candidates::HowToComputeAggregateMeasure) -> bool,
+        pick: impl Fn(&asap_types::stages::HowToComputeAggregateMeasure) -> bool,
     ) -> Vec<QueryRoot> {
         use crate::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates,
@@ -2406,7 +2409,7 @@ mod tests {
             })
             .collect();
         let inventory = generate_per_computation_candidates(
-            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+            &crate::pass2::memo::generate_dag_of_logical_memo_groups(&roots),
         )
         .unwrap();
         let choice: Vec<usize> = inventory
@@ -2560,7 +2563,7 @@ mod tests {
     /// the last two samples of the window, does not.
     #[test]
     fn exact_accumulators_that_merge_get_panes() {
-        use crate::pass1::per_computation_candidates::HowToComputeAggregateMeasure;
+        use asap_types::stages::HowToComputeAggregateMeasure;
         let accumulator = |c: &HowToComputeAggregateMeasure| {
             matches!(c, HowToComputeAggregateMeasure::ExactAccumulator(_))
         };
@@ -3030,7 +3033,7 @@ mod tests {
     /// The composed candidate of `queries` with every target at its exact
     /// option (an exact accumulator, or plain exact execution).
     fn exact(queries: &[&str]) -> Vec<QueryRoot> {
-        use crate::pass1::per_computation_candidates::HowToComputeAggregateMeasure as C;
+        use asap_types::stages::HowToComputeAggregateMeasure as C;
         let queries: Vec<(&str, f64)> = queries.iter().map(|q| (*q, 0.01)).collect();
         chose_where(&queries, |c| matches!(c, C::Exact | C::ExactAccumulator(_)))
     }
@@ -3447,10 +3450,10 @@ mod tests {
         }
         use crate::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates,
-            HowToComputeAggregateMeasure as C,
         };
+        use asap_types::stages::HowToComputeAggregateMeasure as C;
         let inventory = generate_per_computation_candidates(
-            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &crate::pass2::memo::generate_dag_of_logical_memo_groups(
                 &[
                     "topk by (job) (5, sum_over_time(m[1m]))",
                     "topk by (job) (10, sum_over_time(m[1m]))",

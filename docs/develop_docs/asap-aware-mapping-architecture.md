@@ -39,7 +39,7 @@ asap-types ◄── asap-executor (Stage 4; no stage crate depends on it)
 
 ```text
 QueryRoots (Stage 0)
-  │  DagOfLogicalMemoGroups::from_roots, then
+  │  generate_dag_of_logical_memo_groups → DagOfLogicalMemoGroups, then
   │  pass1::logical_memo_candidates::generate_per_computation_logical_memo_candidates
   ▼                                                                     Stage 1, Pass 1
 PerComputationLogicalMemoCandidates (MemoCandidates + pruned_candidates)

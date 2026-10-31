@@ -363,11 +363,11 @@ fn downstream_prices_follow_the_selected_producer_interface() {
 
 #[test]
 fn producer_worker_buckets_remain_joint_choices_and_match_evaluator() {
-    use asap_logical_asap_optimization::{
-        test_support::{compose_logical_candidate, generate_per_computation_candidates},
-        HowToComputeAggregateMeasure,
+    use asap_logical_asap_optimization::test_support::{
+        compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_types::ir::schema::SketchAlgorithm;
+    use asap_types::stages::HowToComputeAggregateMeasure;
     use std::rc::Rc;
     fn append(
         node: Rc<OperatorNode>,
@@ -411,7 +411,7 @@ fn producer_worker_buckets_remain_joint_choices_and_match_evaluator() {
         .accuracy_scope(AccuracyScope::PerValue);
     let original = lower_promql("quantile_over_time(0.95, latency[5m])", target.clone());
     let generated = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
             QueryRoot::Operator(original.clone()),
         ]),
     )

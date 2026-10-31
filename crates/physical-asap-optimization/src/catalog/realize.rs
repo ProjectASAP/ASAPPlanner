@@ -236,12 +236,12 @@ pub fn restore_query_roots(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
     use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
     use asap_logical_asap_optimization::test_support::try_populate_pass1;
     use asap_logical_asap_optimization::test_support::{
         entry, lower_promql, sharing_rules_and_shared_state_groups,
     };
-    use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
     use asap_logical_asap_optimization::PaneWidthDomain;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::stages::{
@@ -290,13 +290,12 @@ mod tests {
             AccuracyTarget::exact(),
         ));
         let roots = vec![root.clone()];
-        let initial = DagOfLogicalMemoGroups::from_roots(&[root]);
-        let per_computation = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(
-                &[roots[0].clone()],
-            ),
-        )
-        .unwrap();
+        let initial = generate_dag_of_logical_memo_groups(&[root]);
+        let per_computation =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+                roots[0].clone()
+            ]))
+            .unwrap();
         let memo = try_populate_pass1(initial, &per_computation).unwrap();
         let logical = LogicalASAPMemoCandidates {
             memo: sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap(),

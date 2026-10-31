@@ -75,7 +75,7 @@ fn assert_removes_exactly(
         compose_logical_candidate, generate_per_computation_candidates,
     };
     let local = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
     let enumerate_local =
@@ -133,17 +133,17 @@ fn pattern_b_with_p50() -> asap_types::workload::PlanningWorkload {
 /// One explicitly shared KLL pane chain, passed through normal physical rules.
 fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
     use asap_logical_asap_optimization::test_support::{
+        compose_logical_candidate, generate_per_computation_candidates,
+    };
+    use asap_logical_asap_optimization::test_support::{
         pane_candidates, window_composition_pass2_candidates,
     };
-    use asap_logical_asap_optimization::{
-        test_support::{compose_logical_candidate, generate_per_computation_candidates},
-        HowToComputeAggregateMeasure,
-    };
     use asap_types::ir::QueryRoot;
+    use asap_types::stages::HowToComputeAggregateMeasure;
     let workload = pattern_b_with_p50();
     let original = lower_promql(&workload);
     let local = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&original),
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&original),
     )
     .unwrap();
     let choices = local

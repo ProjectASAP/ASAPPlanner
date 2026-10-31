@@ -1158,7 +1158,7 @@ fn workload_file_with_a_range_evaluation_is_planned() {
         let entries: Vec<_> = parsed.query_workload.entries().collect();
         let data = parsed.data_workload.clone().unwrap();
         let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(
+            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(
                 &lower_promql_roots(&parsed).unwrap(),
             ),
         )

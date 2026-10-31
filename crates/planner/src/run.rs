@@ -4,20 +4,21 @@
 //! realizer. No stage calls another; the facade owns the deadline and splits
 //! it per round (#1048).
 
+use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
+use asap_types::stages::PerComputationLogicalMemoCandidates;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use asap_cost::PlanRanking;
 use asap_logical_asap_optimization::ChosenCandidatePerMemoGroup;
-use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
 use asap_logical_asap_optimization::DeploymentCapabilitiesError;
 use asap_logical_asap_optimization::{
     generate_logical_asap_memo_candidates, LogicalASAPMemoCandidatesError, Pass2RoundState,
 };
 use asap_logical_asap_optimization::{
     generate_per_computation_logical_memo_candidates, PerComputationCandidateError,
-    PerComputationLogicalMemoCandidates, PerComputationLogicalMemoCandidatesError,
+    PerComputationLogicalMemoCandidatesError,
 };
 use asap_logical_asap_optimization::{PaneWidthDomain, PaneWidthFrontier};
 use asap_physical_asap_optimization::{
@@ -26,6 +27,7 @@ use asap_physical_asap_optimization::{
 use asap_plan_selection::{select_plan, ErrorSelectingPlan, SearchReport, Selection};
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
+use asap_types::stages::DagOfLogicalMemoGroups;
 use asap_types::stages::{
     AssignmentRealizer, CandidateForMemoGroupId, DagOfSelectedCandidates,
     LogicalASAPMemoCandidates, MemoCandidates, MemoGroupId, OperatorNodeOfCandidateForMemoGroup,
@@ -205,7 +207,7 @@ pub fn run_planning(
         root.validate_structure()?;
     }
     // Stage 0: the memo of logical groups.
-    let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+    let initial = generate_dag_of_logical_memo_groups(&roots);
     let has_pane_window = has_pane_window(&initial);
     let has_groups = !initial.groups.is_empty();
     // Pass 1: the per-computation candidates the deployment can run and

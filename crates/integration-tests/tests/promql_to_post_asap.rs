@@ -6,6 +6,7 @@
 //! the summary-bound shape node by node, including the family `(Kind,
 //! Params)` committed on each edge's schema.
 
+use asap_types::stages::HowToComputeAggregateMeasure;
 use std::rc::Rc;
 
 use asap_integration_tests::fixtures::lower_promql;
@@ -724,11 +725,9 @@ fn ddsketch_ratio_selection(
     for facts in data.sources.values_mut() {
         facts.values_non_negative = non_negative;
     }
-    use asap_logical_asap_optimization::{
-        test_support::generate_per_computation_candidates, HowToComputeAggregateMeasure,
-    };
+    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
             QueryRoot::Operator(root),
         ]),
     )

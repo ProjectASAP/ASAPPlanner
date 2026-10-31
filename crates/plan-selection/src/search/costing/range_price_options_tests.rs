@@ -1,13 +1,13 @@
 //! Whole-evaluator parity for selected consumer range-retention tiers.
 use super::*;
 use asap_logical_asap_optimization::test_support::lower_promql;
-use asap_logical_asap_optimization::{
-    test_support::{compose_logical_candidate, generate_per_computation_candidates},
-    HowToComputeAggregateMeasure,
+use asap_logical_asap_optimization::test_support::{
+    compose_logical_candidate, generate_per_computation_candidates,
 };
 use asap_types::ir::properties::{AccuracyScope, AccuracyTarget};
 use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::ir::OperatorNode;
+use asap_types::stages::HowToComputeAggregateMeasure;
 
 use crate::search::candidates::dag::{InputProducerCandidates, QueryOutputCandidates};
 use asap_types::workload::{
@@ -64,7 +64,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             .accuracy_scope(AccuracyScope::PerValue);
         let original = lower_promql("quantile_over_time(0.95, latency[5m])", target.clone());
         let generated = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
                 QueryRoot::Operator(original.clone()),
             ]),
         )

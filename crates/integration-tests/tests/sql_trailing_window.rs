@@ -102,14 +102,14 @@ async fn run(deployment: &DeploymentCapabilities) -> Run {
     let workload = workload();
     let roots = roots(&workload).await;
     use asap_logical_asap_optimization::test_support::{
+        compose_logical_candidate, generate_per_computation_candidates,
+    };
+    use asap_logical_asap_optimization::test_support::{
         pane_candidates, window_composition_pass2_candidates,
     };
-    use asap_logical_asap_optimization::{
-        test_support::{compose_logical_candidate, generate_per_computation_candidates},
-        HowToComputeAggregateMeasure,
-    };
+    use asap_types::stages::HowToComputeAggregateMeasure;
     let local = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
     let compose = |choices: &[usize]| compose_logical_candidate(&local, choices).unwrap();

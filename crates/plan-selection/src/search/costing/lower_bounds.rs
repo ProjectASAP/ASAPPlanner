@@ -677,6 +677,7 @@ fn certified_price<'a>(
 
 #[cfg(test)]
 mod tests {
+    use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
     // Fine panes may widen the bound range; round down only the relaxation,
     // preserving a valid lower bound and the core solver's numeric contract.
     #[test]
@@ -703,7 +704,6 @@ mod tests {
     use asap_logical_asap_optimization::test_support::{
         pane_candidates, window_composition_pass2_candidates,
     };
-    use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
     use asap_physical_asap_optimization::test_support::catalog::materialize_selected_candidates;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::{OperatorNode, QueryRoot};
@@ -761,8 +761,8 @@ mod tests {
             let root = QueryRoot::Operator(lower_promql(&query, target.clone()));
             let query_roots = vec![root];
             let memo = try_populate_pass1(
-                DagOfLogicalMemoGroups::from_roots(&query_roots),
-                &generate_per_computation_candidates(&DagOfLogicalMemoGroups::from_roots(
+                generate_dag_of_logical_memo_groups(&query_roots),
+                &generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(
                     &query_roots,
                 ))
                 .unwrap(),
@@ -1367,7 +1367,7 @@ mod tests {
         };
         let targets = vec![target.clone(); queries.len()];
         let memo = generate_per_computation_logical_memo_candidates(
-            DagOfLogicalMemoGroups::from_roots(&roots),
+            generate_dag_of_logical_memo_groups(&roots),
             &targets,
             &asap_accuracy::IgnoreAccuracyGuarantees,
             &asap_accuracy::NoAccuracyEvidence,

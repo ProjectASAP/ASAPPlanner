@@ -521,7 +521,8 @@ fn compatible(left: &StateNeed, right: &StateNeed) -> bool {
 mod tests {
     use super::*;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::{groups::try_populate_pass1, DagOfLogicalMemoGroups};
+    use crate::pass2::memo::generate_dag_of_logical_memo_groups;
+    use crate::pass2::memo::groups::try_populate_pass1;
     use crate::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
@@ -540,11 +541,10 @@ mod tests {
                 ))
             })
             .collect();
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let inventory = generate_per_computation_candidates(
-            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
-        )
-        .unwrap();
+        let initial = generate_dag_of_logical_memo_groups(&roots);
+        let inventory =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap();
         let mut memo = try_populate_pass1(initial, &inventory).unwrap();
         let entries = vec![
             entry_with(
@@ -624,11 +624,10 @@ mod tests {
             "quantile_over_time(0.5, latency[5m]) / quantile_over_time(0.9, latency[5m])",
             target.clone(),
         ))];
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let inventory = generate_per_computation_candidates(
-            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
-        )
-        .unwrap();
+        let initial = generate_dag_of_logical_memo_groups(&roots);
+        let inventory =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap();
         let mut memo = try_populate_pass1(initial, &inventory).unwrap();
         // Pass 1's parts per KLL size.
         let mut parts_of_size: HashMap<u32, usize> = HashMap::new();
