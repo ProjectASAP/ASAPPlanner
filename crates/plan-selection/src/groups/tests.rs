@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use super::*;
-use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
+use asap_logical_asap_optimization::PaneWidthDomain;
 use asap_types::ir::properties::{AccuracyMetric, BoundExpr, ProbabilityExpr};
 use asap_types::ir::scalar::expr_ir::ScalarValue;
 use asap_types::ir::schema::SketchAlgorithm;
@@ -553,12 +553,9 @@ fn through_stages_1_and_2(queries: &[&str]) -> ThroughStages1And2 {
 
 /// [`through_stages_1_and_2`] over the pane-width domain `domain`.
 fn through_stages_1_and_2_over(queries: &[&str], domain: PaneWidthDomain) -> ThroughStages1And2 {
-    use asap_logical_asap_optimization::pass1::logical_memo_candidates::generate_per_computation_logical_memo_candidates;
-    use asap_logical_asap_optimization::pass2::logical_memo_candidates::{
-        generate_logical_asap_memo_candidates, Pass2RoundState,
-    };
-    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
+    use asap_logical_asap_optimization::generate_per_computation_logical_memo_candidates;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
+    use asap_logical_asap_optimization::{generate_logical_asap_memo_candidates, Pass2RoundState};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{
         DurationMs, Predictability, QueryRecurrence, RepeatedDemand, RepetitionInterval,
@@ -583,7 +580,7 @@ fn through_stages_1_and_2_over(queries: &[&str], domain: PaneWidthDomain) -> Thr
     source.values_non_negative = true;
     let targets = vec![target.clone(); queries.len()];
     let pass1 = generate_per_computation_logical_memo_candidates(
-        DagOfLogicalMemoGroups::from_roots(&roots),
+        asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
         &targets,
         &asap_accuracy::BuiltinAccuracyModel,
         &asap_accuracy::NoAccuracyEvidence,

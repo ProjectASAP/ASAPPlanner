@@ -84,13 +84,10 @@ fn through_stages_over(
     ingesting: bool,
     values_non_negative: bool,
 ) -> Fixture {
-    use asap_logical_asap_optimization::pass1::logical_memo_candidates::generate_per_computation_logical_memo_candidates;
-    use asap_logical_asap_optimization::pass2::logical_memo_candidates::{
-        generate_logical_asap_memo_candidates, Pass2RoundState,
-    };
-    use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
-    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
+    use asap_logical_asap_optimization::generate_per_computation_logical_memo_candidates;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
+    use asap_logical_asap_optimization::PaneWidthDomain;
+    use asap_logical_asap_optimization::{generate_logical_asap_memo_candidates, Pass2RoundState};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{
         Predictability, QueryRecurrence, RepeatedDemand, RepetitionInterval,
@@ -128,7 +125,7 @@ fn through_stages_over(
     }
     let targets: Vec<AccuracyTarget> = queries.iter().map(target).collect();
     let pass1 = generate_per_computation_logical_memo_candidates(
-        DagOfLogicalMemoGroups::from_roots(&roots),
+        asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
         &targets,
         &asap_accuracy::BuiltinAccuracyModel,
         &asap_accuracy::NoAccuracyEvidence,
