@@ -250,7 +250,7 @@ pub enum ClusterObjective {
 
 /// The deployment's choices for plan selection (Stage 3): the cost model,
 /// how fast a core works, and how long one-off queries are spread over.
-/// Loadable from JSON (`stage_pipeline --plan-selection-settings <file>`);
+/// Loadable from JSON (`stage_pipeline --cost-inputs <file>`);
 /// an omitted field takes its default, an unknown one is refused.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]

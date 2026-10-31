@@ -11,13 +11,13 @@ pub(in crate::search) enum CandidateCalibration {
 
 impl CandidateCalibration {
     pub fn for_models(models: SelectionModels<'_>) -> Result<Self, String> {
-        if let Some(factor) = models.plan_selection.frozen_calibration_factor {
+        if let Some(factor) = models.cost_inputs.frozen_calibration_factor {
             return CalibrationFit::from_factor(factor)
                 .map(Self::Frozen)
                 .map_err(|error| error.to_string());
         }
         if models
-            .plan_selection
+            .cost_inputs
             .measured_operation_costs
             .operators
             .is_empty()

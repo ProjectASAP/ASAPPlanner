@@ -46,7 +46,7 @@ pub(in crate::search) fn estimate_costs(
                 [(&entry.recurrence, entry.range_evaluation)],
                 context
                     .models
-                    .plan_selection
+                    .cost_inputs
                     .non_repeating_query_horizon_seconds,
             )
             .ok()
@@ -81,7 +81,7 @@ pub(in crate::search) fn estimate_costs(
                 1,
                 None,
                 context.data,
-                context.models.plan_selection,
+                context.models.cost_inputs,
                 context.calibration.factor(),
             )
             .ok()

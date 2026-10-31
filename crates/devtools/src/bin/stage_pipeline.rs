@@ -223,7 +223,7 @@
 // `rqe_atomic_costs.json`); a node with an entry is priced from it, the
 // others from the formulas times the calibration factor, and each node's
 // `price_source` says `measured` or `analytical`.
-// `--plan-selection-settings <file>` reads all of Stage 3's settings from
+// `--cost-inputs <file>` reads all of Stage 3's settings from
 // one JSON file (`CostInputs`: `cost_model`, e.g.
 // `{"usage_over_time": {"cost_per_cpu_op": 1e-6, ...}}` with the
 // deployment's own unit costs, `resource_speed`,
@@ -303,7 +303,7 @@ const USAGE: &str =
 [--name <name>]... [--table <json>...] [--max-error <f64> --failure-probability <f64> --accuracy-metric <metric>] [--sample-interval-ms <u64>] [--series-count <u64>] [--rows-per-second <f64>] [--rows-held <u64>])) \
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory]] \
-[--plan-selection-settings <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>]] [--milp-time-limit-s <f64>] [--max-displayed <n>] \
+[--cost-inputs <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>]] [--milp-time-limit-s <f64>] [--max-displayed <n>] \
 [--no-memo] [--max-memo-candidates <n>] [--memo-enumeration-limit <n>] [--max-enumerated <n>] [--price-enumerated <n>] --out <file>";
 
 /// Default evaluator-assignment budget for an exhaustive archive run.
@@ -389,7 +389,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut deployment_capabilities = DeploymentCapabilities::default();
     let mut out = None;
     let mut measured_operation_costs_path: Option<String> = None;
-    let mut plan_selection_settings_path: Option<String> = None;
+    let mut cost_inputs_path: Option<String> = None;
     let mut enforce_accuracy_guarantees = false;
     let mut exhaustive = false;
     // `--milp-time-limit-s` limits the MILP search.
@@ -460,7 +460,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             }
             "--out" => out = Some(value()?),
             "--measured-operation-costs" => measured_operation_costs_path = Some(value()?),
-            "--plan-selection-settings" => plan_selection_settings_path = Some(value()?),
+            "--cost-inputs" => cost_inputs_path = Some(value()?),
             "--enforce-accuracy-guarantees" => enforce_accuracy_guarantees = true,
             "--exhaustive" => exhaustive = true,
             "--no-memo" => write_memo = false,
@@ -504,7 +504,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     if max_combinations_given && !exhaustive {
         return Err("--max-combinations limits the exhaustive search: it needs --exhaustive (bounds evaluated assignments)".into());
     }
-    if plan_selection_settings_path.is_some()
+    if cost_inputs_path.is_some()
         && (cost_model.is_some()
             || cluster_memory.is_some()
             || cluster_disk.is_some()
@@ -513,7 +513,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             || measured_operation_costs_path.is_some())
     {
         return Err(
-            "--plan-selection-settings replaces --cost-model, the --cluster-* flags \
+            "--cost-inputs replaces --cost-model, the --cluster-* flags \
                     and --measured-operation-costs"
                 .into(),
         );
@@ -567,12 +567,11 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         }
         None => MeasuredOperationCosts::default(),
     };
-    let plan_selection: CostInputs = match &plan_selection_settings_path {
+    let cost_inputs: CostInputs = match &cost_inputs_path {
         Some(path) => {
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| format!("--plan-selection-settings {path}: {e}"))?;
-            serde_json::from_str(&text)
-                .map_err(|e| format!("--plan-selection-settings {path}: {e}"))?
+            let text =
+                std::fs::read_to_string(path).map_err(|e| format!("--cost-inputs {path}: {e}"))?;
+            serde_json::from_str(&text).map_err(|e| format!("--cost-inputs {path}: {e}"))?
         }
         None => CostInputs {
             cost_model,
@@ -587,8 +586,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         // The exhaustive search reports no calibration factor to price each
         // choice on the selection's scale.
         if exhaustive
-            && plan_selection.frozen_calibration_factor.is_none()
-            && !plan_selection.measured_operation_costs.operators.is_empty()
+            && cost_inputs.frozen_calibration_factor.is_none()
+            && !cost_inputs.measured_operation_costs.operators.is_empty()
         {
             return Err(
                 "--price-enumerated with --exhaustive needs a frozen_calibration_factor \
@@ -725,7 +724,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             Some(asap_executor::supported_summary_families());
     }
     let models = PlanningModels::builtin()
-        .with_plan_selection(&plan_selection)
+        .with_cost_inputs(&cost_inputs)
         .with_deployment_capabilities(&deployment_capabilities)
         .with_ignore_accuracy_guarantees(!enforce_accuracy_guarantees);
     let result = run_search_over(
@@ -752,7 +751,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             .and_then(|selection| {
                 large_peak_memory_warning(
                     selection.cost.usage.peak_memory_bytes,
-                    &plan_selection.cost_model,
+                    &cost_inputs.cost_model,
                 )
             }),
     );

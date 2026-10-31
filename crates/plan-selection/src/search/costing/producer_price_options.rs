@@ -460,7 +460,7 @@ pub(in crate::search) fn extract_price_options(
                 .collect::<Result<Vec<_>, DirectProfileError>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let settings = context.models.plan_selection;
+    let settings = context.models.cost_inputs;
     let CostModel::UsageOverTime(prices) = &settings.cost_model else {
         return Ok(None);
     };

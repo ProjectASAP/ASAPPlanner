@@ -127,7 +127,7 @@ fn run_workload(
         &entries,
         data,
         PlanningModels::builtin()
-            .with_plan_selection(settings)
+            .with_cost_inputs(settings)
             .with_deployment_capabilities(deployment),
         false,
         10_000,
@@ -332,7 +332,7 @@ fn rootless_request_overhead_respects_capacity_and_latency() {
             &roots,
             &entries,
             workload.data_workload.as_ref().unwrap(),
-            PlanningModels::builtin().with_plan_selection(&settings),
+            PlanningModels::builtin().with_cost_inputs(&settings),
             false,
             10_000,
         );

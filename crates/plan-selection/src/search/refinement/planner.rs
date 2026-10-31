@@ -85,7 +85,7 @@ pub(in crate::search) fn optimize_configured_candidates(
     limits: CandidateSearchLimits,
 ) -> Result<CandidatePlanningResult, String> {
     if !matches!(
-        context.models.plan_selection.cost_model,
+        context.models.cost_inputs.cost_model,
         CostModel::UsageOverTime(_) | CostModel::ProvisionedCapacity(_)
     ) {
         return Err("candidate price search does not support ClusterCapacity objectives".into());
@@ -101,7 +101,7 @@ pub(in crate::search) fn optimize_configured_candidates(
         .map_err(|e| e.to_string())?;
     if context
         .models
-        .plan_selection
+        .cost_inputs
         .frozen_calibration_factor
         .is_some_and(|factor| factor != context.calibration.factor())
     {
@@ -922,7 +922,7 @@ fn retained_pane_priority_cost(
     else {
         return 0.0;
     };
-    let price = match (&context.models.plan_selection.cost_model, medium) {
+    let price = match (&context.models.cost_inputs.cost_model, medium) {
         (CostModel::UsageOverTime(prices), Medium::Memory) => prices.cost_per_memory_byte_second,
         (CostModel::UsageOverTime(prices), Medium::Disk) => prices.cost_per_disk_byte_second,
         _ => return 0.0,
@@ -1529,7 +1529,7 @@ mod tests {
         };
         let ignored = CandidatePlanningContext {
             models: models
-                .with_plan_selection(&settings)
+                .with_cost_inputs(&settings)
                 .with_accuracy(&asap_accuracy::IgnoreAccuracyGuarantees),
             ..context
         };
@@ -1773,7 +1773,7 @@ mod tests {
             &configured,
             &CandidatePlanningContext {
                 models: SelectionModels::builtin()
-                    .with_plan_selection(&ignored)
+                    .with_cost_inputs(&ignored)
                     .with_accuracy(&asap_accuracy::IgnoreAccuracyGuarantees),
                 ..context
             },
@@ -1809,7 +1809,7 @@ mod tests {
             entries: &entries,
             data: &data,
             models: SelectionModels::builtin()
-                .with_plan_selection(&settings)
+                .with_cost_inputs(&settings)
                 .with_accuracy(&asap_accuracy::IgnoreAccuracyGuarantees),
             calibration: CalibrationFit::default(),
         };
@@ -2063,7 +2063,7 @@ mod tests {
                 settings.cost_model = CostModel::ProvisionedCapacity(prices);
             }
             let models = SelectionModels {
-                plan_selection: &settings,
+                cost_inputs: &settings,
                 ..SelectionModels::builtin()
             };
             let context = CandidatePlanningContext {
@@ -2283,7 +2283,7 @@ mod tests {
             entries: &entries,
             data: &data,
             models: SelectionModels {
-                plan_selection: &settings,
+                cost_inputs: &settings,
                 ..SelectionModels::builtin()
             },
             calibration: CalibrationFit::default(),

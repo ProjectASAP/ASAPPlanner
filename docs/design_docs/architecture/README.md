@@ -16,7 +16,7 @@ workflows](input-output-workflow.md). The stages are defined in the
 flowchart TD
     W["PlanningWorkload: query workload + optional data workload"]
     F["Frontend dependencies: SQL catalog or PromQL histogram catalog"]
-    D["Deployment inputs: accuracy model, plan selection settings (cost model), deployment capabilities"]
+    D["Deployment inputs: accuracy model, cost inputs (cost model), deployment capabilities"]
     PRE["Stage 0: query-language frontends → logical DAG (Pre-ASAP OperatorNode roots)"]
     S1["Stage 1: logical ASAP-aware optimization (Pass 1, Pass 2) → logical ASAP candidates"]
     S2["Stage 2: physical ASAP-aware optimization (materialization) → physical ASAP candidates"]

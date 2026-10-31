@@ -270,9 +270,9 @@ pub enum ErrorSelectingPlan {
     /// Evaluation stopped without proving feasibility or infeasibility.
     #[error("candidate evaluation deadline exceeded")]
     EvaluationDeadlineExceeded,
-    /// Bad input: the deployment's plan selection settings
+    /// Bad input: the deployment's cost inputs
     /// ([`CostInputs::validate`](asap_cost::CostInputs::validate)).
-    #[error("plan selection settings: {0}")]
+    #[error("cost inputs: {0}")]
     InvalidSettings(AnalyticalCostError),
     /// Bad input: the caller gave a different number of workload entries
     /// than the candidate has query roots.

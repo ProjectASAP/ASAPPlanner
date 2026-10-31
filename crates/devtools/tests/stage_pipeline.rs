@@ -520,7 +520,7 @@ fn default_search_and_installation_validate_the_nine_query_workload() {
     };
     let capabilities: asap_planner::DeploymentCapabilities = serde_json::from_str(NO_RAW).unwrap();
     let models = asap_planner::PlanningModels::builtin()
-        .with_plan_selection(&settings)
+        .with_cost_inputs(&settings)
         .with_deployment_capabilities(&capabilities);
     let (plan, report) = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -1200,7 +1200,7 @@ fn workload_file_with_a_range_evaluation_is_planned() {
             &entries,
             &data,
             asap_planner::PlanningModels::builtin()
-                .with_plan_selection(&settings)
+                .with_cost_inputs(&settings)
                 .with_deployment_capabilities(&deployment),
         )
         .unwrap();
@@ -1229,7 +1229,7 @@ fn workload_file_with_a_range_evaluation_is_planned() {
     std::fs::remove_file(path).unwrap();
 }
 
-/// `--plan-selection-settings <file>` loads Stage 3's settings from JSON:
+/// `--cost-inputs <file>` loads Stage 3's settings from JSON:
 /// cost model 2 with the illustrative prices selects what
 /// `--cost-model provisioned-capacity` selects for Example 4 (P1). The file
 /// replaces the cost-model flags, so combining them is refused.
@@ -1247,23 +1247,20 @@ fn plan_selection_settings_flag_loads_the_settings_from_json() {
     };
     std::fs::write(&path, serde_json::to_string(&settings).unwrap()).unwrap();
     let path_arg = path.to_str().unwrap();
-    let document = generate_example(
-        "planner-layering-3b",
-        &["--plan-selection-settings", path_arg],
-    );
+    let document = generate_example("planner-layering-3b", &["--cost-inputs", path_arg]);
     assert!(selects_a_plan(&document["stage3_plan_selection"]));
     let (code, stderr) = failure(&[
         "--exhaustive",
         "--example",
         "planner-layering-3b",
-        "--plan-selection-settings",
+        "--cost-inputs",
         path_arg,
         "--cost-model",
         "usage-over-time",
     ]);
     assert_eq!(code, Some(2));
     assert!(
-        stderr.contains("--plan-selection-settings replaces --cost-model"),
+        stderr.contains("--cost-inputs replaces --cost-model"),
         "{stderr}"
     );
     std::fs::remove_file(path).unwrap();
@@ -1326,7 +1323,7 @@ fn accuracy_guarantees_are_ignored_by_default_and_enforced_on_request() {
     ));
     std::fs::write(&settings, r#"{"ignore_accuracy_guarantees": true}"#).unwrap();
     let mut from_file = enforcing.clone();
-    from_file.extend(["--plan-selection-settings", settings.to_str().unwrap()]);
+    from_file.extend(["--cost-inputs", settings.to_str().unwrap()]);
     let (code, stderr) = failure(&from_file);
     assert_eq!(code, Some(2), "{stderr}");
     assert!(stderr.contains("ignore_accuracy_guarantees"), "{stderr}");

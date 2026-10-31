@@ -398,7 +398,7 @@ impl Planner {
         }
     }
 
-    fn plan_selection_settings(&self) -> CostInputs {
+    fn cost_inputs(&self) -> CostInputs {
         CostInputs::default()
     }
 
@@ -431,10 +431,10 @@ impl Planner {
         let planning = workload.planning_workload();
         let entries: Vec<_> = planning.query_workload.entries().collect();
         let data = workload.data.clone();
-        let plan_selection = self.plan_selection_settings();
+        let cost_inputs = self.cost_inputs();
         let deployment = workload.deployment();
         let models = PlanningModels::builtin()
-            .with_plan_selection(&plan_selection)
+            .with_cost_inputs(&cost_inputs)
             .with_deployment_capabilities(&deployment)
             .with_ignore_accuracy_guarantees(!self.settings.enforce_accuracy_guarantees);
         let run = match self.settings.search {
@@ -546,10 +546,10 @@ impl Planner {
             let input = filter.operator.children()[0].guarantee.clone();
             *last = QueryRoot::Operator(Rc::new((**filter).clone().with_guarantee(input)));
         }
-        let plan_selection = self.plan_selection_settings();
+        let cost_inputs = self.cost_inputs();
         let deployment = workload.deployment();
         let models = PlanningModels::builtin()
-            .with_plan_selection(&plan_selection)
+            .with_cost_inputs(&cost_inputs)
             .with_deployment_capabilities(&deployment)
             .with_ignore_accuracy_guarantees(!self.settings.enforce_accuracy_guarantees);
         let mut candidates = optimize_physical_asap(

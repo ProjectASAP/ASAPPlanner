@@ -161,7 +161,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             entries: &entries,
             data: &data,
             models: crate::SelectionModels {
-                plan_selection: &settings,
+                cost_inputs: &settings,
                 ..crate::SelectionModels::builtin()
             },
             calibration: asap_cost::CalibrationFit::default(),

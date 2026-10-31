@@ -775,6 +775,6 @@ fn select_plan(
         entries,
         data,
         &models.accuracy_check_inputs(),
-        models.plan_selection,
+        models.cost_inputs,
     )
 }

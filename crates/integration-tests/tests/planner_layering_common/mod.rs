@@ -277,7 +277,7 @@ pub fn run_stages_with(
     deployment: &DeploymentCapabilities,
 ) -> Run {
     let models = asap_planner::PlanningModels::builtin()
-        .with_plan_selection(settings)
+        .with_cost_inputs(settings)
         .with_deployment_capabilities(deployment);
     run_stages_over(workload, roots, models)
 }
@@ -407,7 +407,7 @@ pub fn run_pattern_b_fixture(
         lower_promql(workload),
         pattern_b_computations(workload),
         asap_planner::PlanningModels::builtin()
-            .with_plan_selection(settings)
+            .with_cost_inputs(settings)
             .with_deployment_capabilities(deployment),
     )
 }

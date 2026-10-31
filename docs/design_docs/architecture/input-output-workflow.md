@@ -6,7 +6,7 @@ This document is for library integrators such as ASAPQuery-backend, not users
 submitting queries through a backend.
 
 ASAPPlanner is a **planning library**. Its input is a planning workload plus
-the deployment's inputs: its accuracy model, plan selection settings (the
+the deployment's inputs: its accuracy model, cost inputs (the
 cost model) and capabilities. Its output is one selected physical plan for
 the workload, with every alternative it considered and why each was not
 selected.

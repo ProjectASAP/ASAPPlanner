@@ -924,7 +924,7 @@ mod tests {
                 cost_model,
                 ..CostInputs::default()
             };
-            let models = SelectionModels::builtin().with_plan_selection(&settings);
+            let models = SelectionModels::builtin().with_cost_inputs(&settings);
             let all = select_among_plans(candidates, &entries, &data, models).unwrap();
             let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
             for candidate in candidates {
@@ -2174,7 +2174,7 @@ mod tests {
             &[entry_with(target, repeating(10_000))],
             &gauge,
             SelectionModels::builtin()
-                .with_plan_selection(&settings)
+                .with_cost_inputs(&settings)
                 .with_accuracy(&asap_accuracy::IgnoreAccuracyGuarantees),
         )
         .unwrap();
@@ -2209,7 +2209,7 @@ mod tests {
             &entries,
             &data(),
             SelectionModels::builtin()
-                .with_plan_selection(&settings)
+                .with_cost_inputs(&settings)
                 .with_accuracy(&asap_accuracy::IgnoreAccuracyGuarantees),
         )
         .unwrap();
@@ -3803,7 +3803,7 @@ mod tests {
                 &candidates,
                 &[every_minute()],
                 &arriving(10_000.0),
-                SelectionModels::builtin().with_plan_selection(settings),
+                SelectionModels::builtin().with_cost_inputs(settings),
             )
         };
         let only_provisioned = ResourceUnitCost {
@@ -4458,7 +4458,7 @@ mod tests {
                 &candidates,
                 &[every_minute()],
                 &arriving(10_000.0),
-                SelectionModels::builtin().with_plan_selection(&settings),
+                SelectionModels::builtin().with_cost_inputs(&settings),
             )
             .unwrap()
         };
@@ -4520,7 +4520,7 @@ mod tests {
                 &candidates,
                 &[every_minute()],
                 &arriving(10_000.0),
-                SelectionModels::builtin().with_plan_selection(&settings),
+                SelectionModels::builtin().with_cost_inputs(&settings),
             )
             .unwrap()
         };
@@ -4620,7 +4620,7 @@ mod tests {
                 &candidates,
                 &[every_minute()],
                 &arriving(10_000.0),
-                SelectionModels::builtin().with_plan_selection(&settings),
+                SelectionModels::builtin().with_cost_inputs(&settings),
             )
             .unwrap();
             assert_eq!(selection.selected, candidates[0].id, "{objective:?}");
@@ -5222,7 +5222,7 @@ mod tests {
             candidates,
             &[every_minute()],
             &arriving(10_000.0),
-            SelectionModels::builtin().with_plan_selection(settings),
+            SelectionModels::builtin().with_cost_inputs(settings),
         )
         .unwrap()
     }
@@ -5498,7 +5498,7 @@ mod tests {
         });
         let facts = data();
         let models = SelectionModels {
-            plan_selection: &settings,
+            cost_inputs: &settings,
             ..SelectionModels::builtin()
         };
         let mut selector = PlanSelector::new(&entries, &facts, models, false).unwrap();

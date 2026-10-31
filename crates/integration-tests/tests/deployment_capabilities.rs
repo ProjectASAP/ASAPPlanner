@@ -187,7 +187,7 @@ fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
         original,
         vec![pane_roots],
         asap_planner::PlanningModels::builtin()
-            .with_plan_selection(&settings)
+            .with_cost_inputs(&settings)
             .with_deployment_capabilities(deployment),
     )
 }

@@ -25,7 +25,7 @@ pub struct AccuracyCheckInputs<'a> {
 pub(crate) struct SelectionModels<'a> {
     pub accuracy: &'a dyn AccuracyModel,
     pub evidence: &'a dyn AccuracyEvidenceProvider,
-    pub plan_selection: &'a CostInputs,
+    pub cost_inputs: &'a CostInputs,
 }
 
 impl<'a> SelectionModels<'a> {
@@ -36,7 +36,7 @@ impl<'a> SelectionModels<'a> {
         Self {
             accuracy: accuracy_checks.model,
             evidence: accuracy_checks.evidence,
-            plan_selection: cost_inputs,
+            cost_inputs,
         }
     }
 
@@ -49,7 +49,7 @@ impl<'a> SelectionModels<'a> {
         SelectionModels {
             accuracy: &asap_accuracy::BuiltinAccuracyModel,
             evidence: &asap_accuracy::NoAccuracyEvidence,
-            plan_selection: &DEFAULT_COST_INPUTS,
+            cost_inputs: &DEFAULT_COST_INPUTS,
         }
     }
 
@@ -66,8 +66,8 @@ impl<'a> SelectionModels<'a> {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_plan_selection(mut self, plan_selection: &'a CostInputs) -> Self {
-        self.plan_selection = plan_selection;
+    pub(crate) fn with_cost_inputs(mut self, cost_inputs: &'a CostInputs) -> Self {
+        self.cost_inputs = cost_inputs;
         self
     }
 }

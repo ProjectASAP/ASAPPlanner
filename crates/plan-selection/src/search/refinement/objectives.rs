@@ -46,7 +46,7 @@ pub(in crate::search) fn optimize_objective_candidates(
     limits: CandidateSearchLimits,
     calibration: CandidateCalibration,
 ) -> Result<ObjectivePlanningResult, String> {
-    let calibration = match context.models.plan_selection.frozen_calibration_factor {
+    let calibration = match context.models.cost_inputs.frozen_calibration_factor {
         Some(factor) => CandidateCalibration::Frozen(
             CalibrationFit::from_factor(factor).map_err(|error| error.to_string())?,
         ),
@@ -238,7 +238,7 @@ pub(in crate::search) fn optimize_objective_candidates(
         CandidateCalibration::Frozen(_)
             if context
                 .models
-                .plan_selection
+                .cost_inputs
                 .frozen_calibration_factor
                 .is_some() =>
         {
@@ -424,7 +424,7 @@ mod tests {
         let (configured, roots, entries, data) = fixture();
         let settings = measured_settings();
         let models = SelectionModels {
-            plan_selection: &settings,
+            cost_inputs: &settings,
             ..SelectionModels::builtin()
         };
         let context = CandidatePlanningContext {
@@ -481,7 +481,7 @@ mod tests {
             ..measured_settings()
         };
         let models = SelectionModels {
-            plan_selection: &settings,
+            cost_inputs: &settings,
             ..SelectionModels::builtin()
         };
         let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();

@@ -97,7 +97,7 @@ async fn run(queries: &[&str]) -> Run {
         roots,
         candidates,
         asap_planner::PlanningModels::builtin()
-            .with_plan_selection(&settings)
+            .with_cost_inputs(&settings)
             .with_ignore_accuracy_guarantees(true),
     )
 }
