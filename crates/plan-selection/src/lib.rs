@@ -115,7 +115,7 @@
 //! node computed at ingestion time is a streaming operator holding one row,
 //! and is not charged.)
 //!
-//! Prices come from [`asap_cost::analytical::estimate_operator`] over edge
+//! Prices come from `asap-cost`'s analytical model (`analytical::estimate_operator`) over edge
 //! statistics derived from the [`DataWorkload`](asap_types::workload::DataWorkload) and a fixed default group
 //! count; summary build and estimation are priced as rows × sketch depth and
 //! groups × k. A query-time scan reads the longest window above it (a time

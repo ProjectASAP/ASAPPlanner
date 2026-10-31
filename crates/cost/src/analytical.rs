@@ -16,7 +16,7 @@ use crate::operator_statistics::{
 /// The shared resource container keeps other dimensions explicitly unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(from = "ResourceEstimateWire", into = "ResourceEstimateWire")]
-pub struct ResourceEstimate {
+pub(crate) struct ResourceEstimate {
     resources: crate::resources::PhysicalResources<ModeledCpu, u64>,
 }
 
@@ -84,7 +84,7 @@ impl ResourceEstimate {
 /// Physical operator classes used to expose CPU, memory, and disk formulas
 /// independently of a particular front-end IR spelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PhysicalOperator {
+pub(crate) enum PhysicalOperator {
     Scan,
     Filter {
         /// Scalar predicate operations evaluated for each input row.
@@ -172,12 +172,12 @@ pub enum PhysicalOperator {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PromqlBinaryOperandMode {
+pub(crate) enum PromqlBinaryOperandMode {
     VectorVector,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PromqlBinaryOperation {
+pub(crate) enum PromqlBinaryOperation {
     ArithmeticOrComparison,
     And,
     Or,
@@ -185,20 +185,20 @@ pub enum PromqlBinaryOperation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PromqlVectorCardinality {
+pub(crate) enum PromqlVectorCardinality {
     OneToOne,
     ManyToOne,
     OneToMany,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PromqlSeriesSampleKind {
+pub(crate) enum PromqlSeriesSampleKind {
     LimitK { k: u64 },
     LimitRatio { ratio_bits: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PromqlPresenceKind {
+pub(crate) enum PromqlPresenceKind {
     /// `absent` and `absent_over_time`: synthesize at most one output series.
     Absent,
     /// `present_over_time`: emit independently for each input series.
@@ -206,7 +206,7 @@ pub enum PromqlPresenceKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum HashJoinBuildSide {
+pub(crate) enum HashJoinBuildSide {
     Left,
     Right,
 }
@@ -369,7 +369,7 @@ fn validate_partitioning(
 /// Estimate one physical operator. Child costs are deliberately excluded;
 /// a DAG walker sums CPU/disk once per node and combines simultaneously
 /// retained state separately.
-pub fn estimate_operator(
+pub(crate) fn estimate_operator(
     operator: PhysicalOperator,
     statistics: OperatorStatistics,
 ) -> Result<ResourceEstimate, AnalyticalCostError> {

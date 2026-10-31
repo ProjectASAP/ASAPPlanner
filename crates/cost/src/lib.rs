@@ -2,7 +2,7 @@
 //! resource a plan uses and what that usage costs. It depends only on
 //! `asap-types`, so any stage can price with it.
 //!
-//! - Resource-usage estimation: [`analytical`] and [`operator_statistics`]
+//! - Resource-usage estimation: [`analytical`] and `operator_statistics`
 //!   (the analytical per-operator resource model), `measured` (measured
 //!   operation costs and their lookup), [`execution_demand`] (how often
 //!   each node of a physical DAG is computed), [`state_bytes`] (the bytes a
@@ -26,17 +26,19 @@ use asap_types::ir::properties::ExecutionTiming;
 pub mod analytical;
 pub mod execution_demand;
 mod measured;
-pub mod operator_statistics;
+mod operator_statistics;
 mod ranking;
 mod resources;
 pub mod state_bytes;
 mod usage;
 
 use analytical::AnalyticalCostError;
+pub(crate) use measured::aggregate_lookup;
 pub use measured::{
-    aggregate_lookup, lookup, CostTableProvenance, MeasuredOperationCost, MeasuredOperationCosts,
-    NodePriceSource, OperatorCost, OperatorKind, StateFamily, SummaryOperation,
+    lookup, CostTableProvenance, MeasuredOperationCost, MeasuredOperationCosts, NodePriceSource,
+    OperatorCost, OperatorKind, StateFamily, SummaryOperation,
 };
+pub use operator_statistics::EdgeStatistics;
 pub use ranking::{cheaper, worst_latency_ms, PlanRanking};
 pub use usage::{
     family_name, kept_pane_chains, node_map, node_usage, pane_retention_ms,

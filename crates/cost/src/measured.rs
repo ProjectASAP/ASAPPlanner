@@ -301,7 +301,7 @@ pub fn lookup(
 /// The price of an `Aggregate` at `phase` per input row: the sum over its
 /// measures, when each has an entry (one for its own phase winning over
 /// one for both).
-pub fn aggregate_lookup(
+pub(crate) fn aggregate_lookup(
     table: &MeasuredOperationCosts,
     phase: ExecutionTiming,
     measures: &[AggIntent],
