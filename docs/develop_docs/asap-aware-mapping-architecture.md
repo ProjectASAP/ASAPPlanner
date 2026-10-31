@@ -42,7 +42,7 @@ QueryRoots (Stage 0)
   │  DagOfLogicalMemoGroups::from_roots, then
   │  pass1::logical_memo_candidates::generate_per_computation_logical_memo_candidates
   ▼                                                                     Stage 1, Pass 1
-PerComputationLogicalMemoCandidates (CandidateMemo + pruned_candidates)
+PerComputationLogicalMemoCandidates (MemoCandidates + pruned_candidates)
   │  pass2::logical_memo_candidates::generate_logical_asap_memo_candidates
   │    the memo rules (pass2/memo/rules/) over the candidate memo       Stage 1, Pass 2
   ▼

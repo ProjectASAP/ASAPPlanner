@@ -11,7 +11,7 @@
 // stages.js rebuilds the flat DAG below any of them), and, per step:
 // `{step, title, groups: [{id, label, children, parents, queries, roots_of,
 // node, candidate_count, candidate_count_by_origin, candidates_capped,
-// candidates: [{index, implements, children, origin, budget_share, added,
+// candidates: [{index, implements, children, origin, accuracy_budget_parts, added,
 // label, node, group_of_node}]}]}`, where `node` is a table index and
 // `group_of_node` maps table indices to child groups; `selected_choice`
 // maps a group id (string) of the last step to the selected plan's
@@ -111,7 +111,7 @@ function validateMemo(memo, queryCount) {
         indices.add(candidate.index);
         if (!(candidate.origin in MEMO_ORIGINS)) errors.push(`${cw}: unknown origin ${JSON.stringify(candidate.origin)}`);
         else if (!(byOrigin && byOrigin[candidate.origin] > 0)) errors.push(`${cw}: origin ${candidate.origin} is not counted in candidate_count_by_origin`);
-        if (typeof candidate.label !== 'string' || typeof candidate.budget_share !== 'number') errors.push(`${cw}: needs a label and a numeric budget_share`);
+        if (typeof candidate.label !== 'string' || typeof candidate.accuracy_budget_parts !== 'number') errors.push(`${cw}: needs a label and a numeric accuracy_budget_parts`);
         if (!names(candidate.children)) errors.push(`${cw}: children must name groups of the step`);
         if (typeof candidate.added !== 'boolean') errors.push(`${cw}: added must be a boolean`);
         if (!memoIsNode(memo.nodes, candidate.node)) errors.push(`${cw}: node must index memo.nodes`);
@@ -289,7 +289,7 @@ function memoStepElements(memo, s, options) {
     } else {
       items = group.candidates.map((c) => {
         const chosen = c.index === chosenIndex;
-        const notes = [MEMO_ORIGINS[c.origin].name, c.budget_share !== 1 ? `share ${c.budget_share}` : '', c.added ? '✚ new' : '', chosen ? '✓ selected' : ''].filter(Boolean);
+        const notes = [MEMO_ORIGINS[c.origin].name, c.accuracy_budget_parts !== 1 ? `parts ${c.accuracy_budget_parts}` : '', c.added ? '✚ new' : '', chosen ? '✓ selected' : ''].filter(Boolean);
         return {
           data: { id: `g${group.id}c${c.index}`, kind: 'candidate', groupId: group.id, index: c.index, origin: c.origin, color: MEMO_ORIGINS[c.origin].color,
             label: `${memoClip(`#${c.index} ${c.label}`, 30)}\n${memoClip(notes.join(' · '), 30)}`, queries, w: MEMO_ITEM.width, h: MEMO_ITEM.height },
@@ -500,7 +500,7 @@ function memoViewController() {
     const selected = stepIndex === memo.steps.length - 1 && choice && choice[String(group.id)] === candidate.index;
     $('details').innerHTML = `<h3>Candidate #${esc(candidate.index)} of G${esc(group.id)} <span class="eyebrow">${esc(memo.steps[stepIndex].title)}</span></h3>${kv([
       ['label', candidate.label], ['origin', MEMO_ORIGINS[candidate.origin].name],
-      ['added at this step', candidate.added ? 'yes' : 'no'], ['budget share', candidate.budget_share],
+      ['added at this step', candidate.added ? 'yes' : 'no'], ['accuracy budget parts', candidate.accuracy_budget_parts],
       ['implements', groupList(candidate.implements || [])], ['reads', groupList(candidate.children)],
       ['selected plan', selected ? 'chosen for this group' : 'no'],
     ])}<div><div class="eyebrow">own nodes (top first)</div>${nodeList(own)}</div>

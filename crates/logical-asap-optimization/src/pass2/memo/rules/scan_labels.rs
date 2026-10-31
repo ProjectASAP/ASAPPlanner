@@ -9,13 +9,13 @@ use asap_types::ir::operator::Reduction;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot};
 
 use crate::pass2::memo::state_groups::{boundary_groups, simple_build, StateGroupExpansionError};
-use asap_types::stages::{CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{CandidateForMemoGroup, MemoCandidates, OriginOfCandidateForMemoGroup};
 use asap_types::stages::{MemoGroup, MemoGroupId};
 
 /// Preserve local implementations and append readers over union-label inputs.
 /// Parent/query reachability is rebuilt by the enclosing state-group expansion.
 pub(crate) fn add_scan_label_candidates(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {
     check_generation_deadline(deadline)?;
@@ -169,7 +169,7 @@ fn same_source_node(left: &OperatorNode, right: &OperatorNode) -> bool {
 
 fn intern_inputs(
     node: &Rc<OperatorNode>,
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     queries: &[usize],
     done: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
 ) -> Result<Rc<OperatorNode>, StateGroupExpansionError> {

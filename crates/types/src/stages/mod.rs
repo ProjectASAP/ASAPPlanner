@@ -12,7 +12,7 @@ mod physical;
 mod pruning;
 mod realizer;
 
-pub use candidates::{CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup};
+pub use candidates::{CandidateForMemoGroup, MemoCandidates, OriginOfCandidateForMemoGroup};
 pub use logical_memo_candidates::LogicalASAPMemoCandidates;
 pub use memo::{
     queries_rooted_at, root_groups, CandidateGenerationTimeout, MemoGroup, MemoGroupId,

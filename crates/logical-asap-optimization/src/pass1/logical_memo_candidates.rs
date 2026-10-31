@@ -17,7 +17,7 @@ use crate::pass1::per_computation_candidates::{
 };
 use crate::pass2::memo::candidates::{try_populate_pass1, CandidatePopulationError};
 use crate::pass2::memo::{check_generation_deadline, DagOfLogicalMemoGroups};
-use asap_types::stages::{CandidateGenerationTimeout, CandidateMemo, PrunedCandidate};
+use asap_types::stages::{CandidateGenerationTimeout, MemoCandidates, PrunedCandidate};
 
 /// Stage 1, Pass 1's output: the workload's memo groups, each with its
 /// Pass 1 candidates, and the computation targets they were built from.
@@ -26,7 +26,7 @@ pub struct PerComputationLogicalMemoCandidates {
     /// The groups moved from the [`DagOfLogicalMemoGroups`], its query
     /// roots, and every group's candidates (origin
     /// [`Pass1`](asap_types::stages::OriginOfCandidateForMemoGroup::Pass1)).
-    pub memo: CandidateMemo,
+    pub memo: MemoCandidates,
     /// One per aggregate measure: what Pass 1 chose among.
     pub computation_targets: Vec<ComputationTarget>,
     /// The ways to compute a target's measure that Pass 1 pruned, each on
@@ -84,8 +84,8 @@ pub fn generate_per_computation_logical_memo_candidates(
 }
 
 /// Sizes every candidate of `memo` for its readers' failure probabilities,
-/// in place: each approximate input of a candidate with accuracy budget share
-/// `n` (`accuracy_budget_parts`) gets the smallest
+/// in place: each approximate input of a candidate with `n`
+/// accuracy budget parts (`accuracy_budget_parts`) gets the smallest
 /// [`per_input_failure_probability`] `δ_q / (n · V_q)` among the queries `q`
 /// reaching its group, `V_q` the values `q`'s target covers (`G` of its
 /// root, `roots[q]`, for the whole result)
@@ -96,7 +96,7 @@ pub fn generate_per_computation_logical_memo_candidates(
 /// gives a failure probability (exact, per-value with no `δ`, or a
 /// whole-result target over an unbound `G`) keeps its Pass 1 size.
 fn size_for_failure_probability(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
@@ -170,7 +170,7 @@ mod tests {
     }
 
     /// Pass 1's memo for `queries`, each lowered and entered with its target.
-    fn pass1(queries: &[(&str, AccuracyTarget)], data: &DataWorkload) -> CandidateMemo {
+    fn pass1(queries: &[(&str, AccuracyTarget)], data: &DataWorkload) -> MemoCandidates {
         let roots: Vec<(usize, QueryRoot)> = queries
             .iter()
             .enumerate()
@@ -237,8 +237,8 @@ mod tests {
     }
 
     /// The failure probability of every KLL build of `memo`'s candidates
-    /// for one accuracy-budget share.
-    fn whole_share_kll(memo: &CandidateMemo) -> Vec<Option<f64>> {
+    /// for one accuracy budget part (the whole budget).
+    fn whole_share_kll(memo: &MemoCandidates) -> Vec<Option<f64>> {
         kll_failure_probabilities(
             memo.candidates
                 .iter()

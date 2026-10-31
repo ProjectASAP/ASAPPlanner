@@ -32,8 +32,8 @@ use asap_plan_selection::{select_plan, ErrorSelectingPlan, SearchReport, Selecti
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
 use asap_types::stages::{
-    AssignmentRealizer, CandidateForMemoGroupId, CandidateMemo, DagOfSelectedCandidates,
-    LogicalASAPMemoCandidates, MemoGroupId, OperatorNodeOfCandidateForMemoGroup,
+    AssignmentRealizer, CandidateForMemoGroupId, DagOfSelectedCandidates,
+    LogicalASAPMemoCandidates, MemoCandidates, MemoGroupId, OperatorNodeOfCandidateForMemoGroup,
     PhysicalASAPMemoCandidates, PhysicalCandidateError, PhysicalCandidateKey, PrunedCandidate,
     RealizedPlan,
 };
@@ -69,17 +69,17 @@ pub struct PlanSearchSettings {
 #[derive(Debug, Clone)]
 pub struct MemoSteps {
     /// After hash-consing the frontends' roots: groups, no candidates.
-    pub stage0: CandidateMemo,
+    pub stage0: MemoCandidates,
     /// After Pass 1 (per-computation candidates, then accuracy-scoped sizes).
-    pub pass1: CandidateMemo,
+    pub pass1: MemoCandidates,
     /// The ways to compute a measure Pass 1 pruned, each on its aggregate's
     /// group of `pass1`.
     pub pass1_pruned_candidates: Vec<PrunedCandidate<HowToComputeAggregateMeasure>>,
     /// After local window composition (pane candidates).
-    pub pass2: CandidateMemo,
+    pub pass2: MemoCandidates,
     /// After concrete summary-state group expansion: the memo Stage 2
     /// implements.
-    pub concrete_states: CandidateMemo,
+    pub concrete_states: MemoCandidates,
     /// Stage 2's operator nodes over `concrete_states`
     /// (`PhysicalASAPMemoCandidates::operator_nodes_of_candidates_for_memo_groups`),
     /// which `stage2_pruned_candidates` index.
@@ -187,7 +187,7 @@ struct Round {
     index: usize,
     logical: LogicalASAPMemoCandidates,
     physical: PhysicalASAPMemoCandidates,
-    pass2: CandidateMemo,
+    pass2: MemoCandidates,
     selection: Result<Selection, SelectionError>,
 }
 
@@ -251,7 +251,7 @@ pub fn run_planning(
         run.report = report;
         return Ok(run);
     }
-    let stage0 = CandidateMemo {
+    let stage0 = MemoCandidates {
         candidates: vec![Vec::new(); initial.groups.len()],
         groups: initial.groups.clone(),
         query_roots: initial.query_roots.clone(),
@@ -656,7 +656,7 @@ fn has_pane_window(initial: &DagOfLogicalMemoGroups) -> bool {
 /// memo candidates of a group one root (identical terminal readers of
 /// different inputs); the one reading the selected producers' groups is taken.
 fn selected_chosen_candidates(
-    memo: &CandidateMemo,
+    memo: &MemoCandidates,
     physical: &PhysicalASAPMemoCandidates,
     selected: &DagOfSelectedCandidates,
 ) -> Result<ChosenCandidatePerMemoGroup, String> {

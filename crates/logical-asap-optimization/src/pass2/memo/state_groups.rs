@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 
-use asap_types::stages::{CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{CandidateForMemoGroup, MemoCandidates, OriginOfCandidateForMemoGroup};
 use asap_types::stages::{MemoGroup, MemoGroupId};
 
 #[derive(Debug, thiserror::Error)]
@@ -48,7 +48,7 @@ struct BuildReaders {
 /// Rejects a memo the Pass 2 rules cannot extend: mismatched or
 /// out-of-range group references, shared summary-state groups already
 /// added, or cyclic dependencies. Pass 2 checks this before its rules.
-pub(crate) fn check_unexpanded_memo(memo: &CandidateMemo) -> Result<(), StateGroupExpansionError> {
+pub(crate) fn check_unexpanded_memo(memo: &MemoCandidates) -> Result<(), StateGroupExpansionError> {
     validate_references(memo)?;
     if memo.groups.iter().any(|group| {
         matches!(
@@ -71,7 +71,7 @@ pub(crate) fn check_unexpanded_memo(memo: &CandidateMemo) -> Result<(), StateGro
 /// parents and the queries it may serve. On error, discard `memo`: it may
 /// hold partial work.
 pub(crate) fn add_shared_summary_state_groups(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     deadline: Option<Instant>,
 ) -> Result<(), StateGroupExpansionError> {
     add_shared_summary_state_groups_with_index(memo, deadline, true)
@@ -80,7 +80,7 @@ pub(crate) fn add_shared_summary_state_groups(
 /// `indexed` looks builds up by fingerprint; otherwise by a linear scan
 /// (the reference the index is tested against).
 fn add_shared_summary_state_groups_with_index(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     deadline: Option<Instant>,
     indexed: bool,
 ) -> Result<(), StateGroupExpansionError> {
@@ -245,7 +245,7 @@ fn add_shared_summary_state_groups_with_index(
     Ok(())
 }
 
-fn validate_references(memo: &CandidateMemo) -> Result<(), StateGroupExpansionError> {
+fn validate_references(memo: &MemoCandidates) -> Result<(), StateGroupExpansionError> {
     if memo.groups.len() != memo.candidates.len() {
         return Err(StateGroupExpansionError::MismatchedGroups);
     }
@@ -276,7 +276,7 @@ fn validate_references(memo: &CandidateMemo) -> Result<(), StateGroupExpansionEr
 }
 
 pub(super) fn simple_build(
-    memo: &CandidateMemo,
+    memo: &MemoCandidates,
     candidate: &CandidateForMemoGroup,
 ) -> Option<(Rc<OperatorNode>, Vec<MemoGroupId>)> {
     let mut builds = direct_input_builds(memo, candidate);
@@ -284,7 +284,7 @@ pub(super) fn simple_build(
 }
 
 pub(super) fn direct_input_builds(
-    memo: &CandidateMemo,
+    memo: &MemoCandidates,
     candidate: &CandidateForMemoGroup,
 ) -> Vec<(Rc<OperatorNode>, Vec<MemoGroupId>)> {
     if !matches!(
@@ -468,7 +468,7 @@ mod tests {
 
     /// An expanded memo with what its shared summary-state step added.
     struct Expanded {
-        memo: CandidateMemo,
+        memo: MemoCandidates,
         /// The groups the shared summary-state step added.
         state_groups: Vec<MemoGroupId>,
         /// The candidates it added to reader groups.
@@ -477,7 +477,7 @@ mod tests {
 
     /// Pass 2 after local window composition, over the complete pane-width
     /// domain, as the Pass 2 entry runs it.
-    fn expand(memo: CandidateMemo) -> Result<Expanded, StateGroupExpansionError> {
+    fn expand(memo: MemoCandidates) -> Result<Expanded, StateGroupExpansionError> {
         let memo = crate::test_support::sharing_rules_and_shared_state_groups(
             memo,
             super::super::shared_configurations::PaneWidthDomain::Complete,
@@ -485,7 +485,7 @@ mod tests {
         Ok(expanded(memo))
     }
 
-    fn expanded(memo: CandidateMemo) -> Expanded {
+    fn expanded(memo: MemoCandidates) -> Expanded {
         let state_groups = crate::test_support::shared_summary_state_groups(&memo);
         // Before this step no candidate is a shared build; after it, each
         // state group has one and each added reader candidate is one.
@@ -568,11 +568,11 @@ mod tests {
         ));
     }
 
-    fn workload(queries: &[(&str, f64)]) -> CandidateMemo {
+    fn workload(queries: &[(&str, f64)]) -> MemoCandidates {
         workload_with_identity(queries, false)
     }
 
-    fn workload_with_identity(queries: &[(&str, f64)], identity: bool) -> CandidateMemo {
+    fn workload_with_identity(queries: &[(&str, f64)], identity: bool) -> MemoCandidates {
         let roots: Vec<_> = queries
             .iter()
             .enumerate()
@@ -687,7 +687,7 @@ mod tests {
         assert_eq!(expanded.memo.groups.len(), count);
     }
 
-    fn with_local_panes(mut memo: CandidateMemo, grids: &[u64]) -> CandidateMemo {
+    fn with_local_panes(mut memo: MemoCandidates, grids: &[u64]) -> MemoCandidates {
         use crate::pass2::asap_aware_cse::{pane_candidates, window_composition_pass2_candidates};
 
         let boundaries: HashMap<_, _> = memo

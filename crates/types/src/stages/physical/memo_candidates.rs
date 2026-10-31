@@ -12,7 +12,7 @@ use crate::physical::Materialization;
 use crate::stages::{MemoGroupId, PrunedCandidate};
 
 /// One implementation candidate: index `index` in group `group`'s
-/// candidates ([`CandidateMemo::candidates`](crate::stages::CandidateMemo::candidates)).
+/// candidates ([`MemoCandidates::candidates`](crate::stages::MemoCandidates::candidates)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CandidateForMemoGroupId {
     pub group: MemoGroupId,

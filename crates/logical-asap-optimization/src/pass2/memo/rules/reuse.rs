@@ -2,7 +2,7 @@
 //! canonical input identities after guarantee recomposition rebuilds their DAGs.
 use crate::pass2::memo::state_groups::{boundary_groups, StateGroupExpansionError};
 use asap_types::ir::OperatorNode;
-use asap_types::stages::{CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{CandidateForMemoGroup, MemoCandidates, OriginOfCandidateForMemoGroup};
 use asap_types::stages::{MemoGroup, MemoGroupId};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -13,7 +13,7 @@ pub(in crate::pass2::memo) fn eligible(candidate: &CandidateForMemoGroup) -> boo
 
 pub(in crate::pass2::memo) fn restore_inputs(
     node: &Rc<OperatorNode>,
-    memo: &CandidateMemo,
+    memo: &MemoCandidates,
     inputs: &[MemoGroupId],
 ) -> Rc<OperatorNode> {
     // These are the same declared logical input groups, rebound after a rule
@@ -92,11 +92,11 @@ pub(in crate::pass2::memo) fn same_node(
 }
 
 pub(in crate::pass2::memo) fn append_producer(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     node: Rc<OperatorNode>,
     queries: &[usize],
     origin: OriginOfCandidateForMemoGroup,
-    budget_share: usize,
+    accuracy_budget_parts: usize,
 ) -> Result<MemoGroupId, StateGroupExpansionError> {
     // Reuse only dedicated producer groups. A logical result group can contain
     // other implementations and cannot enforce this producer's exact contract.
@@ -105,7 +105,7 @@ pub(in crate::pass2::memo) fn append_producer(
         !root_groups.contains(&MemoGroupId(*index as u32))
             && memo.candidates[*index].len() == 1
             && memo.candidates[*index][0].origin == origin
-            && memo.candidates[*index][0].accuracy_budget_parts == budget_share
+            && memo.candidates[*index][0].accuracy_budget_parts == accuracy_budget_parts
             && same_node(&group.logical_node, &node, true)
     }) {
         return Ok(MemoGroupId(index as u32));
@@ -132,13 +132,13 @@ pub(in crate::pass2::memo) fn append_producer(
         root_node: node,
         input_groups: children,
         origin,
-        accuracy_budget_parts: budget_share,
+        accuracy_budget_parts,
     }]);
     Ok(id)
 }
 
 pub(in crate::pass2::memo) fn append_reader(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     owner: usize,
     original: &CandidateForMemoGroup,
     node: Rc<OperatorNode>,

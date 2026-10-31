@@ -1,6 +1,6 @@
 //! Stage 1, Pass 2's output, which Stage 2 implements.
 
-use super::CandidateMemo;
+use super::MemoCandidates;
 
 /// Stage 1, Pass 2's output: the Pass 1 groups plus the groups Pass 2 adds
 /// (shared producers, shared summary states), each with its Pass 1
@@ -10,5 +10,5 @@ use super::CandidateMemo;
 pub struct LogicalASAPMemoCandidates {
     /// The expanded memo: groups, query roots (passed through from Pass 1)
     /// and each group's candidates.
-    pub memo: CandidateMemo,
+    pub memo: MemoCandidates,
 }

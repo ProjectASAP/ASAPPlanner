@@ -22,7 +22,7 @@
 //! A fused computation is one more candidate of the outer group, whatever
 //! else reads the groups it absorbs: those keep their own candidates for
 //! their other readers. A candidate equal to one the group already has (the
-//! same structural id, input groups, fused groups and budget share) is not
+//! same structural id, input groups, fused groups and accuracy budget parts) is not
 //! added again.
 //!
 //! A query whose value combines `n` approximate inputs splits its budget
@@ -39,7 +39,7 @@ use std::rc::Rc;
 
 use super::DagOfLogicalMemoGroups;
 use crate::pass1::per_computation_candidates::{
-    compose_logical_candidate_with_budget_share, HowToComputeAggregateMeasure,
+    compose_logical_candidate_with_accuracy_budget_parts, HowToComputeAggregateMeasure,
     PerComputationCandidates,
 };
 use asap_types::ir::schema::FieldDataType;
@@ -47,7 +47,7 @@ use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 
 use super::candidates::CandidatePopulationError;
 use asap_types::stages::{
-    CandidateForMemoGroup, CandidateMemo, MemoGroup, MemoGroupId, OriginOfCandidateForMemoGroup,
+    CandidateForMemoGroup, MemoCandidates, MemoGroup, MemoGroupId, OriginOfCandidateForMemoGroup,
 };
 
 /// Populate implementation candidates without changing initial group identities.
@@ -56,7 +56,7 @@ use asap_types::stages::{
 pub fn try_populate_pass1(
     initial: DagOfLogicalMemoGroups,
     per_computation: &PerComputationCandidates,
-) -> Result<CandidateMemo, CandidatePopulationError> {
+) -> Result<MemoCandidates, CandidatePopulationError> {
     if !per_computation.walked(&initial) {
         return Err(CandidatePopulationError::RootDependenciesChanged);
     }
@@ -81,7 +81,7 @@ pub fn try_populate_pass1(
         }
     }
     let candidates = pass1_candidates(per_computation, &initial.groups);
-    Ok(CandidateMemo {
+    Ok(MemoCandidates {
         groups: initial.groups,
         query_roots: initial.query_roots,
         candidates,
@@ -176,7 +176,7 @@ fn target_candidates(
     logical_nodes: &Rc<[Rc<OperatorNode>]>,
     g: MemoGroupId,
     targets: &[usize],
-    max_budget_share: usize,
+    max_accuracy_budget_parts: usize,
 ) -> Option<Vec<CandidateForMemoGroup>> {
     let aggregate = Rc::clone(&groups[g.0 as usize].logical_node);
     // The groups a candidate's private nodes may bottom out at, by key.
@@ -196,7 +196,7 @@ fn target_candidates(
     let own_key = structural_ids.structural_id(&groups[g.0 as usize].logical_node);
     let mut candidates = Vec::new();
     // Each candidate's identity in the memo: its node's structural id, its
-    // input groups, the groups it fuses and its budget share. A candidate
+    // input groups, the groups it fuses and its accuracy budget parts. A candidate
     // equal to one already listed is not added again.
     let mut known = HashSet::new();
     let mut choice = vec![0; per_computation.targets.len()];
@@ -213,21 +213,21 @@ fn target_candidates(
                 }
             }
         }
-        for budget_share in 1..=max_budget_share {
+        for accuracy_budget_parts in 1..=max_accuracy_budget_parts {
             let Ok(composed) = compose_alone(
                 per_computation,
                 logical_nodes,
                 &aggregate,
                 targets,
                 &choice,
-                budget_share,
+                accuracy_budget_parts,
             ) else {
                 continue;
             };
             let Some(QueryRoot::Operator(root)) = composed.into_iter().next() else {
                 continue;
             };
-            if budget_share > 1 && !builds_a_sketch(&root) {
+            if accuracy_budget_parts > 1 && !builds_a_sketch(&root) {
                 break;
             }
             let (node, children) = if structural_ids.structural_id(&root) == own_key {
@@ -268,7 +268,7 @@ fn target_candidates(
                 structural_ids.structural_id(&node),
                 children.clone(),
                 implements[1..].to_vec(),
-                budget_share,
+                accuracy_budget_parts,
             )) {
                 continue;
             }
@@ -277,7 +277,7 @@ fn target_candidates(
                 root_node: node,
                 input_groups: children,
                 origin: OriginOfCandidateForMemoGroup::Pass1,
-                accuracy_budget_parts: budget_share,
+                accuracy_budget_parts,
             });
         }
         // Mixed-radix over this group's targets only.
@@ -307,7 +307,7 @@ fn compose_alone(
     aggregate: &Rc<OperatorNode>,
     targets: &[usize],
     choice: &[usize],
-    budget_share: usize,
+    accuracy_budget_parts: usize,
 ) -> Result<Vec<QueryRoot>, crate::pass1::per_computation_candidates::PerComputationCandidateError>
 {
     let mut kept: Vec<usize> = targets.to_vec();
@@ -350,7 +350,11 @@ fn compose_alone(
         .iter()
         .map(|&t| if targets.contains(&t) { choice[t] } else { 0 })
         .collect();
-    compose_logical_candidate_with_budget_share(&alone, &alone_choice, budget_share)
+    compose_logical_candidate_with_accuracy_budget_parts(
+        &alone,
+        &alone_choice,
+        accuracy_budget_parts,
+    )
 }
 
 /// `node` with each first node on a path down from its children that
@@ -405,7 +409,7 @@ fn over_groups(
     })
 }
 
-/// Whether `node`'s private nodes build a sketch, which a budget share sizes.
+/// Whether `node`'s private nodes build a sketch, which its accuracy budget parts size.
 fn builds_a_sketch(node: &Rc<OperatorNode>) -> bool {
     OperatorNode::reachable(node).iter().any(|n| {
         matches!(
@@ -505,11 +509,11 @@ mod tests {
     fn populate_pass1(
         initial: DagOfLogicalMemoGroups,
         inventory: &PerComputationCandidates,
-    ) -> CandidateMemo {
+    ) -> MemoCandidates {
         try_populate_pass1(initial, inventory).unwrap()
     }
 
-    fn memo_of(inventory: &PerComputationCandidates) -> CandidateMemo {
+    fn memo_of(inventory: &PerComputationCandidates) -> MemoCandidates {
         let roots: Vec<_> = inventory.roots.iter().cloned().enumerate().collect();
         populate_pass1(DagOfLogicalMemoGroups::from_roots(&roots), inventory)
     }
@@ -628,7 +632,7 @@ mod tests {
     }
 
     /// The memo of PromQL `queries`, each with accuracy target `target`.
-    fn memo(queries: &[&str], target: AccuracyTarget) -> CandidateMemo {
+    fn memo(queries: &[&str], target: AccuracyTarget) -> MemoCandidates {
         let roots: Vec<_> = queries
             .iter()
             .map(|q| QueryRoot::Operator(lower_promql(q, target.clone())))
@@ -644,7 +648,7 @@ mod tests {
 
     /// The group of the first node of `kind` reached from query `q`'s root,
     /// walking down the groups' first children.
-    fn group_of_kind(memo: &CandidateMemo, q: usize, kind: &str) -> usize {
+    fn group_of_kind(memo: &MemoCandidates, q: usize, kind: &str) -> usize {
         let mut g = memo.query_roots[q].as_operator().unwrap().0 as usize;
         while memo.groups[g].logical_node.operator.kind_name() != kind {
             g = memo.groups[g].child_groups[0].0 as usize;
@@ -827,8 +831,8 @@ mod tests {
     }
 
     /// The sketch candidates of `memo`'s group `g`: each one's summary and
-    /// budget share.
-    fn sketch_shares(memo: &CandidateMemo, g: usize) -> Vec<(String, usize)> {
+    /// accuracy budget parts.
+    fn sketch_shares(memo: &MemoCandidates, g: usize) -> Vec<(String, usize)> {
         memo.candidates[g]
             .iter()
             .filter(|c| !algorithms(c).is_empty())
@@ -845,7 +849,7 @@ mod tests {
     /// whole-budget candidate is the exhaustive search's sizing, and the
     /// half-budget one, larger, is never the cheaper valid one.
     #[test]
-    fn a_ratio_operand_has_a_candidate_per_budget_share() {
+    fn a_ratio_operand_has_a_candidate_per_accuracy_budget_parts() {
         let queries = [
             "quantile_over_time(0.9, m[5m]) / quantile_over_time(0.5, m[5m])",
             "quantile_over_time(0.9, m[5m])",
@@ -1033,7 +1037,7 @@ mod tests {
     /// composition derives), and each child group's node is matched by a
     /// candidate of that group in turn.
     struct Combination<'a> {
-        memo: &'a CandidateMemo,
+        memo: &'a MemoCandidates,
         matched: HashMap<(usize, *const OperatorNode), bool>,
         own: HashMap<*const OperatorNode, (Rc<OperatorNode>, serde_json::Value)>,
     }

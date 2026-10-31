@@ -9,13 +9,13 @@ use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, ProjectItem, QueryRoot, ScalarExpr,
 };
-use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{MemoCandidates, OriginOfCandidateForMemoGroup};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
 pub(crate) fn add_rollup_candidates(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {
     check_generation_deadline(deadline)?;
@@ -226,7 +226,7 @@ pub(crate) fn add_rollup_candidates(
 /// Existing pane rollup rules applied to producer pairs on already generated
 /// legal local grids. No whole-workload choice combinations are constructed.
 pub(crate) fn add_window_rollup_candidates(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {
     check_generation_deadline(deadline)?;
