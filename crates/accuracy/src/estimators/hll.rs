@@ -229,7 +229,7 @@ impl ClassicHllConfidence {
 /// probability at `relative_error` over a source of at most `max_distinct`
 /// distinct items is at most `failure_probability`; `at_least` when none up
 /// to 18 is. Pass 1's sizing for a failure probability
-/// ([`sized_for_failure_probability`](crate::sizing::sized_for_failure_probability))
+/// (`sizing::sized_for_failure_probability`)
 /// applies this rule to the source's bound, its sizing for `ε`
 /// ([`hll_precision`]) to a bound of `⌈1/ε⌉`.
 pub fn min_precision(
