@@ -85,8 +85,8 @@ pub use asap_plan_selection::{
     AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, SearchReport, SearchStatus, Selection,
 };
 pub use asap_types::ir::materialized_view::{
-    InstallableDagError, MaterializedView, MaterializedViewInputs, MaterializedViewRefresh,
-    RawDataRetention, RawDataWindow, ViewCoverage,
+    IngestionRefreshGroup, InstallableDagError, MaterializedView, MaterializedViewInputs,
+    MaterializedViewRefresh, RawDataRetention, RawDataWindow, RefreshWindow, ViewCoverage,
 };
 pub use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 pub use asap_types::ir::properties::summary_coverage::{ColumnIdentity, Constraint, SelectionBox};
