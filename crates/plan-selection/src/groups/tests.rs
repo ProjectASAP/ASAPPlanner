@@ -18,7 +18,7 @@ use asap_types::stages::{
 // ---------------------------------------------------------------------------
 
 /// A one-row `VALUES` node of `value`.
-fn values_node(value: f64) -> Rc<OperatorNode> {
+pub(super) fn values_node(value: f64) -> Rc<OperatorNode> {
     OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Values {
         rows: vec![vec![ScalarExpr::Literal(ScalarValue::Float64(value))]],
         schema: Schema::lifted(vec![Field::plain("value", DataType::Float64, false)], None),
@@ -37,7 +37,7 @@ fn rows_node(rows: usize) -> Rc<OperatorNode> {
 }
 
 /// A stateless one-input reader of `child`.
-fn reader_of(child: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+pub(super) fn reader_of(child: &Rc<OperatorNode>) -> Rc<OperatorNode> {
     OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Dedup {
         cols: Vec::new(),
         child: Rc::clone(child),
@@ -48,7 +48,7 @@ fn reader_of(child: &Rc<OperatorNode>) -> Rc<OperatorNode> {
 /// A catalog of `nodes`, node `i` in memo group `nodes[i].1` (each node its
 /// own candidate of that group, all implementation roots), with
 /// `candidates` and one query root per entry of `roots`.
-fn catalog(
+pub(super) fn catalog(
     nodes: Vec<(Rc<OperatorNode>, u32)>,
     candidates: Vec<PhysicalCandidate>,
     roots: Vec<QueryRoot<MemoGroupId>>,
@@ -80,7 +80,7 @@ fn catalog(
 /// One candidate of operator node `node` at query time, not materialized,
 /// reading `producers` per input, that may produce a query's output when
 /// `output`.
-fn candidate(node: usize, producers: &[&[usize]], output: bool) -> PhysicalCandidate {
+pub(super) fn candidate(node: usize, producers: &[&[usize]], output: bool) -> PhysicalCandidate {
     PhysicalCandidate {
         operator_node: OperatorNodeOfCandidateForMemoGroupId(node),
         timing: ExecutionTiming::QueryTime,
@@ -99,7 +99,7 @@ fn candidate(node: usize, producers: &[&[usize]], output: bool) -> PhysicalCandi
     }
 }
 
-fn root(group: u32) -> QueryRoot<MemoGroupId> {
+pub(super) fn root(group: u32) -> QueryRoot<MemoGroupId> {
     QueryRoot::Operator(MemoGroupId(group))
 }
 
@@ -148,7 +148,7 @@ fn data_with(usage: CandidateUsage) -> CandidateData {
     }
 }
 
-fn relative(error: f64, failure_probability: f64) -> AccuracyGuarantee {
+pub(super) fn relative(error: f64, failure_probability: f64) -> AccuracyGuarantee {
     AccuracyGuarantee::new(
         AccuracyMetric::Relative,
         BoundExpr::Constant { value: error },
@@ -553,21 +553,31 @@ fn through_stages_1_and_2(queries: &[&str]) -> ThroughStages1And2 {
 
 /// [`through_stages_1_and_2`] over the pane-width domain `domain`.
 fn through_stages_1_and_2_over(queries: &[&str], domain: PaneWidthDomain) -> ThroughStages1And2 {
+    use asap_logical_asap_optimization::test_support::lower_promql;
+    let roots: Vec<QueryRoot> = queries
+        .iter()
+        .map(|query| QueryRoot::Operator(lower_promql(query, target())))
+        .collect();
+    through_stages_1_and_2_of(roots, domain)
+}
+
+/// The accuracy target of [`through_stages_1_and_2`]'s queries.
+fn target() -> asap_types::ir::properties::AccuracyTarget {
+    asap_types::ir::properties::AccuracyTarget::max_error(0.01).failure_probability(0.01)
+}
+
+/// [`through_stages_1_and_2_over`] for query roots `roots`.
+fn through_stages_1_and_2_of(roots: Vec<QueryRoot>, domain: PaneWidthDomain) -> ThroughStages1And2 {
     use asap_logical_asap_optimization::generate_per_computation_logical_memo_candidates;
-    use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
+    use asap_logical_asap_optimization::test_support::entry_with;
     use asap_logical_asap_optimization::{generate_logical_asap_memo_candidates, Pass2RoundState};
-    use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{
         DurationMs, Predictability, QueryRecurrence, RepeatedDemand, RepetitionInterval,
     };
-    let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
-    let roots: Vec<QueryRoot> = queries
-        .iter()
-        .map(|query| QueryRoot::Operator(lower_promql(query, target.clone())))
-        .collect();
+    let target = target();
     let every_minute =
         QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(60_000)));
-    let entries: Vec<_> = queries
+    let entries: Vec<_> = roots
         .iter()
         .map(|_| QueryWorkloadEntry {
             predictability: Predictability::Predictable { known_at: None },
@@ -578,7 +588,7 @@ fn through_stages_1_and_2_over(queries: &[&str], domain: PaneWidthDomain) -> Thr
     let source = data.sources.get_mut("m").expect("m");
     source.series_count = Some(100);
     source.values_non_negative = true;
-    let targets = vec![target.clone(); queries.len()];
+    let targets = vec![target.clone(); roots.len()];
     let pass1 = generate_per_computation_logical_memo_candidates(
         asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
         &targets,
@@ -822,4 +832,80 @@ fn one_pane_chain_serves_a_ratio_and_its_operands() {
             "{class}"
         );
     }
+}
+
+// The checks keep what they build for later checks and skip repeated
+// exact stand-ins: on RangeHeavy T8+T5's shape (a quotient and both
+// operands alone), on a quotient of three quantiles (where pairs are
+// excluded) and on a ratio with one approximate operand, the weights and
+// excluded pairs equal those with no kept builds and no skipped stand-in.
+#[test]
+fn kept_builds_give_the_weights_of_fresh_builds() {
+    kept_builds_match_fresh_builds(&[
+        "quantile_over_time(0.9, m[5m]) / quantile_over_time(0.5, m[5m])",
+        "quantile_over_time(0.9, m[5m])",
+        "quantile_over_time(0.5, m[5m])",
+    ]);
+    let three = kept_builds_match_fresh_builds(&[
+        "quantile_over_time(0.9, m[5m]) / quantile_over_time(0.5, m[5m]) / quantile_over_time(0.1, m[5m])",
+    ]);
+    assert!(!three.accuracy_excluded_pairs[0].is_empty());
+    // A scalar ratio of two output references whose approximate values sit
+    // under one operand only: the other reference's output candidates
+    // reach no member, and its first exact stand-in must still be built,
+    // or the ratio has no root to check and every approximate candidate
+    // would weigh nothing.
+    use asap_logical_asap_optimization::test_support::lower_promql;
+    use asap_types::ir::scalar::{ArithmeticOpKind, ExprSemantics};
+    let operand = |query: &str| {
+        Box::new(ScalarExpr::PromqlScalarFromVector(lower_promql(
+            query,
+            target(),
+        )))
+    };
+    let ratio = QueryRoot::Scalar(ScalarExpr::Arithmetic {
+        op: ArithmeticOpKind::Div,
+        left: operand("avg_over_time(m[5m])"),
+        right: operand("quantile_over_time(0.5, m[5m])"),
+        semantics: ExprSemantics::Promql,
+    });
+    let ratio = kept_builds_match_fresh_builds_of(vec![ratio]);
+    assert!(!ratio.accuracy_weights[0].is_empty());
+}
+
+/// Asserts that `queries`' accuracy weights and excluded pairs are the
+/// same with kept builds and with none ([`accuracy_positions::FRESH_BUILDS`]);
+/// returns the former.
+fn kept_builds_match_fresh_builds(queries: &[&str]) -> MilpInputs {
+    use asap_logical_asap_optimization::test_support::lower_promql;
+    kept_builds_match_fresh_builds_of(
+        queries
+            .iter()
+            .map(|query| QueryRoot::Operator(lower_promql(query, target())))
+            .collect(),
+    )
+}
+
+/// [`kept_builds_match_fresh_builds`] for query roots `roots`.
+fn kept_builds_match_fresh_builds_of(roots: Vec<QueryRoot>) -> MilpInputs {
+    let stages = through_stages_1_and_2_of(roots, PaneWidthDomain::SeedGrids);
+    let prepare = |fresh: bool| {
+        accuracy_positions::FRESH_BUILDS.with(|cell| cell.set(fresh));
+        let inputs = prepare_milp_inputs(
+            &stages.physical,
+            &stages.entries,
+            &stages.data,
+            &CostInputs::default(),
+        );
+        accuracy_positions::FRESH_BUILDS.with(|cell| cell.set(false));
+        inputs
+    };
+    let (kept, fresh) = (prepare(false), prepare(true));
+    assert!(kept
+        .accuracy_weights
+        .iter()
+        .any(|weights| !weights.is_empty()));
+    assert_eq!(kept.accuracy_weights, fresh.accuracy_weights);
+    assert_eq!(kept.accuracy_excluded_pairs, fresh.accuracy_excluded_pairs);
+    kept
 }
