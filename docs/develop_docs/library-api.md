@@ -177,7 +177,7 @@ asap_planner::run_planning(
     entries: &[QueryWorkloadEntry],   // one per root: accuracy, latency bound, recurrence
     data: &DataWorkload,
     models: PlanningModels<'_>,
-    settings: PlanSearchSettings,     // time_limit_ms, default 30 s
+    settings: PlanSearchSettings,     // time_limit_ms, default 30 s; inspect, default off
 ) -> Result<PlanningRun, PerComputationCandidateError>
 
 // Stage 3 alone, over one round's Stage 2 output:
@@ -204,7 +204,7 @@ asap_plan_selection::select_plan(
 | `PlanOutput.plans` | One `QueryPlan { entry_index, root }` per query, in `QueryWorkload::entries()` order |
 | `PlanOutput.selection` | `Some` with Stage 3's `Selection` under the default pass: `selected_dag`, `nodes_with_proven_non_negative_weights`, `cost` (the selected plan's `PlanCost` with its `ResourceUsage` and `cost_per_second`, `None` under cost model 3), `accepted_accuracy_per_query`, `pruned_candidates` and `search_report` |
 | `PlanOutput.pane_retention_ms` | For each pane chain the selected plan keeps beyond one evaluation, by node id, how long its panes are kept (`RealizedPlan::pane_retention_ms`) |
-| `PlanningRun` | `per_computation_candidates`, the selected round's `logical_asap_candidates` and `physical_asap_candidates`, `selection`, `selected_physical_plan` (`RealizedPlan`), `selected_plan` (the roots to run), `memo_steps` and `report` (per round: counts and Pass 2, Stage 2 and Stage 3 times) |
+| `PlanningRun` | `per_computation_candidates`, the selected round's `logical_asap_candidates` and `physical_asap_candidates`, `selection`, `selected_physical_plan` (`RealizedPlan`), `selected_plan` (the roots to run), `memo_steps` and `report`; `per_computation_candidates` and `memo_steps` are kept only with `PlanSearchSettings::inspect` (per round: counts and Pass 2, Stage 2 and Stage 3 times) |
 | `PlanOutput::physical_asap_dag()` | The planned queries as one `PhysicalASAPDAG`, timed with the default `MaterializationAssignment` (see [Export](#export)) |
 
 Each candidate's `ResourceUsage` holds its usage without prices:

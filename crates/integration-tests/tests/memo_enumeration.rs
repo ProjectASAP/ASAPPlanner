@@ -96,12 +96,16 @@ fn production_run(workload: &PlanningWorkload, search: PlanSearchSettings) -> Pl
     production_run_with(workload, search, PlanningModels::builtin())
 }
 
-/// [`production_run`] with `models`.
+/// [`production_run`] with `models`, keeping every stage's memo.
 fn production_run_with(
     workload: &PlanningWorkload,
     search: PlanSearchSettings,
     models: PlanningModels<'_>,
 ) -> PlanningRun {
+    let search = PlanSearchSettings {
+        inspect: true,
+        ..search
+    };
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
     let roots = production_roots(workload);
@@ -130,6 +134,7 @@ impl asap_accuracy::AccuracyModel for AcceptsNoOutput {
 fn complete_domain_round() -> PlanSearchSettings {
     PlanSearchSettings {
         time_limit_ms: Some(90_000),
+        ..PlanSearchSettings::default()
     }
 }
 
@@ -344,9 +349,8 @@ fn ratio_of_quantiles_production_memo() {
     let models = PlanningModels::builtin().with_accuracy(&AcceptsNoOutput);
     let run = production_run_with(&ratio_of_quantiles(), complete_domain_round(), models);
     let steps = memo_steps(&run);
-    // Stage 0: series identity makes the two `quantile 0.5` one group.
-    assert_eq!(steps.stage0.groups.len(), 7);
-    assert_eq!(candidate_count(&steps.stage0), 0);
+    // Stage 0 (Pass 1's groups): series identity makes the two
+    // `quantile 0.5` one group.
     // Pass 1: the two quantile groups have 5 candidates each, 3 for the
     // whole budget (exact, DDSketch, KLL sized for the whole result) and 2
     // for half of it; the other 5 groups one each.

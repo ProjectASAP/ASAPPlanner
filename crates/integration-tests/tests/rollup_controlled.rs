@@ -181,6 +181,7 @@ fn production_distinct_rollup_finds_shared_kmv() {
         PlanningModels::builtin().with_plan_selection(&settings),
         asap_planner::PlanSearchSettings {
             time_limit_ms: Some(30_000),
+            inspect: false,
         },
     )
     .unwrap();

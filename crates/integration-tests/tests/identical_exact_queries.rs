@@ -40,6 +40,7 @@ fn cost(w: &FuzzWorkload) -> f64 {
         models,
         PlanSearchSettings {
             time_limit_ms: Some(30_000),
+            inspect: false,
         },
         None,
     )

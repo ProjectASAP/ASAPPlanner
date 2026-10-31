@@ -733,8 +733,10 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         &entries,
         &data,
         models,
+        // The document shows every stage's memo.
         PlanSearchSettings {
             time_limit_ms: milp_time_limit_ms,
+            inspect: true,
         },
         exhaustive.then_some(max_combinations),
     );
@@ -1599,12 +1601,14 @@ fn memo_json(
     caps: &MemoCaps,
     pricing: &Pricing<'_>,
 ) -> Value {
+    // Stage 0's groups are Pass 1's, without candidates.
+    let stage0 = MemoCandidates {
+        groups: pass1.groups.clone(),
+        query_roots: pass1.query_roots.clone(),
+        candidates: vec![Vec::new(); pass1.groups.len()],
+    };
     let named = [
-        (
-            "stage0",
-            "Stage 0, the frontends' DAG hash-consed",
-            &steps.stage0,
-        ),
+        ("stage0", "Stage 0, the frontends' DAG hash-consed", &stage0),
         ("pass1", "Stage 1, Pass 1", pass1),
         (
             "pass2",
