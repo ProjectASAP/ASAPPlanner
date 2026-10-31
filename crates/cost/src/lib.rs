@@ -39,9 +39,9 @@ pub use measured::{
 };
 pub use ranking::{cheaper, worst_latency_ms, PlanRanking};
 pub use usage::{
-    family_name, kept_pane_chains, maintained_window_ms, node_map, node_usage, pane_retention_ms,
-    pane_retention_ms_of_plan, panes_of, plan_cost, query_reach, retained_panes, trailing_window,
-    NodeMap, NodeUsage, ProducerOutput,
+    family_name, kept_pane_chains, node_map, node_usage, pane_retention_ms,
+    pane_retention_ms_of_plan, panes_of, plan_cost, query_reach, trailing_window, NodeMap,
+    NodeUsage, ProducerOutput,
 };
 
 /// Cost per second of wall time; one unit is one CPU-millisecond under

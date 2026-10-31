@@ -3,15 +3,16 @@
 //! refinement loop (cost models 1 and 2 with a frozen calibration) or the
 //! bounded objective traversal (cost model 3, or a measured cost table
 //! without a frozen factor). #1095 replaces the engine; this interface stays.
-//! With `ASAP_STAGE3_SEARCH=milp` the new search runs instead
-//! ([`crate::select`]), until #1095 C6 makes it the default.
 
 use std::time::{Duration, Instant};
 
 use asap_cost::{CostInputs, CostModel};
+use asap_types::ir::{ASAPOp, Operator};
 use asap_types::stages::{
-    AssignmentRealizer, DagOfSelectedCandidates, PhysicalASAPMemoCandidates, SelectedNodeId,
+    AssignmentRealizer, DagOfSelectedCandidates, PhysicalASAPMemoCandidates,
+    PhysicalCandidateError, SelectedNodeId,
 };
+use asap_types::workload::bounds::confirmed_weights;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::models::{AccuracyCheckInputs, SelectionModels};
@@ -55,18 +56,6 @@ pub fn select_plan(
     cost_inputs
         .validate()
         .map_err(ErrorSelectingPlan::InvalidSettings)?;
-    // #1095 C5: the new search, behind its internal switch until C6.
-    if crate::select::milp_search_enabled() {
-        return crate::select::select_plan_with_milp(
-            physical,
-            entries,
-            data,
-            accuracy_checks,
-            cost_inputs,
-            realizer,
-            deadline,
-        );
-    }
     let models = SelectionModels::new(accuracy_checks, cost_inputs);
     let calibration_policy =
         CandidateCalibration::for_models(models).map_err(ErrorSelectingPlan::Solver)?;
@@ -196,7 +185,6 @@ pub fn select_plan(
             model_construction_ms: ms(outcome.metrics.model_construction_seconds),
             solver_ms: ms(outcome.metrics.solver_seconds),
             validation_ms: ms(validation_seconds),
-            inexact_objective: None,
         },
     })
 }
@@ -211,14 +199,34 @@ struct Outcome {
     lower_bound: Option<f64>,
 }
 
-/// The selected nodes whose open count-min weight requirement `data`
-/// proves: the selected plan realized once more, each node checked.
+/// The selected nodes whose summary (`SummaryAgg` or `PaneChain`) reads
+/// update weights `data` proves non-negative although the candidate leaves
+/// the requirement open: the selected plan realized once more, each node
+/// checked.
 fn proven_non_negative_weights(
     physical: &PhysicalASAPMemoCandidates,
     selected: &DagOfSelectedCandidates,
     realizer: &dyn AssignmentRealizer,
     data: &DataWorkload,
 ) -> Result<Vec<SelectedNodeId>, ErrorSelectingPlan> {
-    let realized = crate::select::realize(physical, selected, realizer)?;
-    Ok(crate::select::proven_non_negative_weights(&realized, data))
+    let realized = realizer
+        .realize(physical, selected)
+        .map_err(|error| match error {
+            PhysicalCandidateError::RejectedAssignment(reason) => {
+                ErrorSelectingPlan::RealizerRejected(reason)
+            }
+            error => ErrorSelectingPlan::RealizerRejected(error.to_string()),
+        })?;
+    Ok(realized
+        .operator_node_of_selected_node
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| match &node.operator {
+            Operator::ASAP(ASAPOp::SummaryAgg { input, .. } | ASAPOp::PaneChain { input, .. }) => {
+                confirmed_weights(&input.weight_domain, data) != input.weight_domain
+            }
+            _ => false,
+        })
+        .map(|(node, _)| SelectedNodeId(node))
+        .collect())
 }
