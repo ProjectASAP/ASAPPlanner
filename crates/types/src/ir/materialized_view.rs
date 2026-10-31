@@ -52,7 +52,9 @@
 //! computed in the run; views of other groups are materialized view slots.
 //! A node several roots share runs once per run, so a `Scan` below a KLL
 //! pane chain and a DDSketch pane chain of equal pane width reads each
-//! pane's raw data once.
+//! pane's raw data once. Stage 3's cost assumes this grouping; a runtime
+//! that splits a group computes the same states at a higher cost than
+//! priced.
 //!
 //! Each view's `coverage` says what its stored state is: a stable id of its
 //! definition (what it computes) and its selection (which rows went in,
@@ -252,7 +254,7 @@ pub enum MaterializedViewRefresh {
 /// `phase_ms` (`< width_ms`) after a multiple of `width_ms`, relative to the
 /// evaluation time. Views refreshed at ingestion with one refresh window
 /// are refreshed together, in one ingestion run per window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RefreshWindow {
     /// Width of each window.
     pub width_ms: u64,

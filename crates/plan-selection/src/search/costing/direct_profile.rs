@@ -9,6 +9,7 @@ use crate::search::milp::direct_cost::{DirectCostProfile, NodeCostProfile, Query
 use crate::search::refinement::planner::CandidatePlanningContext;
 use asap_cost::CostModel;
 use asap_cost::{NodeUsage, ProducerOutput};
+use asap_types::ir::materialized_view::RefreshWindow;
 use asap_types::ir::physical_export::PhysicalASAPDAGNode;
 use asap_types::ir::properties::execution_data_state::{DataPrimitive, ExecutionDataState};
 use asap_types::ir::properties::{AccuracyScope, ExecutionTiming};
@@ -415,6 +416,7 @@ fn extract_scan_class(
         ingestion: false,
         standing_cost_per_second: 0.0,
         raw_retention: None,
+        refresh_window: None,
     };
     let profiles = cache
         .iter()
@@ -481,6 +483,17 @@ fn profile_for_priced(
         }),
         materialized: node.materialization != Materialization::NotMaterialized,
         raw_retention,
+        // A chain maintained at ingestion refreshes its newest pane. The
+        // profile admits no `TimeShift` at ingestion, so that pane ends at
+        // the evaluation time: phase 0.
+        refresh_window: match &node.payload {
+            asap_types::ir::Operator::ASAP(ASAPOp::PaneChain { pane_width_ms, .. })
+                if node.materialization == Materialization::MatAtIngestion(Medium::Memory) =>
+            {
+                RefreshWindow::of_window(0, i64::try_from(*pane_width_ms).unwrap_or(0))
+            }
+            _ => None,
+        },
     })
 }
 
@@ -1900,6 +1913,239 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A KLL chain (p90 over a minute) and a DDSketch chain (p99 over five
+    /// minutes) kept at ingestion over one `Scan`, each in panes of its
+    /// query's interval. With equal pane widths, one ingestion run per pane
+    /// computes the `Scan` for both chains, and the old Stage 3 engine's
+    /// modeled cost equals the real evaluator's with the `Scan` computed
+    /// once, for one schedule (both every 10 s) and for mixed schedules
+    /// (every 20 s and every 40 s, 20 s panes). With 10 s and 60 s panes the
+    /// chains run apart and both count the `Scan` twice (#1151).
+    #[test]
+    fn chains_of_one_refresh_window_share_their_scan_in_the_direct_profile() {
+        // ((p90 interval, its pane width), (p99 interval, its pane width), Scan computations)
+        for (kll, dd, scan_computations) in [
+            ((10_000, 10_000), (10_000, 10_000), 1),
+            ((20_000, 20_000), (40_000, 20_000), 1),
+            ((10_000, 10_000), (60_000, 60_000), 2),
+        ] {
+            let (modeled, evaluated, multiplier) = two_chains_over_one_scan(kll, dd);
+            let case = format!("p90 (every, panes) {kll:?} ms, p99 {dd:?} ms");
+            assert!(
+                (evaluated - modeled).abs() <= 1e-9 * evaluated.max(1e-15),
+                "{case}: direct {modeled}, evaluator {evaluated}"
+            );
+            assert_eq!(multiplier, scan_computations, "{case}");
+        }
+    }
+
+    /// [`chains_of_one_refresh_window_share_their_scan_in_the_direct_profile`]
+    /// with the p90 and the p99 each `(interval in ms, pane width in ms)`:
+    /// the direct profile's modeled cost of the selected plan, the
+    /// evaluator's cost of it, and the evaluator's multiplier of the `Scan`.
+    fn two_chains_over_one_scan(kll: (u64, u64), dd: (u64, u64)) -> (f64, f64, u64) {
+        use asap_logical_asap_optimization::test_support::{
+            compose_logical_candidate, generate_per_computation_candidates, pane_candidates,
+            window_composition_pass2_candidates,
+        };
+        use asap_types::ir::schema::SketchAlgorithm;
+        use asap_types::stages::HowToComputeAggregateMeasure;
+        use std::collections::HashMap;
+        use std::rc::Rc;
+        /// `node` and every node below it as candidates of `configured`, one
+        /// per node (`seen`, by address), at ingestion below a pane chain.
+        fn append(
+            node: &Rc<OperatorNode>,
+            configured: &mut PhysicalCandidatesWithCosts,
+            ingestion: bool,
+            seen: &mut HashMap<*const OperatorNode, PhysicalCandidateId>,
+        ) -> PhysicalCandidateId {
+            if let Some(id) = seen.get(&Rc::as_ptr(node)) {
+                return *id;
+            }
+            let chain = matches!(node.asap(), Some(ASAPOp::PaneChain { .. }));
+            let ingestion = ingestion || chain;
+            let mut inputs = Vec::new();
+            node.operator
+                .map_children(|child| inputs.push(append(child, configured, ingestion, seen)));
+            let id = PhysicalCandidateId(configured.physical.candidates.len());
+            configured.push_for_tests(
+                Rc::clone(node),
+                if ingestion {
+                    ExecutionTiming::IngestionTime
+                } else {
+                    ExecutionTiming::QueryTime
+                },
+                if chain {
+                    Materialization::MatAtIngestion(Medium::Memory)
+                } else {
+                    Materialization::NotMaterialized
+                },
+                0.0,
+                inputs
+                    .into_iter()
+                    .map(|supplier| InputProducerCandidates {
+                        candidates: vec![supplier].into(),
+                    })
+                    .collect(),
+            );
+            seen.insert(Rc::as_ptr(node), id);
+            id
+        }
+        let target = AccuracyTarget::max_error(0.05)
+            .failure_probability(0.01)
+            .accuracy_scope(AccuracyScope::PerValue);
+        // (query, interval in ms, sketch, pane width in ms)
+        let queries = [
+            (
+                "quantile_over_time(0.9, latency[1m])",
+                kll.0,
+                SketchAlgorithm::Kll,
+                kll.1,
+            ),
+            (
+                "quantile_over_time(0.99, latency[5m])",
+                dd.0,
+                SketchAlgorithm::DDSketch,
+                dd.1,
+            ),
+        ];
+        let originals: Vec<QueryRoot> = queries
+            .iter()
+            .map(|(query, ..)| QueryRoot::Operator(lower_promql(query, target.clone())))
+            .collect();
+        let generated = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&originals),
+        )
+        .unwrap();
+        // Per target, the way to compute it with its query's sketch.
+        let choices: Vec<usize> = generated
+            .targets
+            .iter()
+            .zip(&queries)
+            .map(|(target, (_, _, algorithm, _))| {
+                target
+                    .ways_to_compute
+                    .iter()
+                    .position(|way| {
+                        matches!(way, HowToComputeAggregateMeasure::Summary(found) if found == algorithm)
+                    })
+                    .unwrap()
+            })
+            .collect();
+        let roots = compose_logical_candidate(&generated, &choices).unwrap();
+        let grid: Vec<Option<u64>> = queries
+            .iter()
+            .map(|(_, interval, ..)| Some(*interval))
+            .collect();
+        // Each build in its query's pane width.
+        let panes: Vec<_> = pane_candidates(&roots, &grid)
+            .into_iter()
+            .filter(|pane| {
+                (pane.window_ms(), pane.pane_width_ms) == (60_000, kll.1)
+                    || (pane.window_ms(), pane.pane_width_ms) == (300_000, dd.1)
+            })
+            .collect();
+        assert_eq!(panes.len(), 2, "{panes:?}");
+        let roots = window_composition_pass2_candidates(&roots, &panes)
+            .unwrap()
+            .into_iter()
+            .find(|candidate| {
+                candidate.pane_candidates.len() == 2 && candidate.shared_chains.is_empty()
+            })
+            .unwrap()
+            .roots
+            .unwrap();
+        let data: DataWorkload = serde_json::from_value(serde_json::json!({
+            "arrival": {"ingesting": {"rows_per_second": 100.0}},
+            "sources": {"latency": {"series_count": 2, "rows_held": 30_000,
+                "values_non_negative": true}}
+        }))
+        .unwrap();
+        let sized = crate::sized_as_pass1(&roots, &[target.clone(), target.clone()], &data);
+        let mut configured = PhysicalCandidatesWithCosts::empty_for_tests();
+        let mut seen = HashMap::new();
+        for root in &sized {
+            let QueryRoot::Operator(root) = root else {
+                panic!("operator")
+            };
+            let id = append(root, &mut configured, false, &mut seen);
+            configured.dag.query_roots.push(QueryOutputCandidates {
+                candidates: vec![id],
+            });
+        }
+        configured.sync_physical_for_tests();
+        let scans: Vec<usize> = (0..configured.physical.candidates.len())
+            .filter(|&id| matches!(configured.node(id).non_asap(), Some(NonASAPOp::Scan { .. })))
+            .collect();
+        assert_eq!(scans.len(), 1, "one shared Scan");
+        let entries: Vec<QueryWorkloadEntry> = queries
+            .iter()
+            .map(|(query, interval, ..)| QueryWorkloadEntry {
+                query: Query((*query).into()),
+                requirements: QueryRequirements {
+                    accuracy: target.clone(),
+                    max_latency_ms: None,
+                },
+                predictability: Predictability::Predictable { known_at: None },
+                recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
+                    RepetitionInterval(*interval as u32),
+                )),
+                range_evaluation: None,
+            })
+            .collect();
+        let mut settings = asap_cost::CostInputs::default();
+        settings.resource_speed.ms_per_cpu_op *= 1000.0;
+        settings.resource_speed.ms_per_scanned_byte *= 1000.0;
+        let context = CandidatePlanningContext {
+            deadline: None,
+            refine_materialization: false,
+            query_roots: &originals,
+            realizer: &crate::search::test_realizer(&originals, &entries, &data),
+            entries: &entries,
+            data: &data,
+            models: crate::SelectionModels::builtin().with_cost_inputs(&settings),
+            calibration: asap_cost::CalibrationFit::default(),
+        };
+        let extracted = extract(&configured, &context).unwrap().unwrap();
+        assert!(extracted.supported.iter().all(|supported| *supported));
+        let proposal = crate::search::milp::model::solve_direct_cost_proposal_with_metrics(
+            &configured.dag,
+            &[],
+            None,
+            &mut Default::default(),
+            &extracted.profile,
+        )
+        .unwrap()
+        .unwrap();
+        let mut rejections =
+            crate::search::refinement::planner::CandidateRejectionSummary::default();
+        let evaluated = crate::search::refinement::planner::evaluate_configured_candidate(
+            &configured,
+            &context,
+            &proposal.selected,
+            0,
+            &mut rejections,
+            &mut Vec::new(),
+        )
+        .unwrap()
+        .unwrap_or_else(|| panic!("{rejections:?}"));
+        let costs = &evaluated.0.costs[&evaluated.0.selected];
+        let scan_multiplier = costs
+            .per_node
+            .iter()
+            .find(|(_, cost)| cost.operator == asap_cost::OperatorKind::Scan)
+            .map(|(_, cost)| cost.multiplier)
+            .unwrap();
+        (
+            extracted
+                .profile
+                .selected_cost(&configured.dag, &proposal.selected),
+            costs.cost_per_second.unwrap(),
+            scan_multiplier,
+        )
     }
 
     // Real shared KLL/DDS plans verify schedule unions and held-memory lifetime,

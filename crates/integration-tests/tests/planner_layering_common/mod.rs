@@ -774,7 +774,8 @@ pub fn assert_each_node_charged_per_consuming_query(run: &Run) {
 /// node; for a `NotMaterialized` one, the number of consumers that reach
 /// it. A consumer is a query (operator or scalar root) or a materialized
 /// node, whose walk starts at its inputs; a walk stops at materialized
-/// nodes and counts each node once.
+/// nodes and counts each node once. The `MatAtIngestion` consumers of one
+/// refresh window share one ingestion run and count once (#1151).
 pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
     let materialized: BTreeSet<_> = dag
         .nodes
@@ -782,29 +783,46 @@ pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
         .filter(|n| n.materialization != Materialization::NotMaterialized)
         .map(|n| n.id)
         .collect();
+    // Each walk's start and, for a consumer refreshed at ingestion, its
+    // refresh window.
     let starts = dag
         .roots
         .iter()
-        .map(|&root| vec![root])
+        .map(|&root| (vec![root], None))
         .chain(
             dag.scalar_roots
                 .iter()
-                .map(|(_, expr)| expr.operator_refs().into_iter().copied().collect()),
+                .map(|(_, expr)| (expr.operator_refs().into_iter().copied().collect(), None)),
         )
-        .chain(materialized.iter().map(|&id| dag.producers(id)));
+        .chain(materialized.iter().map(|&id| {
+            let at_ingestion = matches!(
+                dag.nodes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .unwrap()
+                    .materialization,
+                Materialization::MatAtIngestion(_)
+            );
+            let window = at_ingestion.then(|| dag.refresh_window(id)).flatten();
+            (dag.producers(id), window)
+        }));
     let mut times: BTreeMap<_, _> = dag
         .nodes
         .iter()
         .map(|n| (n.id, u64::from(materialized.contains(&n.id))))
         .collect();
-    for start in starts {
+    // The (node, refresh window) pairs whose ingestion run is counted.
+    let mut runs = HashSet::new();
+    for (start, window) in starts {
         let mut seen = HashSet::new();
         let mut stack = start;
         while let Some(id) = stack.pop() {
             if materialized.contains(&id) || !seen.insert(id) {
                 continue;
             }
-            *times.get_mut(&id).expect("node") += 1;
+            if window.is_none_or(|window| runs.insert((id, window))) {
+                *times.get_mut(&id).expect("node") += 1;
+            }
             stack.extend(dag.producers(id));
         }
     }

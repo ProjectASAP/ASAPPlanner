@@ -4,8 +4,9 @@
 //! Profiles are supplied by physical costing; this module never infers prices
 //! from a logical template or treats accuracy as a monetary penalty.
 use crate::search::candidates::graph::{QueryRootAssignment, SelectedCandidateGraph};
+use asap_types::ir::materialized_view::RefreshWindow;
 use good_lp::{constraint, variable, Constraint, Expression, ProblemVariables, Variable};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[path = "general_schedule.rs"]
 mod general_schedule;
@@ -43,6 +44,10 @@ pub(crate) struct NodeCostProfile {
     pub held_memory_cost_per_second: f64,
     pub materialized: bool,
     pub raw_retention: Option<(String, f64)>,
+    /// For a node maintained at ingestion, the refresh window of its
+    /// ingestion runs: one run computes an unmaterialized node below the
+    /// nodes of one refresh window once for all of them.
+    pub refresh_window: Option<RefreshWindow>,
 }
 
 impl NodeCostProfile {
@@ -260,7 +265,9 @@ impl DirectCostProfile {
         // Per unmaterialized node, its executions per second and its held
         // time per second: each consumer (a query, or a materialized node)
         // computes its own copy at its rate and holds it for its query's
-        // latency, or for the materialized node's longest reader's.
+        // latency, or for the materialized node's longest reader's; the
+        // nodes maintained at ingestion of one refresh window share one
+        // ingestion run, which computes it once for all of them.
         let mut execution_rates = vec![0.0; self.nodes.len()];
         let mut held_seconds = vec![0.0; self.nodes.len()];
         let boundaries = selected
@@ -268,23 +275,34 @@ impl DirectCostProfile {
             .iter()
             .map(|root| {
                 let query = root.query_root;
-                (vec![root.candidate.0], rates[query], latency[query])
+                (vec![root.candidate.0], rates[query], latency[query], None)
             })
             .chain(
                 selected
                     .selected_candidates
                     .iter()
                     .filter(|id| self.nodes[id.0].materialized)
-                    .map(|id| (inputs[id.0].clone(), union_rate(id.0), longest(id.0))),
+                    .map(|id| {
+                        (
+                            inputs[id.0].clone(),
+                            union_rate(id.0),
+                            longest(id.0),
+                            self.nodes[id.0].refresh_window,
+                        )
+                    }),
             );
-        for (mut pending, rate, lifetime) in boundaries {
+        // The (node, refresh window) pairs whose ingestion run is counted.
+        let mut runs = BTreeSet::new();
+        for (mut pending, rate, lifetime, refresh_window) in boundaries {
             let mut seen = vec![false; self.nodes.len()];
             while let Some(id) = pending.pop() {
                 if self.nodes[id].materialized || std::mem::replace(&mut seen[id], true) {
                     continue;
                 }
-                execution_rates[id] += rate;
-                held_seconds[id] += rate * lifetime;
+                if refresh_window.is_none_or(|window| runs.insert((id, window))) {
+                    execution_rates[id] += rate;
+                    held_seconds[id] += rate * lifetime;
+                }
                 pending.extend(&inputs[id]);
             }
         }
@@ -621,13 +639,32 @@ pub(super) fn encode(
         roots,
         &check_deadline,
     )?;
+    // Each node's executions: one per boundary reaching it, except that
+    // the boundaries maintained at ingestion of one refresh window share one
+    // ingestion run, executed when any of them reaches the node.
     let mut boundary_count = vec![Expression::from(0.0); count];
+    let mut runs: BTreeMap<(usize, RefreshWindow), Vec<Variable>> = BTreeMap::new();
     for flow in &flows {
+        let refresh_window = flow
+            .boundary
+            .checked_sub(queries)
+            .and_then(|consumer| profile.nodes[consumer].refresh_window);
         for (id, reached) in flow.reached.iter().enumerate() {
-            if let Some(reached) = reached {
-                boundary_count[id] += *reached;
+            match (reached, refresh_window) {
+                (Some(reached), Some(window)) => {
+                    runs.entry((id, window)).or_default().push(*reached)
+                }
+                (Some(reached), None) => boundary_count[id] += *reached,
+                (None, _) => {}
             }
         }
+    }
+    for ((id, _), reached) in runs {
+        let run = variables.add(variable().min(0).max(1));
+        for reached in reached {
+            constraints.push(constraint!(run >= reached));
+        }
+        boundary_count[id] += run;
     }
     // Each materialized node's longest reader's latency, built on first use.
     let mut longest_of: BTreeMap<usize, Variable> = BTreeMap::new();
@@ -767,6 +804,7 @@ mod tests {
                     held_memory_cost_per_second: 3.0,
                     materialized: true,
                     raw_retention: None,
+                    refresh_window: None,
                 },
                 NodeCostProfile {
                     ingestion: false,
@@ -829,6 +867,7 @@ mod tests {
                     held_memory_cost_per_second: 4.0,
                     materialized: true,
                     raw_retention: None,
+                    refresh_window: None,
                 },
                 NodeCostProfile {
                     ingestion: false,
@@ -878,6 +917,7 @@ mod tests {
                         held_memory_cost_per_second: 3.0,
                         materialized: true,
                         raw_retention: None,
+                        refresh_window: None,
                     },
                     NodeCostProfile {
                         ingestion: false,
