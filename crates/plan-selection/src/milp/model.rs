@@ -730,7 +730,10 @@ fn acyclic_rows(milp: &mut SelectionMilp<'_>) {
             reads.push((read, reader, variable));
         }
     }
-    let edges: Vec<(usize, usize)> = reads.iter().map(|&(read, reader, _)| (read, reader)).collect();
+    let edges: Vec<(usize, usize)> = reads
+        .iter()
+        .map(|&(read, reader, _)| (read, reader))
+        .collect();
     let components = strongly_connected_components(milp.instances.len(), &edges);
     let mut rank: HashMap<usize, Variable> = HashMap::new();
     for (read, reader, variable) in reads {
