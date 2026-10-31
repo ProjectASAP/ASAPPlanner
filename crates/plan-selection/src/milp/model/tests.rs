@@ -687,3 +687,81 @@ fn a_deadline_yields_a_plan() {
         SelectionMilpStatus::Optimal | SelectionMilpStatus::TimeLimit
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Acyclic plans
+// ---------------------------------------------------------------------------
+
+/// RangeHeavy templates 7 and 4: `sum by (job) (sum_over_time(m[1h]))` and
+/// `sum_over_time(m[1h])`. The widened scan puts a `Project` in the memo
+/// group it reads, so candidate links close cycles: a `Project` lists itself
+/// among its producers.
+fn widened_scan() -> Fixture {
+    through_stages(
+        &[
+            approximate("sum by (job) (sum_over_time(m[1h]))", 60_000, 0.05),
+            approximate("sum_over_time(m[1h])", 60_000, 0.05),
+        ],
+        true,
+    )
+}
+
+// Candidate links that close a cycle (a `Project` reading its own memo
+// group) never make a cyclic plan: before the acyclicity rows, an owner
+// used the `Project` as its own producer, with no scan below it, and the
+// decoded selection failed `DagOfSelectedCandidates::validate`.
+#[test]
+fn candidate_links_on_a_cycle_give_an_acyclic_plan() {
+    let fixture = widened_scan();
+    let self_reading = (0..fixture.physical.candidates.len()).any(|class| {
+        fixture.physical.candidates[class]
+            .producer_candidates_per_input
+            .iter()
+            .any(|producers| producers.contains(&PhysicalCandidateId(class)))
+    });
+    assert!(self_reading, "the fixture has a candidate reading itself");
+    // Usage on a cycle of links is costed from the producers costed first
+    // (`UsageContext::ProducerOnACycle`), so the objective is not compared
+    // with `plan_cost` here: the plan must be a valid DAG the realizer
+    // accepts.
+    for costs in [cost_inputs(), aws_fargate_cost_inputs()] {
+        let inputs =
+            prepare_milp_inputs(&fixture.physical, &fixture.entries, &fixture.data, &costs);
+        let milp = build_selection_milp(
+            &fixture.physical,
+            &inputs,
+            &fixture.entries,
+            &costs,
+            SelectionMilpOptions {
+                enforce_accuracy: true,
+            },
+        )
+        .unwrap();
+        let solution = solve_selection_milp(milp, None, 0).unwrap();
+        assert_eq!(solution.status, SelectionMilpStatus::Optimal);
+        let selected = crate::milp::decode::decode(&fixture.physical, &solution);
+        selected
+            .validate(&fixture.physical)
+            .expect("the decoded selection is valid");
+        let realizer = asap_physical_asap_optimization::catalog::Stage2AssignmentRealizer {
+            original_roots: &fixture.roots,
+            entries: &fixture.entries,
+            data: &fixture.data,
+            query_time_results_retained: fixture.query_time_results_retained,
+        };
+        realizer
+            .realize(&fixture.physical, &selected)
+            .expect("the realizer accepts the decoded plan");
+    }
+}
+
+/// The `aws-fargate-us-east-1` cost model of the memo examples.
+fn aws_fargate_cost_inputs() -> CostInputs {
+    let defaults = cost_inputs();
+    CostInputs {
+        cost_model: asap_cost::CostModel::UsageOverTime(ResourceUnitCost::aws_fargate_us_east_1(
+            defaults.resource_speed,
+        )),
+        ..defaults
+    }
+}

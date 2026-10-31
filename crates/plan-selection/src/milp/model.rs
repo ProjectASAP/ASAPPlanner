@@ -15,6 +15,7 @@
 //! | `t[q, i0, i]` | `q` reaches `i` through `i0`: the upper bounds of `a` (continuous) |
 //! | `u[i]`, `u[q, i]` | the work of instance `i`'s nodes other than its own, and that work when `q` reaches `i` (latency, continuous) |
 //! | `g[i0, i]` | instance `i0`, reading `i`, is reached by at most one query (binary) |
+//! | `rank[o, k]`, `rank[i]` | order ranks on cyclic components of links (row 5, continuous) |
 //! | `N[q]`, `A[q, p]` | approximate values `q` reads; whether it reads one sized for `p` parts (continuous) |
 //! | `L[q]`, `C[q]` | query `q`'s latency and its compaction term, ms (continuous) |
 //!
@@ -35,6 +36,10 @@
 //!    `s[o, k] ≤ Σ e[o, ·, ·, k] + Σ_r o[r, k]`.
 //! 4. Instances: `b ≤ x[i]`, `ob ≤ x[i]`; `x[i] ≤` its reads; symmetry
 //!    `x[s, j] ≥ x[s, j + 1]`.
+//! 5. Acyclic (row 5 of the issue, "copies suffice", was deleted; the number
+//!    is reused): no class reads itself in an owner, and order ranks on the
+//!    links inside each cyclic component of an owner's links and of the
+//!    instances' reads ([`acyclic_rows`]).
 //! 6. Reach: `a[q, i] ≥ b` for `q`'s own reads of `i`;
 //!    `a[q, i] ≥ a[q, i0] + b − 1` when `i0`'s owner reads `i`. Where a
 //!    reader constraint needs it to be exact from above too (minimum
@@ -503,6 +508,7 @@ pub(crate) fn build_selection_milp<'a>(
         instances,
     };
     structural_rows(&mut milp);
+    acyclic_rows(&mut milp);
     reach_rows(&mut milp);
     reader_constraint_rows(&mut milp);
     latency_rows(&mut milp)?;
@@ -541,6 +547,12 @@ fn structural_rows(milp: &mut SelectionMilp<'_>) {
             variables.used.contains_key(&reader) || Some(reader) == own
         };
         for &(reader, input, producer) in &region.links {
+            // An owner runs each class once, so a class reading itself
+            // (a widened scan's `Project` over its own memo group) is a
+            // cycle in every plan (row 5).
+            if reader == producer {
+                continue;
+            }
             if reader_exists(reader) && variables.used.contains_key(&producer) {
                 let link = milp.builder.binary("e (stateless links)");
                 variables.links.push(((reader, input, producer), link));
@@ -658,6 +670,167 @@ fn structural_rows(milp: &mut SelectionMilp<'_>) {
                 .row("4 symmetry breaking", constraint!(earlier >= later));
         }
     }
+}
+
+/// Row 5: the plan is acyclic. Candidate links can close cycles (a widened
+/// scan's `Project` lists its own memo group's candidates, itself included,
+/// as producers), and rows 2–3 alone admit a cycle that supports itself
+/// with no source below it. A plan's nodes are an owner's stateless uses
+/// and the instances, and a cycle of nodes either stays inside one owner
+/// (its stateless uses; the instance's own node is only read there) or
+/// passes through instances, so two families of order rows suffice:
+/// - per owner, on the links inside a strongly connected component of its
+///   links (`k` reading `k'`): `rank[o, k'] + 1 ≤ rank[o, k] + n (1 − e)`,
+///   with `rank ∈ [0, n − 1]` and `n` the component's size (a class reading
+///   itself has no link at all, see [`structural_rows`]);
+/// - on instances, per component of "the owner of `i0` may read `i`":
+///   `rank[i] + 1 ≤ rank[i0] + n (1 − b)` for each such read `b`.
+///
+/// Only links inside a cyclic component get a row, so a catalog without
+/// cycles adds nothing.
+fn acyclic_rows(milp: &mut SelectionMilp<'_>) {
+    for owner in 0..milp.owners.len() {
+        let links = milp.owners[owner].links.clone();
+        // Its stateless uses and, for an instance owner, its own class (a
+        // reader only).
+        let classes = milp.nodes_of_owner(owner);
+        let index: HashMap<PhysicalCandidateId, usize> = classes
+            .iter()
+            .enumerate()
+            .map(|(index, &class)| (class, index))
+            .collect();
+        let edges: Vec<(usize, usize)> = links
+            .iter()
+            .map(|&((reader, _, producer), _)| (index[&producer], index[&reader]))
+            .collect();
+        let components = strongly_connected_components(classes.len(), &edges);
+        let mut rank: HashMap<usize, Variable> = HashMap::new();
+        for (&(producer, reader), &(_, link)) in edges.iter().zip(&links) {
+            let size = components.size_of(reader);
+            if components.of[producer] != components.of[reader] || size < 2 {
+                continue;
+            }
+            let n = size as f64;
+            let [producer_rank, reader_rank] = [producer, reader].map(|node| {
+                *rank.entry(node).or_insert_with(|| {
+                    milp.builder
+                        .continuous("5 acyclic (stateless ranks)", Some(n - 1.0))
+                })
+            });
+            milp.builder.row(
+                "5 acyclic (stateless ranks)",
+                constraint!(producer_rank + 1.0 <= reader_rank + n * (1.0 - link)),
+            );
+        }
+    }
+    let mut reads: Vec<(usize, usize, Variable)> = Vec::new();
+    for reader in 0..milp.instances.len() {
+        let owner = milp.instance_owner(reader);
+        for &((_, _, read), variable) in &milp.owners[owner].reads {
+            reads.push((read, reader, variable));
+        }
+    }
+    let edges: Vec<(usize, usize)> = reads
+        .iter()
+        .map(|&(read, reader, _)| (read, reader))
+        .collect();
+    let components = strongly_connected_components(milp.instances.len(), &edges);
+    let mut rank: HashMap<usize, Variable> = HashMap::new();
+    for (read, reader, variable) in reads {
+        let size = components.size_of(reader);
+        if components.of[read] != components.of[reader] || size < 2 {
+            continue;
+        }
+        let n = size as f64;
+        let [read_rank, reader_rank] = [read, reader].map(|instance| {
+            *rank.entry(instance).or_insert_with(|| {
+                milp.builder
+                    .continuous("5 acyclic (instance ranks)", Some(n - 1.0))
+            })
+        });
+        milp.builder.row(
+            "5 acyclic (instance ranks)",
+            constraint!(read_rank + 1.0 <= reader_rank + n * (1.0 - variable)),
+        );
+    }
+}
+
+/// The strongly connected components of a directed graph.
+struct Components {
+    /// Per node, its component.
+    of: Vec<usize>,
+    /// Per component, its number of nodes.
+    sizes: Vec<usize>,
+}
+
+impl Components {
+    fn size_of(&self, node: usize) -> usize {
+        self.sizes[self.of[node]]
+    }
+}
+
+/// The strongly connected components of the graph on nodes `0..count` with
+/// `edges` `(from, to)` (Tarjan's algorithm, without recursion).
+fn strongly_connected_components(count: usize, edges: &[(usize, usize)]) -> Components {
+    let mut successors = vec![Vec::new(); count];
+    for &(from, to) in edges {
+        successors[from].push(to);
+    }
+    const UNVISITED: usize = usize::MAX;
+    let mut order = vec![UNVISITED; count];
+    let mut lowest = vec![0; count];
+    let mut on_stack = vec![false; count];
+    let mut stack = Vec::new();
+    let mut of = vec![UNVISITED; count];
+    let mut sizes = Vec::new();
+    let mut next = 0;
+    for root in 0..count {
+        if order[root] != UNVISITED {
+            continue;
+        }
+        // (node, index of its next successor to visit)
+        let mut path = vec![(root, 0)];
+        order[root] = next;
+        lowest[root] = next;
+        next += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        while let Some(&mut (node, ref mut successor)) = path.last_mut() {
+            if let Some(&to) = successors[node].get(*successor) {
+                *successor += 1;
+                if order[to] == UNVISITED {
+                    order[to] = next;
+                    lowest[to] = next;
+                    next += 1;
+                    stack.push(to);
+                    on_stack[to] = true;
+                    path.push((to, 0));
+                } else if on_stack[to] {
+                    lowest[node] = lowest[node].min(order[to]);
+                }
+                continue;
+            }
+            path.pop();
+            if let Some(&(parent, _)) = path.last() {
+                lowest[parent] = lowest[parent].min(lowest[node]);
+            }
+            if lowest[node] == order[node] {
+                let component = sizes.len();
+                let mut size = 0;
+                loop {
+                    let member = stack.pop().expect("the node is on the stack");
+                    on_stack[member] = false;
+                    of[member] = component;
+                    size += 1;
+                    if member == node {
+                        break;
+                    }
+                }
+                sizes.push(size);
+            }
+        }
+    }
+    Components { of, sizes }
 }
 
 /// For each instance, the instances whose owners may read it (`i0`).
