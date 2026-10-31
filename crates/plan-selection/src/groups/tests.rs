@@ -823,3 +823,46 @@ fn one_pane_chain_serves_a_ratio_and_its_operands() {
         );
     }
 }
+
+// The checks keep what they build for later checks: on RangeHeavy T8+T5's
+// shape (a quotient and both operands alone) and on a quotient of three
+// quantiles (where pairs are excluded), the weights and excluded pairs
+// equal those of building every check from scratch.
+#[test]
+fn kept_builds_give_the_weights_of_fresh_builds() {
+    kept_builds_match_fresh_builds(&[
+        "quantile_over_time(0.9, m[5m]) / quantile_over_time(0.5, m[5m])",
+        "quantile_over_time(0.9, m[5m])",
+        "quantile_over_time(0.5, m[5m])",
+    ]);
+    let three = kept_builds_match_fresh_builds(&[
+        "quantile_over_time(0.9, m[5m]) / quantile_over_time(0.5, m[5m]) / quantile_over_time(0.1, m[5m])",
+    ]);
+    assert!(!three.accuracy_excluded_pairs[0].is_empty());
+}
+
+/// Asserts that `queries`' accuracy weights and excluded pairs are the
+/// same with builds kept across checks and with fresh builds; returns the
+/// former.
+fn kept_builds_match_fresh_builds(queries: &[&str]) -> MilpInputs {
+    let stages = through_stages_1_and_2_over(queries, PaneWidthDomain::SeedGrids);
+    let prepare = |fresh: bool| {
+        accuracy_positions::FRESH_BUILDS.with(|cell| cell.set(fresh));
+        let inputs = prepare_milp_inputs(
+            &stages.physical,
+            &stages.entries,
+            &stages.data,
+            &CostInputs::default(),
+        );
+        accuracy_positions::FRESH_BUILDS.with(|cell| cell.set(false));
+        inputs
+    };
+    let (kept, fresh) = (prepare(false), prepare(true));
+    assert!(kept
+        .accuracy_weights
+        .iter()
+        .any(|weights| !weights.is_empty()));
+    assert_eq!(kept.accuracy_weights, fresh.accuracy_weights);
+    assert_eq!(kept.accuracy_excluded_pairs, fresh.accuracy_excluded_pairs);
+    kept
+}
