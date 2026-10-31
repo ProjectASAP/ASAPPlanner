@@ -9,6 +9,7 @@
 
 use super::analytical::AnalyticalCostError;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
+use asap_types::ir::properties::ExecutionTiming;
 use asap_types::physical::Materialization;
 use asap_types::workload::{QueryRecurrence, RangeEvaluation, RepeatedDemand};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -345,7 +346,9 @@ pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consu
 /// (operator or scalar root), at its own rate, or a materialized node, at
 /// that node's rate; a walk stops at the first materialized node it meets,
 /// and a node read several times within one consumer's walk counts once for
-/// it. Its `multiplier` is that number of consumers.
+/// it. Its `multiplier` is that number of consumers. A `NotMaterialized`
+/// ingestion-time node runs in the ingestion pipeline, once per second of
+/// arriving data for every consumer (#1095 §2.0): `(1, 1.0)`.
 pub fn computations(
     dag: &PhysicalASAPDAG,
     recurrence: &[QueryRecurrence],
@@ -427,6 +430,11 @@ pub fn computations(
         .map(|n| {
             let times = match rate_of_materialized.get(&n.id) {
                 Some(&rate) => (1, rate),
+                None if n.output_state.timing == ExecutionTiming::IngestionTime
+                    && count.contains_key(&n.id) =>
+                {
+                    (1, 1.0)
+                }
                 None => count.get(&n.id).copied().unwrap_or((0, 0.0)),
             };
             (n.id, times)

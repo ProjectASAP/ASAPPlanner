@@ -1473,7 +1473,7 @@ fn merged_states(
 
 /// The panes a chain in `retention_ms` ([`pane_retention_ms`]) keeps
 /// completed: its retention over its pane width, at least its pane count.
-fn retained_panes(
+pub fn retained_panes(
     node: &asap_types::ir::physical_export::PhysicalASAPDAGNode,
     retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
 ) -> u64 {
@@ -1523,7 +1523,7 @@ pub fn query_reach(
 /// The window an ingestion-time grouping `node` maintains: a pane chain's
 /// panes, or the time range below it (through filters, projections and
 /// time shifts). `None` when there is none.
-fn maintained_window_ms(
+pub fn maintained_window_ms(
     node: PhysicalASAPNodeId,
     nodes: &NodeMap<'_>,
     producers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,

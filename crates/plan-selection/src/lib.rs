@@ -242,16 +242,23 @@ use asap_cost::state_bytes::{sketch_shape, summary_shape, StateInputRows};
 mod accuracy_binding;
 mod checks;
 mod models;
+// #1095 §2.0: the group selection MILP's inputs (dominance, execution
+// contexts, accuracy weights).
+mod groups;
+// #1095 §2.0: the group selection MILP and the decode of its solution.
+mod milp;
 mod report;
 mod search;
+// #1095 C5: the new search behind `select_plan`'s internal switch.
+mod select;
 mod selector;
 pub(crate) use accuracy_binding::bound_root_guarantee;
 pub(crate) use checks::{accuracy_targets, guarantee_check};
 pub use models::AccuracyCheckInputs;
 pub(crate) use models::SelectionModels;
 pub use report::{
-    large_peak_memory_warning, AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, SearchReport,
-    SearchStatus, Selection,
+    large_peak_memory_warning, AcceptedAccuracy, ErrorSelectingPlan, InexactObjective,
+    RejectionCause, SearchReport, SearchStatus, Selection,
 };
 pub(crate) use report::{Rejection, WholePlanSelection};
 pub use search::select::select_plan;
