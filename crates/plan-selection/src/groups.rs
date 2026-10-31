@@ -1000,12 +1000,22 @@ fn scan_window_options(
                 }
             }
         }
+        // A shareable candidate reading the scan as its own input reads it
+        // at its own window; a read as an output reads it whole.
+        if let ContextKind::Shared(own) = context.kind {
+            if producers_per_input[own.0]
+                .iter()
+                .any(|producers| producers.contains(&scan))
+            {
+                let window = window_of(own);
+                if !kinds.contains(&window) {
+                    kinds.push(window);
+                }
+            }
+        }
         let read_whole = match context.kind {
             ContextKind::Query(_) => output_candidates.iter().any(|out| out.contains(&scan)),
-            ContextKind::Shared(own) => producers_per_input[own.0]
-                .iter()
-                .any(|producers| producers.contains(&scan)),
-            ContextKind::Ingestion => false,
+            ContextKind::Shared(_) | ContextKind::Ingestion => false,
         };
         if read_whole && !kinds.contains(&ScanWindow::Unbounded) {
             kinds.push(ScanWindow::Unbounded);
