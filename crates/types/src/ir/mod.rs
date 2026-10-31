@@ -12,10 +12,7 @@ pub use scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
 pub use schema::error::SchemaDerivationError;
 
 pub mod flat;
-/// What a runtime keeps for a physical ASAP DAG: its materialized views and
-/// raw-data retention, derived from the DAG.
 pub mod materialized_view;
-/// Physical ASAP DAG: the flattened operators plus execution timing.
 pub mod physical_export;
 pub use properties::timing::{
     apply_materialization_timings, apply_materialization_timings_to_roots, data_state,

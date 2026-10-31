@@ -212,7 +212,7 @@ fn sized_for_failure_probability(
 
 /// `roots` with every approximate input of their values
 /// ([`approximate_inputs`]) sized for `failure_probability`
-/// ([`sized_for_failure_probability`]) and the guarantees above composed
+/// (`sized_for_failure_probability`) and the guarantees above composed
 /// again ([`with_resized_summaries`]). A summary whose output carries no
 /// guarantee (e.g. a top-k's heap, which bounds item frequencies, not
 /// membership) is no approximate input and keeps its size: its failure

@@ -251,13 +251,13 @@ pub(crate) fn binomial_upper_tail(n: u32, p: f64, k: u32) -> f64 {
 /// above it again, and plan selection checks each consumer against the
 /// shared state. `None` for no parameters,
 /// parameters of different algorithms, or a shared UnivMon the library
-/// would not build ([`univmon::hash_independent`]).
+/// would not build (`univmon::hash_independent`).
 ///
 /// A KLL's `k` and a distinct-count UnivMon's heap are the exceptions to
 /// the largest value: their error grows as their failure probability
 /// shrinks, so each reader's `k` or heap is first resized to the shared
-/// (smallest) failure probability at no larger error ([`kll::shared_k`],
-/// [`univmon::shared_heap`]), and the shared build meets every reader.
+/// (smallest) failure probability at no larger error (`kll::shared_k`,
+/// `univmon::shared_heap`), and the shared build meets every reader.
 pub fn size_for_all_readers(params: &[&SketchParams]) -> Option<SketchParams> {
     use SketchParams as P;
     let (first, rest) = params.split_first()?;

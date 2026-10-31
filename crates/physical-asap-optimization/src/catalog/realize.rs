@@ -139,7 +139,7 @@ pub struct Stage2AssignmentRealizer<'a> {
 }
 
 impl AssignmentRealizer for Stage2AssignmentRealizer<'_> {
-    /// [`materialize_selected_candidates`] with each selected node at its
+    /// `materialize_selected_candidates` with each selected node at its
     /// candidate's materialization; each node also keeps its candidate's
     /// timing.
     fn realize(

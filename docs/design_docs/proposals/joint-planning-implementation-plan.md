@@ -23,7 +23,7 @@ Preserve supported accuracy semantics, physical eligibility, cost objectives, sc
 
 `PhysicalCandidate` is a local selectable computation. `PhysicalWorkloadPlan` is a complete Stage 2 workload DAG; they are not interchangeable. Physical candidate configuration in selection invokes the authoritative Stage 2 legality code rather than duplicating its rules. Logical rules do not depend on the solver crate.
 
-Pass 1 still exposes the supported `PerComputationCandidates` interface and populates the already-created memo. This is not a second workload selector. Pass 2 can add intermediate state groups and consumer candidates; sharing a component does not merge distinct requested results:
+Pass 1 has one entry, `generate_per_computation_logical_memo_candidates`, which populates the already-created memo groups (its target list, `PerComputationCandidates`, is a crate-private working form). This is not a second workload selector. Pass 2 can add intermediate state groups and consumer candidates; sharing a component does not merge distinct requested results:
 
 ```text
 G95 = { ExactP95, LocalKLLQuantileP95, EstimateP95(G_KLL) }

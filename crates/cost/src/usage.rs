@@ -546,8 +546,8 @@ pub struct NodeUsage<'a> {
 /// the raw rows a query-time scan reads ([`PhysicalASAPDAG::scan_window`];
 /// read only for scans: it reads `width_ms` of rows and keeps them back to
 /// [`ScanWindow::lookback_ms`]), `retained_pane_count` the panes a pane chain keeps
-/// completed ([`retained_panes`]), and `ingestion_window_ms` the window an
-/// ingestion-time node maintains ([`maintained_window_ms`]).
+/// completed (`retained_panes`), and `ingestion_window_ms` the window an
+/// ingestion-time node maintains (`maintained_window_ms`).
 #[allow(clippy::too_many_arguments)]
 pub fn node_usage<'a>(
     node: &'a asap_types::ir::physical_export::PhysicalASAPDAGNode,
@@ -1375,7 +1375,7 @@ fn ingest_workers(
 /// ingestion time, or at query time across evaluations), how far back
 /// from the newest evaluation its completed panes must be kept, in
 /// milliseconds: how long before the evaluation its newest pane ends (the
-/// offset of its input, [`chain_input_offset_ms`]), plus its window
+/// offset of its input, `chain_input_offset_ms`), plus its window
 /// `pane_count · pane_width_ms`, plus the longest
 /// `span_ms` ([`RangeEvaluation`]) among the queries reaching it,
 /// whose earliest step reads that much further back. `reach` is

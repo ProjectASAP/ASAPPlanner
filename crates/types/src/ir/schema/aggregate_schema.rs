@@ -61,7 +61,7 @@ fn per_series_reduction_schema(
 /// so the two can never drift (issue #41).
 ///
 /// `Reduction::PerEntity` selects the label-preserving
-/// [`per_series_reduction_schema`] (`rate`/`increase`/`*_over_time`) instead
+/// `per_series_reduction_schema` (`rate`/`increase`/`*_over_time`) instead
 /// of the cross-series `by ++ measures` shape. Which one applies is read directly
 /// off `reduction` — decided once, at construction, by whoever built the
 /// `Aggregate` node (issue #165) — not re-derived here from `by`/child shape.

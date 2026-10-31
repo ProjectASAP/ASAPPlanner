@@ -112,7 +112,7 @@ pub fn approximate_inputs(root: &QueryRoot) -> Vec<Rc<OperatorNode>> {
 
 /// The theoretical guarantee of a query's output, as composed: the root
 /// node's own, or a scalar root's composed over the operators it reads
-/// ([`scalar_guarantee`]).
+/// (`scalar_guarantee`).
 pub fn root_guarantee(root: &QueryRoot) -> Option<AccuracyGuarantee> {
     match root {
         QueryRoot::Operator(node) => node.guarantee.clone(),
@@ -244,7 +244,7 @@ pub fn with_resized_summaries(
 }
 
 /// The one source a summary state counts the distinct items of its own
-/// rows of, as [`source_distinct_guarantee`] reads it: the source whose
+/// rows of, as `source_distinct_guarantee` reads it: the source whose
 /// distinct bound gives its failure probability. `None` for a state over
 /// computed rows or several sources.
 pub fn distinct_bound_source(state: &OperatorNode) -> Option<String> {
@@ -380,13 +380,13 @@ fn selected_group_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
 }
 
 /// The theoretical guarantee of a composed node, given its children's,
-/// composed with the built-in analytical rules ([`propagate`]);
+/// composed with the built-in analytical rules (`propagate`);
 /// Stage 1 reads no data statistics or deployment evidence. Exact over exact
 /// inputs; a summary estimate has its sized family's bound when
-/// [`estimate_has_bound`], composed with its input's when that is
+/// `estimate_has_bound`, composed with its input's when that is
 /// approximate; an exact aggregation or accumulator over approximate values
-/// uses its function's rule ([`approximate_input_composition`]); arithmetic composes as
-/// [`arithmetic_guarantee`]. A rule that needs a statistic leaves it
+/// uses its function's rule (`approximate_input_composition`); arithmetic composes as
+/// `arithmetic_guarantee`. A rule that needs a statistic leaves it
 /// symbolic (`BoundExpr::Unknown`), and plan selection (Stage 3) binds it.
 /// `None` where no rule applies: a comparison, a value `HAVING` or any other
 /// predicate over an approximate value, a rank error through any operator (a
@@ -1093,7 +1093,7 @@ fn case_guarantee(
 }
 
 /// The guarantee of `column` of a projection's `child`: over a join, the
-/// column's own ([`column_guarantees`]); otherwise the child's sample
+/// column's own (`column_guarantees`); otherwise the child's sample
 /// value has the child's as an operand ([`operand_guarantee`]) and other
 /// columns (labels, timestamps) are exact. `None` when the child has no
 /// sample value or the column's guarantee is unknown.
@@ -1182,7 +1182,7 @@ pub(crate) fn scalar_guarantee(
 
 /// The guarantee of a scalar operand as an input to arithmetic or a
 /// function: a planned operator's as [`operand_guarantee`], anything else
-/// as [`scalar_guarantee`].
+/// as `scalar_guarantee`.
 pub fn operand_of(
     expr: &ScalarExpr,
     column: &dyn Fn(usize) -> Option<AccuracyGuarantee>,
@@ -1197,7 +1197,7 @@ pub fn operand_of(
 
 /// `node`'s guarantee as an input to a computation over its values: a
 /// Count-Min or Count Sketch bound restated as an absolute error over the
-/// stream norm its summary's update weight allows ([`stream_norm`],
+/// stream norm its summary's update weight allows (`stream_norm`,
 /// `additive_as_absolute`).
 pub fn operand_guarantee(node: &Rc<OperatorNode>) -> Option<AccuracyGuarantee> {
     let guarantee = node.guarantee.clone()?;

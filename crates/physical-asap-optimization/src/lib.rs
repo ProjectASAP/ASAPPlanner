@@ -1,11 +1,22 @@
-//! #509 Stage 2, physical ASAP-aware optimization: turns one
-//! CandidateLogicalASAPDAG into CandidatePhysicalASAPDAGs by materialization
-//! and physical operator implementation.
+//! #509 Stage 2, physical ASAP-aware optimization: materialization and
+//! physical operator implementation.
+//!
+//! The planner facade calls [`generate_physical_asap_memo_candidates`] on
+//! Pass 2's memo (`asap_types::stages::LogicalASAPMemoCandidates`): every
+//! operator node of every memo candidate with each allowed timing and
+//! materialization, the producers of each input and the pruned candidates
+//! (`asap_types::stages::PhysicalASAPMemoCandidates`). Stage 3 selects from
+//! that output, and [`Stage2AssignmentRealizer`] builds the selected
+//! assignment as a physical plan. The rules below apply to both, and to the
+//! whole-workload reference pricer `optimize_physical_asap` (feature
+//! `reference-pricer`, for the developer tools), which turns one
+//! CandidateLogicalASAPDAG into its CandidatePhysicalASAPDAGs. The crate
+//! depends on no other stage crate.
 //!
 //! ## Materialization
 //!
 //! Each summary build (a `SummaryAgg` or a `PaneChain`) is one
-//! materialization candidate ([`MaterializationCandidate`]) whose
+//! materialization candidate (`MaterializationCandidate`) whose
 //! output materialization may store (#509 §Materialization, Algorithm 3).
 //! So is the highest node of each other sub-DAG that two or more queries
 //! read (e.g. a `Scan` that a 1 m and a 5 m window read): one a root or a
@@ -24,7 +35,7 @@
 //!   deployment keeps query-time results (the caller's
 //!   `query_time_results_retained`) for a
 //!   tumbling-pane chain that builds one new pane per evaluation
-//!   ([`builds_one_pane_per_evaluation`]): each evaluation builds the
+//!   (`builds_one_pane_per_evaluation`): each evaluation builds the
 //!   newest pane and reuses the others. Both query-time options are offered
 //!   when both apply, and Stage 3 prices each.
 //!
@@ -34,7 +45,7 @@
 //! other combination of options is one physical candidate, the
 //! all-`NotMaterialized` one first: nothing is capped. A node that one
 //! query reads at ingestion time and another at query time is copied, one
-//! copy per timing ([`split_shared_by_timing`]).
+//! copy per timing (`split_shared_by_timing`).
 //!
 //! A build may run at ingestion time (S4) only when:
 //!

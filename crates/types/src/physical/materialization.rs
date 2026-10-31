@@ -1,6 +1,6 @@
 //! The materialization option of each sub-DAG (#509 §Materialization), the
 //! Stage 2 decision a node's execution timing
-//! ([`ExecutionTiming`](crate::ir::properties::ExecutionTiming)) is derived
+//! ([`crate::ir::properties::ExecutionTiming`]) is derived
 //! from.
 
 use crate::ir::properties::ExecutionTiming;

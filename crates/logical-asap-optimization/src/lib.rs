@@ -1,6 +1,7 @@
-//! `asap-logical-asap-optimization` — #509 Stage 1, logical ASAP-aware
-//! optimization: from the query-language frontends' logical DAGs to the
-//! CandidateLogicalASAPDAGs.
+//! `asap-logical-asap-optimization` — #509 Stage 0 hash-consing and
+//! Stage 1, logical ASAP-aware optimization: from the query-language
+//! frontends' logical DAGs to the memo of logical candidates
+//! (`asap_types::stages::LogicalASAPMemoCandidates`) that Stage 2 implements.
 //!
 //! Identical-sub-DAG sharing over the logical DAG (Stage 0, the `cse`
 //! module, behind [`generate_dag_of_logical_memo_groups`]) runs before the
@@ -9,13 +10,16 @@
 //! `Quantile(x, 0.99)` and `Quantile(x, 0.95)` reading one built sketch.
 //!
 //! It depends only on `asap-types` and the shared accuracy model
-//! (`asap-accuracy`), never on a later stage: Stage 2
-//! (`asap-physical-asap-optimization`) and Stage 3 (`asap-plan-selection`)
-//! depend on it, and Cargo enforces that one-way flow. It depends on no
+//! (`asap-accuracy`). It depends on no other stage crate, and no other
+//! stage crate depends on it except in their tests (CI checks the crate
+//! graph): the stage-boundary types (its input
+//! `DagOfLogicalMemoGroups`, Pass 1's `PerComputationLogicalMemoCandidates`
+//! and Pass 2's `LogicalASAPMemoCandidates`) are in `asap_types::stages`, and
+//! the planner facade calls each stage in turn. It depends on no
 //! query-language frontend either, except with the `test-support` feature,
 //! whose test helpers (`test_support`) lower PromQL test queries through
-//! `asap-frontend-promql`; the later stages enable that feature only for
-//! their tests.
+//! `asap-frontend-promql`; other crates enable that feature only for their
+//! tests.
 //!
 //! Post-lowering **canonicalization** is *not* here: it lives in
 //! `asap_frontend_common::canonicalize`, run inside that crate's shared
@@ -48,9 +52,11 @@
 //! approximate-over-approximate compositions under conservative rules (no
 //! independence assumptions, unknown statistics stay unknown). A
 //! composition with no rule leaves the guarantee `None` and keeps the
-//! candidate. Stage 1 has no pluggable accuracy model: plan selection
-//! (Stage 3) checks each candidate's guarantee against its query's
-//! `AccuracyTarget` with the deployment's `AccuracyModel` before pricing it.
+//! candidate. Pass 1 takes the deployment's `AccuracyModel` and evidence
+//! only to prune summaries no query reading them can use (when they cannot
+//! accept an output without its guarantee) and sizes every summary for its
+//! readers; plan selection (Stage 3) checks each selected candidate's
+//! guarantee against its query's `AccuracyTarget` and never resizes.
 
 /// The deployment's capabilities: supported summaries and what it retains.
 mod deployment_capabilities;

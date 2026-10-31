@@ -29,7 +29,7 @@ fn invalid(message: &str) -> SchemaDerivationError {
 
 /// The `PaneChain` a summary-state node carries merged: the chain itself,
 /// or the one chain a `SummaryMerge` that keeps its groups reads, in full
-/// or its newest panes ([`merged_pane_count`]). `None` for any other node,
+/// or its newest panes (`merged_pane_count`). `None` for any other node,
 /// a rollup (regrouping merge) included.
 pub fn merged_chain(state: &OperatorNode) -> Option<&OperatorNode> {
     match state.asap()? {
@@ -75,7 +75,7 @@ pub(crate) fn whole_window_build(
 
 /// The `SummaryAgg` whose state a summary-state node with a
 /// [`merged_chain`] carries: one build over the window of the panes it
-/// merges ([`merged_pane_count`]).
+/// merges (`merged_pane_count`).
 pub fn merged_window_build(state: &OperatorNode) -> Result<OperatorNode, SchemaDerivationError> {
     let (Some(chain), Some(pane_count)) = (merged_chain(state), merged_pane_count(state)) else {
         return Err(invalid("expected merged panes of one pane chain"));

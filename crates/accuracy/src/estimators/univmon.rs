@@ -13,7 +13,7 @@
 //! - entropy has no certified bound.
 //!
 //! Every bound assumes the key hash is uniformly random and the shape keeps
-//! the hashes independent ([`hash_independent`]). Terminal-mode states
+//! the hashes independent (`hash_independent`). Terminal-mode states
 //! (OctoSketch aggregators fed promoted deltas) are not covered: the
 //! executor rejects them.
 use super::*;
@@ -217,7 +217,7 @@ pub(crate) fn incomplete_top_layer_statistic(heap_size: u32, layers: u8, source:
     format!("{INCOMPLETE_TOP_LAYER}[k={heap_size},layers={layers}]({MAX_DISTINCT}[{source}])")
 }
 
-/// The heap, layers and source an [`incomplete_top_layer_statistic`] names.
+/// The heap, layers and source an `incomplete_top_layer_statistic` names.
 pub fn parse_incomplete_top_layer_statistic(statistic: &str) -> Option<(u32, u8, &str)> {
     let rest = statistic
         .strip_prefix(INCOMPLETE_TOP_LAYER)?
@@ -232,7 +232,7 @@ pub fn parse_incomplete_top_layer_statistic(statistic: &str) -> Option<(u32, u8,
     Some((heap_size.parse().ok()?, layers.parse().ok()?, source))
 }
 
-/// The probability an [`incomplete_top_layer_statistic`] names, given the
+/// The probability an `incomplete_top_layer_statistic` names, given the
 /// source's distinct bound `F0_max`:
 /// - 0 when `F0_max ≤ k`: the top layer cannot receive more keys than its
 ///   heap holds;

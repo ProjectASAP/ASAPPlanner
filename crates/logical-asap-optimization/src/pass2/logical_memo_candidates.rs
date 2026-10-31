@@ -62,7 +62,7 @@ pub enum LogicalASAPMemoCandidatesError {
 /// Stage 1, Pass 2 for one pane-width round: adds to `round`'s memo the
 /// local pane candidates for the widths of `domain` that earlier rounds did
 /// not generate (rule 1), records `domain` in `round`, then runs rules 2–9
-/// and [`add_shared_summary_state_groups`] on a copy and returns it.
+/// and `add_shared_summary_state_groups` on a copy and returns it.
 /// `entries[i]` is query `i`'s workload entry. Stops once `deadline` passes.
 pub fn generate_logical_asap_memo_candidates(
     round: &mut Pass2RoundState,
