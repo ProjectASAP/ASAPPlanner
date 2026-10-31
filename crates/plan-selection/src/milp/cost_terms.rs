@@ -63,7 +63,9 @@ use asap_types::workload::bounds::source_name;
 use asap_types::workload::{QueryRecurrence, RepeatedDemand};
 use good_lp::{constraint, Expression, IntoAffineExpression, Variable};
 
-use crate::groups::{CandidateUsage, ContextKind, RunKind, UsageAndOutput, UsageContext};
+use crate::groups::{
+    CandidateUsage, ContextKind, ResultSlot, RunKind, UsageAndOutput, UsageContext,
+};
 
 use super::model::{Reader, Scope, SelectionMilp, SelectionMilpError};
 
@@ -985,8 +987,10 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
         }
     };
     // Per query-time shareable context: the execution cost of its runs
-    // other than `m`'s plain own term, and the most it can be.
-    let mut context_execution: BTreeMap<usize, (Expression, f64)> = BTreeMap::new();
+    // other than `m`'s plain own term, and per slot (`None`: `m`'s own run)
+    // the most it can be.
+    let mut context_execution: BTreeMap<usize, (Expression, BTreeMap<Option<ResultSlot>, f64>)> =
+        BTreeMap::new();
     // `H[m]` per query-time shareable context.
     let mut held_time: HashMap<usize, (Variable, f64)> = HashMap::new();
     let runs = milp.runs();
@@ -996,6 +1000,9 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
         let candidate_data = &milp.physical.candidates[candidate.0];
         let (timing, materialization) = (candidate_data.timing, candidate_data.materialization);
         let own = milp.inputs.contexts[context].kind == ContextKind::Shared(candidate);
+        // The most this run adds to its context's execution cost: all its
+        // terms at 1.
+        let mut run_execution = 0.0;
         for term in &terms {
             let numbers = term.numbers;
             charge(&term.indicator, numbers.standing_cost);
@@ -1008,11 +1015,11 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
                             charge(&component.into(), numbers.execution_cost * rate);
                         }
                     } else {
-                        let (sum, most) = context_execution
+                        let (sum, _) = context_execution
                             .entry(context)
-                            .or_insert_with(|| (Expression::from(0.0), 0.0));
+                            .or_insert_with(|| (Expression::from(0.0), BTreeMap::new()));
                         *sum += numbers.execution_cost * term.indicator.clone();
-                        *most += numbers.execution_cost;
+                        run_execution += numbers.execution_cost;
                     }
                 }
             }
@@ -1093,11 +1100,25 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
                 ContextKind::Ingestion => {}
             }
         }
+        if let Some((_, most_per_slot)) = context_execution.get_mut(&context) {
+            let slot = (!own).then(|| milp.inputs.slot[candidate.0]);
+            let entry = most_per_slot.entry(slot).or_default();
+            *entry = entry.max(run_execution);
+        }
     }
     // A context's execution at its varying rate: `V ≥ E − Ē (x[m] − z)` per
-    // component `z`.
+    // component `z`, `Ē` the most `E` can be: per slot, its costliest run.
     milp.builder.scope = Scope::SharedContexts;
-    for (context, (sum, most)) in context_execution {
+    for (context, (sum, most_per_slot)) in context_execution {
+        let most: f64 = if super::model::tests_loose_big_m() {
+            // Before: every term's cost.
+            sum.clone()
+                .linear_coefficients()
+                .map(|(_, cost)| cost)
+                .sum()
+        } else {
+            most_per_slot.values().sum()
+        };
         let ContextRate::Components(components) = &rates[context] else {
             continue;
         };

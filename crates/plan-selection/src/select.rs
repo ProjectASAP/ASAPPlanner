@@ -98,7 +98,10 @@ pub(crate) fn select_plan_with_milp(
         &inputs,
         entries,
         cost_inputs,
-        SelectionMilpOptions { enforce_accuracy },
+        SelectionMilpOptions {
+            enforce_accuracy,
+            split_into_parts: true,
+        },
     )
     .map_err(selection_error)?;
     let build_ms = construction_started.elapsed().as_millis() as u64;
@@ -336,6 +339,7 @@ fn report_run(
         "plan_cost_per_second": plan_cost_per_second,
         "dual_bound_per_second": solution.cost_lower_bound_per_second,
         "relative_gap": solution.relative_gap,
+        "parts": solution.parts,
     });
     use std::io::Write;
     if let Ok(mut file) = std::fs::OpenOptions::new()
