@@ -14,13 +14,13 @@ use asap_logical_asap_optimization::pass2::memo::enumeration::{
     build_logical_asap_dags_from_chosen_candidates, ChosenCandidatePerMemoGroup,
 };
 use asap_physical_asap_optimization::optimize_physical_asap;
-use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_plan_selection::reference_pricer::{select_among_plans, WholePlanSelection};
 use asap_plan_selection::{ErrorSelectingPlan, Selection};
 use asap_planner::{installable_plan_of, InstallablePlanError, PlanningModels, PlanningRun};
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
+use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::stages::CandidateMemo;
 use asap_types::stages::MemoGroupId;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};

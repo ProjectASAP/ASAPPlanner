@@ -85,7 +85,7 @@ fn reads_sketch(root: &Rc<OperatorNode>) -> bool {
 /// These fixtures test evaluator hooks, not a timed search's archive prefix.
 fn physical_candidates(
     workload: &PlanningWorkload,
-) -> Vec<asap_physical_asap_optimization::PhysicalWorkloadPlan> {
+) -> Vec<asap_types::physical::PhysicalWorkloadPlan> {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
@@ -130,7 +130,7 @@ fn physical_candidates(
 
 fn plan_every_candidate(
     workload: &PlanningWorkload,
-    candidates: &[asap_physical_asap_optimization::PhysicalWorkloadPlan],
+    candidates: &[asap_types::physical::PhysicalWorkloadPlan],
     models: PlanningModels<'_>,
 ) -> Result<PlanOutput, ErrorSelectingPlan> {
     let selection = select_among_plans(

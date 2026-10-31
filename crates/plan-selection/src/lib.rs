@@ -324,7 +324,6 @@ mod tests {
         MIXED_COST_SOURCE,
     };
     use asap_cost::{MeasuredOperationCosts, OperatorCost, ResourceUnitCost};
-    use asap_physical_asap_optimization::PhysicalWorkloadPlan;
     use asap_types::ir::operator::AggIntent;
     use asap_types::ir::physical_export::{
         PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
@@ -336,6 +335,7 @@ mod tests {
         FieldDataType, Schema, SketchAlgorithm, SketchParams, WeightDomain,
     };
     use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
+    use asap_types::physical::PhysicalWorkloadPlan;
     use asap_types::physical::{Materialization, Medium};
     use asap_types::workload::bounds::with_confirmed_weights;
     use asap_types::workload::bounds::{declared_series, series_read, values_per_result};

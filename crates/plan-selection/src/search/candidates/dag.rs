@@ -861,7 +861,7 @@ impl PhysicalCandidatesWithCosts {
             PhysicalASAPMemoCandidates::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
         );
         self.physical =
-            asap_physical_asap_optimization::catalog::test_support::prune(physical).unwrap();
+            asap_physical_asap_optimization::test_support::catalog::prune(physical).unwrap();
         let kept: Vec<_> = self
             .physical
             .candidates

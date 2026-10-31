@@ -1,13 +1,13 @@
 //! Unit tests of Stage 2's configuration enumeration
-//! (`asap_physical_asap_optimization::catalog`) that select with the solver.
+//! (`asap_physical_asap_optimization::test_support::catalog`) that select with the solver.
 use std::rc::Rc;
 
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
-use asap_physical_asap_optimization::catalog::test_support::{
+use asap_physical_asap_optimization::test_support::catalog::{
     compatible_timing, enumerate_candidate_configurations_before,
     may_keep_across_evaluations_per_sole_reader_query, CandidateInventory,
 };
-use asap_physical_asap_optimization::catalog::ConfigurationError;
+use asap_physical_asap_optimization::ConfigurationError;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot, ScalarExpr};
 use asap_types::physical::{Materialization, Medium};
@@ -455,7 +455,7 @@ mod tests {
             modes[id.0] = Some(expanded.physical.candidates[id.0].materialization);
         }
         let query_roots = vec![QueryRoot::Operator(root); 2];
-        let physical = asap_physical_asap_optimization::catalog::materialize_selected_candidates(
+        let physical = asap_physical_asap_optimization::test_support::catalog::materialize_selected_candidates(
             &expanded.physical,
             &selected.to_selected_dag(),
             &selected.materializations_by_node(&modes),

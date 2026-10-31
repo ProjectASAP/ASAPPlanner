@@ -12,11 +12,9 @@ mod pruning;
 mod realize;
 mod reconstruction;
 
-pub use asap_types::stages::{PhysicalCandidateError, RealizedPlan};
 pub use configurations::ConfigurationError;
 pub use inventory::CandidateInventoryError;
-pub use realize::{materialize_selected_candidates, Stage2AssignmentRealizer};
-pub use reconstruction::{reconstruct_selected_candidates, ReconstructedCandidates};
+pub use realize::Stage2AssignmentRealizer;
 
 use asap_types::stages::{
     LogicalASAPMemoCandidates, PhysicalASAPMemoCandidates, PhysicalCandidateId, ReaderConstraint,
@@ -181,8 +179,11 @@ pub mod test_support {
         build_candidate_inventory_before, build_with_compatible_producers_cache, CandidateInventory,
     };
     pub use super::pruning::{prune, usable_candidates};
-    pub use super::realize::{ordered_output_references, restore_query_roots};
+    pub use super::realize::{
+        materialize_selected_candidates, ordered_output_references, restore_query_roots,
+    };
     pub use super::reconstruction::{
         ordered_inputs, output_contract_satisfied, paired_node_identities,
+        reconstruct_selected_candidates, ReconstructedCandidates,
     };
 }

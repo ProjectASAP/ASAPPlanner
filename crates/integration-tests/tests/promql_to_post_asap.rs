@@ -15,7 +15,6 @@ use asap_integration_tests::physical_export::{
 use asap_integration_tests::planning::{
     logical_candidates, logical_candidates_ignoring_guarantees,
 };
-use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_plan_selection::reference_pricer::WholePlanSelection as Selection;
 use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
@@ -28,6 +27,7 @@ use asap_types::ir::schema::{
     SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryInputExpr, SummaryUpdate,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr};
+use asap_types::physical::PhysicalWorkloadPlan;
 
 /// The first logical candidate (Stage 1, in enumeration order) of `root` as
 /// a query at `accuracy` that uses an ASAP operator, or the plain exact one

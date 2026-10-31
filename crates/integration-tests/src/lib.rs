@@ -404,7 +404,7 @@ pub mod planning {
         entries: &[asap_types::workload::QueryWorkloadEntry],
         data: &DataWorkload,
     ) -> (
-        Vec<asap_physical_asap_optimization::PhysicalWorkloadPlan>,
+        Vec<asap_types::physical::PhysicalWorkloadPlan>,
         asap_plan_selection::reference_pricer::WholePlanSelection,
     ) {
         let models = asap_planner::PlanningModels::builtin();

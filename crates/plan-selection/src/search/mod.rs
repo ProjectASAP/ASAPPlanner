@@ -15,8 +15,8 @@ pub(crate) fn test_realizer<'a>(
     roots: &'a [asap_types::ir::QueryRoot],
     entries: &'a [asap_types::workload::QueryWorkloadEntry],
     data: &'a asap_types::workload::DataWorkload,
-) -> asap_physical_asap_optimization::catalog::Stage2AssignmentRealizer<'a> {
-    asap_physical_asap_optimization::catalog::Stage2AssignmentRealizer {
+) -> asap_physical_asap_optimization::Stage2AssignmentRealizer<'a> {
+    asap_physical_asap_optimization::Stage2AssignmentRealizer {
         original_roots: roots,
         entries,
         data,

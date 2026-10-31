@@ -18,13 +18,13 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use asap_cost::CostInputs;
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_logical_asap_optimization::DeploymentCapabilities;
-use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_plan_selection::reference_pricer::WholePlanSelection as Selection;
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot};
 use asap_types::physical::Materialization;
+use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{PlanningWorkload, QueryRecurrence, RepeatedDemand};
 
 pub use asap_devtools::planner_layering_examples::*;

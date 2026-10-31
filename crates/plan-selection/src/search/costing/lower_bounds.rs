@@ -704,7 +704,7 @@ mod tests {
     use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
     use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
-    use asap_physical_asap_optimization::catalog::materialize_selected_candidates;
+    use asap_physical_asap_optimization::test_support::catalog::materialize_selected_candidates;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::{OperatorNode, QueryRoot};
     use asap_types::physical::Medium;

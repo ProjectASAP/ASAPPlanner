@@ -1,13 +1,13 @@
 //! Unit tests of Stage 2's reconstruction of a selection
-//! (`asap_physical_asap_optimization::catalog`) that select with the solver.
+//! (`asap_physical_asap_optimization::test_support::catalog`) that select with the solver.
 use std::rc::Rc;
 
 use crate::search::candidates::dag::{
     DagOfPhysicalCandidatesWithCosts, PhysicalCandidatesWithCosts,
 };
 use crate::search::candidates::graph::SelectedCandidateGraph;
-use asap_physical_asap_optimization::catalog::reconstruct_selected_candidates;
-use asap_physical_asap_optimization::catalog::test_support::{
+use asap_physical_asap_optimization::test_support::catalog::reconstruct_selected_candidates;
+use asap_physical_asap_optimization::test_support::catalog::{
     ordered_inputs, output_contract_satisfied, paired_node_identities,
 };
 use asap_types::ir::OperatorNode;
