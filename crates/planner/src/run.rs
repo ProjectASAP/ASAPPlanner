@@ -25,7 +25,7 @@ use asap_logical_asap_optimization::pass2::memo::shared_configurations::{
     PaneWidthDomain, PaneWidthFrontier,
 };
 use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
-use asap_physical_asap_optimization::catalog::{
+use asap_physical_asap_optimization::{
     generate_physical_asap_memo_candidates, Stage2AssignmentRealizer,
 };
 use asap_plan_selection::{select_plan, ErrorSelectingPlan, SearchReport, Selection};

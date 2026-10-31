@@ -99,8 +99,13 @@
 //! candidate alone, with the error as its reason.
 //! A summary needs no rewrite: `SummaryAgg` → `SummaryEstimate` already is
 //! build → estimate. Every node keeps the guarantee Stage 1 composed for it.
-pub mod catalog;
+mod catalog;
 mod summary_window;
+
+pub use catalog::{
+    generate_physical_asap_memo_candidates, CandidateInventoryError, ConfigurationError,
+    ErrorGeneratingPhysicalASAPMemoCandidates, Stage2AssignmentRealizer,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -117,15 +122,12 @@ use asap_types::ir::{
 };
 use asap_types::physical::Materialization;
 use asap_types::physical::Medium;
+use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
 use summary_window::{plan_pane_phase, validate_pane_coverage, PaneLayout, WindowEdgeCoverage};
 use thiserror::Error;
-
-/// One CandidatePhysicalASAPDAG (Stage 2 output); defined in `asap-types`
-/// so the realizer trait can return it.
-pub use asap_types::physical::PhysicalWorkloadPlan;
 
 #[derive(Debug, Error)]
 pub enum PhysicalASAPOptimizationError {
@@ -400,6 +402,11 @@ pub(crate) fn builds_one_pane_per_evaluation<'a>(
 /// caller to name. Sharing between `roots` is preserved: one cache serves the
 /// whole workload. `query_time_results_retained` says whether a query-time
 /// result may be kept across evaluations.
+///
+/// The reference pricer: only the developer tools (and tests) enumerate a
+/// whole workload this way; planning goes through
+/// [`generate_physical_asap_memo_candidates`].
+#[cfg(any(test, feature = "reference-pricer"))]
 pub fn optimize_physical_asap(
     from_logical: &str,
     roots: &[QueryRoot],
@@ -923,6 +930,7 @@ fn down_closed(
 /// Every assignment of an option to each materialization candidate (mixed
 /// radix, the last varying fastest, all `NotMaterialized` first) that is
 /// [`down_closed`].
+#[cfg(any(test, feature = "reference-pricer"))]
 fn materialization_assignments(
     mat_candidates: &[MaterializationCandidate],
 ) -> impl Iterator<Item = Vec<Materialization>> + '_ {
@@ -1142,6 +1150,7 @@ pub mod test_support {
 
     use crate::{PhysicalASAPOptimizationError, PhysicalWorkloadPlan};
 
+    pub use crate::catalog::test_support as catalog;
     pub use crate::summary_window::{
         validate_pane_coverage, PaneCoverageError, PaneLayout, WindowEdgeCoverage,
     };

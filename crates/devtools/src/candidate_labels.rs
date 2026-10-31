@@ -9,12 +9,12 @@ use std::rc::Rc;
 use asap_logical_asap_optimization::pass1::per_computation_candidates::{
     HowToComputeAggregateMeasure, PerComputationCandidates,
 };
-use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::NonASAPOp;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::physical::Materialization;
+use asap_types::physical::PhysicalWorkloadPlan;
 
 use crate::planning_stages::PlanningStagesRun;
 

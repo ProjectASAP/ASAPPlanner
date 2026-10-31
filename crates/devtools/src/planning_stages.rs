@@ -3,11 +3,11 @@
 //! tests, so both see the same candidates, ids and selection.
 
 use asap_frontend_sql::SqlCatalog;
-use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_planner::{run_planning, PlanSearchSettings, PlanningModels, PlanningRun};
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
+use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{DataWorkload, PlanningWorkload, QueryWorkloadEntry};
 use serde_json::Value;
 use std::collections::HashSet;

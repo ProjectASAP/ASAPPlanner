@@ -281,7 +281,6 @@ use asap_logical_asap_optimization::pass2::memo::enumeration::{
     build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
 };
 use asap_logical_asap_optimization::DeploymentCapabilities;
-use asap_physical_asap_optimization::PhysicalWorkloadPlan;
 use asap_plan_selection::reference_pricer::{Rejection, WholePlanSelection};
 use asap_plan_selection::{
     large_peak_memory_warning, AcceptedAccuracy, ErrorSelectingPlan, Selection,
@@ -292,6 +291,7 @@ use asap_types::ir::flat::{flatten, FlatDag, FlatNode, NodeId};
 use asap_types::ir::operator::node::OperatorNode;
 use asap_types::ir::properties::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
 use asap_types::ir::QueryRoot;
+use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::stages::{queries_rooted_at, MemoGroupId};
 use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup, PruneReason};
 use asap_types::workload::{

@@ -1,6 +1,6 @@
 //! Unit tests of Stage 2's terminal-reader factoring
-//! (`asap_physical_asap_optimization::catalog`) that select with the solver.
-use asap_physical_asap_optimization::catalog::test_support::{
+//! (`asap_physical_asap_optimization::test_support::catalog`) that select with the solver.
+use asap_physical_asap_optimization::test_support::catalog::{
     factor_terminal_readers, CandidateInventory, MemoGroupOutputKey,
     MemoGroupOutputToCompatibleProducersCache,
 };

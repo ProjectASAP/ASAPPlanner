@@ -96,7 +96,7 @@ async fn plan_promql(queries: &[(&str, f64)]) -> PlanOutput {
 fn composed_summary_candidates(
     queries: &[(&str, f64)],
 ) -> (
-    Vec<asap_physical_asap_optimization::PhysicalWorkloadPlan>,
+    Vec<asap_types::physical::PhysicalWorkloadPlan>,
     WholePlanSelection,
 ) {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
@@ -163,9 +163,7 @@ fn composed_summary_candidates(
 
 /// Construct a legal shared-KLL candidate explicitly. Sharing capability must
 /// not depend on which prefix a time-limited optimization search visits.
-fn shared_kll_candidate(
-    workload: &PlanningWorkload,
-) -> asap_physical_asap_optimization::PhysicalWorkloadPlan {
+fn shared_kll_candidate(workload: &PlanningWorkload) -> asap_types::physical::PhysicalWorkloadPlan {
     use asap_logical_asap_optimization::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
@@ -771,7 +769,7 @@ async fn exact_state_roots_are_finalized() {
 
 /// The reference pricer over `candidates`, every candidate kept.
 fn select_plan(
-    candidates: &[asap_physical_asap_optimization::PhysicalWorkloadPlan],
+    candidates: &[asap_types::physical::PhysicalWorkloadPlan],
     entries: &[asap_types::workload::QueryWorkloadEntry],
     data: &asap_types::workload::DataWorkload,
     models: PlanningModels<'_>,

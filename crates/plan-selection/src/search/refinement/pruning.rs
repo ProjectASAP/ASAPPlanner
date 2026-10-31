@@ -1,9 +1,9 @@
 //! Unit tests of Stage 2's structural pruning
-//! (`asap_physical_asap_optimization::catalog`) that select with the solver.
+//! (`asap_physical_asap_optimization::test_support::catalog`) that select with the solver.
 use crate::search::candidates::dag::DagOfPhysicalCandidatesWithCosts;
 use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
 use crate::search::candidates::dag::ReaderConstraint;
-use asap_physical_asap_optimization::catalog::test_support::usable_candidates;
+use asap_physical_asap_optimization::test_support::catalog::usable_candidates;
 use asap_types::stages::PhysicalCandidateId;
 
 #[cfg(test)]

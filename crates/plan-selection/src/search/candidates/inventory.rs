@@ -1,13 +1,13 @@
 //! Unit tests of Stage 2's candidate inventory
-//! (`asap_physical_asap_optimization::catalog`) that select with the solver.
+//! (`asap_physical_asap_optimization::test_support::catalog`) that select with the solver.
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use asap_physical_asap_optimization::catalog::test_support::{
+use asap_physical_asap_optimization::test_support::catalog::{
     build_candidate_inventory_before, build_with_compatible_producers_cache, CandidateInventory,
     MemoGroupOutputToCompatibleProducersCache,
 };
-use asap_physical_asap_optimization::catalog::CandidateInventoryError;
+use asap_physical_asap_optimization::CandidateInventoryError;
 use asap_types::ir::OperatorNode;
 use asap_types::physical::Materialization;
 use asap_types::stages::{CandidateMemo, MemoGroupId, PhysicalCandidateId};
@@ -360,7 +360,7 @@ mod tests {
     ) {
         use crate::search::candidates::configurations::enumerate_candidate_configurations;
         use asap_logical_asap_optimization::test_support::entry_with;
-        use asap_physical_asap_optimization::catalog::materialize_selected_candidates;
+        use asap_physical_asap_optimization::test_support::catalog::materialize_selected_candidates;
         use asap_types::workload::{
             DataArrival, DataWorkload, Predictability, QueryRecurrence, RepeatedDemand,
             RepetitionInterval, SourceFacts,
@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn producer_reuse_rules_produce_validated_shared_plans() {
         use asap_logical_asap_optimization::test_support::entry_with;
-        use asap_physical_asap_optimization::catalog::materialize_selected_candidates;
+        use asap_physical_asap_optimization::test_support::catalog::materialize_selected_candidates;
         use asap_types::workload::{
             DataWorkload, QueryRecurrence, RepeatedDemand, RepetitionInterval,
         };
@@ -837,7 +837,7 @@ mod tests {
                 facts.values_non_negative = true;
             }
             let mut realized =
-                asap_physical_asap_optimization::catalog::materialize_selected_candidates(
+                asap_physical_asap_optimization::test_support::catalog::materialize_selected_candidates(
                     &inventory.configured_for_tests().physical,
                     &selected.to_selected_dag(),
                     &selected.materializations_by_node(&modes),
@@ -866,7 +866,7 @@ mod tests {
     #[test]
     fn exact_topk_is_lowered_before_decomposition_and_survives_stage2() {
         use asap_logical_asap_optimization::test_support::entry_with;
-        use asap_physical_asap_optimization::catalog::materialize_selected_candidates;
+        use asap_physical_asap_optimization::test_support::catalog::materialize_selected_candidates;
         use asap_types::ir::operator::AggIntent;
         use asap_types::workload::{
             DataWorkload, QueryRecurrence, RepeatedDemand, RepetitionInterval,
@@ -994,7 +994,7 @@ mod tests {
             assert_eq!(roots.len(), 1);
             roots[0].validate_structure().unwrap();
             assert!(
-                asap_physical_asap_optimization::catalog::test_support::output_contract_satisfied(
+                asap_physical_asap_optimization::test_support::catalog::output_contract_satisfied(
                     &memo.groups[outputs[0].0 as usize].logical_node,
                     &roots[0]
                 )

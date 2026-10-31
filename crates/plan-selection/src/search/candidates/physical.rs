@@ -1,15 +1,14 @@
 //! Unit tests of Stage 2's realization of a selected assignment
-//! (`asap_physical_asap_optimization::catalog`) that select with the solver.
+//! (`asap_physical_asap_optimization::test_support::catalog`) that select with the solver.
 use std::rc::Rc;
 
-use asap_physical_asap_optimization::catalog::test_support::{
-    ordered_output_references, output_contract_satisfied, restore_query_roots,
-};
-use asap_physical_asap_optimization::catalog::{
-    materialize_selected_candidates, PhysicalCandidateError,
+use asap_physical_asap_optimization::test_support::catalog::{
+    materialize_selected_candidates, ordered_output_references, output_contract_satisfied,
+    restore_query_roots,
 };
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::physical::Materialization;
+use asap_types::stages::PhysicalCandidateError;
 
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
