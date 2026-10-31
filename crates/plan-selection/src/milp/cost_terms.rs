@@ -519,7 +519,11 @@ fn window_terms(
                     let ContextKind::Shared(own) = milp.inputs.contexts[reading].kind else {
                         continue;
                     };
-                    (ScanWindow::Unbounded, Expression::from(milp.selected[&own]))
+                    // `m` itself reads the scan: at its own window.
+                    (
+                        window_union(reader_windows(milp, scan, own)),
+                        Expression::from(milp.selected[&own]),
+                    )
                 }
             };
             reads.push((reading, window, indicator));
@@ -532,11 +536,25 @@ fn window_terms(
         }
     }
     let usage_at = |milp: &SelectionMilp<'_>, window: ScanWindow| {
-        milp.inputs.candidate_data[scan.0]
+        let found = milp.inputs.candidate_data[scan.0]
             .usage_per_window
             .iter()
             .find(|(known, _, _)| *known == window)
-            .map(|&(_, usage, output)| (NodeNumbers::of(&usage), output))
+            .map(|&(_, usage, output)| (NodeNumbers::of(&usage), output));
+        if found.is_none() {
+            super::warm_start::debug(|| {
+                format!(
+                    "scan {} has no usage at {window:?}; costed at {:?}",
+                    scan.0,
+                    milp.inputs.candidate_data[scan.0]
+                        .usage_per_window
+                        .iter()
+                        .map(|(w, _, _)| *w)
+                        .collect::<Vec<_>>()
+                )
+            });
+        }
+        found
     };
     let terms = match kinds.len() {
         0 => None,
