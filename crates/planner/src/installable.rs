@@ -29,7 +29,9 @@ use std::rc::Rc;
 use asap_cost::{NodePriceSource, OperatorKind};
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::{SearchReport, Selection};
-use asap_types::ir::materialized_view::{InstallableDagError, MaterializedView, RawDataRetention};
+use asap_types::ir::materialized_view::{
+    IngestionRefreshGroup, InstallableDagError, MaterializedView, RawDataRetention,
+};
 use asap_types::ir::operator::pane_chain::expand_pane_chains_in_workload;
 use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError,
@@ -191,7 +193,8 @@ pub enum InstallablePlanError {
     #[error("pane retention for node {node_id}, which is not a pane chain of the selected plan")]
     PaneRetentionOfUnknownChain { node_id: PhysicalASAPNodeId },
     /// Unsatisfiable request: the executor cannot refresh materialized view
-    /// `node_id` from its inputs (`reason`).
+    /// `node_id` from its inputs (`reason`); for a refresh group, `node_id`
+    /// is its first view and `reason` names every view compiled with it.
     #[error("the executor cannot refresh materialized view {node_id} from its inputs: {reason}")]
     MaterializedViewNotExecutable {
         node_id: PhysicalASAPNodeId,
@@ -300,6 +303,15 @@ impl InstallablePlan {
         Ok(self.dag.materialized_views()?)
     }
 
+    /// The views refreshed at ingestion, by refresh group, each group after
+    /// the groups it reads ([`PhysicalASAPDAG::ingestion_refresh_groups`]):
+    /// a runtime refreshes each group in one ingestion run per window.
+    pub fn ingestion_refresh_groups(
+        &self,
+    ) -> Result<Vec<IngestionRefreshGroup>, InstallablePlanError> {
+        Ok(self.dag.ingestion_refresh_groups()?)
+    }
+
     /// How far back each raw-data source is kept for query-time scans
     /// ([`PhysicalASAPDAG::raw_data_retention`]): the raw data a runtime
     /// keeps, the raw-data counterpart of each view's retention.
@@ -326,8 +338,10 @@ impl InstallablePlan {
     }
 
     /// Whether the Planner's executor compiles this plan as a runtime runs
-    /// it: each view's refresh over the views it reads and the `Scan`s it
-    /// reads (from the runtime's data store), then the query run
+    /// it: each refresh group's views compiled together (every root its
+    /// ingestion runs may have) and each other view's refresh,
+    /// over the views it reads and the `Scan`s it reads (from the runtime's
+    /// data store), then the query run
     /// over the views it reads and the `Scan`s it reads outside them. The
     /// DAG's own `TimeRange`s are compiled, so a window the executor cannot
     /// run fails here. `Err` holds the executor's error, or why the views
@@ -446,12 +460,12 @@ impl<'a> IndexedDag<'a> {
         }
     }
 
-    /// The sub-DAG of `root` and every node below it, with their edges, in
-    /// the DAG's node and edge order, rooted at `root`: all a refresh of
-    /// `root` reads, at the cost of its size rather than the plan's.
-    fn dag_below(&self, root: PhysicalASAPNodeId) -> PhysicalASAPDAG {
+    /// The sub-DAG of `roots` and every node below them, with their edges,
+    /// in the DAG's node and edge order, rooted at `roots`: all a refresh of
+    /// `roots` reads, at the cost of its size rather than the plan's.
+    fn dag_below(&self, roots: &[PhysicalASAPNodeId]) -> PhysicalASAPDAG {
         let mut below = HashSet::new();
-        let mut pending = vec![root];
+        let mut pending = roots.to_vec();
         while let Some(id) = pending.pop() {
             if below.insert(id) {
                 pending.extend(self.inputs.get(&id).into_iter().flatten().copied());
@@ -467,7 +481,7 @@ impl<'a> IndexedDag<'a> {
         PhysicalASAPDAG {
             nodes: ids.iter().map(|id| self.nodes[id].clone()).collect(),
             edges,
-            roots: vec![root],
+            roots: roots.to_vec(),
             scalar_roots: Vec::new(),
         }
     }
@@ -503,10 +517,16 @@ fn reader_span_ms_by_node(
     spans
 }
 
-/// Whether the executor compiles `dag` as a runtime runs it: each of
-/// `views`' refreshes ([`executor_refreshes`]), the first in the whole plan,
-/// which runs the executor's checks of the whole plan once, every other over
-/// the nodes below it; then the query run ([`executor_runs_queries`]).
+/// Whether the executor compiles `dag` as a runtime runs it: each refresh
+/// ([`executor_refreshes`]): one per refresh group of the views refreshed
+/// at ingestion ([`PhysicalASAPDAG::ingestion_refresh_groups_of`] `views`)
+/// and one per other view of `views` (refreshed on first read), the first
+/// in the whole plan, which runs the executor's checks of the whole plan
+/// once, every other over the nodes below it; then the query run
+/// ([`executor_runs_queries`]). A group is compiled with all its views as
+/// roots: a compile check covering every run's roots (the views whose
+/// state for the run's window is not stored yet, a subset), not the root
+/// set of any one run.
 fn executor_compiles(
     dag: &PhysicalASAPDAG,
     views: &[MaterializedView],
@@ -514,8 +534,22 @@ fn executor_compiles(
     let indexed = IndexedDag::new(dag);
     let views_by_node: HashMap<PhysicalASAPNodeId, &MaterializedView> =
         views.iter().map(|view| (view.node_id, view)).collect();
-    for (position, view) in views.iter().enumerate() {
-        executor_refreshes(view, &views_by_node, &indexed, position == 0)?;
+    let groups = dag.ingestion_refresh_groups_of(views);
+    let refreshed_at_ingestion: HashSet<PhysicalASAPNodeId> = groups
+        .iter()
+        .flat_map(|group| group.views.iter().map(|view| view.node_id))
+        .collect();
+    let refreshes = groups
+        .iter()
+        .map(|group| group.views.iter().collect::<Vec<_>>())
+        .chain(
+            views
+                .iter()
+                .filter(|view| !refreshed_at_ingestion.contains(&view.node_id))
+                .map(|view| vec![view]),
+        );
+    for (position, refreshed) in refreshes.enumerate() {
+        executor_refreshes(&refreshed, &views_by_node, &indexed, position == 0)?;
     }
     executor_runs_queries(&indexed, &views_by_node)
 }
@@ -550,41 +584,49 @@ fn executor_runs_queries(
     })
 }
 
-/// Whether the executor compiles `view`'s refresh with the views it reads
-/// (among `views_by_node`) as materialized view slots, as a runtime runs it;
-/// the executor's reason when it does not.
+/// Whether the executor compiles the refresh of `refreshed` (one view, or
+/// every view of one refresh group) as roots, with the views they read
+/// (among `views_by_node`) that are not among them as materialized view
+/// slots; the executor's reason, naming the roots, when it does not.
 fn executor_refreshes(
-    view: &MaterializedView,
+    refreshed: &[&MaterializedView],
     views_by_node: &HashMap<PhysicalASAPNodeId, &MaterializedView>,
     indexed: &IndexedDag<'_>,
     in_whole_plan: bool,
 ) -> Result<(), InstallablePlanError> {
     use asap_executor::physical_planner::compile;
+    let roots: Vec<PhysicalASAPNodeId> = refreshed.iter().map(|view| view.node_id).collect();
     // The refresh reads only the nodes below it: compile them, or the whole
     // plan once, for the executor's checks of the whole plan.
     let sub_dag;
     let below = match in_whole_plan {
         true => indexed.dag,
         false => {
-            sub_dag = indexed.dag_below(view.node_id);
+            sub_dag = indexed.dag_below(&roots);
             &sub_dag
         }
     };
     #[cfg(test)]
     tests::COMPILED_NODES.with(|count| count.set(count.get() + below.nodes.len()));
     // Raw data is read at each `Scan`, a raw data slot `compile` makes.
-    let read: Vec<MaterializedView> = view
-        .inputs
-        .materialized_views
+    let root_set: HashSet<PhysicalASAPNodeId> = roots.iter().copied().collect();
+    let mut read_ids = HashSet::new();
+    let read: Vec<MaterializedView> = refreshed
         .iter()
+        .flat_map(|view| &view.inputs.materialized_views)
+        .filter(|id| !root_set.contains(id) && read_ids.insert(**id))
         .filter_map(|id| views_by_node.get(id).map(|read| (*read).clone()))
         .collect();
-    compile(below, &read, &[view.node_id as u64])
+    let root_ids: Vec<u64> = roots.iter().map(|&id| id as u64).collect();
+    compile(below, &read, &root_ids)
         .map(|_| ())
         .map_err(
             |error| InstallablePlanError::MaterializedViewNotExecutable {
-                node_id: view.node_id,
-                reason: error.to_string(),
+                node_id: roots[0],
+                reason: match roots.as_slice() {
+                    [_] => error.to_string(),
+                    _ => format!("refreshed with views {roots:?}: {error}"),
+                },
             },
         )
 }
@@ -759,10 +801,11 @@ mod tests {
     /// A p99 panel over a 300 s window every second, with no raw data kept:
     /// one DDSketch per series in each of 300 one-second panes built at
     /// ingestion, about 300 materialized views in a DAG of about 900 nodes.
-    /// Each view's refresh is compiled over the nodes below it, and the
-    /// whole plan's checks run once, so the nodes handed to the executor
-    /// grow with the plan, not with the plan times its views (before, every
-    /// refresh compiled the whole plan). The count
+    /// Each refresh (here one refresh group of all the panes) is compiled
+    /// over the nodes below its views, and the whole plan's checks run once,
+    /// so the nodes handed to the executor grow with the plan, not with the
+    /// plan times its views (before, every refresh compiled the whole
+    /// plan). The count
     /// covers both `plan_installable`'s build and `check_compiles`.
     #[tokio::test]
     async fn view_refreshes_compile_only_the_nodes_below_them() {

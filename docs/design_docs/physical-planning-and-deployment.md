@@ -449,6 +449,9 @@ impl InstallablePlan {
     /// Every materialized view, in dependency order: its node, refresh mode
     /// (at ingestion, or on first read and kept), coverage, inputs and retention.
     pub fn materialized_views(&self) -> Result<Vec<MaterializedView>, InstallablePlanError>;
+    /// The views refreshed at ingestion, by refresh group (one refresh window
+    /// each), each group after the groups it reads.
+    pub fn ingestion_refresh_groups(&self) -> Result<Vec<IngestionRefreshGroup>, InstallablePlanError>;
     /// Per raw-data `Source` read at query time: how far back raw data must be kept.
     pub fn raw_data_retention(&self) -> Result<Vec<RawDataRetention>, InstallablePlanError>;
 }
@@ -456,9 +459,17 @@ pub struct RawDataRetention {
     pub source: Source,
     pub lookback_ms: Option<u64>,     // None = unbounded
 }
+pub struct IngestionRefreshGroup {
+    pub refresh_window: Option<RefreshWindow>, // None = an unbounded window, a group of its own
+    pub views: Vec<MaterializedView>,          // in dependency order
+}
+pub struct RefreshWindow {
+    pub width_ms: u64,                // width of each window
+    pub phase_ms: u64,                // where each window ends, modulo width_ms
+}
 ```
 
-Both derivations are methods on `PhysicalASAPDAG` in `asap-types`, so a
+These derivations are methods on `PhysicalASAPDAG` in `asap-types`, so a
 runtime needs no dependency on the planner crate.
 
 A **materialized view** is a node whose output is kept across evaluations
@@ -587,7 +598,8 @@ family and where the state is kept do not enter. A view with an unbounded
 window is a group of its own.
 
 A **refresh group** is the set of views refreshed at ingestion that have one
-refresh window `(W, p)`. A runtime refreshes a refresh group with one
+refresh window `(W, p)` (`PhysicalASAPDAG::refresh_window`,
+`ingestion_refresh_groups`). A runtime refreshes a refresh group with one
 ingestion run per window `(e - W, e]`, `e ≡ p (mod W)`:
 
 - The run's roots are the views of the group whose state for the window
@@ -620,7 +632,7 @@ error answered by a DDSketch chain with one-minute panes over the same `Scan`:
 ```text
 Install (once):
     views     = plan.materialized_views()?          // [KLL and DDSketch pane nodes, refresh = at ingestion, retention]
-    // both chains have refresh window (1m, 0): one refresh group of ten pane views
+    groups    = plan.ingestion_refresh_groups()?    // [refresh window (1m, 0): ten KLL and DDSketch pane views]
     refresh   = compile(dag, [], [kll_pane_0, dd_pane_0])  // the newest pane of each chain
                 // Scan → TimeRange(1m) → NativeKllBuild(k=200)
                 //                      → NativeDDSketchBuild(α=0.01)
@@ -725,6 +737,7 @@ operator/runtime fixtures:
 | --- | --- |
 | `kll_pane_execution::five_panes_roundtrip_and_shared_merge_runs_once` | One-minute pane refreshes from raw data → five materialized view slots → shared native merge → p50/p99; counts every sample once, checks adjacent aligned windows and instruments one merge start per run |
 | `kll_pane_execution::a_store_keyed_by_definition_and_time_range_answers_the_panes` | A store that finds states only by `(definition_id, time range)` answers the five-pane query: the panes share one definition and request the five ranges that tile the window |
+| `runtime_install::panes_of_one_refresh_window_read_each_raw_window_once` | A KLL chain and a DDSketch chain of 10 s panes over one `Scan` are one refresh group: each pane window is read from raw data once, in one ingestion run that builds both panes; each state equals that of a run of its view alone, and both queries answer as the query-time reference |
 | `kll_pane_execution::panes_reject_parameters_schema_and_missing_binding` | Parameter relabelling, incompatible schemas and missing views fail explicitly |
 | `precompute_candidates::grouped_rate_can_be_materialized_before_or_after_grouped_sum` | Stored Rate state and stored Sum state answer like query time; summing counters before Rate does not |
 | `sql_to_physical::sql_filter_grouped_sum_executes_and_rebinds` | SQL text → candidate search → physical compilation → shared Scan predicates and grouped summary execution; NULL samples are ignored and fresh bindings produce new results |
