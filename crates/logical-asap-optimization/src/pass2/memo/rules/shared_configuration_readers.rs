@@ -66,19 +66,27 @@ struct StateNeed {
     build: Rc<OperatorNode>,
     merge: Option<Rc<OperatorNode>>,
     family: FieldDataType,
+    /// The reader candidate's `accuracy_budget_parts`: the shares its build
+    /// is sized for.
+    accuracy_budget_parts: usize,
     /// The reader's normalized pane layout, when its set shares panes: equal
     /// layouts of one set have one index, so a configuration rewrites them once.
     normalized_layout: Option<usize>,
 }
 
 /// A shared build's need: one pane layout (its index among the set's pane
-/// configurations, for request deduplication) or one size.
+/// configurations, for request deduplication) or one size, with the shares
+/// of the budget its build is sized for ([`covered_parts`]).
 enum StateCovering {
     Panes {
         configuration_index: usize,
         configuration: PaneConfiguration,
+        accuracy_budget_parts: usize,
     },
-    Size(FieldDataType),
+    Size {
+        family: FieldDataType,
+        accuracy_budget_parts: usize,
+    },
 }
 
 /// Summary builds of one family over one input at different sizes or pane
@@ -172,6 +180,7 @@ impl SharedProducer for SummaryStates {
                         build,
                         merge,
                         family,
+                        accuracy_budget_parts: entry.accuracy_budget_parts,
                         normalized_layout: None,
                     },
                 };
@@ -224,7 +233,7 @@ impl SharedProducer for SummaryStates {
             return Ok(state_size_configurations(requirements, deadline)?
                 .into_iter()
                 .map(|configuration| {
-                    StateCovering::Size(match (first, configuration) {
+                    let family = match (first, configuration) {
                         (FieldDataType::Sketch(kind, grouping), Some(params)) => {
                             FieldDataType::Sketch(
                                 SketchKind::new(*kind.algorithm(), params),
@@ -232,7 +241,11 @@ impl SharedProducer for SummaryStates {
                             )
                         }
                         _ => first.clone(),
-                    })
+                    };
+                    StateCovering::Size {
+                        accuracy_budget_parts: covered_parts(&family, set),
+                        family,
+                    }
                 })
                 .collect());
         };
@@ -243,6 +256,7 @@ impl SharedProducer for SummaryStates {
                 .map(
                     |(configuration_index, configuration)| StateCovering::Panes {
                         configuration_index,
+                        accuracy_budget_parts: covered_parts(&configuration.family, set),
                         configuration,
                     },
                 )
@@ -261,9 +275,7 @@ impl SharedProducer for SummaryStates {
             StateCovering::Panes { configuration, .. } => {
                 configuration.serves(&pane_requirement(need).expect("pane set"))
             }
-            StateCovering::Size(family) => {
-                shared_size(family, &need.family).is_some_and(|joined| same_family(&joined, family))
-            }
+            StateCovering::Size { family, .. } => serves_size(family, &need.family),
         };
         if !serves {
             return Ok(0);
@@ -274,6 +286,7 @@ impl SharedProducer for SummaryStates {
             StateCovering::Panes {
                 configuration_index,
                 configuration,
+                ..
             } => {
                 let Ok(count) =
                     u32::try_from(configuration.longest_window_ms / configuration.pane_width_ms)
@@ -296,7 +309,7 @@ impl SharedProducer for SummaryStates {
                     count,
                 )
             }
-            StateCovering::Size(family) => {
+            StateCovering::Size { family, .. } => {
                 self.rewrite_count += 1;
                 with_resized_build(&roots, &need.build, family.clone())
             }
@@ -332,6 +345,18 @@ impl SharedProducer for SummaryStates {
         previous.push(Rc::clone(&node));
         let mut candidate = original;
         candidate.root_node = node;
+        // The rewritten build is sized for the covering's shares, at least
+        // the reader's own.
+        candidate.accuracy_budget_parts = match covering {
+            StateCovering::Panes {
+                accuracy_budget_parts,
+                ..
+            }
+            | StateCovering::Size {
+                accuracy_budget_parts,
+                ..
+            } => (*accuracy_budget_parts).max(candidate.accuracy_budget_parts),
+        };
         memo.candidates[reader.group].push(candidate);
         Ok(1)
     }
@@ -419,6 +444,23 @@ fn pane_requirement(reader: &StateNeed) -> Option<PaneRequirement> {
         window_ms: pane_width_ms.checked_mul(u64::from(newest_panes.unwrap_or(*pane_count)))?,
         family: reader.family.clone(),
     })
+}
+
+/// Whether a build of `family` serves a reader of `reader`: the size both
+/// share is `family` itself.
+fn serves_size(family: &FieldDataType, reader: &FieldDataType) -> bool {
+    shared_size(family, reader).is_some_and(|joined| same_family(&joined, family))
+}
+
+/// The shares of the budget a build of `family` is sized for: the most of
+/// any reader in `set` it serves (it is at least as large as that reader's
+/// own build, sized for those shares); 1 when it serves none.
+fn covered_parts(family: &FieldDataType, set: &[Reader<StateNeed>]) -> usize {
+    set.iter()
+        .filter(|reader| serves_size(family, &reader.need.family))
+        .map(|reader| reader.need.accuracy_budget_parts)
+        .max()
+        .unwrap_or(1)
 }
 
 fn same_family(left: &FieldDataType, right: &FieldDataType) -> bool {
@@ -549,5 +591,77 @@ mod tests {
             })
             .collect();
         assert_eq!(widths, HashSet::from([1, 2, 3, 6]));
+    }
+
+    /// The KLL sizes (`k`) of the builds `candidate` reads.
+    fn kll_sizes(candidate: &asap_types::stages::CandidateForMemoGroup) -> Vec<u32> {
+        OperatorNode::reachable(&candidate.root_node)
+            .iter()
+            .filter_map(|node| match node.asap() {
+                Some(
+                    ASAPOp::SummaryAgg {
+                        family: FieldDataType::Sketch(kind, _),
+                        ..
+                    }
+                    | ASAPOp::PaneChain {
+                        family: FieldDataType::Sketch(kind, _),
+                        ..
+                    },
+                ) => match kind.params() {
+                    asap_types::ir::schema::SketchParams::Kll { k, .. } => Some(*k),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    // A rewrite to a size another reader's build was sized for carries that
+    // build's shares of the budget: in `q0.5 / q0.9` each operand has a KLL
+    // sized for the whole budget and one for half of it, and the copy of the
+    // whole-budget reader rewritten to the half-budget size is sized for two
+    // shares, not one.
+    #[test]
+    fn a_rewrite_to_a_shared_size_carries_its_parts() {
+        let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
+        let roots = vec![(
+            0,
+            QueryRoot::Operator(lower_promql(
+                "quantile_over_time(0.5, latency[5m]) / quantile_over_time(0.9, latency[5m])",
+                target.clone(),
+            )),
+        )];
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+        let inventory = generate_per_computation_candidates(
+            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        )
+        .unwrap();
+        let mut memo = try_populate_pass1(initial, &inventory).unwrap();
+        // Pass 1's parts per KLL size.
+        let mut parts_of_size: HashMap<u32, usize> = HashMap::new();
+        for candidate in memo.candidates.iter().flatten() {
+            for k in kll_sizes(candidate) {
+                let parts = parts_of_size.entry(k).or_insert(0);
+                *parts = (*parts).max(candidate.accuracy_budget_parts);
+            }
+        }
+        assert!(
+            parts_of_size.values().any(|&parts| parts == 2),
+            "{parts_of_size:?}"
+        );
+        let before = memo.candidates.iter().map(Vec::len).sum::<usize>();
+        expand_configurations(&mut memo, true, PaneWidthDomain::SeedGrids, None).unwrap();
+        assert!(memo.candidates.iter().map(Vec::len).sum::<usize>() > before);
+        for candidate in memo.candidates.iter().flatten() {
+            for k in kll_sizes(candidate) {
+                if let Some(&parts) = parts_of_size.get(&k) {
+                    assert!(
+                        candidate.accuracy_budget_parts >= parts,
+                        "k {k}: parts {} below {parts}",
+                        candidate.accuracy_budget_parts
+                    );
+                }
+            }
+        }
     }
 }

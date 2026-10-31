@@ -343,13 +343,14 @@ fn ratio_of_quantiles_production_memo() {
     }
     // The state-configuration rule rewrites a candidate's KLL to the size
     // the readers of a state share; the rewrite is a copy of the candidate
-    // (`derive` in `pass2/memo/rules/shared_configuration_readers.rs`), so it keeps its
-    // `accuracy_budget_parts`. In each quantile group the `accuracy_budget_parts` 1 KLL `k` 567
-    // (sized for the whole result) gets copies at `k` 567 and 1184, both
-    // with `accuracy_budget_parts` 1; the `accuracy_budget_parts` 2 KLL `k` 1184 keeps 2.
-    // The `k` 1184 copy with `accuracy_budget_parts` 1 composes the same DAG as the
-    // `accuracy_budget_parts` 2 candidate: one sketch, sized for half the budget,
-    // which also meets the whole budget, so the label is sound.
+    // (`derive` in `pass2/memo/rules/shared_configuration_readers.rs`) with
+    // the `accuracy_budget_parts` its new size was made for. In each quantile
+    // group the `accuracy_budget_parts` 1 KLL `k` 567 (sized for the whole
+    // result) gets copies at `k` 567 (parts 1) and 1184 (parts 2, the size of
+    // the half-budget KLL); the `accuracy_budget_parts` 2 KLL `k` 1184 keeps
+    // 2. The `k` 1184 copy composes the same DAG as the original
+    // `accuracy_budget_parts` 2 candidate: one sketch, sized for half the
+    // budget.
     let pass1 = &steps.pass1;
     let quantile_groups: Vec<_> = (0..pass1.groups.len())
         .filter(|&group| pass1.candidates[group].len() == 5)
@@ -367,20 +368,20 @@ fn ratio_of_quantiles_production_memo() {
         let candidates = &last.candidates[group];
         assert_eq!(
             sizes(candidates),
-            [(567, 1), (1184, 2), (567, 1), (1184, 1)]
+            [(567, 1), (1184, 2), (567, 1), (1184, 2)]
         );
-        let at = |k: u32, share: usize| {
-            candidates
-                .iter()
-                .position(|c| {
-                    c.origin == OriginOfCandidateForMemoGroup::Pass1
-                        && c.accuracy_budget_parts == share
-                        && kll(c).first().is_some_and(|&(kk, _)| kk == k)
-                })
-                .unwrap()
-        };
+        let at_k: Vec<usize> = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.origin == OriginOfCandidateForMemoGroup::Pass1
+                    && kll(c).first().is_some_and(|&(k, _)| k == 1184)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(at_k.len(), 2);
         let alone = |index: usize| composed(last, &[(MemoGroupId(group as u32), index)].into());
-        assert_eq!(alone(at(1184, 1)), alone(at(1184, 2)));
+        assert_eq!(alone(at_k[0]), alone(at_k[1]));
     }
 }
 
