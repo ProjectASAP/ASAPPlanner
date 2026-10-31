@@ -450,11 +450,13 @@ fn shared_quantiles_pass1_memo_and_whole_workload_plans() {
     );
 }
 
-/// Candidates may read each other: a coarse quantile's rollup reads the finer
-/// grouping, whose candidates may read the coarse one. A choice taking both
-/// composes no DAG: `build_logical_asap_dags_from_chosen_candidates` says so, and `enumerate` leaves it out. The
-/// memo is built from production's roots on the seed grids, without the
-/// search: the pair, not the counts, is what this checks.
+/// Pass 2 rejects a memo whose groups read each other, a group reading
+/// itself included, so production's memo (coarse and fine quantiles, whose
+/// rollups read the finer grouping) has a dependency order and every choice
+/// `enumerate` returns composes. A cycle made by hand, a child candidate
+/// reading back the group that reads it, composes no DAG:
+/// `build_logical_asap_dags_from_chosen_candidates` says so. The memo is
+/// built from production's roots on the seed grids, without the search.
 #[test]
 fn choices_whose_candidates_read_each_other_are_left_out() {
     let workload = with_queries(
@@ -467,29 +469,40 @@ fn choices_whose_candidates_read_each_other_are_left_out() {
         10_000,
     );
     let entries: Vec<_> = workload.query_workload.entries().collect();
-    let memo = &expanded_memo(production_roots(&workload), &entries);
-    let mutual = (0..memo.groups.len())
+    let memo = expanded_memo(production_roots(&workload), &entries);
+    assert!(memo.topological_order().is_some());
+    for (group, candidates) in memo.candidates.iter().enumerate() {
+        for candidate in candidates {
+            assert!(!candidate.input_groups.contains(&MemoGroupId(group as u32)));
+        }
+    }
+    let enumeration = enumerate(&memo, 2_000);
+    assert!(!enumeration.all_chosen_candidates.is_empty());
+    for choice in &enumeration.all_chosen_candidates {
+        build_logical_asap_dags_from_chosen_candidates(&memo, choice).unwrap();
+    }
+
+    let (group, index, child) = (0..memo.groups.len())
         .flat_map(|group| (0..memo.candidates[group].len()).map(move |index| (group, index)))
         .find_map(|(group, index)| {
             memo.candidates[group][index]
                 .input_groups
-                .iter()
-                .find_map(|&child| {
-                    memo.candidates[child.0 as usize]
-                        .iter()
-                        .position(|c| c.input_groups.contains(&MemoGroupId(group as u32)))
-                        .map(|back| (child, back))
-                })
-                .map(|(child, back)| [(MemoGroupId(group as u32), index), (child, back)])
+                .first()
+                .map(|&child| (MemoGroupId(group as u32), index, child))
         })
-        .expect("a pair of groups whose candidates read each other");
+        .expect("a candidate reading another group");
+    let mut cyclic = memo.clone();
+    let mut back = cyclic.candidates[child.0 as usize][0].clone();
+    back.root_node = Rc::clone(&cyclic.groups[group.0 as usize].logical_node);
+    back.input_groups = vec![group];
+    cyclic.candidates[child.0 as usize].push(back);
+    let back_index = cyclic.candidates[child.0 as usize].len() - 1;
+    assert_eq!(cyclic.topological_order(), None);
     assert!(matches!(
-        build_logical_asap_dags_from_chosen_candidates(memo, &mutual.into()),
+        build_logical_asap_dags_from_chosen_candidates(
+            &cyclic,
+            &[(group, index), (child, back_index)].into()
+        ),
         Err(asap_logical_asap_optimization::pass2::memo::enumeration::ErrorBuildingLogicalASAPDagsFromChosenCandidates::Cycle { .. })
     ));
-    let enumeration = enumerate(memo, 2_000);
-    assert!(!enumeration.all_chosen_candidates.is_empty());
-    for choice in &enumeration.all_chosen_candidates {
-        build_logical_asap_dags_from_chosen_candidates(memo, choice).unwrap();
-    }
 }
