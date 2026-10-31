@@ -265,7 +265,7 @@
   "pane_retention_ms": {
     "1": 3900000
   },
-  "proven_optimal": false,
+  "proven_optimal": true,
   "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"order-service\"}[5m])) by (le))",
   "selected": {
     "accepted": [

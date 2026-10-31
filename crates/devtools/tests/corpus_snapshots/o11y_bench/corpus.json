@@ -78,6 +78,8 @@
     {
       "id": "q05",
       "query": "max_over_time((sum(rate(http_requests_total{job=\"order-service\",status=~\"5..\"}[5m])) / sum(rate(http_requests_total{job=\"order-service\"}[5m])))[6h:1m])"
+,
+      "time_limit_reason": "searching every pane-width round to Complete runs past the 240 s limit; the plan and cost found before it are the same as when planning stopped after 16 s"
     },
     {
       "id": "q06",

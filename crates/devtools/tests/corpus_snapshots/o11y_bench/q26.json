@@ -2285,7 +2285,7 @@
   "pane_retention_ms": {
     "1": 7200000
   },
-  "proven_optimal": false,
+  "proven_optimal": true,
   "query": "sum(rate(process_cpu_seconds_total[1h]))",
   "selected": {
     "accepted": [
