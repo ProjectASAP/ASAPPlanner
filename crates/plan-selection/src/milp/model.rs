@@ -1579,6 +1579,9 @@ fn accuracy_rows(milp: &mut SelectionMilp<'_>) {
         let exact_target = milp.entries[query].requirements.accuracy.is_exact();
         // (candidate, dep, parts) per run `q` may depend on.
         let mut counted: Vec<(PhysicalCandidateId, Expression, usize)> = Vec::new();
+        // Where each counted run gives its value: (context, slot), `None`
+        // for a shareable candidate's own run. One value per place.
+        let mut places: BTreeSet<(usize, Option<ResultSlot>)> = BTreeSet::new();
         for &(context, candidate) in &approximate_runs {
             let Some(weight) = inputs.accuracy_weights[query].get(&candidate).copied() else {
                 continue;
@@ -1621,6 +1624,10 @@ fn accuracy_rows(milp: &mut SelectionMilp<'_>) {
                 AccuracyWeight::Unusable(_) => false,
             };
             if usable {
+                places.insert(match inputs.contexts[context].kind {
+                    ContextKind::Shared(own) if own == candidate => (context, None),
+                    _ => (context, Some(inputs.slot[candidate.0])),
+                });
                 counted.push((
                     candidate,
                     dep,
@@ -1642,7 +1649,8 @@ fn accuracy_rows(milp: &mut SelectionMilp<'_>) {
             milp.builder
                 .row("8 accuracy (pair)", constraint!(one + other <= 1.0));
         }
-        let most = counted.len() as f64;
+        // The most values `q` can depend on together.
+        let most = places.len() as f64;
         if counted.iter().all(|&(_, _, parts)| parts as f64 >= most) {
             continue;
         }
