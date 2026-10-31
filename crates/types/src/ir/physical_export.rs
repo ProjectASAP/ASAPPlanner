@@ -499,15 +499,13 @@ impl PhysicalASAPDAG {
 
     /// `Self::view_window` of each of `nodes`, by id, with the DAG indexed
     /// once for all of them: O(nodes + edges + the nodes walked below each).
+    /// It walks each operator's inputs (a valid DAG's edges), so it also
+    /// answers for a DAG of nodes alone.
     pub fn view_windows(
         &self,
         nodes: impl IntoIterator<Item = PhysicalASAPNodeId>,
     ) -> HashMap<PhysicalASAPNodeId, ScanWindow> {
         let payloads = self.payloads_by_id();
-        let mut inputs: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
-        for edge in &self.edges {
-            inputs.entry(edge.consumer).or_default().push(edge.producer);
-        }
         let window_of = |node: PhysicalASAPNodeId| {
             let mut seen = HashSet::new();
             let mut pending = vec![node];
@@ -538,10 +536,11 @@ impl PhysicalASAPDAG {
                             _ => ScanWindow::Unbounded,
                         }
                     }
-                    _ => {
-                        pending.extend(inputs.get(&id).into_iter().flatten());
+                    Some(payload) => {
+                        pending.extend(payload.children().into_iter().copied());
                         continue;
                     }
+                    None => continue,
                 };
                 window = Some(window.map_or(read, |window| window.union(read)));
             }

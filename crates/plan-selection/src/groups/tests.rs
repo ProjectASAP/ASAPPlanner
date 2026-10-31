@@ -503,7 +503,7 @@ fn shared_middle() -> PhysicalASAPMemoCandidates {
 
 // Each query context holds its own top and the shared middle as a read
 // across its boundary; the middle's own context holds the leaf below it;
-// `I` holds nothing; a query that cannot reach the middle holds only its
+// no `I_r` is read, so there is none; a query that cannot reach the middle holds only its
 // own candidate.
 #[test]
 fn execution_contexts_on_a_hand_built_catalog() {
@@ -523,13 +523,12 @@ fn execution_contexts_on_a_hand_built_catalog() {
             (ContextKind::Query(0), vec![middle, top_0]),
             (ContextKind::Query(1), vec![middle, top_1]),
             (ContextKind::Query(2), vec![lone]),
-            (ContextKind::Ingestion, Vec::new()),
             (ContextKind::Shared(middle), vec![leaf]),
         ]
     );
-    assert_eq!(inputs.context_of_shareable, BTreeMap::from([(middle, 4)]));
-    assert!(inputs.contexts[4].computes(RunKind::PerContext));
-    assert!(!inputs.contexts[4].computes(RunKind::Shareable));
+    assert_eq!(inputs.context_of_shareable, BTreeMap::from([(middle, 3)]));
+    assert!(inputs.contexts[3].computes(RunKind::PerContext));
+    assert!(!inputs.contexts[3].computes(RunKind::Shareable));
     assert_eq!(
         inputs.output_candidates,
         vec![vec![top_0], vec![top_1], vec![lone]]
@@ -656,7 +655,8 @@ fn two_queries_share_a_pane_chain_through_the_real_pipeline() {
             assert!(
                 context.computes(kind)
                     || kind == RunKind::Shareable
-                    || (kind == RunKind::Ingestion && context.kind != ContextKind::Ingestion)
+                    || (kind == RunKind::Ingestion
+                        && !matches!(context.kind, ContextKind::Ingestion(_)))
             );
         }
     }

@@ -24,7 +24,7 @@
 //!   union is costed by `asap-cost` itself.
 //!
 //! **Executions per second** of a run: `rate(q)` in query context `q`; 1 in
-//! `I` and for an ingestion-time shareable candidate; for a query-time
+//! each `I_r` and for an ingestion-time shareable candidate; for a query-time
 //! shareable candidate `m` and the runs in its context, `Σ rate · z[m, G,
 //! ℓ]` over its schedule groups and their levels, `z ≥ a[q, m]` for each
 //! reader at that level or faster (a group's rate is its fastest reader's).
@@ -211,11 +211,12 @@ fn producer_gives(
     let Some(outputs) = outputs else {
         return Some(read.into());
     };
-    // The producer's run: computed here, its own run, or its run in `I`.
+    // The producer's run: computed here, its own run, or its run in an
+    // `I_r`.
     let producer_run = match milp.kind(producer) {
         _ if milp.computes(context, producer) => context,
         RunKind::Shareable => milp.context_of(producer)?,
-        RunKind::Ingestion => milp.ingestion_context(),
+        RunKind::Ingestion => milp.ingestion_context_read_by(context)?,
         RunKind::PerContext => return None,
     };
     if milp.terms_in_progress.contains(&(producer_run, producer)) {
@@ -848,7 +849,7 @@ fn context_rates(
     for context in 0..milp.inputs.contexts.len() {
         let rate = match milp.inputs.contexts[context].kind {
             ContextKind::Query(query) => ContextRate::Fixed(query_rate[query]),
-            ContextKind::Ingestion => ContextRate::Fixed(1.0),
+            ContextKind::Ingestion(_) => ContextRate::Fixed(1.0),
             ContextKind::Shared(m) => {
                 let per_request = match milp.physical.candidates[m.0].materialization {
                     Materialization::MatAtIngestion(_) | Materialization::NotMaterialized => {
@@ -1097,7 +1098,7 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
                         charge(&held.into(), per_byte_ms * rate);
                     }
                 }
-                ContextKind::Ingestion => {}
+                ContextKind::Ingestion(_) => {}
             }
         }
         if let Some((_, most_per_slot)) = context_execution.get_mut(&context) {

@@ -190,7 +190,7 @@ impl Diagnosis {
         for (context, choices) in milp.choice.iter().enumerate() {
             let place = match milp.inputs.contexts[context].kind {
                 crate::groups::ContextKind::Query(query) => format!("q{query}"),
-                crate::groups::ContextKind::Ingestion => "I".to_string(),
+                crate::groups::ContextKind::Ingestion(pipeline) => format!("I{pipeline:?}"),
                 crate::groups::ContextKind::Shared(m) => format!("m{}", m.0),
             };
             for (&c, variable) in choices {
