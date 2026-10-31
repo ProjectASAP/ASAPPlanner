@@ -32,20 +32,38 @@ fn select(
     )
 }
 
+/// `fixture` with metric `m` declared non-negative.
+fn non_negative(mut fixture: Fixture) -> Fixture {
+    let source = fixture.data.sources.get_mut("m").expect("m");
+    source.values_non_negative = true;
+    fixture
+}
+
 // The new search's selection: an optimal, valid plan whose cost is
-// `plan_cost`'s, the MILP's size and every query's accepted accuracy.
+// `plan_cost`'s, the MILP's size and every query's accepted accuracy. The
+// ratio of quantiles is a regression of #1127: the A1 rows admitted two
+// KLL sketches at parts = 2, whose rank errors compose no guarantee through
+// the quotient, so the search returned `SelectedPlanFailedCheck`.
 #[test]
 fn the_milp_search_selects_a_checked_plan() {
-    // A ratio of quantiles is not here: on this fixture the A1 rows admit
-    // two sketches at parts = 2 for which Stage 1 composes no guarantee,
-    // so the search returns `SelectedPlanFailedCheck` (an open question
-    // on #1095 C5).
+    let ratio = || {
+        through_stages(
+            &[approximate(
+                "quantile_over_time(0.5, m[5m]) / quantile_over_time(0.9, m[5m])",
+                60_000,
+                0.01,
+            )],
+            true,
+        )
+    };
     for fixture in [
         shared_sum(),
         through_stages(
             &[approximate("quantile_over_time(0.9, m[5m])", 60_000, 0.01)],
             true,
         ),
+        ratio(),
+        non_negative(ratio()),
     ] {
         let stage2 = realizer(&fixture);
         let selection = select(&fixture, &BuiltinAccuracyModel, &stage2).unwrap();

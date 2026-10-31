@@ -12,7 +12,8 @@
 //!    instance of each shareable candidate, each with its region of stateless
 //!    candidates, the links inside it and the shareable candidates it may read.
 //! 4. **Accuracy weights** ([`AccuracyWeight`]) per query and approximate
-//!    candidate, from the query's expression shape.
+//!    candidate, and pairs excluded together, from the composition of the
+//!    query's outputs.
 //!
 //! Nothing calls it yet; the MILP (C4) will.
 //!
@@ -73,53 +74,50 @@
 //!
 //! ## Accuracy weights
 //!
-//! `w(q, k)` counts the shares of `q`'s accuracy budget an approximate
-//! candidate `k` (a sketch [`ASAPOp::SummaryAgg`] or [`ASAPOp::PaneChain`], what
-//! [`asap_accuracy::propagation::approximate_inputs`] counts) uses, from
-//! the operators on the way from `q`'s output down to `k`
-//! ([`asap_accuracy::budget`]): `1` for an ordinary position, `2` for a
-//! quotient's denominator (a lone approximate denominator sized for the
-//! whole target misses it: `ε/(1 − ε) > ε`) and [`AccuracyWeight::Unusable`]
-//! for a quotient inside a quotient, an operator with no error bound, or an
-//! operator whose rule is unclear here ([`UnusableReason`]). When `k` sits
-//! at several positions under `q`, the largest weight counts.
+//! `w(q, k)` says whether query `q` may read approximate candidate `k` (a
+//! sketch [`ASAPOp::SummaryAgg`] or [`ASAPOp::PaneChain`], what
+//! [`asap_accuracy::propagation::approximate_inputs`] counts), and pairs of
+//! approximate candidates `q` may not read together. Both come from the
+//! composition itself, never from an operator table
+//! ([`accuracy_positions`]): `q`'s outputs are built over the candidates
+//! with `k` approximate and every other candidate exact, their guarantees
+//! composed by `asap-accuracy` ([`asap_accuracy::propagation::composed_guarantee`])
+//! and checked by the same check the selected plan passes
+//! ([`crate::checks::guarantee_check`], with the deployment's model):
+//! - every output exact: `k`'s values do not reach the output (only a row
+//!   count does), and `k` gets no weight;
+//! - every output meets the target: `w(q, k) = 1`, one share of `q`'s
+//!   budget ([`asap_accuracy::budget`]); `k`'s sizes are those of its
+//!   `parts`, so a lone denominator sized for the whole target
+//!   (`ε/(1 − ε) > ε`) fails here;
+//! - otherwise [`AccuracyWeight::Unusable`], with the check's cause
+//!   ([`UnusableReason`]): e.g. a rank error through any arithmetic, or an
+//!   HLL whose declared distinct bound is outside its contract.
 //!
-//! | Operator on the way down | Input | Position below |
-//! |---|---|---|
-//! | `BinaryOp` `/` whose right input may carry an approximate value | left, right | numerator, denominator |
-//! | `BinaryOp` `/` whose right input is exact in every plan | left, right | unchanged (a scaling), irrelevant |
-//! | `BinaryOp` `+ − ×` | both | unchanged |
-//! | `BinaryOp` `% ^ atan2` | both | unusable (no bound) |
-//! | `BinaryOp` comparison, `bool` comparison, set operator | both | unusable (unclear) |
-//! | `Aggregate` of `count` only; a count accumulator (`SummaryAgg`, `PaneChain`) | its input | irrelevant (no value reaches the output) |
-//! | `Project` dividing by a column, or with `%`, `^`, `atan2`, a function, `CASE`, a comparison or a subquery | its input | unusable (unclear: which side is which is not known per input) |
-//! | `SQLWindowFunc`, SQL `SetOp`, `PromqlVectorFromScalar` | all | unusable (unclear) |
-//! | an operator read inside an expression (a scalar subquery in a filter) | that input | unusable (unclear) |
-//! | any other operator | its inputs | unchanged |
-//!
-//! A quotient below a numerator or denominator makes the position below it
-//! unusable (nested quotient). An approximate candidate only at irrelevant
-//! positions gets no weight. "May carry an approximate value" is a fixpoint
-//! over the candidate links: the candidate is approximate, or reads such a candidate
-//! through an input that is not irrelevant. A scalar query root is read the
-//! same way: `/` over operator references, `+ − ×`, unary minus and casts
-//! keep the position; any other expression around a reference makes it
-//! unusable.
+//! For each pair `k1, k2` of candidates usable alone, both sized for at
+//! least two shares, whose values meet in one plan of `q` (under two inputs
+//! of one candidate, under two references of a scalar root, or one below
+//! the other), the outputs are built and checked with both approximate; a
+//! pair that fails is excluded (`a[q, k1] + a[q, k2] ≤ 1`). A pair with a
+//! member sized for one share is excluded by the shares row already. The
+//! rows still bound the shares a plan reads by each candidate's `parts`,
+//! which the equal split proves for one product or quotient of two inputs;
+//! three or more approximate inputs are not built together.
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use asap_cost::{CostInputs, NodeUsage, ProducerOutput};
-use asap_types::ir::operator::operator_properties::BinaryOpKind;
 use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId, ScanWindow,
 };
 use asap_types::ir::properties::execution_data_state::{DataPrimitive, ExecutionDataState};
 use asap_types::ir::properties::{AccuracyGuarantee, ExecutionTiming};
-use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
-use asap_types::ir::schema::{ExactKind, FieldDataType, Schema};
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr};
+use asap_types::ir::schema::{FieldDataType, Schema};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use asap_types::physical::Materialization;
 use asap_types::stages::{output_references, MemoGroupId, PhysicalASAPMemoCandidates};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
+
+use crate::SelectionModels;
 
 use asap_types::ir::OperatorResultKind;
 use asap_types::stages::{PhysicalCandidateId, ReaderConstraint};
@@ -150,8 +148,12 @@ pub(crate) struct MilpInputs {
     /// One per shareable candidate left that some query can reach, ascending by
     /// candidate: its `m_s` instance owners share one region.
     pub(crate) instance_owners: Vec<InstanceOwners>,
-    /// Per query: `w(q, k)` for each approximate candidate `k` it can reach.
+    /// Per query: `w(q, k)` for each approximate candidate `k` whose values
+    /// reach its output.
     pub(crate) accuracy_weights: Vec<BTreeMap<PhysicalCandidateId, AccuracyWeight>>,
+    /// Per query: the pairs `(k1, k2)`, `k1 < k2`, of candidates usable alone
+    /// that it may not read together.
+    pub(crate) accuracy_excluded_pairs: Vec<Vec<(PhysicalCandidateId, PhysicalCandidateId)>>,
 }
 
 /// One candidate's data for the MILP.
@@ -325,20 +327,29 @@ pub(crate) struct InstanceOwners {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum AccuracyWeight {
     One,
+    /// Two shares. No longer produced: the composition decides each
+    /// position ([`accuracy_positions`]); kept while the warm start still
+    /// matches it.
+    #[allow(dead_code)]
     Two,
     /// `∞`: `k` is unusable for `q`.
     Unusable(UnusableReason),
 }
 
-/// Why a position's weight is `∞`.
+/// Why a position's weight is `∞`: the check of `q`'s outputs with `k`
+/// approximate failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum UnusableReason {
-    /// A quotient below a quotient's numerator or denominator.
-    NestedQuotient,
-    /// `%`, `^` or `atan2`: no error bound.
-    NoErrorBound,
-    /// An operator whose rule is not decided (module documentation).
-    UnclearOperator,
+    /// Some output has no guarantee
+    /// ([`RejectionCause::NoAccuracyGuarantee`](crate::report::RejectionCause::NoAccuracyGuarantee)).
+    NoAccuracyGuarantee,
+    /// Some output's guarantee misses the target
+    /// ([`RejectionCause::AccuracyTargetMissed`](crate::report::RejectionCause::AccuracyTargetMissed)).
+    AccuracyTargetMissed,
+    /// Not checked, so not usable: more than
+    /// [`accuracy_positions::MAX_COMPOSITIONS`] outputs to build, or a node
+    /// that does not rebuild over its producers.
+    NotChecked,
 }
 
 /// The state a shareable candidate holds (#1095 Step 2), which makes it worth
@@ -460,13 +471,33 @@ fn reader_constraint_ids_per_candidate(physical: &PhysicalASAPMemoCandidates) ->
 }
 
 /// [`MilpInputs`] for `physical`'s candidates; `entries[q]` is query `q`'s
-/// workload entry.
+/// workload entry. Accuracy is checked with the built-in model and no
+/// evidence ([`prepare_milp_inputs_with`]).
+#[cfg(test)]
 pub(crate) fn prepare_milp_inputs(
     physical: &PhysicalASAPMemoCandidates,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     cost_inputs: &CostInputs,
 ) -> MilpInputs {
+    let models = SelectionModels {
+        accuracy: &asap_accuracy::BuiltinAccuracyModel,
+        evidence: &asap_accuracy::NoAccuracyEvidence,
+        plan_selection: cost_inputs,
+    };
+    prepare_milp_inputs_with(physical, entries, data, &models)
+}
+
+/// [`MilpInputs`] for `physical`'s candidates, its accuracy positions
+/// checked with `models` (the deployment's accuracy model and evidence) and
+/// its usage costed with `models.plan_selection`.
+pub(crate) fn prepare_milp_inputs_with(
+    physical: &PhysicalASAPMemoCandidates,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: &SelectionModels<'_>,
+) -> MilpInputs {
+    let cost_inputs = models.plan_selection;
     let links = &CandidateLinks::new(physical);
     let class_count = physical.candidates.len();
     let all_alive = vec![true; class_count];
@@ -529,11 +560,17 @@ pub(crate) fn prepare_milp_inputs(
             })
         })
         .collect();
-    let accuracy_weights = accuracy_weights(
+    let AccuracyPositions {
+        weights: accuracy_weights,
+        excluded_pairs: accuracy_excluded_pairs,
+    } = accuracy_positions::accuracy_positions(
         physical,
         &candidate_data,
         &producer_candidates_per_input,
         &output_candidates,
+        entries,
+        data,
+        models,
     );
     MilpInputs {
         candidate_data,
@@ -544,6 +581,7 @@ pub(crate) fn prepare_milp_inputs(
         query_owners,
         instance_owners,
         accuracy_weights,
+        accuracy_excluded_pairs,
     }
 }
 
@@ -1605,351 +1643,9 @@ pub(crate) fn prune_dominated_candidates(
     pruned
 }
 
-// ---------------------------------------------------------------------------
-// Accuracy weights
-// ---------------------------------------------------------------------------
+mod accuracy_positions;
 
-/// Where a value sits under a query's output (module documentation,
-/// "Accuracy weights").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Position {
-    Ordinary,
-    Numerator,
-    Denominator,
-    /// Its values do not reach the output (only a row count does).
-    Irrelevant,
-    Unusable(UnusableReason),
-}
-
-impl Position {
-    /// Its weight; `None` for [`Position::Irrelevant`].
-    fn weight(self) -> Option<AccuracyWeight> {
-        match self {
-            Position::Ordinary | Position::Numerator => Some(AccuracyWeight::One),
-            Position::Denominator => Some(AccuracyWeight::Two),
-            Position::Irrelevant => None,
-            Position::Unusable(reason) => Some(AccuracyWeight::Unusable(reason)),
-        }
-    }
-
-    /// The position of a quotient's numerator (`numerator`) or denominator
-    /// below this one, when its denominator may be approximate.
-    fn quotient_side(self, numerator: bool) -> Self {
-        match self {
-            Position::Ordinary if numerator => Position::Numerator,
-            Position::Ordinary => Position::Denominator,
-            Position::Numerator | Position::Denominator => {
-                Position::Unusable(UnusableReason::NestedQuotient)
-            }
-            other => other,
-        }
-    }
-
-    fn unusable(self, reason: UnusableReason) -> Self {
-        match self {
-            Position::Unusable(_) | Position::Irrelevant => self,
-            _ => Position::Unusable(reason),
-        }
-    }
-}
-
-/// The number of `operator`'s direct inputs, which come first in its
-/// `map_children` order; any later child is an operator read inside one of
-/// its expressions. `None` for an ASAP operator, whose children are all
-/// direct inputs.
-fn direct_input_count(operator: &Operator) -> Option<usize> {
-    match operator {
-        Operator::NonASAP(operator) => Some(match operator {
-            NonASAPOp::Scan { .. } | NonASAPOp::Values { .. } => 0,
-            NonASAPOp::PromqlVectorFromScalar(_) => 0,
-            NonASAPOp::Join { .. } | NonASAPOp::SetOp { .. } | NonASAPOp::BinaryOp { .. } => 2,
-            NonASAPOp::Concat { children, .. } => children.len(),
-            _ => 1,
-        }),
-        Operator::ASAP(_) => None,
-    }
-}
-
-/// Whether `expr`, a `Project` item, keeps each value's position: columns,
-/// literals, unary minus, casts, `+ − ×` and division by a column-free
-/// expression.
-fn keeps_position<C>(expr: &ScalarExpr<C>) -> bool {
-    match expr {
-        ScalarExpr::Column(_) | ScalarExpr::Literal(_) => true,
-        ScalarExpr::Negative { expr, .. } | ScalarExpr::Cast { expr, .. } => keeps_position(expr),
-        ScalarExpr::Arithmetic {
-            op, left, right, ..
-        } => match op {
-            ArithmeticOpKind::Add | ArithmeticOpKind::Sub | ArithmeticOpKind::Mul => {
-                keeps_position(left) && keeps_position(right)
-            }
-            ArithmeticOpKind::Div => keeps_position(left) && is_constant(right),
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
-/// Whether `expr` reads no column and no operator.
-fn is_constant<C>(expr: &ScalarExpr<C>) -> bool {
-    match expr {
-        ScalarExpr::Literal(_) => true,
-        ScalarExpr::Negative { expr, .. } | ScalarExpr::Cast { expr, .. } => is_constant(expr),
-        ScalarExpr::Arithmetic { left, right, .. } => is_constant(left) && is_constant(right),
-        _ => false,
-    }
-}
-
-/// The position of input `input` of `node` when `node` is at `position`
-/// (module documentation, "Accuracy weights"). `denominator_may_be_approximate`
-/// says whether a quotient's right input may carry an approximate value.
-fn input_position(
-    node: &OperatorNode,
-    input: usize,
-    position: Position,
-    denominator_may_be_approximate: bool,
-) -> Position {
-    if matches!(position, Position::Unusable(_) | Position::Irrelevant) {
-        return position;
-    }
-    let unclear = position.unusable(UnusableReason::UnclearOperator);
-    if direct_input_count(&node.operator).is_some_and(|direct| input >= direct) {
-        return unclear;
-    }
-    let operator = match &node.operator {
-        // A count accumulator reads no value of its input.
-        Operator::ASAP(
-            ASAPOp::SummaryAgg {
-                family: FieldDataType::ExactAggregate(ExactKind::Count, _),
-                ..
-            }
-            | ASAPOp::PaneChain {
-                family: FieldDataType::ExactAggregate(ExactKind::Count, _),
-                ..
-            },
-        ) if input == 0 => return Position::Irrelevant,
-        Operator::ASAP(_) => return position,
-        Operator::NonASAP(operator) => operator,
-    };
-    match operator {
-        NonASAPOp::BinaryOp { operator, .. } => match operator.kind {
-            BinaryOpKind::Arithmetic(ArithmeticOpKind::Div) if !denominator_may_be_approximate => {
-                // An exact divisor scales the numerator.
-                match input {
-                    0 => position,
-                    _ => Position::Irrelevant,
-                }
-            }
-            BinaryOpKind::Arithmetic(ArithmeticOpKind::Div) => position.quotient_side(input == 0),
-            BinaryOpKind::Arithmetic(
-                ArithmeticOpKind::Add | ArithmeticOpKind::Sub | ArithmeticOpKind::Mul,
-            ) => position,
-            BinaryOpKind::Arithmetic(_) => position.unusable(UnusableReason::NoErrorBound),
-            BinaryOpKind::Compare(_) | BinaryOpKind::CompareBool(_) | BinaryOpKind::Set(_) => {
-                unclear
-            }
-        },
-        NonASAPOp::Aggregate { measures, .. }
-            if measures.iter().all(|measure| {
-                matches!(measure, asap_types::ir::operator::AggIntent::Count { .. })
-            }) =>
-        {
-            Position::Irrelevant
-        }
-        NonASAPOp::Project { cols, .. } => {
-            match cols.iter().all(|item| keeps_position(&item.expr)) {
-                true => position,
-                false => unclear,
-            }
-        }
-        NonASAPOp::SQLWindowFunc { .. }
-        | NonASAPOp::SetOp { .. }
-        | NonASAPOp::PromqlVectorFromScalar(_) => unclear,
-        _ => position,
-    }
-}
-
-/// The position of each operator reference of a scalar query root, in
-/// `map_operator_refs` order (the order of `output_references`).
-/// `may_be_approximate(r)` says whether reference `r` may carry an
-/// approximate value.
-fn scalar_root_positions<C>(
-    expr: &ScalarExpr<C>,
-    may_be_approximate: &dyn Fn(usize) -> bool,
-) -> Vec<Position> {
-    let mut count = 0;
-    let numbered = expr.map_operator_refs(&mut |_| {
-        count += 1;
-        count - 1
-    });
-    let mut positions = vec![Position::Ordinary; count];
-    fn walk(
-        expr: &ScalarExpr<usize>,
-        position: Position,
-        positions: &mut [Position],
-        may_be_approximate: &dyn Fn(usize) -> bool,
-    ) {
-        match expr {
-            ScalarExpr::PromqlScalarFromVector(reference)
-            | ScalarExpr::ScalarSubquery(reference) => {
-                positions[*reference] = position;
-            }
-            ScalarExpr::Negative { expr, .. } | ScalarExpr::Cast { expr, .. } => {
-                walk(expr, position, positions, may_be_approximate)
-            }
-            ScalarExpr::Arithmetic {
-                op, left, right, ..
-            } => match op {
-                ArithmeticOpKind::Add | ArithmeticOpKind::Sub | ArithmeticOpKind::Mul => {
-                    walk(left, position, positions, may_be_approximate);
-                    walk(right, position, positions, may_be_approximate);
-                }
-                ArithmeticOpKind::Div
-                    if !right
-                        .operator_refs()
-                        .into_iter()
-                        .any(|&reference| may_be_approximate(reference)) =>
-                {
-                    walk(left, position, positions, may_be_approximate);
-                    walk(right, Position::Irrelevant, positions, may_be_approximate);
-                }
-                ArithmeticOpKind::Div => {
-                    walk(
-                        left,
-                        position.quotient_side(true),
-                        positions,
-                        may_be_approximate,
-                    );
-                    walk(
-                        right,
-                        position.quotient_side(false),
-                        positions,
-                        may_be_approximate,
-                    );
-                }
-                _ => {
-                    for reference in expr.operator_refs() {
-                        positions[*reference] = position.unusable(UnusableReason::NoErrorBound);
-                    }
-                }
-            },
-            other => {
-                for reference in other.operator_refs() {
-                    positions[*reference] = position.unusable(UnusableReason::UnclearOperator);
-                }
-            }
-        }
-    }
-    walk(
-        &numbered,
-        Position::Ordinary,
-        &mut positions,
-        may_be_approximate,
-    );
-    positions
-}
-
-/// Per candidate, whether it may carry an approximate value to its readers: it
-/// outputs one, or reads one through an input whose values reach its output
-/// (not a row count). A fixpoint, so cycles of candidate links are covered.
-fn may_carry_approximate_values(
-    physical: &PhysicalASAPMemoCandidates,
-    candidate_data: &[CandidateData],
-    producer_candidates_per_input: &[Vec<Vec<PhysicalCandidateId>>],
-) -> Vec<bool> {
-    let mut carries: Vec<bool> = candidate_data.iter().map(|data| data.approximate).collect();
-    loop {
-        let mut changed = false;
-        for class in 0..carries.len() {
-            if carries[class] {
-                continue;
-            }
-            let node = physical.physical_node(PhysicalCandidateId(class));
-            let reads = producer_candidates_per_input[class].iter().enumerate().any(
-                |(input, producers)| {
-                    input_position(node, input, Position::Ordinary, true) != Position::Irrelevant
-                        && producers.iter().any(|producer| carries[producer.0])
-                },
-            );
-            if reads {
-                carries[class] = true;
-                changed = true;
-            }
-        }
-        if !changed {
-            return carries;
-        }
-    }
-}
-
-/// `w(q, k)` for every query `q` and approximate candidate `k` it can reach
-/// through the links left (module documentation, "Accuracy weights").
-fn accuracy_weights(
-    physical: &PhysicalASAPMemoCandidates,
-    candidate_data: &[CandidateData],
-    producer_candidates_per_input: &[Vec<Vec<PhysicalCandidateId>>],
-    output_candidates: &[Vec<PhysicalCandidateId>],
-) -> Vec<BTreeMap<PhysicalCandidateId, AccuracyWeight>> {
-    let carries =
-        may_carry_approximate_values(physical, candidate_data, producer_candidates_per_input);
-    let output_refs = output_references(&physical.query_roots);
-    let mut root_positions = Vec::new();
-    for root in &physical.query_roots {
-        match root {
-            QueryRoot::Operator(_) => root_positions.push(Position::Ordinary),
-            QueryRoot::Scalar(expr) => {
-                let first = root_positions.len();
-                let may_be_approximate = |reference: usize| {
-                    output_candidates
-                        .get(first + reference)
-                        .is_some_and(|out| out.iter().any(|class| carries[class.0]))
-                };
-                root_positions.extend(scalar_root_positions(expr, &may_be_approximate));
-            }
-        }
-    }
-    let mut weights = vec![BTreeMap::new(); physical.query_roots.len()];
-    let mut seen: Vec<HashSet<(PhysicalCandidateId, Position)>> =
-        vec![HashSet::new(); physical.query_roots.len()];
-    for (reference, &(query, _)) in output_refs.iter().enumerate() {
-        let start = root_positions
-            .get(reference)
-            .copied()
-            .unwrap_or(Position::Unusable(UnusableReason::UnclearOperator));
-        let mut stack: Vec<(PhysicalCandidateId, Position)> = output_candidates[reference]
-            .iter()
-            .map(|&class| (class, start))
-            .collect();
-        while let Some((class, position)) = stack.pop() {
-            if position == Position::Irrelevant {
-                continue;
-            }
-            // One unusable state per candidate is enough.
-            let visited = match position {
-                Position::Unusable(_) => {
-                    (class, Position::Unusable(UnusableReason::NestedQuotient))
-                }
-                _ => (class, position),
-            };
-            if !seen[query].insert(visited) {
-                continue;
-            }
-            if let (true, Some(weight)) = (candidate_data[class.0].approximate, position.weight()) {
-                let entry = weights[query].entry(class).or_insert(weight);
-                *entry = (*entry).max(weight);
-            }
-            let node = physical.physical_node(class);
-            let denominator_may_be_approximate = producer_candidates_per_input[class.0]
-                .get(1)
-                .is_some_and(|producers| producers.iter().any(|producer| carries[producer.0]));
-            for (input, producers) in producer_candidates_per_input[class.0].iter().enumerate() {
-                let below = input_position(node, input, position, denominator_may_be_approximate);
-                stack.extend(producers.iter().map(|&producer| (producer, below)));
-            }
-        }
-    }
-    weights
-}
+use accuracy_positions::AccuracyPositions;
 
 #[cfg(test)]
 mod tests;

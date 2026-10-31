@@ -36,7 +36,7 @@ use crate::milp::model::{
     SelectionMilpStatus,
 };
 use crate::models::{AccuracyCheckInputs, SelectionModels};
-use crate::owners::{prepare_milp_inputs, MilpInputs};
+use crate::owners::{prepare_milp_inputs_with, MilpInputs};
 use crate::report::{
     ErrorSelectingPlan, InexactObjective, Rejection, RejectionCause, SearchReport, SearchStatus,
     Selection,
@@ -85,7 +85,7 @@ pub(crate) fn select_plan_with_milp(
         || accuracy_checks.evidence.may_provide_evidence());
 
     let construction_started = Instant::now();
-    let inputs = prepare_milp_inputs(physical, entries, data, cost_inputs);
+    let inputs = prepare_milp_inputs_with(physical, entries, data, &models);
     let pruned_candidates = pruned_before_the_milp(physical, &inputs);
     let milp = build_selection_milp(
         physical,

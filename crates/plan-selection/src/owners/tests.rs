@@ -1,10 +1,12 @@
 use std::rc::Rc;
 
 use super::*;
+use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
 use asap_types::ir::properties::{AccuracyMetric, BoundExpr, ProbabilityExpr};
 use asap_types::ir::scalar::expr_ir::ScalarValue;
+use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::ir::schema::{DataType, Field};
-use asap_types::ir::{BinaryOperator, ExprSemantics};
+use asap_types::ir::{QueryRoot, ScalarExpr};
 use asap_types::physical::Medium;
 use asap_types::stages::{
     CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
@@ -41,29 +43,6 @@ fn reader_of(child: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         child: Rc::clone(child),
     }))
     .unwrap()
-}
-
-/// `kind` over `lhs` and `rhs`, with `lhs`'s schema (no schema
-/// derivation: only the operator is read).
-fn binary(
-    kind: ArithmeticOpKind,
-    lhs: &Rc<OperatorNode>,
-    rhs: &Rc<OperatorNode>,
-) -> Rc<OperatorNode> {
-    Rc::new(OperatorNode::with_schema(
-        Operator::NonASAP(NonASAPOp::BinaryOp {
-            operator: BinaryOperator {
-                checked_relative_division: false,
-                checked_finite_division: false,
-                kind: BinaryOpKind::Arithmetic(kind),
-                vector_match: None,
-            },
-            return_bool: false,
-            lhs: Rc::clone(lhs),
-            rhs: Rc::clone(rhs),
-        }),
-        lhs.schema.clone(),
-    ))
 }
 
 /// A catalog of `nodes`, node `i` in memo group `nodes[i].1` (each node its
@@ -582,16 +561,20 @@ struct ThroughStages1And2 {
 }
 
 /// `queries` (PromQL over metric `m`, each predictable and repeating every
-/// minute with a 1 % error target) through Stage 1 and Stage 2 as the
-/// facade runs them, over the complete pane-width domain, with raw data and
+/// minute with a 1 % error target, over metric `m` with 100 series)
+/// through Stage 1 and Stage 2 as the facade runs them, over the complete pane-width domain, with raw data and
 /// query-time results retained.
 fn through_stages_1_and_2(queries: &[&str]) -> ThroughStages1And2 {
+    through_stages_1_and_2_over(queries, PaneWidthDomain::Complete)
+}
+
+/// [`through_stages_1_and_2`] over the pane-width domain `domain`.
+fn through_stages_1_and_2_over(queries: &[&str], domain: PaneWidthDomain) -> ThroughStages1And2 {
     use asap_logical_asap_optimization::pass1::logical_memo_candidates::generate_per_computation_logical_memo_candidates;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::logical_memo_candidates::{
         generate_logical_asap_memo_candidates, Pass2RoundState,
     };
-    use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
     use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
@@ -618,7 +601,10 @@ fn through_stages_1_and_2(queries: &[&str]) -> ThroughStages1And2 {
             ..entry_with(target.clone(), every_minute.clone())
         })
         .collect();
-    let data = DataWorkload::sampled_every(["m".to_string()], DurationMs(1_000));
+    let mut data = DataWorkload::sampled_every(["m".to_string()], DurationMs(1_000));
+    let source = data.sources.get_mut("m").expect("m");
+    source.series_count = Some(100);
+    source.values_non_negative = true;
     let per_computation =
         generate_per_computation_candidates(&DagOfLogicalMemoGroups::from_roots(&roots)).unwrap();
     let pass1 = generate_per_computation_logical_memo_candidates(
@@ -630,13 +616,8 @@ fn through_stages_1_and_2(queries: &[&str]) -> ThroughStages1And2 {
     )
     .unwrap();
     let mut round = Pass2RoundState::new(pass1);
-    let logical = generate_logical_asap_memo_candidates(
-        &mut round,
-        &entries,
-        PaneWidthDomain::Complete,
-        None,
-    )
-    .unwrap();
+    let logical =
+        generate_logical_asap_memo_candidates(&mut round, &entries, domain, None).unwrap();
     let physical =
         asap_physical_asap_optimization::catalog::generate_physical_asap_memo_candidates(
             &logical, &entries, &data, true, true, None,
@@ -725,9 +706,12 @@ fn two_queries_share_a_pane_chain_through_the_real_pipeline() {
     }
     for weights in &inputs.accuracy_weights {
         assert!(!weights.is_empty());
-        assert!(weights
-            .values()
-            .all(|&weight| weight == AccuracyWeight::One));
+        assert!(
+            weights
+                .values()
+                .all(|&weight| weight == AccuracyWeight::One),
+            "{weights:?}"
+        );
     }
 }
 
@@ -735,106 +719,152 @@ fn two_queries_share_a_pane_chain_through_the_real_pipeline() {
 // Accuracy weights
 // ---------------------------------------------------------------------------
 
-/// `w(q, k)` of the one query of `physical` whose approximate candidates
-/// are `approximate_candidates`, by candidate.
-fn weights_of(
+/// The sketch algorithm and `parts` of each approximate candidate of
+/// `physical`, with its weight for query 0 (`None`: no weight).
+fn sketch_weights(
     physical: &PhysicalASAPMemoCandidates,
-    approximate_candidates: &[usize],
-) -> BTreeMap<usize, AccuracyWeight> {
-    let candidate_data: Vec<CandidateData> = (0..physical.candidates.len())
-        .map(|candidate| CandidateData {
-            approximate: approximate_candidates.contains(&candidate),
-            accuracy_budget_parts: 1,
-            ..CandidateData::default()
+    inputs: &MilpInputs,
+) -> Vec<(SketchAlgorithm, usize, Option<AccuracyWeight>)> {
+    (0..physical.candidates.len())
+        .filter(|&class| inputs.candidate_data[class].approximate)
+        .map(|class| {
+            let id = PhysicalCandidateId(class);
+            let algorithm = match physical.physical_node(id).asap() {
+                Some(
+                    ASAPOp::SummaryAgg {
+                        family: FieldDataType::Sketch(kind, _),
+                        ..
+                    }
+                    | ASAPOp::PaneChain {
+                        family: FieldDataType::Sketch(kind, _),
+                        ..
+                    },
+                ) => *kind.algorithm(),
+                _ => unreachable!("an approximate candidate is a sketch"),
+            };
+            (
+                algorithm,
+                inputs.candidate_data[class].accuracy_budget_parts,
+                inputs.accuracy_weights[0].get(&id).copied(),
+            )
         })
-        .collect();
-    let alive = vec![true; physical.candidates.len()];
-    let links = producer_candidates_left(&CandidateLinks::new(physical), &alive);
-    let outputs = output_candidates(physical, &alive);
-    let weights = accuracy_weights(physical, &candidate_data, &links, &outputs);
-    weights[0]
-        .iter()
-        .map(|(candidate, weight)| (candidate.0, *weight))
         .collect()
 }
 
-/// `a ∘ b` over two leaves, the query's root: candidates 0 and 1 are the
-/// leaves, 2 the operator.
-fn two_leaves(kind: ArithmeticOpKind) -> PhysicalASAPMemoCandidates {
-    let (a, b) = (values_node(1.0), values_node(2.0));
-    let top = binary(kind, &a, &b);
-    catalog(
-        vec![(a, 0), (b, 1), (top, 2)],
-        vec![
-            candidate(0, &[], false),
-            candidate(1, &[], false),
-            candidate(2, &[&[0], &[1]], true),
-        ],
-        vec![root(2)],
-    )
-}
-
-// A ratio's numerator weighs 1 and its denominator 2; a sum's operands 1
-// each.
+// `q0.5 / q0.9` through the real stages, weights from the composition: a
+// KLL rank error has no rule through a quotient, so every KLL candidate is
+// unusable (the operator table admitted them, #1127); a DDSketch relative
+// error composes, but a lone denominator sized for the whole target
+// (`parts = 1`) misses it (`ε/(1 − ε) > ε`) while one sized for two parts
+// meets it.
 #[test]
-fn ratio_and_sum_weights() {
-    use AccuracyWeight::*;
-    let ratio = weights_of(&two_leaves(ArithmeticOpKind::Div), &[0, 1]);
-    assert_eq!(ratio, BTreeMap::from([(0, One), (1, Two)]));
-    let sum = weights_of(&two_leaves(ArithmeticOpKind::Add), &[0, 1]);
-    assert_eq!(sum, BTreeMap::from([(0, One), (1, One)]));
-}
-
-// An exact divisor scales the numerator: it keeps weight 1.
-#[test]
-fn an_exact_divisor_keeps_the_numerator_ordinary() {
-    let ratio = weights_of(&two_leaves(ArithmeticOpKind::Div), &[0]);
-    assert_eq!(ratio, BTreeMap::from([(0, AccuracyWeight::One)]));
-}
-
-// `(a / b) / c`: the inner quotient's operands are unusable (a nested
-// quotient), the outer denominator weighs 2.
-#[test]
-fn a_nested_quotient_is_unusable() {
-    let (a, b, c) = (values_node(1.0), values_node(2.0), values_node(3.0));
-    let inner = binary(ArithmeticOpKind::Div, &a, &b);
-    let outer = binary(ArithmeticOpKind::Div, &inner, &c);
-    let physical = catalog(
-        vec![(a, 0), (b, 1), (c, 2), (inner, 3), (outer, 4)],
-        vec![
-            candidate(0, &[], false),
-            candidate(1, &[], false),
-            candidate(2, &[], false),
-            candidate(3, &[&[0], &[1]], false),
-            candidate(4, &[&[3], &[2]], true),
-        ],
-        vec![root(4)],
+fn ratio_weights_come_from_the_composition() {
+    let stages = through_stages_1_and_2(&[
+        "quantile_over_time(0.5, m[5m]) / quantile_over_time(0.9, m[5m])",
+    ]);
+    let inputs = prepare_milp_inputs(
+        &stages.physical,
+        &stages.entries,
+        &stages.data,
+        &CostInputs::default(),
     );
-    let nested = AccuracyWeight::Unusable(UnusableReason::NestedQuotient);
+    let weights = sketch_weights(&stages.physical, &inputs);
+    let of = |algorithm: SketchAlgorithm, parts: usize| -> BTreeSet<Option<AccuracyWeight>> {
+        weights
+            .iter()
+            .filter(|(a, p, _)| *a == algorithm && *p == parts)
+            .map(|(_, _, weight)| *weight)
+            .collect()
+    };
+    let no_guarantee = Some(AccuracyWeight::Unusable(
+        UnusableReason::NoAccuracyGuarantee,
+    ));
+    let missed = Some(AccuracyWeight::Unusable(
+        UnusableReason::AccuracyTargetMissed,
+    ));
+    for parts in [1, 2] {
+        assert_eq!(
+            of(SketchAlgorithm::Kll, parts),
+            BTreeSet::from([no_guarantee]),
+            "{weights:?}"
+        );
+    }
+    // At one part: numerators meet the target, denominators miss it.
     assert_eq!(
-        weights_of(&physical, &[0, 1, 2]),
-        BTreeMap::from([(0, nested), (1, nested), (2, AccuracyWeight::Two)])
-    );
-}
-
-// A scalar root `a / b` over two operator references: numerator 1,
-// denominator 2.
-#[test]
-fn a_scalar_ratio_weighs_its_denominator_two() {
-    let (a, b) = (values_node(1.0), values_node(2.0));
-    let reference = |group| Box::new(ScalarExpr::PromqlScalarFromVector(MemoGroupId(group)));
-    let physical = catalog(
-        vec![(a, 0), (b, 1)],
-        vec![candidate(0, &[], true), candidate(1, &[], true)],
-        vec![QueryRoot::Scalar(ScalarExpr::Arithmetic {
-            op: ArithmeticOpKind::Div,
-            left: reference(0),
-            right: reference(1),
-            semantics: ExprSemantics::Promql,
-        })],
+        of(SketchAlgorithm::DDSketch, 1),
+        BTreeSet::from([Some(AccuracyWeight::One), missed]),
+        "{weights:?}"
     );
     assert_eq!(
-        weights_of(&physical, &[0, 1]),
-        BTreeMap::from([(0, AccuracyWeight::One), (1, AccuracyWeight::Two)])
+        of(SketchAlgorithm::DDSketch, 2),
+        BTreeSet::from([Some(AccuracyWeight::One)]),
+        "{weights:?}"
     );
+    // Two DDSketches at two parts compose: no pair is excluded.
+    assert!(inputs.accuracy_excluded_pairs[0].is_empty());
+}
+
+// RangeHeavy T8+T5's shape: `q0.9 / q0.5` with both operands also queried
+// alone. One DDSketch pane chain sized for two shares of the budget serves
+// both quotient operands and both lone quantiles, as today's engine plans
+// it: the check accepts the quotient over it (`(α + α)/(1 − α) ≤ ε` at
+// `α = 1 − (1 + ε)^{−1/2}`), so it weighs 1 for every query. A chain sized
+// for the whole budget (`α = ε`) never serves the quotient's denominator.
+#[test]
+fn one_pane_chain_serves_a_ratio_and_its_operands() {
+    let stages = through_stages_1_and_2_over(
+        &[
+            "quantile_over_time(0.9, m[5m]) / quantile_over_time(0.5, m[5m])",
+            "quantile_over_time(0.9, m[5m])",
+            "quantile_over_time(0.5, m[5m])",
+        ],
+        PaneWidthDomain::SeedGrids,
+    );
+    let inputs = prepare_milp_inputs(
+        &stages.physical,
+        &stages.entries,
+        &stages.data,
+        &CostInputs::default(),
+    );
+    let alpha = |class: usize| match stages
+        .physical
+        .physical_node(PhysicalCandidateId(class))
+        .asap()
+    {
+        Some(ASAPOp::PaneChain {
+            family: FieldDataType::Sketch(kind, _),
+            ..
+        }) => match kind.params() {
+            asap_types::ir::schema::SketchParams::DDSketch { alpha } => Some(*alpha),
+            _ => None,
+        },
+        _ => None,
+    };
+    let weight = |query: usize, class: usize| {
+        inputs.accuracy_weights[query]
+            .get(&PhysicalCandidateId(class))
+            .copied()
+    };
+    let two_shares = 1.0 - 1.01f64.powf(-0.5);
+    let shared: Vec<usize> = (0..stages.physical.candidates.len())
+        .filter(|&class| alpha(class).is_some())
+        .filter(|&class| (0..3).all(|query| weight(query, class) == Some(AccuracyWeight::One)))
+        .collect();
+    assert!(!shared.is_empty());
+    for &class in &shared {
+        assert!(
+            (alpha(class).unwrap() - two_shares).abs() < 1e-9,
+            "{:?}",
+            alpha(class)
+        );
+    }
+    // A chain sized for the whole budget weighs 1 for the ratio only where
+    // its values are the numerator's alone, so it never also serves both
+    // lone quantiles.
+    for class in (0..stages.physical.candidates.len()).filter(|&class| alpha(class) == Some(0.01)) {
+        assert!(
+            !(0..3).all(|query| weight(query, class) == Some(AccuracyWeight::One)),
+            "{class}"
+        );
+    }
 }
