@@ -12,11 +12,15 @@
 //! - [`completion`]: the exact objective of a plan given as binaries, the
 //!   cheapest values of the continuous variables found without a solver;
 //! - [`decode`]: the solution as a `DagOfSelectedCandidates`, one node per
-//!   candidate run.
+//!   candidate run;
+//! - `lp_diagnosis` (feature `lp-diagnosis`, measurement only): where the
+//!   LP relaxation loses its bound.
 //!
 //! [`crate::select`] runs them, realizes the plan once and checks it.
 pub(crate) mod completion;
 pub(crate) mod cost_terms;
 pub(crate) mod decode;
+#[cfg(feature = "lp-diagnosis")]
+pub(crate) mod lp_diagnosis;
 pub(crate) mod model;
 pub(crate) mod warm_start;

@@ -125,6 +125,9 @@ pub(crate) struct ModelBuilder {
     pub(crate) scopes: BTreeMap<Scope, FamilySize>,
     /// Where new variables and rows are counted.
     pub(crate) scope: Scope,
+    /// The family of each variable, in creation order.
+    #[cfg(feature = "lp-diagnosis")]
+    pub(crate) column_families: Vec<&'static str>,
 }
 
 impl ModelBuilder {
@@ -136,10 +139,16 @@ impl ModelBuilder {
             families: BTreeMap::new(),
             scopes: BTreeMap::new(),
             scope: Scope::Global,
+            #[cfg(feature = "lp-diagnosis")]
+            column_families: Vec::new(),
         }
     }
 
     fn count(&mut self, family: &'static str, size: FamilySize) {
+        #[cfg(feature = "lp-diagnosis")]
+        if size.variables > 0 {
+            self.column_families.push(family);
+        }
         self.families.entry(family).or_default().add(size);
         self.scopes.entry(self.scope).or_default().add(size);
     }
@@ -1826,6 +1835,25 @@ pub(crate) fn solve_selection_milp(
     let start = warm_start::warm_start(&milp, &completion, Some(search_budget));
     let warm_start_ms = warm_started.elapsed().as_millis() as u64;
     let warm_start_cost_per_second = start.as_ref().map(|start| start.cost_per_second);
+    #[cfg(feature = "lp-diagnosis")]
+    let diagnosis = {
+        let column_of: HashMap<Variable, usize> = milp
+            .builder
+            .variables
+            .iter_variables_with_def()
+            .enumerate()
+            .map(|(column, (variable, _))| (variable, column))
+            .collect();
+        let start_columns = start.as_ref().map(|start| {
+            let mut columns = vec![0.0; column_of.len()];
+            for &(variable, value) in &start.values {
+                columns[column_of[&variable]] = value;
+            }
+            columns
+        });
+        super::lp_diagnosis::Diagnosis::run(&milp, start_columns.as_deref())
+            .map(|diagnosis| (diagnosis, start_columns))
+    };
     let parts = if milp.split_into_parts {
         independent_parts(&milp)
     } else {
@@ -1986,6 +2014,19 @@ pub(crate) fn solve_selection_milp(
     warm_start::debug(|| {
         format!("objective: HiGHS {highs_objective:e}, completed {objective_value:e}")
     });
+    #[cfg(feature = "lp-diagnosis")]
+    if let Some((diagnosis, start_columns)) = diagnosis {
+        let incumbent = completion.complete_columns(&columns).ok();
+        diagnosis.write(
+            start_columns.as_deref(),
+            incumbent
+                .as_ref()
+                .map(|completed| completed.columns.as_slice()),
+            objective_value,
+            dual_bound,
+            &format!("{status:?}"),
+        );
+    }
     let on = |variable: Variable| columns[column_of[&variable]] > 0.5;
     Ok(SelectionMilpSolution {
         status,
