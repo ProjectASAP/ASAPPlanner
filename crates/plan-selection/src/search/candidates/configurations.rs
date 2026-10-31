@@ -1,13 +1,13 @@
 //! Unit tests of Stage 2's configuration enumeration
-//! (`asap_physical_asap_optimization::catalog`) that select with the solver.
+//! (`asap_physical_asap_optimization::test_support::catalog`) that select with the solver.
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
-use asap_physical_asap_optimization::catalog::test_support::{
+use asap_logical_asap_optimization::DeploymentCapabilities;
+use asap_physical_asap_optimization::test_support::catalog::{
     compatible_timing, enumerate_candidate_configurations_before,
     may_keep_across_evaluations_per_sole_reader_query, CandidateInventory,
 };
-use asap_physical_asap_optimization::catalog::ConfigurationError;
+use asap_physical_asap_optimization::ConfigurationError;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot, ScalarExpr};
 use asap_types::physical::{Materialization, Medium};
@@ -20,8 +20,8 @@ use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
 
 /// [`enumerate_candidate_configurations_before`] with no deadline, its
 /// output references those of `source`, owned by the queries
-/// `output_queries[reference]` ([`query_roots_for_tests`]), and an unpriced
-/// DAG. Multiple references of one scalar query count once for shared-query
+/// `output_queries[reference]` ([`query_roots_for_tests`]), with the
+/// engine's execution-scope copies and an unpriced DAG. Multiple references of one scalar query count once for shared-query
 /// materialization.
 #[cfg(test)]
 pub(in crate::search) fn enumerate_candidate_configurations(
@@ -40,7 +40,12 @@ pub(in crate::search) fn enumerate_candidate_configurations(
         deployment.raw_data_retained,
         None,
     )
-    .map(PhysicalCandidatesWithCosts::new)
+    .map(|physical| {
+        // As `select_plan` does: the engine's execution-scope copies.
+        crate::search::candidates::scopes::expand_execution_scopes(&physical, entries, None)
+            .expect("expansion without a deadline")
+            .configured
+    })
 }
 
 /// A hand-built inventory: node `i` runs `nodes[i].0` and reads, per input,
@@ -86,6 +91,7 @@ pub(in crate::search) fn inventory_for_tests(
                         index: id,
                     }],
                     is_implementation_root: true,
+                    accuracy_budget_parts: 1,
                     physical_node: node,
                 },
                 inputs.into_iter().map(Into::into).collect(),
@@ -94,7 +100,7 @@ pub(in crate::search) fn inventory_for_tests(
         .unzip();
     CandidateInventory {
         operator_nodes_of_candidates_for_memo_groups: operator_nodes,
-        supplier_nodes_per_input: suppliers,
+        producer_nodes_per_input: suppliers,
         query_output_nodes,
         implementation_roots_of_group,
     }
@@ -163,12 +169,12 @@ mod tests {
     use super::*;
     use crate::search::candidates::inventory::{build_candidate_inventory, InventoryForTests};
     use crate::search::milp::model::select_candidates;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
-    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
+    use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
+    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups;
+    use asap_logical_asap_optimization::test_support::try_populate_pass1;
+    use asap_logical_asap_optimization::PaneWidthDomain;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::QueryRoot;
@@ -204,14 +210,15 @@ mod tests {
         ];
         let roots = queries
             .iter()
-            .enumerate()
-            .map(|(id, query)| (id, QueryRoot::Operator(lower_promql(query, target.clone()))))
+            .map(|query| QueryRoot::Operator(lower_promql(query, target.clone())))
             .collect::<Vec<_>>();
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+        let initial = generate_dag_of_logical_memo_groups(&roots);
         let outputs = (0..2)
             .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect::<Vec<_>>();
-        let candidates = generate_per_computation_candidates(roots).unwrap();
+        let candidates =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap();
         let memo = sharing_rules_and_shared_state_groups(
             try_populate_pass1(initial, &candidates).unwrap(),
             PaneWidthDomain::Complete,
@@ -250,9 +257,9 @@ mod tests {
     }
 
     // Indexed compatibility must reproduce every original ordered edge while
-    // storing repeated supplier lists once, including query/ingestion modes.
+    // storing repeated producer lists once, including query/ingestion modes.
     #[test]
-    fn supplier_index_preserves_all_edges_and_shares_storage() {
+    fn producer_index_preserves_all_edges_and_shares_storage() {
         let (source, entries, data) = fixture();
         let expanded = enumerate_candidate_configurations(
             &source,
@@ -266,13 +273,13 @@ mod tests {
             let original = &source.graph.candidates[configuration.operator_node.0];
             let generated = &expanded.dag.candidates[consumer];
             assert_eq!(
-                generated.supplier_candidates_per_input.len(),
-                original.supplier_candidates_per_input.len()
+                generated.producer_candidates_per_input.len(),
+                original.producer_candidates_per_input.len()
             );
             for (original, generated) in original
-                .supplier_candidates_per_input
+                .producer_candidates_per_input
                 .iter()
-                .zip(&generated.supplier_candidates_per_input)
+                .zip(&generated.producer_candidates_per_input)
             {
                 let expected: Vec<_> = original
                     .candidates
@@ -295,16 +302,16 @@ mod tests {
                 assert_eq!(generated.candidates.as_slice(), expected.as_slice());
             }
         }
-        let metrics = asap_types::stages::supplier_storage_metrics(&expanded.physical);
+        let metrics = asap_types::stages::producer_storage_metrics(&expanded.physical);
         let requirements = expanded
             .dag
             .candidates
             .iter()
-            .map(|candidate| candidate.supplier_candidates_per_input.len())
+            .map(|candidate| candidate.producer_candidates_per_input.len())
             .sum::<usize>();
-        assert!(metrics.unique_supplier_sets < requirements, "{metrics:?}");
+        assert!(metrics.unique_producer_sets < requirements, "{metrics:?}");
         assert!(
-            metrics.stored_supplier_ids < metrics.logical_connections,
+            metrics.stored_producer_ids < metrics.logical_connections,
             "{metrics:?}"
         );
     }
@@ -326,7 +333,7 @@ mod tests {
                 .graph
                 .candidates
                 .iter()
-                .map(|candidate| candidate.supplier_candidates_per_input.len())
+                .map(|candidate| candidate.producer_candidates_per_input.len())
                 .sum::<usize>();
         assert!(
             expanded.physical.candidates.len()
@@ -368,7 +375,7 @@ mod tests {
         }
         for (consumer, candidate) in expanded.dag.candidates.iter().enumerate() {
             for producer in candidate
-                .supplier_candidates_per_input
+                .producer_candidates_per_input
                 .iter()
                 .flat_map(|input| &input.candidates)
             {
@@ -443,19 +450,19 @@ mod tests {
         for id in &selected.selected_candidates {
             modes[id.0] = Some(expanded.physical.candidates[id.0].materialization);
         }
-        let original_roots = vec![QueryRoot::Operator(root); 2];
-        let physical = asap_physical_asap_optimization::catalog::materialize_selected_candidates(
+        let query_roots = vec![QueryRoot::Operator(root); 2];
+        let physical = asap_physical_asap_optimization::test_support::catalog::materialize_selected_candidates(
             &expanded.physical,
-            &selected,
-            &modes,
-            &original_roots,
+            &selected.to_selected_dag(),
+            &selected.materializations_by_node(&modes),
+            &query_roots,
             &entries,
             &data,
             deployment.query_time_results_retained,
         )
         .unwrap();
-        physical.physical.dag.validate().unwrap();
-        assert_eq!(physical.physical.roots.len(), 2);
+        physical.plan.dag.validate().unwrap();
+        assert_eq!(physical.plan.roots.len(), 2);
     }
 
     // Repeating the same workload entry adds output references, not a quadratic
@@ -481,7 +488,7 @@ mod tests {
                 .dag
                 .candidates
                 .iter()
-                .flat_map(|candidate| &candidate.supplier_candidates_per_input)
+                .flat_map(|candidate| &candidate.producer_candidates_per_input)
                 .map(|input| input.candidates.len())
                 .sum();
             counts.push((expanded.physical.candidates.len(), edges));
@@ -583,7 +590,7 @@ mod tests {
             .enumerate()
             .filter(|(_, candidate)| {
                 candidate
-                    .supplier_candidates_per_input
+                    .producer_candidates_per_input
                     .iter()
                     .any(|input| input.candidates.contains(shared_build))
             })
@@ -594,7 +601,7 @@ mod tests {
             if reader_sources.contains(&configuration.operator_node.0)
                 && configuration.timing == ExecutionTiming::QueryTime
             {
-                for input in &mut expanded.dag.candidates[id].supplier_candidates_per_input {
+                for input in &mut expanded.dag.candidates[id].producer_candidates_per_input {
                     if input.candidates.iter().any(|producer| {
                         expanded.physical.candidates[producer.0].operator_node.0 == shared_build.0
                     }) {

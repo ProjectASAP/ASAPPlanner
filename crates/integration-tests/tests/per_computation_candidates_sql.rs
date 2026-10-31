@@ -3,15 +3,15 @@
 //! ranks.
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    compose_logical_candidate, generate_per_computation_candidates, ComputationTarget,
-    HavingPlacement, HowToComputeAggregateMeasure,
+use asap_logical_asap_optimization::test_support::{
+    compose_logical_candidate, generate_per_computation_candidates,
 };
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SummaryInputExpr};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
+use asap_types::stages::{ComputationTarget, HavingPlacement, HowToComputeAggregateMeasure};
 
 async fn targets(sql: &str) -> Vec<ComputationTarget> {
     let catalog = SqlCatalog::new().with_table(
@@ -25,9 +25,13 @@ async fn targets(sql: &str) -> Vec<ComputationTarget> {
     let root = lower_sql(sql, &catalog, accuracy)
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
-    generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))])
-        .unwrap()
-        .targets
+    generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+            QueryRoot::Operator(root),
+        ]),
+    )
+    .unwrap()
+    .targets
 }
 
 fn placements(targets: &[ComputationTarget]) -> Vec<HavingPlacement> {
@@ -122,11 +126,16 @@ async fn a_filter_or_group_key_over_an_estimate_has_no_guarantee() {
         let root = lower_sql(sql, &catalog, accuracy.clone())
             .await
             .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"));
+        // No guarantee meets the target, so Pass 1 prunes the sketch
+        // unless every output is accepted.
         let candidates: Vec<_> =
-            asap_integration_tests::planning::logical_candidates(root, accuracy.clone())
-                .into_iter()
-                .filter(reads_quantile_sketch)
-                .collect();
+            asap_integration_tests::planning::logical_candidates_ignoring_guarantees(
+                root,
+                accuracy.clone(),
+            )
+            .into_iter()
+            .filter(reads_quantile_sketch)
+            .collect();
         assert!(!candidates.is_empty(), "{sql}");
         for candidate in candidates {
             assert_eq!(candidate.guarantee, None, "{sql}");
@@ -204,8 +213,12 @@ async fn heap_updates_over(fields: Vec<Field>, sql: &str) -> Vec<(String, String
     let catalog = SqlCatalog::new().with_table("flows", Schema::new(fields));
     let accuracy = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let root = lower_sql(sql, &catalog, accuracy).await.unwrap();
-    let inventory =
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+            QueryRoot::Operator(root),
+        ]),
+    )
+    .unwrap();
     let name = |expr: &SummaryInputExpr| match expr {
         SummaryInputExpr::Column(ColumnRef::Named(name)) => name.clone(),
         SummaryInputExpr::Column(ColumnRef::Qualified { table, name }) => {
@@ -241,7 +254,7 @@ async fn heap_updates_over(fields: Vec<Field>, sql: &str) -> Vec<(String, String
             choice[t] = c;
             let composed = compose_logical_candidate(&inventory, &choice)
                 .unwrap_or_else(|e| panic!("{candidate:?} composes: {e}"));
-            let QueryRoot::Operator(root) = &composed[0].1 else {
+            let QueryRoot::Operator(root) = &composed[0] else {
                 panic!("operator root")
             };
             for node in OperatorNode::reachable(root) {

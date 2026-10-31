@@ -1,21 +1,24 @@
-//! Pricing a candidate node by node: resource usage, latency, retention and
-//! kept pane chains.
+//! Costing a physical plan DAG node by node: each node's resource usage
+//! ([`node_usage`]), then the plan's usage, latency, retention, kept pane
+//! chains and cost ([`plan_cost`]). Moved from Stage 3 (`asap-plan-selection`,
+//! whose module doc, "Cost model", describes the model), so Stage 3 computes
+//! no cost of its own.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use asap_cost::analytical::{
+use crate::analytical::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceEstimate,
 };
-use asap_cost::execution_demand::{computations, evaluation_rate, query_starts};
-use asap_cost::operator_statistics::{
+use crate::execution_demand::{computations, consumers, evaluation_rate, query_starts, Consumer};
+use crate::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
-use asap_cost::state_bytes::{
+use crate::state_bytes::{
     keeps_every_value, row_bytes, sketch_shape, summary_shape, StateInputRows,
 };
-use asap_cost::{aggregate_lookup, lookup, StateFamily};
-use asap_cost::{
-    CalibrationFit, CandidateCost, CostInputs, CostModel, NodeCost, NodePriceSource, OperatorKind,
+use crate::{aggregate_lookup, lookup, StateFamily};
+use crate::{
+    CalibrationFit, CostInputs, CostModel, NodeCost, NodePriceSource, OperatorKind, PlanCost,
     QueryLatency, ResourceUsage, COST_SOURCE, COST_UNIT, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
 };
 use asap_types::ir::operator::{GroupKeys, Reduction, Source};
@@ -30,7 +33,6 @@ use asap_types::ir::{ASAPOp, NonASAPOp, TimeRangeKind};
 use asap_types::physical::{Materialization, Medium};
 use asap_types::workload::{DataWorkload, QueryRecurrence, RangeEvaluation};
 
-use crate::checks::family_name;
 use asap_types::workload::bounds::{
     declared_non_negative, declared_series, group_count_bound, source_name, source_rows_per_ms,
     unchanged_source_columns,
@@ -49,7 +51,7 @@ use asap_types::workload::bounds::{
 /// `range_evaluations[q]` say how often query `q` runs and how many steps
 /// each run evaluates (one when missing).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn price_at_scale(
+pub fn plan_cost(
     dag: &PhysicalASAPDAG,
     nodes: &NodeMap<'_>,
     kept_chains: &HashSet<PhysicalASAPNodeId>,
@@ -58,7 +60,7 @@ pub(crate) fn price_at_scale(
     data: &DataWorkload,
     settings: &CostInputs,
     formula_scale: f64,
-) -> Result<(CandidateCost, CalibrationFit), (PhysicalASAPNodeId, AnalyticalCostError)> {
+) -> Result<(PlanCost, CalibrationFit), (PhysicalASAPNodeId, AnalyticalCostError)> {
     let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
     let table = &settings.measured_operation_costs;
     let mut fit = CalibrationFit::default();
@@ -68,11 +70,11 @@ pub(crate) fn price_at_scale(
         CostModel::UsageOverTime(prices) => Some(prices),
         _ => None,
     };
-    let EachNodePriced {
+    let EachNodeUsage {
         priced,
         multipliers,
         reach,
-    } = price_each_node(
+    } = each_node_usage(
         dag,
         nodes,
         kept_chains,
@@ -94,7 +96,7 @@ pub(crate) fn price_at_scale(
     let mut work_ms: HashMap<PhysicalASAPNodeId, f64> = HashMap::new();
     // Query-time memory held only while one evaluation runs, a MatAtQuery
     // state in memory or a NotMaterialized node's working memory: (bytes,
-    // per second, whether each reading query computes its own copy),
+    // per second, whether each consumer computes its own copy),
     // counted once the evaluations' latencies are known, in node order so
     // the sum is the same in every run.
     let mut held: BTreeMap<PhysicalASAPNodeId, (u64, f64, bool)> = BTreeMap::new();
@@ -121,7 +123,7 @@ pub(crate) fn price_at_scale(
             .saturating_add(node_priced.peak_memory_bytes);
         usage.disk_bytes = usage.disk_bytes.saturating_add(node_priced.disk_bytes);
         fit.add(node_priced.fit);
-        work_ms.insert(node.id, node_priced.work_ms);
+        work_ms.insert(node.id, node_priced.work_ms_per_execution);
         output.insert(node.id, node_priced.output);
         if node_priced.family != StateFamily::None {
             family_of.insert(node.id, node_priced.family);
@@ -246,38 +248,53 @@ pub(crate) fn price_at_scale(
     }
     // Query-time memory is held for one evaluation: a MatAtQuery state from
     // its build until the longest query reading it finishes, about that
-    // query's latency; a NotMaterialized node's copy for each reading query
-    // for that query's latency, so its rate-weighted mean.
-    for (id, (state, per_second, computed_per_reader)) in held {
-        let readers = reach
+    // query's latency, once per execution. A NotMaterialized node's working
+    // memory is computed once per consumer ([`consumers`]), and each copy is
+    // held while its consumer's evaluation runs: a query's for that query's
+    // latency, at its rate; a materialized node's until the longest query
+    // reading that node finishes, at the node's rate, as its MatAtQuery
+    // state is.
+    let longest_reader_ms = |id: PhysicalASAPNodeId| {
+        reach
             .iter()
-            .enumerate()
             .zip(&latency)
-            .filter(|((_, reached), _)| reached.contains(&id));
-        let longest_ms = readers
-            .clone()
+            .filter(|(reached, _)| reached.contains(&id))
             .map(|(_, l)| l.total_ms())
-            .fold(0.0, f64::max);
-        let mut rate_weighted_ms = 0.0;
-        let mut evaluations_per_second = 0.0;
-        if computed_per_reader {
-            for ((query, _), l) in readers {
-                let rate = evaluation_rate(
-                    recurrence
-                        .get(query)
-                        .map(|r| (r, range_evaluations.get(query).copied().flatten())),
-                    settings.non_repeating_query_horizon_seconds,
-                )
-                .map_err(|error| (id, error))?;
-                rate_weighted_ms += rate * l.total_ms();
-                evaluations_per_second += rate;
+            .fold(0.0, f64::max)
+    };
+    let consumers_of = consumers(dag);
+    for (id, (state, per_second, computed_per_consumer)) in held {
+        // The milliseconds it is held per second: each execution's held
+        // time times its executions per second, summed.
+        let held_ms_per_second = match computed_per_consumer {
+            false => per_second * longest_reader_ms(id),
+            true => {
+                let mut sum = 0.0;
+                for &consumer in consumers_of.get(&id).into_iter().flatten() {
+                    sum += match consumer {
+                        Consumer::Query(query) => {
+                            let rate = evaluation_rate(
+                                recurrence
+                                    .get(query)
+                                    .map(|r| (r, range_evaluations.get(query).copied().flatten())),
+                                settings.non_repeating_query_horizon_seconds,
+                            )
+                            .map_err(|error| (id, error))?;
+                            rate * latency.get(query).map_or(0.0, QueryLatency::total_ms)
+                        }
+                        Consumer::Materialized(node) => {
+                            multipliers[&node].1 * longest_reader_ms(node)
+                        }
+                    };
+                }
+                sum
             }
-        }
-        let evaluation_ms = match evaluations_per_second > 0.0 {
-            true => rate_weighted_ms / evaluations_per_second,
-            false => longest_ms,
         };
-        let byte_seconds = state as f64 * evaluation_ms / 1_000.0 * per_second;
+        let evaluation_ms = match per_second > 0.0 {
+            true => held_ms_per_second / per_second,
+            false => 0.0,
+        };
+        let byte_seconds = state as f64 * held_ms_per_second / 1_000.0;
         let node = per_node.get_mut(&id).expect("every node is measured");
         usage.average_memory_bytes += byte_seconds;
         node.detail += &format!("; holds {state} bytes for {evaluation_ms:.1} ms");
@@ -319,7 +336,7 @@ pub(crate) fn price_at_scale(
         CostModel::ClusterCapacity(_) => None,
     };
     Ok((
-        CandidateCost {
+        PlanCost {
             usage,
             cost_per_second: cost,
             cost_unit: COST_UNIT,
@@ -341,17 +358,17 @@ pub(crate) fn price_at_scale(
     ))
 }
 
-/// Every node of a physical DAG priced ([`price_each_node`]), with each
+/// Every node of a physical DAG priced ([`each_node_usage`]), with each
 /// node's `(multiplier, per_second)` ([`computations`]) and the nodes each
 /// query reaches at query time ([`query_reach`]).
-pub(crate) struct EachNodePriced<'a> {
-    pub(crate) priced: HashMap<PhysicalASAPNodeId, PricedNode<'a>>,
-    pub(crate) multipliers: HashMap<PhysicalASAPNodeId, (u64, f64)>,
-    pub(crate) reach: Vec<HashSet<PhysicalASAPNodeId>>,
+struct EachNodeUsage<'a> {
+    priced: HashMap<PhysicalASAPNodeId, NodeUsage<'a>>,
+    multipliers: HashMap<PhysicalASAPNodeId, (u64, f64)>,
+    reach: Vec<HashSet<PhysicalASAPNodeId>>,
 }
 
-/// [`price_node`] over every node of `dag`, children first, with the
-/// arguments of [`price_at_scale`]. `root_scan_lookback_ms` is the
+/// [`node_usage`] over every node of `dag`, children first, with the
+/// arguments of [`plan_cost`]. `root_scan_lookback_ms` is the
 /// look-back of a query-time scan no window above it in `dag` bounds (a
 /// scan priced without its consumers); `None` when the scan has no
 /// window, so it reads the source's `rows_held` or fails with
@@ -359,7 +376,7 @@ pub(crate) struct EachNodePriced<'a> {
 /// the computations per second of each root's consumer in place of its
 /// query's own rate ([`computations`]).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn price_each_node<'a>(
+fn each_node_usage<'a>(
     dag: &'a PhysicalASAPDAG,
     nodes: &NodeMap<'a>,
     kept_chains: &HashSet<PhysicalASAPNodeId>,
@@ -370,7 +387,7 @@ pub(crate) fn price_each_node<'a>(
     formula_scale: f64,
     root_scan_lookback_ms: Option<u64>,
     root_rates: Option<&[f64]>,
-) -> Result<EachNodePriced<'a>, (PhysicalASAPNodeId, AnalyticalCostError)> {
+) -> Result<EachNodeUsage<'a>, (PhysicalASAPNodeId, AnalyticalCostError)> {
     let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
     let multipliers = computations(
         dag,
@@ -386,14 +403,14 @@ pub(crate) fn price_each_node<'a>(
     for e in &dag.edges {
         producers_of.entry(e.consumer).or_default().push(e.producer);
     }
-    let mut priced: HashMap<PhysicalASAPNodeId, PricedNode<'a>> = HashMap::new();
+    let mut priced: HashMap<PhysicalASAPNodeId, NodeUsage<'a>> = HashMap::new();
     for node in &dag.nodes {
         let views: Vec<ProducerOutput<'a>> = producers_of
             .get(&node.id)
             .map_or(&[][..], Vec::as_slice)
             .iter()
             .map(|p| {
-                let produced: &PricedNode<'a> = &priced[p];
+                let produced: &NodeUsage<'a> = &priced[p];
                 ProducerOutput {
                     payload: &nodes[p].payload,
                     output_schema: &nodes[p].output_schema,
@@ -418,7 +435,7 @@ pub(crate) fn price_each_node<'a>(
             }
             _ => ScanWindow::Unbounded,
         };
-        let node_priced = price_node(
+        let node_priced = node_usage(
             node,
             &views,
             multipliers[&node.id],
@@ -434,7 +451,7 @@ pub(crate) fn price_each_node<'a>(
         .map_err(|error| (node.id, error))?;
         priced.insert(node.id, node_priced);
     }
-    Ok(EachNodePriced {
+    Ok(EachNodeUsage {
         priced,
         multipliers,
         reach,
@@ -475,62 +492,64 @@ fn state_family<'a>(
     }
 }
 
-/// One producer of a node being priced ([`price_node`]): its payload and
+/// One producer of a node being priced ([`node_usage`]): its payload and
 /// schema, its output statistics, the sources it reads and its state
 /// family.
 #[derive(Debug, Clone)]
-pub(crate) struct ProducerOutput<'a> {
-    pub(crate) payload: &'a Payload,
-    pub(crate) output_schema: &'a Schema,
-    pub(crate) output: EdgeStatistics,
-    pub(crate) sources: BTreeSet<&'a str>,
-    pub(crate) family: StateFamily<'a>,
+pub struct ProducerOutput<'a> {
+    pub payload: &'a Payload,
+    pub output_schema: &'a Schema,
+    pub output: EdgeStatistics,
+    pub sources: BTreeSet<&'a str>,
+    pub family: StateFamily<'a>,
     /// Its output columns that still hold one source row's label (or
     /// column) values unchanged ([`unchanged_source_columns`]).
-    pub(crate) unchanged_columns: BTreeSet<&'a str>,
+    pub unchanged_columns: BTreeSet<&'a str>,
 }
 
-/// What one node costs and outputs ([`price_node`]): its output statistics,
-/// sources and state family for its consumers; its work for one
-/// computation in ms on one core; its usage per second; what is charged
+/// What one node uses and outputs ([`node_usage`]): its output statistics, sources and state family for its
+/// consumers; its work for one computation (one execution) in ms on one
+/// core; its usage per second; what is charged
 /// once the whole plan is known (memory held for a query's evaluation, an
 /// in-memory ingestion window's partial copies, the raw data a query-time
 /// scan keeps on disk); its calibration fit and its [`NodeCost`].
 #[derive(Debug, Clone)]
-pub(crate) struct PricedNode<'a> {
-    pub(crate) output: EdgeStatistics,
-    pub(crate) sources: BTreeSet<&'a str>,
-    pub(crate) family: StateFamily<'a>,
+pub struct NodeUsage<'a> {
+    pub output: EdgeStatistics,
+    pub sources: BTreeSet<&'a str>,
+    pub family: StateFamily<'a>,
     /// Its output columns that still hold one source row's label (or
     /// column) values unchanged ([`unchanged_source_columns`]).
-    pub(crate) unchanged_columns: BTreeSet<&'a str>,
-    pub(crate) work_ms: f64,
-    pub(crate) cpu_ops_per_second: f64,
-    pub(crate) scanned_bytes_per_second: f64,
-    pub(crate) average_memory_bytes: f64,
-    pub(crate) peak_memory_bytes: u64,
-    pub(crate) disk_bytes: u64,
+    pub unchanged_columns: BTreeSet<&'a str>,
+    pub work_ms_per_execution: f64,
+    pub cpu_ops_per_second: f64,
+    pub scanned_bytes_per_second: f64,
+    pub average_memory_bytes: f64,
+    pub peak_memory_bytes: u64,
+    pub disk_bytes: u64,
     /// Query-time memory held while an evaluation runs: (bytes, computations
-    /// per second, whether each reading query computes its own copy).
-    pub(crate) held: Option<(u64, f64, bool)>,
+    /// per second, whether each consumer computes its own copy, held while
+    /// that consumer's evaluation runs ([`plan_cost`]), rather than one copy
+    /// held until the longest query reading the node finishes).
+    pub held: Option<(u64, f64, bool)>,
     /// An in-memory ingestion-time state's bytes per window.
-    pub(crate) maintained: Option<u64>,
+    pub maintained: Option<u64>,
     /// A query-time scan's source and the raw bytes it reads.
-    pub(crate) raw_scan: Option<(&'a Source, u64)>,
-    pub(crate) fit: CalibrationFit,
-    pub(crate) cost: NodeCost,
+    pub raw_scan: Option<(&'a Source, u64)>,
+    pub fit: CalibrationFit,
+    pub cost: NodeCost,
 }
 
 /// Measure and price one node of a physical DAG (one step of
-/// [`price_at_scale`]): `producers` are its producers in edge order,
+/// [`plan_cost`]): `producers` are its producers in edge order,
 /// `rate` its `(multiplier, per_second)` ([`computations`]), `scan_window`
 /// the raw rows a query-time scan reads ([`PhysicalASAPDAG::scan_window`];
 /// read only for scans: it reads `width_ms` of rows and keeps them back to
 /// [`ScanWindow::lookback_ms`]), `retained_pane_count` the panes a pane chain keeps
-/// completed ([`retained_panes`]), and `ingestion_window_ms` the window an
-/// ingestion-time node maintains ([`maintained_window_ms`]).
+/// completed (`retained_panes`), and `ingestion_window_ms` the window an
+/// ingestion-time node maintains (`maintained_window_ms`).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn price_node<'a>(
+pub fn node_usage<'a>(
     node: &'a asap_types::ir::physical_export::PhysicalASAPDAGNode,
     producers: &[ProducerOutput<'a>],
     rate: (u64, f64),
@@ -540,7 +559,7 @@ pub(crate) fn price_node<'a>(
     data: &DataWorkload,
     settings: &'a CostInputs,
     formula_scale: f64,
-) -> Result<PricedNode<'a>, AnalyticalCostError> {
+) -> Result<NodeUsage<'a>, AnalyticalCostError> {
     let table = &settings.measured_operation_costs;
     let speed = settings.resource_speed;
     let usage_prices = match &settings.cost_model {
@@ -1100,7 +1119,9 @@ pub(crate) fn price_node<'a>(
     // aggregate keeps per group when that is more. A computation that
     // keeps nothing holds its working memory while it runs, once per
     // consumer that recomputes it; at query time, that is held for the
-    // evaluation too (counted below, as a MatAtQuery state is).
+    // evaluation too (counted in [`plan_cost`], per consumer: a query's
+    // latency, or a materialized consumer's longest reader's, as a
+    // MatAtQuery state is).
     let state = out.bytes.max(estimate.peak_memory_bytes());
     let (kept, medium) = match (node.materialization, &node.payload) {
         (Materialization::NotMaterialized, _) => {
@@ -1203,12 +1224,12 @@ pub(crate) fn price_node<'a>(
     if cost.is_some_and(|cost| !cost.is_finite()) {
         return Err(AnalyticalCostError::Overflow);
     }
-    Ok(PricedNode {
+    Ok(NodeUsage {
         output: out,
         sources,
         family,
         unchanged_columns,
-        work_ms: node_ms,
+        work_ms_per_execution: node_ms,
         cpu_ops_per_second: estimate.cpu_ops() * per_second,
         scanned_bytes_per_second: estimate.scan_bytes() as f64 * per_second,
         average_memory_bytes,
@@ -1230,35 +1251,7 @@ pub(crate) fn price_node<'a>(
     })
 }
 
-/// [`price_at_scale`] of one candidate alone, its calibration factor fitted
-/// over its own measured nodes (as [`select_plan`](crate::select_plan) fits it over all).
-#[cfg(test)]
-pub(crate) fn price(
-    dag: &PhysicalASAPDAG,
-    nodes: &NodeMap<'_>,
-    kept_chains: &HashSet<PhysicalASAPNodeId>,
-    recurrence: &[QueryRecurrence],
-    range_evaluations: &[Option<RangeEvaluation>],
-    data: &DataWorkload,
-    settings: &CostInputs,
-) -> Result<CandidateCost, (PhysicalASAPNodeId, AnalyticalCostError)> {
-    let at = |formula_scale| {
-        price_at_scale(
-            dag,
-            nodes,
-            kept_chains,
-            recurrence,
-            range_evaluations,
-            data,
-            settings,
-            formula_scale,
-        )
-    };
-    let (_, fit) = at(1.0)?;
-    Ok(at(fit.factor())?.0)
-}
-
-/// [`CandidateCost::source`] for nodes priced as `per_node` says.
+/// [`PlanCost::source`] for nodes priced as `per_node` says.
 fn cost_source(per_node: &BTreeMap<PhysicalASAPNodeId, NodeCost>) -> &'static str {
     let measured = |node: &NodeCost| node.price_source == NodePriceSource::Measured;
     if !per_node.values().any(measured) {
@@ -1382,13 +1375,13 @@ fn ingest_workers(
 /// ingestion time, or at query time across evaluations), how far back
 /// from the newest evaluation its completed panes must be kept, in
 /// milliseconds: how long before the evaluation its newest pane ends (the
-/// offset of its input, [`chain_input_offset_ms`]), plus its window
+/// offset of its input, `chain_input_offset_ms`), plus its window
 /// `pane_count · pane_width_ms`, plus the longest
 /// `span_ms` ([`RangeEvaluation`]) among the queries reaching it,
 /// whose earliest step reads that much further back. `reach` is
 /// [`query_reach`] of `dag`; `range_evaluations[q]` is query `q`'s (none
 /// when missing). Without range evaluations, each chain's window.
-pub(crate) fn pane_retention_ms(
+pub fn pane_retention_ms(
     dag: &PhysicalASAPDAG,
     reach: &[HashSet<PhysicalASAPNodeId>],
     range_evaluations: &[Option<RangeEvaluation>],
@@ -1447,6 +1440,17 @@ fn chain_input_offset_ms(
     u64::try_from(offset_ms).unwrap_or(0)
 }
 
+/// The pane retention of every kept pane chain of `dag`
+/// ([`pane_retention_ms`] over [`query_reach`]), for a plan whose query
+/// `q` has range evaluation `range_evaluations[q]` (none when missing):
+/// what Stage 2's realizer records for a realized plan.
+pub fn pane_retention_ms_of_plan(
+    dag: &PhysicalASAPDAG,
+    range_evaluations: &[Option<RangeEvaluation>],
+) -> BTreeMap<PhysicalASAPNodeId, u64> {
+    pane_retention_ms(dag, &query_reach(dag, &node_map(dag)), range_evaluations)
+}
+
 /// The input states a `SummaryMerge` over `producers` reads: every row of
 /// each, or of the one pane chain whose newest `newest_panes` it merges,
 /// that many panes' states per group.
@@ -1482,7 +1486,7 @@ fn retained_panes(
 }
 
 /// A node's panes: a pane chain's count, 1 for any other node.
-pub(crate) fn panes_of(node: &asap_types::ir::physical_export::PhysicalASAPDAGNode) -> u64 {
+pub fn panes_of(node: &asap_types::ir::physical_export::PhysicalASAPDAGNode) -> u64 {
     match &node.payload {
         Payload::ASAP(ASAPOp::PaneChain { pane_count, .. }) => u64::from(*pane_count).max(1),
         _ => 1,
@@ -1491,7 +1495,7 @@ pub(crate) fn panes_of(node: &asap_types::ir::physical_export::PhysicalASAPDAGNo
 
 /// The nodes each query reaches at query time, in workload order: its walk
 /// from its roots, stopping at (and including) ingestion-time nodes.
-pub(crate) fn query_reach(
+pub fn query_reach(
     dag: &PhysicalASAPDAG,
     nodes: &HashMap<PhysicalASAPNodeId, &asap_types::ir::physical_export::PhysicalASAPDAGNode>,
 ) -> Vec<HashSet<PhysicalASAPNodeId>> {
@@ -1547,22 +1551,9 @@ fn maintained_window_ms(
     }
 }
 
-/// The raw data the query-time scan `scan` reads, in milliseconds back from
-/// the evaluation: `end_offset_ms + width_ms` of its readers' window
-/// ([`PhysicalASAPDAG::scan_window`], with each chain in `kept_chains`
-/// reading one pane); `None` when that window is unbounded (the scan reads
-/// every row its source holds).
-pub(crate) fn query_time_lookback_ms(
-    dag: &PhysicalASAPDAG,
-    scan: PhysicalASAPNodeId,
-    kept_chains: &HashSet<PhysicalASAPNodeId>,
-) -> Option<u64> {
-    dag.scan_window(scan, kept_chains).lookback_ms()
-}
-
 /// The window of a scan reading the `lookback_ms` up to the evaluation
 /// (`Unbounded` for `None`).
-pub(crate) fn trailing_window(lookback_ms: Option<u64>) -> ScanWindow {
+pub fn trailing_window(lookback_ms: Option<u64>) -> ScanWindow {
     lookback_ms.map_or(ScanWindow::Unbounded, |width_ms| ScanWindow::Within {
         end_offset_ms: 0,
         width_ms: i64::try_from(width_ms).unwrap_or(i64::MAX),
@@ -1570,12 +1561,12 @@ pub(crate) fn trailing_window(lookback_ms: Option<u64>) -> ScanWindow {
 }
 
 /// The nodes of `dag` by id.
-pub(crate) fn node_map(dag: &PhysicalASAPDAG) -> NodeMap<'_> {
+pub fn node_map(dag: &PhysicalASAPDAG) -> NodeMap<'_> {
     dag.nodes.iter().map(|n| (n.id, n)).collect()
 }
 
 /// The nodes of a physical DAG by id.
-type NodeMap<'a> =
+pub type NodeMap<'a> =
     HashMap<PhysicalASAPNodeId, &'a asap_types::ir::physical_export::PhysicalASAPDAGNode>;
 
 /// The tumbling-pane chains of `dag` kept across evaluations
@@ -1584,7 +1575,7 @@ type NodeMap<'a> =
 /// pane per evaluation). Each evaluation builds the newest pane, and the
 /// older ones, which complete the readers' look-back, are kept from
 /// earlier evaluations.
-pub(crate) fn kept_pane_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASAPNodeId> {
+pub fn kept_pane_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASAPNodeId> {
     dag.nodes
         .iter()
         .filter(|node| {
@@ -1642,6 +1633,20 @@ fn widest_window_read_ms(
         }
     }
     widest
+}
+
+/// A summary family's name in reports: a shared (Hydra) structure by its
+/// Hydra kind, e.g. `HydraCms`; a sketch by its algorithm; an exact
+/// accumulator by its kind.
+pub fn family_name(family: &FieldDataType) -> String {
+    match family {
+        FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
+            format!("{kind:?}")
+        }
+        FieldDataType::Sketch(kind, _) => format!("{:?}", kind.algorithm()),
+        FieldDataType::ExactAggregate(kind, _) => format!("exact {kind:?} accumulator"),
+        other => format!("{other:?}"),
+    }
 }
 
 /// `input` split as evenly as integers allow into `partitions` parts.

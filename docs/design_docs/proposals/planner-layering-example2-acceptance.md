@@ -9,7 +9,8 @@ several computations". Tests:
 
 This spec was written by a test designer who does not implement the stages.
 Tests run the stages through `planner_layering_common::run_stages`: Pass 1
-and composition, `optimize_physical_asap` and `select_plan`. A test that
+and composition, `optimize_physical_asap` and the whole-workload reference
+pricer (`asap_plan_selection::reference_pricer::select_among_plans`). A test that
 needs a missing feature is `#[ignore]`d with the PR that delivers it.
 
 ## Workload

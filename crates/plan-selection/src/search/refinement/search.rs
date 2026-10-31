@@ -18,11 +18,12 @@ use std::time::{Duration, Instant};
 
 use crate::search::candidates::dag::{CandidateSelectionError, DagOfPhysicalCandidatesWithCosts};
 use crate::search::candidates::graph::RejectedQuerySubgraph;
+use crate::search::candidates::graph::SelectedCandidateGraph;
 use crate::search::milp::model::{
     solve_candidate_proposal_with_metrics, solve_direct_cost_proposal_with_metrics,
     CandidateProposal, CandidateSolveMetrics, ObservedAssignment,
 };
-use asap_types::stages::{PhysicalCandidateId, SelectedCandidateGraph};
+use asap_types::stages::PhysicalCandidateId;
 
 #[derive(Debug, Default)]
 pub(in crate::search) struct CandidateEvaluation {
@@ -70,6 +71,8 @@ pub(in crate::search) enum CandidateSearchStatus {
     NumericalStall,
 }
 
+// Read by the engine's tests; #1095 replaces the engine.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug)]
 pub(in crate::search) struct CandidateSearchResult {
     pub incumbent: Option<EvaluatedCandidate>,
@@ -263,7 +266,7 @@ fn search_with_solver(
             // Seed with one copy per configuration to avoid spending the warm-start
             // budget on interchangeable execution bindings. The certified search
             // retains every copy, including when this restricted seed is infeasible.
-            use asap_types::stages::ReaderConstraint;
+            use crate::search::candidates::dag::ReaderConstraint;
             let mut extra_copies: Vec<_> = heuristic
                 .reader_constraints
                 .iter()
@@ -285,9 +288,9 @@ fn search_with_solver(
             }
             for (id, candidate) in heuristic.candidates.iter_mut().enumerate() {
                 if disabled[id] {
-                    candidate.supplier_candidates_per_input.clear();
+                    candidate.producer_candidates_per_input.clear();
                 } else {
-                    for input in &mut candidate.supplier_candidates_per_input {
+                    for input in &mut candidate.producer_candidates_per_input {
                         input.candidates.retain(|producer| !disabled[producer.0]);
                     }
                 }
@@ -753,7 +756,7 @@ fn same_assignment(left: &SelectedCandidateGraph, right: &SelectedCandidateGraph
 mod tests {
     use super::*;
     use crate::search::candidates::dag::{
-        InputSupplierCandidates, PhysicalCandidateWithCost, QueryOutputCandidates,
+        InputProducerCandidates, PhysicalCandidateWithCost, QueryOutputCandidates,
     };
 
     use asap_types::stages::PhysicalCandidateId;
@@ -764,7 +767,7 @@ mod tests {
                 .iter()
                 .map(|&local_cost| PhysicalCandidateWithCost {
                     local_cost,
-                    supplier_candidates_per_input: vec![],
+                    producer_candidates_per_input: vec![],
                 })
                 .collect(),
             query_roots: vec![QueryOutputCandidates {
@@ -937,7 +940,7 @@ mod tests {
     #[test]
     fn nonoptimal_proposal_preserves_bound_and_improves_incumbent() {
         use crate::search::candidates::dag::validate_selected_graph;
-        use asap_types::stages::QueryRootAssignment;
+        use crate::search::candidates::graph::QueryRootAssignment;
         let graph = choices(&[2.0, 3.0]);
         let mut round = 0;
         let result = search_with_solver(
@@ -1057,7 +1060,7 @@ mod tests {
     // certified search when two incompatible query contexts need both copies.
     #[test]
     fn baseline_scope_restriction_falls_back_to_complete_graph() {
-        use asap_types::stages::ReaderConstraint;
+        use crate::search::candidates::dag::ReaderConstraint;
         let mut graph = choices(&[1.0, 1.0]);
         graph.query_roots.push(graph.query_roots[0].clone());
         graph.reader_constraints = vec![
@@ -1273,8 +1276,8 @@ mod tests {
     fn observed_cost_cut_includes_absent_candidate_decisions() {
         let mut graph = choices(&[1.0, 1.0]);
         graph.candidates[1]
-            .supplier_candidates_per_input
-            .push(InputSupplierCandidates {
+            .producer_candidates_per_input
+            .push(InputProducerCandidates {
                 candidates: vec![PhysicalCandidateId(0)].into(),
             });
         let result = search_candidates(&graph, limits(10), |selected| {
@@ -1331,8 +1334,8 @@ mod tests {
     fn observed_context_distinguishes_connections_and_output_assignments() {
         let mut graph = choices(&[0.0; 3]);
         graph.candidates[2]
-            .supplier_candidates_per_input
-            .push(InputSupplierCandidates {
+            .producer_candidates_per_input
+            .push(InputProducerCandidates {
                 candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
             });
         graph.query_roots = (0..3)

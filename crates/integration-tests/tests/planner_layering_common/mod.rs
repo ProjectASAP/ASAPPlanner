@@ -16,15 +16,15 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use asap_cost::CostInputs;
-use asap_devtools::planning_stages::{lower_promql_roots, run_default_search_over};
+use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_logical_asap_optimization::DeploymentCapabilities;
-use asap_physical_asap_optimization::PhysicalWorkloadPlan;
-use asap_plan_selection::Selection;
+use asap_plan_selection::reference_pricer::WholePlanSelection as Selection;
 use asap_types::ir::flat::{flatten, FlatDag, NodeId};
 use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams, SketchStatistic};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot};
 use asap_types::physical::Materialization;
+use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{PlanningWorkload, QueryRecurrence, RepeatedDemand};
 
 pub use asap_devtools::planner_layering_examples::*;
@@ -66,7 +66,7 @@ pub fn needs_merge(form: WindowForm, query_window_ms: u64) -> bool {
 /// expression rule, as the memo's group identity applies it).
 #[allow(dead_code)]
 pub fn share_identical(roots: &[QueryRoot]) -> Vec<QueryRoot> {
-    asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
+    asap_logical_asap_optimization::test_support::share_common_sub_dags(
         roots
             .iter()
             .enumerate()
@@ -79,6 +79,39 @@ pub fn share_identical(roots: &[QueryRoot]) -> Vec<QueryRoot> {
     .into_iter()
     .map(|(_, node)| QueryRoot::Operator(node))
     .collect()
+}
+
+/// `roots` with no node shared between queries: each query reads its own
+/// copy of every node it reaches (sharing within one query is kept). Pass 1
+/// composes a candidate from memo groups, so queries that read an identical
+/// sub-DAG share its group's node; this is the fixtures' independent
+/// variant of such a candidate.
+#[allow(dead_code)]
+pub fn unshare(roots: &[QueryRoot]) -> Vec<QueryRoot> {
+    use asap_types::ir::OperatorNode;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+    fn copy(
+        node: &Rc<OperatorNode>,
+        copies: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    ) -> Rc<OperatorNode> {
+        if let Some(copied) = copies.get(&Rc::as_ptr(node)) {
+            return Rc::clone(copied);
+        }
+        let copied = Rc::new(OperatorNode {
+            operator: node.operator.map_children(|child| copy(child, copies)),
+            ..(**node).clone()
+        });
+        copies.insert(Rc::as_ptr(node), Rc::clone(&copied));
+        copied
+    }
+    roots
+        .iter()
+        .map(|root| match root {
+            QueryRoot::Operator(node) => QueryRoot::Operator(copy(node, &mut HashMap::new())),
+            QueryRoot::Scalar(scalar) => QueryRoot::Scalar(scalar.clone()),
+        })
+        .collect()
 }
 
 /// The number of distinct nodes (by identity) `roots` reach: smaller after
@@ -243,8 +276,8 @@ pub fn run_stages_with(
     settings: &CostInputs,
     deployment: &DeploymentCapabilities,
 ) -> Run {
-    let models = asap_plan_selection::PlanningModels::builtin()
-        .with_plan_selection(settings)
+    let models = asap_planner::PlanningModels::builtin()
+        .with_cost_inputs(settings)
         .with_deployment_capabilities(deployment);
     run_stages_over(workload, roots, models)
 }
@@ -252,21 +285,25 @@ pub fn run_stages_with(
 fn run_stages_over(
     workload: &PlanningWorkload,
     roots: Vec<QueryRoot>,
-    models: asap_plan_selection::PlanningModels<'_>,
+    models: asap_planner::PlanningModels<'_>,
 ) -> Run {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
-    let run = run_default_search_over(roots, &entries, &data, models).expect("planning stages run");
-    let logical_candidates = run
-        .stage1_logical_asap_optimization
+    // The facade's run, with the reference pricer over the selected round's
+    // memo choices: the whole-plan costs and rejections these tests read.
+    let run = run_planning_stages_over(roots, &entries, &data, None, models)
+        .expect("planning stages run");
+    let reference = run.reference.expect("the memo is enumerated");
+    let logical_candidates = reference
+        .choices
         .into_iter()
         .map(|c| {
             let roots = c.roots.unwrap_or_else(|e| panic!("{} composes: {e}", c.id));
             logical(c.id, roots)
         })
         .collect();
-    let physical = run
-        .stage2_physical_asap_optimization
+    let physical = reference
+        .physical
         .into_iter()
         .map(|candidate| Physical {
             id: candidate.id.clone(),
@@ -282,12 +319,8 @@ fn run_stages_over(
         ),
         logical: logical_candidates,
         physical,
-        pruned: run
-            .stage2_pruned
-            .into_iter()
-            .map(|p| (p.from_logical, p.reason))
-            .collect(),
-        selection: run.stage3_plan_selection.expect("plan selection selects"),
+        pruned: reference.stage2_failed,
+        selection: reference.selection.expect("plan selection selects"),
     }
 }
 
@@ -299,18 +332,26 @@ pub fn run_explicit_candidates(
     workload: &PlanningWorkload,
     original_roots: Vec<QueryRoot>,
     candidates: Vec<Vec<QueryRoot>>,
-    models: asap_plan_selection::PlanningModels<'_>,
+    models: asap_planner::PlanningModels<'_>,
 ) -> Run {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
+    let targets: Vec<_> = entries
+        .iter()
+        .map(|entry| entry.requirements.accuracy.clone())
+        .collect();
+    // Explicit candidates are composed outside the memo: their summaries are
+    // sized as Pass 1 sizes a candidate, which Stage 3 only checks.
     let logical: Vec<_> = candidates
         .into_iter()
         .enumerate()
         .map(|(index, roots)| {
+            let roots = asap_accuracy::propagation::recompose_guarantees(&roots)
+                .expect("explicit fixture contracts compose");
             logical(
                 format!("P{}", index + 1),
-                asap_accuracy::propagation::recompose_guarantees(&roots)
-                    .expect("explicit fixture contracts compose"),
+                asap_accuracy::sizing::with_summaries_sized_for_targets(&roots, &targets, &data)
+                    .expect("explicit fixture summaries rebuild"),
             )
         })
         .collect();
@@ -340,8 +381,12 @@ pub fn run_explicit_candidates(
             });
         }
     }
-    let plans: Vec<_> = physical.iter().map(|plan| plan.candidate.clone()).collect();
-    let selection = asap_plan_selection::select_plan(&plans, &entries, &data, models)
+    // Stage 2's deployment rules (raw data retention) prune the plans the
+    // deployment cannot run before Stage 3 prices the rest.
+    let mut plans: Vec<_> = physical.iter().map(|plan| plan.candidate.clone()).collect();
+    asap_devtools::memo_pricing::retain_deployable(&mut plans, models);
+    physical.retain(|p| plans.iter().any(|plan| plan.id == p.id));
+    let selection = asap_devtools::memo_pricing::reference_select(&plans, &entries, &data, models)
         .expect("explicit fixture contains a valid physical configuration");
     Run {
         stage0_query_language_frontends: logical_stage0(original_roots),
@@ -361,8 +406,8 @@ pub fn run_pattern_b_fixture(
         workload,
         lower_promql(workload),
         pattern_b_computations(workload),
-        asap_plan_selection::PlanningModels::builtin()
-            .with_plan_selection(settings)
+        asap_planner::PlanningModels::builtin()
+            .with_cost_inputs(settings)
             .with_deployment_capabilities(deployment),
     )
 }
@@ -370,16 +415,18 @@ pub fn run_pattern_b_fixture(
 /// Three fixed Pattern-B computations used by cost/retention fixtures:
 /// exact, whole-window KLL, and a KLL chain of sixty-second panes.
 pub fn pattern_b_computations(workload: &PlanningWorkload) -> Vec<Vec<QueryRoot>> {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
     };
-    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+    use asap_logical_asap_optimization::test_support::{
         pane_candidates, window_composition_pass2_candidates,
     };
+    use asap_types::stages::HowToComputeAggregateMeasure;
     let roots = lower_promql(workload);
-    let local =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
+    )
+    .unwrap();
     assert_eq!(
         local.targets.len(),
         1,
@@ -395,11 +442,7 @@ pub fn pattern_b_computations(workload: &PlanningWorkload) -> Vec<Vec<QueryRoot>
             )
         })
         .unwrap();
-    let whole: Vec<_> = compose_logical_candidate(&local, &[kll])
-        .unwrap()
-        .into_iter()
-        .map(|(_, root)| root)
-        .collect();
+    let whole: Vec<_> = compose_logical_candidate(&local, &[kll]).unwrap();
     let panes = pane_candidates(&whole, &[Some(60_000)]);
     assert_eq!(panes.len(), 1);
     let chain = window_composition_pass2_candidates(&whole, &panes)

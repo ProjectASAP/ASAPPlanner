@@ -6,15 +6,17 @@
 //! the summary-bound shape node by node, including the family `(Kind,
 //! Params)` committed on each edge's schema.
 
+use asap_types::stages::HowToComputeAggregateMeasure;
 use std::rc::Rc;
 
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::physical_export::{
     at_ingestion, at_ingestion_physical_asap_dag, physical_asap_dag,
 };
-use asap_integration_tests::planning::logical_candidates;
-use asap_physical_asap_optimization::PhysicalWorkloadPlan;
-use asap_plan_selection::Selection;
+use asap_integration_tests::planning::{
+    logical_candidates, logical_candidates_ignoring_guarantees,
+};
+use asap_plan_selection::reference_pricer::WholePlanSelection as Selection;
 use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::properties::AccuracyMetric;
@@ -26,6 +28,7 @@ use asap_types::ir::schema::{
     SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryInputExpr, SummaryUpdate,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr};
+use asap_types::physical::PhysicalWorkloadPlan;
 
 /// The first logical candidate (Stage 1, in enumeration order) of `root` as
 /// a query at `accuracy` that uses an ASAP operator, or the plain exact one
@@ -64,7 +67,28 @@ fn candidates_using(
     accuracy: AccuracyTarget,
     algorithm: SketchAlgorithm,
 ) -> Vec<Rc<OperatorNode>> {
-    logical_candidates(Rc::clone(root), accuracy)
+    using(logical_candidates(Rc::clone(root), accuracy), algorithm)
+}
+
+/// [`candidates_using`] with every output accepted whatever its guarantee:
+/// a heap-backed Top-K's output has no guarantee, so Pass 1 prunes the
+/// heap these update and execution tests check unless guarantees are
+/// ignored.
+fn heap_topk_candidates_using(
+    root: &Rc<OperatorNode>,
+    accuracy: AccuracyTarget,
+    algorithm: SketchAlgorithm,
+) -> Vec<Rc<OperatorNode>> {
+    using(
+        logical_candidates_ignoring_guarantees(Rc::clone(root), accuracy),
+        algorithm,
+    )
+}
+
+/// The `candidates` that build a sketch of `algorithm`, each below its
+/// `Project`s.
+fn using(candidates: Vec<Rc<OperatorNode>>, algorithm: SketchAlgorithm) -> Vec<Rc<OperatorNode>> {
+    candidates
         .into_iter()
         .filter(|candidate| uses_sketch(candidate, &algorithm))
         .map(|candidate| Rc::clone(below_projects(&candidate)))
@@ -255,7 +279,7 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_evaluation_contract
             AccuracyTarget::max_error(0.01).failure_probability(0.01),
         )
         .expect("lower temporal Top-K");
-        let candidates = candidates_using(
+        let candidates = heap_topk_candidates_using(
             &pre,
             AccuracyTarget::max_error(0.01).failure_probability(0.01),
             expected_family,
@@ -430,7 +454,7 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
             SketchAlgorithm::CountSketchWithHeap,
         ]
         .into_iter()
-        .flat_map(|algorithm| candidates_using(&pre, accuracy.clone(), algorithm))
+        .flat_map(|algorithm| heap_topk_candidates_using(&pre, accuracy.clone(), algorithm))
         .collect();
         assert!(!candidates.is_empty(), "no heap candidate for {query}");
         for plan in candidates {
@@ -701,11 +725,13 @@ fn ddsketch_ratio_selection(
     for facts in data.sources.values_mut() {
         facts.values_non_negative = non_negative;
     }
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        generate_per_computation_candidates, HowToComputeAggregateMeasure,
-    };
-    let inventory =
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+            QueryRoot::Operator(root),
+        ]),
+    )
+    .unwrap();
     let exact = vec![0; inventory.targets.len()];
     let dds = inventory
         .targets
@@ -733,15 +759,11 @@ fn ddsketch_ratio_selection(
     // Pass 1 choices composed and implemented by Stage 2; one query, so no
     // sharing rule applies.
     use asap_accuracy::propagation::recompose_guarantees;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate;
-    let models = asap_plan_selection::PlanningModels::builtin();
+    use asap_logical_asap_optimization::test_support::compose_logical_candidate;
+    let models = asap_planner::PlanningModels::builtin();
     let mut physical = Vec::new();
     for choice in [exact, dds] {
-        let roots: Vec<_> = compose_logical_candidate(&inventory, &choice)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let roots: Vec<_> = compose_logical_candidate(&inventory, &choice).unwrap();
         let roots = recompose_guarantees(&roots).unwrap();
         physical.extend(
             asap_physical_asap_optimization::optimize_physical_asap(
@@ -757,7 +779,8 @@ fn ddsketch_ratio_selection(
     for (index, plan) in physical.iter_mut().enumerate() {
         plan.id = format!("fixture-{index}");
     }
-    let selection = asap_plan_selection::select_plan(&physical, &entries, &data, models).unwrap();
+    let selection =
+        asap_devtools::memo_pricing::reference_select(&physical, &entries, &data, models).unwrap();
     let ratios = physical
         .into_iter()
         .filter(|candidate| {

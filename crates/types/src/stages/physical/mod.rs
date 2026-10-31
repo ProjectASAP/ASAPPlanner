@@ -3,17 +3,16 @@
 
 mod graph;
 mod memo_candidates;
-mod suppliers;
+mod producers;
 
 pub use graph::{
-    validate_selected_connections, PhysicalCandidateId, ProducerConsumerConnection,
-    QueryRootAssignment, ReaderConstraint, SelectedCandidateGraph,
+    DagOfSelectedCandidates, PhysicalCandidateId, ReaderConstraint, SelectedEdge, SelectedNodeId,
 };
 pub use memo_candidates::{
     output_references, CandidateForMemoGroupId, OperatorNodeOfCandidateForMemoGroup,
     OperatorNodeOfCandidateForMemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate,
-    PruningMetrics,
+    PhysicalCandidateKey,
 };
-pub use suppliers::{
-    supplier_storage_metrics, SupplierCandidates, SupplierSetInterner, SupplierStorageMetrics,
+pub use producers::{
+    producer_storage_metrics, ProducerCandidates, ProducerSetInterner, ProducerStorageMetrics,
 };

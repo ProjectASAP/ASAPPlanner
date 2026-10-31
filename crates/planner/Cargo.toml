@@ -20,6 +20,10 @@ asap-frontend-sql = { path = "../frontend-sql" }
 asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-metricsql = { path = "../frontend-metricsql" }
 asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
+# The facade runs every stage: Stage 2's catalog and realizer, Stage 3's
+# `select_plan`, with the deployment's accuracy model.
+asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
+asap-accuracy = { path = "../accuracy" }
 # The Planner's own executor: `plan_installable` offers only the summary
 # families it runs when the caller leaves them unrestricted.
 asap-executor = { path = "../executor" }
@@ -33,9 +37,13 @@ thiserror = "2"
 test-support = ["asap-types/test-support"]
 
 [dev-dependencies]
+# The reference pricer over fixed candidate plans.
+asap-plan-selection = { path = "../plan-selection", features = ["reference-pricer"] }
 # The tests compare installed plans with `test_support::query_time_reference`.
 asap-planner = { path = ".", features = ["test-support"] }
 asap-physical-asap-optimization = { path = "../physical-asap-optimization", features = ["test-support"] }
+# Pass 1's target list (`per_computation_candidates`) for the tests.
+asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
 # The deployment accuracy model tests implement `AccuracyModel`.
 asap-accuracy = { path = "../accuracy", features = ["test-support"] }
 # The SQL frontend plans through DataFusion, which is async; `e2e_plan` is

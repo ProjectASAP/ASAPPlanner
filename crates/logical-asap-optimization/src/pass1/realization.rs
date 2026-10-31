@@ -39,7 +39,7 @@ const FAMILY_PREFERENCE: &[SketchAlgorithm] = &[
 /// statistic, in preference order, less UnivMon for a distinct-tuple
 /// count. Empty for an intent no sketch
 /// statistic serves.
-pub fn summary_candidates(intent: &AggIntent) -> Vec<SketchAlgorithm> {
+pub(crate) fn summary_candidates(intent: &AggIntent) -> Vec<SketchAlgorithm> {
     candidates_by(intent, FamilyCapability::of_per_instance_sketch)
 }
 

@@ -11,7 +11,7 @@
 //! guarantee says.
 
 use crate::OperandDomain;
-use asap_types::ir::properties::{AccuracyGuarantee, AccuracyTarget};
+use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric, AccuracyTarget};
 use asap_types::ir::{OperatorNode, QueryRoot};
 
 /// The deployment's accuracy decisions in plan selection: whether a
@@ -20,7 +20,7 @@ use asap_types::ir::{OperatorNode, QueryRoot};
 /// [`BuiltinAccuracyModel`]; a deployment with its own target check (a
 /// registered cross-metric conversion, say) or its own measurements
 /// implements this trait and passes it in
-/// `asap_plan_selection::PlanningModels::accuracy`.
+/// `asap_planner::PlanningModels::accuracy`.
 /// Guarantees are composed with the built-in rules only
 /// (`propagate`).
 pub trait AccuracyModel {
@@ -67,12 +67,26 @@ pub trait AccuracyModel {
     fn may_accept_regardless_of_guarantee(&self) -> bool {
         true
     }
+
+    /// Whether a guarantee stated in `metric` can meet `target` with some
+    /// error bound and failure probability, however small: Pass 1 prunes a
+    /// summary with which no reading query's output can. The default is
+    /// [`Self::satisfies`]'s built-in rule: an exact target accepts only an
+    /// exact output, and a target that sets a metric only a bound in that
+    /// metric (or an L2-scaled bound for an L1-scaled target). A model that
+    /// converts between metrics overrides it.
+    fn metric_can_meet(&self, metric: AccuracyMetric, target: &AccuracyTarget) -> bool {
+        !target.is_exact()
+            && target
+                .accuracy_metric
+                .is_none_or(|wanted| crate::metric_meets(metric, wanted))
+    }
 }
 
 /// The planner's built-in analytical rules as an [`AccuracyModel`]: the
 /// conservative target check `satisfies` makes, and no
 /// output accepted regardless of its guarantee.
-/// The default in `asap_plan_selection::PlanningModels::builtin`.
+/// The default in `asap_planner::PlanningModels::builtin`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BuiltinAccuracyModel;
 
@@ -89,7 +103,7 @@ impl AccuracyModel for BuiltinAccuracyModel {
 /// The deployment's planning-time accuracy evidence, read only by plan
 /// selection: enforced operand domains the propagation rules need, and
 /// empirical guarantees for whole query outputs. Passed in
-/// `asap_plan_selection::PlanningModels::evidence`.
+/// `asap_planner::PlanningModels::evidence`.
 pub trait AccuracyEvidenceProvider {
     /// Enforced domain of `operand`'s true values ([`OperandDomain`]), scoped
     /// to this complete expression, including its source, filters, grouping
@@ -121,12 +135,43 @@ pub trait AccuracyEvidenceProvider {
 }
 
 /// No deployment evidence: every operand domain and output guarantee is
-/// unknown. The default in `asap_plan_selection::PlanningModels::builtin`.
+/// unknown. The default in `asap_planner::PlanningModels::builtin`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoAccuracyEvidence;
 
 impl AccuracyEvidenceProvider for NoAccuracyEvidence {
     fn may_provide_evidence(&self) -> bool {
         false
+    }
+}
+
+/// Accepts every query output regardless of its guarantee, for comparing
+/// candidates on cost alone (e.g. a benchmark of sketch plans that have no
+/// analytical guarantee); [`Self::satisfies`] is the built-in rule. The
+/// facade passes it to plan selection when the caller asks to ignore
+/// accuracy guarantees (`PlanningModels::ignore_accuracy_guarantees`).
+/// Executability checks still run: Count-Min over update weights not proven
+/// non-negative is rejected. Each output accepted only because of it is
+/// marked in the report (`AcceptedAccuracy::guarantee_check_rejection`).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IgnoreAccuracyGuarantees;
+
+impl AccuracyModel for IgnoreAccuracyGuarantees {
+    fn satisfies(&self, guarantee: &AccuracyGuarantee, target: &AccuracyTarget) -> bool {
+        BuiltinAccuracyModel.satisfies(guarantee, target)
+    }
+
+    fn accepts_output_regardless_of_guarantee(
+        &self,
+        _output: &QueryRoot,
+        _target: &AccuracyTarget,
+    ) -> bool {
+        true
+    }
+
+    /// It accepts every output, so no candidate is discarded early for
+    /// its accuracy.
+    fn may_accept_regardless_of_guarantee(&self) -> bool {
+        true
     }
 }

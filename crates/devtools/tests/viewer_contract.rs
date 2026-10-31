@@ -277,8 +277,8 @@ fn viewer_categorizes_exactly_the_exported_node_kinds() {
     let asap = asap_samples();
     let expected: BTreeSet<&str> = non_asap
         .iter()
-        .map(NonASAPOp::kind_name)
-        .chain(asap.iter().map(ASAPOp::kind_name))
+        .map(|op| Operator::NonASAP(op.clone()).kind_name())
+        .chain(asap.iter().map(|op| Operator::ASAP(op.clone()).kind_name()))
         .collect();
     assert_eq!(
         expected.len(),
@@ -302,8 +302,10 @@ fn stages_js_strings(declaration: &str) -> BTreeSet<String> {
         .split_once(declaration)
         .unwrap_or_else(|| panic!("stages.js must declare {declaration}"))
         .1
-        .split_once("];")
-        .expect("the array must end with `];`")
+        // The array's own `]`: its strings hold none, and a `concat([...])`
+        // ends with `]);`, not `];`.
+        .split_once(']')
+        .expect("the array must end with `]`")
         .0;
     body.split('\'')
         .skip(1)
@@ -345,38 +347,28 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
     );
 
     let causes = [
-        C::FailureProbabilityResizeFailed,
         C::AccuracyTargetMissed,
         C::CountMinWeightsNotProvenNonNegative,
-        C::PerEntityAggregateNotExecutable,
         C::NoAccuracyGuarantee,
-        C::RawDataNotRetained,
         C::LatencyBoundExceeded,
         C::LatencyOverRepeatInterval,
         C::OverClusterCapacity,
         C::Costlier,
         C::Slower,
         C::MoreMemory,
-        C::NotLowestLatencyOnParetoFront,
-        C::Dominated,
         C::TiedLostOnEnumerationOrder,
     ];
     for cause in causes {
         match cause {
-            C::FailureProbabilityResizeFailed
-            | C::AccuracyTargetMissed
+            C::AccuracyTargetMissed
             | C::CountMinWeightsNotProvenNonNegative
-            | C::PerEntityAggregateNotExecutable
             | C::NoAccuracyGuarantee
-            | C::RawDataNotRetained
             | C::LatencyBoundExceeded
             | C::LatencyOverRepeatInterval
             | C::OverClusterCapacity
             | C::Costlier
             | C::Slower
             | C::MoreMemory
-            | C::NotLowestLatencyOnParetoFront
-            | C::Dominated
             | C::TiedLostOnEnumerationOrder => {}
         }
     }

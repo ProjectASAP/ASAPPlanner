@@ -65,10 +65,14 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
     let views = plan.materialized_views().unwrap();
     let output = views
         .iter()
-        .max_by_key(|output| output.inputs.raw_data_windows[0].bounds_ms(EVALUATION_MS).1)
+        .max_by_key(|output| {
+            output.inputs.raw_data_windows()[0]
+                .bounds_ms(EVALUATION_MS)
+                .1
+        })
         .unwrap();
     // The pane's window at this evaluation, `(start_ms, end_ms]`.
-    let (start_ms, end_ms) = output.inputs.raw_data_windows[0].bounds_ms(EVALUATION_MS);
+    let (start_ms, end_ms) = output.inputs.raw_data_windows()[0].bounds_ms(EVALUATION_MS);
     // Feed both series within the selected pane, whose width is an optimizer
     // decision. Keep distinct millisecond timestamps even for very fine panes.
     let width_ms = end_ms - start_ms;

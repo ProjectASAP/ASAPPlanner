@@ -87,8 +87,8 @@ To run it, see [RUNNING.md](RUNNING.md).
   origin when the step's memo lists the candidate; a group a choice does not
   name takes candidate 0). The selected choice is over the last memo step;
   when an earlier step was enumerated, the header says so and only each
-  row's own groups are compared. A row also shows `budget share < 1` when
-  a chosen candidate shares its budget, and, when priced, its cost and
+  row's own groups are compared. A row also shows `accuracy budget parts > 1`
+  when a chosen candidate is sized for a part of its budget, and, when priced, its cost and
   validity (`✗ invalid` with the cause). A row cheaper than the selected
   plan is red; the selected choice says `✓ selected`. Clicking a row draws
   its DAG in the Stage 1 lane; the document holds every listed choice's
@@ -222,45 +222,59 @@ are ignored, `stage_pipeline`'s default.
   "stage0_query_language_frontends": { "dag": "<flat logical DAG>" },
   "stage1_logical_asap_optimization": {
     "combinations": 9, "capped": false,
-    "pass1_pruned": [{ "target": 0, "query": "Q1",
-                       "pruned": [{ "candidate": "DDSketch", "reason": "UnsupportedByDeployment" }],
-                       "fused_pruned": [] }],
+    "pruned_candidates": [{ "group": 3, "candidate": "DDSketch", "reason": "UnsupportedByDeployment" }],
     "candidates": [{ "id": "L1", "display_name": "...", "dag": "<flat logical DAG>" },
                    { "id": "L2", "display_name": "...", "error": "..." }]
   },
   "stage2_physical_asap_optimization": {
     "candidates": [{ "id": "P1", "from_logical": "L1", "display_name": "...", "dag": "<PhysicalASAPDAG>" }],
-    "pruned": [{ "from_logical": "L3", "display_name": "...", "reason": "..." }]
+    "pruned": [{ "from_logical": "L3", "display_name": "...", "reason": "..." }],
+    "pruned_candidates": [{ "group": 1, "operator_node": 0, "operator": "Scan", "implementation_root": true,
+                            "timing": "query_time", "materialization": "NotMaterialized",
+                            "reason": "RawDataNotRetained" }]
   },
   "stage3_plan_selection": {
-    "costs": { "P1": { "cost_per_second": 7.9, "cpu_core_seconds_per_second": 0.0041,
-                       "unit": "cost_per_second", "source": "...",
-                       "usage": { "cpu_ops_per_second": 4100210.0, "scanned_bytes_per_second": 38400000.0,
-                                  "average_memory_bytes": 0.0, "peak_memory_bytes": 16481088,
-                                  "disk_bytes": 192000000, "peak_cpu_cores": 2,
-                                  "latency_per_query": [{ "compaction_ms": 0.0, "query_ms": 33.2 }] },
-                       "per_node": { "<node id>": { "operator": "Scan", "timing": "query_time",
-                                                     "cpu_core_seconds_per_second": 0.0012,
-                                                     "cost_per_second": 2.3, "multiplier": 1, "detail": "...",
-                                                     "price_source": "analytical" } } } },
-    "accepted": { "P1": [{ "target_metric": null, "accepted_metric": "rank", "sketches": ["Kll"],
-                           "summary": "metric not set; accepted rank (Kll)" }] },
-    "selected": "P1",
-    "rejected": [{ "id": "P2", "cause": "costlier", "reason": "..." }],
-    "search_rejected": [{ "id": "P5", "cause": "accuracy_target_missed", "reason": "..." }],
-    "rejected_by_cause": { "raw_data_not_retained": 533, "costlier": 12 },
+    "selected_dag": { "candidate_of_node": [3, 7], "edges": [{ "producer": 0, "consumer": 1, "input": 0 }],
+                      "node_of_output_reference": [1] },
+    "nodes_with_proven_non_negative_weights": [],
+    "cost": { "cost_per_second": 7.9, "cpu_core_seconds_per_second": 0.0041,
+              "cost_unit": "cost_per_second", "source": "...",
+              "usage": { "cpu_ops_per_second": 4100210.0, "scanned_bytes_per_second": 38400000.0,
+                         "average_memory_bytes": 0.0, "peak_memory_bytes": 16481088,
+                         "disk_bytes": 192000000, "peak_cpu_cores": 2,
+                         "latency_per_query": [{ "compaction_ms": 0.0, "query_ms": 33.2 }] },
+              "per_node": { "<node id>": { "operator": "Scan", "timing": "query_time",
+                                            "cpu_core_seconds_per_second": 0.0012,
+                                            "cost_per_second": 2.3, "multiplier": 1, "detail": "...",
+                                            "price_source": "analytical" } } },
+    "accepted_accuracy_per_query": [{ "target_metric": null, "accepted_metric": "rank", "sketches": ["Kll"],
+                                      "summary": "metric not set; accepted rank (Kll)" }],
+    "pruned_candidates": [],
+    "search_report": { "status": "optimal", "cost_lower_bound_per_second": 7.9,
+                       "milp_variables": 812, "milp_constraints": 1490,
+                       "model_construction_ms": 12, "solver_ms": 40, "validation_ms": 95 },
+    "pane_retention_ms": { "<node id>": 600000 },
     "materialized_views": [{ "node_id": 2, "refresh": "at_ingestion",
                              "coverage": { "definition_id": "98f2b35a…", "selection": ["..."] },
                              "inputs": { "raw_data_windows": [{ "source": { "TimeSeries": { "metric": "data" } },
                                                                 "end_offset_ms": 0, "width_ms": 20000 }],
                                          "materialized_views": [] },
                              "retention_ms": 600000,
-                             "stage2_node_id": 1, "installed_position": 0, "installed_count": 30 }],
-    "search": { "candidates_checked": 206, "components": [{ "queries": [0, 1], "candidates_checked": 204, "selected": "P61-m19" }],
-                "queries": [{ "candidates_checked": 3, "discarded": [{ "choice": [[4, 0]], "cause": "no_accuracy_guarantee", "reason": "..." }] }],
-                "searched_as_one": null, "raw_scan_assignments_skipped": 0, "raw_scan_candidates_skipped": 0,
-                "runner_up_cost_per_second": null },
-    "front": []
+                             "stage2_node_id": 1, "installed_position": 0, "installed_count": 30 }]
+  },
+  "planning_report": { "pass1_ms": 3.1, "selected_round": 1, "pane_widths_pending": false, "time_limit_ms": 30000,
+                       "rounds": [{ "pane_width_domain": "SeedGrids", "memo_groups": 12, "logical_candidates": 30,
+                                    "operator_nodes": 40, "physical_candidates": 96, "stage2_pruned_candidates": 4,
+                                    "pass2_ms": 1.2, "stage2_ms": 3.4, "stage3_ms": 150.0,
+                                    "search_report": { "...": "..." }, "error": null }] },
+  "reference_pricing": {
+    "cost_per_candidate": { "E1-0": { "...": "as stage3_plan_selection.cost" } },
+    "accepted_accuracy_per_candidate": { "E1-0": [{ "...": "as accepted_accuracy_per_query" }] },
+    "selected_candidate": "E1-0",
+    "pruned_candidates": [{ "candidate": "E2-0", "cause": "costlier", "reason": "..." }],
+    "pruned_candidates_not_enumerated": [],
+    "pruned_candidate_count_by_cause": { "accuracy_target_missed": 533, "costlier": 12 },
+    "pane_retention_ms": {}
   }
 }
 ```
@@ -276,21 +290,40 @@ are ignored, `stage_pipeline`'s default.
   δ). An approximate target without a metric also has
   `requirements.default_metric`, the metric the query's result is naturally
   stated in (null for a quantile), for display only.
-- `stage3_plan_selection.accepted` has, per shown valid candidate and query,
-  the metric the target set (null when not set) and the metric Stage 3
-  accepted (null for an exact output).
-- `costs` has, per shown valid candidate, its resource `usage` and its
-  `cost_per_second` under the run's cost model (`--cost-model`). A
-  candidate's `cost_per_second` is null under cost model 3, which has no
+- `stage3_plan_selection` is Stage 3's `Selection`: the selected DAG
+  (`selected_dag`: `candidate_of_node`, the selected round's Stage 2
+  candidate each node runs, one node per run; `edges`, node to node, per
+  `input`; `node_of_output_reference`), the nodes whose count-min weights
+  it proved non-negative, the selected plan's `cost`, the
+  accuracy it accepted per query (the metric the target set, null when not
+  set, and the metric Stage 3 accepted, null for an exact output), the
+  candidates it pruned and its `search_report`. The selected plan is shown
+  as the Stage 1 candidate `L1` and the Stage 2 candidate `P1`.
+- A `cost` has its resource `usage` and its `cost_per_second` under the
+  run's cost model (`--cost-model`): null under cost model 3, which has no
   prices; a node's is null under cost models 2 and 3, which price or limit
-  the whole candidate's peaks. `front` lists the Pareto front under cost
-  model 3's `pareto-front` objective, and is empty otherwise.
+  the whole plan's peaks.
+- `planning_report` is the facade's: Pass 1's time, then per pane-width
+  round its domain, Pass 2's and Stage 2's counts, each stage's time, and
+  Stage 3's search report or error; `selected_round` and whether some pane
+  widths were not searched (`pane_widths_pending`).
+- `reference_pricing` (only with `--exhaustive`) is the reference pricer
+  over the enumerated memo choices (`E<n>` logical, `E<n>-<k>` physical),
+  with keys named as Stage 3's `Selection` names its fields: per shown
+  candidate its cost (`cost_per_candidate`) and accepted accuracy
+  (`accepted_accuracy_per_candidate`), its pick `selected_candidate`, the
+  `pruned_candidates` and `pruned_candidate_count_by_cause`. The page lists
+  these candidates after `P1`, with the reference pricer's pick marked.
 - `deployment_capabilities` repeats the run's `--deployment-capabilities`
-  inputs with defaults filled in. `pass1_pruned` has, per Pass 1 target with
-  a pruned candidate, the target's index, the query it is listed under, and
-  each pruned candidate of the target (`pruned`) and of its fused
-  computation (`fused_pruned`) with the reason. The page does not show
-  either section yet.
+  inputs with defaults filled in. Each stage's
+  `pruned_candidates` lists what that stage removed, one entry per removed
+  candidate with its memo `group` and `reason` (`PruneReason`): Pass 1's
+  ways to compute a measure (`candidate`), and Stage 2's physical
+  candidates, keyed by `operator_node` (index into Stage 2's operator
+  nodes), `timing` and `materialization`, with the node's
+  `operator` label and whether it is an `implementation_root`. The Memo
+  view's group panel lists both for the selected group;
+  `deployment_capabilities` is not shown.
 - A node's `per_node` entry holds its `operator` (as the measured cost
   table names it), `timing` (`ingestion_time` or `query_time`), its
   predicted CPU in core-seconds per second (`cpu_core_seconds_per_second`),
@@ -299,14 +332,13 @@ are ignored, `stage_pipeline`'s default.
   names `plan_installable`'s predicted usage gives them. A candidate's
   `cpu_core_seconds_per_second` is its nodes' sum. These CPU fields are
   report-only: prices do not read them back.
-- Each `stage3_plan_selection.rejected` entry has a `cause`: a failed check
-  (`failure_probability_resize_failed`, `accuracy_target_missed`,
+- Each `reference_pricing.pruned_candidates` entry names its `candidate`
+  and has a `reason` and a `cause`: a failed check
+  (`accuracy_target_missed`,
   `count_min_weights_not_proven_non_negative`,
-  `per_entity_aggregate_not_executable`, `no_accuracy_guarantee`,
-  `raw_data_not_retained`, `latency_bound_exceeded`,
+  `no_accuracy_guarantee`, `latency_bound_exceeded`,
   `latency_over_repeat_interval`, `over_cluster_capacity`) or a loss under
   the cost model (`costlier`, `slower`, `more_memory`,
-  `not_lowest_latency_on_pareto_front`, `dominated`,
   `tied_lost_on_enumeration_order`).
 - `accuracy_guarantees` is `ignored` (`stage_pipeline`'s default: Stage 3
   accepts every query output regardless of its guarantee and compares the
@@ -317,16 +349,16 @@ are ignored, `stage_pipeline`'s default.
   `enforced` (`--enforce-accuracy-guarantees`, as `plan_installable` plans
   with the default `CostInputs`). The Stage 3 header shows it;
   an older document without it is still valid, any other value is not.
-- `search` is `candidate-connections`, or `exhaustive` for traversal of the
-  same finite catalog with evaluated plans and rejections archived. Exhaustive
-  mode is not an independent reference optimizer; time and evaluation budgets
-  still apply. `--max-combinations` bounds evaluated assignments.
-- `stage3_plan_selection.search.candidate_connections` reports catalog size,
-  objective, calibration scope, termination status, nullable lower bound/gap,
-  generation/model/solver/validation timings, and refinement counts. A timeout
-  incumbent is validated but does not certify unexplored candidates. Cluster
-  objectives can have no scalar lower bound. Historical committed documents
-  with old memo reports remain readable; those engines cannot be selected.
+- `search` is `candidate-connections`, or `exhaustive` when the document
+  also holds the reference enumeration (`reference_pricing`): the selected
+  round's memo choices, each implemented by Stage 2 with every
+  materialization assignment and all priced by the reference pricer.
+  `--max-combinations` bounds the choices enumerated.
+- `stage3_plan_selection.search_report` reports how the search ended
+  (`optimal` or `deadline_reached`), its cost lower bound when it has one,
+  the MILP's size and the model, solver and validation times. Historical
+  committed documents with the earlier Stage 3 section (`costs`,
+  `selected`, `rejected`, `search`) remain readable.
 - `stage3_plan_selection.warnings` holds one-line warnings about the
   workload and the selected plan: a PromQL query applying `rate`,
   `increase` or `irate` to a metric the data workload declares a gauge
@@ -334,10 +366,8 @@ are ignored, `stage_pipeline`'s default.
   plan's peak memory when over 10^12 bytes and the cost model declares no
   memory capacity; absent when there are none. The candidate list's header
   shows them.
-- `search_rejected` lists the rejections that name no candidate the
-  document holds: under the default search, the first rejection of each
-  cause (their candidates are not kept), and the search's own (e.g. `q2`
-  when every own candidate of that query was discarded). The page lists
+- `reference_pricing.pruned_candidates_not_enumerated` lists the reference
+  pricer's rejections that name no enumerated candidate. The page lists
   them after the other rows, not clickable.
 - `workload.data_workload` is the `DataWorkload` the run planned with
   (`arrival`, and per source exactly the `SourceFacts` fields). Labels,
@@ -354,14 +384,16 @@ are ignored, `stage_pipeline`'s default.
   nodes (a pane chain's panes, newest first) and `installed_count` their
   number. Empty without a selection; `materialized_views_error` says why when
   the plan is not installable.
-- `rejected_by_cause` counts the rejections by cause: every candidate's
-  under `--exhaustive`, the recorded ones under the default search.
+- `pruned_candidate_count_by_cause` counts the pruned candidates by cause,
+  over every enumerated candidate; the header lists the counts.
 - Under `--exhaustive` the document shows at most `--max-displayed`
   physical candidates: the selected one, the other valid ones cheapest
   first, then the rejected ones taking each cause in turn, and the Stage 1
   candidates they come from.
-- When Pass 1 fails, Stage 1 has `error` and no candidates. When selection
-  fails, `selected` is null, with the rejections or with `error`.
+- When Pass 1 fails, Stage 1 has `error` and no candidates. When Stage 3
+  selects no plan, `stage3_plan_selection` has `selected_dag: null` and
+  `error`; when the reference pricer selects none, its
+  `selected_candidate` is null, with the `pruned_candidates` or `error`.
 - `memo` (left out with `--no-memo`) is the memo the search built, from
   the planning round whose plan was selected: `nodes`, one node table for
   the whole section (each distinct logical node once, as in a flat logical
@@ -374,7 +406,7 @@ are ignored, `stage_pipeline`'s default.
   `node`, the group's node in `nodes`) and their candidates (`candidate_count`,
   `candidate_count_by_origin`, `candidates_capped`, and the first
   `--max-memo-candidates`, default 64, under `candidates`: `index`,
-  `implements`, `children`, `origin`, `budget_share`, `added`, `label`,
+  `implements`, `children`, `origin`, `accuracy_budget_parts`, `added`, `label`,
   `node`, and `group_of_node`: the `nodes` indices below it that are a
   child group's node, to that group's id); `selected_choice`, the selected plan's
   candidate index per group of the last step (null with

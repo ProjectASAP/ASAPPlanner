@@ -6,7 +6,8 @@
 //!
 //! Lowering is production's: the PromQL frontend, then each root with the
 //! series-identity column, as `Stage1ToStage3Pass` does. The memo is read from
-//! the production run's `Stage1ToStage3Run::memo_steps`.
+//! the production run's `PlanningRun::per_computation_candidates` (after
+//! Pass 1) and `PlanningRun::memo_steps` (the other steps).
 //!
 //! **Which round's memo.** The default search plans in rounds of growing
 //! pane-width domains and records the memo of the round whose plan it
@@ -22,34 +23,33 @@
 //! (`accuracy_budget_parts` 1) and the plans `compose_logical_candidate` builds from
 //! the Pass 1 inventory's assignments are not equal sets:
 //! - A whole-workload plan is a memo DAG exactly when targets that compute
-//!   the same thing take the same choice. With series identity the two
-//!   `quantile 0.5` are one memo group, which takes one candidate; the
-//!   inventory keeps a target for each and may give them different
-//!   summaries.
+//!   the same thing take the same choice and it takes no KLL. With series
+//!   identity the two `quantile 0.5` are one memo group, which takes one
+//!   candidate; the inventory keeps a target for each and may give them
+//!   different summaries. The inventory sizes a KLL per value; Pass 1 sizes
+//!   every memo KLL for the whole result (a failure probability below the
+//!   query's, divided over the source's series), so no KLL plan is in both.
 //! - A whole-budget memo DAG is a whole-workload plan exactly when it takes
-//!   no KLL sized for the whole result (Pass 1's accuracy-scoped candidates,
-//!   sized for a failure probability below the query's, which the inventory
-//!   does not offer).
+//!   no KLL sized for the whole result, that is, no KLL.
 //!
 //! The memo's other choices size an operand's summary for a share of the
 //! budget (a ratio's operands); the whole-workload path has no such plans.
+use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
 use std::rc::Rc;
 
 use asap_devtools::planning_stages::lower_promql_roots;
 use asap_integration_tests::planning::expanded_memo;
-use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    compose_logical_candidate, PerComputationCandidates,
+use asap_logical_asap_optimization::test_support::{
+    compose_logical_candidate, generate_per_computation_candidates, PerComputationCandidates,
 };
-use asap_logical_asap_optimization::pass2::memo::enumeration::{
+use asap_logical_asap_optimization::{
     build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
 };
-use asap_plan_selection::{
-    run_stage1_to_stage3_with, MemoSteps, PlanningModels, Stage1ToStage3Run, Stage1ToStage3Search,
-};
+use asap_planner::{run_planning, MemoSteps, PlanSearchSettings, PlanningModels, PlanningRun};
 use asap_types::ir::schema::{FieldDataType, SketchParams};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use asap_types::stages::{queries_rooted_at, MemoGroupId};
-use asap_types::stages::{CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{CandidateForMemoGroup, MemoCandidates, OriginOfCandidateForMemoGroup};
 use asap_types::workload::{PlanningWorkload, Query, RepeatedDemand, RepetitionInterval};
 
 const RATIO_OF_QUANTILES: &str = concat!(
@@ -87,48 +87,109 @@ fn with_queries(queries: &[&str], interval_ms: u32) -> PlanningWorkload {
 
 /// The frontend's roots, each with the series-identity column, as
 /// `Stage1ToStage3Pass` and `stage_pipeline` lower a PromQL workload.
-fn production_roots(workload: &PlanningWorkload) -> Vec<(usize, QueryRoot)> {
-    lower_promql_roots(workload)
-        .unwrap()
-        .into_iter()
-        .enumerate()
-        .collect()
+fn production_roots(workload: &PlanningWorkload) -> Vec<QueryRoot> {
+    lower_promql_roots(workload).unwrap()
 }
 
 /// The production run of Stages 1 to 3 over `workload`.
-fn production_run(
+fn production_run(workload: &PlanningWorkload, search: PlanSearchSettings) -> PlanningRun {
+    production_run_with(workload, search, PlanningModels::builtin())
+}
+
+/// [`production_run`] with `models`, keeping every stage's memo.
+fn production_run_with(
     workload: &PlanningWorkload,
-    search: Stage1ToStage3Search,
-) -> Stage1ToStage3Run<usize> {
+    search: PlanSearchSettings,
+    models: PlanningModels<'_>,
+) -> PlanningRun {
+    let search = PlanSearchSettings {
+        inspect: true,
+        ..search
+    };
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
     let roots = production_roots(workload);
-    run_stage1_to_stage3_with(roots, &entries, &data, PlanningModels::builtin(), search).unwrap()
+    run_planning(roots, &entries, &data, models, search).unwrap()
 }
 
-/// One round over the complete pane-width domain, without a time limit that
-/// a slow machine could reach.
-fn complete_domain_round() -> Stage1ToStage3Search {
-    Stage1ToStage3Search {
-        max_evaluations: Some(1),
-        milp_time_limit_ms: Some(3_600_000),
-        ..Stage1ToStage3Search::default()
+/// A deployment model that may accept an output whatever its guarantee, so
+/// Pass 1 prunes no summary for its target, and accepts none: Stage 3
+/// validates no plan, and the run records its last round's memo.
+struct AcceptsNoOutput;
+
+impl asap_accuracy::AccuracyModel for AcceptsNoOutput {
+    fn satisfies(
+        &self,
+        _guarantee: &asap_types::ir::properties::AccuracyGuarantee,
+        _target: &asap_types::ir::properties::AccuracyTarget,
+    ) -> bool {
+        false
     }
 }
 
-fn memo_steps(run: &Stage1ToStage3Run<usize>) -> &MemoSteps {
+/// Rounds up to the complete pane-width domain, with a time limit a slow
+/// machine's Pass 2 does not reach. Stage 3 may use the whole budget: when
+/// it validates no plan, it searches until the deadline; the memo steps are
+/// recorded either way.
+fn complete_domain_round() -> PlanSearchSettings {
+    PlanSearchSettings {
+        time_limit_ms: Some(90_000),
+        ..PlanSearchSettings::default()
+    }
+}
+
+fn memo_steps(run: &PlanningRun) -> &MemoSteps {
     run.memo_steps
         .as_ref()
         .expect("a planning round recorded its memo within the time budget")
 }
 
-fn candidate_count(memo: &CandidateMemo) -> usize {
+/// The memo after Pass 1.
+fn pass1_memo(run: &PlanningRun) -> &MemoCandidates {
+    &run.per_computation_candidates
+        .as_ref()
+        .expect("Pass 1's output")
+        .memo
+}
+
+/// Pass 1's target list for `workload`, pruned as the facade's Pass 1
+/// prunes it under `models`.
+fn pass1_inventory(
+    workload: &PlanningWorkload,
+    models: &PlanningModels<'_>,
+) -> PerComputationCandidates {
+    let roots = production_roots(workload);
+    let inventory =
+        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+            .unwrap()
+            .without_unsupported_summaries(
+                models
+                    .deployment_capabilities
+                    .supported_summaries
+                    .as_deref(),
+            );
+    let accuracy = models.accuracy_check_inputs();
+    if accuracy.model.may_accept_regardless_of_guarantee()
+        || accuracy.evidence.may_provide_evidence()
+    {
+        return inventory;
+    }
+    let targets: Vec<_> = workload
+        .query_workload
+        .entries()
+        .map(|entry| entry.requirements.accuracy.clone())
+        .collect();
+    let data = workload.data_workload.clone().unwrap_or_default();
+    inventory.without_summaries_no_query_can_use(&targets, &data, accuracy.model)
+}
+
+fn candidate_count(memo: &MemoCandidates) -> usize {
     memo.candidates.iter().map(Vec::len).sum()
 }
 
 /// Every plan the whole-workload path composes from the inventory: one per
 /// assignment of each target's choices, with the assignment.
-fn whole_workload_plans(inventory: &PerComputationCandidates<usize>) -> Vec<(Vec<usize>, Plan)> {
+fn whole_workload_plans(inventory: &PerComputationCandidates) -> Vec<(Vec<usize>, Plan)> {
     let counts: Vec<_> = inventory.targets.iter().map(|t| t.choice_count()).collect();
     let total: usize = counts.iter().product();
     (0..total)
@@ -147,7 +208,7 @@ fn whole_workload_plans(inventory: &PerComputationCandidates<usize>) -> Vec<(Vec
             let roots = compose_logical_candidate(inventory, &choice).ok()?;
             let plan = roots
                 .into_iter()
-                .map(|(_, root)| match root {
+                .map(|root| match root {
                     QueryRoot::Operator(node) => node,
                     QueryRoot::Scalar(_) => panic!("operator roots only"),
                 })
@@ -158,7 +219,7 @@ fn whole_workload_plans(inventory: &PerComputationCandidates<usize>) -> Vec<(Vec
 }
 
 /// `choice`'s DAG, one root per query.
-fn composed(memo: &CandidateMemo, choice: &ChosenCandidatePerMemoGroup) -> Plan {
+fn composed(memo: &MemoCandidates, choice: &ChosenCandidatePerMemoGroup) -> Plan {
     let mut roots = build_logical_asap_dags_from_chosen_candidates(memo, choice)
         .expect("an enumerated choice composes");
     roots.sort_by_key(|(group, _)| {
@@ -170,7 +231,7 @@ fn composed(memo: &CandidateMemo, choice: &ChosenCandidatePerMemoGroup) -> Plan 
 }
 
 fn chosen<'a>(
-    memo: &'a CandidateMemo,
+    memo: &'a MemoCandidates,
     choice: &'a ChosenCandidatePerMemoGroup,
 ) -> impl Iterator<Item = &'a CandidateForMemoGroup> {
     choice
@@ -198,10 +259,9 @@ fn kll(candidate: &CandidateForMemoGroup) -> Vec<(u32, Option<f64>)> {
         .collect()
 }
 
-/// Pass 1's accuracy-scoped candidate: a KLL sized for the whole result, at
-/// the query's failure probability divided over the source's series (1e-7
-/// here), far below what a per-value KLL is sized for (the query's, or half
-/// of it).
+/// A KLL Pass 1 sized for the whole result, at the query's failure
+/// probability divided over the source's series (1e-7 here), far below what
+/// a per-value KLL is sized for (the query's, or half of it).
 fn sized_for_whole_result(candidate: &CandidateForMemoGroup) -> bool {
     kll(candidate)
         .iter()
@@ -212,9 +272,10 @@ fn sized_for_whole_result(candidate: &CandidateForMemoGroup) -> bool {
 /// whole-budget DAGs and the whole-workload plans; returns (memo choices,
 /// whole-budget ones, whole-workload plans, plans in both).
 fn assert_pass1_memo_and_whole_workload_plans(
-    run: &Stage1ToStage3Run<usize>,
+    run: &PlanningRun,
+    inventory: &PerComputationCandidates,
 ) -> (usize, usize, usize, usize) {
-    let memo = &memo_steps(run).pass1;
+    let memo = pass1_memo(run);
     let enumeration = enumerate(memo, 100_000);
     assert!(enumeration.complete);
     let plans: Vec<_> = enumeration
@@ -231,21 +292,28 @@ fn assert_pass1_memo_and_whole_workload_plans(
         .zip(&plans)
         .filter(|(choice, _)| chosen(memo, choice).all(|c| c.accuracy_budget_parts == 1))
         .collect();
-    let inventory = &run.stage1_pass1_per_computation;
     let whole = whole_workload_plans(inventory);
     // Targets that compute the same thing.
     let same: Vec<(usize, usize)> = (0..inventory.targets.len())
         .flat_map(|a| (a + 1..inventory.targets.len()).map(move |b| (a, b)))
         .filter(|&(a, b)| {
             let (a, b) = (&inventory.targets[a], &inventory.targets[b]);
-            a.aggregate == b.aggregate && a.measure_index == b.measure_index
+            inventory.aggregate(a) == inventory.aggregate(b) && a.measure_index == b.measure_index
         })
         .collect();
+    let takes_kll = |plan: &Plan| {
+        plan.iter().flat_map(OperatorNode::reachable).any(|node| {
+            matches!(node.asap(), Some(ASAPOp::SummaryAgg {
+                family: FieldDataType::Sketch(kind, _), ..
+            }) if matches!(kind.params(), SketchParams::Kll { .. }))
+        })
+    };
     for (assignment, plan) in &whole {
         assert_eq!(
             whole_budget.iter().any(|(_, p)| *p == plan),
-            same.iter().all(|&(a, b)| assignment[a] == assignment[b]),
-            "a whole-workload plan is a memo DAG when equal targets choose alike"
+            same.iter().all(|&(a, b)| assignment[a] == assignment[b]) && !takes_kll(plan),
+            "a whole-workload plan is a memo DAG when equal targets choose alike \
+             and it takes no (per-value) KLL"
         );
         assert!(
             !plans.iter().any(|p| p == plan) || whole_budget.iter().any(|(_, p)| *p == plan),
@@ -268,30 +336,41 @@ fn assert_pass1_memo_and_whole_workload_plans(
 }
 
 /// The example's memo after each production step, and the `accuracy_budget_parts`
-/// of the state-configuration rule's rewrites (one test: one 11 s run).
+/// of the state-configuration rule's rewrites (one test: one planning run).
 #[test]
 fn ratio_of_quantiles_production_memo() {
-    let run = production_run(&ratio_of_quantiles(), complete_domain_round());
+    // With the built-in model, Pass 1 prunes every summary of the quantile
+    // groups: no query has a guarantee through `/` and `+` over a KLL rank
+    // error or a DDSketch relative one. The memo below is planned with a
+    // model that prunes none and accepts no output, so its summaries stay
+    // and its last round, over the complete pane-width domain, is recorded.
+    let enforced = production_run(&ratio_of_quantiles(), PlanSearchSettings::default());
+    assert_eq!(candidate_count(pass1_memo(&enforced)), 7);
+    let models = PlanningModels::builtin().with_accuracy(&AcceptsNoOutput);
+    let run = production_run_with(&ratio_of_quantiles(), complete_domain_round(), models);
     let steps = memo_steps(&run);
-    // Stage 0: series identity makes the two `quantile 0.5` one group.
-    assert_eq!(steps.stage0.groups.len(), 7);
-    assert_eq!(candidate_count(&steps.stage0), 0);
-    // Pass 1: the two quantile groups have 7 candidates each, 4 for the
-    // whole budget (exact, KLL per value, DDSketch, KLL for the whole
-    // result) and 3 for half of it; the other 5 groups one each.
-    assert_eq!(steps.pass1.groups.len(), 7);
-    assert_eq!(candidate_count(&steps.pass1), 19);
-    // 7 × 7 choices, 4 × 4 of them for the whole budget. The inventory has
-    // 3 × 3 × 3 assignments (a target per `quantile 0.5`, 3 choices each):
-    // the 3 × 3 that give both `quantile 0.5` the same choice are memo DAGs.
+    // Stage 0 (Pass 1's groups): series identity makes the two
+    // `quantile 0.5` one group.
+    // Pass 1: the two quantile groups have 5 candidates each, 3 for the
+    // whole budget (exact, DDSketch, KLL sized for the whole result) and 2
+    // for half of it; the other 5 groups one each.
+    assert_eq!(pass1_memo(&run).groups.len(), 7);
+    assert_eq!(candidate_count(pass1_memo(&run)), 15);
+    // 5 × 5 choices, 3 × 3 of them for the whole budget. The inventory has
+    // 3 × 3 assignments (one target per quantile group and measure, so the
+    // two `quantile 0.5` share one, 3 choices each): the 2 × 2 that take no
+    // KLL are memo DAGs.
     assert_eq!(
-        assert_pass1_memo_and_whole_workload_plans(&run),
-        (49, 16, 27, 9)
+        assert_pass1_memo_and_whole_workload_plans(
+            &run,
+            &pass1_inventory(&ratio_of_quantiles(), &models)
+        ),
+        (25, 9, 9, 4)
     );
     // The last step, over the complete pane-width domain.
     let last = &steps.concrete_states;
-    assert_eq!(last.groups.len(), 438);
-    assert_eq!(candidate_count(last), 2158);
+    assert_eq!(last.groups.len(), 255);
+    assert_eq!(candidate_count(last), 1243);
     let enumeration = enumerate(last, 2_000);
     assert!(!enumeration.complete);
     assert_eq!(enumeration.all_chosen_candidates.len(), 2_000);
@@ -304,16 +383,17 @@ fn ratio_of_quantiles_production_memo() {
     }
     // The state-configuration rule rewrites a candidate's KLL to the size
     // the readers of a state share; the rewrite is a copy of the candidate
-    // (`derive` in `pass2/memo/rules/shared_configuration_readers.rs`), so it keeps its
-    // `accuracy_budget_parts`. In each quantile group the `accuracy_budget_parts` 1 KLL `k` 567
-    // (sized for the whole result) gets copies at `k` 567, 1156 and 1184,
-    // all with `accuracy_budget_parts` 1; the `accuracy_budget_parts` 2 KLL `k` 1184 keeps 2.
-    // The `k` 1184 copy with `accuracy_budget_parts` 1 composes the same DAG as the
-    // `accuracy_budget_parts` 2 candidate: one sketch, sized for half the budget,
-    // which also meets the whole budget, so the label is sound.
-    let pass1 = &steps.pass1;
+    // (`derive` in `pass2/memo/rules/shared_configuration_readers.rs`) with
+    // the `accuracy_budget_parts` its new size was made for. In each quantile
+    // group the `accuracy_budget_parts` 1 KLL `k` 567 (sized for the whole
+    // result) gets copies at `k` 567 (parts 1) and 1184 (parts 2, the size of
+    // the half-budget KLL); the `accuracy_budget_parts` 2 KLL `k` 1184 keeps
+    // 2. The `k` 1184 copy composes the same DAG as the original
+    // `accuracy_budget_parts` 2 candidate: one sketch, sized for half the
+    // budget.
+    let pass1 = pass1_memo(&run);
     let quantile_groups: Vec<_> = (0..pass1.groups.len())
-        .filter(|&group| pass1.candidates[group].len() == 7)
+        .filter(|&group| pass1.candidates[group].len() == 5)
         .collect();
     assert_eq!(quantile_groups.len(), 2);
     for group in quantile_groups {
@@ -324,42 +404,32 @@ fn ratio_of_quantiles_production_memo() {
                 .filter_map(|c| kll(c).first().map(|&(k, _)| (k, c.accuracy_budget_parts)))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(
-            sizes(&pass1.candidates[group]),
-            [(345, 1), (746, 2), (567, 1), (1184, 2)]
-        );
+        assert_eq!(sizes(&pass1.candidates[group]), [(567, 1), (1184, 2)]);
         let candidates = &last.candidates[group];
         assert_eq!(
             sizes(candidates),
-            [
-                (345, 1),
-                (746, 2),
-                (567, 1),
-                (1184, 2),
-                (567, 1),
-                (1156, 1),
-                (1184, 1)
-            ]
+            [(567, 1), (1184, 2), (567, 1), (1184, 2)]
         );
-        let at = |k: u32, share: usize| {
-            candidates
-                .iter()
-                .position(|c| {
-                    c.origin == OriginOfCandidateForMemoGroup::Pass1
-                        && c.accuracy_budget_parts == share
-                        && kll(c).first().is_some_and(|&(kk, _)| kk == k)
-                })
-                .unwrap()
-        };
+        let at_k: Vec<usize> = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.origin == OriginOfCandidateForMemoGroup::Pass1
+                    && kll(c).first().is_some_and(|&(k, _)| k == 1184)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(at_k.len(), 2);
         let alone = |index: usize| composed(last, &[(MemoGroupId(group as u32), index)].into());
-        assert_eq!(alone(at(1184, 1)), alone(at(1184, 2)));
+        assert_eq!(alone(at_k[0]), alone(at_k[1]));
     }
 }
 
-/// On the three-query workload, the same relation: the inventory's 3 × 3
-/// assignments are all memo DAGs; the memo's 4 × 4 whole-budget DAGs add
-/// the KLL sized for the whole result. Pass 1 is the same in every round,
-/// so the default search will do.
+/// On the three-query workload, the same relation: the memo's 3 × 3
+/// whole-budget DAGs and the inventory's 3 × 3 assignments share the 2 × 2
+/// that take no KLL (the memo's is sized for the whole result, the
+/// inventory's per value). Pass 1 is the same in every round, so the
+/// default search will do.
 #[test]
 fn shared_quantiles_pass1_memo_and_whole_workload_plans() {
     let workload = with_queries(
@@ -370,18 +440,23 @@ fn shared_quantiles_pass1_memo_and_whole_workload_plans() {
         ],
         60_000,
     );
-    let run = production_run(&workload, Stage1ToStage3Search::default());
+    let run = production_run(&workload, PlanSearchSettings::default());
     assert_eq!(
-        assert_pass1_memo_and_whole_workload_plans(&run),
-        (16, 16, 9, 9)
+        assert_pass1_memo_and_whole_workload_plans(
+            &run,
+            &pass1_inventory(&workload, &PlanningModels::builtin())
+        ),
+        (9, 9, 9, 4)
     );
 }
 
-/// Candidates may read each other: a coarse quantile's rollup reads the finer
-/// grouping, whose candidates may read the coarse one. A choice taking both
-/// composes no DAG: `build_logical_asap_dags_from_chosen_candidates` says so, and `enumerate` leaves it out. The
-/// memo is built from production's roots on the seed grids, without the
-/// search: the pair, not the counts, is what this checks.
+/// Pass 2 rejects a memo whose groups read each other, a group reading
+/// itself included, so production's memo (coarse and fine quantiles, whose
+/// rollups read the finer grouping) has a dependency order and every choice
+/// `enumerate` returns composes. A cycle made by hand, a child candidate
+/// reading back the group that reads it, composes no DAG:
+/// `build_logical_asap_dags_from_chosen_candidates` says so. The memo is
+/// built from production's roots on the seed grids, without the search.
 #[test]
 fn choices_whose_candidates_read_each_other_are_left_out() {
     let workload = with_queries(
@@ -394,29 +469,40 @@ fn choices_whose_candidates_read_each_other_are_left_out() {
         10_000,
     );
     let entries: Vec<_> = workload.query_workload.entries().collect();
-    let memo = &expanded_memo(production_roots(&workload), &entries);
-    let mutual = (0..memo.groups.len())
+    let memo = expanded_memo(production_roots(&workload), &entries);
+    assert!(memo.topological_order().is_some());
+    for (group, candidates) in memo.candidates.iter().enumerate() {
+        for candidate in candidates {
+            assert!(!candidate.input_groups.contains(&MemoGroupId(group as u32)));
+        }
+    }
+    let enumeration = enumerate(&memo, 2_000);
+    assert!(!enumeration.all_chosen_candidates.is_empty());
+    for choice in &enumeration.all_chosen_candidates {
+        build_logical_asap_dags_from_chosen_candidates(&memo, choice).unwrap();
+    }
+
+    let (group, index, child) = (0..memo.groups.len())
         .flat_map(|group| (0..memo.candidates[group].len()).map(move |index| (group, index)))
         .find_map(|(group, index)| {
             memo.candidates[group][index]
                 .input_groups
-                .iter()
-                .find_map(|&child| {
-                    memo.candidates[child.0 as usize]
-                        .iter()
-                        .position(|c| c.input_groups.contains(&MemoGroupId(group as u32)))
-                        .map(|back| (child, back))
-                })
-                .map(|(child, back)| [(MemoGroupId(group as u32), index), (child, back)])
+                .first()
+                .map(|&child| (MemoGroupId(group as u32), index, child))
         })
-        .expect("a pair of groups whose candidates read each other");
+        .expect("a candidate reading another group");
+    let mut cyclic = memo.clone();
+    let mut back = cyclic.candidates[child.0 as usize][0].clone();
+    back.root_node = Rc::clone(&cyclic.groups[group.0 as usize].logical_node);
+    back.input_groups = vec![group];
+    cyclic.candidates[child.0 as usize].push(back);
+    let back_index = cyclic.candidates[child.0 as usize].len() - 1;
+    assert_eq!(cyclic.topological_order(), None);
     assert!(matches!(
-        build_logical_asap_dags_from_chosen_candidates(memo, &mutual.into()),
-        Err(asap_logical_asap_optimization::pass2::memo::enumeration::ErrorBuildingLogicalASAPDagsFromChosenCandidates::Cycle { .. })
+        build_logical_asap_dags_from_chosen_candidates(
+            &cyclic,
+            &[(group, index), (child, back_index)].into()
+        ),
+        Err(asap_logical_asap_optimization::ErrorBuildingLogicalASAPDagsFromChosenCandidates::Cycle { .. })
     ));
-    let enumeration = enumerate(memo, 2_000);
-    assert!(!enumeration.all_chosen_candidates.is_empty());
-    for choice in &enumeration.all_chosen_candidates {
-        build_logical_asap_dags_from_chosen_candidates(memo, choice).unwrap();
-    }
 }

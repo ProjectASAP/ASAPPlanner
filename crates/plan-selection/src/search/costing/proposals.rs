@@ -13,7 +13,7 @@ use asap_types::physical::Materialization;
 
 use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
 use crate::search::refinement::planner::CandidatePlanningContext;
-use crate::{price_node, PricedNode, ProducerOutput};
+use asap_cost::{node_usage, NodeUsage, ProducerOutput};
 
 /// Partial heuristic estimates are harmless: unknown or interrupted entries
 /// remain zero, and the surrounding search still enforces its shared deadline.
@@ -46,14 +46,14 @@ pub(in crate::search) fn estimate_costs(
                 [(&entry.recurrence, entry.range_evaluation)],
                 context
                     .models
-                    .plan_selection
+                    .cost_inputs
                     .non_repeating_query_horizon_seconds,
             )
             .ok()
         })
         .reduce(f64::min)
         .unwrap_or(0.0);
-    let mut prices: Vec<Option<PricedNode<'_>>> = Vec::with_capacity(templates.nodes.len());
+    let mut prices: Vec<Option<NodeUsage<'_>>> = Vec::with_capacity(templates.nodes.len());
     for (id, node) in templates.nodes.iter().enumerate() {
         if expired(context.deadline) {
             break;
@@ -73,15 +73,15 @@ pub(in crate::search) fn estimate_costs(
             })
             .collect();
         prices.push(producers.and_then(|producers| {
-            price_node(
+            node_usage(
                 node,
                 &producers,
                 (1, rate),
-                crate::trailing_window(templates.lookbacks[id]),
+                asap_cost::trailing_window(templates.lookbacks[id]),
                 1,
                 None,
                 context.data,
-                context.models.plan_selection,
+                context.models.cost_inputs,
                 context.calibration.factor(),
             )
             .ok()
@@ -126,7 +126,7 @@ impl TemplateCatalog {
         };
         let lookback = match node.asap() {
             // Query-time construction reads all panes' source rows. Reuse the
-            // compact PaneChain formula in price_node without expanding panes.
+            // compact PaneChain formula in asap_cost::node_usage without expanding panes.
             Some(ASAPOp::PaneChain {
                 pane_width_ms,
                 pane_count,
@@ -180,11 +180,11 @@ mod tests {
     use super::*;
     use crate::search::candidates::configurations::enumerate_candidate_configurations;
     use crate::search::candidates::inventory::build_candidate_inventory;
-    use crate::PlanningModels;
+    use crate::SelectionModels;
     use asap_cost::CalibrationFit;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
+    use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
+    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
+    use asap_logical_asap_optimization::test_support::try_populate_pass1;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
@@ -200,12 +200,12 @@ mod tests {
             "quantile_over_time(0.9, data[5m])",
             target.clone(),
         ))];
-        let identified = roots.iter().cloned().enumerate().collect::<Vec<_>>();
-        let initial = DagOfLogicalMemoGroups::from_roots(&identified);
+        let initial = generate_dag_of_logical_memo_groups(&roots);
         let output = *initial.query_roots[0].as_operator().unwrap();
         let memo = try_populate_pass1(
             initial,
-            &generate_per_computation_candidates(identified).unwrap(),
+            &generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap(),
         )
         .unwrap();
         let inventory = build_candidate_inventory(&memo, &[output], |_| Ok(0.0)).unwrap();
@@ -239,20 +239,20 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let models = PlanningModels::builtin();
+        let models = SelectionModels::builtin();
         let mut configured = enumerate_candidate_configurations(
             &inventory,
             &[0],
             &entries,
             &data,
-            models.deployment_capabilities,
+            &asap_logical_asap_optimization::DeploymentCapabilities::default(),
         )
         .unwrap();
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
             models,

@@ -3,6 +3,7 @@
 //! uses exact evaluator atoms. Retained state carries separate standing charges.
 //! Profiles are supplied by physical costing; this module never infers prices
 //! from a logical template or treats accuracy as a monetary penalty.
+use crate::search::candidates::graph::{QueryRootAssignment, SelectedCandidateGraph};
 use good_lp::{constraint, variable, Constraint, Expression, ProblemVariables, Variable};
 use std::collections::BTreeMap;
 
@@ -16,13 +17,13 @@ mod schedule_selection_tests;
 pub(crate) use general_schedule_rates::QueryScheduleRates;
 
 use crate::search::candidates::dag::*;
-use asap_types::stages::*;
+use crate::search::candidates::graph::ProducerConsumerConnection;
 
 /// Smallest/largest monetary coefficient ratio after lifetime normalization.
 /// The minimum is scaled to one; no positive cost is rounded away.
 pub(super) const MINIMUM_DIRECT_RELATIVE_COEFFICIENT: f64 = 1e-12;
 
-// Weighted-lifetime equalities use dimensionless rates. Their small entries
+// Held-time terms weight lifetimes by dimensionless rates. Their small entries
 // need a stronger guard than monetary objective coefficients, since absolute
 // LP feasibility tolerances can erase a rare reader's otherwise large cost.
 const MINIMUM_QUERY_RATE_WEIGHT: f64 = 1e-6;
@@ -95,7 +96,7 @@ impl DirectCostProfile {
         }
         for (consumer, candidate) in graph.candidates.iter().enumerate() {
             for producer in candidate
-                .supplier_candidates_per_input
+                .producer_candidates_per_input
                 .iter()
                 .flat_map(|input| input.candidates.iter())
             {
@@ -133,8 +134,7 @@ impl DirectCostProfile {
                 .any(|rate| *rate > 0.0 && rate / total_rate < MINIMUM_QUERY_RATE_WEIGHT)
             {
                 return Err(CandidateSelectionError::UnsupportedDirectCost(
-                    "query-rate weights are below the supported weighted-lifetime numerical range"
-                        .into(),
+                    "query-rate weights are below the supported held-time numerical range".into(),
                 ));
             }
         }
@@ -180,7 +180,7 @@ impl DirectCostProfile {
                     .map(|rate| rate / total)
                     .fold(1.0, f64::min)
             });
-            // Heterogeneous mean-lifetime rows multiply these coefficients;
+            // Per-consumer held-time terms multiply these coefficients;
             // checking each factor separately would miss their small product.
             if minimum.is_some_and(|term| {
                 term / maximum_latency * minimum_rate_weight < MINIMUM_NORMALIZED_LATENCY_TERM
@@ -248,25 +248,43 @@ impl DirectCostProfile {
                 schedule.union_rate(reached.iter().map(|row| row[id]))
             }
         };
+        // The longest latency of the queries reaching each node.
+        let longest = |id: usize| {
+            reached
+                .iter()
+                .zip(&latency)
+                .filter(|(row, _)| row[id])
+                .map(|(_, latency)| *latency)
+                .fold(0.0, f64::max)
+        };
+        // Per unmaterialized node, its executions per second and its held
+        // time per second: each consumer (a query, or a materialized node)
+        // computes its own copy at its rate and holds it for its query's
+        // latency, or for the materialized node's longest reader's.
         let mut execution_rates = vec![0.0; self.nodes.len()];
+        let mut held_seconds = vec![0.0; self.nodes.len()];
         let boundaries = selected
             .query_roots
             .iter()
-            .map(|root| (vec![root.candidate.0], rates[root.query_root]))
+            .map(|root| {
+                let query = root.query_root;
+                (vec![root.candidate.0], rates[query], latency[query])
+            })
             .chain(
                 selected
                     .selected_candidates
                     .iter()
                     .filter(|id| self.nodes[id.0].materialized)
-                    .map(|id| (inputs[id.0].clone(), union_rate(id.0))),
+                    .map(|id| (inputs[id.0].clone(), union_rate(id.0), longest(id.0))),
             );
-        for (mut pending, rate) in boundaries {
+        for (mut pending, rate, lifetime) in boundaries {
             let mut seen = vec![false; self.nodes.len()];
             while let Some(id) = pending.pop() {
                 if self.nodes[id].materialized || std::mem::replace(&mut seen[id], true) {
                     continue;
                 }
                 execution_rates[id] += rate;
+                held_seconds[id] += rate * lifetime;
                 pending.extend(&inputs[id]);
             }
         }
@@ -274,34 +292,15 @@ impl DirectCostProfile {
         let mut raw = BTreeMap::<&str, f64>::new();
         for id in &selected.selected_candidates {
             let node = &self.nodes[id.0];
-            let readers: Vec<_> = reached
-                .iter()
-                .enumerate()
-                .filter(|(_, row)| row[id.0])
-                .map(|(q, _)| latency[q])
-                .collect();
-            let execution_rate = if node.materialized {
-                union_rate(id.0)
+            let (execution_rate, held_seconds) = if node.materialized {
+                let rate = union_rate(id.0);
+                (rate, rate * longest(id.0))
             } else {
-                execution_rates[id.0]
-            };
-            let lifetime = if node.materialized {
-                readers.iter().copied().fold(0.0, f64::max)
-            } else {
-                let reader_rates = reached.iter().enumerate().filter(|(_, row)| row[id.0]);
-                let denominator: f64 = reader_rates.clone().map(|(q, _)| rates[q]).sum();
-                if denominator > 0.0 {
-                    reader_rates
-                        .map(|(q, _)| rates[q] * latency[q])
-                        .sum::<f64>()
-                        / denominator
-                } else {
-                    readers.iter().copied().fold(0.0, f64::max)
-                }
+                (execution_rates[id.0], held_seconds[id.0])
             };
             total += node.standing_cost_per_second
-                + execution_rate
-                    * (node.execution_cost + node.held_memory_cost_per_second * lifetime);
+                + execution_rate * node.execution_cost
+                + node.held_memory_cost_per_second * held_seconds;
             if let Some((source, cost)) = &node.raw_retention {
                 let value = raw.entry(source).or_default();
                 *value = value.max(*cost);
@@ -310,7 +309,7 @@ impl DirectCostProfile {
         total + raw.values().sum::<f64>()
     }
 
-    /// Sum all required input roles, but take the maximum compatible supplier
+    /// Sum all required input roles, but take the maximum compatible producer
     /// for each role. This bounds every selected DAG (shared work may be counted
     /// twice) without summing mutually exclusive catalog choices. Potential
     /// cycles conservatively use the old all-node sum, never a cyclic DP value.
@@ -323,7 +322,7 @@ impl DirectCostProfile {
                 continue;
             }
             for supplier in candidate
-                .supplier_candidates_per_input
+                .producer_candidates_per_input
                 .iter()
                 .flat_map(|input| input.candidates.iter())
             {
@@ -339,7 +338,7 @@ impl DirectCostProfile {
             if !self.nodes[id].ingestion {
                 bounds[id] = self.nodes[id].query_work_seconds()
                     + graph.candidates[id]
-                        .supplier_candidates_per_input
+                        .producer_candidates_per_input
                         .iter()
                         .map(|input| {
                             input
@@ -455,7 +454,7 @@ fn boundary_flows(
             graph.query_roots[boundary].candidates.clone()
         } else {
             graph.candidates[boundary - queries]
-                .supplier_candidates_per_input
+                .producer_candidates_per_input
                 .iter()
                 .flat_map(|input| input.candidates.iter().copied())
                 .collect()
@@ -467,7 +466,7 @@ fn boundary_flows(
             }
             pending.extend(
                 graph.candidates[id.0]
-                    .supplier_candidates_per_input
+                    .producer_candidates_per_input
                     .iter()
                     .flat_map(|input| input.candidates.iter().copied()),
             );
@@ -612,9 +611,7 @@ pub(super) fn encode(
         reach,
         &check_deadline,
     )?;
-    let mut boundary_count = vec![Expression::from(0.0); count];
-    let mut boundary_limit = vec![0usize; count];
-    for flow in boundary_flows(
+    let flows = boundary_flows(
         graph,
         profile,
         variables,
@@ -623,14 +620,31 @@ pub(super) fn encode(
         edges,
         roots,
         &check_deadline,
-    )? {
-        for (id, reached) in flow.reached.into_iter().enumerate() {
+    )?;
+    let mut boundary_count = vec![Expression::from(0.0); count];
+    for flow in &flows {
+        for (id, reached) in flow.reached.iter().enumerate() {
             if let Some(reached) = reached {
-                boundary_count[id] += reached;
-                boundary_limit[id] += 1;
+                boundary_count[id] += *reached;
             }
         }
     }
+    // Each materialized node's longest reader's latency, built on first use.
+    let mut longest_of: BTreeMap<usize, Variable> = BTreeMap::new();
+    let mut longest =
+        |id: usize, variables: &mut ProblemVariables, constraints: &mut Vec<Constraint>| {
+            *longest_of.entry(id).or_insert_with(|| {
+                let longest = variables.add(variable().min(0).max(maximum_latency));
+                for (query, row) in reach.iter().enumerate() {
+                    if let Some(reached) = row[id] {
+                        constraints.push(constraint!(
+                            longest >= latency[query].clone() - maximum_latency * (1.0 - reached)
+                        ));
+                    }
+                }
+                longest
+            })
+        };
     let mut objective = Expression::from(profile.request_cost / divisor);
     let mut retained: BTreeMap<&str, Vec<(usize, f64)>> = BTreeMap::new();
     for (id, node) in profile.nodes.iter().enumerate() {
@@ -653,85 +667,28 @@ pub(super) fn encode(
         if node.held_memory_cost_per_second == 0.0 {
             continue;
         }
+        // Every consumer runs at the one query rate: a materialized node
+        // holds its result for its longest reader's latency; an
+        // unmaterialized node is computed once per consumer (a query, or a
+        // materialized node), each copy held for that query's latency or
+        // that node's longest reader's.
         let held_latency = if node.materialized {
-            let longest = variables.add(variable().min(0).max(maximum_latency));
-            for (query, row) in reach.iter().enumerate() {
-                if let Some(reached) = row[id] {
-                    constraints.push(constraint!(
-                        longest >= latency[query].clone() - maximum_latency * (1.0 - reached)
-                    ));
-                }
-            }
-            Expression::from(longest)
+            Expression::from(longest(id, variables, constraints))
         } else {
-            let sum: Expression = reach
-                .iter()
-                .enumerate()
-                .filter_map(|(query, row)| {
-                    row[id].map(|reached| {
-                        gated(
-                            variables,
-                            constraints,
-                            latency[query].clone(),
-                            reached,
-                            maximum_latency,
-                        )
-                    })
-                })
-                .sum();
-            let reader_count: Expression = reach.iter().filter_map(|row| row[id]).sum();
-            let sizes: Vec<_> = (0..=queries)
-                .map(|_| variables.add(variable().binary()))
-                .collect();
-            constraints.push(constraint!(sizes.iter().copied().sum::<Expression>() == 1));
-            constraints.push(constraint!(
-                sizes
-                    .iter()
-                    .enumerate()
-                    .map(|(k, v)| k as f64 * *v)
-                    .sum::<Expression>()
-                    == reader_count
-            ));
-            let mut weighted = Expression::from(0.0);
-            // The boundary count is an integer in [0, roots + states]. Gate
-            // its possible values, then multiply only by a bounded continuous
-            // lifetime. This reproduces B/Q without dividing by a variable.
-            let boundaries: Vec<_> = (0..=boundary_limit[id])
-                .map(|_| variables.add(variable().binary()))
-                .collect();
-            constraints.push(constraint!(
-                boundaries.iter().copied().sum::<Expression>() == 1
-            ));
-            constraints.push(constraint!(
-                boundaries
-                    .iter()
-                    .enumerate()
-                    .map(|(b, v)| b as f64 * *v)
-                    .sum::<Expression>()
-                    == executions
-            ));
-            for (k, size) in sizes.iter().enumerate().skip(1) {
+            let mut held = Expression::from(0.0);
+            for flow in &flows {
                 check_deadline()?;
-                let selected_sum = gated(
-                    variables,
-                    constraints,
-                    sum.clone(),
-                    *size,
-                    maximum_latency * queries as f64,
-                );
-                for (b, boundary) in boundaries.iter().enumerate().skip(1) {
-                    check_deadline()?;
-                    let value = gated(
-                        variables,
-                        constraints,
-                        selected_sum.into(),
-                        *boundary,
-                        maximum_latency * queries as f64,
-                    );
-                    weighted += b as f64 / k as f64 * value;
-                }
+                let Some(reached) = flow.reached[id] else {
+                    continue;
+                };
+                let lifetime = if flow.boundary < queries {
+                    latency[flow.boundary].clone()
+                } else {
+                    longest(flow.boundary - queries, variables, constraints).into()
+                };
+                held += gated(variables, constraints, lifetime, reached, maximum_latency);
             }
-            weighted
+            held
         };
         objective += node.held_memory_cost_per_second * profile.query_rate * latency_scale
             / divisor
@@ -753,13 +710,14 @@ mod tests {
     use crate::search::milp::model::{
         solve_direct_cost_proposal_with_metrics, CandidateSolveMetrics,
     };
+    use asap_types::stages::*;
 
     fn node(input: Option<usize>) -> PhysicalCandidateWithCost {
         PhysicalCandidateWithCost {
             local_cost: 0.0,
-            supplier_candidates_per_input: input
+            producer_candidates_per_input: input
                 .into_iter()
-                .map(|id| InputSupplierCandidates {
+                .map(|id| InputProducerCandidates {
                     candidates: vec![PhysicalCandidateId(id)].into(),
                 })
                 .collect(),
@@ -835,10 +793,12 @@ mod tests {
         assert!((solve(&graph, &profile) - 73.0).abs() < 1e-7);
     }
 
-    // Two queries behind one materialized computation produce B=1,Q=2 for
-    // its unmaterialized input. Charging it once per query would double memory.
+    // Two queries behind one materialized computation: its unmaterialized
+    // input is computed once, for that computation, and held, as its result
+    // is, for the longer reader's latency (7.5 s, not the 7 s mean).
+    // Charging it once per query would double memory.
     #[test]
-    fn upstream_lifetime_uses_boundary_count_divided_by_query_count() {
+    fn upstream_lifetime_is_the_materialized_consumers_longest_reader() {
         let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![node(None), node(Some(0)), node(Some(1)), node(Some(1))],
             query_roots: vec![root(2), root(3)],
@@ -886,7 +846,7 @@ mod tests {
                 },
             ],
         };
-        assert!((solve(&graph, &profile) - 115.0).abs() < 1e-7);
+        assert!((solve(&graph, &profile) - 118.0).abs() < 1e-7);
     }
     // Independently enumerate both readers' choices. Sharing changes execution
     // counts and held lifetime; the least-node graph alone cannot price these.
@@ -898,7 +858,7 @@ mod tests {
             ..Default::default()
         };
         for reader in [2, 3] {
-            graph.candidates[reader].supplier_candidates_per_input[0].candidates =
+            graph.candidates[reader].producer_candidates_per_input[0].candidates =
                 vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
         }
         for materialized_build_cost in [1.0, 10.0, 100.0] {
@@ -1128,13 +1088,13 @@ mod tests {
                 node(Some(0)),
                 PhysicalCandidateWithCost {
                     local_cost: 0.0,
-                    supplier_candidates_per_input: vec![InputSupplierCandidates {
+                    producer_candidates_per_input: vec![InputProducerCandidates {
                         candidates: vec![PhysicalCandidateId(1), PhysicalCandidateId(2)].into(),
                     }],
                 },
                 PhysicalCandidateWithCost {
                     local_cost: 0.0,
-                    supplier_candidates_per_input: vec![InputSupplierCandidates {
+                    producer_candidates_per_input: vec![InputProducerCandidates {
                         candidates: vec![PhysicalCandidateId(1), PhysicalCandidateId(3)].into(),
                     }],
                 },
@@ -1209,8 +1169,9 @@ mod tests {
         }
     }
     // Query-kept state refreshes once at its readers' union rate. Residency is
-    // charged once, while its unmaterialized input is held for the weighted
-    // reader lifetime. This differs from charging the kept state per reader.
+    // charged once, while its unmaterialized input, computed once per
+    // refresh, is held for the longest reader's latency, as the state is.
+    // This differs from charging the kept state per reader.
     #[test]
     fn retained_query_state_prices_residency_refresh_and_input_lifetime() {
         let graph = DagOfPhysicalCandidatesWithCosts {
@@ -1257,16 +1218,13 @@ mod tests {
         };
         // Latencies are 3.6 and 4.6 seconds. Equal-rate readers share one
         // refresh; distinct fixed intervals add under the evaluator's policy.
-        for (rates, union, expected) in [(vec![2.0, 2.0], 2.0, 74.4), (vec![1.0, 2.0], 3.0, 83.0)] {
+        for (rates, union, expected) in [(vec![2.0, 2.0], 2.0, 77.4), (vec![1.0, 2.0], 3.0, 86.0)] {
             if rates[0] != rates[1] {
                 profile.schedules = Some(schedule_selection_tests::rate_schedule(&rates));
             }
             let weighted_latency = rates[0] * 3.6 + rates[1] * 4.6;
             let rate_sum: f64 = rates.iter().sum();
-            let independent = 7.0
-                + union * (3.0 + 3.0 * weighted_latency / rate_sum)
-                + rate_sum
-                + 2.0 * weighted_latency;
+            let independent = 7.0 + union * (3.0 + 3.0 * 4.6) + rate_sum + 2.0 * weighted_latency;
             assert!((independent - expected).abs() < 1e-10);
             let proposal = solve_direct_cost_proposal_with_metrics(
                 &graph,
@@ -1353,11 +1311,11 @@ mod tests {
     #[test]
     fn compaction_selection_matches_exhaustive_reader_bindings() {
         let mut reader = node(Some(0));
-        reader.supplier_candidates_per_input[0].candidates =
+        reader.producer_candidates_per_input[0].candidates =
             vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
         reader
-            .supplier_candidates_per_input
-            .push(node(Some(2)).supplier_candidates_per_input.remove(0));
+            .producer_candidates_per_input
+            .push(node(Some(2)).producer_candidates_per_input.remove(0));
         let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![node(None), node(None), node(None), reader.clone(), reader],
             query_roots: vec![root(3), root(4)],
@@ -1453,7 +1411,7 @@ mod tests {
             query_roots: vec![root(2)],
             ..Default::default()
         };
-        graph.candidates[2].supplier_candidates_per_input[0].candidates =
+        graph.candidates[2].producer_candidates_per_input[0].candidates =
             vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
         for tiny_compaction in [false, true] {
             let profile = DirectCostProfile {
@@ -1508,7 +1466,7 @@ mod tests {
             assert!((proposal.model_lower_bound.unwrap() - 1.0).abs() < 1e-8);
         }
     }
-    // Supplier choices use max, required positions use sum, and potential
+    // Producer choices use max, required positions use sum, and potential
     // cycles conservatively fall back instead of inventing a smaller bound.
     #[test]
     fn latency_bound_respects_choices_required_inputs_and_potential_cycles() {
@@ -1517,7 +1475,7 @@ mod tests {
             query_roots: vec![root(2)],
             ..Default::default()
         };
-        graph.candidates[2].supplier_candidates_per_input[0].candidates =
+        graph.candidates[2].producer_candidates_per_input[0].candidates =
             vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
         let profile = DirectCostProfile {
             nodes: [1.0, 3.0, 2.0]
@@ -1534,11 +1492,11 @@ mod tests {
         };
         assert_eq!(profile.maximum_latency(&graph), 5.0);
         graph.candidates[2]
-            .supplier_candidates_per_input
-            .push(node(Some(0)).supplier_candidates_per_input.remove(0));
+            .producer_candidates_per_input
+            .push(node(Some(0)).producer_candidates_per_input.remove(0));
         assert_eq!(profile.maximum_latency(&graph), 6.0);
-        graph.candidates[0].supplier_candidates_per_input =
-            node(Some(2)).supplier_candidates_per_input;
+        graph.candidates[0].producer_candidates_per_input =
+            node(Some(2)).producer_candidates_per_input;
         assert_eq!(profile.maximum_latency(&graph), 6.0);
     }
 }

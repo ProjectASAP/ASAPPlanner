@@ -1,6 +1,6 @@
 //! The materialization option of each sub-DAG (#509 §Materialization), the
 //! Stage 2 decision a node's execution timing
-//! ([`ExecutionTiming`](crate::ir::properties::ExecutionTiming)) is derived
+//! ([`crate::ir::properties::ExecutionTiming`]) is derived
 //! from.
 
 use crate::ir::properties::ExecutionTiming;
@@ -48,7 +48,7 @@ impl Materialization {
 
     /// Whether a node of this materialization is a materialized view: its
     /// output is kept across evaluations.
-    pub fn is_materialized_view(self) -> bool {
+    pub(crate) fn is_materialized_view(self) -> bool {
         matches!(
             self,
             Self::MatAtIngestion(_) | Self::MatAtQueryKeptAcrossEvaluations(_)

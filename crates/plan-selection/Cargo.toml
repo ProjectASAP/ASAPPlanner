@@ -5,15 +5,14 @@ edition = "2021"
 
 # #509 Stage 3, plan selection: the only stage that prices plans, with the
 # planning models (accuracy from `asap-accuracy`; cost from `asap-cost`)
-# and the Stage 1 to Stage 3 driver.
-# Depends on Stages 1 and 2, never on the executor.
+# Reads only Stage 2's output (`asap_types::stages`) and calls Stage 2 through
+# the facade's `AssignmentRealizer`: no dependency on Stages 1 or 2, nor on
+# the executor (#1054 X1, #1047 P7). Tests build their inputs with them.
 [dependencies]
 asap_sketchlib = { workspace = true }
 asap-types = { path = "../types" }
 asap-accuracy = { path = "../accuracy" }
 asap-cost = { path = "../cost" }
-asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
-asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -21,6 +20,11 @@ rmp-serde = "1"
 
 good_lp = { version = "=1.15.3", default-features = false, features = ["highs"] }
 highs = "=2.4.0"
+
+[features]
+# `reference_pricer`: the whole-workload selector over enumerated plans, for
+# the developer tools' reference pricing (`asap-devtools`).
+reference-pricer = []
 
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }

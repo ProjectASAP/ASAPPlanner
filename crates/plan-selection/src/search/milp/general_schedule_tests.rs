@@ -1,6 +1,7 @@
 use super::*;
 use crate::search::milp::model::{solve_direct_cost_proposal_with_metrics, CandidateSolveMetrics};
 use asap_types::ir::properties::AccuracyTarget;
+use asap_types::stages::*;
 use asap_types::workload::{
     DemandEstimate, Predictability, Query, QueryRecurrence, QueryRequirements, QueryWorkloadEntry,
     RangeEvaluation, Rate, RepeatedDemand, RepetitionInterval,
@@ -30,9 +31,9 @@ fn fixed(interval: u32, evaluations: u64) -> QueryWorkloadEntry {
 fn node(input: Option<usize>) -> PhysicalCandidateWithCost {
     PhysicalCandidateWithCost {
         local_cost: 0.0,
-        supplier_candidates_per_input: input
+        producer_candidates_per_input: input
             .into_iter()
-            .map(|input| InputSupplierCandidates {
+            .map(|input| InputProducerCandidates {
                 candidates: vec![PhysicalCandidateId(input)].into(),
             })
             .collect(),
@@ -83,14 +84,11 @@ fn check_cost(
         ..Default::default()
     }));
     let sum: f64 = expected_rates.iter().sum();
-    let weighted: f64 = expected_rates
-        .iter()
-        .enumerate()
-        .map(|(q, rate)| rate * (q as f64 + 4.0))
-        .sum();
+    // Node 0 is computed once per execution of node 1, its one consumer, and
+    // held, as node 1's result is, for the longest reader's latency.
     let longest = entries.len() as f64 + 3.0;
     let expected = expected_union
-        * (6.0 + 3.0 * weighted / sum + if per_request { 0.0 } else { 2.0 * longest })
+        * (6.0 + 3.0 * longest + if per_request { 0.0 } else { 2.0 * longest })
         + sum
         + if per_request { 13.0 } else { 0.0 };
     let profile = DirectCostProfile {
@@ -118,7 +116,7 @@ fn check_cost(
 }
 
 #[test]
-fn noncommensurate_fixed_intervals_price_weighted_memory_without_integer_lattice() {
+fn noncommensurate_fixed_intervals_price_held_memory_without_integer_lattice() {
     let intervals = [59_000, 61_000, 67_000, 71_000];
     let entries: Vec<_> = intervals
         .iter()
@@ -132,7 +130,7 @@ fn noncommensurate_fixed_intervals_price_weighted_memory_without_integer_lattice
 }
 
 #[test]
-fn mixed_schedules_price_materialized_union_and_unmaterialized_mean() {
+fn mixed_schedules_price_materialized_union_and_unmaterialized_input() {
     let estimate = QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(DemandEstimate {
         expected_rate: Rate(0.137),
         observed_at: None,
@@ -154,16 +152,17 @@ fn mixed_schedules_price_materialized_union_and_unmaterialized_mean() {
     let rates = [2.0, 1.5, 0.548, 0.25, 0.1];
     // Fixed intervals and estimates add; the two batch demands use max(15,6)/60.
     check_cost(&entries, &rates, 2.0 + 1.5 + 0.548 + 0.25, false);
-    // Retained refreshes use request rates; readers and weighted lifetime still
-    // use evaluation rates including each query's different range length.
+    // Retained refreshes use request rates; readers still use evaluation
+    // rates including each query's different range length.
     check_cost(&entries, &rates, 1.0 + 0.5 + 0.137 + 3.0 / 60.0, true);
 }
 
 #[test]
 fn zero_rate_readers_preserve_materialized_and_unmaterialized_lifetimes() {
-    // With all rates zero the execution cost is zero. With one positive reader,
-    // unmaterialized lifetime ignores the zero-rate reader, while a shared
-    // query-time materialization still uses its longest reached latency.
+    // With all rates zero the execution cost is zero. Whatever the readers'
+    // rates, a shared query-time materialization and its unmaterialized
+    // input, computed once per execution of it, use its longest reached
+    // latency.
     for rates in [[0.0, 0.0], [0.0, 0.5], [0.5, 0.0]] {
         let entries: Vec<_> = rates
             .iter()
@@ -223,12 +222,7 @@ fn zero_rate_readers_preserve_materialized_and_unmaterialized_lifetimes() {
             request_cost: 0.0,
         };
         let sum: f64 = rates.iter().sum();
-        let lifetime = if sum > 0.0 {
-            (rates[0] * 4.0 + rates[1] * 5.0) / sum
-        } else {
-            5.0
-        };
-        let expected = sum * (2.0 + 4.0 + 3.0 * lifetime + 2.0 * 5.0) + sum;
+        let expected = sum * (2.0 + 4.0 + 3.0 * 5.0 + 2.0 * 5.0) + sum;
         let proposal = solve_direct_cost_proposal_with_metrics(
             &graph,
             &[],

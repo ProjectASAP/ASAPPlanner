@@ -2,7 +2,7 @@
 use asap_cost::CostInputs;
 use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, FuzzWorkload, Planner};
 use asap_devtools::planning_stages::run_search_over;
-use asap_plan_selection::{PlanningModels, Stage1ToStage3Search};
+use asap_planner::{PlanSearchSettings, PlanningModels};
 use serde_json::json;
 use std::path::Path;
 
@@ -31,24 +31,23 @@ fn cost(w: &FuzzWorkload) -> f64 {
     let settings = CostInputs::default();
     let deployment = w.deployment();
     let models = PlanningModels::builtin()
-        .with_plan_selection(&settings)
+        .with_cost_inputs(&settings)
         .with_deployment_capabilities(&deployment);
     let run = run_search_over(
         roots,
         &entries,
         &w.data,
         models,
-        Stage1ToStage3Search {
-            milp_time_limit_ms: Some(30_000),
-            ..Default::default()
+        PlanSearchSettings {
+            time_limit_ms: Some(30_000),
+            inspect: false,
         },
+        None,
     )
     .unwrap();
-    let selection = run.stage3_plan_selection.as_ref().unwrap();
-    let value = selection.costs[&selection.selected]
-        .cost_per_second
-        .unwrap();
-    println!("cost={value}; selected={}", selection.selected);
+    let selection = run.run.selection.as_ref().unwrap();
+    let value = selection.cost.cost_per_second.unwrap();
+    println!("cost={value}");
     value
 }
 

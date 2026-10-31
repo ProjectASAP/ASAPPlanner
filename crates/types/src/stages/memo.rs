@@ -1,6 +1,6 @@
 //! Memo groups: the distinct logical sub-expressions of the workload.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 use crate::ir::{OperatorNode, QueryRoot};
@@ -43,6 +43,57 @@ impl MemoGroup {
     /// The queries whose roots reach it, by index in the workload, ascending.
     pub fn reached_by_queries(&self) -> &[usize] {
         &self.queries
+    }
+}
+
+/// Stage 0's output, Pass 1's input: the workload's memo groups, one per
+/// distinct logical sub-expression, without implementation choices or
+/// solver state. Stage 1 builds it by hash-consing the query roots.
+#[derive(Debug, Clone)]
+pub struct DagOfLogicalMemoGroups {
+    pub groups: Vec<MemoGroup>,
+    /// Each query's root over groups, by index in the workload: its
+    /// operator's group, or its scalar expression with every operator
+    /// reference replaced by that operator's group.
+    pub query_roots: Vec<QueryRoot<MemoGroupId>>,
+    /// Each node of the original workload, by address, to its group.
+    group_of: HashMap<*const OperatorNode, MemoGroupId>,
+}
+
+impl DagOfLogicalMemoGroups {
+    /// The memo groups `groups` (children before parents), each query's
+    /// root over them, and `group_of`: each node of the original workload,
+    /// by address, to its group.
+    pub fn new(
+        groups: Vec<MemoGroup>,
+        query_roots: Vec<QueryRoot<MemoGroupId>>,
+        group_of: HashMap<*const OperatorNode, MemoGroupId>,
+    ) -> Self {
+        Self {
+            groups,
+            query_roots,
+            group_of,
+        }
+    }
+
+    /// Group of a node from the original workload, not a rewritten candidate.
+    pub fn group_for_node(&self, node: &Rc<OperatorNode>) -> Option<MemoGroupId> {
+        self.group_of.get(&Rc::as_ptr(node)).copied()
+    }
+
+    /// Each query's root over the groups' logical nodes, in workload order:
+    /// a group several queries read is one node.
+    pub fn roots_over_groups(&self) -> Vec<QueryRoot> {
+        let node = |g: &MemoGroupId| Rc::clone(&self.groups[g.0 as usize].logical_node);
+        self.query_roots
+            .iter()
+            .map(|root| match root {
+                QueryRoot::Operator(g) => QueryRoot::Operator(node(g)),
+                QueryRoot::Scalar(expr) => {
+                    QueryRoot::Scalar(expr.map_operator_refs(&mut |g| node(g)))
+                }
+            })
+            .collect()
     }
 }
 

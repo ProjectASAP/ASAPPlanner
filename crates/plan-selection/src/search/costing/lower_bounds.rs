@@ -10,8 +10,9 @@ use asap_types::physical::Materialization;
 
 use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
 use crate::search::refinement::planner::CandidatePlanningContext;
-use crate::{price_node, PricedNode, ProducerOutput, StateFamily};
+use crate::StateFamily;
 use asap_cost::CostModel;
+use asap_cost::{node_usage, NodeUsage, ProducerOutput};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(in crate::search) struct LowerBoundMetrics {
@@ -37,7 +38,7 @@ pub(in crate::search) fn apply(
     let mut metrics = LowerBoundMetrics::default();
     let mut costs = vec![0.0; count];
     if matches!(
-        context.models.plan_selection.cost_model,
+        context.models.cost_inputs.cost_model,
         CostModel::UsageOverTime(_)
     ) {
         // A selected query-time node must serve at least one query boundary.
@@ -52,7 +53,7 @@ pub(in crate::search) fn apply(
                         [(&entry.recurrence, None)],
                         context
                             .models
-                            .plan_selection
+                            .cost_inputs
                             .non_repeating_query_horizon_seconds,
                     )
                     .map(|rate| minimum.min(rate))
@@ -86,7 +87,7 @@ pub(in crate::search) fn apply(
             }
             pending.extend(
                 configured.dag.candidates[id]
-                    .supplier_candidates_per_input
+                    .producer_candidates_per_input
                     .iter()
                     .flat_map(|input| input.candidates.iter().map(|producer| producer.0)),
             );
@@ -192,7 +193,7 @@ pub(in crate::search) fn apply(
                 });
                 if position
                     != configured.dag.candidates[id]
-                        .supplier_candidates_per_input
+                        .producer_candidates_per_input
                         .len()
                 {
                     return None;
@@ -283,7 +284,7 @@ fn common_reader_windows(configured: &PhysicalCandidatesWithCosts) -> Vec<Option
     let graph = &configured.dag;
     let mut readers = vec![Vec::new(); graph.candidates.len()];
     for (reader, candidate) in graph.candidates.iter().enumerate() {
-        for requirement in &candidate.supplier_candidates_per_input {
+        for requirement in &candidate.producer_candidates_per_input {
             for producer in requirement.candidates.iter() {
                 readers[producer.0].push(reader);
             }
@@ -328,39 +329,10 @@ fn common_reader_windows(configured: &PhysicalCandidatesWithCosts) -> Vec<Option
 }
 
 /// Whether a summary build's price at its template's parameters is at most
-/// its price in any plan that selects it. Stage 3 resizes a sketch only to
-/// larger parameters (`with_failure_probability` and HLL's `min_precision`
-/// keep at least the current size), and the analytical shape
-/// (`sketch_shape`) never charges a larger sketch less. A measured table
-/// interpolates between measured sizes and need not grow with size, so a
-/// resizable sketch with measured entries is not certified. DDSketch and
-/// exact accumulators are never resized.
-fn template_price_is_a_floor(build: &ASAPOp, context: &CandidatePlanningContext<'_>) -> bool {
-    let (ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. }) = build else {
-        return false;
-    };
-    let FieldDataType::Sketch(kind, _) = family else {
-        return true;
-    };
-    let params = kind.params();
-    matches!(params, SketchParams::DDSketch { .. })
-        || !measured_family(
-            params,
-            &context.models.plan_selection.measured_operation_costs,
-        )
-}
-
-/// Whether `table` measures any operator, at any phase, over `params`'s
-/// sketch algorithm. Such a family is priced by interpolating measured
-/// sizes, which need not rise with size, so a resized sketch can be priced
-/// below its Pass 1 size: neither its build nor the estimates and merges
-/// above it get a size-based bound.
-fn measured_family(params: &SketchParams, table: &asap_cost::MeasuredOperationCosts) -> bool {
-    table.operators.iter().any(|entry| {
-        entry.sketch.as_ref().is_some_and(|measured| {
-            std::mem::discriminant(measured) == std::mem::discriminant(params)
-        })
-    })
+/// its price in any plan that selects it: always, since Stage 1 sizes every
+/// summary and Stage 3 only checks, so the template is the size that runs.
+fn template_price_is_a_floor(_build: &ASAPOp, _context: &CandidatePlanningContext<'_>) -> bool {
+    true
 }
 
 fn round_down_small_bounds(costs: &mut [f64]) -> usize {
@@ -446,8 +418,8 @@ impl ConcreteRows {
     fn price<'a>(
         &'a self,
         context: &'a CandidatePlanningContext<'a>,
-    ) -> Vec<Option<PricedNode<'a>>> {
-        let mut result: Vec<Option<PricedNode<'a>>> = Vec::with_capacity(self.nodes.len());
+    ) -> Vec<Option<NodeUsage<'a>>> {
+        let mut result: Vec<Option<NodeUsage<'a>>> = Vec::with_capacity(self.nodes.len());
         for (id, node) in self.nodes.iter().enumerate() {
             let views: Option<Vec<_>> = self.children[id]
                 .iter()
@@ -464,7 +436,7 @@ impl ConcreteRows {
                 })
                 .collect();
             result.push(views.and_then(|views| {
-                price_node(
+                node_usage(
                     node,
                     &views,
                     (1, 1.0),
@@ -472,7 +444,7 @@ impl ConcreteRows {
                     1,
                     None,
                     context.data,
-                    context.models.plan_selection,
+                    context.models.cost_inputs,
                     context.calibration.factor(),
                 )
                 .ok()
@@ -484,7 +456,7 @@ impl ConcreteRows {
     fn certify(
         &self,
         configured: &PhysicalCandidatesWithCosts,
-        prices: &[Option<PricedNode<'_>>],
+        prices: &[Option<NodeUsage<'_>>],
     ) -> Result<Vec<bool>, String> {
         let interfaces: Vec<_> = self
             .nodes
@@ -520,7 +492,7 @@ impl ConcreteRows {
                     continue;
                 }
                 let root = self.roots[id].unwrap();
-                let inputs = &configured.dag.candidates[id].supplier_candidates_per_input;
+                let inputs = &configured.dag.candidates[id].producer_candidates_per_input;
                 let agrees = inputs.len() == self.children[root].len()
                     && inputs
                         .iter()
@@ -553,10 +525,10 @@ fn certified_price<'a>(
     common_reader_window_ms: &[Option<u64>],
     context: &'a CandidatePlanningContext<'a>,
     query_rate_floor: f64,
-    cache: &mut [Option<PricedNode<'a>>],
+    cache: &mut [Option<NodeUsage<'a>>],
     visiting: &mut [bool],
     complete: &mut [bool],
-) -> Result<Option<PricedNode<'a>>, String> {
+) -> Result<Option<NodeUsage<'a>>, String> {
     if complete[id] {
         return Ok(cache[id].clone());
     }
@@ -568,9 +540,9 @@ fn certified_price<'a>(
         return Ok(None);
     };
     visiting[id] = true;
-    let result: Result<Option<PricedNode<'a>>, String> = (|| {
+    let result: Result<Option<NodeUsage<'a>>, String> = (|| {
         let mut views = Vec::new();
-        for requirement in &configured.dag.candidates[id].supplier_candidates_per_input {
+        for requirement in &configured.dag.candidates[id].producer_candidates_per_input {
             let mut representative = None;
             let mut signature = None;
             for supplier in &requirement.candidates {
@@ -672,10 +644,10 @@ fn certified_price<'a>(
         };
         // One ingestion boundary executes once per accounted second; additional
         // unmaterialized consumers can only add executions. A summary build is
-        // priced at its template's size, the smallest Stage 3 can give it
+        // priced at its template's size, its final size
         // ([`template_price_is_a_floor`]). Retention above its own pane count
         // and all whole-plan charges are deliberately omitted.
-        Ok(price_node(
+        Ok(node_usage(
             node,
             &views,
             (
@@ -688,11 +660,11 @@ fn certified_price<'a>(
             ),
             // Stage 3 scans the width of the union of the readers' windows,
             // at least their common width, whatever their offsets.
-            crate::trailing_window(common_reader_window_ms[id]),
+            asap_cost::trailing_window(common_reader_window_ms[id]),
             retained,
             maintained_window,
             context.data,
-            context.models.plan_selection,
+            context.models.cost_inputs,
             context.calibration.factor(),
         )
         .ok())
@@ -705,6 +677,7 @@ fn certified_price<'a>(
 
 #[cfg(test)]
 mod tests {
+    use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
     // Fine panes may widen the bound range; round down only the relaxation,
     // preserving a valid lower bound and the core solver's numeric contract.
     #[test]
@@ -722,21 +695,21 @@ mod tests {
 
     use super::*;
     use crate::search::milp::model::{solve_candidate_proposal, ObservedAssignment};
-    use crate::{PlanSelector, PlanningModels};
+    use crate::{PlanSelector, SelectionModels};
     use asap_cost::CalibrationFit;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+    use asap_logical_asap_optimization::generate_per_computation_logical_memo_candidates;
+    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
+    use asap_logical_asap_optimization::test_support::try_populate_pass1;
+    use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
+    use asap_logical_asap_optimization::test_support::{
         pane_candidates, window_composition_pass2_candidates,
     };
-    use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
-    use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
-    use asap_physical_asap_optimization::catalog::materialize_selected_candidates;
+    use asap_physical_asap_optimization::test_support::catalog::materialize_selected_candidates;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::{OperatorNode, QueryRoot};
     use asap_types::physical::Medium;
 
-    use crate::search::candidates::dag::{InputSupplierCandidates, QueryOutputCandidates};
+    use crate::search::candidates::dag::{InputProducerCandidates, QueryOutputCandidates};
 
     use asap_types::stages::PhysicalCandidateId;
     use asap_types::workload::*;
@@ -786,10 +759,13 @@ mod tests {
                 format!("quantile_over_time({q}, latency[5m])")
             };
             let root = QueryRoot::Operator(lower_promql(&query, target.clone()));
-            let roots_with_ids = vec![(0usize, root)];
+            let query_roots = vec![root];
             let memo = try_populate_pass1(
-                DagOfLogicalMemoGroups::from_roots(&roots_with_ids),
-                &generate_per_computation_candidates(roots_with_ids).unwrap(),
+                generate_dag_of_logical_memo_groups(&query_roots),
+                &generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(
+                    &query_roots,
+                ))
+                .unwrap(),
             )
             .unwrap();
             let root_group = memo.query_roots[0].as_operator().unwrap().0 as usize;
@@ -842,7 +818,7 @@ mod tests {
                 0.0,
                 inputs
                     .into_iter()
-                    .map(|input| InputSupplierCandidates {
+                    .map(|input| InputProducerCandidates {
                         candidates: vec![PhysicalCandidateId(input)].into(),
                     })
                     .collect(),
@@ -870,7 +846,7 @@ mod tests {
             })
             .collect();
         for candidate in &mut configured.dag.candidates {
-            for input in &mut candidate.supplier_candidates_per_input {
+            for input in &mut candidate.producer_candidates_per_input {
                 if chains.contains(&input.candidates[0]) {
                     input.candidates = chains.clone().into();
                 }
@@ -921,7 +897,7 @@ mod tests {
         let mut projects = Vec::new();
         for (index, &chain) in chains.iter().enumerate() {
             let scan =
-                configured.dag.candidates[chain].supplier_candidates_per_input[0].candidates[0];
+                configured.dag.candidates[chain].producer_candidates_per_input[0].candidates[0];
             configured.sync_physical_for_tests();
             let input = configured.node(scan.0).clone();
             let range =
@@ -955,7 +931,7 @@ mod tests {
                     ExecutionTiming::IngestionTime,
                     Materialization::NotMaterialized,
                     0.0,
-                    vec![InputSupplierCandidates {
+                    vec![InputProducerCandidates {
                         candidates: vec![producer].into(),
                     }],
                 );
@@ -964,7 +940,7 @@ mod tests {
             projects.push(producer);
         }
         for chain in chains {
-            configured.dag.candidates[chain].supplier_candidates_per_input[0].candidates =
+            configured.dag.candidates[chain].producer_candidates_per_input[0].candidates =
                 projects.clone().into();
             configured.sync_physical_for_tests();
             let child = configured.nodes_for_tests()[projects[0].0].clone();
@@ -1016,7 +992,7 @@ mod tests {
                 ExecutionTiming::IngestionTime,
                 Materialization::NotMaterialized,
                 0.0,
-                vec![InputSupplierCandidates {
+                vec![InputProducerCandidates {
                     candidates: vec![*scan].into(),
                 }],
             );
@@ -1024,7 +1000,7 @@ mod tests {
         }
         for (id, template) in configured.nodes_for_tests().iter().enumerate() {
             if matches!(template.asap(), Some(ASAPOp::PaneChain { .. })) {
-                let input = &mut configured.dag.candidates[id].supplier_candidates_per_input[0];
+                let input = &mut configured.dag.candidates[id].producer_candidates_per_input[0];
                 // Put larger signed-domain Project pricing last to expose the
                 // former arbitrary representative selection.
                 let mut suppliers = scans.clone();
@@ -1033,13 +1009,13 @@ mod tests {
             }
         }
         configured.sync_physical_for_tests();
-        let models = PlanningModels::builtin();
+        let models = SelectionModels::builtin();
         let calibration = CalibrationFit::default();
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
             models,
@@ -1059,17 +1035,17 @@ mod tests {
             }
             let physical = materialize_selected_candidates(
                 &configured.physical,
-                &selected,
-                &modes,
+                &selected.to_selected_dag(),
+                &selected.materializations_by_node(&modes),
                 &roots,
                 &entries,
                 &data,
-                models.deployment_capabilities.query_time_results_retained,
+                false,
             )
             .unwrap();
             let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
             selector.set_calibration(calibration);
-            selector.offer(&physical.physical).unwrap();
+            selector.offer(&physical.plan).unwrap();
             let (result, _) = selector.finish().unwrap();
             let cost = result.costs[&result.selected].cost_per_second.unwrap();
             assert!(
@@ -1149,7 +1125,7 @@ mod tests {
                         })
                         .collect();
                     for project in &projects {
-                        configured.dag.candidates[project.0].supplier_candidates_per_input[0]
+                        configured.dag.candidates[project.0].producer_candidates_per_input[0]
                             .candidates
                             .extend(projects.iter().copied());
                         configured.sync_physical_for_tests();
@@ -1180,13 +1156,13 @@ mod tests {
                     {"operator": "FinalizeExactAccumulator", "phase": "query_time", "exact": "Sum", "ns_per_unit": 900.0, "ns_per_invocation": 400.0}
                 ]})).unwrap();
             }
-            let models = PlanningModels::builtin().with_plan_selection(&settings);
+            let models = SelectionModels::builtin().with_cost_inputs(&settings);
             let calibration = CalibrationFit::from_factor(2.0).unwrap();
             let context = CandidatePlanningContext {
                 deadline: None,
                 refine_materialization: false,
-                seed_separate_plans: false,
-                original_roots: &roots,
+                query_roots: &roots,
+                realizer: &crate::search::test_realizer(&roots, &entries, &data),
                 entries: &entries,
                 data: &data,
                 models,
@@ -1229,17 +1205,17 @@ mod tests {
                 }
                 let physical = materialize_selected_candidates(
                     &configured.physical,
-                    &selected,
-                    &modes,
+                    &selected.to_selected_dag(),
+                    &selected.materializations_by_node(&modes),
                     &roots,
                     &entries,
                     &data,
-                    models.deployment_capabilities.query_time_results_retained,
+                    false,
                 )
                 .unwrap();
                 let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
                 selector.set_calibration(calibration);
-                selector.offer(&physical.physical).unwrap();
+                selector.offer(&physical.plan).unwrap();
                 let (result, _) = selector.finish().unwrap();
                 let cost = result.costs[&result.selected].cost_per_second.unwrap();
                 assert!(selected.modeled_cost > 0.0);
@@ -1280,11 +1256,11 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: PlanningModels::builtin(),
+            models: SelectionModels::builtin(),
             calibration: CalibrationFit::default(),
         };
         let metrics = apply(&mut configured, &context).unwrap();
@@ -1303,7 +1279,7 @@ mod tests {
     }
     // Equal row counts do not certify different sources as interchangeable cost inputs.
     #[test]
-    fn differing_supplier_metadata_leaves_pane_bounds_zero() {
+    fn differing_producer_metadata_leaves_pane_bounds_zero() {
         let (mut configured, roots, entries, mut data) = fixture();
         let scans: Vec<_> = configured
             .nodes_for_tests()
@@ -1331,18 +1307,18 @@ mod tests {
         let nodes = configured.nodes_for_tests();
         for (candidate, node) in configured.dag.candidates.iter_mut().zip(&nodes) {
             if matches!(node.asap(), Some(ASAPOp::PaneChain { .. })) {
-                candidate.supplier_candidates_per_input[0].candidates = scans.clone().into();
+                candidate.producer_candidates_per_input[0].candidates = scans.clone().into();
             }
         }
         configured.sync_physical_for_tests();
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: PlanningModels::builtin(),
+            models: SelectionModels::builtin(),
             calibration: CalibrationFit::default(),
         };
         let metrics = apply(&mut configured, &context).unwrap();
@@ -1350,33 +1326,57 @@ mod tests {
         assert_eq!(metrics.ingestion_scans, 2);
     }
 
-    /// Each of `queries`' Pass 1 candidates that `pick` selects, built for
-    /// `built_for`, every node at query time and equal nodes shared: their
-    /// configured inventory after [`apply`], the bound of the selected plan,
-    /// and that plan's evaluated cost for queries with target
-    /// `evaluated_for` (Stage 3 resizes sketches to it).
+    /// Each of `queries`' Pass 1 candidates that `pick` selects, sized by
+    /// Pass 1 for `target` (their final size), every node at query time and
+    /// equal nodes shared: their configured inventory after [`apply`], the
+    /// bound of the selected plan, and that plan's evaluated cost.
     fn query_time_bound_and_cost(
         queries: &[&str],
-        built_for: AccuracyTarget,
-        evaluated_for: AccuracyTarget,
+        target: AccuracyTarget,
         settings: &asap_cost::CostInputs,
         pick: fn(&OperatorNode) -> bool,
     ) -> (PhysicalCandidatesWithCosts, f64, f64) {
-        let roots_with_ids: Vec<_> = queries
+        let roots: Vec<_> = queries
             .iter()
-            .enumerate()
-            .map(|(id, query)| {
-                (
-                    id,
-                    QueryRoot::Operator(lower_promql(query, built_for.clone())),
+            .map(|query| QueryRoot::Operator(lower_promql(query, target.clone())))
+            .collect();
+        let entries: Vec<_> = queries
+            .iter()
+            .map(|_| {
+                entry_with(
+                    target.clone(),
+                    QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(
+                        10_000,
+                    ))),
                 )
             })
             .collect();
-        let memo = try_populate_pass1(
-            DagOfLogicalMemoGroups::from_roots(&roots_with_ids),
-            &generate_per_computation_candidates(roots_with_ids).unwrap(),
+        let data = DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1000.0,
+            },
+            sources: [(
+                "latency".into(),
+                SourceFacts {
+                    series_count: Some(2),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let targets = vec![target.clone(); queries.len()];
+        let memo = generate_per_computation_logical_memo_candidates(
+            generate_dag_of_logical_memo_groups(&roots),
+            &targets,
+            &asap_accuracy::IgnoreAccuracyGuarantees,
+            &asap_accuracy::NoAccuracyEvidence,
+            &data,
+            None,
+            None,
         )
-        .unwrap();
+        .unwrap()
+        .memo;
         let picked: Vec<_> = (0..queries.len())
             .map(|query| {
                 let root_group = memo.query_roots[query].as_operator().unwrap().0 as usize;
@@ -1412,7 +1412,7 @@ mod tests {
                 0.0,
                 inputs
                     .into_iter()
-                    .map(|input| InputSupplierCandidates {
+                    .map(|input| InputProducerCandidates {
                         candidates: vec![PhysicalCandidateId(input)].into(),
                     })
                     .collect(),
@@ -1430,41 +1430,16 @@ mod tests {
             .iter()
             .map(|candidate| QueryRoot::Operator(Rc::clone(&candidate.root_node)))
             .collect();
-        let entries: Vec<_> = queries
-            .iter()
-            .map(|_| {
-                entry_with(
-                    evaluated_for.clone(),
-                    QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(
-                        10_000,
-                    ))),
-                )
-            })
-            .collect();
-        let data = DataWorkload {
-            arrival: DataArrival::Ingesting {
-                rows_per_second: 1000.0,
-            },
-            sources: [(
-                "latency".into(),
-                SourceFacts {
-                    series_count: Some(2),
-                    ..Default::default()
-                },
-            )]
-            .into_iter()
-            .collect(),
-        };
-        let models = PlanningModels::builtin().with_plan_selection(settings);
+        let models = SelectionModels::builtin().with_cost_inputs(settings);
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
             models,
             calibration: CalibrationFit::default(),
-            seed_separate_plans: false,
         };
         apply(&mut configured, &context).unwrap();
         let selected = solve_candidate_proposal(&configured.dag, &[], None)
@@ -1479,16 +1454,16 @@ mod tests {
             .collect();
         let physical = materialize_selected_candidates(
             &configured.physical,
-            &selected,
-            &modes,
+            &selected.to_selected_dag(),
+            &selected.materializations_by_node(&modes),
             &roots,
             &entries,
             &data,
-            models.deployment_capabilities.query_time_results_retained,
+            false,
         )
         .unwrap();
         let mut selector = PlanSelector::new(&entries, &data, models, false).unwrap();
-        selector.offer(&physical.physical).unwrap();
+        selector.offer(&physical.plan).unwrap();
         let (result, _) = selector.finish().unwrap();
         let cost = result.costs[&result.selected].cost_per_second.unwrap();
         (configured, selected.modeled_cost, cost)
@@ -1521,7 +1496,6 @@ mod tests {
         ] {
             let (configured, bound, cost) = query_time_bound_and_cost(
                 &[query],
-                AccuracyTarget::exact(),
                 AccuracyTarget::exact(),
                 &asap_cost::CostInputs::default(),
                 |node| {
@@ -1572,7 +1546,6 @@ mod tests {
             let (configured, bound, cost) = query_time_bound_and_cost(
                 queries,
                 AccuracyTarget::exact(),
-                AccuracyTarget::exact(),
                 &asap_cost::CostInputs::default(),
                 pick,
             );
@@ -1601,17 +1574,16 @@ mod tests {
             if matches!(kind.params(), SketchParams::Kll { .. }))
     }
 
-    // A KLL build is priced at its template's size, the smallest Stage 3
-    // gives it: a smaller failure probability (as a smaller budget share
-    // gives) resizes it larger, and the bound stays below every such cost.
+    // A KLL build is priced at its template's size, which Pass 1 sized for
+    // the target and Stage 3 never changes: at every failure probability
+    // the bound stays at or below the evaluated cost, and a smaller one
+    // gives a larger sketch.
     #[test]
-    fn a_kll_build_bound_holds_for_every_resized_size() {
-        let built_for = AccuracyTarget::max_error(0.01).failure_probability(0.01);
+    fn a_kll_build_bound_holds_at_every_failure_probability() {
         let mut costs = Vec::new();
         for failure_probability in [0.01, 0.001, 0.0001] {
             let (configured, bound, cost) = query_time_bound_and_cost(
                 &["quantile_over_time(0.9, latency[5m])"],
-                built_for.clone(),
                 AccuracyTarget::max_error(0.01).failure_probability(failure_probability),
                 &asap_cost::CostInputs::default(),
                 is_kll_build,
@@ -1625,56 +1597,37 @@ mod tests {
         }
         assert!(
             costs[2] > costs[0],
-            "resizing must enlarge the sketch: {costs:?}"
+            "a smaller failure probability sizes a larger sketch: {costs:?}"
         );
     }
 
-    // A measured table need not grow with size, so a resizable sketch with
-    // measured entries gets no certified bound.
+    // A measured table need not grow with size, but the template is the
+    // size the plan runs: a KLL build with measured entries, and the
+    // estimate over it, keep a certified bound at or below the evaluated
+    // cost.
     #[test]
-    fn a_measured_kll_build_is_not_certified() {
+    fn a_measured_kll_build_and_estimate_keep_the_bound_below_the_cost() {
         let settings = asap_cost::CostInputs {
             measured_operation_costs: serde_json::from_value(serde_json::json!({"operators": [
-            {"operator": "SummaryAgg", "phase": "query_time", "sketch": {"Kll": {"k": 200}}, "ns_per_unit": 300.0, "ns_per_invocation": 200.0}
-        ]}))
-        .unwrap(),
-            ..Default::default()
-        };
-        let (configured, _, _) = query_time_bound_and_cost(
-            &["quantile_over_time(0.9, latency[5m])"],
-            AccuracyTarget::max_error(0.01).failure_probability(0.01),
-            AccuracyTarget::max_error(0.01).failure_probability(0.01),
-            &settings,
-            is_kll_build,
-        );
-        assert_eq!(bound_of(&configured, is_kll_build), 0.0);
-    }
-
-    // A measured estimate over a KLL can make a larger, resized KLL cheaper
-    // than its Pass 1 size: a measured entry for the family on any operator
-    // leaves the build and the estimate above it uncertified, so the bound
-    // stays below the evaluated cost.
-    #[test]
-    fn a_measured_kll_estimate_keeps_the_bound_below_the_cost() {
-        let settings = asap_cost::CostInputs {
-            measured_operation_costs: serde_json::from_value(serde_json::json!({"operators": [
+            {"operator": "SummaryAgg", "phase": "query_time", "sketch": {"Kll": {"k": 200}}, "ns_per_unit": 300.0, "ns_per_invocation": 200.0},
             {"operator": "SummaryEstimate", "phase": "query_time", "sketch": {"Kll": {"k": 8}}, "ns_per_unit": 0.0, "ns_per_invocation": 5.0e9},
             {"operator": "SummaryEstimate", "phase": "query_time", "sketch": {"Kll": {"k": 20000}}, "ns_per_unit": 0.0, "ns_per_invocation": 1.0}
         ]}))
         .unwrap(),
             ..Default::default()
         };
-        let built_for = AccuracyTarget::max_error(0.01).failure_probability(0.01);
         for failure_probability in [0.01, 0.0001] {
             let (configured, bound, cost) = query_time_bound_and_cost(
                 &["quantile_over_time(0.9, latency[5m])"],
-                built_for.clone(),
                 AccuracyTarget::max_error(0.01).failure_probability(failure_probability),
                 &settings,
                 is_kll_build,
             );
-            assert_eq!(bound_of(&configured, is_kll_build), 0.0);
-            assert!(bound <= cost, "{failure_probability}: {bound} above {cost}");
+            assert!(bound_of(&configured, is_kll_build) > 0.0);
+            assert!(
+                bound > 0.0 && bound <= cost * (1.0 + 1e-9),
+                "{failure_probability}: {bound} above {cost}"
+            );
         }
     }
 }

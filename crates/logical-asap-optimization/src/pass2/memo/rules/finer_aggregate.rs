@@ -7,7 +7,7 @@ use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::state_groups::StateGroupExpansionError;
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::{NonASAPOp, Operator, OperatorNode, OperatorResultKind};
-use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{MemoCandidates, OriginOfCandidateForMemoGroup};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
@@ -71,7 +71,7 @@ fn value_rollup(measure: &AggIntent, col: usize, global: bool) -> Option<AggInte
 }
 
 pub(crate) fn add_finer_aggregate_candidates(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {
     // Only aggregates of equal measures can match; bucket by them (the
@@ -102,7 +102,7 @@ pub(crate) fn add_finer_aggregate_candidates(
 /// Adds to group `owner` a read of group `finer`'s result when it computes
 /// `owner`'s aggregate; the number of candidates added (0 or 1).
 fn add_read(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     owner: usize,
     finer: usize,
 ) -> Result<usize, StateGroupExpansionError> {

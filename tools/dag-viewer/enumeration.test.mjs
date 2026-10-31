@@ -47,7 +47,7 @@ test('each broken field of memo.enumeration is reported', () => {
     'choices[0].choice must map group ids to candidate indices': (d) => { d.memo.enumeration.choices[0].choice = { G7: 0 }; },
     'choices[0].roots must index memo.nodes': (d) => { d.memo.enumeration.choices[0].roots = [d.memo.nodes.length]; },
     'choices[1].roots must index memo.nodes': (d) => { delete d.memo.enumeration.choices[1].roots; },
-    'choices[0].budget_share_1 must be true or false': (d) => { delete d.memo.enumeration.choices[0].budget_share_1; },
+    'choices[0].accuracy_budget_parts_1 must be true or false': (d) => { delete d.memo.enumeration.choices[0].accuracy_budget_parts_1; },
     'choices[0].cheaper_than_selected must be true or false': (d) => { d.memo.enumeration.choices[0].cheaper_than_selected = 1; },
     'choices[0].cost_per_second must be a number or null': (d) => { d.memo.enumeration.choices[0].cost_per_second = 'cheap'; },
     'choices[0].rejection must be a string or null': (d) => { d.memo.enumeration.choices[0].rejection = 3; },
@@ -112,7 +112,7 @@ test('a row names the groups whose candidate differs from the selected choice, w
   assert.equal(rows[1].text, 'the selected choice');
   assert.equal(rows[1].selected, true);
   assert.equal(rows[3].text, 'G7 → #3 CMS+heap shared build (shared_build)');
-  assert.equal(rows[3].budgetShare1, false);
+  assert.equal(rows[3].accuracyBudgetParts1, false);
   assert.ok(rows.every((r) => !r.priced && r.cost === null && !r.cheaper));
 });
 

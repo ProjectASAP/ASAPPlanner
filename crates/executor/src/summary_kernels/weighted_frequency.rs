@@ -207,7 +207,7 @@ impl WeightedFrequency {
     }
 
     /// Adds `weight` to the identity tuple `values`. An error, and the state
-    /// unchanged, for a weight [`Self::check_weight`] refuses, an identity
+    /// unchanged, for a weight `Self::check_weight` refuses, an identity
     /// that is not Null, Bool, Int64, finite Float64 or Utf8, or an update
     /// that would carry a counter past `f64::MAX`.
     pub fn update(&mut self, values: &[Value], weight: f64) -> Result<(), Error> {

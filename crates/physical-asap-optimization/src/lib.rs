@@ -1,11 +1,22 @@
-//! #509 Stage 2, physical ASAP-aware optimization: turns one
-//! CandidateLogicalASAPDAG into CandidatePhysicalASAPDAGs by materialization
-//! and physical operator implementation.
+//! #509 Stage 2, physical ASAP-aware optimization: materialization and
+//! physical operator implementation.
+//!
+//! The planner facade calls [`generate_physical_asap_memo_candidates`] on
+//! Pass 2's memo (`asap_types::stages::LogicalASAPMemoCandidates`): every
+//! operator node of every memo candidate with each allowed timing and
+//! materialization, the producers of each input and the pruned candidates
+//! (`asap_types::stages::PhysicalASAPMemoCandidates`). Stage 3 selects from
+//! that output, and [`Stage2AssignmentRealizer`] builds the selected
+//! assignment as a physical plan. The rules below apply to both, and to the
+//! whole-workload reference pricer `optimize_physical_asap` (feature
+//! `reference-pricer`, for the developer tools), which turns one
+//! CandidateLogicalASAPDAG into its CandidatePhysicalASAPDAGs. The crate
+//! depends on no other stage crate.
 //!
 //! ## Materialization
 //!
 //! Each summary build (a `SummaryAgg` or a `PaneChain`) is one
-//! materialization candidate ([`MaterializationCandidate`]) whose
+//! materialization candidate (`MaterializationCandidate`) whose
 //! output materialization may store (#509 §Materialization, Algorithm 3).
 //! So is the highest node of each other sub-DAG that two or more queries
 //! read (e.g. a `Scan` that a 1 m and a 5 m window read): one a root or a
@@ -24,7 +35,7 @@
 //!   deployment keeps query-time results (the caller's
 //!   `query_time_results_retained`) for a
 //!   tumbling-pane chain that builds one new pane per evaluation
-//!   ([`builds_one_pane_per_evaluation`]): each evaluation builds the
+//!   (`builds_one_pane_per_evaluation`): each evaluation builds the
 //!   newest pane and reuses the others. Both query-time options are offered
 //!   when both apply, and Stage 3 prices each.
 //!
@@ -34,7 +45,7 @@
 //! other combination of options is one physical candidate, the
 //! all-`NotMaterialized` one first: nothing is capped. A node that one
 //! query reads at ingestion time and another at query time is copied, one
-//! copy per timing ([`split_shared_by_timing`]).
+//! copy per timing (`split_shared_by_timing`).
 //!
 //! A build may run at ingestion time (S4) only when:
 //!
@@ -99,8 +110,14 @@
 //! candidate alone, with the error as its reason.
 //! A summary needs no rewrite: `SummaryAgg` → `SummaryEstimate` already is
 //! build → estimate. Every node keeps the guarantee Stage 1 composed for it.
-pub mod catalog;
+mod catalog;
+mod split_by_timing;
 mod summary_window;
+
+pub use catalog::{
+    generate_physical_asap_memo_candidates, CandidateInventoryError, ConfigurationError,
+    ErrorGeneratingPhysicalASAPMemoCandidates, Stage2AssignmentRealizer,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -111,21 +128,19 @@ use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_id
 use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
 use asap_types::ir::schema::{ExactKind, FieldDataType};
 use asap_types::ir::{
-    apply_materialization_timings, is_filtered_build, split_shared_by_timing, ASAPOp,
-    MaterializationAssignment, NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode, QueryRoot,
-    ScalarExpr, SchemaDerivationError, SortKey,
+    apply_materialization_timings, is_filtered_build, ASAPOp, MaterializationAssignment,
+    NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr,
+    SchemaDerivationError, SortKey,
 };
 use asap_types::physical::Materialization;
 use asap_types::physical::Medium;
+use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
+use split_by_timing::split_shared_by_timing;
 use summary_window::{plan_pane_phase, validate_pane_coverage, PaneLayout, WindowEdgeCoverage};
 use thiserror::Error;
-
-/// One CandidatePhysicalASAPDAG (Stage 2 output); defined in `asap-types`
-/// so the realizer trait can return it.
-pub use asap_types::physical::PhysicalWorkloadPlan;
 
 #[derive(Debug, Error)]
 pub enum PhysicalASAPOptimizationError {
@@ -400,6 +415,11 @@ pub(crate) fn builds_one_pane_per_evaluation<'a>(
 /// caller to name. Sharing between `roots` is preserved: one cache serves the
 /// whole workload. `query_time_results_retained` says whether a query-time
 /// result may be kept across evaluations.
+///
+/// The reference pricer: only the developer tools (and tests) enumerate a
+/// whole workload this way; planning goes through
+/// [`generate_physical_asap_memo_candidates`].
+#[cfg(any(test, feature = "reference-pricer"))]
 pub fn optimize_physical_asap(
     from_logical: &str,
     roots: &[QueryRoot],
@@ -923,6 +943,7 @@ fn down_closed(
 /// Every assignment of an option to each materialization candidate (mixed
 /// radix, the last varying fastest, all `NotMaterialized` first) that is
 /// [`down_closed`].
+#[cfg(any(test, feature = "reference-pricer"))]
 fn materialization_assignments(
     mat_candidates: &[MaterializationCandidate],
 ) -> impl Iterator<Item = Vec<Materialization>> + '_ {
@@ -1142,6 +1163,8 @@ pub mod test_support {
 
     use crate::{PhysicalASAPOptimizationError, PhysicalWorkloadPlan};
 
+    pub use crate::catalog::test_support as catalog;
+    pub use crate::split_by_timing::split_shared_by_timing;
     pub use crate::summary_window::{
         validate_pane_coverage, PaneCoverageError, PaneLayout, WindowEdgeCoverage,
     };
@@ -1473,10 +1496,13 @@ mod tests {
             "topk by (job) (10, sum_over_time(m[1m]))",
             AccuracyTarget::max_error(0.01).failure_probability(0.001),
         );
-        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(
-            vec![(0, QueryRoot::Operator(root))],
-        )
-        .unwrap();
+        let inventory =
+            asap_logical_asap_optimization::test_support::generate_per_computation_candidates(
+                &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+                    QueryRoot::Operator(root),
+                ]),
+            )
+            .unwrap();
         // A summary (the last candidate) for every target.
         let choice: Vec<_> = inventory
             .targets
@@ -1484,12 +1510,11 @@ mod tests {
             .map(|t| t.choice_count() - 1)
             .collect();
         let roots: Vec<_> =
-            asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate(
+            asap_logical_asap_optimization::test_support::compose_logical_candidate(
                 &inventory, &choice,
             )
             .unwrap()
             .into_iter()
-            .map(|(_, root)| root)
             .collect();
         let candidate = first_candidate(&roots);
         assert!(candidate
@@ -1519,34 +1544,31 @@ mod tests {
                 .failure_probability(0.001)
                 .accuracy_metric(asap_types::ir::properties::AccuracyMetric::Rank),
         );
-        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(
-            vec![(0, QueryRoot::Operator(root))],
-        )
-        .unwrap();
+        let inventory =
+            asap_logical_asap_optimization::test_support::generate_per_computation_candidates(
+                &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+                    QueryRoot::Operator(root),
+                ]),
+            )
+            .unwrap();
         let choice: Vec<_> = inventory
             .targets
             .iter()
             .map(|t| t.choice_count() - 1)
             .collect();
-        asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate(
-            &inventory, &choice,
-        )
-        .unwrap()
-        .remove(0)
-        .1
+        asap_logical_asap_optimization::test_support::compose_logical_candidate(&inventory, &choice)
+            .unwrap()
+            .remove(0)
     }
 
     /// `root` with its summary build in 1-min tumbling panes.
     fn in_panes(root: QueryRoot) -> QueryRoot {
         let roots = [root];
         let rule_candidates =
-            asap_logical_asap_optimization::pass2::asap_aware_cse::pane_candidates(
-                &roots,
-                &[Some(MINUTE)],
-            );
+            asap_logical_asap_optimization::test_support::pane_candidates(&roots, &[Some(MINUTE)]);
         assert_eq!(rule_candidates.len(), 1, "{rule_candidates:?}");
         let mut pass2_candidates =
-            asap_logical_asap_optimization::pass2::asap_aware_cse::window_composition_pass2_candidates(
+            asap_logical_asap_optimization::test_support::window_composition_pass2_candidates(
                 &roots,
                 &rule_candidates,
             )

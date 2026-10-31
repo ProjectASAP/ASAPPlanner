@@ -5,15 +5,15 @@ use asap_cost::CostInputs;
 use asap_devtools::memo_pricing::{price_choices, PricedChoice, SelectedBaseline};
 use asap_devtools::planner_layering_examples::example1;
 use asap_devtools::planning_stages::{lower_promql_roots, run_default_search_over};
-use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
-use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
-use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-use asap_logical_asap_optimization::pass2::memo::enumeration::enumerate;
-use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
-use asap_plan_selection::PlanningModels;
+use asap_logical_asap_optimization::enumerate;
+use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
+use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
+use asap_logical_asap_optimization::test_support::try_populate_pass1;
+use asap_logical_asap_optimization::DeploymentCapabilities;
+use asap_planner::PlanningModels;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::QueryRoot;
-use asap_types::stages::CandidateMemo;
+use asap_types::stages::MemoCandidates;
 use asap_types::workload::{
     DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
     QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand, RepeatingEntry,
@@ -62,7 +62,7 @@ struct Planned {
     roots: Vec<QueryRoot>,
     entries: Vec<QueryWorkloadEntry>,
     data: DataWorkload,
-    memo: CandidateMemo,
+    memo: MemoCandidates,
 }
 
 /// `stage_pipeline` lowers each series' identity as a column
@@ -78,9 +78,11 @@ fn planned(workload: &PlanningWorkload, series_identity: bool) -> Planned {
             .into_iter()
             .collect()
     };
-    let indexed: Vec<_> = roots.iter().cloned().enumerate().collect();
-    let initial = DagOfLogicalMemoGroups::from_roots(&indexed);
-    let inventory = generate_per_computation_candidates(indexed).unwrap();
+    let initial = generate_dag_of_logical_memo_groups(&roots);
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
+    )
+    .unwrap();
     Planned {
         roots,
         entries: workload.query_workload.entries().collect(),
@@ -92,12 +94,13 @@ fn planned(workload: &PlanningWorkload, series_identity: bool) -> Planned {
 /// `stage_pipeline`'s models: the executor's summary families,
 /// `settings` (accuracy guarantees ignored unless enforced).
 fn models<'a>(
-    settings: &'a CostInputs,
+    settings: &'a Settings,
     deployment: &'a DeploymentCapabilities,
 ) -> PlanningModels<'a> {
     PlanningModels::builtin()
-        .with_plan_selection(settings)
+        .with_cost_inputs(&settings.cost_inputs)
         .with_deployment_capabilities(deployment)
+        .with_ignore_accuracy_guarantees(settings.ignore_accuracy_guarantees)
 }
 
 fn deployment() -> DeploymentCapabilities {
@@ -107,10 +110,17 @@ fn deployment() -> DeploymentCapabilities {
     }
 }
 
-fn settings(enforce_accuracy_guarantees: bool) -> CostInputs {
-    CostInputs {
+/// `stage_pipeline`'s cost inputs, and whether it ignores accuracy
+/// guarantees.
+struct Settings {
+    cost_inputs: CostInputs,
+    ignore_accuracy_guarantees: bool,
+}
+
+fn settings(enforce_accuracy_guarantees: bool) -> Settings {
+    Settings {
+        cost_inputs: CostInputs::default(),
         ignore_accuracy_guarantees: !enforce_accuracy_guarantees,
-        ..CostInputs::default()
     }
 }
 
@@ -124,7 +134,7 @@ fn selected(planned: &Planned, models: PlanningModels<'_>) -> SelectedBaseline {
         models,
     )
     .unwrap();
-    SelectedBaseline::of(run.stage3_plan_selection.as_ref().expect("a selection"))
+    SelectedBaseline::of(run.run.selection.as_ref().expect("a selection"))
 }
 
 /// Every choice of `planned`'s Pass 1 memo (the enumeration is complete),
@@ -181,7 +191,7 @@ fn assert_no_listed_choice_is_cheaper(document: &Value) -> Vec<Value> {
         choices.len() as u64
     );
     let stage3 = &document["stage3_plan_selection"];
-    let selected = &stage3["costs"][stage3["selected"].as_str().unwrap()]["cost_per_second"];
+    let selected = &stage3["cost"]["cost_per_second"];
     assert_eq!(
         enumeration["priced"],
         json!({"count": choices.len(), "cheaper_than_selected": 0, "selected_cost_per_second": selected})
@@ -199,7 +209,9 @@ fn assert_no_listed_choice_is_cheaper(document: &Value) -> Vec<Value> {
     choices
 }
 
-/// #509 Example 1: its Pass 1 memo (the listed step) stands for 5 DAGs;
+/// #509 Example 1: its Pass 1 memo (the listed step) stands for 3 DAGs
+/// (Q2's top-k group: exact, Count-Min with a heap and Count Sketch with a
+/// heap);
 /// Q2's summary reads miss its 100 ms latency bound, and no valid DAG is
 /// cheaper than the selection.
 #[test]
@@ -207,7 +219,7 @@ fn example1_no_listed_choice_is_cheaper_than_the_selected_plan() {
     let document = priced_document(&["--example", "planner-layering-1"]);
     let choices = assert_no_listed_choice_is_cheaper(&document);
     assert_eq!(document["memo"]["enumeration"]["step"], "pass1");
-    assert_eq!(choices.len(), 5);
+    assert_eq!(choices.len(), 3);
     assert!(choices
         .iter()
         .any(|c| c["rejection"] == "latency_bound_exceeded"));
@@ -216,15 +228,23 @@ fn example1_no_listed_choice_is_cheaper_than_the_selected_plan() {
 /// The issue's ratio of quantiles as `stage_pipeline` lowers it (series
 /// identity: the two `quantile 0.5` share one group): no listed DAG is
 /// cheaper than the selection, with accuracy guarantees ignored (the
-/// default) or enforced.
+/// default) or enforced. Enforced, Pass 1 prunes every summary: no query
+/// has a guarantee through `/` and `+` over a KLL rank error or a DDSketch
+/// relative one, so every listed DAG is exact and valid.
 #[test]
 fn ratio_of_quantiles_no_listed_choice_is_cheaper_than_the_selected_plan() {
-    for enforce in [&[][..], &["--enforce-accuracy-guarantees"][..]] {
-        let mut args = vec!["--workload", RATIO_OF_QUANTILES_WORKLOAD];
-        args.extend_from_slice(enforce);
-        let choices = assert_no_listed_choice_is_cheaper(&priced_document(&args));
-        assert!(choices.len() >= 49);
-    }
+    let ignored = assert_no_listed_choice_is_cheaper(&priced_document(&[
+        "--workload",
+        RATIO_OF_QUANTILES_WORKLOAD,
+    ]));
+    assert!(ignored.len() >= 25);
+    let enforced = assert_no_listed_choice_is_cheaper(&priced_document(&[
+        "--workload",
+        RATIO_OF_QUANTILES_WORKLOAD,
+        "--enforce-accuracy-guarantees",
+    ]));
+    assert!(!enforced.is_empty());
+    assert!(enforced.iter().all(|choice| choice["valid"] == true));
 }
 
 /// Lowered without series identity, the two `quantile 0.5` have no unique

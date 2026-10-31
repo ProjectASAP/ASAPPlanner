@@ -1,23 +1,23 @@
-//! Local pricing interfaces are generated from certified supplier interfaces.
+//! Local pricing interfaces are generated from certified producer interfaces.
 //! No workload plans are enumerated. A candidate's distinct local options are
 //! connected jointly by the MILP; identical interfaces retain every binding.
 use super::*;
 use crate::search::milp::direct_price_options::{
-    CandidatePriceOption, JointPriceProfile, SupplierPriceBinding,
+    CandidatePriceOption, JointPriceProfile, ProducerPriceBinding,
 };
 
 const MAXIMUM_PRICE_OPTIONS: usize = 50_000;
 
 #[derive(Clone)]
 struct PriceClass<'a> {
-    priced: PricedNode<'a>,
+    priced: NodeUsage<'a>,
     lookback: Option<u64>,
     sketches: usize,
     raw_source: Option<String>,
     work: WorkBounds,
     workers: Option<u64>,
     compaction: f64,
-    bindings: Vec<Vec<SupplierPriceBinding>>,
+    bindings: Vec<Vec<ProducerPriceBinding>>,
     ancestor_work: std::collections::BTreeMap<usize, u64>,
     sketch_ids: std::collections::BTreeSet<usize>,
     sketch_sources: std::collections::BTreeMap<usize, Option<String>>,
@@ -45,12 +45,12 @@ impl PriceClass<'_> {
 /// explicit selected-consumer witness. Cyclic catalogs use bounded local
 /// interface propagation; selected physical graphs must still be acyclic.
 struct InputTuples {
-    choices: Vec<Vec<SupplierPriceBinding>>,
+    choices: Vec<Vec<ProducerPriceBinding>>,
     indices: Vec<usize>,
     done: bool,
 }
 impl InputTuples {
-    fn new(choices: Vec<Vec<SupplierPriceBinding>>) -> Self {
+    fn new(choices: Vec<Vec<ProducerPriceBinding>>) -> Self {
         Self {
             indices: vec![0; choices.len()],
             done: choices.iter().any(Vec::is_empty),
@@ -59,7 +59,7 @@ impl InputTuples {
     }
 }
 impl Iterator for InputTuples {
-    type Item = Vec<SupplierPriceBinding>;
+    type Item = Vec<ProducerPriceBinding>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
             return None;
@@ -107,7 +107,7 @@ pub(in crate::search) fn extract_price_options(
             continue;
         }
         for supplier in configured.dag.candidates[id]
-            .supplier_candidates_per_input
+            .producer_candidates_per_input
             .iter()
             .flat_map(|input| input.candidates.iter())
         {
@@ -138,7 +138,7 @@ pub(in crate::search) fn extract_price_options(
         order.extend((0..count).filter(|id| !ordered[*id]));
     }
     // Reuse the existing one-node certification/pricing path. Only one already
-    // priced supplier interface is present in this reusable scratch cache, so
+    // priced producer interface is present in this reusable scratch cache, so
     // price() performs one local operation without recursive plan generation.
     let mut cache = vec![None; count];
     let mut visited = vec![true; count];
@@ -164,7 +164,7 @@ pub(in crate::search) fn extract_price_options(
                 continue;
             }
             let mut inputs = Vec::new();
-            for input in &configured.dag.candidates[id].supplier_candidates_per_input {
+            for input in &configured.dag.candidates[id].producer_candidates_per_input {
                 let mut choices = Vec::new();
                 for producer in &input.candidates {
                     check_deadline(context.deadline)?;
@@ -172,7 +172,7 @@ pub(in crate::search) fn extract_price_options(
                         continue;
                     }
                     for price_option in 0..classes[producer.0].len() {
-                        choices.push(SupplierPriceBinding {
+                        choices.push(ProducerPriceBinding {
                             producer: *producer,
                             price_option,
                         });
@@ -377,7 +377,7 @@ pub(in crate::search) fn extract_price_options(
                             sketch_ids.insert(id);
                         }
                         if node.output_state.timing == ExecutionTiming::IngestionTime {
-                            ancestor_work.insert(id, priced.work_ms.to_bits());
+                            ancestor_work.insert(id, priced.work_ms_per_execution.to_bits());
                         } else {
                             ancestor_work.clear();
                         }
@@ -460,7 +460,7 @@ pub(in crate::search) fn extract_price_options(
                 .collect::<Result<Vec<_>, DirectProfileError>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let settings = context.models.plan_selection;
+    let settings = context.models.cost_inputs;
     let CostModel::UsageOverTime(prices) = &settings.cost_model else {
         return Ok(None);
     };

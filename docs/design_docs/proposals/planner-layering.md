@@ -257,11 +257,10 @@ product of every sub-DAG's choices. The memo search, which is the planner's
 search (every Stage 1 to Stage 3 entry point runs it), runs the same stages
 with the same semantics and code boundaries, but on the workload's distinct
 logical sub-expressions: each choice is made once per sub-expression, and only
-the choices several sub-expressions depend on are made jointly. The
-whole-workload form remains in one place: before the joint search, each
-query's own candidates are checked alone, applying Pass 2 to one explicit
-Pass 1 assignment at a time, to prune choices that fail regardless of
-sharing.
+the choices several sub-expressions depend on are made jointly. The code no
+longer builds whole-workload candidates: the memo rules replace each
+whole-workload Pass 2 rule, and the reference pricer enumerates memo
+choices (`memo::enumeration`).
 
 This section gives the memo's components, follows one query through each
 step, and gives the algorithm that turns a memo back into the candidate DAGs
@@ -274,7 +273,7 @@ lists each stage's input and output types.
 |---|---|---|
 | Memo group | `MemoGroup`, numbered by `MemoGroupId` | One distinct logical sub-expression: its logical node, its child groups, the groups that read it (`parent_groups()`) and the queries that reach it (`reached_by_queries()`). Groups are numbered children first; `DagOfLogicalMemoGroups::query_roots` holds each query's root over groups. |
 | DAG of logical memo groups | `DagOfLogicalMemoGroups` | Stage 0's groups, before any implementation choice: the workload's logical DAG hash-consed (below). |
-| Candidate memo | `CandidateMemo` | The groups, and the candidates for each memo group (`candidates[group]`). Pass 1 creates it from the DAG of logical memo groups; the Pass 2 rules add candidates and groups. |
+| Memo candidates | `MemoCandidates` | The groups, and the candidates for each memo group (`candidates[group]`). Pass 1 creates it from the DAG of logical memo groups; the Pass 2 rules add candidates and groups. |
 | Candidate for a memo group | `CandidateForMemoGroup` | One way to implement a group over child groups. `fused_groups`: for a fused computation, the groups it absorbs beyond the group whose candidate it is; empty otherwise. `root_node`: its own nodes, down to the nodes of the groups it reads. `input_groups`: the groups it reads, whose implementations are chosen separately. `origin`: the rule that made it (`OriginOfCandidateForMemoGroup`, below). `accuracy_budget_parts`: the number of equal shares of the accuracy budget its summaries are sized for, 1 for the whole budget and `n` when it is one of `n` approximate inputs of a query. |
 | Concrete summary-state group | a `MemoGroup` whose node is a `SummaryAgg` or a `PaneChain` | One summary state at one size, or one pane chain at one layout, that several readers may share. A choice several groups depend on, such as a shared size or a pane grid, is one concrete group per value, when two or more readers may read that value, and each of them gets a candidate reading that group: of two readers needing a KLL with `k ≥ 345` and `k ≥ 200`, both may read a group `KLL(345)`, and the second may also keep its own private `KLL(200)`. Choosing a value is choosing a group, so the memo has no separate type for such a choice. The other Pass 2 rules add groups too (below). |
 
@@ -282,7 +281,7 @@ lists each stage's input and output types.
 one. It makes no implementation choice, so this section counts it as Stage 0
 (its output); the code runs it as Stage 1 starts, which is why
 [Stage inputs and outputs](#stage-inputs-and-outputs-whole-workload-candidates-and-memo)
-lists `DagOfLogicalMemoGroups::from_roots` with Pass 1. `DagOfLogicalMemoGroups::from_roots` runs
+lists `generate_dag_of_logical_memo_groups` with Pass 1. `generate_dag_of_logical_memo_groups` runs
 `share_common_sub_dags` (`crates/logical-asap-optimization/src/pass2/cse.rs`) over the frontends'
 roots and numbers the shared nodes as groups. Two structurally equal nodes
 become one group only when sharing them is legal, that is, when every reader
@@ -346,7 +345,7 @@ One query, evaluated every minute, with `max_error 0.01` and
 avg by (job) (quantile_over_time(0.5, data[5m]) / quantile_over_time(0.5, data[5m]) + quantile_over_time(0.9, data[5m]))
 ```
 
-**Step 1, Stage 0.** `DagOfLogicalMemoGroups::from_roots` makes 7 groups:
+**Step 1, Stage 0.** `generate_dag_of_logical_memo_groups` makes 7 groups:
 
 | Group | Logical sub-expression | Reads |
 |---|---|---|
@@ -440,7 +439,7 @@ table describes. `pass2::memo::enumeration` converts a memo after any step into
 that vector.
 
 - **`ChosenCandidatePerMemoGroup`** maps each needed group to one candidate index in
-  `CandidateMemo::candidates[group]`. A group is *needed* when a query's
+  `MemoCandidates::candidates[group]`. A group is *needed* when a query's
   root is in it or a chosen candidate reads it.
 - **`enumerate(memo, limit) -> AllChosenCandidatesPerMemoGroup { all_chosen_candidates, complete }`** lists
   every choice, depth first:
@@ -508,10 +507,14 @@ into one plan and check and cost it with Stage 2 and Stage 3. The search is a
 candidate-connection search: a MILP (mixed-integer linear program) over the graph of candidates and the
 groups they read proposes a choice from local cost bounds, Stage 2 and
 Stage 3 validate and cost it, and each validated cost constrains the MILP
-again (evaluator-backed refinement). It first finds an incumbent (the best validated plan so far) on seed pane
-grids, then exposes finer pane widths; only a completed round over the full
-pane-width domain bounds the declared search space, and otherwise the result
-is the best validated plan found. On tiny catalogs, tests check that this
+again (evaluator-backed refinement). Stage 3 realizes each proposed choice
+through Stage 2's `AssignmentRealizer`, which the facade builds and passes in,
+so Stage 3 does not depend on the Stage 2 crate. The facade first finds an
+incumbent (the best validated plan so far) in a round over seed pane grids,
+then exposes finer pane widths in later rounds, each round running Pass 2,
+Stage 2 and Stage 3; only a completed round over the full pane-width domain
+bounds the declared search space, and otherwise the result is the best
+validated plan found. On tiny catalogs, tests check that this
 bounded search selects the same plan cost as a complete traversal of the same
 catalog under every cost model, and that the MILP's selection matches an
 independent enumeration of the candidate graph.
@@ -519,28 +522,32 @@ independent enumeration of the candidate graph.
 #### Memo code interface
 
 The memo rules are in `crates/logical-asap-optimization/src/` (module
-`memo`); the memo types Stage 1 hands Stage 2 are in
-`crates/types/src/stages/` (`asap_types::stages`); the search over the memo
-is in `crates/plan-selection/src/search/`.
+`pass2::memo`, crate-private: the crate root re-exports each entry point); the memo types Stage 1 hands Stage 2 are in
+`crates/types/src/stages/` (`asap_types::stages`); the facade that runs the
+stages is in `crates/planner/src/run.rs`; the search over Stage 2's
+candidates is in `crates/plan-selection/src/search/`.
 
 | Step | Entry point | Path |
 |---|---|---|
-| Stage 0 | `DagOfLogicalMemoGroups::from_roots`, `MemoGroup`, `MemoGroupId` | `pass2/memo.rs` (`MemoGroup`, `MemoGroupId`: `asap_types::stages`); hash-consing is `share_common_sub_dags` in `pass2/cse.rs` |
-| Pass 1 | `generate_per_computation_candidates_with_memo` and `without_unsupported_summaries` (the inventory); `generate_per_computation_logical_memo_candidates` → `PerComputationLogicalMemoCandidates` (the memo: `try_populate_pass1`, exported from `pass2::memo::candidates`, then the accuracy-scoped candidates) | `pass1/per_computation_candidates.rs`; `pass1/logical_memo_candidates.rs`; `pass2/memo/groups.rs` |
-| Memo types | `CandidateMemo`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup`, `LogicalASAPMemoCandidates`, `CandidateGenerationTimeout`, `root_groups`, `queries_rooted_at` | `crates/types/src/stages/` (`asap_types::stages`) |
+| Stage 0 | `generate_dag_of_logical_memo_groups` → `DagOfLogicalMemoGroups`, `MemoGroup`, `MemoGroupId` | `pass2/memo.rs` (the types: `asap_types::stages`); hash-consing is `share_common_sub_dags` in `pass2/cse.rs` |
+| Pass 1 | `generate_per_computation_logical_memo_candidates` → `PerComputationLogicalMemoCandidates` (with `ComputationTarget` and `HowToComputeAggregateMeasure`, in `asap_types::stages`), the one entry: inside it, the computation targets (walking the memo groups), the summaries the deployment does not support and those no query can use pruned, the candidates attached to the groups (`try_populate_pass1`), then the accuracy-scoped sizes | `pass1/logical_memo_candidates.rs`; `pass1/per_computation_candidates.rs`; `pass2/memo/groups.rs` |
+| Memo types | `DagOfLogicalMemoGroups`, `PerComputationLogicalMemoCandidates` (with `ComputationTarget`, `FusedComputation`, `HavingEntry`, `HavingPlacement`, `HowToComputeAggregateMeasure`), `MemoCandidates`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup`, `LogicalASAPMemoCandidates`, `CandidateGenerationTimeout`, `root_groups`, `queries_rooted_at` | `crates/types/src/stages/` (`asap_types::stages`) |
 | Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, one pane-width round over a `Pass2RoundState` (kept between rounds: the memo after step 1 and before the rules, and the widths already generated). It calls in this order: 1. window composition for the round's new widths (`extend_local_window_composition`); 2–9. the rules in `pass2/memo/rules/`: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; 10. `add_shared_summary_state_groups`, the shared builds | `pass2/logical_memo_candidates.rs` (`LogicalASAPMemoCandidates` itself: `asap_types::stages`); `pass2/memo/window_candidates.rs`, `pass2/memo/rules/`, `pass2/memo/state_groups.rs`, `pass2/memo/shared_configurations.rs` |
-| Memo to candidate DAGs | `enumerate`, `build_logical_asap_dags_from_chosen_candidates`, `ChosenCandidatePerMemoGroup`, `AllChosenCandidatesPerMemoGroup`, `ErrorBuildingLogicalASAPDagsFromChosenCandidates` | `pass2/memo/enumeration.rs` (module `pass2::memo::enumeration`) |
-| Production memo build and search | `run_stage1_to_stage3_with` builds the DAG of logical memo groups (`pipeline.rs`); `candidate_connection_search` (`route.rs`) builds the candidate memo for each pane-width round: query pruning (first round), `generate_per_computation_logical_memo_candidates` (first round), `generate_logical_asap_memo_candidates` (the `Pass2RoundState` is kept in `DomainProgress.pass2_round` between rounds); then `candidates/`, `milp/` and `refinement/` | `crates/plan-selection/src/search/` |
+| Memo to candidate DAGs | `enumerate`, `build_logical_asap_dags_from_chosen_candidates`, `ChosenCandidatePerMemoGroup`, `AllChosenCandidatesPerMemoGroup`, `ErrorBuildingLogicalASAPDagsFromChosenCandidates` | `pass2/memo/enumeration.rs` (re-exported at the crate root) |
+| Production memo build and search | The facade's `run_planning` builds the DAG of logical memo groups and runs Pass 1 (`generate_per_computation_logical_memo_candidates`) once; then, for each pane-width round, `generate_logical_asap_memo_candidates` (the `Pass2RoundState` is kept between rounds), `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`. It keeps the best round's selection (`asap_cost::PlanRanking`) and builds that plan with Stage 2's `AssignmentRealizer::realize`. Behind `select_plan`: `candidates/`, `milp/` and `refinement/` | `crates/planner/src/run.rs`; `crates/plan-selection/src/search/` |
 
 ## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies
 
 Stages 0 to 2 (logical and physical planning stages) each output a candidate set holding every semantically equivalent and legal candidate DAG of that stage; stage 3 is the only step that chooses one candidate DAG as output currently (TODO: early selection for valid and more efficient candidates of stage 0-2 can be designed later). Candidate sets are internal to ASAPPlanner and may
 be shared or enumerated lazily. Two kinds of removal are kept apart:
 
-* **Pruning** removes an **invalid** candidate. Any stage may prune, but only
-  when the candidate is provably invalid (for example, a summary family that
-  cannot meet the query's accuracy target), and every pruned candidate carries
-  a reason.
+* **Pruning** removes an **invalid** candidate. Each stage prunes only what
+  its own knowledge proves invalid (for example, a summary family that
+  cannot meet the query's accuracy target), and records every pruned
+  candidate in its output's `pruned_candidates`, in one shape for every
+  stage: `PrunedCandidate { group, candidate, reason }` with one
+  `PruneReason` enum (`asap_types::stages`). See
+  [Pruning by stage](#pruning-by-stage).
 * **Selection** discards **valid** candidates. Only stage 3 does this, when it
   picks the cheapest one.
 
@@ -559,6 +566,31 @@ selection picks one. [Example 1](#example-1-aggregation-over-dimensions--the-can
 
 The sections below describe each stage.
 
+### Pruning by stage
+
+| Stage | Prunes (`PruneReason`) | Recorded in | `candidate` |
+|---|---|---|---|
+| 0. Frontends | nothing: a query that cannot be lowered fails planning with an error | — | — |
+| 1, Pass 1 | what the measure or the deployment cannot compute: `RequiresExact`, `NullableAvgInput`, `NoRelationalCountSketchRealization`, `UnsupportedByDeployment`, `QuantileOutsideUnitInterval`, `TopKHeapOverOneRowPerItem`; and, only when the deployment's accuracy model and evidence cannot accept an output without its guarantee, a summary no query reading it can use: `NoErrorBoundForQueryTarget` | `PerComputationLogicalMemoCandidates::pruned_candidates`, each on its aggregate's memo group | the way to compute the measure (`HowToComputeAggregateMeasure`) |
+| 1, Pass 2 | nothing: it only adds candidates | — | — |
+| 2 | what cannot be implemented, built or kept: `PerEntityAggregateNotExecutable` (an exact per-entity `Aggregate` the executor has no kernel for), `RawDataNotRetained` (a query-time scan of raw data the deployment does not keep), `InputHasNoBuildableProducer`, `ReachesNoQueryOutput`, `TooFewQueryReaders` (shared within one evaluation with fewer than two reading queries) | `PhysicalASAPMemoCandidates::pruned_candidates`, each on its operator node's memo group | `PhysicalCandidateKey { operator_node, timing, materialization }` |
+| 3 | valid candidates that lose, and the checks only a whole plan can make (accuracy, latency, cluster capacity) | its own `RejectionCause` | — |
+
+Stage 2's key names what a pruned candidate would have been, since kept
+candidates are renumbered after pruning and a pruned one has no
+`PhysicalCandidateId`. Stage 2 emits one candidate per operator node,
+timing and materialization, and makes no copies of it, so (`operator_node`,
+`timing`, `materialization`) is unique. Operator
+nodes are kept whole, so `operator_node` indexes the output's
+`operator_nodes_of_candidates_for_memo_groups`. Pass 1's accuracy pruning
+(`NoErrorBoundForQueryTarget`) runs inside Pass 1's entry, before the
+candidates are attached to the memo groups, and records a `PrunedCandidate`
+like every other Pass 1 prune.
+
+`stage_pipeline` writes both lists as `pruned_candidates` under
+`stage1_logical_asap_optimization` and `stage2_physical_asap_optimization`,
+and the viewer's Memo view lists a group's entries in its group panel.
+
 ### Stage inputs and outputs: whole-workload candidates and memo
 
 The table above names each stage's output as a set of whole-workload
@@ -571,11 +603,11 @@ the memo path's entry points.
 | Stage | Whole-workload candidates: input → output | Memo: input → output | Entry point (memo path) |
 |---|---|---|---|
 | 0. Frontends | Query text, language → one logical root per query, carrying its accuracy target | Same: a `QueryRoot` per query | `lower_promql_workload`, `lower_sql_dialect` (`asap-frontend-*`); `plan_installable` (`asap_planner`) runs the frontends and Stages 1–3 on the user input |
-| 1, Pass 1 | Logical roots; the deployment's supported summaries → the Pass 1 inventory, every computation's candidates (`PerComputationCandidates`) | Logical roots → `DagOfLogicalMemoGroups` (hash-consed `MemoGroup`s); with the Pass 1 inventory, less the summaries the deployment does not support and the choices early query pruning removes → `PerComputationLogicalMemoCandidates`: the `CandidateMemo` (each group's `CandidateForMemoGroup`s, with the accuracy-scoped sizes), the computation targets and the pruned candidates | `DagOfLogicalMemoGroups::from_roots`, `generate_per_computation_candidates_with_memo`, `without_unsupported_summaries`, `generate_per_computation_logical_memo_candidates` |
-| 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (`stage1_candidates_of_choice`) | `CandidateMemo`; the entries' recurrence and range steps → the same memo with each rule's candidates added to the groups they implement | the memo rules (`pass2/memo/rules/`), `pass2::memo::window_candidates` |
-| 1, concrete summary-state groups | (part of Pass 2) | `CandidateMemo` → the memo with concrete summary-state groups: one group per shared size or pane layout that readers can read | `add_shared_summary_state_groups`, Pass 2's last step; the Pass 2 output is `LogicalASAPMemoCandidates` (`generate_logical_asap_memo_candidates`) |
-| 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per materialization assignment | Each candidate for a memo group, on demand → its physical operators and its allowed materializations | `implement_candidate_operators`, `summary_materialization_eligibility` (called from Stage 3) |
-| 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model, raw-data retention → one plan | The expanded memo's candidates and their configurations; the same inputs → one candidate per needed group, connected into one plan | `run_stage1_to_stage3_with`, `candidate_connection_search`; output `Stage1ToStage3Run`, which holds the selected `PhysicalWorkloadPlan` and the selection |
+| 1, Pass 1 | Logical roots; the deployment's supported summaries → the Pass 1 inventory, every computation's candidates (`PerComputationCandidates`, now Pass 1's crate-private working form) | Logical roots → `DagOfLogicalMemoGroups` (hash-consed `MemoGroup`s); with the Pass 1 inventory, less the summaries the deployment does not support and those no query reading them can use → `PerComputationLogicalMemoCandidates`: the `MemoCandidates` (each group's `CandidateForMemoGroup`s, with the accuracy-scoped sizes), the computation targets and the pruned candidates (`PrunedCandidate<HowToComputeAggregateMeasure>`) | `generate_dag_of_logical_memo_groups`, `generate_per_computation_logical_memo_candidates` |
+| 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (no longer in the code) | `MemoCandidates`; the entries' recurrence and range steps → the same memo with each rule's candidates added to the groups they implement | the memo rules (`pass2/memo/rules/`), `pass2::memo::window_candidates` |
+| 1, concrete summary-state groups | (part of Pass 2) | `MemoCandidates` → the memo with concrete summary-state groups: one group per shared size or pane layout that readers can read | `add_shared_summary_state_groups`, Pass 2's last step; the Pass 2 output is `LogicalASAPMemoCandidates` (`generate_logical_asap_memo_candidates`) |
+| 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per materialization assignment | `LogicalASAPMemoCandidates`; entries, `DataWorkload`, query-time and raw-data retention → `PhysicalASAPMemoCandidates`: every operator node of every candidate with each allowed timing and materialization (one physical candidate each, no copies), the producers of each input, reader constraints (each applied to every selected run of its candidate), and the pruned candidates (`PrunedCandidate<PhysicalCandidateKey>`) | `generate_physical_asap_memo_candidates` (`asap_physical_asap_optimization`) |
+| 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model → one plan | `PhysicalASAPMemoCandidates`; entries, `DataWorkload`, `AccuracyCheckInputs`, `CostInputs`, Stage 2's realizer, a deadline → `Selection`: the selected plan (`selected_dag`, a `DagOfSelectedCandidates`: one node per run of a candidate, so a candidate recomputed by two readers or shared as two instances over different inputs is two nodes, with an edge per input), its cost, the accepted accuracy per query and the search report | `select_plan` (`asap_plan_selection`); the facade (`run_planning`, output `PlanningRun`) runs it per pane-width round and builds the selected `PhysicalWorkloadPlan` with `AssignmentRealizer::realize`, one plan node per selected node |
 | 4. Execution | The selected `PhysicalASAPDAG` → query results | Same: an `InstallablePlan` (`{dag, query_texts}`) → query results | The deployment runtime installs the `InstallablePlan` |
 
 What changed with the memo:
@@ -583,9 +615,10 @@ What changed with the memo:
   number is the sum of each group's choices instead of their product. Only
   choices several groups depend on, such as a shared state's size, are made
   jointly.
-- Stage 2 is no longer a pass over whole candidate DAGs. Stage 3 calls it per
-  candidate for a memo group while it builds the candidate graph, so
-  physical optimization runs lazily, per candidate.
+- Stage 2 is no longer a pass over whole candidate DAGs. It implements every
+  operator node of every candidate for a memo group once, enumerates each
+  node's timings and materializations, and prunes what cannot be built,
+  used or kept; Stage 3 selects among what remains.
 - The concrete summary-state groups are expanded by Stage 3's search today,
   through the Stage 1 functions above. A planned change moves this expansion
   into Stage 1, so that Stage 3 receives a complete memo and only selects.
@@ -815,11 +848,16 @@ model for its share. Pass 2 never resizes a summary for its own readers: a
 pane chain inherits the size of the build it replaces (a merge of equal-size
 panes keeps the guarantee when the family's merged error is `Exact` or
 `AsIfBuiltOverUnion`), and a build shared by several readers takes the
-strictest reader's size, one state group per distinct size. The whole-result
-failure-probability capacities (`add_scoped_candidates`) run in Pass 1's
-`generate_per_computation_logical_memo_candidates`; one sizing step still runs
-outside Pass 1 and is to move into it: Stage 3's failure-probability resizing
-(`resize_for_failure_probability`).
+strictest reader's size, one state group per distinct size. The failure
+probability is part of Pass 1's size too
+(`generate_per_computation_logical_memo_candidates`): each approximate input
+of a candidate with `n` budget parts is sized for `δ / (n · V)`, the smallest
+over the queries reaching its group, where `V` is the number of values the
+query's accuracy scope covers (1 per value, at most `⌊1 / share⌋` for a record
+share, and `G` from the workload-derived bounds for the whole result), and a
+classic HLL's precision is raised for its source's declared distinct bound.
+Stage 3 never resizes: a candidate whose sizes miss the composed accuracy
+target is rejected.
 Pass 1 creates no merge nodes: each candidate summarizes exactly its own
 window, and merging across windows comes from the window-composition rule in
 Pass 2.
@@ -1246,6 +1284,25 @@ Output: C3 — CandidatePhysicalASAPDAGs
 here; they determine the cost of each option, which stage 3 uses to pick the
 cheapest plan (the typical outcomes above).
 
+On the memo, Stage 2 prunes per operator node and records each pruned
+candidate in `PhysicalASAPMemoCandidates::pruned_candidates`
+([Pruning by stage](#pruning-by-stage)). It does not generate a
+configuration the deployment cannot run: an exact per-entity `Aggregate`
+(a per-series range reduction over raw data samples) with more than one
+measure, a measure without an exact per-entity kernel such as
+`stddev_over_time`, a measure filter or a `HAVING`
+(`PerEntityAggregateNotExecutable`; the rule reads one node, so no whole
+plan is needed), and, without raw data retained, a query-time scan of raw
+data (`RawDataNotRetained`). It then removes the candidates no buildable
+input, query output or reader count can use (`InputHasNoBuildableProducer`,
+`ReachesNoQueryOutput`, `TooFewQueryReaders`),
+repeating until nothing more is removed. Stage 2 makes no execution-scope
+copies: how many times a candidate runs is Stage 3's choice, and a
+selection names each run as a node of its `DagOfSelectedCandidates`.
+Today's Stage 3 engine, whose MILP runs each candidate at most once, makes
+the copies it needs itself before solving and decodes each selected copy
+into a node.
+
 *Example for Algorithm 3* ([Example 4, Pattern B](#example-4-materialization-of-window-summaries-in-physical-planning)).
 The logical candidate is the `Tumbling(1m)` KLL option from Algorithm 2. The
 diagram shows three of its materialization assignments, each drawn as a copy
@@ -1294,7 +1351,7 @@ flowchart TB
 ### 3. Plan selection
 
 Selection rejects every candidate that misses an accuracy target or a latency
-bound, or that needs a capability the deployment lacks, and then picks the
+bound, or that is over the cluster's capacity, and then picks the
 cheapest remaining plan. It is the only stage that uses the deployment's cost
 and accuracy models, and the only stage that discards valid candidates;
 earlier stages only prune provably invalid ones. Accuracy is
@@ -1314,7 +1371,7 @@ usage into a choice:
 |---|---|---|
 | Cost model 1, `UsageOverTime(ResourceUnitCost)` (default) | Pay-as-you-go | Unit cost × usage per second; the cheapest wins |
 | Cost model 2, `ProvisionedCapacity(ResourceUnitCost)` | Pays for provisioned capacity | Unit cost × peak memory, peak CPU cores and disk; the cheapest wins |
-| Cost model 3, `ClusterCapacity(ClusterLimits)` | Its own cluster | No prices: a candidate over the cluster's memory, disk or (optionally) cores is invalid; the objective `LowestLatency`, `LeastMemory` or `ParetoFront` chooses among the rest |
+| Cost model 3, `ClusterCapacity(ClusterLimits)` | Its own cluster | No prices: a candidate over the cluster's memory, disk or (optionally) cores is invalid; the objective `LowestLatency` or `LeastMemory` chooses among the rest |
 
 ### 4. Execution
 

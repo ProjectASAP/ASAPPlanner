@@ -31,7 +31,8 @@ pub use budget::per_input_target;
 pub use evidence::OperandDomain;
 pub(crate) use evidence::PropagationStats;
 pub use model::{
-    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, NoAccuracyEvidence,
+    AccuracyEvidenceProvider, AccuracyModel, BuiltinAccuracyModel, IgnoreAccuracyGuarantees,
+    NoAccuracyEvidence,
 };
 
 #[cfg(test)]
@@ -83,7 +84,7 @@ pub(crate) fn satisfies(guarantee: &AccuracyGuarantee, target: &AccuracyTarget) 
 /// error has no distribution-free value error), which the default model
 /// does not make: it does not satisfy. The scope is compared separately
 /// ([`scope_meets`]).
-fn metric_meets(guarantee: AccuracyMetric, target: AccuracyMetric) -> bool {
+pub(crate) fn metric_meets(guarantee: AccuracyMetric, target: AccuracyMetric) -> bool {
     guarantee == target
         || (guarantee == AccuracyMetric::ABSOLUTE_STREAM_L2
             && target == AccuracyMetric::ABSOLUTE_STREAM_L1)

@@ -4,7 +4,6 @@
 
 use std::time::Instant;
 
-use crate::pass1::logical_memo_candidates::PerComputationLogicalMemoCandidates;
 use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::rules::{
     finer_aggregate, rollup, scan_labels, shared_configuration_readers, summary_inputs,
@@ -15,7 +14,8 @@ use crate::pass2::memo::state_groups::{
     add_shared_summary_state_groups, check_unexpanded_memo, StateGroupExpansionError,
 };
 use crate::pass2::memo::window_candidates::extend_local_window_composition;
-use asap_types::stages::CandidateMemo;
+use asap_types::stages::MemoCandidates;
+use asap_types::stages::PerComputationLogicalMemoCandidates;
 use asap_types::stages::{CandidateGenerationTimeout, LogicalASAPMemoCandidates};
 use asap_types::workload::QueryWorkloadEntry;
 
@@ -25,7 +25,7 @@ use asap_types::workload::QueryWorkloadEntry;
 /// then reruns the other rules on a copy.
 #[derive(Debug, Clone)]
 pub struct Pass2RoundState {
-    unexpanded_memo: CandidateMemo,
+    unexpanded_memo: MemoCandidates,
     previous_domain: Option<PaneWidthDomain>,
 }
 
@@ -38,14 +38,9 @@ impl Pass2RoundState {
         }
     }
 
-    /// The pane widths of the last round, `None` before the first.
-    pub fn previous_domain(&self) -> Option<PaneWidthDomain> {
-        self.previous_domain
-    }
-
     /// The memo after the last round's local window composition, before
     /// the other Pass 2 rules (Pass 1's memo before the first round).
-    pub fn unexpanded_memo(&self) -> &CandidateMemo {
+    pub fn unexpanded_memo(&self) -> &MemoCandidates {
         &self.unexpanded_memo
     }
 }
@@ -67,7 +62,7 @@ pub enum LogicalASAPMemoCandidatesError {
 /// Stage 1, Pass 2 for one pane-width round: adds to `round`'s memo the
 /// local pane candidates for the widths of `domain` that earlier rounds did
 /// not generate (rule 1), records `domain` in `round`, then runs rules 2–9
-/// and [`add_shared_summary_state_groups`] on a copy and returns it.
+/// and `add_shared_summary_state_groups` on a copy and returns it.
 /// `entries[i]` is query `i`'s workload entry. Stops once `deadline` passes.
 pub fn generate_logical_asap_memo_candidates(
     round: &mut Pass2RoundState,
@@ -94,7 +89,7 @@ pub fn generate_logical_asap_memo_candidates(
 
 /// Pass 2's rules 2–9, in order, on a memo after local window composition.
 pub(crate) fn apply_sharing_rules(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     domain: PaneWidthDomain,
     deadline: Option<Instant>,
 ) -> Result<(), StateGroupExpansionError> {

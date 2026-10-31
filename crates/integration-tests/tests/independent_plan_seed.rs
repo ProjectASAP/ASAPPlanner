@@ -35,7 +35,7 @@ fn sql(queries: &[String]) -> FuzzWorkload {
 fn cost(queries: &[String]) -> f64 {
     use asap_cost::CostInputs;
     use asap_devtools::planning_stages::run_search_over;
-    use asap_plan_selection::{PlanningModels, Stage1ToStage3Search};
+    use asap_planner::{PlanSearchSettings, PlanningModels};
     let w = sql(queries);
     let roots = Planner::new(FuzzSettings::default()).lower(&w).unwrap();
     let planning = w.planning_workload();
@@ -43,25 +43,23 @@ fn cost(queries: &[String]) -> f64 {
     let settings = CostInputs::default();
     let deployment = w.deployment();
     let models = PlanningModels::builtin()
-        .with_plan_selection(&settings)
+        .with_cost_inputs(&settings)
         .with_deployment_capabilities(&deployment);
     let run = run_search_over(
         roots,
         &entries,
         &w.data,
         models,
-        Stage1ToStage3Search {
-            milp_time_limit_ms: Some(30_000),
-            ..Default::default()
+        PlanSearchSettings {
+            time_limit_ms: Some(30_000),
+            inspect: false,
         },
+        None,
     )
     .unwrap();
-    let selection = run.stage3_plan_selection.as_ref().unwrap();
-    let report = selection.search.candidate_connections.as_ref().unwrap();
-    println!("{queries:?}: status {}", report.status);
-    selection.costs[&selection.selected]
-        .cost_per_second
-        .unwrap()
+    let selection = run.run.selection.as_ref().unwrap();
+    println!("{queries:?}: status {:?}", selection.search_report.status);
+    selection.cost.cost_per_second.unwrap()
 }
 
 /// Asserts the joint plan of `queries` costs no more than their separate

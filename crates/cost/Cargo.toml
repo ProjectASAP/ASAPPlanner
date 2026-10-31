@@ -18,3 +18,8 @@ serde_json = "1"
 # The executor's charge for each summary state, checked against the bytes
 # the state byte models give for it plus the accumulator's own fields (#947).
 asap-executor = { path = "../executor" }
+# Physical plans of PromQL queries for the plan cost tests (tests/), built
+# by the stages above this crate; `tests/held_memory.rs` builds them with
+# the reference pricer's `optimize_physical_asap`.
+asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
+asap-physical-asap-optimization = { path = "../physical-asap-optimization", features = ["reference-pricer"] }

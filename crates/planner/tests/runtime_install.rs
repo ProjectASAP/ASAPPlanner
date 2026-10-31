@@ -11,19 +11,23 @@ use crate::time_series;
 use asap_executor::physical_planner::compile;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, Value};
+use asap_physical_asap_optimization::test_support::split_shared_by_timing;
 use asap_planner::{
-    plan_installable, CostInputs, DeploymentCapabilities, FrontendInput, InstallablePlan,
-    InstallablePlanError, MaterializedView, MaterializedViewRefresh, OperatorKind,
+    plan_installable, run_planning, CostInputs, DeploymentCapabilities, FrontendInput,
+    InstallablePlan, InstallablePlanError, MaterializedView, MaterializedViewRefresh, OperatorKind,
     OptimizationInput, OptimizationPass, OptimizeError, PhysicalASAPDAG, PlanOutput,
-    PlanningModels, PlanningWorkload, SelectedPlanReport, SelectionBox, Stage1ToStage3Pass,
-    UserInput,
+    PlanSearchSettings, PlanningModels, PlanningWorkload, SelectedPlanReport, SelectionBox,
+    Stage1ToStage3Pass, UserInput,
 };
+use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::ir::{
-    apply_materialization_timings_to_roots, split_shared_by_timing, ASAPOp,
-    MaterializationAssignment, OperatorNode, QueryRoot,
+    apply_materialization_timings_to_roots, ASAPOp, MaterializationAssignment, OperatorNode,
+    QueryRoot,
 };
 use asap_types::physical::{Materialization, Medium};
+use asap_types::stages::HowToComputeAggregateMeasure;
+use asap_types::stages::PruneReason;
 use futures::{executor::block_on, StreamExt};
 use std::collections::HashMap;
 use std::ops::Bound;
@@ -232,7 +236,7 @@ async fn plan_with_report_for(
     // The models Stages 1-3 read: built-in accuracy, the deployment inputs.
     let models = PlanningModels::builtin()
         .with_deployment_capabilities(capabilities)
-        .with_plan_selection(&settings);
+        .with_cost_inputs(&settings);
     // The one Planner call: the selected plan, ready to install.
     plan_installable(UserInput::new(
         &workload,
@@ -281,16 +285,21 @@ fn state_key(view: &MaterializedView, evaluation_ms: i64) -> String {
         Bound::Excluded(at) => Bound::Excluded(evaluation_ms + at),
         Bound::Unbounded => Bound::Unbounded,
     };
-    let mut selection = view.coverage.selection.clone();
-    let timed = selection.iter().any(|b| b.relative_time.is_some());
-    for selection_box in &mut selection {
-        selection_box.relative_time = selection_box
-            .relative_time
-            .as_ref()
-            .map(|(lower, upper)| (absolute(lower), absolute(upper)));
-    }
+    let boxes = view.coverage().selection();
+    let timed = boxes.iter().any(|b| b.relative_time().is_some());
+    let selection: Vec<SelectionBox> = boxes
+        .iter()
+        .map(|selection_box| {
+            SelectionBox::new(
+                selection_box.columns().clone(),
+                selection_box
+                    .relative_time()
+                    .map(|(lower, upper)| (absolute(&lower), absolute(&upper))),
+            )
+        })
+        .collect();
     serde_json::json!({
-        "definition_id": view.coverage.definition_id,
+        "definition_id": view.coverage().definition_id(),
         "selection": selection,
         "evaluation_ms": (!timed).then_some(evaluation_ms),
     })
@@ -360,13 +369,13 @@ fn run_data_plane_on(
     for view in &views {
         // The evaluation its windows end at: this one, or for a tumbling
         // at-ingestion view the newest point of its grid at or before it.
-        let built_for_ms = match (ingestion, view.refresh) {
+        let built_for_ms = match (ingestion, view.refresh()) {
             (IngestionBuilds::Tumbling, MaterializedViewRefresh::AtIngestion) => view
                 .inputs
-                .raw_data_windows
+                .raw_data_windows()
                 .first()
                 .map_or(evaluation_ms, |window| {
-                    evaluation_ms - evaluation_ms.rem_euclid(window.width_ms)
+                    evaluation_ms - evaluation_ms.rem_euclid(window.width_ms())
                 }),
             _ => evaluation_ms,
         };
@@ -374,7 +383,7 @@ fn run_data_plane_on(
         // it reads spans together.
         let span = view
             .inputs
-            .raw_data_windows
+            .raw_data_windows()
             .iter()
             .map(|window| window.bounds_ms(built_for_ms))
             .chain(
@@ -395,7 +404,7 @@ fn run_data_plane_on(
             // The run that refreshes it: an ingestion run over its data's span
             // once its inputs are complete (each window ends at the run's
             // end), or the query run of this evaluation.
-            let scope = match view.refresh {
+            let scope = match view.refresh() {
                 MaterializedViewRefresh::AtIngestion => Scope::Ingestion {
                     window_start_ms: span.0,
                     window_end_ms: span.1,
@@ -413,7 +422,7 @@ fn run_data_plane_on(
                 StoredState {
                     state: Batch::try_new(schema, state_rows).unwrap(),
                     start_ms: span.0,
-                    retention_ms: view.retention_ms,
+                    retention_ms: view.retention_ms(),
                 },
             );
             outputs_built += 1;
@@ -421,7 +430,7 @@ fn run_data_plane_on(
         // One stored state serves every view with its key, so it is kept
         // for the largest retention any of them requires.
         let stored = store.get_mut(&key).unwrap();
-        stored.retention_ms = stored.retention_ms.max(view.retention_ms);
+        stored.retention_ms = stored.retention_ms.max(view.retention_ms());
         built.insert(view.node_id as u64, (stored.state.clone(), span));
     }
     // The query run reads the views it reaches from the queries' roots
@@ -526,7 +535,7 @@ async fn the_plan_carries_stage3s_predicted_usage() {
         "a pane-only plan"
     );
     let selection = selection.as_ref().expect("Stage 3's report");
-    let usage = selection.predicted_usage.as_ref().expect("predicted usage");
+    let usage = &selection.predicted_usage;
     let node_costs: f64 = usage
         .per_node
         .iter()
@@ -685,7 +694,7 @@ async fn assert_phased_copies_answer_as_reference(phases_ms: &[i64]) {
     assert!(
         views
             .iter()
-            .any(|view| view.refresh == MaterializedViewRefresh::AtIngestion),
+            .any(|view| view.refresh() == MaterializedViewRefresh::AtIngestion),
         "{views:#?}"
     );
     // Samples of `m`, `job` a (instances 1-3) and b (4-6), every second
@@ -799,7 +808,7 @@ async fn assert_answers_as_reference_without_raw_data(
     assert!(
         views
             .iter()
-            .any(|view| view.refresh == MaterializedViewRefresh::AtIngestion),
+            .any(|view| view.refresh() == MaterializedViewRefresh::AtIngestion),
         "{views:#?}"
     );
     assert!(
@@ -893,7 +902,7 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
         .unwrap_or_else(|r: Vec<_>| {
             panic!("{r:?}");
         });
-    assert_eq!(retention.lookback_ms, Some(1_000));
+    assert_eq!(retention.lookback_ms(), Some(1_000));
     let samples = [
         sample("latency_ms", "a", EVALUATION_MS - 900, 1.0),
         sample("latency_ms", "a", EVALUATION_MS - 100, 10.0),
@@ -941,21 +950,24 @@ async fn query_time_results_kept_across_evaluations_are_built_in_query_runs() {
     assert_eq!(views.len(), 5);
     assert!(views
         .iter()
-        .all(|v| v.refresh == MaterializedViewRefresh::OnFirstRead
-            && v.inputs.raw_data_windows[0].width_ms == 60_000));
+        .all(|v| v.refresh() == MaterializedViewRefresh::OnFirstRead
+            && v.inputs.raw_data_windows()[0].width_ms() == 60_000));
     // Raw data is kept for refreshing the oldest pane at the oldest step:
     // the five panes' 5 minutes plus the hour of steps, as long as the panes
     // themselves are kept.
     let pane_lookback_ms = views
         .iter()
-        .flat_map(|v| &v.inputs.raw_data_windows)
-        .map(|w| w.lookback_ms())
+        .flat_map(|v| v.inputs.raw_data_windows())
+        .map(asap_types::test_support::lookback_ms)
         .max();
     assert_eq!(pane_lookback_ms, Some(300_000));
-    assert!(views.iter().all(|v| v.retention_ms == 3_900_000));
+    assert!(views.iter().all(|v| v.retention_ms() == 3_900_000));
     let retention = installed.raw_data_retention().unwrap();
     assert_eq!(
-        retention.iter().map(|r| r.lookback_ms).collect::<Vec<_>>(),
+        retention
+            .iter()
+            .map(|r| r.lookback_ms())
+            .collect::<Vec<_>>(),
         vec![Some(3_900_000)],
         "{retention:?}"
     );
@@ -1346,10 +1358,10 @@ fn job_samples() -> Vec<RawDataSample> {
 
 /// The time selection `(from_ms, to_ms]` relative to the evaluation.
 fn relative_time(from_ms: i64, to_ms: i64) -> Vec<SelectionBox> {
-    vec![SelectionBox {
-        relative_time: Some((Bound::Excluded(from_ms), Bound::Included(to_ms))),
-        ..SelectionBox::default()
-    }]
+    vec![SelectionBox::new(
+        Default::default(),
+        Some((Bound::Excluded(from_ms), Bound::Included(to_ms))),
+    )]
 }
 
 /// A per-group maximum and a per-group sum (`max by (job)` and
@@ -1383,23 +1395,23 @@ async fn group_outputs_from_one_stored_per_series_sum_are_listed_and_built() {
     };
     assert_eq!(sums.len(), 2, "{:#?}", views);
     assert!(per_series.inputs.materialized_views.is_empty());
-    assert_eq!(per_series.inputs.raw_data_windows.len(), 1);
+    assert_eq!(per_series.inputs.raw_data_windows().len(), 1);
     for sum in sums {
         assert_eq!(sum.inputs.materialized_views, [per_series.node_id]);
-        assert!(sum.inputs.raw_data_windows.is_empty());
+        assert!(sum.inputs.raw_data_windows().is_empty());
         assert_ne!(
-            sum.coverage.definition_id,
-            per_series.coverage.definition_id
+            sum.coverage().definition_id(),
+            per_series.coverage().definition_id()
         );
     }
     assert_ne!(
-        sums[0].coverage.definition_id,
-        sums[1].coverage.definition_id
+        sums[0].coverage().definition_id(),
+        sums[1].coverage().definition_id()
     );
     for output in &views {
-        assert_eq!(output.refresh, MaterializedViewRefresh::AtIngestion);
-        assert_eq!(output.coverage.selection, relative_time(-60_000, 0));
-        assert_eq!(output.retention_ms, 60_000);
+        assert_eq!(output.refresh(), MaterializedViewRefresh::AtIngestion);
+        assert_eq!(output.coverage().selection(), relative_time(-60_000, 0));
+        assert_eq!(output.retention_ms(), 60_000);
     }
     assert!(plan.raw_data_retention().unwrap().is_empty());
     let run = run_data_plane(
@@ -1441,7 +1453,7 @@ async fn a_coarse_sum_rolls_up_from_the_stored_fine_sum() {
     };
     assert!(first.inputs.materialized_views.is_empty());
     assert_eq!(rolled_up.inputs.materialized_views, [first.node_id]);
-    assert!(rolled_up.inputs.raw_data_windows.is_empty());
+    assert!(rolled_up.inputs.raw_data_windows().is_empty());
     let run = run_data_plane(
         &plan_json,
         &job_samples(),
@@ -1479,14 +1491,14 @@ async fn a_summary_across_series_from_per_series_summaries_is_listed_and_built()
     };
     assert!(per_series.inputs.materialized_views.is_empty());
     assert_eq!(across.inputs.materialized_views, [per_series.node_id]);
-    assert!(across.inputs.raw_data_windows.is_empty());
+    assert!(across.inputs.raw_data_windows().is_empty());
     for output in [per_series, across] {
-        assert_eq!(output.refresh, MaterializedViewRefresh::AtIngestion);
-        assert_eq!(output.coverage.selection, relative_time(-60_000, 0));
+        assert_eq!(output.refresh(), MaterializedViewRefresh::AtIngestion);
+        assert_eq!(output.coverage().selection(), relative_time(-60_000, 0));
     }
     assert_ne!(
-        across.coverage.definition_id,
-        per_series.coverage.definition_id
+        across.coverage().definition_id(),
+        per_series.coverage().definition_id()
     );
     let run = run_data_plane(
         &plan_json,
@@ -1535,18 +1547,21 @@ async fn a_kept_sliding_window_merge_is_listed_and_built() {
         merge.inputs.materialized_views,
         panes.iter().map(|pane| pane.node_id).collect::<Vec<_>>()
     );
-    assert!(merge.inputs.raw_data_windows.is_empty());
-    assert_eq!(merge.refresh, MaterializedViewRefresh::OnFirstRead);
-    assert_eq!(merge.coverage.selection, relative_time(-300_000, 0));
-    assert_eq!(merge.retention_ms, 300_000 + 3_600_000);
+    assert!(merge.inputs.raw_data_windows().is_empty());
+    assert_eq!(merge.refresh(), MaterializedViewRefresh::OnFirstRead);
+    assert_eq!(merge.coverage().selection(), relative_time(-300_000, 0));
+    assert_eq!(merge.retention_ms(), 300_000 + 3_600_000);
     for (i, pane) in panes.iter().enumerate() {
         let i = i as i64;
-        assert_eq!(pane.coverage.definition_id, merge.coverage.definition_id);
         assert_eq!(
-            pane.coverage.selection,
+            pane.coverage().definition_id(),
+            merge.coverage().definition_id()
+        );
+        assert_eq!(
+            pane.coverage().selection(),
             relative_time(-(i + 1) * 60_000, -i * 60_000)
         );
-        assert!(pane.retention_ms >= merge.retention_ms);
+        assert!(pane.retention_ms() >= merge.retention_ms());
     }
     let mut store = SummaryStore::new();
     let first = run_data_plane(&plan_json, &job_samples(), EVALUATION_MS, &mut store);
@@ -1573,8 +1588,8 @@ async fn panes_of_an_hour_share_one_definition_with_distinct_times() {
     let views = plan.materialized_views().unwrap();
     assert!(!views.is_empty());
     let mut panes: Vec<&MaterializedView> = views.iter().collect();
-    panes.sort_by_key(|o| o.inputs.raw_data_windows[0].end_offset_ms);
-    let width_ms = panes[0].inputs.raw_data_windows[0].width_ms;
+    panes.sort_by_key(|o| o.inputs.raw_data_windows()[0].end_offset_ms());
+    let width_ms = panes[0].inputs.raw_data_windows()[0].width_ms();
     assert!(width_ms > 0);
     assert_eq!(
         width_ms * panes.len() as i64,
@@ -1583,17 +1598,20 @@ async fn panes_of_an_hour_share_one_definition_with_distinct_times() {
     );
     for (i, pane) in panes.iter().enumerate() {
         let i = i as i64;
-        let [window] = pane.inputs.raw_data_windows.as_slice() else {
+        let [window] = pane.inputs.raw_data_windows() else {
             panic!("{pane:?}");
         };
         assert_eq!(
-            (window.width_ms, window.end_offset_ms),
+            (window.width_ms(), window.end_offset_ms()),
             (width_ms, i * width_ms)
         );
         assert!(pane.inputs.materialized_views.is_empty());
-        assert_eq!(pane.coverage.definition_id, panes[0].coverage.definition_id);
         assert_eq!(
-            pane.coverage.selection,
+            pane.coverage().definition_id(),
+            panes[0].coverage().definition_id()
+        );
+        assert_eq!(
+            pane.coverage().selection(),
             relative_time(-(i + 1) * width_ms, -i * width_ms)
         );
     }
@@ -1765,9 +1783,7 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
     let (plan, selection) = plan_p99_avg(true).await.expect("a valid plan");
     let selection = selection.as_ref().expect("Stage 3's report");
     let views = plan.materialized_views().unwrap();
-    // Its id depends on what the search enumerates: without raw data the
-    // search builds only the plans that scan nothing at query time.
-    assert!(!selection.selected_candidate_id.is_empty());
+    assert!(selection.cost_per_second.is_some());
     assert!(!views.is_empty(), "panes built at ingestion");
     assert_eq!(
         stored_definitions(&plan, "DDSketch").len(),
@@ -1877,17 +1893,86 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
 }
 
 /// Without a non-negative declaration, relative sketch error cannot propagate
-/// through the average. Early candidate pruning must report that missing bound
-/// and reject this no-raw deployment, just as final validation would.
+/// through the average, so this no-raw deployment has no valid plan: plan
+/// selection selects none. Pass 1 prunes the quantile sketches for that
+/// reason (`NoErrorBoundForQueryTarget`) and Stage 2 the exact candidates,
+/// which scan raw data at query time.
 #[tokio::test]
 async fn an_undeclared_gauges_merged_ddsketch_panes_get_no_relative_bound_through_avg() {
     let error = plan_p99_avg(false).await.expect_err("no valid plan");
+    assert_plan_selection_selected_none(&error);
+    // Pass 1 prunes both quantile sketches for that reason: DDSketch's
+    // relative bound does not pass through the average of an undeclared
+    // gauge, and no rule carries KLL's rank bound through it.
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let models = PlanningModels::builtin().with_deployment_capabilities(&capabilities);
+    let no_bound = pass1_pruned_for_no_error_bound(&p99_avg_workload(false), models);
     assert!(
-        error.contains("infeasible_under_configured_model"),
+        no_bound.contains(&"DDSketch".to_string()) && no_bound.contains(&"Kll".to_string()),
+        "{no_bound:?}"
+    );
+    // Declared non-negative, DDSketch's bound passes through the average.
+    let no_bound = pass1_pruned_for_no_error_bound(&p99_avg_workload(true), models);
+    assert!(!no_bound.contains(&"DDSketch".to_string()), "{no_bound:?}");
+}
+
+/// The summaries Pass 1 pruned planning `workload` (PromQL) with `models`
+/// because no query reading them can meet its target
+/// ([`PruneReason::NoErrorBoundForQueryTarget`]), as the facade's planning
+/// run reports them (`MemoSteps::pass1_pruned_candidates`): each family's
+/// name (e.g. `"Kll"`).
+fn pass1_pruned_for_no_error_bound(
+    workload: &PlanningWorkload,
+    models: PlanningModels<'_>,
+) -> Vec<String> {
+    let roots = asap_frontend_promql::lower_promql_query_workload(workload)
+        .unwrap()
+        .into_iter()
+        .map(|root| match root {
+            QueryRoot::Operator(node) => {
+                QueryRoot::Operator(with_promql_series_identity(&node).unwrap_or(node))
+            }
+            scalar => scalar,
+        })
+        .collect();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap_or_default();
+    let run = run_planning(
+        roots,
+        &entries,
+        &data,
+        models,
+        PlanSearchSettings {
+            time_limit_ms: Some(5_000),
+            inspect: true,
+        },
+    )
+    .unwrap();
+    run.per_computation_candidates
+        .expect("Pass 1's output")
+        .pruned_candidates
+        .iter()
+        .filter(|pruned| pruned.reason == PruneReason::NoErrorBoundForQueryTarget)
+        .filter_map(|pruned| match &pruned.candidate {
+            HowToComputeAggregateMeasure::Summary(family) => Some(format!("{family:?}")),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `error` says plan selection found no valid plan: no candidate is valid,
+/// or none was validated by the deadline. Not a solver, realizer or input
+/// failure.
+fn assert_plan_selection_selected_none(error: &str) {
+    assert!(
+        error.contains("plan selection: no valid candidate")
+            || error.contains("plan selection: no plan by the deadline")
+            || error.contains("the planning budget ended before a plan was selected"),
         "{error}"
     );
-    assert!(error.contains("AccuracyTargetMissed"), "{error}");
-    assert!(error.contains("Relative bound None"), "{error}");
 }
 
 /// `avg by (g) (quantile_over_time(0.99, x[100s]))` every 10 s at rank
@@ -2026,7 +2111,7 @@ fn exact_average_of_p99s(samples: &[RawDataSample]) -> BTreeMap<String, f64> {
 /// Issue #774: without raw data samples retained, every candidate of an average
 /// of p99s fails a check (the exact ones scan raw data samples at query time,
 /// the sketch ones have no guarantee), so planning fails. With
-/// `ignore_accuracy_guarantees` loaded from the settings JSON, the cheapest
+/// `PlanningModels::ignore_accuracy_guarantees`, the cheapest
 /// sketch plan is selected, the report marks its output as accepted without
 /// a guarantee, and it runs: equal to its query-time reference and within a
 /// loose tolerance of the exact answer.
@@ -2037,7 +2122,7 @@ async fn ignoring_accuracy_guarantees_selects_a_sketch_plan_that_runs() {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    let plan = |settings: CostInputs| {
+    let plan = |ignore: bool| {
         let workload = workload.clone();
         let capabilities = capabilities.clone();
         async move {
@@ -2046,26 +2131,32 @@ async fn ignoring_accuracy_guarantees_selects_a_sketch_plan_that_runs() {
                 FrontendInput::Promql { histograms: None },
                 PlanningModels::builtin()
                     .with_deployment_capabilities(&capabilities)
-                    .with_plan_selection(&settings),
+                    .with_ignore_accuracy_guarantees(ignore),
             ))
             .await
         }
     };
     // Without the setting, no candidate is valid.
-    let error = plan(CostInputs::default())
+    let error = plan(false)
         .await
         .expect_err("no candidate is valid without the setting");
+    assert_plan_selection_selected_none(&error.to_string());
+    // Pass 1 prunes every quantile sketch for it: no rule carries a rank
+    // bound through the average, and a relative one does not meet a rank
+    // target. With the setting, Stage 3 may accept an output without its
+    // guarantee, so Pass 1 prunes none.
+    let models = PlanningModels::builtin().with_deployment_capabilities(&capabilities);
+    let no_bound = pass1_pruned_for_no_error_bound(&workload, models);
     assert!(
-        error
-            .to_string()
-            .contains("infeasible_under_configured_model"),
-        "{error}"
+        no_bound.contains(&"DDSketch".to_string()) && no_bound.contains(&"Kll".to_string()),
+        "{no_bound:?}"
     );
-    // With it, loaded from JSON as a deployment passes it.
-    let settings: CostInputs =
-        serde_json::from_str(r#"{"ignore_accuracy_guarantees": true}"#).unwrap();
-    assert!(settings.ignore_accuracy_guarantees);
-    let (installed, report) = plan(settings).await.expect("a sketch plan is selected");
+    assert_eq!(
+        pass1_pruned_for_no_error_bound(&workload, models.with_ignore_accuracy_guarantees(true)),
+        Vec::<String>::new()
+    );
+    // With it.
+    let (installed, report) = plan(true).await.expect("a sketch plan is selected");
     // A per-series KLL or DDSketch plan.
     let families: Vec<String> = installed
         .dag
@@ -2134,16 +2225,14 @@ async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    let settings = CostInputs {
-        ignore_accuracy_guarantees: true,
-        ..CostInputs::default()
-    };
+    let settings = CostInputs::default();
     let (plan, report) = plan_installable(UserInput::new(
         &p99_avg_workload(false),
         FrontendInput::Promql { histograms: None },
         PlanningModels::builtin()
             .with_deployment_capabilities(&capabilities)
-            .with_plan_selection(&settings),
+            .with_cost_inputs(&settings)
+            .with_ignore_accuracy_guarantees(true),
     ))
     .await
     .expect("a plan is selected");
@@ -2173,13 +2262,11 @@ async fn plan_p99(
             .then(|| only_summary_family(SketchAlgorithm::DDSketch)),
         ..DeploymentCapabilities::default()
     };
-    let settings = CostInputs {
-        ignore_accuracy_guarantees: ignore_accuracy,
-        ..CostInputs::default()
-    };
+    let settings = CostInputs::default();
     let models = PlanningModels::builtin()
         .with_deployment_capabilities(&capabilities)
-        .with_plan_selection(&settings);
+        .with_cost_inputs(&settings)
+        .with_ignore_accuracy_guarantees(ignore_accuracy);
     plan_installable(UserInput::new(
         &workload,
         FrontendInput::Promql { histograms: None },
@@ -2399,17 +2486,15 @@ async fn ignoring_guarantees_counter_topk_plans_compile_and_answer_exactly() {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    let settings = CostInputs {
-        ignore_accuracy_guarantees: true,
-        ..CostInputs::default()
-    };
+    let settings = CostInputs::default();
     for (function, seconds) in [("increase", 300.0), ("rate", 1.0)] {
         let plan = plan_installable(UserInput::new(
             &counter_topk_workload(function),
             FrontendInput::Promql { histograms: None },
             PlanningModels::builtin()
                 .with_deployment_capabilities(&capabilities)
-                .with_plan_selection(&settings),
+                .with_cost_inputs(&settings)
+                .with_ignore_accuracy_guarantees(true),
         ))
         .await
         .unwrap_or_else(|error| panic!("{function}: {error}"))
@@ -2551,7 +2636,7 @@ fn stored_definitions(plan: &InstallablePlan, family: &str) -> BTreeSet<String> 
                 .unwrap()
                 .contains(family)
         })
-        .map(|view| view.coverage.definition_id.clone())
+        .map(|view| view.coverage().definition_id().to_owned())
         .collect()
 }
 
@@ -2700,16 +2785,14 @@ async fn plan_ignoring_guarantees(
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    // The settings' override accepts every output, so a forced heap goes
-    // through the accuracy model instead.
-    let settings = CostInputs {
-        ignore_accuracy_guarantees: heap.is_none(),
-        ..CostInputs::default()
-    };
+    // Ignoring guarantees replaces the accuracy model, so a forced heap goes
+    // through its own accuracy model instead.
+    let settings = CostInputs::default();
     let heap_only = heap.map(HeapPlansOnly);
     let models = PlanningModels::builtin()
         .with_deployment_capabilities(&capabilities)
-        .with_plan_selection(&settings);
+        .with_cost_inputs(&settings)
+        .with_ignore_accuracy_guarantees(heap.is_none());
     let models = match &heap_only {
         Some(model) => models.with_accuracy(model),
         None => models,

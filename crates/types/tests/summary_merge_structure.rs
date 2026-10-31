@@ -360,7 +360,7 @@ fn family_capability_table() {
     for (family, merge_inputs, readouts) in rows {
         let capability = FamilyCapability::of(&family);
         assert_eq!(capability.merge_inputs, merge_inputs, "{family:?}");
-        assert_eq!(capability.readouts.to_vec(), readouts, "{family:?}");
+        assert_eq!(capability.readouts().to_vec(), readouts, "{family:?}");
         for statistic in &statistics {
             let row = readouts
                 .iter()
@@ -685,8 +685,8 @@ fn idempotent_families_merge_overlapping_states() {
         let merged = same_region(family.clone()).unwrap_or_else(|e| panic!("{family:?}: {e}"));
         merged.validate_structure().unwrap();
         assert_eq!(
-            merged.coverage().unwrap().selection,
-            family_state(family, "us").coverage().unwrap().selection
+            merged.coverage().unwrap().selection(),
+            family_state(family, "us").coverage().unwrap().selection()
         );
     }
     for family in [exact(ExactKind::Sum, ExactParams::Sum), kll()] {

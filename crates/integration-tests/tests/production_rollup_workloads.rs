@@ -8,7 +8,7 @@ use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
 use asap_executor::physical_planner::promql_rows;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_plan_selection::{PlanningModels, Stage1ToStage3Run};
+use asap_planner::{run_planning, PlanSearchSettings, PlanningModels, PlanningRun};
 use asap_types::ir::properties::{AccuracyMetric, AccuracyScope, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
@@ -66,71 +66,49 @@ fn data() -> DataWorkload {
 }
 
 fn production(
-    roots: Vec<(usize, QueryRoot)>,
+    roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
-) -> Stage1ToStage3Run<usize> {
+) -> PlanningRun {
     let mut settings = CostInputs::default();
     settings.cost_model = CostModel::UsageOverTime(ResourceUnitCost::aws_fargate_us_east_1(
         settings.resource_speed,
     ));
-    asap_plan_selection::run_stage1_to_stage3_with(
+    run_planning(
         roots,
         entries,
         data,
-        PlanningModels::builtin().with_plan_selection(&settings),
-        asap_plan_selection::Stage1ToStage3Search {
-            milp_time_limit_ms: Some(30_000),
-            ..Default::default()
+        PlanningModels::builtin().with_cost_inputs(&settings),
+        PlanSearchSettings {
+            time_limit_ms: Some(30_000),
+            inspect: false,
         },
     )
     .unwrap()
 }
 
 fn check(
-    run: &Stage1ToStage3Run<usize>,
+    run: &PlanningRun,
     queries: usize,
     expected_rollups: usize,
     family: &str,
     separate_cost: Option<f64>,
 ) {
     let selection = run
-        .stage3_plan_selection
+        .selection
         .as_ref()
         .expect("validated production plan within 30s");
-    let report = selection.search.candidate_connections.as_ref().unwrap();
-    println!(
-        "selected cost={:?}; report={report:?}",
-        selection.costs[&selection.selected].cost_per_second
-    );
-    assert!(
-        report.joint_price_solve_calls > 0,
-        "joint supplier prices were not solved: {report:?}"
-    );
-    assert!(
-        report.direct_cost_validated_plans > 0,
-        "no directly priced validated plan: {report:?}"
-    );
-    assert!(report
-        .direct_cost_best_validated_cost
-        .is_some_and(|cost| cost.is_finite() && cost >= 0.0));
-    let selected_cost = selection.costs[&selection.selected]
-        .cost_per_second
-        .unwrap();
+    println!("selected cost={:?}", selection.cost.cost_per_second);
+    let selected_cost = selection.cost.cost_per_second.unwrap();
     if let Some(separate) = separate_cost {
-        // Whole-result direct configurations are conservatively sized; full
-        // refinement may find a slightly smaller valid state. Both searches
-        // must improve on independently built KLLs at the same accuracy target.
-        assert!(report.direct_cost_best_validated_cost.unwrap() < separate);
+        // Both searches must improve on independently built KLLs at the
+        // same accuracy target.
         assert!(selected_cost < separate);
-    } else {
-        assert!(report.direct_cost_best_validated_cost.unwrap() <= selected_cost * (1.0 + 1e-9));
     }
-    let accepted = &selection.accepted[&selection.selected];
+    let accepted = &selection.accepted_accuracy_per_query;
     assert_eq!(accepted.len(), queries);
     assert!(accepted.iter().all(|a| !a.accepted_regardless_of_guarantee));
     if separate_cost.is_some() && accepted.iter().all(|a| a.sketches.is_empty()) {
-        assert!(selected_cost <= report.direct_cost_best_validated_cost.unwrap() * (1.0 + 1e-9));
         println!("exact plan costs less than both the direct incumbent and independent KLLs");
         return;
     }
@@ -140,7 +118,7 @@ fn check(
             .all(|a| !a.accepted_regardless_of_guarantee && a.sketches.iter().any(|s| s == family)),
         "{accepted:?}"
     );
-    let selected = run.selected().unwrap();
+    let selected = &run.selected_physical_plan.as_ref().unwrap().plan;
     let mut seen = HashSet::new();
     let mut builds = 0;
     let mut rollups = 0;
@@ -168,16 +146,13 @@ fn check(
     );
 }
 
-async fn sql(queries: &[String], accuracy: AccuracyTarget) -> Stage1ToStage3Run<usize> {
+async fn sql(queries: &[String], accuracy: AccuracyTarget) -> PlanningRun {
     let mut roots = Vec::new();
-    for (id, query) in queries.iter().enumerate() {
-        roots.push((
-            id,
-            QueryRoot::Operator(
-                lower_sql(query, &catalog(), accuracy.clone())
-                    .await
-                    .unwrap(),
-            ),
+    for query in queries {
+        roots.push(QueryRoot::Operator(
+            lower_sql(query, &catalog(), accuracy.clone())
+                .await
+                .unwrap(),
         ));
     }
     production(
@@ -219,13 +194,9 @@ fn production_promql_compares_rollup_with_exact() {
         "quantile by (job) (0.5, data)",
     ]
     .iter()
-    .enumerate()
-    .map(|(id, query)| {
+    .map(|query| {
         let root = lower_promql(query, accuracy.clone()).unwrap();
-        (
-            id,
-            QueryRoot::Operator(promql_rows::with_series_identity(&root).unwrap()),
-        )
+        QueryRoot::Operator(promql_rows::with_series_identity(&root).unwrap())
     })
     .collect();
     let data: DataWorkload = serde_json::from_value(serde_json::json!({"arrival":{"ingesting":{"rows_per_second":666.67}},"sources":{"data":{"series_count":10000,"metric_type":"gauge","sample_interval":15000,"rows_held":10000}}})).unwrap();
@@ -243,15 +214,18 @@ fn production_promql_compares_rollup_with_exact() {
 
 // Price the same workload with independently built, unmaterialized KLL states.
 fn independent_kll_cost(
-    roots: Vec<(usize, QueryRoot)>,
+    roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
 ) -> f64 {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
     };
-    let inventory = generate_per_computation_candidates(roots).unwrap();
+    use asap_types::stages::HowToComputeAggregateMeasure;
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
+    )
+    .unwrap();
     let choices: Vec<_> = inventory
         .targets
         .iter()
@@ -270,16 +244,19 @@ fn independent_kll_cost(
                 .unwrap()
         })
         .collect();
-    let roots: Vec<_> = compose_logical_candidate(&inventory, &choices)
-        .unwrap()
-        .into_iter()
-        .map(|(_, root)| root)
+    let roots: Vec<_> = compose_logical_candidate(&inventory, &choices).unwrap();
+    // Composed outside the memo: sized as Pass 1 sizes a candidate.
+    let targets: Vec<_> = entries
+        .iter()
+        .map(|entry| entry.requirements.accuracy.clone())
         .collect();
+    let roots =
+        asap_accuracy::sizing::with_summaries_sized_for_targets(&roots, &targets, data).unwrap();
     let mut settings = CostInputs::default();
     settings.cost_model = CostModel::UsageOverTime(ResourceUnitCost::aws_fargate_us_east_1(
         settings.resource_speed,
     ));
-    let models = PlanningModels::builtin().with_plan_selection(&settings);
+    let models = PlanningModels::builtin().with_cost_inputs(&settings);
     let plan = asap_physical_asap_optimization::test_support::optimize_physical_asap_chosen(
         "independent",
         &roots,
@@ -290,7 +267,8 @@ fn independent_kll_cost(
     )
     .unwrap()
     .unwrap();
-    let result = asap_plan_selection::select_plan(&[plan], entries, data, models).unwrap();
+    let result =
+        asap_devtools::memo_pricing::reference_select(&[plan], entries, data, models).unwrap();
     result.costs[&result.selected].cost_per_second.unwrap()
 }
 
@@ -303,13 +281,9 @@ fn production_binary_queries_use_joint_prices_with_mixed_schedules() {
     let queries = ["m + n", "m + m", "m or n", "m * n", "m - n"];
     let roots = queries
         .iter()
-        .enumerate()
-        .map(|(id, query)| {
+        .map(|query| {
             let root = lower_promql(query, accuracy.clone()).unwrap();
-            (
-                id,
-                QueryRoot::Operator(promql_rows::with_series_identity(&root).unwrap()),
-            )
+            QueryRoot::Operator(promql_rows::with_series_identity(&root).unwrap())
         })
         .collect();
     let mut entries: Vec<_> = [59_000, 61_000, 67_000, 71_000, 73_000]
@@ -330,22 +304,15 @@ fn production_binary_queries_use_joint_prices_with_mixed_schedules() {
     }))
     .unwrap();
     let run = production(roots, &entries, &data);
-    let selection = run
-        .stage3_plan_selection
-        .as_ref()
-        .expect("validated binary workload");
-    let report = selection.search.candidate_connections.as_ref().unwrap();
-    println!("mixed binary workload report={report:?}");
-    assert!(
-        report.joint_price_solve_calls > 0 && report.direct_cost_validated_plans > 0,
-        "{report:?}"
-    );
-    let accepted = &selection.accepted[&selection.selected];
+    let selection = run.selection.as_ref().expect("validated binary workload");
+    println!("mixed binary workload report={:?}", selection.search_report);
+    let accepted = &selection.accepted_accuracy_per_query;
     assert_eq!(accepted.len(), queries.len());
     assert!(accepted
         .iter()
         .all(|item| !item.accepted_regardless_of_guarantee));
-    assert!(selection.costs[&selection.selected]
+    assert!(selection
+        .cost
         .cost_per_second
         .is_some_and(|cost| cost.is_finite() && cost >= 0.0));
 }

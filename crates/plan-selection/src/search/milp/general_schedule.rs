@@ -1,4 +1,4 @@
-//! Exact mixed-schedule demand and weighted lifetimes without subset tables.
+//! Exact mixed-schedule demand and per-consumer lifetimes without subset tables.
 use super::*;
 
 fn both(
@@ -12,6 +12,14 @@ fn both(
     constraints.push(constraint!(value <= right));
     constraints.push(constraint!(value >= left + right - 1));
     value
+}
+
+/// Whose lifetime a demand's held memory lasts: query `.0`'s latency, or
+/// node `.0`'s longest reader's latency.
+#[derive(Debug, Clone, Copy)]
+enum Holder {
+    Query(usize),
+    Node(usize),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -57,7 +65,19 @@ pub(super) fn encode(
             };
         }
     }
-    let mut demands = materialized.clone();
+    // Per node, its demands `(used, rate, holder)`: a materialized node's own
+    // executions, and an unmaterialized node's per consumer, each held for
+    // its holder's lifetime.
+    let mut demands: Vec<Vec<(Variable, f64, Holder)>> = materialized
+        .iter()
+        .enumerate()
+        .map(|(id, terms)| {
+            terms
+                .iter()
+                .map(|&(used, rate)| (used, rate, Holder::Node(id)))
+                .collect()
+        })
+        .collect();
     for flow in boundary_flows(
         graph,
         profile,
@@ -73,21 +93,32 @@ pub(super) fn encode(
             let Some(reached) = reached else { continue };
             if flow.boundary < queries {
                 if schedule.per_query_rates()[flow.boundary] > 0.0 {
-                    demands[id].push((reached, schedule.per_query_rates()[flow.boundary]));
+                    demands[id].push((
+                        reached,
+                        schedule.per_query_rates()[flow.boundary],
+                        Holder::Query(flow.boundary),
+                    ));
                 }
             } else {
-                for (used, rate) in &materialized[flow.boundary - queries] {
-                    demands[id].push((both(variables, constraints, reached, *used), *rate));
+                let consumer = flow.boundary - queries;
+                for (used, rate) in &materialized[consumer] {
+                    demands[id].push((
+                        both(variables, constraints, reached, *used),
+                        *rate,
+                        Holder::Node(consumer),
+                    ));
                 }
             }
         }
     }
     let mut objective = Expression::from(profile.request_cost / divisor);
     let mut retained = BTreeMap::<&str, Vec<(usize, f64)>>::new();
+    // Each materialized node's longest reader's latency, built on first use.
+    let mut longest_of: BTreeMap<usize, Variable> = BTreeMap::new();
     for (id, node) in profile.nodes.iter().enumerate() {
         check_deadline()?;
         objective += node.standing_cost_per_second / divisor * active[id];
-        for (used, rate) in &demands[id] {
+        for (used, rate, _) in &demands[id] {
             objective += node.execution_cost * *rate / divisor * *used;
         }
         if let Some((source, cost)) = &node.raw_retention {
@@ -96,66 +127,28 @@ pub(super) fn encode(
         if node.held_memory_cost_per_second == 0.0 || demands[id].is_empty() {
             continue;
         }
-        let lifetime = variables.add(variable().min(0).max(1));
-        if node.materialized {
-            for (q, row) in reach.iter().enumerate() {
-                if let Some(reached) = row[id] {
-                    constraints.push(constraint!(
-                        lifetime >= latency[q].clone() - (1.0 - reached)
-                    ));
-                }
-            }
-        } else {
-            // D*A=N is linear after gating A and each query latency by binary
-            // reach: sum(w_q * reached_q * A) = sum(w_q * reached_q * L_q).
-            // No reciprocal, LCM, or enumeration of selected reader subsets.
-            let total: f64 = schedule.per_query_rates().iter().sum();
-            let mut left = Expression::from(0.0);
-            let mut right = Expression::from(0.0);
-            if total > 0.0 {
-                for (q, row) in reach.iter().enumerate() {
-                    check_deadline()?;
-                    if let Some(reached) = row[id] {
-                        let weight = schedule.per_query_rates()[q] / total;
-                        if weight == 0.0 {
-                            continue;
+        // Held for each demand's holder's lifetime: a query's latency, or a
+        // materialized node's longest reader's.
+        for &(used, rate, holder) in &demands[id] {
+            let lifetime = match holder {
+                Holder::Query(query) => latency[query].clone(),
+                Holder::Node(holder) => {
+                    let longest = *longest_of.entry(holder).or_insert_with(|| {
+                        let longest = variables.add(variable().min(0).max(1));
+                        for (q, row) in reach.iter().enumerate() {
+                            if let Some(reached) = row[holder] {
+                                constraints.push(constraint!(
+                                    longest >= latency[q].clone() - (1.0 - reached)
+                                ));
+                            }
                         }
-                        left +=
-                            weight * gated(variables, constraints, lifetime.into(), reached, 1.0);
-                        right += weight
-                            * gated(variables, constraints, latency[q].clone(), reached, 1.0);
-                    }
+                        longest
+                    });
+                    Expression::from(longest)
                 }
-            }
-            constraints.push(constraint!(left == right));
-            if schedule.per_query_rates().contains(&0.0) {
-                let positive: Vec<_> = reach
-                    .iter()
-                    .enumerate()
-                    .filter(|(q, _)| schedule.per_query_rates()[*q] > 0.0)
-                    .filter_map(|(_, row)| row[id])
-                    .collect();
-                let has_positive = variables.add(variable().min(0).max(1));
-                for reached in &positive {
-                    constraints.push(constraint!(has_positive >= *reached));
-                }
-                constraints.push(constraint!(
-                    has_positive <= positive.iter().copied().sum::<Expression>()
-                ));
-                // Match the evaluator's longest-reader fallback when every reached
-                // reader has zero expected demand; no division by zero is needed.
-                for (q, row) in reach.iter().enumerate() {
-                    if let Some(reached) = row[id] {
-                        constraints.push(constraint!(
-                            lifetime >= latency[q].clone() - (1.0 - reached) - has_positive
-                        ));
-                    }
-                }
-            }
-        }
-        for (used, rate) in &demands[id] {
-            objective += node.held_memory_cost_per_second * latency_scale * *rate / divisor
-                * gated(variables, constraints, lifetime.into(), *used, 1.0);
+            };
+            objective += node.held_memory_cost_per_second * latency_scale * rate / divisor
+                * gated(variables, constraints, lifetime, used, 1.0);
         }
     }
     for costs in retained.values() {

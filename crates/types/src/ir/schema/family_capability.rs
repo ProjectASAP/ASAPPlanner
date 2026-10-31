@@ -34,7 +34,7 @@ pub struct FamilyCapability {
     /// only when `merge_inputs` is set). Empty for a family read only as a
     /// finalized value (exact accumulators, whose merged state is exact) or
     /// one not listed.
-    pub readouts: &'static [(StatisticKind, MergedError)],
+    pub(crate) readouts: &'static [(StatisticKind, MergedError)],
 }
 
 /// One sketch family a deployment's executor can build, with the readouts
@@ -85,6 +85,15 @@ impl From<asap_sketchlib::MergeInputRule> for MergeInputRule {
             asap_sketchlib::MergeInputRule::Disjoint => Self::Disjoint,
             asap_sketchlib::MergeInputRule::MayOverlap => Self::MayOverlap,
         }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl FamilyCapability {
+    /// Each statistic one state of the family answers, with the error of
+    /// that readout from a merged state.
+    pub fn readouts(&self) -> &'static [(StatisticKind, MergedError)] {
+        self.readouts
     }
 }
 

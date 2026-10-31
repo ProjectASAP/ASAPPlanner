@@ -20,8 +20,13 @@ fn initialized(
     }
 }
 
+use crate::search::candidates::dag::ReaderConstraint;
 use crate::search::candidates::dag::*;
+use crate::search::candidates::graph::ProducerConsumerConnection;
 use crate::search::candidates::graph::RejectedQuerySubgraph;
+pub(in crate::search) use crate::search::candidates::graph::{
+    QueryRootAssignment, SelectedCandidateGraph,
+};
 use asap_types::stages::*;
 use good_lp::solvers::highs::highs;
 use good_lp::solvers::{ResolutionError, SolutionStatus};
@@ -42,7 +47,7 @@ fn required_reader_reach(
     let mut consumers = vec![Vec::new(); count];
     for (consumer, candidate) in graph.candidates.iter().enumerate() {
         check_deadline()?;
-        for input in &candidate.supplier_candidates_per_input {
+        for input in &candidate.producer_candidates_per_input {
             for producer in &input.candidates {
                 consumers[producer.0].push(consumer);
             }
@@ -55,7 +60,7 @@ fn required_reader_reach(
             if !std::mem::replace(&mut potential[output][candidate.0], true) {
                 pending.extend(
                     graph.candidates[candidate.0]
-                        .supplier_candidates_per_input
+                        .producer_candidates_per_input
                         .iter()
                         .flat_map(|input| input.candidates.iter().copied()),
                 );
@@ -171,7 +176,7 @@ pub(crate) struct CandidateSolveMetrics {
     pub solver_seconds: f64,
     pub solve_calls: usize,
     pub direct_cost_solve_calls: usize,
-    /// Direct solves jointly selecting supplier-dependent pricing options.
+    /// Direct solves jointly selecting producer-dependent pricing options.
     pub joint_price_solve_calls: usize,
     pub direct_cost_validated_plans: usize,
     pub direct_cost_best_validated_cost: Option<f64>,
@@ -350,7 +355,7 @@ pub(super) fn solve_with_objective(
 
     for (consumer, candidate) in graph.candidates.iter().enumerate() {
         check_deadline()?;
-        for (requirement, input) in candidate.supplier_candidates_per_input.iter().enumerate() {
+        for (requirement, input) in candidate.producer_candidates_per_input.iter().enumerate() {
             let mut producers_selected = Expression::from(0.0);
             for &producer in &input.candidates {
                 check_deadline()?;
@@ -1286,16 +1291,20 @@ mod tests {
             );
             let observed = SelectedCandidateGraph {
                 selected_candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)],
-                connections: vec![asap_types::stages::ProducerConsumerConnection {
-                    consumer: PhysicalCandidateId(1),
-                    requirement: 0,
-                    producer: PhysicalCandidateId(0),
-                }],
+                connections: vec![
+                    crate::search::candidates::graph::ProducerConsumerConnection {
+                        consumer: PhysicalCandidateId(1),
+                        requirement: 0,
+                        producer: PhysicalCandidateId(0),
+                    },
+                ],
                 query_roots: (0..2)
-                    .map(|query_root| asap_types::stages::QueryRootAssignment {
-                        query_root,
-                        candidate: PhysicalCandidateId(1),
-                    })
+                    .map(
+                        |query_root| crate::search::candidates::graph::QueryRootAssignment {
+                            query_root,
+                            candidate: PhysicalCandidateId(1),
+                        },
+                    )
                     .collect(),
                 modeled_cost: 0.0,
             };
@@ -1481,9 +1490,9 @@ mod tests {
     fn candidate(cost: f64, inputs: &[&[usize]]) -> PhysicalCandidateWithCost {
         PhysicalCandidateWithCost {
             local_cost: cost,
-            supplier_candidates_per_input: inputs
+            producer_candidates_per_input: inputs
                 .iter()
-                .map(|sources| InputSupplierCandidates {
+                .map(|sources| InputProducerCandidates {
                     candidates: sources.iter().copied().map(PhysicalCandidateId).collect(),
                 })
                 .collect(),
@@ -1515,7 +1524,7 @@ mod tests {
             .iter()
             .enumerate()
             .flat_map(|(consumer, c)| {
-                c.supplier_candidates_per_input.iter().enumerate().flat_map(
+                c.producer_candidates_per_input.iter().enumerate().flat_map(
                     move |(requirement, input)| {
                         input
                             .candidates
@@ -1570,7 +1579,7 @@ mod tests {
                 }
                 marks[candidate] = 1;
                 for requirement in 0..graph.candidates[candidate]
-                    .supplier_candidates_per_input
+                    .producer_candidates_per_input
                     .len()
                 {
                     let producers: Vec<_> = dependencies[candidate]

@@ -17,7 +17,7 @@ pub fn compile_physical_asap_dag(
     Ok(planner_types::ir::physical_export::compile_physical_asap_dag(&root)?)
 }
 
-/// The logical DAG the planner pipeline (`run_stage1_to_stage3`) selects for the
+/// The logical DAG the planner pipeline (`asap_planner::run_planning`) selects for the
 /// single query `root` at `accuracy`, over a continuously ingested source,
 /// with the built-in models.
 pub fn selected_dag(
@@ -26,8 +26,9 @@ pub fn selected_dag(
 ) -> Rc<OperatorNode> {
     let run = run_stage1_to_stage3(root, accuracy);
     let [QueryRoot::Operator(selected)] = run
-        .selected_logical()
-        .unwrap_or_else(|| panic!("a plan is selected: {:?}", run.stage3_plan_selection))
+        .selected_plan
+        .as_deref()
+        .unwrap_or_else(|| panic!("a plan is selected: {:?}", run.selection))
     else {
         panic!("one operator root");
     };
@@ -38,11 +39,15 @@ pub fn selected_dag(
 /// computations at their default choice. A bounded solver archive need not
 /// contain every algorithm that executor binding tests need to exercise.
 pub fn computation_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
-    let inventory = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))])
-        .expect("Pass 1 accepts the query");
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+            QueryRoot::Operator(root),
+        ]),
+    )
+    .expect("Pass 1 accepts the query");
     let mut choices = vec![vec![0; inventory.targets.len()]];
     for (index, target) in inventory.targets.iter().enumerate() {
         for choice in 1..target.choice_count() {
@@ -56,28 +61,9 @@ pub fn computation_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
         .map(|choice| {
             let mut roots = compose_logical_candidate(&inventory, &choice)
                 .expect("a generated computation candidate composes");
-            match roots.remove(0).1 {
+            match roots.remove(0) {
                 QueryRoot::Operator(root) => root,
                 QueryRoot::Scalar(_) => panic!("one operator root"),
-            }
-        })
-        .collect()
-}
-
-/// Fail on rejected composition rather than silently skipping a candidate.
-pub fn require_composed_operator_candidates(
-    candidates: Vec<asap_plan_selection::search::LogicalCandidate>,
-) -> Vec<Rc<OperatorNode>> {
-    candidates
-        .into_iter()
-        .map(|candidate| {
-            match candidate
-                .roots
-                .unwrap_or_else(|e| panic!("{} does not compose: {e}", candidate.id))
-                .remove(0)
-            {
-                QueryRoot::Operator(node) => node,
-                QueryRoot::Scalar(_) => panic!("operator root"),
             }
         })
         .collect()
@@ -86,7 +72,7 @@ pub fn require_composed_operator_candidates(
 fn run_stage1_to_stage3(
     root: Rc<OperatorNode>,
     accuracy: planner_types::ir::properties::AccuracyTarget,
-) -> asap_plan_selection::Stage1ToStage3Run<usize> {
+) -> asap_planner::PlanningRun {
     use planner_types::workload::{DataArrival, DataWorkload};
     let data = DataWorkload {
         arrival: DataArrival::Ingesting {
@@ -94,8 +80,8 @@ fn run_stage1_to_stage3(
         },
         ..Default::default()
     };
-    asap_plan_selection::run_stage1_to_stage3_with(
-        vec![(0, QueryRoot::Operator(root))],
+    asap_planner::run_planning(
+        vec![QueryRoot::Operator(root)],
         &[planner_types::workload::QueryWorkloadEntry {
             query: Default::default(),
             requirements: planner_types::workload::QueryRequirements {
@@ -107,8 +93,8 @@ fn run_stage1_to_stage3(
             range_evaluation: None,
         }],
         &data,
-        asap_plan_selection::PlanningModels::builtin(),
-        asap_plan_selection::Stage1ToStage3Search::default(),
+        asap_planner::PlanningModels::builtin(),
+        asap_planner::PlanSearchSettings::default(),
     )
     .expect("Pass 1 accepts the query")
 }

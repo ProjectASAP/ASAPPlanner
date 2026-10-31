@@ -19,10 +19,10 @@ use planner_layering_common::*;
 // Fixed algorithm/window fixtures keep numerical evaluator checks independent
 // of a time-bounded production search's archived incumbents.
 fn run_a() -> Run {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
     };
+    use asap_types::stages::HowToComputeAggregateMeasure;
     let workload = pattern_a(
         PatternARecurrence::OnceAdHoc,
         DataArrival::Mixed {
@@ -30,8 +30,10 @@ fn run_a() -> Run {
         },
     );
     let roots = lower_promql(&workload);
-    let local =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
+    )
+    .unwrap();
     let mut computations = Vec::new();
     for kll in [false, true] {
         let choices: Vec<_> = local
@@ -55,11 +57,7 @@ fn run_a() -> Run {
                 }
             })
             .collect();
-        let whole: Vec<_> = compose_logical_candidate(&local, &choices)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let whole = unshare(&compose_logical_candidate(&local, &choices).unwrap());
         computations.push(whole.clone());
         computations.push(share_identical(&whole));
     }
@@ -67,22 +65,24 @@ fn run_a() -> Run {
         &workload,
         roots,
         computations,
-        asap_plan_selection::PlanningModels::builtin(),
+        asap_planner::PlanningModels::builtin(),
     )
 }
 
 fn run_b() -> Run {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
     };
-    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+    use asap_logical_asap_optimization::test_support::{
         pane_candidates, window_composition_pass2_candidates,
     };
+    use asap_types::stages::HowToComputeAggregateMeasure;
     let workload = pattern_b();
     let roots = lower_promql(&workload);
-    let local =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
+    )
+    .unwrap();
     let mut computations = vec![roots.clone()];
     for option in 0..local.targets[0].choice_count() {
         if !matches!(
@@ -91,11 +91,7 @@ fn run_b() -> Run {
         ) {
             continue;
         }
-        let whole: Vec<_> = compose_logical_candidate(&local, &[option])
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let whole: Vec<_> = compose_logical_candidate(&local, &[option]).unwrap();
         let panes = pane_candidates(&whole, &[Some(PATTERN_B_INTERVAL_MS)]);
         let chain = window_composition_pass2_candidates(&whole, &panes)
             .unwrap()
@@ -108,7 +104,7 @@ fn run_b() -> Run {
         &workload,
         roots,
         computations,
-        asap_plan_selection::PlanningModels::builtin(),
+        asap_planner::PlanningModels::builtin(),
     )
 }
 

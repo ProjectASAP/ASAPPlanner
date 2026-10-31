@@ -21,7 +21,9 @@ use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
 use asap_integration_tests::physical_export::physical_asap_dag;
-use asap_integration_tests::planning::logical_candidates;
+use asap_integration_tests::planning::{
+    logical_candidates, logical_candidates_ignoring_guarantees,
+};
 use asap_types::ir::operator::operator_properties::Reduction;
 use asap_types::ir::physical_export::{EdgeRole, PhysicalASAPNodeId, PhysicalASAPOperatorPayload};
 use asap_types::ir::properties::AccuracyTarget;
@@ -38,7 +40,24 @@ use asap_types::workload::SqlDialect;
 /// a query at `accuracy` that uses an ASAP operator, or the plain exact one
 /// when none does: the summary-bound form the pins below inspect.
 fn realize(root: &Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
-    let candidates = logical_candidates(Rc::clone(root), accuracy);
+    first_summary_bound(logical_candidates(Rc::clone(root), accuracy))
+}
+
+/// [`realize`] with every output accepted whatever its guarantee: a value
+/// filter over an estimate has no guarantee, so Pass 1 prunes the summary
+/// these pins inspect unless guarantees are ignored.
+fn realize_ignoring_guarantees(
+    root: &Rc<OperatorNode>,
+    accuracy: AccuracyTarget,
+) -> Rc<OperatorNode> {
+    first_summary_bound(logical_candidates_ignoring_guarantees(
+        Rc::clone(root),
+        accuracy,
+    ))
+}
+
+/// The first of `candidates` that uses an ASAP operator, or the first.
+fn first_summary_bound(candidates: Vec<Rc<OperatorNode>>) -> Rc<OperatorNode> {
     let node = candidates
         .iter()
         .find(|candidate| candidate.contains_asap())
@@ -78,7 +97,7 @@ fn first_summary_agg(node: &Rc<OperatorNode>) -> &Rc<OperatorNode> {
 /// of a `FinalizeExactAccumulator`; `None` for anything else.
 fn unary_child(node: &OperatorNode) -> Option<&Rc<OperatorNode>> {
     match &node.operator {
-        Operator::NonASAP(op) => match op.children().as_slice() {
+        Operator::NonASAP(_) => match node.children().as_slice() {
             [child] => Some(*child),
             _ => None,
         },
@@ -405,7 +424,7 @@ async fn sql_relational_parents_retain_summary_bound_aggregate() {
         AccuracyTarget::max_error(0.01),
     )
     .await;
-    let root = realize(&pre_asap, AccuracyTarget::max_error(0.01));
+    let root = realize_ignoring_guarantees(&pre_asap, AccuracyTarget::max_error(0.01));
 
     let mut node = root.as_ref();
     let mut saw_project = false;
@@ -491,7 +510,7 @@ async fn sql_filter_keeps_read_predicate_and_summary_population_selection() {
     };
     assert_eq!(expected_source_predicates.len(), 1, "fixture source WHERE");
 
-    let root = realize(&pre_asap, AccuracyTarget::max_error(0.01));
+    let root = realize_ignoring_guarantees(&pre_asap, AccuracyTarget::max_error(0.01));
 
     let mut node = root.as_ref();
     let mut retained_read_predicate = None;

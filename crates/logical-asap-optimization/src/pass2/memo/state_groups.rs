@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 
-use asap_types::stages::{CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{CandidateForMemoGroup, MemoCandidates, OriginOfCandidateForMemoGroup};
 use asap_types::stages::{MemoGroup, MemoGroupId};
 
 #[derive(Debug, thiserror::Error)]
@@ -48,7 +48,7 @@ struct BuildReaders {
 /// Rejects a memo the Pass 2 rules cannot extend: mismatched or
 /// out-of-range group references, shared summary-state groups already
 /// added, or cyclic dependencies. Pass 2 checks this before its rules.
-pub(crate) fn check_unexpanded_memo(memo: &CandidateMemo) -> Result<(), StateGroupExpansionError> {
+pub(crate) fn check_unexpanded_memo(memo: &MemoCandidates) -> Result<(), StateGroupExpansionError> {
     validate_references(memo)?;
     if memo.groups.iter().any(|group| {
         matches!(
@@ -71,7 +71,7 @@ pub(crate) fn check_unexpanded_memo(memo: &CandidateMemo) -> Result<(), StateGro
 /// parents and the queries it may serve. On error, discard `memo`: it may
 /// hold partial work.
 pub(crate) fn add_shared_summary_state_groups(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     deadline: Option<Instant>,
 ) -> Result<(), StateGroupExpansionError> {
     add_shared_summary_state_groups_with_index(memo, deadline, true)
@@ -80,7 +80,7 @@ pub(crate) fn add_shared_summary_state_groups(
 /// `indexed` looks builds up by fingerprint; otherwise by a linear scan
 /// (the reference the index is tested against).
 fn add_shared_summary_state_groups_with_index(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     deadline: Option<Instant>,
     indexed: bool,
 ) -> Result<(), StateGroupExpansionError> {
@@ -144,12 +144,20 @@ fn add_shared_summary_state_groups_with_index(
             parents: Vec::new(),
             queries,
         });
+        // The build is its readers' own build, so it is sized for their
+        // shares of the budget (equal builds have equal sizes).
+        let accuracy_budget_parts = build
+            .readers
+            .iter()
+            .map(|(group, index, _)| memo.candidates[*group][*index].accuracy_budget_parts)
+            .max()
+            .unwrap_or(1);
         memo.candidates.push(vec![CandidateForMemoGroup {
             fused_groups: Vec::new(),
             root_node: Rc::clone(&build.build),
             input_groups: build.children,
             origin: OriginOfCandidateForMemoGroup::SharedBuild,
-            accuracy_budget_parts: 1,
+            accuracy_budget_parts,
         }]);
         for (group, index, own_build) in build.readers {
             check_generation_deadline(deadline)?;
@@ -237,7 +245,7 @@ fn add_shared_summary_state_groups_with_index(
     Ok(())
 }
 
-fn validate_references(memo: &CandidateMemo) -> Result<(), StateGroupExpansionError> {
+fn validate_references(memo: &MemoCandidates) -> Result<(), StateGroupExpansionError> {
     if memo.groups.len() != memo.candidates.len() {
         return Err(StateGroupExpansionError::MismatchedGroups);
     }
@@ -268,7 +276,7 @@ fn validate_references(memo: &CandidateMemo) -> Result<(), StateGroupExpansionEr
 }
 
 pub(super) fn simple_build(
-    memo: &CandidateMemo,
+    memo: &MemoCandidates,
     candidate: &CandidateForMemoGroup,
 ) -> Option<(Rc<OperatorNode>, Vec<MemoGroupId>)> {
     let mut builds = direct_input_builds(memo, candidate);
@@ -276,7 +284,7 @@ pub(super) fn simple_build(
 }
 
 pub(super) fn direct_input_builds(
-    memo: &CandidateMemo,
+    memo: &MemoCandidates,
     candidate: &CandidateForMemoGroup,
 ) -> Vec<(Rc<OperatorNode>, Vec<MemoGroupId>)> {
     if !matches!(
@@ -453,14 +461,14 @@ fn replace_node(
 mod tests {
     use super::*;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::candidates::try_populate_pass1;
-    use crate::pass2::memo::DagOfLogicalMemoGroups;
+    use crate::pass2::memo::generate_dag_of_logical_memo_groups;
+    use crate::pass2::memo::groups::try_populate_pass1;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::QueryRoot;
 
     /// An expanded memo with what its shared summary-state step added.
     struct Expanded {
-        memo: CandidateMemo,
+        memo: MemoCandidates,
         /// The groups the shared summary-state step added.
         state_groups: Vec<MemoGroupId>,
         /// The candidates it added to reader groups.
@@ -469,7 +477,7 @@ mod tests {
 
     /// Pass 2 after local window composition, over the complete pane-width
     /// domain, as the Pass 2 entry runs it.
-    fn expand(memo: CandidateMemo) -> Result<Expanded, StateGroupExpansionError> {
+    fn expand(memo: MemoCandidates) -> Result<Expanded, StateGroupExpansionError> {
         let memo = crate::test_support::sharing_rules_and_shared_state_groups(
             memo,
             super::super::shared_configurations::PaneWidthDomain::Complete,
@@ -477,7 +485,7 @@ mod tests {
         Ok(expanded(memo))
     }
 
-    fn expanded(memo: CandidateMemo) -> Expanded {
+    fn expanded(memo: MemoCandidates) -> Expanded {
         let state_groups = crate::test_support::shared_summary_state_groups(&memo);
         // Before this step no candidate is a shared build; after it, each
         // state group has one and each added reader candidate is one.
@@ -560,15 +568,14 @@ mod tests {
         ));
     }
 
-    fn workload(queries: &[(&str, f64)]) -> CandidateMemo {
+    fn workload(queries: &[(&str, f64)]) -> MemoCandidates {
         workload_with_identity(queries, false)
     }
 
-    fn workload_with_identity(queries: &[(&str, f64)], identity: bool) -> CandidateMemo {
+    fn workload_with_identity(queries: &[(&str, f64)], identity: bool) -> MemoCandidates {
         let roots: Vec<_> = queries
             .iter()
-            .enumerate()
-            .map(|(id, (query, error))| {
+            .map(|(query, error)| {
                 let root = crate::test_support::lower_promql(
                     query,
                     AccuracyTarget::max_error(*error).failure_probability(0.001),
@@ -579,11 +586,13 @@ mod tests {
                 } else {
                     root
                 };
-                (id, QueryRoot::Operator(root))
+                QueryRoot::Operator(root)
             })
             .collect();
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let initial = generate_dag_of_logical_memo_groups(&roots);
+        let inventory =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap();
         try_populate_pass1(initial, &inventory).unwrap()
     }
 
@@ -676,7 +685,7 @@ mod tests {
         assert_eq!(expanded.memo.groups.len(), count);
     }
 
-    fn with_local_panes(mut memo: CandidateMemo, grids: &[u64]) -> CandidateMemo {
+    fn with_local_panes(mut memo: MemoCandidates, grids: &[u64]) -> MemoCandidates {
         use crate::pass2::asap_aware_cse::{pane_candidates, window_composition_pass2_candidates};
 
         let boundaries: HashMap<_, _> = memo
@@ -874,6 +883,85 @@ mod tests {
                 expanded.memo.groups[parent.0 as usize].logical_node.schema
             );
         }
+    }
+
+    /// The groups `group`'s candidates read, directly or through the
+    /// candidates of the groups they read.
+    fn groups_read_by(memo: &MemoCandidates, group: usize) -> HashSet<usize> {
+        let mut read = HashSet::new();
+        let mut pending = vec![group];
+        while let Some(group) = pending.pop() {
+            for input in memo.candidates[group]
+                .iter()
+                .flat_map(|candidate| &candidate.input_groups)
+            {
+                if read.insert(input.0 as usize) {
+                    pending.push(input.0 as usize);
+                }
+            }
+        }
+        read
+    }
+
+    // A scan (or time range) that already has every label of its metric is
+    // not widened: widening recomposes guarantees, and an unwidened root
+    // that differs from the original only in its guarantee annotation must
+    // not become an identity `Project` over its own group.
+    #[test]
+    fn scan_label_widening_never_reads_its_own_group() {
+        for queries in [
+            [
+                ("sum by (job, region) (m)", 0.01),
+                ("sum by (job) (m)", 0.01),
+            ],
+            [
+                ("sum by (job, region) (rate(m[5m]))", 0.01),
+                ("sum by (job) (rate(m[5m]))", 0.01),
+            ],
+        ] {
+            let mut memo = workload_with_identity(&queries, true);
+            crate::pass2::logical_memo_candidates::apply_sharing_rules(
+                &mut memo,
+                super::super::shared_configurations::PaneWidthDomain::Complete,
+                None,
+            )
+            .unwrap();
+            assert!(
+                memo.candidates.iter().flatten().any(
+                    |candidate| candidate.origin == OriginOfCandidateForMemoGroup::WidenedScans
+                ),
+                "{queries:?}: the narrower scan is widened"
+            );
+            for group in 0..memo.groups.len() {
+                assert!(
+                    !groups_read_by(&memo, group).contains(&group),
+                    "{queries:?}: group {group} reads itself: {:?}",
+                    memo.candidates[group]
+                        .iter()
+                        .map(|candidate| (&candidate.origin, &candidate.input_groups))
+                        .collect::<Vec<_>>()
+                );
+            }
+            let expanded = expand(workload_with_identity(&queries, true)).unwrap();
+            for group in 0..expanded.memo.groups.len() {
+                assert!(!groups_read_by(&expanded.memo, group).contains(&group));
+            }
+        }
+    }
+
+    // A candidate reading its own group is a cycle the memo rejects.
+    #[test]
+    fn a_group_reading_itself_is_a_cyclic_memo() {
+        let mut memo = workload(&[("sum by (job) (m)", 0.01)]);
+        assert!(check_unexpanded_memo(&memo).is_ok());
+        let mut reader = memo.candidates[0][0].clone();
+        reader.input_groups = vec![MemoGroupId(0)];
+        memo.candidates[0].push(reader);
+        assert_eq!(memo.topological_order(), None);
+        assert!(matches!(
+            check_unexpanded_memo(&memo),
+            Err(StateGroupExpansionError::CyclicDependencies)
+        ));
     }
 
     // Label widening must not erase source predicates in order to create reuse.
@@ -1155,6 +1243,13 @@ mod tests {
             })
             .expect("average has shared state input");
         assert_eq!(reader.accuracy_budget_parts, 2);
+        // The shared build is the readers' own, sized for two shares too.
+        for state in &expanded.state_groups {
+            assert_eq!(
+                expanded.memo.candidates[state.0 as usize][0].accuracy_budget_parts,
+                2
+            );
+        }
         assert!(
             reader
                 .input_groups
@@ -1207,25 +1302,21 @@ mod tests {
             accuracy: AccuracyTarget::max_error(0.01),
         };
         let roots = vec![
-            (
-                0,
-                QueryRoot::Operator(agg(
-                    vec![],
-                    quantile(0.5),
-                    time_range(std::time::Duration::from_secs(300), scan()),
-                )),
-            ),
-            (
-                1,
-                QueryRoot::Operator(agg(
-                    vec![1],
-                    quantile(0.9),
-                    time_range(std::time::Duration::from_secs(1200), scan()),
-                )),
-            ),
+            QueryRoot::Operator(agg(
+                vec![],
+                quantile(0.5),
+                time_range(std::time::Duration::from_secs(300), scan()),
+            )),
+            QueryRoot::Operator(agg(
+                vec![1],
+                quantile(0.9),
+                time_range(std::time::Duration::from_secs(1200), scan()),
+            )),
         ];
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let generated = generate_per_computation_candidates(roots).unwrap();
+        let initial = generate_dag_of_logical_memo_groups(&roots);
+        let generated =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap();
         let memo = with_local_panes(
             try_populate_pass1(initial, &generated).unwrap(),
             &[10_000, 10_000],

@@ -8,7 +8,7 @@ use crate::ir::{OperatorNode, QueryRoot};
 
 /// The hash-consed workload: its groups, children before parents.
 #[derive(Debug, Clone, Default)]
-pub struct CandidateMemo {
+pub struct MemoCandidates {
     pub groups: Vec<MemoGroup>,
     /// Each query's root over groups, by index in the workload (the
     /// initial logical memo's query roots); groups added later are never a
@@ -24,7 +24,7 @@ pub struct CandidateMemo {
 pub struct CandidateForMemoGroup {
     /// The groups a fused computation also implements, beyond the group
     /// whose candidate it is (its owner, implicit from its position in
-    /// [`CandidateMemo::candidates`]); empty otherwise.
+    /// [`MemoCandidates::candidates`]); empty otherwise.
     pub fused_groups: Vec<MemoGroupId>,
     /// The implementation's own node(s): its root node, whose descendants
     /// down to [`Self::input_groups`] are its private nodes.
@@ -65,11 +65,12 @@ pub enum OriginOfCandidateForMemoGroup {
     WidenedScans,
 }
 
-impl CandidateMemo {
+impl MemoCandidates {
     /// The groups, each after every group it or one of its candidates
     /// reads, the lower index first among those ready: a dependency order for
     /// candidate traversal, whatever order transformations appended
-    /// groups in. `None` when those reads form a cycle.
+    /// groups in. `None` when those reads form a cycle, a group reading
+    /// itself included.
     pub fn topological_order(&self) -> Option<Vec<MemoGroupId>> {
         let count = self.groups.len();
         let mut reads: Vec<HashSet<usize>> = vec![HashSet::new(); count];
@@ -80,9 +81,8 @@ impl CandidateMemo {
                 .iter()
                 .chain(candidates.iter().flat_map(|c| &c.input_groups))
             {
-                if child.0 as usize != g {
-                    reads[g].insert(child.0 as usize);
-                }
+                // A group reading itself never becomes ready: a cycle.
+                reads[g].insert(child.0 as usize);
             }
         }
         let mut readers: Vec<Vec<usize>> = vec![Vec::new(); count];

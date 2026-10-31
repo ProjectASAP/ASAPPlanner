@@ -1,15 +1,23 @@
 //! Sizing: the target an approximate-capable intent's summary is sized
-//! against, its `(ε, δ)` budget, the default sketch parameters for it, and
-//! a family sized for one equal share of that target.
+//! against, its `(ε, δ)` budget, the default sketch parameters for it, a
+//! family sized for one equal share of that target, and the failure
+//! probability each approximate input needs over the values the target
+//! covers.
+use std::rc::Rc;
+
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{
     FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic,
 };
+use asap_types::ir::{OperatorNode, QueryRoot, SchemaDerivationError};
+use asap_types::workload::bounds::{series_read, values_per_result};
+use asap_types::workload::DataWorkload;
 
-use crate::estimators::local_guarantee;
+use crate::estimators::{hll, local_guarantee, with_failure_probability};
 use crate::per_input_target;
+use crate::propagation::{approximate_inputs, distinct_bound_source, with_resized_summaries};
 
 /// Confidence δ assumed when the target carries only an ε
 /// (`AccuracyTarget::epsilon`): the (ε, δ)-parameterised sketches (CMS) need
@@ -138,6 +146,135 @@ pub fn sized(algorithm: &SketchAlgorithm, intent: &AggIntent, share: usize) -> S
         return whole;
     };
     per_input_target(&target, metric, share).map_or(whole, |share| size(&share))
+}
+
+/// The failure probability each of the `budget_parts` approximate inputs
+/// of query `root`'s value is sized for, so that the value meets `target`
+/// over every value the target covers: `δ / (n · V)`, the query's `δ`
+/// shared equally by `n = budget_parts` inputs and union-bounded over the
+/// `V` values its scope covers
+/// ([`AccuracyScope::max_values_covered`](asap_types::ir::properties::AccuracyScope::max_values_covered):
+/// 1 for a per-value target, at most `⌊1 / share⌋` for one over the groups
+/// holding a record share, and `G` ([`values_per_result`]) for the whole
+/// result). `None` for an exact target, one without a positive failure
+/// probability, and a whole-result target whose `G` is unbound: its target
+/// then stays unmet, and plan selection rejects the plan.
+pub fn per_input_failure_probability(
+    target: &AccuracyTarget,
+    budget_parts: usize,
+    root: &QueryRoot,
+    data: &DataWorkload,
+) -> Option<f64> {
+    let delta = target
+        .failure_probability
+        .filter(|delta| !target.is_exact() && *delta > 0.0)?;
+    let values = target.accuracy_scope.max_values_covered(values_per_result(
+        root,
+        series_read(root, data),
+        data,
+    ))?;
+    Some(delta / (budget_parts.max(1) as f64 * values as f64))
+}
+
+/// Sketch summary `state`'s `params` sized for failure probability
+/// `failure_probability`: the parameters that depend on it enlarged
+/// ([`with_failure_probability`]), and classic HLL's precision from the
+/// distinct bound of the source it counts (keeping the relative error it
+/// was sized for). Never smaller than `params`. `None` keeps `params`: an
+/// HLL whose source declares no distinct bound.
+fn sized_for_failure_probability(
+    state: &OperatorNode,
+    params: &SketchParams,
+    failure_probability: f64,
+    data: &DataWorkload,
+) -> Option<SketchParams> {
+    Some(match params {
+        SketchParams::Hll {
+            precision,
+            relative_error,
+        } => {
+            let source = distinct_bound_source(state)?;
+            let bound = data.sources.get(&source)?.max_distinct_per_evaluation?;
+            let relative_error = hll::classic_relative_error(*precision, *relative_error);
+            SketchParams::Hll {
+                precision: hll::min_precision(
+                    relative_error,
+                    failure_probability,
+                    bound,
+                    *precision,
+                ),
+                relative_error: Some(relative_error),
+            }
+        }
+        params => with_failure_probability(params, failure_probability),
+    })
+}
+
+/// `roots` with every approximate input of their values
+/// ([`approximate_inputs`]) sized for `failure_probability`
+/// (`sized_for_failure_probability`) and the guarantees above composed
+/// again ([`with_resized_summaries`]). A summary whose output carries no
+/// guarantee (e.g. a top-k's heap, which bounds item frequencies, not
+/// membership) is no approximate input and keeps its size: its failure
+/// probability bounds nothing the target checks. The same `Rc` where
+/// nothing changes.
+pub fn with_summaries_sized_for_failure_probability(
+    roots: &[QueryRoot],
+    failure_probability: f64,
+    data: &DataWorkload,
+) -> Result<Vec<QueryRoot>, SchemaDerivationError> {
+    let inputs: std::collections::HashSet<*const OperatorNode> = roots
+        .iter()
+        .flat_map(approximate_inputs)
+        .map(|state| Rc::as_ptr(&state))
+        .collect();
+    if inputs.is_empty() {
+        return Ok(roots.to_vec());
+    }
+    with_resized_summaries(roots, &|state, params| {
+        inputs
+            .contains(&std::ptr::from_ref(state))
+            .then(|| sized_for_failure_probability(state, params, failure_probability, data))
+            .flatten()
+    })
+}
+
+/// Whole-workload `roots` (query `i`'s root `roots[i]` with target
+/// `targets[i]`), composed outside the memo, with their summaries sized as
+/// Pass 1 sizes a memo candidate: each approximate input of query `i`'s
+/// value, `n_i` in all ([`approximate_inputs`]), for
+/// [`per_input_failure_probability`] `δ_i / (n_i · V_i)`, a summary several
+/// roots read for the smallest among them, and the guarantees above
+/// composed again. For plans built by hand (tests, the fuzzer's witnesses);
+/// the planner sizes its candidates in Pass 1.
+pub fn with_summaries_sized_for_targets(
+    roots: &[QueryRoot],
+    targets: &[AccuracyTarget],
+    data: &DataWorkload,
+) -> Result<Vec<QueryRoot>, SchemaDerivationError> {
+    let mut required: std::collections::HashMap<*const OperatorNode, f64> =
+        std::collections::HashMap::new();
+    for (root, target) in roots.iter().zip(targets) {
+        let inputs = approximate_inputs(root);
+        let Some(failure_probability) =
+            per_input_failure_probability(target, inputs.len(), root, data)
+        else {
+            continue;
+        };
+        for state in &inputs {
+            let entry = required
+                .entry(Rc::as_ptr(state))
+                .or_insert(failure_probability);
+            *entry = entry.min(failure_probability);
+        }
+    }
+    if required.is_empty() {
+        return Ok(roots.to_vec());
+    }
+    with_resized_summaries(roots, &|state, params| {
+        let failure_probability = *required.get(&std::ptr::from_ref(state))?;
+        sized_for_failure_probability(state, params, failure_probability, data)
+    })
 }
 
 #[cfg(test)]

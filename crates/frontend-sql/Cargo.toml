@@ -28,10 +28,19 @@ datafusion = { version = "54", default-features = false, features = [
 # -- opaque JSON, matching how `asap-types` itself carries it.
 serde_json = "1"
 
+[features]
+# Exposes `test_support` (lowering to the name-based tree, before binding)
+# to tests.
+test-support = []
+
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
-asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
-asap-plan-selection = { path = "../plan-selection" }
+asap-frontend-sql = { path = ".", features = ["test-support"] }
+# Pass 1's target list (`per_computation_candidates`) for the tests.
+asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
+# The planning stages through the facade (a dev-dependency cycle, for
+# integration tests only).
+asap-planner = { path = "../planner" }
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 # bgp_jan2024_workload corpus is sourced verbatim as YAML (ASAPQuery PR #561)
 # rather than transcribed into the flat .sql shape the other corpora use.

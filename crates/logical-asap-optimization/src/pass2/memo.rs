@@ -1,21 +1,21 @@
 //! Logical group identity established before implementation candidate generation.
 //!
 //! This module depends only on logical IR. It preserves the existing CSE
-//! legality rules and owns the original roots so pointer-based lookup remains
-//! valid while later stages populate implementation candidates.
+//! legality rules; Pass 1 walks its groups.
 
 /// Logical implementation candidates populated after initial identity construction.
-pub mod candidates;
+pub(crate) mod candidates;
 /// The candidate DAGs a memo stands for: choices and their composition.
-pub mod enumeration;
-mod groups;
+pub(crate) mod enumeration;
+pub(crate) mod groups;
+pub(crate) use groups::NodeToStructuralIdCache;
 pub(crate) mod rules;
 /// Shared finite state configuration enumeration.
-pub mod shared_configurations;
+pub(crate) mod shared_configurations;
 /// Concrete summary-state groups exposed by sharing rules.
-pub mod state_groups;
+pub(crate) mod state_groups;
 /// Local pane candidates with selected-reader grid configurations.
-pub mod window_candidates;
+pub(crate) mod window_candidates;
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -23,7 +23,9 @@ use std::time::Instant;
 
 use crate::pass2::cse::share_common_sub_dags;
 use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::stages::{CandidateGenerationTimeout, MemoGroup, MemoGroupId};
+use asap_types::stages::{
+    CandidateGenerationTimeout, DagOfLogicalMemoGroups, MemoGroup, MemoGroupId,
+};
 
 pub(crate) fn check_generation_deadline(
     deadline: Option<Instant>,
@@ -35,66 +37,22 @@ pub(crate) fn check_generation_deadline(
     }
 }
 
-/// Initial logical groups, without implementation choices or solver state.
-#[derive(Debug, Clone)]
-pub struct DagOfLogicalMemoGroups {
-    pub groups: Vec<MemoGroup>,
-    /// Each query's root over groups, by index in the workload: its
-    /// operator's group, or its scalar expression with every operator
-    /// reference replaced by that operator's group.
-    pub query_roots: Vec<QueryRoot<MemoGroupId>>,
-    original_roots: Vec<QueryRoot>,
-    group_of: GroupOf,
-}
-
-impl DagOfLogicalMemoGroups {
-    pub fn from_roots<Id>(roots: &[(Id, QueryRoot)]) -> Self {
-        let (groups, group_of) = hash_consed(roots);
-        let group = |node: &Rc<OperatorNode>| group_of[&Rc::as_ptr(node)];
-        let query_roots = roots
-            .iter()
-            .map(|(_, root)| match root {
-                QueryRoot::Operator(node) => QueryRoot::Operator(group(node)),
-                QueryRoot::Scalar(expr) => {
-                    QueryRoot::Scalar(expr.map_operator_refs(&mut |node| group(node)))
-                }
-            })
-            .collect();
-        Self {
-            groups,
-            query_roots,
-            original_roots: roots.iter().map(|(_, root)| root.clone()).collect(),
-            group_of,
-        }
-    }
-
-    /// Group of a node from the original workload, not a rewritten candidate.
-    pub fn group_for_node(&self, node: &Rc<OperatorNode>) -> Option<MemoGroupId> {
-        self.group_of.get(&Rc::as_ptr(node)).copied()
-    }
-
-    /// Check root kind and ordered operator dependencies, not scalar values.
-    /// Changing scalar-only output expressions does not change logical groups.
-    /// Never compare operator DAGs recursively: shared diamonds and NaN literals
-    /// make structural equality inappropriate for pointer-indexed identities.
-    pub fn matches_root_dependencies<Id>(&self, roots: &[(Id, QueryRoot)]) -> bool {
-        self.original_roots.len() == roots.len()
-            && self
-                .original_roots
-                .iter()
-                .zip(roots)
-                .all(|(original, (_, root))| {
-                    std::mem::discriminant(original) == std::mem::discriminant(root) && {
-                        let original_nodes = operator_roots(original);
-                        let nodes = operator_roots(root);
-                        original_nodes.len() == nodes.len()
-                            && original_nodes
-                                .iter()
-                                .zip(&nodes)
-                                .all(|(a, b)| Rc::ptr_eq(a, b))
-                    }
-                })
-    }
+/// Stage 0: the memo groups of the workload's query roots, query `i`
+/// being `roots[i]`, by hash-consing identical logical sub-expressions
+/// (`share_common_sub_dags`).
+pub fn generate_dag_of_logical_memo_groups(roots: &[QueryRoot]) -> DagOfLogicalMemoGroups {
+    let (groups, group_of) = hash_consed(roots);
+    let group = |node: &Rc<OperatorNode>| group_of[&Rc::as_ptr(node)];
+    let query_roots = roots
+        .iter()
+        .map(|root| match root {
+            QueryRoot::Operator(node) => QueryRoot::Operator(group(node)),
+            QueryRoot::Scalar(expr) => {
+                QueryRoot::Scalar(expr.map_operator_refs(&mut |node| group(node)))
+            }
+        })
+        .collect();
+    DagOfLogicalMemoGroups::new(groups, query_roots, group_of)
 }
 
 /// Each original node (of `roots`), by address, to its group.
@@ -103,11 +61,11 @@ type GroupOf = HashMap<*const OperatorNode, MemoGroupId>;
 /// The groups of `roots`, children before parents, and each original node's
 /// group. A scalar query reaches the groups of the operator nodes its
 /// expression reads.
-fn hash_consed<Id>(roots: &[(Id, QueryRoot)]) -> (Vec<MemoGroup>, GroupOf) {
+fn hash_consed(roots: &[QueryRoot]) -> (Vec<MemoGroup>, GroupOf) {
     let originals: Vec<(usize, Rc<OperatorNode>)> = roots
         .iter()
         .enumerate()
-        .flat_map(|(query, (_, root))| {
+        .flat_map(|(query, root)| {
             operator_roots(root)
                 .into_iter()
                 .map(move |node| (query, node))
@@ -225,12 +183,12 @@ mod tests {
     #[test]
     fn repeated_results_share_groups_but_quantile_levels_do_not() {
         let roots = vec![
-            (0, query("sum by (job) (m)")),
-            (1, query("sum by (job) (m)")),
-            (2, query("quantile_over_time(0.95, m[5m])")),
-            (3, query("quantile_over_time(0.99, m[5m])")),
+            query("sum by (job) (m)"),
+            query("sum by (job) (m)"),
+            query("quantile_over_time(0.95, m[5m])"),
+            query("quantile_over_time(0.99, m[5m])"),
         ];
-        let memo = DagOfLogicalMemoGroups::from_roots(&roots);
+        let memo = generate_dag_of_logical_memo_groups(&roots);
         let root_group = |q: usize| *memo.query_roots[q].as_operator().unwrap();
         assert_eq!(root_group(0), root_group(1));
         assert_ne!(root_group(2), root_group(3));
@@ -252,14 +210,11 @@ mod tests {
     /// two equal sub-expressions are one group read twice.
     #[test]
     fn equal_keyless_deterministic_results_share_one_group() {
-        let roots = vec![(
-            0,
-            QueryRoot::Operator(lower_promql(
+        let roots = vec![QueryRoot::Operator(lower_promql(
                 "avg by (job) (quantile_over_time(0.5, data[5m]) / quantile_over_time(0.5, data[5m]) + quantile_over_time(0.9, data[5m]))",
                 AccuracyTarget::max_error(0.01).failure_probability(0.001),
-            )),
-        )];
-        let memo = DagOfLogicalMemoGroups::from_roots(&roots);
+            ))];
+        let memo = generate_dag_of_logical_memo_groups(&roots);
         let division = memo
             .groups
             .iter()
@@ -282,76 +237,16 @@ mod tests {
             unreachable!()
         };
         let roots = vec![
-            (10, QueryRoot::Scalar(ScalarExpr::literal_f64(1.0))),
-            (
-                20,
-                QueryRoot::Scalar(ScalarExpr::PromqlScalarFromVector(node.clone())),
-            ),
-            (30, QueryRoot::Operator(node.clone())),
+            QueryRoot::Scalar(ScalarExpr::literal_f64(1.0)),
+            QueryRoot::Scalar(ScalarExpr::PromqlScalarFromVector(node.clone())),
+            QueryRoot::Operator(node.clone()),
         ];
-        let memo = DagOfLogicalMemoGroups::from_roots(&roots);
+        let memo = generate_dag_of_logical_memo_groups(&roots);
         let id = memo.group_for_node(&node).unwrap();
         assert_eq!(queries_rooted_at(&memo.query_roots, id), vec![1, 2]);
         assert_eq!(memo.groups[id.0 as usize].reached_by_queries(), [1, 2]);
-        assert!(memo.matches_root_dependencies(&roots));
-        let mut reordered = roots.clone();
-        reordered.swap(0, 1);
-        assert!(!memo.matches_root_dependencies(&reordered));
-        assert!(DagOfLogicalMemoGroups::from_roots(&roots[..1])
+        assert!(generate_dag_of_logical_memo_groups(&roots[..1])
             .groups
             .is_empty());
-    }
-
-    /// Non-reflexive floating literals must not invalidate unchanged dependencies.
-    #[test]
-    fn unchanged_nan_root_matches_by_dependency_identity() {
-        let roots = vec![(0, QueryRoot::Scalar(ScalarExpr::literal_f64(f64::NAN)))];
-        let memo = DagOfLogicalMemoGroups::from_roots(&roots);
-        assert!(memo.matches_root_dependencies(&roots));
-    }
-
-    /// Dependency checks must not unfold shared operator DAGs once per path.
-    #[test]
-    fn checking_shared_diamond_uses_root_identity() {
-        use asap_types::ir::operator::operator_properties::BinaryOpKind;
-        use asap_types::ir::scalar::CompareOpKind;
-        use asap_types::ir::{BinaryOperator, NonASAPOp, Operator};
-        let QueryRoot::Operator(mut node) = query("m") else {
-            unreachable!()
-        };
-        for _ in 0..24 {
-            node = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::BinaryOp {
-                operator: BinaryOperator {
-                    checked_relative_division: false,
-                    checked_finite_division: false,
-                    kind: BinaryOpKind::Compare(CompareOpKind::Eq),
-                    vector_match: None,
-                },
-                return_bool: false,
-                lhs: node.clone(),
-                rhs: node,
-            }))
-            .unwrap();
-        }
-        // Construct the identity guard directly so this regression isolates
-        // root matching from the independently tested CSE/interner.
-        let roots = vec![(0, QueryRoot::Operator(node))];
-        let memo = DagOfLogicalMemoGroups {
-            groups: Vec::new(),
-            query_roots: Vec::new(),
-            original_roots: roots.iter().map(|(_, r)| r.clone()).collect(),
-            group_of: GroupOf::new(),
-        };
-        assert!(memo.matches_root_dependencies(&roots));
-    }
-
-    /// Structural equality alone cannot validate pointer-indexed target lookups.
-    #[test]
-    fn rebuilt_equal_roots_do_not_match_the_original_workload() {
-        let roots = vec![(0, query("sum by (job) (m)"))];
-        let memo = DagOfLogicalMemoGroups::from_roots(&roots);
-        let rebuilt = vec![(0, query("sum by (job) (m)"))];
-        assert!(!memo.matches_root_dependencies(&rebuilt));
-        assert!(memo.matches_root_dependencies(&roots.clone()));
     }
 }

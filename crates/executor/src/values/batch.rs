@@ -16,7 +16,7 @@ const ROW_SLOT_BYTES: usize = 8;
 /// The output of one operator: equal-length columns in one Planner schema.
 ///
 /// Plain columns are Arrow arrays in a [`RecordBatch`], in the layout
-/// [`arrow_columns`] gives each Planner type. A summary column is a
+/// `arrow_columns` gives each Planner type. A summary column is a
 /// `UInt32` array of state indices in the record batch, plus its
 /// [`StateColumn`] beside it. Cloning a batch shares its buffers.
 #[derive(Clone)]
@@ -43,7 +43,7 @@ impl std::fmt::Debug for Batch {
 /// One column of a batch built with [`Batch::try_from_columns`].
 pub enum BatchColumn {
     /// A plain column: an Arrow array in its Planner type's layout (see
-    /// [`super::arrow_columns`]: text is `DictionaryArray<UInt32Type>` over
+    /// `super::arrow_columns`: text is `DictionaryArray<UInt32Type>` over
     /// `Utf8`, a timestamp `TimestampMillisecondArray`, …).
     Plain(ArrayRef),
     /// A summary column: row `i`'s state is `states.state(indices[i])`.
@@ -587,7 +587,7 @@ impl Batch {
     /// Memory the batch holds, for execution memory reservations: its
     /// column buffers, a fixed slot per row, and each state column once,
     /// except states held outside the run (see
-    /// [`Self::mark_states_held_outside_run`]). Constant time in the number
+    /// `Self::mark_states_held_outside_run`). Constant time in the number
     /// of rows.
     pub fn memory_bytes(&self) -> usize {
         let mut seen = std::collections::BTreeSet::new();

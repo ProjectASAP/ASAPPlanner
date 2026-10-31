@@ -46,8 +46,8 @@ fn repeating_with(queries: &[&str], extra: &str) -> PlanningWorkload {
 /// Stage 3's priced raw lookback of `dag` (the selected candidate's
 /// physical DAG, pane chains unexpanded), per source: each query-time
 /// scan's `PhysicalASAPDAG::scan_window` with every chain kept across
-/// evaluations reading its newest pane, as `query_time_lookback_ms` in
-/// `asap-plan-selection` prices it, the longest per source.
+/// evaluations reading its newest pane, as `asap-plan-selection` prices
+/// it, the longest per source.
 fn stage3_raw_lookback_ms(dag: &PhysicalASAPDAG) -> Vec<(Source, Option<u64>)> {
     let kept_chains: HashSet<_> = dag
         .nodes
@@ -98,13 +98,10 @@ async fn raw_data_retention_is_the_lookback_stage3_prices() {
     let m = Source::TimeSeries { metric: "m".into() };
     assert_eq!(
         plan.raw_data_retention().unwrap(),
-        [RawDataRetention {
-            source: m.clone(),
-            lookback_ms: Some(65 * 60_000),
-        }]
+        [RawDataRetention::new(m.clone(), Some(65 * 60_000))]
     );
     let output = e2e_plan(input()).await.unwrap();
-    let selected = compile_physical_asap_workload(&output.selection.unwrap().plan).unwrap();
+    let selected = compile_physical_asap_workload(&output.roots()).unwrap();
     assert_eq!(stage3_raw_lookback_ms(&selected), [(m, Some(65 * 60_000))]);
 
     let capabilities = DeploymentCapabilities {
@@ -136,15 +133,15 @@ fn a_range_evaluated_query_time_scan_keeps_its_window_plus_the_span() {
     );
     let roots = asap_devtools::planning_stages::lower_promql_roots(&workload).unwrap();
     let entries: Vec<_> = workload.query_workload.entries().collect();
-    let (plan, _) = installable_plan_of(&roots, None, &entries).unwrap();
+    let (plan, _) = installable_plan_of(&roots, None, &Default::default(), &entries).unwrap();
     plan.validate().unwrap();
     assert!(plan.materialized_views().unwrap().is_empty());
     assert_eq!(
         plan.raw_data_retention().unwrap(),
-        [RawDataRetention {
-            source: Source::TimeSeries { metric: "m".into() },
-            lookback_ms: Some(5 * 60_000 + 3_600_000),
-        }]
+        [RawDataRetention::new(
+            Source::TimeSeries { metric: "m".into() },
+            Some(5 * 60_000 + 3_600_000)
+        )]
     );
     let scan = plan
         .dag
@@ -236,14 +233,14 @@ fn materialized_views_equal_the_stored_outputs_main_listed() {
                 output["node_id"].as_u64().unwrap(),
                 "{name}"
             );
-            assert_eq!(view.refresh, refresh, "{name}");
+            assert_eq!(view.refresh(), refresh, "{name}");
             assert_eq!(
-                serde_json::to_value(&view.coverage).unwrap(),
+                serde_json::to_value(view.coverage()).unwrap(),
                 output["coverage"],
                 "{name}"
             );
             assert_eq!(
-                view.retention_ms,
+                view.retention_ms(),
                 output["retention_ms"].as_u64().unwrap(),
                 "{name}"
             );
@@ -277,9 +274,9 @@ fn materialized_views_equal_the_stored_outputs_main_listed() {
                 .collect();
             assert_eq!(
                 view.inputs
-                    .raw_data_windows
+                    .raw_data_windows()
                     .iter()
-                    .map(|w| (w.source.clone(), w.end_offset_ms, w.width_ms))
+                    .map(|w| (w.source().clone(), w.end_offset_ms(), w.width_ms()))
                     .collect::<Vec<_>>(),
                 windows,
                 "{name}"

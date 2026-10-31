@@ -13,6 +13,8 @@ edition = "2021"
 [dependencies]
 asap-accuracy = { path = "../accuracy" }
 asap-types = { path = "../types" }
+# The pane retention of a realized plan (`AssignmentRealizer::realize`).
+asap-cost = { path = "../cost" }
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -20,10 +22,13 @@ thiserror = "2"
 
 [features]
 # Exposes `test_support` (single-candidate realization, operator
-# implementation, pane coverage) and `catalog::test_support` (catalog
+# implementation, pane coverage, and `test_support::catalog`: catalog
 # internals plan selection's unit tests exercise with its solver), for other
-# crates' tests.
-test-support = []
+# crates' tests. Tests also enumerate whole workloads with the reference pricer.
+test-support = ["reference-pricer"]
+# `optimize_physical_asap`: the whole-workload enumeration behind the
+# developer tools' reference pricing (`asap-devtools`). Planning does not use it.
+reference-pricer = []
 
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }

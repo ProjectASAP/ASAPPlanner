@@ -4,6 +4,23 @@
 
 use std::rc::Rc;
 
+// Stage 1 internals other crates' tests call: Pass 1's working form and its
+// population step, single-candidate composition, Stage 0 hash-consing, and
+// the Pass 2 rule entry points those tests build memos with.
+pub use crate::pass1::per_computation_candidates::{
+    compose_logical_candidate, generate_per_computation_candidates, PerComputationCandidates,
+};
+pub use crate::pass2::asap_aware_cse::{
+    pane_candidates, rollup_candidates, rollup_pass2_candidates,
+    window_composition_pass2_candidates, window_composition_shared_chain_candidates,
+    with_union_scan_labels,
+};
+pub use crate::pass2::cse::share_common_sub_dags;
+pub use crate::pass2::memo::groups::try_populate_pass1;
+pub use crate::pass2::memo::window_candidates::{
+    add_local_window_composition, add_local_window_composition_in_domain,
+};
+
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::OperatorNode;
 use asap_types::workload::{
@@ -13,14 +30,14 @@ use asap_types::workload::{
 
 /// Pass 2 after local window composition, on a memo the test composed
 /// itself (or not at all): rules 2–9 for `domain`, then
-/// [`add_shared_summary_state_groups`](crate::pass2::memo::state_groups::add_shared_summary_state_groups).
+/// `add_shared_summary_state_groups`.
 /// Production runs these through
 /// [`generate_logical_asap_memo_candidates`](crate::pass2::logical_memo_candidates::generate_logical_asap_memo_candidates).
 pub fn sharing_rules_and_shared_state_groups(
-    mut memo: asap_types::stages::CandidateMemo,
+    mut memo: asap_types::stages::MemoCandidates,
     domain: crate::pass2::memo::shared_configurations::PaneWidthDomain,
 ) -> Result<
-    asap_types::stages::CandidateMemo,
+    asap_types::stages::MemoCandidates,
     crate::pass2::memo::state_groups::StateGroupExpansionError,
 > {
     crate::pass2::logical_memo_candidates::apply_sharing_rules(&mut memo, domain, None)?;
@@ -28,12 +45,12 @@ pub fn sharing_rules_and_shared_state_groups(
     Ok(memo)
 }
 
-/// The groups [`add_shared_summary_state_groups`](crate::pass2::memo::state_groups::add_shared_summary_state_groups)
+/// The groups `add_shared_summary_state_groups`
 /// added to an expanded memo, in order: each has one candidate, the
 /// shared build (origin `SharedBuild`); no other group's candidates are
 /// only that.
 pub fn shared_summary_state_groups(
-    memo: &asap_types::stages::CandidateMemo,
+    memo: &asap_types::stages::MemoCandidates,
 ) -> Vec<asap_types::stages::MemoGroupId> {
     memo.candidates
         .iter()
@@ -237,9 +254,11 @@ pub fn cms_summary(query: &str) -> OperatorNode {
     let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let root = lower_promql(query, target);
     // Inspect each local computation choice under the built-in deployment.
-    let per_computation = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))])
-        .unwrap()
-        .without_unsupported_summaries(None);
+    let per_computation = generate_per_computation_candidates(
+        &crate::pass2::memo::generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(root)]),
+    )
+    .unwrap()
+    .without_unsupported_summaries(None);
     let summary = per_computation
         .targets
         .iter()
@@ -249,9 +268,7 @@ pub fn cms_summary(query: &str) -> OperatorNode {
             (0..choices.choice_count()).filter_map(move |candidate| {
                 let mut assignment = vec![0; inventory.targets.len()];
                 assignment[target] = candidate;
-                compose_logical_candidate(inventory, &assignment)
-                    .ok()
-                    .map(|roots| roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>())
+                compose_logical_candidate(inventory, &assignment).ok()
             })
         })
         .flat_map(|roots| match &roots[0] {

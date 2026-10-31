@@ -5,14 +5,15 @@
 //! then the group keys naming each ranked item.
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    compose_logical_candidate, generate_per_computation_candidates, HowToComputeAggregateMeasure,
+use asap_logical_asap_optimization::test_support::{
+    compose_logical_candidate, generate_per_computation_candidates,
 };
 use asap_physical_asap_optimization::optimize_physical_asap;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot, ScalarExpr};
+use asap_types::stages::HowToComputeAggregateMeasure;
 
 fn approximate() -> AccuracyTarget {
     AccuracyTarget::max_error(0.01).failure_probability(0.001)
@@ -75,8 +76,12 @@ async fn check_every_choice(
         matches!(measures.as_slice(), [AggIntent::TopK { k: 5, .. }]),
         "{sql}"
     );
-    let inventory =
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+            QueryRoot::Operator(root),
+        ]),
+    )
+    .unwrap();
     // The cartesian product of every target's candidates.
     let mut choices = vec![vec![]];
     for target in &inventory.targets {
@@ -100,7 +105,8 @@ async fn check_every_choice(
             // that candidate. Every other choice must compose.
             Err(e) => {
                 let summarized_topk = inventory.targets.iter().zip(&choice).any(|(t, &i)| {
-                    let NonASAPOp::Aggregate { measures, .. } = t.aggregate.expect_non_asap()
+                    let NonASAPOp::Aggregate { measures, .. } =
+                        inventory.aggregate(t).expect_non_asap()
                     else {
                         return false;
                     };
@@ -112,7 +118,7 @@ async fn check_every_choice(
                 continue;
             }
         };
-        let roots: Vec<_> = composed.into_iter().map(|(_, root)| root).collect();
+        let roots: Vec<_> = composed;
         let candidate = optimize_physical_asap(
             "L1",
             &roots,

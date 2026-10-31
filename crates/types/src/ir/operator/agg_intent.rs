@@ -281,7 +281,7 @@ pub enum AggIntent<C = ColumnId> {
     /// interpretation of `payload` itself.
     ///
     /// Core treats this opaquely: [`AggIntent::is_per_series`] returns `false`,
-    /// [`AggIntent::input_col`] returns `None`, and
+    /// `AggIntent::input_col` returns `None`, and
     /// `AggIntent::output_column` names the output column after `kind`
     /// with an unconstrained `Utf8` type — a deployment model that binds
     /// `Extension` intents is expected to override/re-derive the schema

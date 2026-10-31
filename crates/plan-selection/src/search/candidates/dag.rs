@@ -4,18 +4,128 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use crate::search::candidates::graph::SelectedCandidateGraph;
 use asap_types::ir::OperatorNode;
-use asap_types::stages::{
-    validate_selected_connections, PhysicalASAPMemoCandidates, PhysicalCandidateId,
-    ReaderConstraint, SelectedCandidateGraph, SupplierCandidates,
-};
+use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, ProducerCandidates};
+
+/// Today's engine's reader constraints: Stage 2's
+/// ([`asap_types::stages::ReaderConstraint`]), plus the activation order of
+/// the execution-scope copies the engine expands
+/// ([`crate::search::candidates::scopes`]). Deleted with the engine (#1095).
+#[derive(Debug, Clone)]
+pub(crate) enum ReaderConstraint {
+    /// Symmetry only: interchangeable execution-scope copies activate in
+    /// order. Both copies still need genuine consumers; this does not
+    /// create a DAG edge.
+    ActivationRequires {
+        candidate: PhysicalCandidateId,
+        required_candidate: PhysicalCandidateId,
+    },
+    /// As Stage 2's, on each selected copy.
+    MinimumQueryReaders {
+        candidate: PhysicalCandidateId,
+        query_outputs: Vec<Vec<usize>>,
+        minimum: usize,
+    },
+    /// As Stage 2's, on each selected copy.
+    HighestSharedQueryMaterialization {
+        candidate: PhysicalCandidateId,
+        query_outputs: Vec<Vec<usize>>,
+    },
+    /// As Stage 2's, on each selected copy.
+    AllowedOutputs {
+        candidate: PhysicalCandidateId,
+        outputs: Vec<usize>,
+    },
+    /// As Stage 2's, on each selected copy.
+    IncompatibleOutputs {
+        candidate: PhysicalCandidateId,
+        left: usize,
+        right: usize,
+    },
+}
+
+impl From<asap_types::stages::ReaderConstraint> for ReaderConstraint {
+    fn from(constraint: asap_types::stages::ReaderConstraint) -> Self {
+        use asap_types::stages::ReaderConstraint as Stage2;
+        match constraint {
+            Stage2::MinimumQueryReaders {
+                candidate,
+                query_outputs,
+                minimum,
+            } => Self::MinimumQueryReaders {
+                candidate,
+                query_outputs,
+                minimum,
+            },
+            Stage2::HighestSharedQueryMaterialization {
+                candidate,
+                query_outputs,
+            } => Self::HighestSharedQueryMaterialization {
+                candidate,
+                query_outputs,
+            },
+            Stage2::AllowedOutputs { candidate, outputs } => {
+                Self::AllowedOutputs { candidate, outputs }
+            }
+            Stage2::IncompatibleOutputs {
+                candidate,
+                left,
+                right,
+            } => Self::IncompatibleOutputs {
+                candidate,
+                left,
+                right,
+            },
+        }
+    }
+}
+
+impl ReaderConstraint {
+    #[cfg(test)]
+    /// Stage 2's constraint it is; `None` for `ActivationRequires`.
+    pub(crate) fn to_stage2(&self) -> Option<asap_types::stages::ReaderConstraint> {
+        use asap_types::stages::ReaderConstraint as Stage2;
+        Some(match self.clone() {
+            Self::ActivationRequires { .. } => return None,
+            Self::MinimumQueryReaders {
+                candidate,
+                query_outputs,
+                minimum,
+            } => Stage2::MinimumQueryReaders {
+                candidate,
+                query_outputs,
+                minimum,
+            },
+            Self::HighestSharedQueryMaterialization {
+                candidate,
+                query_outputs,
+            } => Stage2::HighestSharedQueryMaterialization {
+                candidate,
+                query_outputs,
+            },
+            Self::AllowedOutputs { candidate, outputs } => {
+                Stage2::AllowedOutputs { candidate, outputs }
+            }
+            Self::IncompatibleOutputs {
+                candidate,
+                left,
+                right,
+            } => Stage2::IncompatibleOutputs {
+                candidate,
+                left,
+                right,
+            },
+        })
+    }
+}
 
 /// One required input, distinct even when another input accepts the same
-/// suppliers.
+/// producers.
 #[derive(Debug, Clone)]
-pub(crate) struct InputSupplierCandidates {
-    /// The candidates that may supply it.
-    pub candidates: SupplierCandidates,
+pub(crate) struct InputProducerCandidates {
+    /// The candidates that may produce it.
+    pub candidates: ProducerCandidates,
 }
 
 /// One physical candidate, indexed like
@@ -25,9 +135,9 @@ pub(crate) struct InputSupplierCandidates {
 pub(crate) struct PhysicalCandidateWithCost {
     /// Local work and state only; producer costs must not appear here again.
     pub local_cost: f64,
-    /// Per input, the candidates that may supply it (as Stage 2's
-    /// `PhysicalCandidate::supplier_candidates_per_input`).
-    pub supplier_candidates_per_input: Vec<InputSupplierCandidates>,
+    /// Per input, the candidates that may produce it (as Stage 2's
+    /// `PhysicalCandidate::producer_candidates_per_input`).
+    pub producer_candidates_per_input: Vec<InputProducerCandidates>,
 }
 
 /// One output reference of the query roots.
@@ -190,7 +300,7 @@ impl DagOfPhysicalCandidatesWithCosts {
                 )));
             }
             total_cost += candidate.local_cost;
-            for (requirement, input) in candidate.supplier_candidates_per_input.iter().enumerate() {
+            for (requirement, input) in candidate.producer_candidates_per_input.iter().enumerate() {
                 validate_ids(
                     &input.candidates,
                     &format!("candidate {index}, requirement {requirement}"),
@@ -225,7 +335,7 @@ impl DagOfPhysicalCandidatesWithCosts {
 }
 
 /// Check the decoded integral graph instead of trusting rounded solver values:
-/// its structure ([`validate_selected_connections`]), resource budgets and
+/// its structure (`validate_selected_connections`), resource budgets and
 /// modeled cost.
 pub(crate) fn validate_selected_graph(
     graph: &DagOfPhysicalCandidatesWithCosts,
@@ -236,16 +346,31 @@ pub(crate) fn validate_selected_graph(
         .iter()
         .map(|root| root.candidates.as_slice())
         .collect();
+    // `to_selected_candidates` orders the roots by output index, so each
+    // output must be assigned exactly once before that order means anything.
+    let mut assigned_outputs: Vec<usize> = selected
+        .query_roots
+        .iter()
+        .map(|root| root.query_root)
+        .collect();
+    assigned_outputs.sort_unstable();
+    if !assigned_outputs
+        .iter()
+        .copied()
+        .eq(0..graph.query_roots.len())
+    {
+        return Err("decoded candidate selection violates dependency or root constraints".into());
+    }
     validate_selected_connections(
         graph.candidates.len(),
         |candidate| {
             graph.candidates[candidate.0]
-                .supplier_candidates_per_input
+                .producer_candidates_per_input
                 .len()
         },
         |candidate, input| {
             graph.candidates[candidate.0]
-                .supplier_candidates_per_input
+                .producer_candidates_per_input
                 .get(input)
                 .map(|requirement| &requirement.candidates)
         },
@@ -275,8 +400,170 @@ pub(crate) fn validate_selected_graph(
     Ok(())
 }
 
+/// Today's engine's structural check of a selection over its graph (one
+/// run per candidate): every selected candidate exists once, each output
+/// reference has one allowed root, each selected input has exactly one
+/// allowed selected producer, the selection is acyclic, reaches only what
+/// the roots read, and keeps every reader constraint.
+fn validate_selected_connections<'a>(
+    candidate_count: usize,
+    input_count: impl Fn(PhysicalCandidateId) -> usize,
+    producers_of_input: impl Fn(PhysicalCandidateId, usize) -> Option<&'a ProducerCandidates>,
+    query_output_candidates: &[&[PhysicalCandidateId]],
+    reader_constraints: &[ReaderConstraint],
+    selected: &SelectedCandidateGraph,
+) -> Result<(), String> {
+    let invalid =
+        || "decoded candidate selection violates dependency or root constraints".to_string();
+    let active: HashSet<_> = selected.selected_candidates.iter().copied().collect();
+    if active.len() != selected.selected_candidates.len()
+        || active.iter().any(|c| c.0 >= candidate_count)
+        || selected.query_roots.len() != query_output_candidates.len()
+    {
+        return Err(invalid());
+    }
+    let query_output_candidates_selected = selected.output_candidates();
+    for (candidate, allowed) in query_output_candidates_selected
+        .iter()
+        .zip(query_output_candidates)
+    {
+        if !active.contains(candidate) || !allowed.contains(candidate) {
+            return Err(invalid());
+        }
+    }
+    let mut producers: Vec<Vec<Option<PhysicalCandidateId>>> = (0..candidate_count)
+        .map(|c| vec![None; input_count(PhysicalCandidateId(c))])
+        .collect();
+    for connection in &selected.connections {
+        if !active.contains(&connection.producer) || !active.contains(&connection.consumer) {
+            return Err(invalid());
+        }
+        let Some(producer_candidates) =
+            producers_of_input(connection.consumer, connection.requirement)
+        else {
+            return Err(invalid());
+        };
+        let target = &mut producers[connection.consumer.0][connection.requirement];
+        if target.is_some() || !producer_candidates.contains(&connection.producer) {
+            return Err(invalid());
+        }
+        *target = Some(connection.producer);
+    }
+    if active
+        .iter()
+        .any(|c| producers[c.0].iter().any(Option::is_none))
+    {
+        return Err(invalid());
+    }
+    // Kahn's algorithm checks cycles without recursion on a potentially deep DAG.
+    let mut outstanding: Vec<_> = producers.iter().map(Vec::len).collect();
+    let mut consumers = vec![Vec::new(); candidate_count];
+    for connection in &selected.connections {
+        consumers[connection.producer.0].push(connection.consumer.0);
+    }
+    let mut ready: Vec<_> = active
+        .iter()
+        .filter(|c| outstanding[c.0] == 0)
+        .map(|c| c.0)
+        .collect();
+    let mut visited = 0;
+    while let Some(producer) = ready.pop() {
+        visited += 1;
+        for &consumer in &consumers[producer] {
+            outstanding[consumer] -= 1;
+            if outstanding[consumer] == 0 {
+                ready.push(consumer);
+            }
+        }
+    }
+    if visited != active.len() {
+        return Err(invalid());
+    }
+    let mut reachable = HashSet::new();
+    let mut pending: Vec<_> = query_output_candidates_selected.clone();
+    while let Some(candidate) = pending.pop() {
+        if reachable.insert(candidate) {
+            pending.extend(producers[candidate.0].iter().flatten().copied());
+        }
+    }
+    // Reuse one traversal per output across all reader-compatibility checks.
+    let mut output_reach = Vec::new();
+    if !reader_constraints.is_empty() {
+        output_reach = vec![HashSet::new(); query_output_candidates.len()];
+        for (output, &root) in query_output_candidates_selected.iter().enumerate() {
+            let reached = &mut output_reach[output];
+            let mut pending = vec![root];
+            while let Some(candidate) = pending.pop() {
+                if reached.insert(candidate) {
+                    pending.extend(producers[candidate.0].iter().flatten().copied());
+                }
+            }
+        }
+    }
+    let output_reaches =
+        |output: usize, target: PhysicalCandidateId| output_reach[output].contains(&target);
+    for requirement in reader_constraints {
+        let violated = match requirement {
+            ReaderConstraint::ActivationRequires {
+                candidate,
+                required_candidate,
+            } => active.contains(candidate) && !active.contains(required_candidate),
+            ReaderConstraint::MinimumQueryReaders {
+                candidate,
+                query_outputs,
+                minimum,
+            } => {
+                active.contains(candidate)
+                    && query_outputs
+                        .iter()
+                        .filter(|outputs| {
+                            outputs
+                                .iter()
+                                .any(|&output| output_reaches(output, *candidate))
+                        })
+                        .count()
+                        < *minimum
+            }
+            ReaderConstraint::HighestSharedQueryMaterialization {
+                candidate,
+                query_outputs,
+            } => {
+                active.contains(candidate)
+                    && !query_output_candidates_selected.contains(candidate)
+                    && !selected.connections.iter().any(|edge| {
+                        edge.producer == *candidate
+                            && query_outputs
+                                .iter()
+                                .filter(|outputs| {
+                                    outputs
+                                        .iter()
+                                        .any(|output| output_reaches(*output, edge.consumer))
+                                })
+                                .count()
+                                <= 1
+                    })
+            }
+            ReaderConstraint::AllowedOutputs { candidate, outputs } => (0..query_output_candidates
+                .len())
+                .any(|output| !outputs.contains(&output) && output_reaches(output, *candidate)),
+            ReaderConstraint::IncompatibleOutputs {
+                candidate,
+                left,
+                right,
+            } => output_reaches(*left, *candidate) && output_reaches(*right, *candidate),
+        };
+        if violated {
+            return Err("decoded selection violates selected-reader compatibility".into());
+        }
+    }
+    if reachable != active {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 impl DagOfPhysicalCandidatesWithCosts {
-    /// `physical`'s candidates, suppliers, query outputs and reader
+    /// `physical`'s candidates, producers, query outputs and reader
     /// constraints, at zero cost and with no resource budgets.
     pub(crate) fn unpriced(physical: &PhysicalASAPMemoCandidates) -> Self {
         Self {
@@ -285,10 +572,10 @@ impl DagOfPhysicalCandidatesWithCosts {
                 .iter()
                 .map(|candidate| PhysicalCandidateWithCost {
                     local_cost: 0.0,
-                    supplier_candidates_per_input: candidate
-                        .supplier_candidates_per_input
+                    producer_candidates_per_input: candidate
+                        .producer_candidates_per_input
                         .iter()
-                        .map(|suppliers| InputSupplierCandidates {
+                        .map(|suppliers| InputProducerCandidates {
                             candidates: suppliers.clone(),
                         })
                         .collect(),
@@ -300,7 +587,12 @@ impl DagOfPhysicalCandidatesWithCosts {
                 })
                 .collect(),
             resource_budgets: Vec::new(),
-            reader_constraints: physical.reader_constraints.clone(),
+            reader_constraints: physical
+                .reader_constraints
+                .iter()
+                .cloned()
+                .map(ReaderConstraint::from)
+                .collect(),
         }
     }
 }
@@ -314,6 +606,47 @@ pub(crate) struct PhysicalCandidatesWithCosts {
     pub physical: PhysicalASAPMemoCandidates,
     /// What the MILP selects over: the same candidates with their costs.
     pub dag: DagOfPhysicalCandidatesWithCosts,
+}
+
+/// The workload's query roots as Stage 3 sees them, from Stage 2's output
+/// alone: each output reference of `physical.query_roots` is the operator
+/// tree of its group's first implementation root (its
+/// `physical_node`). The engine's heuristics read them instead of the
+/// frontends' roots (#1047 P7); `None` when a referenced group has no
+/// implementation root.
+pub(crate) fn query_roots_of(
+    physical: &PhysicalASAPMemoCandidates,
+) -> Option<Vec<asap_types::ir::QueryRoot>> {
+    use asap_types::ir::QueryRoot;
+    let tree = |group: &asap_types::stages::MemoGroupId| {
+        let &root = physical.implementation_roots(*group).first()?;
+        let candidate = &physical.candidates[root.0];
+        Some(Rc::clone(
+            &physical.operator_nodes_of_candidates_for_memo_groups[candidate.operator_node.0]
+                .physical_node,
+        ))
+    };
+    if !physical
+        .query_roots
+        .iter()
+        .flat_map(QueryRoot::operator_refs)
+        .all(|group| tree(group).is_some())
+    {
+        return None;
+    }
+    let tree = |group: &asap_types::stages::MemoGroupId| tree(group).expect("checked above");
+    Some(
+        physical
+            .query_roots
+            .iter()
+            .map(|root| match root {
+                QueryRoot::Operator(group) => QueryRoot::Operator(tree(group)),
+                QueryRoot::Scalar(expression) => {
+                    QueryRoot::Scalar(expression.map_operator_refs(&mut |group| tree(group)))
+                }
+            })
+            .collect(),
+    )
 }
 
 impl PhysicalCandidatesWithCosts {
@@ -369,7 +702,7 @@ impl PhysicalCandidatesWithCosts {
                     operator_node: asap_types::stages::OperatorNodeOfCandidateForMemoGroupId(id),
                     timing: *timing,
                     materialization: *materialization,
-                    supplier_candidates_per_input: Vec::new(),
+                    producer_candidates_per_input: Vec::new(),
                     may_produce_query_output: false,
                     may_keep_across_evaluations_per_sole_reader_query: Vec::new(),
                 },
@@ -385,6 +718,7 @@ impl PhysicalCandidatesWithCosts {
                         index: id,
                     }],
                     is_implementation_root: false,
+                    accuracy_budget_parts: 1,
                     physical_node: node,
                 },
             )
@@ -411,7 +745,7 @@ impl PhysicalCandidatesWithCosts {
         timing: asap_types::ir::properties::ExecutionTiming,
         materialization: asap_types::physical::Materialization,
         local_cost: f64,
-        inputs: Vec<InputSupplierCandidates>,
+        inputs: Vec<InputProducerCandidates>,
     ) -> PhysicalCandidateId {
         let id = PhysicalCandidateId(self.physical.candidates.len());
         let operator_node = asap_types::stages::OperatorNodeOfCandidateForMemoGroupId(
@@ -427,6 +761,7 @@ impl PhysicalCandidatesWithCosts {
                     index: operator_node.0,
                 }],
                 is_implementation_root: false,
+                accuracy_budget_parts: 1,
                 physical_node: node,
             });
         self.physical
@@ -435,20 +770,20 @@ impl PhysicalCandidatesWithCosts {
                 operator_node,
                 timing,
                 materialization,
-                supplier_candidates_per_input: Vec::new(),
+                producer_candidates_per_input: Vec::new(),
                 may_produce_query_output: false,
                 may_keep_across_evaluations_per_sole_reader_query: Vec::new(),
             });
         self.dag.candidates.push(PhysicalCandidateWithCost {
             local_cost,
-            supplier_candidates_per_input: inputs,
+            producer_candidates_per_input: inputs,
         });
         self.sync_physical_for_tests();
         id
     }
 
     /// Makes `physical` agree with a DAG a test built or edited directly:
-    /// suppliers and reader constraints are the DAG's, and the candidates
+    /// producers and reader constraints are the DAG's, and the candidates
     /// each distinct DAG query-root list names become the implementation
     /// roots, with `may_produce_query_output`, of one group (1, 2, … in
     /// order of first appearance) that output references; other candidates'
@@ -485,8 +820,8 @@ impl PhysicalCandidatesWithCosts {
             }
         }
         for (id, candidate) in self.physical.candidates.iter_mut().enumerate() {
-            candidate.supplier_candidates_per_input = self.dag.candidates[id]
-                .supplier_candidates_per_input
+            candidate.producer_candidates_per_input = self.dag.candidates[id]
+                .producer_candidates_per_input
                 .iter()
                 .map(|input| input.candidates.clone())
                 .collect();
@@ -507,21 +842,26 @@ impl PhysicalCandidatesWithCosts {
             physical.operator_nodes_of_candidates_for_memo_groups,
             physical.candidates,
             query_roots,
-            self.dag.reader_constraints.clone(),
+            self.dag
+                .reader_constraints
+                .iter()
+                .filter_map(ReaderConstraint::to_stage2)
+                .collect(),
         );
     }
 
     /// Stage 2's structural pruning of `physical`, with the DAG restricted to
     /// the kept candidates at their costs and resource usage. Each candidate
     /// must run its own operator node (as the test constructors make them),
-    /// which then names its index before pruning.
-    pub(crate) fn prune_for_tests(&mut self) -> asap_types::stages::PruningMetrics {
+    /// which then names its index before pruning. Returns how many
+    /// candidates were pruned.
+    pub(crate) fn prune_for_tests(&mut self) -> usize {
         let physical = std::mem::replace(
             &mut self.physical,
             PhysicalASAPMemoCandidates::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
         );
         self.physical =
-            asap_physical_asap_optimization::catalog::test_support::prune(physical).unwrap();
+            asap_physical_asap_optimization::test_support::catalog::prune(physical).unwrap();
         let kept: Vec<_> = self
             .physical
             .candidates
@@ -542,7 +882,7 @@ impl PhysicalCandidatesWithCosts {
             })
             .collect();
         self.dag = dag;
-        self.physical.pruning_metrics
+        self.physical.pruned_candidates.len()
     }
 }
 
@@ -590,7 +930,7 @@ impl PhysicalCandidatesWithCosts {
         &mut self,
         node: Rc<OperatorNode>,
         like: PhysicalCandidateId,
-        inputs: Vec<InputSupplierCandidates>,
+        inputs: Vec<InputProducerCandidates>,
     ) -> PhysicalCandidateId {
         let id = PhysicalCandidateId(self.physical.candidates.len());
         let mut operator_nodes = self
@@ -605,7 +945,7 @@ impl PhysicalCandidatesWithCosts {
         let mut candidate = candidates[like.0].clone();
         candidate.operator_node =
             asap_types::stages::OperatorNodeOfCandidateForMemoGroupId(operator_nodes.len() - 1);
-        candidate.supplier_candidates_per_input = inputs
+        candidate.producer_candidates_per_input = inputs
             .iter()
             .map(|input| input.candidates.clone())
             .collect();
@@ -618,7 +958,7 @@ impl PhysicalCandidatesWithCosts {
         );
         self.dag.candidates.push(PhysicalCandidateWithCost {
             local_cost: self.dag.candidates[like.0].local_cost,
-            supplier_candidates_per_input: inputs,
+            producer_candidates_per_input: inputs,
         });
         id
     }

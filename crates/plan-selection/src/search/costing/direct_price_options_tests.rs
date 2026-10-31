@@ -2,11 +2,11 @@
 //! because their statistics differ from the template's input.
 use super::*;
 use asap_logical_asap_optimization::test_support::lower_promql;
-use asap_types::ir::properties::AccuracyTarget;
+use asap_types::ir::properties::{AccuracyScope, AccuracyTarget};
 use asap_types::ir::{Operator, OperatorNode, ProjectItem, ScalarExpr};
 
 use crate::search::candidates::dag::{
-    DagOfPhysicalCandidatesWithCosts, InputSupplierCandidates, PhysicalCandidateWithCost,
+    DagOfPhysicalCandidatesWithCosts, InputProducerCandidates, PhysicalCandidateWithCost,
     QueryOutputCandidates,
 };
 use asap_types::workload::{
@@ -14,7 +14,7 @@ use asap_types::workload::{
 };
 
 #[test]
-fn differing_supplier_statistics_keep_both_price_interfaces() {
+fn differing_producer_statistics_keep_both_price_interfaces() {
     let scan = |metric| {
         OperatorNode::reachable(&lower_promql(metric, AccuracyTarget::exact()))
             .into_iter()
@@ -43,8 +43,8 @@ fn differing_supplier_statistics_keep_both_price_interfaces() {
             candidates: (0..3)
                 .map(|id| PhysicalCandidateWithCost {
                     local_cost: 0.0,
-                    supplier_candidates_per_input: if id == 2 {
-                        vec![InputSupplierCandidates {
+                    producer_candidates_per_input: if id == 2 {
+                        vec![InputProducerCandidates {
                             candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
                         }]
                     } else {
@@ -83,11 +83,11 @@ fn differing_supplier_statistics_keep_both_price_interfaces() {
     let context = CandidatePlanningContext {
         deadline: None,
         refine_materialization: false,
-        seed_separate_plans: false,
-        original_roots: &roots,
+        query_roots: &roots,
+        realizer: &crate::search::test_realizer(&roots, &entries, &data),
         entries: &entries,
         data: &data,
-        models: crate::PlanningModels::builtin(),
+        models: crate::SelectionModels::builtin(),
         calibration: asap_cost::CalibrationFit::default(),
     };
     let extracted = extract_price_options(&configured, &context)
@@ -128,19 +128,20 @@ fn differing_supplier_statistics_keep_both_price_interfaces() {
         "projection work must follow selected input rows, not template rows"
     );
     assert_eq!(
-        configured.dag.candidates[2].supplier_candidates_per_input[0]
+        configured.dag.candidates[2].producer_candidates_per_input[0]
             .candidates
             .len(),
         2
     );
-    // Force each structurally legal supplier in turn. The model must price
+    // Force each structurally legal producer in turn. The model must price
     // the selected binding rather than only returning the cheapest interface.
     for producer in [PhysicalCandidateId(0), PhysicalCandidateId(1)] {
-        configured.dag.reader_constraints =
-            vec![asap_types::stages::ReaderConstraint::ActivationRequires {
+        configured.dag.reader_constraints = vec![
+            crate::search::candidates::dag::ReaderConstraint::ActivationRequires {
                 candidate: PhysicalCandidateId(2),
                 required_candidate: producer,
-            }];
+            },
+        ];
         configured.sync_physical_for_tests();
         let proposal =
             crate::search::milp::direct_price_options::solve_joint_price_proposal_with_metrics(
@@ -191,7 +192,7 @@ fn differing_supplier_statistics_keep_both_price_interfaces() {
 }
 
 #[test]
-fn downstream_prices_follow_the_selected_supplier_interface() {
+fn downstream_prices_follow_the_selected_producer_interface() {
     let scan = |metric| {
         OperatorNode::reachable(&lower_promql(metric, AccuracyTarget::exact()))
             .into_iter()
@@ -220,8 +221,8 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
             candidates: (0..3)
                 .map(|id| PhysicalCandidateWithCost {
                     local_cost: 0.0,
-                    supplier_candidates_per_input: if id == 2 {
-                        vec![InputSupplierCandidates {
+                    producer_candidates_per_input: if id == 2 {
+                        vec![InputProducerCandidates {
                             candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
                         }]
                     } else {
@@ -259,7 +260,7 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
         ExecutionTiming::QueryTime,
         Materialization::NotMaterialized,
         0.0,
-        vec![InputSupplierCandidates {
+        vec![InputProducerCandidates {
             candidates: vec![PhysicalCandidateId(2)].into(),
         }],
     );
@@ -286,11 +287,11 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
     let context = CandidatePlanningContext {
         deadline: None,
         refine_materialization: false,
-        seed_separate_plans: false,
-        original_roots: &roots,
+        query_roots: &roots,
+        realizer: &crate::search::test_realizer(&roots, &entries, &data),
         entries: &entries,
         data: &data,
-        models: crate::PlanningModels::builtin(),
+        models: crate::SelectionModels::builtin(),
         calibration: asap_cost::CalibrationFit::default(),
     };
     let extracted = extract_price_options(&configured, &context)
@@ -332,7 +333,7 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
             .unwrap()
         };
     let baseline = solve(&configured, &extracted);
-    configured.dag.candidates[2].supplier_candidates_per_input[0].candidates = vec![
+    configured.dag.candidates[2].producer_candidates_per_input[0].candidates = vec![
         PhysicalCandidateId(0),
         PhysicalCandidateId(1),
         PhysicalCandidateId(2),
@@ -361,12 +362,12 @@ fn downstream_prices_follow_the_selected_supplier_interface() {
 }
 
 #[test]
-fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+fn producer_worker_buckets_remain_joint_choices_and_match_evaluator() {
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
     };
     use asap_types::ir::schema::SketchAlgorithm;
+    use asap_types::stages::HowToComputeAggregateMeasure;
     use std::rc::Rc;
     fn append(
         node: Rc<OperatorNode>,
@@ -397,7 +398,7 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
             0.0,
             inputs
                 .into_iter()
-                .map(|supplier| InputSupplierCandidates {
+                .map(|supplier| InputProducerCandidates {
                     candidates: vec![supplier].into(),
                 })
                 .collect(),
@@ -409,9 +410,12 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         .failure_probability(0.01)
         .accuracy_scope(AccuracyScope::PerValue);
     let original = lower_promql("quantile_over_time(0.95, latency[5m])", target.clone());
-    let generated =
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(original.clone()))])
-            .unwrap();
+    let generated = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+            QueryRoot::Operator(original.clone()),
+        ]),
+    )
+    .unwrap();
     let choice = generated.targets[0]
         .ways_to_compute
         .iter()
@@ -422,33 +426,25 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
             )
         })
         .unwrap();
-    let roots: Vec<_> = compose_logical_candidate(&generated, &[choice])
-        .unwrap()
-        .into_iter()
-        .map(|(_, root)| root)
-        .collect();
-    let pane_rules = asap_logical_asap_optimization::pass2::asap_aware_cse::pane_candidates(
+    let roots: Vec<_> = compose_logical_candidate(&generated, &[choice]).unwrap();
+    let pane_rules =
+        asap_logical_asap_optimization::test_support::pane_candidates(&roots, &[Some(60_000)]);
+    let roots = asap_logical_asap_optimization::test_support::window_composition_pass2_candidates(
         &roots,
-        &[Some(60_000)],
-    );
-    let roots =
-        asap_logical_asap_optimization::pass2::asap_aware_cse::window_composition_pass2_candidates(
-            &roots,
-            &pane_rules,
-        )
-        .unwrap()
-        .pop()
-        .unwrap()
-        .roots
-        .unwrap();
+        &pane_rules,
+    )
+    .unwrap()
+    .pop()
+    .unwrap()
+    .roots
+    .unwrap();
     let data: DataWorkload = serde_json::from_value(serde_json::json!({
         "arrival":{"ingesting":{"rows_per_second":100.0}},
         "sources":{
             "latency":{"series_count":1,"sample_interval":100,"rows_held":3000,"values_non_negative":true}
         }
     })).unwrap();
-    let sized = crate::resize_for_failure_probability(&roots, std::slice::from_ref(&target), &data)
-        .unwrap();
+    let sized = crate::sized_as_pass1(&roots, std::slice::from_ref(&target), &data);
     let mut configured = PhysicalCandidatesWithCosts::empty_for_tests();
     let QueryRoot::Operator(root) = &sized[0] else {
         panic!("operator")
@@ -468,17 +464,17 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         .iter()
         .position(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
         .unwrap();
-    let raw_supplier =
-        configured.dag.candidates[chain].supplier_candidates_per_input[0].candidates[0];
+    let raw_producer =
+        configured.dag.candidates[chain].producer_candidates_per_input[0].candidates[0];
     configured.sync_physical_for_tests();
     assert!(matches!(
-        configured.node(raw_supplier.0).non_asap(),
+        configured.node(raw_producer.0).non_asap(),
         Some(NonASAPOp::Scan { .. })
     ));
     // This tests the pricing kernel, not executor installation of a projection
-    // below a pane. Both suppliers return exactly the same stream. The identity projection
+    // below a pane. Both producers return exactly the same stream. The identity projection
     // adds ingestion CPU without changing rows, values, or source identity.
-    let source = configured.node(raw_supplier.0).clone();
+    let source = configured.node(raw_producer.0).clone();
     let projected = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
         cols: source
             .schema
@@ -494,13 +490,13 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
         child: source,
     }))
     .unwrap();
-    let projected_supplier = configured.push_for_tests(
+    let projected_producer = configured.push_for_tests(
         projected,
         ExecutionTiming::IngestionTime,
         Materialization::NotMaterialized,
         0.0,
-        vec![InputSupplierCandidates {
-            candidates: vec![raw_supplier].into(),
+        vec![InputProducerCandidates {
+            candidates: vec![raw_producer].into(),
         }],
     );
     let originals = vec![QueryRoot::Operator(original)];
@@ -519,15 +515,15 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
     let context = CandidatePlanningContext {
         deadline: None,
         refine_materialization: false,
-        seed_separate_plans: false,
-        original_roots: &originals,
+        query_roots: &originals,
+        realizer: &crate::search::test_realizer(&originals, &entries, &data),
         entries: &entries,
         data: &data,
-        models: crate::PlanningModels::builtin(),
+        models: crate::SelectionModels::builtin(),
         calibration: asap_cost::CalibrationFit::default(),
     };
     let initial = extract(&configured, &context).unwrap().unwrap();
-    let raw_work: f64 = [raw_supplier.0, chain]
+    let raw_work: f64 = [raw_producer.0, chain]
         .into_iter()
         .map(|id| initial.profile.nodes[id].work_seconds * 1000.0)
         .sum();
@@ -549,19 +545,19 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
             memory_bytes_per_state: None,
         });
     let context = CandidatePlanningContext {
-        models: crate::PlanningModels {
-            plan_selection: &settings,
+        models: crate::SelectionModels {
+            cost_inputs: &settings,
             ..context.models
         },
         ..context
     };
-    configured.dag.candidates[chain].supplier_candidates_per_input[0].candidates =
-        vec![raw_supplier, projected_supplier].into();
+    configured.dag.candidates[chain].producer_candidates_per_input[0].candidates =
+        vec![raw_producer, projected_producer].into();
     configured.sync_physical_for_tests();
     let old = extract(&configured, &context).unwrap().unwrap();
     assert_eq!(
         old.suppliers[chain],
-        vec![raw_supplier],
+        vec![raw_producer],
         "old fixed-bucket extraction loses the second worker choice"
     );
     let joint = extract_price_options(&configured, &context)
@@ -575,7 +571,7 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
                 .compatible_input_tuples
                 .iter()
                 .flatten()
-                .any(|binding| binding.producer == raw_supplier)
+                .any(|binding| binding.producer == raw_producer)
         })
         .unwrap();
     let projected_option = joint.candidates[chain]
@@ -585,22 +581,23 @@ fn supplier_worker_buckets_remain_joint_choices_and_match_evaluator() {
                 .compatible_input_tuples
                 .iter()
                 .flatten()
-                .any(|binding| binding.producer == projected_supplier)
+                .any(|binding| binding.producer == projected_producer)
         })
         .unwrap();
     assert_eq!(raw_option.profile.compaction_seconds, 0.0);
     assert!(projected_option.profile.compaction_seconds > 0.0);
-    for supplier in [raw_supplier, projected_supplier] {
-        configured.dag.reader_constraints =
-            vec![asap_types::stages::ReaderConstraint::ActivationRequires {
+    for supplier in [raw_producer, projected_producer] {
+        configured.dag.reader_constraints = vec![
+            crate::search::candidates::dag::ReaderConstraint::ActivationRequires {
                 candidate: root_id,
                 required_candidate: supplier,
-            }];
+            },
+        ];
         configured.sync_physical_for_tests();
-        if supplier == raw_supplier {
+        if supplier == raw_producer {
             configured.dag.reader_constraints.push(
-                asap_types::stages::ReaderConstraint::AllowedOutputs {
-                    candidate: projected_supplier,
+                crate::search::candidates::dag::ReaderConstraint::AllowedOutputs {
+                    candidate: projected_producer,
                     outputs: vec![],
                 },
             );
@@ -669,8 +666,8 @@ fn mixed_schedule_joint_prices_match_the_real_evaluator() {
             candidates: (0..3)
                 .map(|id| PhysicalCandidateWithCost {
                     local_cost: 0.0,
-                    supplier_candidates_per_input: if id == 2 {
-                        vec![InputSupplierCandidates {
+                    producer_candidates_per_input: if id == 2 {
+                        vec![InputProducerCandidates {
                             candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into(),
                         }]
                     } else {
@@ -730,17 +727,17 @@ fn mixed_schedule_joint_prices_match_the_real_evaluator() {
     configured.sync_physical_for_tests();
     // All roots use the original source; this parity check has no synthetic
     // equivalence between different source names.
-    configured.dag.candidates[2].supplier_candidates_per_input[0].candidates =
+    configured.dag.candidates[2].producer_candidates_per_input[0].candidates =
         vec![PhysicalCandidateId(0)].into();
     configured.sync_physical_for_tests();
     let context = CandidatePlanningContext {
         deadline: None,
         refine_materialization: false,
-        seed_separate_plans: false,
-        original_roots: &roots,
+        query_roots: &roots,
+        realizer: &crate::search::test_realizer(&roots, &entries, &data),
         entries: &entries,
         data: &data,
-        models: crate::PlanningModels::builtin(),
+        models: crate::SelectionModels::builtin(),
         calibration: asap_cost::CalibrationFit::default(),
     };
     let profile = extract_price_options(&configured, &context)

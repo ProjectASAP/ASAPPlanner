@@ -1,14 +1,15 @@
 //! Whole-evaluator parity for selected consumer range-retention tiers.
 use super::*;
-use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    compose_logical_candidate, generate_per_computation_candidates, HowToComputeAggregateMeasure,
-};
 use asap_logical_asap_optimization::test_support::lower_promql;
-use asap_types::ir::properties::AccuracyTarget;
+use asap_logical_asap_optimization::test_support::{
+    compose_logical_candidate, generate_per_computation_candidates,
+};
+use asap_types::ir::properties::{AccuracyScope, AccuracyTarget};
 use asap_types::ir::schema::SketchAlgorithm;
 use asap_types::ir::OperatorNode;
+use asap_types::stages::HowToComputeAggregateMeasure;
 
-use crate::search::candidates::dag::{InputSupplierCandidates, QueryOutputCandidates};
+use crate::search::candidates::dag::{InputProducerCandidates, QueryOutputCandidates};
 use asap_types::workload::{
     DataWorkload, Predictability, Query, QueryRequirements, QueryWorkloadEntry, RangeEvaluation,
     RepetitionInterval,
@@ -46,7 +47,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             0.0,
             inputs
                 .into_iter()
-                .map(|supplier| InputSupplierCandidates {
+                .map(|supplier| InputProducerCandidates {
                     candidates: vec![supplier].into(),
                 })
                 .collect(),
@@ -62,9 +63,12 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             .failure_probability(0.01)
             .accuracy_scope(AccuracyScope::PerValue);
         let original = lower_promql("quantile_over_time(0.95, latency[5m])", target.clone());
-        let generated =
-            generate_per_computation_candidates(vec![(0, QueryRoot::Operator(original.clone()))])
-                .unwrap();
+        let generated = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+                QueryRoot::Operator(original.clone()),
+            ]),
+        )
+        .unwrap();
         let choice = generated.targets[0]
             .ways_to_compute
             .iter()
@@ -75,17 +79,11 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
                 )
             })
             .unwrap();
-        let roots: Vec<_> = compose_logical_candidate(&generated, &[choice])
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
-        let rules = asap_logical_asap_optimization::pass2::asap_aware_cse::pane_candidates(
-            &roots,
-            &[Some(10_000)],
-        );
+        let roots: Vec<_> = compose_logical_candidate(&generated, &[choice]).unwrap();
+        let rules =
+            asap_logical_asap_optimization::test_support::pane_candidates(&roots, &[Some(10_000)]);
         let roots =
-            asap_logical_asap_optimization::pass2::asap_aware_cse::window_composition_pass2_candidates(
+            asap_logical_asap_optimization::test_support::window_composition_pass2_candidates(
                 &roots, &rules,
             )
             .unwrap()
@@ -98,9 +96,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             "sources":{"latency":{"series_count":2,"rows_held":30000,"values_non_negative":true}}
         }))
         .unwrap();
-        let sized =
-            crate::resize_for_failure_probability(&roots, std::slice::from_ref(&target), &data)
-                .unwrap();
+        let sized = crate::sized_as_pass1(&roots, std::slice::from_ref(&target), &data);
         let mut configured = PhysicalCandidatesWithCosts::empty_for_tests();
         let QueryRoot::Operator(root) = &sized[0] else {
             panic!("operator")
@@ -156,14 +152,16 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &originals,
+            query_roots: &originals,
+            realizer: &asap_physical_asap_optimization::Stage2AssignmentRealizer {
+                query_time_results_retained: deployment.query_time_results_retained,
+                ..crate::search::test_realizer(&originals, &entries, &data)
+            },
             entries: &entries,
             data: &data,
-            models: crate::PlanningModels {
-                plan_selection: &settings,
-                deployment_capabilities: &deployment,
-                ..crate::PlanningModels::builtin()
+            models: crate::SelectionModels {
+                cost_inputs: &settings,
+                ..crate::SelectionModels::builtin()
             },
             calibration: asap_cost::CalibrationFit::default(),
         };

@@ -25,7 +25,7 @@ use asap_types::ir::{
 };
 use asap_types::physical::Materialization;
 use asap_types::stages::{root_groups, MemoGroupId};
-use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{MemoCandidates, OriginOfCandidateForMemoGroup};
 use asap_types::workload::{
     DataArrival, DataWorkload, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
     RepetitionInterval,
@@ -35,14 +35,13 @@ const EVALUATION_MS: i64 = 300_000;
 
 /// `queries` lowered at `accuracy`, with series identity, as the planner
 /// receives them.
-fn roots(queries: &[(&str, AccuracyTarget)]) -> Vec<(usize, QueryRoot)> {
+fn roots(queries: &[(&str, AccuracyTarget)]) -> Vec<QueryRoot> {
     queries
         .iter()
-        .enumerate()
-        .map(|(i, (query, accuracy))| {
+        .map(|(query, accuracy)| {
             let root = lower_promql(query, accuracy.clone()).unwrap();
             let root = promql_rows::with_series_identity(&root).unwrap();
-            (i, QueryRoot::Operator(root))
+            QueryRoot::Operator(root)
         })
         .collect()
 }
@@ -55,7 +54,7 @@ fn exact_queries<'a>(queries: &[&'a str]) -> Vec<(&'a str, AccuracyTarget)> {
 }
 
 /// The memo Stage 1 builds for `queries`, each with `recurrence`.
-fn memo(queries: &[(&str, AccuracyTarget)], recurrence: QueryRecurrence) -> CandidateMemo {
+fn memo(queries: &[(&str, AccuracyTarget)], recurrence: QueryRecurrence) -> MemoCandidates {
     expanded_memo(roots(queries), &vec![exact(recurrence); queries.len()])
 }
 
@@ -162,7 +161,7 @@ fn summary_builds(root: &Rc<OperatorNode>) -> usize {
 /// Every candidate of every group of `memo` with origin in `origins`, with
 /// the group it implements; groups that answer a query or aggregate only.
 fn candidates_of<'a>(
-    memo: &'a CandidateMemo,
+    memo: &'a MemoCandidates,
     origins: &'a [OriginOfCandidateForMemoGroup],
 ) -> impl Iterator<Item = (usize, &'a Rc<OperatorNode>)> + 'a {
     let root_groups = root_groups(&memo.query_roots);
@@ -193,7 +192,7 @@ fn candidates_of<'a>(
 /// for all its readers (`MatAtQuery`), and the selection's lowest prices of
 /// `group` and of every variant.
 fn select(
-    memo: &CandidateMemo,
+    memo: &MemoCandidates,
     queries: usize,
     entry: QueryWorkloadEntry,
     variants: &[BTreeMap<usize, usize>],
@@ -242,7 +241,10 @@ fn select(
 }
 
 /// `(group, candidate index)` of every candidate [`candidates_of`] yields.
-fn choices(memo: &CandidateMemo, origins: &[OriginOfCandidateForMemoGroup]) -> Vec<(usize, usize)> {
+fn choices(
+    memo: &MemoCandidates,
+    origins: &[OriginOfCandidateForMemoGroup],
+) -> Vec<(usize, usize)> {
     candidates_of(memo, origins)
         .map(|(group, node)| {
             let index = memo.candidates[group]
@@ -257,7 +259,7 @@ fn choices(memo: &CandidateMemo, origins: &[OriginOfCandidateForMemoGroup]) -> V
 /// [`candidates_of`], without the candidates that are their group's own
 /// node.
 fn own_candidates<'a>(
-    memo: &'a CandidateMemo,
+    memo: &'a MemoCandidates,
     origins: &'a [OriginOfCandidateForMemoGroup],
 ) -> impl Iterator<Item = (usize, &'a Rc<OperatorNode>)> + 'a {
     candidates_of(memo, origins)
@@ -412,7 +414,7 @@ fn nested_sum_by_the_metric_name_answers_as_the_nested_sums() {
 /// queries before `first_approximate_query` read, executes to the rows of
 /// the computation it replaces (its group's logical node).
 fn reuse_answers_alike_in(
-    memo: &CandidateMemo,
+    memo: &MemoCandidates,
     queries: &[(&str, AccuracyTarget)],
     first_approximate_query: usize,
 ) {

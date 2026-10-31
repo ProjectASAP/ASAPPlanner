@@ -1,19 +1,19 @@
 //! Unit tests of Stage 2's candidate inventory
-//! (`asap_physical_asap_optimization::catalog`) that select with the solver.
+//! (`asap_physical_asap_optimization::test_support::catalog`) that select with the solver.
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use asap_physical_asap_optimization::catalog::test_support::{
+use asap_physical_asap_optimization::test_support::catalog::{
     build_candidate_inventory_before, build_with_compatible_producers_cache, CandidateInventory,
     MemoGroupOutputToCompatibleProducersCache,
 };
-use asap_physical_asap_optimization::catalog::CandidateInventoryError;
+use asap_physical_asap_optimization::CandidateInventoryError;
 use asap_types::ir::OperatorNode;
 use asap_types::physical::Materialization;
-use asap_types::stages::{CandidateMemo, MemoGroupId, PhysicalCandidateId};
+use asap_types::stages::{MemoCandidates, MemoGroupId, PhysicalCandidateId};
 
 use crate::search::candidates::dag::{
-    DagOfPhysicalCandidatesWithCosts, InputSupplierCandidates, PhysicalCandidateWithCost,
+    DagOfPhysicalCandidatesWithCosts, InputProducerCandidates, PhysicalCandidateWithCost,
     QueryOutputCandidates,
 };
 
@@ -23,7 +23,7 @@ use crate::search::candidates::dag::{
 pub(in crate::search) struct InventoryForTests {
     pub inventory: CandidateInventory,
     /// Node `i` as candidate `i`, priced by the test's node cost, reading the
-    /// inventory's suppliers; query roots are its output references.
+    /// inventory's producers; query roots are its output references.
     pub graph: DagOfPhysicalCandidatesWithCosts,
     /// Node `i`'s operator node.
     pub templates: Vec<Rc<OperatorNode>>,
@@ -45,12 +45,12 @@ impl InventoryForTests {
         let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: templates
                 .iter()
-                .zip(&inventory.supplier_nodes_per_input)
+                .zip(&inventory.producer_nodes_per_input)
                 .map(|(node, inputs)| PhysicalCandidateWithCost {
                     local_cost: node_local_cost(node).unwrap(),
-                    supplier_candidates_per_input: inputs
+                    producer_candidates_per_input: inputs
                         .iter()
-                        .map(|suppliers| InputSupplierCandidates {
+                        .map(|suppliers| InputProducerCandidates {
                             candidates: suppliers.clone(),
                         })
                         .collect(),
@@ -107,7 +107,7 @@ impl std::ops::Deref for InventoryForTests {
 /// Scalar query assembly and Stage 2/accuracy validation remain with the caller.
 #[cfg(test)]
 pub(in crate::search) fn build_candidate_inventory(
-    memo: &CandidateMemo,
+    memo: &MemoCandidates,
     output_groups: &[MemoGroupId],
     node_local_cost: impl FnMut(&OperatorNode) -> Result<f64, String>,
 ) -> Result<InventoryForTests, CandidateInventoryError> {
@@ -120,35 +120,33 @@ mod tests {
     use super::*;
     use crate::search::candidates::reconstruction::reconstruct_candidate_outputs;
     use crate::search::milp::model::select_candidates;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
-    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
+    use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
+    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups;
+    use asap_logical_asap_optimization::test_support::try_populate_pass1;
+    use asap_logical_asap_optimization::PaneWidthDomain;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::{ASAPOp, NonASAPOp, QueryRoot};
 
-    fn quantile_memo() -> (CandidateMemo, Vec<MemoGroupId>) {
+    fn quantile_memo() -> (MemoCandidates, Vec<MemoGroupId>) {
         let roots = [0.95, 0.99]
             .into_iter()
-            .enumerate()
-            .map(|(query, quantile)| {
-                (
-                    query,
-                    QueryRoot::Operator(lower_promql(
-                        &format!("quantile_over_time({quantile}, latency[5m])"),
-                        AccuracyTarget::max_error(0.01).failure_probability(0.001),
-                    )),
-                )
+            .map(|quantile| {
+                QueryRoot::Operator(lower_promql(
+                    &format!("quantile_over_time({quantile}, latency[5m])"),
+                    AccuracyTarget::max_error(0.01).failure_probability(0.001),
+                ))
             })
             .collect::<Vec<_>>();
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+        let initial = generate_dag_of_logical_memo_groups(&roots);
         let output_groups = (0..2)
             .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect();
-        let candidates = generate_per_computation_candidates(roots).unwrap();
+        let candidates =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap();
         let memo = try_populate_pass1(initial, &candidates).unwrap();
         (
             sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap(),
@@ -355,7 +353,7 @@ mod tests {
     ) {
         use crate::search::candidates::configurations::enumerate_candidate_configurations;
         use asap_logical_asap_optimization::test_support::entry_with;
-        use asap_physical_asap_optimization::catalog::materialize_selected_candidates;
+        use asap_physical_asap_optimization::test_support::catalog::materialize_selected_candidates;
         use asap_types::workload::{
             DataArrival, DataWorkload, Predictability, QueryRecurrence, RepeatedDemand,
             RepetitionInterval, SourceFacts,
@@ -366,19 +364,17 @@ mod tests {
             .collect();
         let roots: Vec<_> = queries
             .into_iter()
-            .enumerate()
-            .map(|(id, query)| {
-                (
-                    id,
-                    QueryRoot::Operator(lower_promql(query, targets[id].clone())),
-                )
-            })
+            .zip(&targets)
+            .map(|(query, target)| QueryRoot::Operator(lower_promql(query, target.clone())))
             .collect();
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+        let initial = generate_dag_of_logical_memo_groups(&roots);
         let outputs: Vec<_> = (0..roots.len())
             .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect();
-        let generated = generate_per_computation_candidates(roots.clone()).unwrap();
+        let generated = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(
+            &roots.clone(),
+        ))
+        .unwrap();
         let mut memo = try_populate_pass1(initial, &generated).unwrap();
         let entries: Vec<_> = (0..roots.len())
             .map(|query| {
@@ -392,7 +388,7 @@ mod tests {
                 entry
             })
             .collect();
-        asap_logical_asap_optimization::pass2::memo::window_candidates::add_local_window_composition(
+        asap_logical_asap_optimization::test_support::add_local_window_composition(
             &mut memo, &entries,
         );
         let memo = sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap();
@@ -456,18 +452,17 @@ mod tests {
         for id in &selected.selected_candidates {
             modes[id.0] = Some(configured.physical.candidates[id.0].materialization);
         }
-        let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
         let mut physical = materialize_selected_candidates(
             &configured.physical,
-            &selected,
-            &modes,
+            &selected.to_selected_dag(),
+            &selected.materializations_by_node(&modes),
             &roots,
             &entries,
             &data,
             deployment.query_time_results_retained,
         )
         .unwrap();
-        physical.physical.dag.validate().unwrap();
+        physical.plan.dag.validate().unwrap();
         if let Some(window_ms) = newest_window_ms {
             let Some(ASAPOp::PaneChain {
                 pane_width_ms,
@@ -479,27 +474,26 @@ mod tests {
             };
             // The complete width domain permits different pane counts. Verify
             // the short reader's coverage, not one traversal-dependent width.
-            assert!(physical.physical.dag.nodes.iter().any(|node| matches!(
+            assert!(physical.plan.dag.nodes.iter().any(|node| matches!(
                 node.payload, asap_types::ir::Operator::ASAP(ASAPOp::SummaryMerge {newest_panes: Some(count), ..})
                     if u64::from(count) * pane_width_ms == window_ms && count < *pane_count
             )));
         }
 
-        assert!(physical.nodes_by_candidate[chains[0].0].is_some());
+        assert!(selected.node_of(*chains[0]).is_some());
         // Validate this exact selected shared graph. Bounded search incumbents
         // need not choose it, and synthetic activation prices are never bills.
-        physical.physical.id = "shared-pane-regression".into();
+        physical.plan.id = "shared-pane-regression".into();
         let mut evaluator = crate::PlanSelector::new(
             &entries,
             &data,
-            crate::PlanningModels {
-                deployment_capabilities: &deployment,
-                ..crate::PlanningModels::builtin()
+            crate::SelectionModels {
+                ..crate::SelectionModels::builtin()
             },
             false,
         )
         .unwrap();
-        evaluator.offer(&physical.physical).unwrap();
+        evaluator.offer(&physical.plan).unwrap();
         let (selection, physical) = evaluator
             .finish()
             .expect("shared pane graph must pass accuracy and cost validation");
@@ -526,7 +520,7 @@ mod tests {
     #[test]
     fn producer_reuse_rules_produce_validated_shared_plans() {
         use asap_logical_asap_optimization::test_support::entry_with;
-        use asap_physical_asap_optimization::catalog::materialize_selected_candidates;
+        use asap_physical_asap_optimization::test_support::catalog::materialize_selected_candidates;
         use asap_types::workload::{
             DataWorkload, QueryRecurrence, RepeatedDemand, RepetitionInterval,
         };
@@ -554,14 +548,16 @@ mod tests {
             let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
             let roots: Vec<_> = queries
                 .into_iter()
-                .enumerate()
-                .map(|(id, query)| (id, QueryRoot::Operator(lower_promql(query, target.clone()))))
+                .map(|query| QueryRoot::Operator(lower_promql(query, target.clone())))
                 .collect();
-            let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+            let initial = generate_dag_of_logical_memo_groups(&roots);
             let outputs: Vec<_> = (0..2)
                 .map(|query| *initial.query_roots[query].as_operator().unwrap())
                 .collect();
-            let generated = generate_per_computation_candidates(roots.clone()).unwrap();
+            let generated = generate_per_computation_candidates(
+                &generate_dag_of_logical_memo_groups(&roots.clone()),
+            )
+            .unwrap();
             let memo = sharing_rules_and_shared_state_groups(
                 try_populate_pass1(initial, &generated).unwrap(),
                 PaneWidthDomain::Complete,
@@ -629,7 +625,6 @@ mod tests {
             for id in &selected.selected_candidates {
                 modes[id.0] = Some(Materialization::NotMaterialized);
             }
-            let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
             let mut data = DataWorkload {
                 arrival: asap_types::workload::DataArrival::Ingesting {
                     rows_per_second: 1000.0,
@@ -643,19 +638,19 @@ mod tests {
                 .values_non_negative = true;
             let mut realized = materialize_selected_candidates(
                 &inventory.configured_for_tests().physical,
-                &selected,
-                &modes,
+                &selected.to_selected_dag(),
+                &selected.materializations_by_node(&modes),
                 &roots,
                 &entries,
                 &data,
                 false,
             )
             .unwrap();
-            realized.physical.id = format!("shared-{kind}");
+            realized.plan.id = format!("shared-{kind}");
             let mut evaluator =
-                crate::PlanSelector::new(&entries, &data, crate::PlanningModels::builtin(), false)
+                crate::PlanSelector::new(&entries, &data, crate::SelectionModels::builtin(), false)
                     .unwrap();
-            evaluator.offer(&realized.physical).unwrap();
+            evaluator.offer(&realized.plan).unwrap();
             let (selection, physical) = evaluator
                 .finish()
                 .unwrap_or_else(|error| panic!("{kind}: {error:?}"));
@@ -694,19 +689,19 @@ mod tests {
                 .collect();
             let roots: Vec<_> = queries
                 .iter()
-                .enumerate()
-                .map(|(id, (query, _))| {
-                    (
-                        id,
-                        QueryRoot::Operator(lower_promql(query, targets[id].clone())),
-                    )
+                .zip(&targets)
+                .map(|((query, _), target)| {
+                    QueryRoot::Operator(lower_promql(query, target.clone()))
                 })
                 .collect();
-            let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+            let initial = generate_dag_of_logical_memo_groups(&roots);
             let outputs: Vec<_> = (0..roots.len())
                 .map(|query| *initial.query_roots[query].as_operator().unwrap())
                 .collect();
-            let generated = generate_per_computation_candidates(roots.clone()).unwrap();
+            let generated = generate_per_computation_candidates(
+                &generate_dag_of_logical_memo_groups(&roots.clone()),
+            )
+            .unwrap();
             let mut memo = try_populate_pass1(initial, &generated).unwrap();
             let owner = outputs[0].0 as usize;
             let mut fused = memo.candidates[owner][0].clone();
@@ -805,7 +800,6 @@ mod tests {
                     )
                 })
                 .collect();
-            let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
             let mut data = DataWorkload {
                 arrival: asap_types::workload::DataArrival::Ingesting {
                     rows_per_second: 1000.0,
@@ -818,21 +812,21 @@ mod tests {
                 facts.values_non_negative = true;
             }
             let mut realized =
-                asap_physical_asap_optimization::catalog::materialize_selected_candidates(
+                asap_physical_asap_optimization::test_support::catalog::materialize_selected_candidates(
                     &inventory.configured_for_tests().physical,
-                    &selected,
-                    &modes,
+                    &selected.to_selected_dag(),
+                    &selected.materializations_by_node(&modes),
                     &roots,
                     &entries,
                     &data,
                     false,
                 )
                 .unwrap();
-            realized.physical.id = format!("independent-capacities-{share_both}");
+            realized.plan.id = format!("independent-capacities-{share_both}");
             let mut evaluator =
-                crate::PlanSelector::new(&entries, &data, crate::PlanningModels::builtin(), false)
+                crate::PlanSelector::new(&entries, &data, crate::SelectionModels::builtin(), false)
                     .unwrap();
-            evaluator.offer(&realized.physical).unwrap();
+            evaluator.offer(&realized.plan).unwrap();
             let (selection, physical) = evaluator.finish().unwrap();
             physical.dag.validate().unwrap();
             assert!(selection.costs[&selection.selected]
@@ -847,7 +841,7 @@ mod tests {
     #[test]
     fn exact_topk_is_lowered_before_decomposition_and_survives_stage2() {
         use asap_logical_asap_optimization::test_support::entry_with;
-        use asap_physical_asap_optimization::catalog::materialize_selected_candidates;
+        use asap_physical_asap_optimization::test_support::catalog::materialize_selected_candidates;
         use asap_types::ir::operator::AggIntent;
         use asap_types::workload::{
             DataWorkload, QueryRecurrence, RepeatedDemand, RepetitionInterval,
@@ -861,14 +855,17 @@ mod tests {
             asap_types::ir::schema::FieldDataType::Plain(asap_types::ir::schema::DataType::Float64)
         );
         assert!(root.schema.unique_keys.is_empty());
-        let roots = vec![(0, QueryRoot::Operator(Rc::clone(&root)))];
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+        let roots = vec![QueryRoot::Operator(Rc::clone(&root))];
+        let initial = generate_dag_of_logical_memo_groups(&roots);
         let output = initial.group_for_node(&root).unwrap();
         let original_input = Rc::clone(
             &initial.groups[initial.groups[output.0 as usize].child_groups[0].0 as usize]
                 .logical_node,
         );
-        let generated = generate_per_computation_candidates(roots.clone()).unwrap();
+        let generated = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(
+            &roots.clone(),
+        ))
+        .unwrap();
         let memo = try_populate_pass1(initial, &generated).unwrap();
         let mut priced_operators = Vec::new();
         let inventory = build_candidate_inventory(&memo, &[output], |node| {
@@ -898,17 +895,17 @@ mod tests {
         )];
         let physical = materialize_selected_candidates(
             &inventory.configured_for_tests().physical,
-            &selected,
-            &modes,
-            &roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>(),
+            &selected.to_selected_dag(),
+            &selected.materializations_by_node(&modes),
+            &roots,
             &entries,
             &DataWorkload::default(),
             false,
         )
         .unwrap();
-        physical.physical.dag.validate().unwrap();
+        physical.plan.dag.validate().unwrap();
         assert_eq!(
-            physical.nodes_by_candidate.iter().flatten().count(),
+            physical.operator_node_of_selected_node.len(),
             selected.selected_candidates.len()
         );
         assert_eq!(
@@ -917,26 +914,22 @@ mod tests {
         );
     }
 
-    fn nested_sum_memo(external_reader: bool) -> (CandidateMemo, Vec<MemoGroupId>) {
+    fn nested_sum_memo(external_reader: bool) -> (MemoCandidates, Vec<MemoGroupId>) {
         let mut queries = vec!["sum by (region) (sum by (region, job) (m))"];
         if external_reader {
             queries.push("sum by (region, job) (m)");
         }
         let roots = queries
             .iter()
-            .enumerate()
-            .map(|(query, text)| {
-                (
-                    query,
-                    QueryRoot::Operator(lower_promql(text, AccuracyTarget::exact())),
-                )
-            })
+            .map(|text| QueryRoot::Operator(lower_promql(text, AccuracyTarget::exact())))
             .collect::<Vec<_>>();
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+        let initial = generate_dag_of_logical_memo_groups(&roots);
         let outputs = (0..queries.len())
             .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect();
-        let generated = generate_per_computation_candidates(roots).unwrap();
+        let generated =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap();
         (try_populate_pass1(initial, &generated).unwrap(), outputs)
     }
 
@@ -965,7 +958,7 @@ mod tests {
             assert_eq!(roots.len(), 1);
             roots[0].validate_structure().unwrap();
             assert!(
-                asap_physical_asap_optimization::catalog::test_support::output_contract_satisfied(
+                asap_physical_asap_optimization::test_support::catalog::output_contract_satisfied(
                     &memo.groups[outputs[0].0 as usize].logical_node,
                     &roots[0]
                 )
@@ -1107,7 +1100,7 @@ mod tests {
         assert!(matches!(
             build_candidate_inventory(&memo, &outputs, |_| Ok(1.0)),
             Err(CandidateInventoryError::Unsupported {
-                reason: "zero accuracy budget share",
+                reason: "zero accuracy budget parts",
                 ..
             })
         ));
@@ -1115,8 +1108,8 @@ mod tests {
     // Budget shares are concrete sizes: composed root accuracy, not the share
     // label, decides feasibility. Oversizing one remaining estimate stays legal.
     #[test]
-    fn ratio_accuracy_is_validated_after_selecting_concrete_budget_shares() {
-        use crate::{PlanSelector, PlanningModels, SelectionError};
+    fn ratio_accuracy_is_validated_after_selecting_concrete_accuracy_budget_parts() {
+        use crate::{ErrorSelectingPlan, PlanSelector, SelectionModels};
         use asap_accuracy::test_support::satisfies;
         use asap_cost::CalibrationFit;
         use asap_logical_asap_optimization::test_support::entry_with;
@@ -1129,10 +1122,12 @@ mod tests {
 
         let target = AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Relative);
         let query = "quantile_over_time(0.99, m[1m]) / quantile_over_time(0.5, m[1m])";
-        let roots = vec![(0, QueryRoot::Operator(lower_promql(query, target.clone())))];
-        let logical = DagOfLogicalMemoGroups::from_roots(&roots);
+        let roots = vec![QueryRoot::Operator(lower_promql(query, target.clone()))];
+        let logical = generate_dag_of_logical_memo_groups(&roots);
         let output = *logical.query_roots[0].as_operator().unwrap();
-        let generated = generate_per_computation_candidates(roots).unwrap();
+        let generated =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap();
         let original = try_populate_pass1(logical, &generated).unwrap();
         assert!(original
             .candidates
@@ -1161,7 +1156,7 @@ mod tests {
             target.clone(),
             QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(60_000))),
         )];
-        let models = PlanningModels::builtin();
+        let models = SelectionModels::builtin();
         for (share, one_exact, valid) in [(1, false, false), (2, false, true), (2, true, true)] {
             let mut memo = original.clone();
             let mut made_exact = false;
@@ -1213,7 +1208,7 @@ mod tests {
                 &roots,
                 &entries,
                 &data,
-                models.deployment_capabilities.query_time_results_retained,
+                false,
                 &mut |_, _, _| Materialization::NotMaterialized,
             )
             .unwrap()
@@ -1223,7 +1218,7 @@ mod tests {
             selector.offer(&physical).unwrap();
             match selector.finish() {
                 Ok(_) => assert!(valid, "undersized ratio must fail end-to-end accuracy"),
-                Err(SelectionError::NoValidCandidate(_)) => {
+                Err(ErrorSelectingPlan::NoValidCandidate(_)) => {
                     assert!(!valid, "properly sized ratio must be accepted")
                 }
                 Err(error) => panic!("unexpected evaluation error: {error}"),

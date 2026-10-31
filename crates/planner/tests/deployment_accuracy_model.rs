@@ -8,7 +8,20 @@ use std::rc::Rc;
 
 use asap_accuracy::{AccuracyModel, BuiltinAccuracyModel};
 use asap_frontend_promql::{lower_promql_query_workload, promql_metric_names};
-use asap_plan_selection::{PlanOutput, PlanningModels, RejectionCause};
+use asap_plan_selection::reference_pricer::{select_among_plans, WholePlanSelection};
+use asap_plan_selection::{ErrorSelectingPlan, RejectionCause};
+use asap_planner::PlanningModels;
+
+/// The reference pricer's selection among every given candidate, and the
+/// selected plan's operator roots.
+struct PlanOutput {
+    plans: Vec<QueryPlan>,
+    selection: Option<WholePlanSelection>,
+}
+
+struct QueryPlan {
+    root: Rc<OperatorNode>,
+}
 use asap_types::ir::properties::{AccuracyGuarantee, AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
@@ -72,16 +85,18 @@ fn reads_sketch(root: &Rc<OperatorNode>) -> bool {
 /// These fixtures test evaluator hooks, not a timed search's archive prefix.
 fn physical_candidates(
     workload: &PlanningWorkload,
-) -> Vec<asap_physical_asap_optimization::PhysicalWorkloadPlan> {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+) -> Vec<asap_types::physical::PhysicalWorkloadPlan> {
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_physical_asap_optimization::test_support::optimize_physical_asap_chosen;
     use asap_types::physical::Materialization;
 
     let roots = lower_promql_query_workload(workload).expect("lowers");
-    let inventory =
-        generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
+    )
+    .unwrap();
     let mut choices = BTreeSet::from([vec![0; inventory.targets.len()]]);
     for (index, target) in inventory.targets.iter().enumerate() {
         for implementation in 1..target.choice_count() {
@@ -94,11 +109,7 @@ fn physical_candidates(
         .into_iter()
         .enumerate()
         .map(|(index, choice)| {
-            let roots: Vec<_> = compose_logical_candidate(&inventory, &choice)
-                .unwrap()
-                .into_iter()
-                .map(|(_, root)| root)
-                .collect();
+            let roots: Vec<_> = compose_logical_candidate(&inventory, &choice).unwrap();
             let mut candidate = optimize_physical_asap_chosen(
                 &format!("fixture-{index}"),
                 &roots,
@@ -117,30 +128,30 @@ fn physical_candidates(
 
 fn plan_every_candidate(
     workload: &PlanningWorkload,
-    candidates: &[asap_physical_asap_optimization::PhysicalWorkloadPlan],
+    candidates: &[asap_types::physical::PhysicalWorkloadPlan],
     models: PlanningModels<'_>,
-) -> Result<PlanOutput, asap_plan_selection::SelectionError> {
-    let selection = asap_plan_selection::select_plan(
+) -> Result<PlanOutput, ErrorSelectingPlan> {
+    let selection = select_among_plans(
         candidates,
         &workload.query_workload.entries().collect::<Vec<_>>(),
         workload.data_workload.as_ref().unwrap(),
-        models,
+        &models.accuracy_check_inputs(),
+        models.cost_inputs,
     )?;
     let plans = selection
         .plan
         .iter()
-        .enumerate()
-        .map(|(entry_index, root)| match root {
-            QueryRoot::Operator(node) => asap_plan_selection::QueryPlan {
-                entry_index,
+        .map(|root| match root {
+            QueryRoot::Operator(node) => QueryPlan {
                 root: Rc::clone(node),
             },
             QueryRoot::Scalar(_) => panic!("operator queries only"),
         })
         .collect();
-    let mut output = PlanOutput::new(plans);
-    output.selection = Some(selection);
-    Ok(output)
+    Ok(PlanOutput {
+        plans,
+        selection: Some(selection),
+    })
 }
 
 /// Every candidate Stage 3 was given: the valid ones it priced and the

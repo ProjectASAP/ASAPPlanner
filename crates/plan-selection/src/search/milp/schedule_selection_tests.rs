@@ -1,5 +1,6 @@
 use super::*;
 use crate::search::milp::model::{solve_direct_cost_proposal_with_metrics, CandidateSolveMetrics};
+use asap_types::stages::*;
 use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
 
 fn union(queries: &[QueryRecurrence], mask: usize) -> f64 {
@@ -45,9 +46,9 @@ pub(super) fn rate_schedule(rates: &[f64]) -> QueryScheduleRates {
 fn node(input: Option<usize>) -> PhysicalCandidateWithCost {
     PhysicalCandidateWithCost {
         local_cost: 0.0,
-        supplier_candidates_per_input: input
+        producer_candidates_per_input: input
             .into_iter()
-            .map(|id| InputSupplierCandidates {
+            .map(|id| InputProducerCandidates {
                 candidates: vec![PhysicalCandidateId(id)].into(),
             })
             .collect(),
@@ -59,10 +60,12 @@ fn root(id: usize) -> QueryOutputCandidates {
     }
 }
 
-// Boundary demand is the evaluator's union rate; upstream held memory uses
-// the rate-weighted mean, not the arithmetic mean or the sum of root rates.
+// Boundary demand is the evaluator's union rate; upstream held memory is
+// computed once per boundary execution, at that union rate, and held for the
+// boundary's longest reader (7.5 s), not the rate-weighted mean (6.83 s) nor
+// at the sum of root rates.
 #[test]
-fn heterogeneous_intervals_price_boundary_rates_and_weighted_lifetimes() {
+fn heterogeneous_intervals_price_boundary_rates_and_longest_reader_lifetimes() {
     let queries = [500, 1000]
         .map(|ms| QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(ms))));
     let graph = DagOfPhysicalCandidatesWithCosts {
@@ -129,8 +132,8 @@ fn heterogeneous_intervals_price_boundary_rates_and_weighted_lifetimes() {
     )
     .unwrap()
     .unwrap();
-    assert!((result.direct_modeled_cost.unwrap() - 167.5).abs() < 1e-8);
-    assert!((result.model_lower_bound.unwrap() - 167.5).abs() < 1e-8);
+    assert!((result.direct_modeled_cost.unwrap() - 173.5).abs() < 1e-8);
+    assert!((result.model_lower_bound.unwrap() - 173.5).abs() < 1e-8);
 }
 
 // Same-interval readers can share one evaluation only at compatible phases.
@@ -200,7 +203,7 @@ fn heterogeneous_selection_matches_exhaustive_reader_assignments() {
         ..Default::default()
     };
     for id in [2, 3] {
-        graph.candidates[id].supplier_candidates_per_input[0].candidates =
+        graph.candidates[id].producer_candidates_per_input[0].candidates =
             vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
     }
     let profile = DirectCostProfile {

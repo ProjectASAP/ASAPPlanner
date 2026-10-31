@@ -1,8 +1,9 @@
 //! Frontend-to-Pass-1 acceptance: candidate discovery precedes empirical selection.
-use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    computation_candidates_for_intent, generate_per_computation_candidates, HavingEntry,
-    HavingPlacement, HowToComputeAggregateMeasure, PerComputationCandidateError, PruneReason,
+use crate::pass1::per_computation_candidates::{
+    computation_candidates_for_intent, generate_per_computation_candidates,
+    PerComputationCandidateError,
 };
+use crate::pass2::memo::generate_dag_of_logical_memo_groups;
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::AccuracyTarget;
@@ -14,6 +15,8 @@ use asap_types::ir::schema::{
 use asap_types::ir::{
     ASAPOp, ExprSemantics, NonASAPOp, Operator, OperatorNode, Predicate, QueryRoot, ScalarExpr,
 };
+use asap_types::stages::PruneReason;
+use asap_types::stages::{HavingEntry, HavingPlacement, HowToComputeAggregateMeasure};
 use std::rc::Rc;
 
 fn approximate() -> AccuracyTarget {
@@ -157,19 +160,17 @@ fn scalar_root_producers_are_discovered_once() {
         accuracy: approximate(),
     });
     let roots = vec![
-        (
-            "scalar",
-            QueryRoot::Scalar(ScalarExpr::ScalarSubquery(producer.clone())),
-        ),
-        ("relation", QueryRoot::Operator(producer.clone())),
+        QueryRoot::Scalar(ScalarExpr::ScalarSubquery(producer.clone())),
+        QueryRoot::Operator(producer.clone()),
     ];
-    let candidates = generate_per_computation_candidates(roots).unwrap();
+    let candidates =
+        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots)).unwrap();
     assert_eq!(candidates.roots.len(), 2);
-    for (_, root) in &candidates.roots {
+    for root in &candidates.roots {
         root.validate_structure().unwrap();
     }
     assert_eq!(candidates.targets.len(), 1);
-    assert!(Rc::ptr_eq(&candidates.targets[0].aggregate, &producer));
+    assert_eq!(**candidates.aggregate(&candidates.targets[0]), *producer);
     assert!(producer.timing.is_none());
     assert!(producer.guarantee.is_none());
     producer.validate_structure().unwrap();
@@ -211,7 +212,7 @@ fn exact_promql(query: &str) -> Vec<QueryRoot> {
 fn example_1_exact_q1_keeps_exact_accumulators_only() {
     let roots = exact_promql("sum by (job) (rate(http_requests_total[1m]))");
     let candidates =
-        generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
+        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots)).unwrap();
     let found: Vec<_> = candidates
         .targets
         .iter()
@@ -231,7 +232,7 @@ fn example_1_exact_q1_keeps_exact_accumulators_only() {
     assert!(candidates
         .targets
         .iter()
-        .all(|target| target.aggregate.timing.is_none()));
+        .all(|target| candidates.aggregate(target).timing.is_none()));
 }
 
 /// Physical annotations, ASAP operators and invalid probability requirements
@@ -244,10 +245,9 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
     .clone();
     producer.timing = Some(asap_types::ir::properties::ExecutionTiming::QueryTime);
     assert!(matches!(
-        generate_per_computation_candidates(vec![(
-            0,
+        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
             QueryRoot::Operator(Rc::new(producer.clone()))
-        )]),
+        ])),
         Err(PerComputationCandidateError::AssignedPhysicalAnnotation)
     ));
     let mut stored = (*aggregate(AggIntent::Count {
@@ -257,17 +257,18 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
     stored.materialization =
         asap_types::physical::Materialization::MatAtQuery(asap_types::physical::Medium::Memory);
     assert!(matches!(
-        generate_per_computation_candidates(vec![(
-            0,
+        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
             QueryRoot::Operator(Rc::new(stored.clone()))
-        )]),
+        ])),
         Err(PerComputationCandidateError::AssignedPhysicalAnnotation)
     ));
     // An annotated node below an unannotated root is rejected too.
     for annotated in [producer, stored] {
         let root = having_filter(Rc::new(annotated), always());
         assert!(matches!(
-            generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]),
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+                QueryRoot::Operator(root)
+            ])),
             Err(PerComputationCandidateError::AssignedPhysicalAnnotation)
         ));
     }
@@ -290,7 +291,9 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
     }))
     .unwrap();
     assert!(matches!(
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(summary))]),
+        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+            QueryRoot::Operator(summary)
+        ])),
         Err(PerComputationCandidateError::ContainsAsap)
     ));
     let epsilon_delta =
@@ -330,22 +333,21 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
         vec![],
         None,
     );
-    let error =
-        generate_per_computation_candidates(vec![("q", QueryRoot::Operator(invalid))]).unwrap_err();
+    let error = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+        QueryRoot::Operator(invalid),
+    ]))
+    .unwrap_err();
     assert!(
         matches!(
             &error,
             PerComputationCandidateError::InvalidAccuracy {
                 root: Some(root),
                 measure: Some(1)
-            } if root == "\"q\""
+            } if root == "0"
         ),
         "{error:?}"
     );
-    assert!(
-        error.to_string().contains("root \"q\", measure 1 "),
-        "{error}"
-    );
+    assert!(error.to_string().contains("root 0, measure 1 "), "{error}");
 }
 
 /// TopK keeps both declared heap substrates without choosing an implementation.
@@ -392,8 +394,10 @@ fn multi_measure_aggregate_has_one_target_per_measure() {
         vec![],
         None,
     );
-    let inventory =
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(node))]).unwrap();
+    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+        QueryRoot::Operator(node),
+    ]))
+    .unwrap();
     let candidates = &inventory.targets;
     assert_eq!(
         candidates
@@ -419,10 +423,12 @@ fn aggregate_without_realization_is_not_a_target() {
         population: true,
     });
     assert!(
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(node))])
-            .unwrap()
-            .targets
-            .is_empty()
+        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+            QueryRoot::Operator(node)
+        ]))
+        .unwrap()
+        .targets
+        .is_empty()
     );
 }
 
@@ -439,8 +445,10 @@ fn filtered_measure_keeps_candidates_and_records_its_filter() {
         vec![Some(always()), None],
         None,
     );
-    let inventory =
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(filtered))]).unwrap();
+    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+        QueryRoot::Operator(filtered),
+    ]))
+    .unwrap();
     let targets = &inventory.targets;
     assert_eq!(targets.len(), 2);
     for (index, target) in targets.iter().enumerate() {
@@ -453,17 +461,17 @@ fn filtered_measure_keeps_candidates_and_records_its_filter() {
 
 /// Target `target`'s own ways to compute and the ones Pass 1 pruned.
 fn choices_of(
-    inventory: &asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidates<usize>,
+    inventory: &crate::pass1::per_computation_candidates::PerComputationCandidates,
     target: usize,
-) -> asap_logical_asap_optimization::pass1::per_computation_candidates::ComputationChoices {
-    asap_logical_asap_optimization::pass1::per_computation_candidates::ComputationChoices {
+) -> crate::pass1::per_computation_candidates::ComputationChoices {
+    crate::pass1::per_computation_candidates::ComputationChoices {
         candidates: inventory.targets[target].ways_to_compute.clone(),
         pruned: inventory.pruned_of_target(target, false),
     }
 }
 
 fn assert_sql_count_choices(
-    choices: &asap_logical_asap_optimization::pass1::per_computation_candidates::ComputationChoices,
+    choices: &crate::pass1::per_computation_candidates::ComputationChoices,
 ) {
     assert_eq!(
         choices.candidates,
@@ -537,11 +545,13 @@ fn equals(column: usize, value: ScalarValue) -> Predicate {
 fn key_only_having_is_pushed_below_and_keeps_candidates() {
     let node = grouped_count(None);
     let root = having_filter(node.clone(), equals(0, ScalarValue::Utf8("a".into())));
-    let inventory =
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root.clone()))]).unwrap();
+    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+        QueryRoot::Operator(root.clone()),
+    ]))
+    .unwrap();
     let targets = &inventory.targets;
     assert_eq!(targets.len(), 1);
-    assert!(Rc::ptr_eq(&targets[0].aggregate, &node));
+    assert_eq!(**inventory.aggregate(&targets[0]), *node);
     assert_eq!(
         targets[0].having_filters,
         vec![HavingEntry {
@@ -558,13 +568,10 @@ fn key_only_having_is_pushed_below_and_keeps_candidates() {
 #[test]
 fn value_having_stays_above_output_and_keeps_candidates() {
     let value = || equals(1, ScalarValue::Int64(10));
-    let inventory = generate_per_computation_candidates(vec![
-        (
-            0,
-            QueryRoot::Operator(having_filter(grouped_count(None), value())),
-        ),
-        (1, QueryRoot::Operator(grouped_count(Some(value())))),
-    ])
+    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+        QueryRoot::Operator(having_filter(grouped_count(None), value())),
+        QueryRoot::Operator(grouped_count(Some(value()))),
+    ]))
     .unwrap();
     let targets = &inventory.targets;
     assert_eq!(targets.len(), 2);
@@ -584,16 +591,10 @@ fn value_having_stays_above_output_and_keeps_candidates() {
 #[test]
 fn avg_rewrites_to_sum_and_count_states() {
     let avg = || vec![AggIntent::Avg { col: None }];
-    let inventory = generate_per_computation_candidates(vec![
-        (
-            0,
-            QueryRoot::Operator(aggregate_over(scan(false), avg(), vec![], None)),
-        ),
-        (
-            1,
-            QueryRoot::Operator(aggregate_over(scan(true), avg(), vec![], None)),
-        ),
-    ])
+    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+        QueryRoot::Operator(aggregate_over(scan(false), avg(), vec![], None)),
+        QueryRoot::Operator(aggregate_over(scan(true), avg(), vec![], None)),
+    ]))
     .unwrap();
     let targets = &inventory.targets;
     assert_eq!(
@@ -623,10 +624,10 @@ fn having_on_one_consumer_of_a_shared_aggregate_stays_above() {
     let node = grouped_count(None);
     let key = equals(0, ScalarValue::Utf8("a".into()));
     let filtered = having_filter(node.clone(), key.clone());
-    let targets = generate_per_computation_candidates(vec![
-        (0, QueryRoot::Operator(filtered.clone())),
-        (1, QueryRoot::Operator(node.clone())),
-    ])
+    let targets = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+        QueryRoot::Operator(filtered.clone()),
+        QueryRoot::Operator(node.clone()),
+    ]))
     .unwrap()
     .targets;
     assert_eq!(targets.len(), 1);
@@ -642,17 +643,18 @@ fn having_on_one_consumer_of_a_shared_aggregate_stays_above() {
     // Two consumers applying the same key-only predicate push it below.
     let first = having_filter(node.clone(), key.clone());
     let second = having_filter(node, key);
-    let targets = generate_per_computation_candidates(vec![
-        (0, QueryRoot::Operator(first)),
-        (1, QueryRoot::Operator(second)),
-    ])
+    let targets = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+        QueryRoot::Operator(first),
+        QueryRoot::Operator(second),
+    ]))
     .unwrap()
     .targets;
     assert!(targets[0]
         .having_filters
         .iter()
         .all(|entry| entry.placement == HavingPlacement::BelowAggregate));
-    assert_eq!(targets[0].having_filters.len(), 2);
+    // The two equal `Filter`s are one memo group, so one HAVING entry.
+    assert_eq!(targets[0].having_filters.len(), 1);
 }
 
 /// A scalar reference to a grouped aggregate (`Filter(scan, EXISTS G)` as a
@@ -670,15 +672,15 @@ fn a_scalar_reference_consumer_keeps_a_key_only_having_above() {
             negated: false,
         }),
     );
-    let targets = generate_per_computation_candidates(vec![
-        (0, QueryRoot::Operator(filtered.clone())),
-        (1, QueryRoot::Operator(exists)),
-    ])
-    .unwrap()
-    .targets;
+    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+        QueryRoot::Operator(filtered.clone()),
+        QueryRoot::Operator(exists),
+    ]))
+    .unwrap();
+    let targets = &inventory.targets;
     let target = targets
         .iter()
-        .find(|target| Rc::ptr_eq(&target.aggregate, &node))
+        .find(|target| **inventory.aggregate(target) == *node)
         .expect("the grouped count's target");
     assert_eq!(
         target.having_filters,
@@ -698,9 +700,11 @@ fn only_the_adjacent_of_stacked_filters_is_having() {
     let inner_key = equals(0, ScalarValue::Utf8("a".into()));
     let inner = having_filter(node.clone(), inner_key.clone());
     let outer = having_filter(inner.clone(), equals(0, ScalarValue::Utf8("b".into())));
-    let targets = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(outer))])
-        .unwrap()
-        .targets;
+    let targets = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+        QueryRoot::Operator(outer),
+    ]))
+    .unwrap()
+    .targets;
     assert_eq!(targets.len(), 1);
     assert_eq!(
         targets[0].having_filters,
@@ -722,19 +726,13 @@ fn global_aggregate_having_stays_above() {
         }]
     };
     let never = Predicate(ScalarExpr::Literal(ScalarValue::Boolean(false)));
-    let targets = generate_per_computation_candidates(vec![
-        (
-            0,
-            QueryRoot::Operator(having_filter(
-                aggregate_over(scan(false), count(), vec![], None),
-                never.clone(),
-            )),
-        ),
-        (
-            1,
-            QueryRoot::Operator(aggregate_over(scan(false), count(), vec![], Some(never))),
-        ),
-    ])
+    let targets = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+        QueryRoot::Operator(having_filter(
+            aggregate_over(scan(false), count(), vec![], None),
+            never.clone(),
+        )),
+        QueryRoot::Operator(aggregate_over(scan(false), count(), vec![], Some(never))),
+    ]))
     .unwrap()
     .targets;
     assert_eq!(targets.len(), 2);
@@ -755,7 +753,7 @@ fn global_aggregate_having_stays_above() {
 fn example_1_exact_q2_prunes_topk_heaps() {
     let roots = exact_promql("topk by (job) (10, sum_over_time(http_requests_total[1m]))");
     let candidates =
-        generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
+        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots)).unwrap();
     let found: Vec<_> = candidates
         .targets
         .iter()
@@ -789,12 +787,13 @@ fn example_1_exact_q2_prunes_topk_heaps() {
 
 /// The `HAVING` entries of the target whose measure satisfies `is`.
 fn having_of(
-    targets: &[asap_logical_asap_optimization::pass1::per_computation_candidates::ComputationTarget],
+    inventory: &crate::pass1::per_computation_candidates::PerComputationCandidates,
     is: impl Fn(&AggIntent) -> bool,
 ) -> Vec<HavingEntry> {
-    let target = targets
+    let target = inventory
+        .targets
         .iter()
-        .find(|target| match target.aggregate.non_asap() {
+        .find(|target| match inventory.aggregate(target).non_asap() {
             Some(NonASAPOp::Aggregate { measures, .. }) => is(&measures[target.measure_index]),
             _ => false,
         })
@@ -823,11 +822,13 @@ fn scalar_reference_filter_is_not_having() {
     };
     let agg = aggregate_over(scan(false), count(), vec![], None);
     let root = having_filter(scan(false), above_scalar(1, agg.clone()));
-    let targets = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))])
-        .unwrap()
-        .targets;
+    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+        QueryRoot::Operator(root),
+    ]))
+    .unwrap();
+    let targets = &inventory.targets;
     assert_eq!(targets.len(), 1);
-    assert!(Rc::ptr_eq(&targets[0].aggregate, &agg));
+    assert_eq!(**inventory.aggregate(&targets[0]), *agg);
     assert!(
         targets[0].having_filters.is_empty(),
         "{:?}",
@@ -836,9 +837,11 @@ fn scalar_reference_filter_is_not_having() {
 
     let agg = aggregate_over(scan(false), count(), vec![], None);
     let root = having_filter(agg.clone(), above_scalar(0, agg.clone()));
-    let targets = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root.clone()))])
-        .unwrap()
-        .targets;
+    let targets = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+        QueryRoot::Operator(root.clone()),
+    ]))
+    .unwrap()
+    .targets;
     assert_eq!(targets.len(), 1);
     assert_eq!(
         targets[0].having_filters,
@@ -854,7 +857,7 @@ fn scalar_reference_filter_is_not_having() {
 #[test]
 fn promql_scalar_operand_is_not_having() {
     let roots = exact_promql("http_requests_total > scalar(sum(http_requests_total))");
-    let targets = generate_per_computation_candidates(roots.into_iter().enumerate().collect())
+    let targets = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
         .unwrap()
         .targets;
     assert!(!targets.is_empty());
@@ -867,11 +870,14 @@ fn promql_scalar_operand_is_not_having() {
     }
 
     let roots = exact_promql("sum by (job) (x) > scalar(count(x))");
-    let targets = generate_per_computation_candidates(roots.into_iter().enumerate().collect())
-        .unwrap()
-        .targets;
-    assert!(having_of(&targets, |intent| matches!(intent, AggIntent::Count { .. })).is_empty());
-    let sum = having_of(&targets, |intent| matches!(intent, AggIntent::Sum { .. }));
+    let inventory =
+        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots)).unwrap();
+    assert!(having_of(&inventory, |intent| matches!(
+        intent,
+        AggIntent::Count { .. }
+    ))
+    .is_empty());
+    let sum = having_of(&inventory, |intent| matches!(intent, AggIntent::Sum { .. }));
     assert_eq!(sum.len(), 1, "{sum:?}");
     assert_eq!(sum[0].placement, HavingPlacement::AboveOutput);
 }
@@ -891,10 +897,10 @@ fn having_shared_with_a_project_consumer_stays_above() {
         child: node,
     }))
     .unwrap();
-    let targets = generate_per_computation_candidates(vec![
-        (0, QueryRoot::Operator(filtered)),
-        (1, QueryRoot::Operator(project)),
-    ])
+    let targets = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+        QueryRoot::Operator(filtered),
+        QueryRoot::Operator(project),
+    ]))
     .unwrap()
     .targets;
     assert_eq!(targets.len(), 1);
@@ -928,9 +934,11 @@ fn without_and_per_entity_having_stays_above() {
         }))
         .unwrap();
         let root = having_filter(node, equals(0, ScalarValue::Utf8("a".into())));
-        let targets = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))])
-            .unwrap()
-            .targets;
+        let targets = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+            QueryRoot::Operator(root),
+        ]))
+        .unwrap()
+        .targets;
         assert_eq!(targets.len(), 1, "{reduction:?}");
         let placements: Vec<_> = targets[0]
             .having_filters
@@ -950,16 +958,17 @@ fn without_and_per_entity_having_stays_above() {
 /// with an exact guarantee.
 #[test]
 fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate;
+    use crate::pass1::per_computation_candidates::compose_logical_candidate;
     let producer = aggregate(AggIntent::Cardinality {
         cols: vec![0],
         accuracy: approximate(),
     });
-    let inventory =
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(producer.clone()))])
-            .unwrap();
+    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+        QueryRoot::Operator(producer.clone()),
+    ]))
+    .unwrap();
     let exact = compose_logical_candidate(&inventory, &[0]).unwrap();
-    let QueryRoot::Operator(kept) = &exact[0].1 else {
+    let QueryRoot::Operator(kept) = &exact[0] else {
         panic!("operator root expected")
     };
     assert_eq!(kept.operator.kind_name(), producer.operator.kind_name());
@@ -967,7 +976,7 @@ fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
     assert!(kept.guarantee.as_ref().is_some_and(|g| g.is_exact()));
 
     let hll = compose_logical_candidate(&inventory, &[1]).unwrap();
-    let QueryRoot::Operator(estimate) = &hll[0].1 else {
+    let QueryRoot::Operator(estimate) = &hll[0] else {
         panic!("operator root expected")
     };
     let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = estimate.asap() else {
@@ -975,33 +984,33 @@ fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
     };
     // The state takes every row of its source: one unrestricted selection box.
     let coverage = summary_input.coverage().unwrap();
-    assert!(OperatorNode::reachable(&coverage.definition).iter().any(|node| matches!(
+    assert!(OperatorNode::reachable(coverage.definition()).iter().any(|node| matches!(
         node.non_asap(),
         Some(NonASAPOp::Scan { source: Source::Table { table_ref }, .. }) if table_ref == "flows"
     )));
-    assert_eq!(coverage.selection.len(), 1);
+    assert_eq!(coverage.selection().len(), 1);
     assert!(
-        coverage.selection[0].columns.is_empty() && coverage.selection[0].relative_time.is_none()
+        coverage.selection()[0].columns().is_empty()
+            && coverage.selection()[0].relative_time().is_none()
     );
-    hll[0].1.validate_structure().unwrap();
+    hll[0].validate_structure().unwrap();
     assert!(compose_logical_candidate(&inventory, &[99]).is_err());
 }
 
 /// The one root of the workload candidate composed from `roots` and `choice`.
 fn composed(roots: Vec<Rc<OperatorNode>>, choice: &[usize]) -> Vec<Rc<OperatorNode>> {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate;
-    let inventory = generate_per_computation_candidates(
-        roots
+    use crate::pass1::per_computation_candidates::compose_logical_candidate;
+    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(
+        &roots
             .into_iter()
-            .enumerate()
-            .map(|(id, node)| (id, QueryRoot::Operator(node)))
-            .collect(),
-    )
+            .map(QueryRoot::Operator)
+            .collect::<Vec<_>>(),
+    ))
     .unwrap();
     compose_logical_candidate(&inventory, choice)
         .unwrap()
         .into_iter()
-        .map(|(_, root)| {
+        .map(|root| {
             root.validate_structure().unwrap();
             match root {
                 QueryRoot::Operator(node) => node,
@@ -1256,15 +1265,17 @@ fn composed_guarantees() {
 /// a subquery in it reads the subquery's substitution.
 #[test]
 fn own_having_subquery_is_substituted() {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate;
+    use crate::pass1::per_computation_candidates::compose_logical_candidate;
     let inner = aggregate(quantile());
     let outer = grouped_quantile(Some(above_scalar(1, inner.clone())));
-    let inventory =
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(outer.clone()))]).unwrap();
+    let inventory = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&[
+        QueryRoot::Operator(outer.clone()),
+    ]))
+    .unwrap();
     assert_eq!(inventory.targets.len(), 2);
     let kll = 1;
     let composed = compose_logical_candidate(&inventory, &[kll, kll]).unwrap();
-    let QueryRoot::Operator(root) = &composed[0].1 else {
+    let QueryRoot::Operator(root) = &composed[0] else {
         panic!("operator root expected")
     };
     let Some(NonASAPOp::Filter { pred, child }) = root.non_asap() else {
@@ -1355,50 +1366,25 @@ fn grouped_avg_composition_preserves_the_whole_schema() {
     assert_eq!(out.schema, root.schema);
 }
 
-// Cached local rules preserve filtered and unfiltered consumers independently.
+// Structurally equal aggregates are one memo group with one target, and its
+// HAVING placement is decided over every consumer of the group: an unfiltered
+// consumer keeps the key-only HAVING above the output for the filtered ones.
 #[test]
 fn memo_cached_rules_preserve_occurrence_specific_having() {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates_with_memo,
-    };
-    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
     let shared = grouped_count(None);
     let other = grouped_count(None);
     let key = equals(0, ScalarValue::Utf8("a".into()));
     let roots = vec![
-        (
-            0,
-            QueryRoot::Operator(having_filter(shared.clone(), key.clone())),
-        ),
-        (1, QueryRoot::Operator(shared)),
-        (2, QueryRoot::Operator(having_filter(other, key))),
+        QueryRoot::Operator(having_filter(shared.clone(), key.clone())),
+        QueryRoot::Operator(shared),
+        QueryRoot::Operator(having_filter(other, key)),
     ];
-    let memo = DagOfLogicalMemoGroups::from_roots(&roots);
-    let baseline = generate_per_computation_candidates(roots.clone()).unwrap();
-    let cached = generate_per_computation_candidates_with_memo(roots, &memo).unwrap();
-    assert_eq!(cached.targets.len(), 2);
-    assert_ne!(
-        cached.targets[0].having_filters[0].placement,
-        cached.targets[1].having_filters[0].placement
-    );
-    for (before, after) in baseline.targets.iter().zip(&cached.targets) {
-        assert_eq!(before.ways_to_compute, after.ways_to_compute);
-        assert_eq!(before.having_filters, after.having_filters);
-        assert_eq!(before.fused_computation, after.fused_computation);
-    }
-    for target in 0..baseline.targets.len() {
-        for choice in 0..baseline.targets[target].choice_count() {
-            let mut selected = vec![0; baseline.targets.len()];
-            selected[target] = choice;
-            assert_eq!(
-                compose_logical_candidate(&baseline, &selected).unwrap(),
-                compose_logical_candidate(&cached, &selected).unwrap()
-            );
-        }
-    }
-    let other_roots = vec![(0, QueryRoot::Operator(grouped_count(None)))];
-    assert!(matches!(
-        generate_per_computation_candidates_with_memo(other_roots, &memo),
-        Err(PerComputationCandidateError::MemoRootsChanged)
-    ));
+    let memo = generate_dag_of_logical_memo_groups(&roots);
+    let cached = generate_per_computation_candidates(&memo).unwrap();
+    assert_eq!(cached.targets.len(), 1);
+    // Roots 0 and 2 apply the same `Filter`, one memo group: one entry.
+    let [entry] = &cached.targets[0].having_filters[..] else {
+        panic!("one HAVING entry: {:?}", cached.targets[0].having_filters);
+    };
+    assert_eq!(entry.placement, HavingPlacement::AboveOutput);
 }

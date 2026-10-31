@@ -1,7 +1,8 @@
 //! Price a memo's enumerated choices as the selected plan is priced: each
 //! choice's composed DAG (`memo::enumeration::build_logical_asap_dags_from_chosen_candidates`) goes through Stage 2
 //! (`optimize_physical_asap`, every materialization assignment) and Stage 3
-//! (`select_plan`, under the run's models), and the plan Stage 3 selects for
+//! (the reference pricer, `asap_plan_selection::reference_pricer`, under the
+//! run's models), and the plan it selects for
 //! it is installed as `plan_installable` installs one (`installable_plan_of`,
 //! which also compiles it with the executor), so a choice cheaper than the
 //! selected plan shows that the search missed a plan the memo stands for.
@@ -9,14 +10,18 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::pass2::memo::enumeration::{
+use asap_logical_asap_optimization::{
     build_logical_asap_dags_from_chosen_candidates, ChosenCandidatePerMemoGroup,
 };
 use asap_physical_asap_optimization::optimize_physical_asap;
-use asap_plan_selection::{select_plan, PlanningModels, Selection, SelectionError};
-use asap_planner::{installable_plan_of, InstallablePlanError};
-use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::stages::CandidateMemo;
+use asap_plan_selection::reference_pricer::{select_among_plans, WholePlanSelection};
+use asap_plan_selection::{ErrorSelectingPlan, Selection};
+use asap_planner::{installable_plan_of, InstallablePlanError, PlanningModels, PlanningRun};
+use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
+use asap_types::physical::PhysicalWorkloadPlan;
+use asap_types::stages::MemoCandidates;
 use asap_types::stages::MemoGroupId;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
@@ -56,16 +61,13 @@ pub struct SelectedBaseline {
 }
 
 impl SelectedBaseline {
-    /// The baseline of `selection`: its selected plan's cost and the
-    /// calibration factor its search reported.
+    /// The baseline of `selection`: its selected plan's cost. Stage 3
+    /// reports no calibration factor, so a measured cost table without a
+    /// frozen factor is priced at each choice's own fit.
     pub fn of(selection: &Selection) -> Self {
         Self {
-            cost_per_second: selection.costs[&selection.selected].cost_per_second,
-            calibration_factor: selection
-                .search
-                .candidate_connections
-                .as_ref()
-                .map(|report| report.calibration_factor),
+            cost_per_second: selection.cost.cost_per_second,
+            calibration_factor: None,
         }
     }
 }
@@ -78,7 +80,7 @@ const TIE_TOLERANCE: f64 = 1e-9;
 /// is `stage0_roots[i]` with workload entry `entries[i]`; its operator
 /// references are replaced by their root groups' composed DAGs.
 pub fn price_choices(
-    memo: &CandidateMemo,
+    memo: &MemoCandidates,
     choices: &[ChosenCandidatePerMemoGroup],
     stage0_roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
@@ -86,11 +88,11 @@ pub fn price_choices(
     models: PlanningModels<'_>,
     selected: Option<SelectedBaseline>,
 ) -> Vec<PricedChoice> {
-    let mut settings = models.plan_selection.clone();
+    let mut settings = models.cost_inputs.clone();
     if settings.frozen_calibration_factor.is_none() {
         settings.frozen_calibration_factor = selected.and_then(|s| s.calibration_factor);
     }
-    let models = models.with_plan_selection(&settings);
+    let models = models.with_cost_inputs(&settings);
     let selected_cost = selected.and_then(|s| s.cost_per_second);
     // Which root group each query's operator references name is the same
     // for every choice.
@@ -135,39 +137,31 @@ fn price_choice(
     if let Err(error) = roots.iter().try_for_each(QueryRoot::validate_structure) {
         return invalid("invalid_structure", error.to_string());
     }
-    let id = format!("E{}", index + 1);
-    let mut physical = match optimize_physical_asap(
-        &id,
-        &roots,
-        entries,
-        data,
-        models.deployment_capabilities.query_time_results_retained,
-    ) {
-        Ok(physical) if !physical.is_empty() => physical,
-        Ok(_) => return invalid("stage2_failed", "no physical plan".into()),
-        Err(error) => return invalid("stage2_failed", error.to_string()),
+    let physical = match physical_plans_of(&roots, index, entries, data, models) {
+        Ok(physical) => physical,
+        Err(error) => return invalid("stage2_failed", error),
     };
-    for (k, plan) in physical.iter_mut().enumerate() {
-        plan.id = format!("{id}-{k}");
-    }
-    match select_plan(&physical, entries, data, models) {
-        Ok(selection) => match installable_plan_of(&selection.plan, Some(&selection), entries) {
-            // A standalone scalar query, which a runtime cannot answer yet,
-            // does not depend on the choice.
-            Ok(_) | Err(InstallablePlanError::UnsupportedQueryRoot { .. }) => PricedChoice {
-                valid: true,
-                rejection: None,
-                rejection_reason: None,
-                cost_per_second: selection.costs[&selection.selected].cost_per_second,
-                cheaper_than_selected: false,
-            },
-            Err(
-                error @ (InstallablePlanError::MaterializedViewNotExecutable { .. }
-                | InstallablePlanError::QueryRunNotExecutable { .. }),
-            ) => invalid("not_executable", error.to_string()),
-            Err(error) => invalid("not_installable", error.to_string()),
-        },
-        Err(SelectionError::NoValidCandidate(rejected)) => match rejected.first() {
+    match reference_select(&physical, entries, data, models) {
+        Ok(selection) => {
+            match installable_plan_of(&selection.plan, None, &selection.pane_retention_ms, entries)
+            {
+                // A standalone scalar query, which a runtime cannot answer yet,
+                // does not depend on the choice.
+                Ok(_) | Err(InstallablePlanError::UnsupportedQueryRoot { .. }) => PricedChoice {
+                    valid: true,
+                    rejection: None,
+                    rejection_reason: None,
+                    cost_per_second: selection.costs[&selection.selected].cost_per_second,
+                    cheaper_than_selected: false,
+                },
+                Err(
+                    error @ (InstallablePlanError::MaterializedViewNotExecutable { .. }
+                    | InstallablePlanError::QueryRunNotExecutable { .. }),
+                ) => invalid("not_executable", error.to_string()),
+                Err(error) => invalid("not_installable", error.to_string()),
+            }
+        }
+        Err(ErrorSelectingPlan::NoValidCandidate(rejected)) => match rejected.first() {
             Some(first) => invalid(
                 serde_json::to_value(first.cause)
                     .ok()
@@ -182,12 +176,153 @@ fn price_choice(
     }
 }
 
+/// Every physical plan Stage 2 offers for choice `index`'s composed `roots`
+/// (each materialization assignment), named `E<index+1>-<k>`.
+pub fn physical_plans_of(
+    roots: &[QueryRoot],
+    index: usize,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> Result<Vec<PhysicalWorkloadPlan>, String> {
+    let id = format!("E{}", index + 1);
+    let mut physical = optimize_physical_asap(
+        &id,
+        roots,
+        entries,
+        data,
+        models.deployment_capabilities.query_time_results_retained,
+    )
+    .map_err(|error| error.to_string())?;
+    retain_deployable(&mut physical, models);
+    if physical.is_empty() {
+        return Err("no physical plan".into());
+    }
+    for (k, plan) in physical.iter_mut().enumerate() {
+        plan.id = format!("{id}-{k}");
+        plan.from_logical = id.clone();
+    }
+    Ok(physical)
+}
+
+/// Drops the plans of `physical` that Stage 2 would not offer under
+/// `models.deployment_capabilities`: without raw data retained, a plan that
+/// scans raw data at query time (Stage 2's `PruneReason::RawDataNotRetained`;
+/// `optimize_physical_asap` enumerates every assignment and leaves this
+/// rule to Stage 2's catalog, and the reference pricer no longer checks it).
+pub fn retain_deployable(physical: &mut Vec<PhysicalWorkloadPlan>, models: PlanningModels<'_>) {
+    if models.deployment_capabilities.raw_data_retained {
+        return;
+    }
+    physical.retain(|plan| {
+        plan.dag.nodes.iter().all(|node| {
+            !matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { .. })
+            ) || node.output_state.timing == ExecutionTiming::IngestionTime
+        })
+    });
+}
+
+/// The reference pricer over `physical` under `models`: every plan checked,
+/// priced and ranked, every candidate kept.
+pub fn reference_select(
+    physical: &[PhysicalWorkloadPlan],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+) -> Result<WholePlanSelection, ErrorSelectingPlan> {
+    select_among_plans(
+        physical,
+        entries,
+        data,
+        &models.accuracy_check_inputs(),
+        models.cost_inputs,
+    )
+}
+
+/// One enumerated memo choice of a reference enumeration: its composed
+/// logical roots (or why they do not compose), under id `E<n>`.
+#[derive(Debug)]
+pub struct EnumeratedChoice {
+    pub id: String,
+    pub roots: Result<Vec<QueryRoot>, String>,
+}
+
+/// `stage_pipeline --exhaustive`: the first `max_choices` choices of the
+/// selected round's memo (`run.memo_steps.concrete_states`), each composed,
+/// implemented by Stage 2 with every materialization assignment, and all
+/// their physical plans priced together by the reference pricer.
+#[derive(Debug)]
+pub struct ReferenceEnumeration {
+    pub choices: Vec<EnumeratedChoice>,
+    pub physical: Vec<PhysicalWorkloadPlan>,
+    /// Why a composed choice has no physical plan, by choice id.
+    pub stage2_failed: Vec<(String, String)>,
+    /// Whether the memo has more choices than `max_choices`.
+    pub capped: bool,
+    pub selection: Result<WholePlanSelection, ErrorSelectingPlan>,
+}
+
+/// The reference enumeration of `run` ([`ReferenceEnumeration`]); `None`
+/// without a memo.
+pub fn reference_enumeration(
+    run: &PlanningRun,
+    stage0_roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    max_choices: usize,
+) -> Option<ReferenceEnumeration> {
+    use asap_logical_asap_optimization::enumerate;
+    let memo = &run.memo_steps.as_ref()?.concrete_states;
+    let enumeration = enumerate(memo, max_choices.saturating_add(1));
+    let capped = !enumeration.complete || enumeration.all_chosen_candidates.len() > max_choices;
+    let root_groups = root_groups_of_queries(memo, stage0_roots);
+    let mut choices = Vec::new();
+    let mut physical = Vec::new();
+    let mut stage2_failed = Vec::new();
+    for (index, choice) in enumeration
+        .all_chosen_candidates
+        .iter()
+        .take(max_choices)
+        .enumerate()
+    {
+        let id = format!("E{}", index + 1);
+        let roots = build_logical_asap_dags_from_chosen_candidates(memo, choice)
+            .map_err(|error| error.to_string())
+            .and_then(|composed| query_roots(&composed, stage0_roots, &root_groups))
+            .and_then(|roots| {
+                roots
+                    .iter()
+                    .try_for_each(QueryRoot::validate_structure)
+                    .map_err(|error| error.to_string())?;
+                Ok(roots)
+            });
+        if let Ok(roots) = &roots {
+            match physical_plans_of(roots, index, entries, data, models) {
+                Ok(plans) => physical.extend(plans),
+                Err(error) => stage2_failed.push((id.clone(), error)),
+            }
+        }
+        choices.push(EnumeratedChoice { id, roots });
+    }
+    let selection = reference_select(&physical, entries, data, models);
+    Some(ReferenceEnumeration {
+        choices,
+        physical,
+        stage2_failed,
+        capped,
+        selection,
+    })
+}
+
 /// For each query, the root group of each of its operator references, in
 /// `operator_refs` order: the one group the query's root (in the memo's
 /// `query_roots`) reads when its root is one operator, else the group
 /// whose node is the reference.
 fn root_groups_of_queries(
-    memo: &CandidateMemo,
+    memo: &MemoCandidates,
     stage0_roots: &[QueryRoot],
 ) -> Result<Vec<Vec<MemoGroupId>>, String> {
     stage0_roots
@@ -223,7 +358,7 @@ fn root_groups_of_queries(
 /// equal one (the memo's group nodes are the frontends' nodes with common
 /// sub-DAGs shared).
 fn group_of(
-    memo: &CandidateMemo,
+    memo: &MemoCandidates,
     groups: &[MemoGroupId],
     node: &Rc<OperatorNode>,
     query: usize,

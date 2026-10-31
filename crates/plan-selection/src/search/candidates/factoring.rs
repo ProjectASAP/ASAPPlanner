@@ -1,6 +1,6 @@
 //! Unit tests of Stage 2's terminal-reader factoring
-//! (`asap_physical_asap_optimization::catalog`) that select with the solver.
-use asap_physical_asap_optimization::catalog::test_support::{
+//! (`asap_physical_asap_optimization::test_support::catalog`) that select with the solver.
+use asap_physical_asap_optimization::test_support::catalog::{
     factor_terminal_readers, CandidateInventory, MemoGroupOutputKey,
     MemoGroupOutputToCompatibleProducersCache,
 };
@@ -41,7 +41,7 @@ mod tests {
         inventory: CandidateInventory,
     ) -> crate::search::candidates::dag::PhysicalCandidatesWithCosts {
         use crate::search::candidates::dag::{
-            DagOfPhysicalCandidatesWithCosts, InputSupplierCandidates, PhysicalCandidateWithCost,
+            DagOfPhysicalCandidatesWithCosts, InputProducerCandidates, PhysicalCandidateWithCost,
             PhysicalCandidatesWithCosts, QueryOutputCandidates,
         };
         use asap_types::ir::properties::ExecutionTiming;
@@ -51,9 +51,9 @@ mod tests {
             candidates: (0..count)
                 .map(|id| PhysicalCandidateWithCost {
                     local_cost: NODE_COSTS[id],
-                    supplier_candidates_per_input: inventory.supplier_nodes_per_input[id]
+                    producer_candidates_per_input: inventory.producer_nodes_per_input[id]
                         .iter()
-                        .map(|suppliers| InputSupplierCandidates {
+                        .map(|suppliers| InputProducerCandidates {
                             candidates: suppliers.clone(),
                         })
                         .collect(),
@@ -85,7 +85,7 @@ mod tests {
                 )
             })
             .collect();
-        crate::search::candidates::scopes::expand_execution_scopes(
+        crate::search::candidates::scopes::expand_execution_scopes_for_tests(
             PhysicalCandidatesWithCosts::from_dag_for_tests(dag, nodes),
             &vec![1; count],
             &[0, 0],
@@ -98,8 +98,8 @@ mod tests {
     // its different cost and identity must survive despite equal reader types.
     #[test]
     fn terminal_quotient_preserves_all_bindings_and_pay_once_costs() {
+        use crate::search::candidates::dag::ReaderConstraint;
         use crate::search::milp::model::select_candidates;
-        use asap_types::stages::ReaderConstraint;
         for assignment in [[0, 0], [0, 1], [1, 0], [1, 1]] {
             let original = with_scopes(terminal_fixture());
             let mut factored = terminal_fixture();
@@ -143,7 +143,7 @@ mod tests {
     fn duplicate_terminal_interfaces_reduce_scoped_candidates_and_connections() {
         let build = || {
             let mut inventory = terminal_fixture();
-            for reader in &mut inventory.supplier_nodes_per_input[2..] {
+            for reader in &mut inventory.producer_nodes_per_input[2..] {
                 reader[0] = vec![PhysicalCandidateId(0), PhysicalCandidateId(1)].into();
             }
             inventory
@@ -158,7 +158,7 @@ mod tests {
                 graph
                     .candidates
                     .iter()
-                    .flat_map(|candidate| &candidate.supplier_candidates_per_input)
+                    .flat_map(|candidate| &candidate.producer_candidates_per_input)
                     .map(|input| input.candidates.len())
                     .sum::<usize>(),
             )
@@ -181,7 +181,7 @@ mod tests {
         eligibility.query_output_nodes[1] = vec![PhysicalCandidateId(3)];
         assert_eq!(factor_terminal_readers(&mut eligibility, None).unwrap(), 0);
         let mut internal = terminal_fixture();
-        internal.supplier_nodes_per_input[0].push(vec![PhysicalCandidateId(2)].into());
+        internal.producer_nodes_per_input[0].push(vec![PhysicalCandidateId(2)].into());
         assert_eq!(factor_terminal_readers(&mut internal, None).unwrap(), 0);
     }
 
@@ -216,9 +216,9 @@ mod tests {
             .is_none());
     }
 
-    // Storage sharing never couples the two consumers' supplier decisions.
+    // Storage sharing never couples the two consumers' producer decisions.
     #[test]
-    fn two_reader_bindings_keep_independent_supplier_lists() {
+    fn two_reader_bindings_keep_independent_producer_lists() {
         let expected = lower_promql("latency", AccuracyTarget::exact());
         let key = || MemoGroupOutputKey::new(MemoGroupId(1), &expected).unwrap();
         let mut cache = MemoGroupOutputToCompatibleProducersCache::default();
@@ -232,7 +232,7 @@ mod tests {
     }
     // Exhaust every two-reader binding, charging each retained producer once.
     // A longer retention requirement has its own logical group and cannot
-    // accidentally inherit the shorter reader's supplier set from the cache.
+    // accidentally inherit the shorter reader's producer set from the cache.
     #[test]
     fn cached_interfaces_preserve_exhaustive_sharing_and_retention_choices() {
         let expected = lower_promql("latency", AccuracyTarget::exact());

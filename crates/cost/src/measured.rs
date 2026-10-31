@@ -301,7 +301,7 @@ pub fn lookup(
 /// The price of an `Aggregate` at `phase` per input row: the sum over its
 /// measures, when each has an entry (one for its own phase winning over
 /// one for both).
-pub fn aggregate_lookup(
+pub(crate) fn aggregate_lookup(
     table: &MeasuredOperationCosts,
     phase: ExecutionTiming,
     measures: &[AggIntent],
@@ -502,9 +502,9 @@ struct TableFields {
 
 /// Which prices one node's CPU operations came from. A node is one operator
 /// node of the candidate's physical plan DAG (`PhysicalASAPDAG`), keyed by
-/// its `PhysicalASAPNodeId` in [`CandidateCost::per_node`]; not a machine.
+/// its `PhysicalASAPNodeId` in [`PlanCost::per_node`]; not a machine.
 ///
-/// [`CandidateCost::per_node`]: crate::CandidateCost::per_node
+/// [`PlanCost::per_node`]: crate::PlanCost::per_node
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodePriceSource {

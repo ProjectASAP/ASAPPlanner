@@ -437,9 +437,21 @@ fn declared_counter(data: &DataWorkload, metric: &str) -> bool {
 /// selected plan the executor runs, which reads no data workload. The same
 /// `Rc` where nothing changes.
 pub fn with_confirmed_weights(roots: &[QueryRoot], data: &DataWorkload) -> Vec<QueryRoot> {
+    with_confirmed_weights_at(roots, data, &|_| true)
+}
+
+/// [`with_confirmed_weights`] at the summaries `confirm_at` names only: the
+/// selected plan with the weight proofs Stage 3 made for its candidates
+/// applied (`Selection::nodes_with_proven_non_negative_weights`).
+pub fn with_confirmed_weights_at(
+    roots: &[QueryRoot],
+    data: &DataWorkload,
+    confirm_at: &dyn Fn(&Rc<OperatorNode>) -> bool,
+) -> Vec<QueryRoot> {
     fn confirm(
         node: &Rc<OperatorNode>,
         data: &DataWorkload,
+        confirm_at: &dyn Fn(&Rc<OperatorNode>) -> bool,
         cache: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
     ) -> Rc<OperatorNode> {
         if let Some(done) = cache.get(&Rc::as_ptr(node)) {
@@ -447,7 +459,7 @@ pub fn with_confirmed_weights(roots: &[QueryRoot], data: &DataWorkload) -> Vec<Q
         }
         let mut changed = false;
         let mut operator = node.operator.map_children(|child| {
-            let rebuilt = confirm(child, data, cache);
+            let rebuilt = confirm(child, data, confirm_at, cache);
             changed |= !Rc::ptr_eq(&rebuilt, child);
             rebuilt
         });
@@ -455,7 +467,7 @@ pub fn with_confirmed_weights(roots: &[QueryRoot], data: &DataWorkload) -> Vec<Q
             &mut operator
         {
             let confirmed = confirmed_weights(&input.weight_domain, data);
-            if confirmed != input.weight_domain {
+            if confirmed != input.weight_domain && confirm_at(node) {
                 input.weight_domain = confirmed;
                 changed = true;
             }
@@ -477,10 +489,10 @@ pub fn with_confirmed_weights(roots: &[QueryRoot], data: &DataWorkload) -> Vec<Q
     roots
         .iter()
         .map(|root| match root {
-            QueryRoot::Operator(n) => QueryRoot::Operator(confirm(n, data, &mut cache)),
-            QueryRoot::Scalar(expr) => {
-                QueryRoot::Scalar(expr.map_operator_refs(&mut |n| confirm(n, data, &mut cache)))
-            }
+            QueryRoot::Operator(n) => QueryRoot::Operator(confirm(n, data, confirm_at, &mut cache)),
+            QueryRoot::Scalar(expr) => QueryRoot::Scalar(
+                expr.map_operator_refs(&mut |n| confirm(n, data, confirm_at, &mut cache)),
+            ),
         })
         .collect()
 }

@@ -54,13 +54,14 @@ estimator; an execution test in `crates/integration-tests/tests/` such as
 A new way for computations of one Pass 1 candidate to share, split or reuse
 work.
 
-1. In `crates/logical-asap-optimization/src/pass2/asap_aware_cse.rs`, add the part it can choose as a `*Candidate` type
-   with a finder (for example `rollup_candidates(roots)`), and the function
-   that applies a set of them and returns `*Pass2Candidate`s (for example
-   `rollup_pass2_candidates`). Read summary families only through
-   `FamilyCapability`.
-2. In `crates/logical-asap-optimization/src/pass2/workload_candidates.rs`, call it
-   from Stage 1 enumeration after the
+1. Add a memo rule under `crates/logical-asap-optimization/src/pass2/memo/rules/`
+   (for example `rollup.rs` or `topk.rs`): it adds candidates (and, when it
+   needs them, groups) to the memo groups it implements, keeping every
+   existing candidate. Read summary families only through
+   `FamilyCapability`. Shared rewrite helpers live in
+   `pass2/asap_aware_cse.rs`.
+2. Declare it in `pass2/memo/rules.rs` and call it from `apply_sharing_rules`
+   (`pass2/logical_memo_candidates.rs`), after the
    existing rules.
 3. Add its row to the Pass 2 rule table of the
    [design](../design_docs/proposals/planner-layering.md).
@@ -68,7 +69,7 @@ work.
 A rule must keep every Pass 1 candidate, must not add a family or a readout,
 and must keep the composed DAG's meaning. Stage 3 decides whether it pays off.
 
-Tests: unit tests beside the rule in `pass2/asap_aware_cse.rs` for when it applies
+Tests: unit tests beside the rule in `pass2/memo/rules/` for when it applies
 and when it must not; an end-to-end test like
 `crates/integration-tests/tests/reuse_rules.rs` that the planned workload
 contains the candidate and that Stage 3 prices it.
@@ -82,7 +83,7 @@ contains the candidate and that Stage 3 prices it.
    `MaterializationCandidate` options), after the existing options so default
    candidate ids stay the same, and gate it on the deployment input that
    allows it.
-3. Price it in `crates/plan-selection/src/pricing.rs`: what it keeps in memory or on
+3. Price it in `crates/cost/src/usage.rs` (`asap_cost::node_usage`): what it keeps in memory or on
    disk, and what each evaluation rebuilds.
 
 Tests: Stage 2 unit tests for when the option is offered;
@@ -94,7 +95,7 @@ tests in `planner_layering_example4.rs`.
 - A new validity check goes in `select_plan` and rejects a candidate with a
   `Rejection { cause, reason }` whose `cause` is a new failed-check
   `RejectionCause` variant (listed in `RejectionCause::failed_a_check`); it never fails the whole selection
-  unless the input itself is bad (a new `SelectionError` variant, documented
+  unless the input itself is bad (a new `ErrorSelectingPlan` variant, documented
   as bad input).
 - A new pricing input goes in `CostInputs` (validated in its
   `validate`); a new statement about the executor goes in

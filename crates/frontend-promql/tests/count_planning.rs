@@ -1,4 +1,5 @@
 //! Query text through summary selection: counts use observations, never value weights.
+use crate::planner_support::selected_dag;
 use crate::support;
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::properties::AccuracyTarget;
@@ -8,7 +9,7 @@ use asap_types::ir::schema::{
 };
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use std::rc::Rc;
-use support::{logical_candidates, lower_promql, physical_asap_dag, selected_dag};
+use support::{logical_candidates, lower_promql, physical_asap_dag};
 
 /// Whether `node` reads a Hydra state (one sketch shared by every group).
 fn reads_hydra(node: &Rc<OperatorNode>) -> bool {
@@ -280,13 +281,10 @@ fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
 #[test]
 #[should_panic(expected = "does not compose")]
 fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidateError;
-    support::require_composed_operator_candidates(vec![
-        asap_plan_selection::search::LogicalCandidate {
-            id: "invalid-composition".into(),
-            roots: Err(PerComputationCandidateError::InvalidChoice),
-        },
-    ]);
+    support::require_composed_operator_candidates(vec![support::LogicalCandidate {
+        id: "invalid-composition".into(),
+        roots: Err("invalid choice".into()),
+    }]);
 }
 
 // Ranked-row schemas let an aggregate consume TopK's numeric output (#672).

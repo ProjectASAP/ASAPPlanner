@@ -8,9 +8,11 @@
 //! the unified [`OperatorNode`] IR, deriving every schema on the way.
 //! Depends on DataFusion only — never on the PromQL parser.
 
-pub mod error;
-pub mod frequency;
-pub mod sql;
+mod error;
+mod frequency;
+mod sql;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 use std::rc::Rc;
 
@@ -20,7 +22,8 @@ use asap_types::ir::OperatorNode;
 use asap_types::workload::{QueryLanguage, QueryWorkload, SqlDialect};
 
 pub use error::SqlError;
-pub use sql::{SqlCatalog, SqlLowerer};
+pub use sql::SqlCatalog;
+use sql::SqlLowerer;
 
 /// Lower a single SQL query string to the resolved, canonical operator DAG,
 /// parsed as `SqlDialect::DataFusionSQL`.

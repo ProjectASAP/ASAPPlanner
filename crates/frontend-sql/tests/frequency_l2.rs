@@ -1,11 +1,13 @@
 //! The SQL frontend names the frequency L2 idiom as a `FrequencyL2` intent
 //! (#509 Example 2's Q3, in its Float64 form).
 use asap_frontend_common::resolve_root;
-use asap_frontend_sql::{lower_sql, lower_sql_batch, SqlCatalog, SqlLowerer};
+use asap_frontend_sql::test_support::lower_unresolved;
+use asap_frontend_sql::{lower_sql, lower_sql_batch, SqlCatalog};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode};
+use asap_types::stages::HowToComputeAggregateMeasure;
 use std::rc::Rc;
 
 fn catalog(nullable: bool) -> SqlCatalog {
@@ -33,8 +35,7 @@ fn has_l2(node: &OperatorNode) -> bool {
 /// The relational DAG the frontend lowers before frequency recognition.
 async fn relational(sql: &str, catalog: &SqlCatalog) -> Rc<OperatorNode> {
     resolve_root(
-        &SqlLowerer::new(catalog)
-            .lower(sql, &AccuracyTarget::exact())
+        &lower_unresolved(sql, catalog, &AccuracyTarget::exact())
             .await
             .unwrap(),
     )
@@ -149,20 +150,22 @@ async fn batch_lowering_recognizes_frequency_l2() {
 /// recognized L2 intent.
 #[tokio::test]
 async fn stage1_offers_exact_and_summary_l2_candidates() {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        generate_per_computation_candidates, HowToComputeAggregateMeasure,
-    };
+    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
     use asap_types::ir::QueryRoot;
     let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let root = lower_sql(CAST_COUNT, &catalog(false), target)
         .await
         .unwrap();
-    let inventory =
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+            QueryRoot::Operator(root),
+        ]),
+    )
+    .unwrap();
     let l2 = inventory
         .targets
         .iter()
-        .find(|t| has_l2(&t.aggregate))
+        .find(|t| has_l2(inventory.aggregate(t)))
         .expect("L2 target");
     let candidates = &l2.ways_to_compute;
     assert!(

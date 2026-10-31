@@ -9,13 +9,13 @@ use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, ProjectItem, QueryRoot, ScalarExpr,
 };
-use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{MemoCandidates, OriginOfCandidateForMemoGroup};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
 pub(crate) fn add_rollup_candidates(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {
     check_generation_deadline(deadline)?;
@@ -226,7 +226,7 @@ pub(crate) fn add_rollup_candidates(
 /// Existing pane rollup rules applied to producer pairs on already generated
 /// legal local grids. No whole-workload choice combinations are constructed.
 pub(crate) fn add_window_rollup_candidates(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {
     check_generation_deadline(deadline)?;
@@ -327,9 +327,9 @@ pub(crate) fn add_window_rollup_candidates(
 #[cfg(test)]
 mod tests {
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::candidates::try_populate_pass1;
+    use crate::pass2::memo::generate_dag_of_logical_memo_groups;
+    use crate::pass2::memo::groups::try_populate_pass1;
     use crate::pass2::memo::shared_configurations::PaneWidthDomain;
-    use crate::pass2::memo::DagOfLogicalMemoGroups;
     use crate::test_support::{lower_promql, sharing_rules_and_shared_state_groups};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::QueryRoot;
@@ -343,16 +343,12 @@ mod tests {
     fn a_rollup_reads_the_finer_query_result_itself() {
         let roots: Vec<_> = ["sum by (job) (m)", "sum by (job, instance) (m)"]
             .into_iter()
-            .enumerate()
-            .map(|(query, text)| {
-                (
-                    query,
-                    QueryRoot::Operator(lower_promql(text, AccuracyTarget::exact())),
-                )
-            })
+            .map(|text| QueryRoot::Operator(lower_promql(text, AccuracyTarget::exact())))
             .collect();
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let initial = generate_dag_of_logical_memo_groups(&roots);
+        let inventory =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap();
         let memo = sharing_rules_and_shared_state_groups(
             try_populate_pass1(initial, &inventory).unwrap(),
             PaneWidthDomain::Complete,

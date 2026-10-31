@@ -1,9 +1,10 @@
 //! Unit tests of Stage 2's structural pruning
-//! (`asap_physical_asap_optimization::catalog`) that select with the solver.
+//! (`asap_physical_asap_optimization::test_support::catalog`) that select with the solver.
 use crate::search::candidates::dag::DagOfPhysicalCandidatesWithCosts;
 use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
-use asap_physical_asap_optimization::catalog::test_support::usable_candidates;
-use asap_types::stages::{PhysicalCandidateId, ReaderConstraint};
+use crate::search::candidates::dag::ReaderConstraint;
+use asap_physical_asap_optimization::test_support::catalog::usable_candidates;
+use asap_types::stages::PhysicalCandidateId;
 
 #[cfg(test)]
 mod tests {
@@ -13,15 +14,15 @@ mod tests {
     use asap_types::physical::Materialization;
 
     use crate::search::candidates::dag::{
-        InputSupplierCandidates, PhysicalCandidateWithCost, QueryOutputCandidates, ResourceBudget,
+        InputProducerCandidates, PhysicalCandidateWithCost, QueryOutputCandidates, ResourceBudget,
     };
 
     fn candidate(cost: f64, inputs: &[&[usize]]) -> PhysicalCandidateWithCost {
         PhysicalCandidateWithCost {
             local_cost: cost,
-            supplier_candidates_per_input: inputs
+            producer_candidates_per_input: inputs
                 .iter()
-                .map(|ids| InputSupplierCandidates {
+                .map(|ids| InputProducerCandidates {
                     candidates: ids.iter().map(|id| PhysicalCandidateId(*id)).collect(),
                 })
                 .collect(),
@@ -45,10 +46,10 @@ mod tests {
         usable_candidates(&configured(graph.clone()).physical)
     }
 
-    // Removing an unrelated candidate remaps IDs once per shared supplier
+    // Removing an unrelated candidate remaps IDs once per shared producer
     // list; the subsequent solve still sees independent consumer requirements.
     #[test]
-    fn pruning_retains_shared_supplier_storage_after_remapping() {
+    fn pruning_retains_shared_producer_storage_after_remapping() {
         let graph = DagOfPhysicalCandidatesWithCosts {
             candidates: vec![
                 candidate(9.0, &[]),
@@ -68,20 +69,20 @@ mod tests {
         };
         let original = graph.clone();
         let mut inventory = configured(graph);
-        assert_eq!(inventory.prune_for_tests().removed_candidates, 1);
+        assert_eq!(inventory.prune_for_tests(), 1);
         let graph = &inventory.dag;
         assert_eq!(
-            graph.candidates[1].supplier_candidates_per_input[0]
+            graph.candidates[1].producer_candidates_per_input[0]
                 .candidates
                 .as_slice(),
             &[PhysicalCandidateId(0)]
         );
         assert_eq!(
-            asap_types::stages::supplier_storage_metrics(&inventory.physical),
-            asap_types::stages::SupplierStorageMetrics {
+            asap_types::stages::producer_storage_metrics(&inventory.physical),
+            asap_types::stages::ProducerStorageMetrics {
                 logical_connections: 2,
-                unique_supplier_sets: 1,
-                stored_supplier_ids: 1
+                unique_producer_sets: 1,
+                stored_producer_ids: 1
             }
         );
         assert_eq!(
@@ -115,8 +116,7 @@ mod tests {
         };
         let before = select_candidates(&graph).unwrap().unwrap();
         let mut inventory = configured(graph);
-        let metrics = inventory.prune_for_tests();
-        assert_eq!(metrics.removed_candidates, 3);
+        assert_eq!(inventory.prune_for_tests(), 3);
         assert_eq!(
             inventory.dag.resource_budgets[0].candidate_usage,
             vec![2.0, 3.0, 1.0]
@@ -178,36 +178,5 @@ mod tests {
         inventory.prune_for_tests();
         assert_eq!(inventory.dag.query_roots.len(), 1);
         assert!(select_candidates(&inventory.dag).unwrap().is_none());
-    }
-
-    // Activation implications do not create execution cycles; an unreachable
-    // required copy does make the dependent choice unusable.
-    #[test]
-    fn activation_requirements_preserve_selection_semantics() {
-        let mut graph = DagOfPhysicalCandidatesWithCosts {
-            candidates: vec![candidate(1.0, &[]), candidate(2.0, &[])],
-            query_roots: vec![
-                QueryOutputCandidates {
-                    candidates: vec![PhysicalCandidateId(0)],
-                },
-                QueryOutputCandidates {
-                    candidates: vec![PhysicalCandidateId(1)],
-                },
-            ],
-            reader_constraints: vec![
-                ReaderConstraint::ActivationRequires {
-                    candidate: PhysicalCandidateId(0),
-                    required_candidate: PhysicalCandidateId(1),
-                },
-                ReaderConstraint::ActivationRequires {
-                    candidate: PhysicalCandidateId(1),
-                    required_candidate: PhysicalCandidateId(0),
-                },
-            ],
-            ..Default::default()
-        };
-        assert_eq!(usable(&graph), vec![true, true]);
-        graph.query_roots.pop();
-        assert_eq!(usable(&graph), vec![false, false]);
     }
 }

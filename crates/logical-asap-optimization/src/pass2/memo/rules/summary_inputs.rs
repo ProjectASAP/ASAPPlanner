@@ -5,13 +5,13 @@ use super::reuse::{append_producer, append_reader, eligible, replace};
 use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::state_groups::StateGroupExpansionError;
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
-use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{MemoCandidates, OriginOfCandidateForMemoGroup};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 
 pub(crate) fn factor_summary_inputs(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     deadline: Option<Instant>,
 ) -> Result<(), StateGroupExpansionError> {
     check_generation_deadline(deadline)?;
@@ -70,7 +70,7 @@ pub(crate) fn factor_summary_inputs(
 }
 
 fn canonical_preprocessing(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     node: &Rc<OperatorNode>,
     boundaries: &HashSet<*const OperatorNode>,
     queries: &[usize],

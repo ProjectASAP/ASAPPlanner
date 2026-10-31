@@ -1,13 +1,14 @@
 use std::rc::Rc;
 
+use crate::planner_support::run_stage1_to_stage3;
 use crate::support;
 use asap_accuracy::test_support::{local_guarantee, satisfies};
-use asap_logical_asap_optimization::pass2::cse::share_common_sub_dags;
+use asap_logical_asap_optimization::test_support::share_common_sub_dags;
 use asap_types::ir::properties::AccuracyMetric;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr};
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
-use support::{logical_candidates, lower_promql, physical_asap_dag, run_stage1_to_stage3};
+use support::{logical_candidates, lower_promql, physical_asap_dag};
 
 /// The summary evaluation over a UnivMon state that `root` reads, if any.
 fn univmon_estimate(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
@@ -139,7 +140,8 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
             } else {
                 assert!(!unknown.is_empty(), "{query}");
                 let [asap_types::ir::QueryRoot::Operator(selected)] = run
-                    .selected_logical()
+                    .selected_plan
+                    .as_deref()
                     .expect("a certified plan is selected")
                 else {
                     panic!("one operator result");

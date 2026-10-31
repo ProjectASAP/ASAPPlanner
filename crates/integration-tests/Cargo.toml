@@ -5,14 +5,19 @@ edition = "2021"
 autotests = false
 
 [dependencies]
-asap-types = { path = "../types" }
+# The shared fixtures (`src/`) export physical DAGs with test-only helpers.
+asap-types = { path = "../types", features = ["test-support"] }
 asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-sql = { path = "../frontend-sql" }
 asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
-asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
+asap-physical-asap-optimization = { path = "../physical-asap-optimization", features = ["reference-pricer"] }
 asap-accuracy = { path = "../accuracy" }
 asap-cost = { path = "../cost" }
-asap-plan-selection = { path = "../plan-selection" }
+asap-plan-selection = { path = "../plan-selection", features = ["reference-pricer"] }
+# The fixtures plan through the facade and the developer tools' reference
+# enumeration.
+asap-planner = { path = "../planner", features = ["test-support"] }
+asap-devtools = { path = "../devtools" }
 
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }

@@ -436,14 +436,16 @@ fn stored_series_evaluations_support_filters_and_sets() {
                 (3, 4, EdgeRole::Right),
             ]
             .into_iter()
-            .map(|(producer, consumer, role)| PhysicalASAPDAGEdge {
-                producer,
-                consumer,
-                role,
-                intermediate_schema: nodes[producer].output_schema.clone(),
-                data_state: nodes[producer].output_state,
-                grouping: GroupingEdgeCompatibility::NotApplicable,
-                window: WindowEdgeCompatibility::NotApplicable,
+            .map(|(producer, consumer, role)| {
+                PhysicalASAPDAGEdge::new(
+                    producer,
+                    consumer,
+                    role,
+                    nodes[producer].output_schema.clone(),
+                    nodes[producer].output_state,
+                    GroupingEdgeCompatibility::NotApplicable,
+                    WindowEdgeCompatibility::NotApplicable,
+                )
             })
             .collect();
             let mut dag = PhysicalASAPDAG {

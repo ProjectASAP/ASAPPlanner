@@ -2,7 +2,7 @@
 //! resource a plan uses and what that usage costs. It depends only on
 //! `asap-types`, so any stage can price with it.
 //!
-//! - Resource-usage estimation: [`analytical`] and [`operator_statistics`]
+//! - Resource-usage estimation: [`analytical`] and `operator_statistics`
 //!   (the analytical per-operator resource model), `measured` (measured
 //!   operation costs and their lookup), [`execution_demand`] (how often
 //!   each node of a physical DAG is computed), [`state_bytes`] (the bytes a
@@ -11,7 +11,10 @@
 //! - Cost models: [`ResourceUsage`], [`ResourceUnitCost`],
 //!   [`ResourceSpeed`], [`CostModel`] ([`ClusterLimits`],
 //!   [`ClusterObjective`]) and the deployment's [`CostInputs`], with the
-//!   per-node and per-candidate costs ([`NodeCost`], [`CandidateCost`]).
+//!   per-node and per-plan costs ([`NodeCost`], [`PlanCost`]).
+//! - Costing a physical plan DAG: [`node_usage`] gives one node's
+//!   [`NodeUsage`]; [`plan_cost`] the whole plan's [`PlanCost`]. Stage 3
+//!   computes no cost of its own.
 //!
 //! Plan selection (Stage 3, `asap-plan-selection`) documents how it prices
 //! a candidate with these.
@@ -23,25 +26,35 @@ use asap_types::ir::properties::ExecutionTiming;
 pub mod analytical;
 pub mod execution_demand;
 mod measured;
-pub mod operator_statistics;
+mod operator_statistics;
+mod ranking;
 mod resources;
 pub mod state_bytes;
+mod usage;
 
 use analytical::AnalyticalCostError;
+pub(crate) use measured::aggregate_lookup;
 pub use measured::{
-    aggregate_lookup, lookup, CostTableProvenance, MeasuredOperationCost, MeasuredOperationCosts,
-    NodePriceSource, OperatorCost, OperatorKind, StateFamily, SummaryOperation,
+    lookup, CostTableProvenance, MeasuredOperationCost, MeasuredOperationCosts, NodePriceSource,
+    OperatorCost, OperatorKind, StateFamily, SummaryOperation,
+};
+pub use operator_statistics::EdgeStatistics;
+pub use ranking::{cheaper, worst_latency_ms, PlanRanking};
+pub use usage::{
+    family_name, kept_pane_chains, node_map, node_usage, pane_retention_ms,
+    pane_retention_ms_of_plan, panes_of, plan_cost, query_reach, trailing_window, NodeMap,
+    NodeUsage, ProducerOutput,
 };
 
 /// Cost per second of wall time; one unit is one CPU-millisecond under
 /// [`ResourceUnitCost::illustrative`].
 pub const COST_UNIT: &str = "cost_per_second";
-/// [`CandidateCost::source`] when every node is priced from the formulas.
+/// [`PlanCost::source`] when every node is priced from the formulas.
 pub const COST_SOURCE: &str = "analytical-cost-v2 (illustrative statistics)";
-/// [`CandidateCost::source`] when every node is priced from the measured
+/// [`PlanCost::source`] when every node is priced from the measured
 /// table.
 pub const MEASURED_COST_SOURCE: &str = "measured operation costs (illustrative statistics)";
-/// [`CandidateCost::source`] when some nodes are priced from the measured
+/// [`PlanCost::source`] when some nodes are priced from the measured
 /// table and the others from the formulas.
 pub const MIXED_COST_SOURCE: &str =
     "measured operation costs and analytical-cost-v2 (illustrative statistics)";
@@ -233,15 +246,11 @@ pub enum ClusterObjective {
     LowestLatency,
     /// The smallest peak memory; ties by disk, then worst-query latency.
     LeastMemory,
-    /// Report every candidate no other beats on peak memory, disk and
-    /// worst-query latency at once (plan selection's `Selection::front`); select the
-    /// front's lowest-latency member.
-    ParetoFront,
 }
 
 /// The deployment's choices for plan selection (Stage 3): the cost model,
 /// how fast a core works, and how long one-off queries are spread over.
-/// Loadable from JSON (`stage_pipeline --plan-selection-settings <file>`);
+/// Loadable from JSON (`stage_pipeline --cost-inputs <file>`);
 /// an omitted field takes its default, an unknown one is refused.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -266,17 +275,6 @@ pub struct CostInputs {
     /// candidate catalog before pricing, preserving the default calibration policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frozen_calibration_factor: Option<f64>,
-    /// Accept every query output regardless of its accuracy guarantee:
-    /// planning uses an accuracy model that accepts every output in place
-    /// of `PlanningModels::accuracy` (`asap-plan-selection`). This field is the one built-in way
-    /// to ignore guarantees.
-    /// For comparing candidates on cost alone, e.g. a benchmark of sketch
-    /// plans with no analytical guarantee. Executability checks still apply.
-    /// Each output accepted only because of it, i.e. whose guarantee check
-    /// fails, is marked in the report
-    /// (`AcceptedAccuracy::guarantee_check_rejection`). JSON:
-    /// `"ignore_accuracy_guarantees": true`. Default `false`.
-    pub ignore_accuracy_guarantees: bool,
 }
 
 impl Default for CostInputs {
@@ -287,7 +285,6 @@ impl Default for CostInputs {
             non_repeating_query_horizon_seconds: DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS,
             measured_operation_costs: MeasuredOperationCosts::default(),
             frozen_calibration_factor: None,
-            ignore_accuracy_guarantees: false,
         }
     }
 }
@@ -359,7 +356,7 @@ impl CostInputs {
 /// One node's price per second of wall time, with how it was measured. A
 /// node is one operator node of the candidate's physical plan DAG
 /// (`PhysicalASAPDAG`), keyed by its [`PhysicalASAPNodeId`] in
-/// [`CandidateCost::per_node`]; not a machine.
+/// [`PlanCost::per_node`]; not a machine.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeCost {
     /// Its operator, as the measured table names it.
@@ -391,7 +388,7 @@ pub struct NodeCost {
 /// the whole candidate's, `per_node` one price per operator node of its
 /// physical plan DAG.
 #[derive(Debug, Clone, PartialEq)]
-pub struct CandidateCost {
+pub struct PlanCost {
     pub usage: ResourceUsage,
     /// Its price per second under cost model 1 or 2 (under cost model 1, the
     /// sum of its nodes' charges plus request overhead for queries without

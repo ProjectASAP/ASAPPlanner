@@ -54,7 +54,7 @@ The test prints totals, parse errors, lowering errors, pre-ASAP successes,
 post-ASAP candidates, unchanged queries, and post-ASAP errors. `Pre-ASAP` means
 that parsing and lowering produced an `OperatorNode` DAG. `Post-ASAP candidate`
 means that some Stage 1 candidate of the query, run alone through
-`run_stage1_to_stage3` with the built-in models, contains an ASAP operator
+the facade's planning stages (`asap_planner::run_planning`) with the built-in models, contains an ASAP operator
 (`contains_asap()`). `Unchanged` is a successful pre-ASAP query whose Stage 1
 candidates are all exact.
 

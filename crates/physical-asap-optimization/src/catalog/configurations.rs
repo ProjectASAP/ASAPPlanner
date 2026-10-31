@@ -6,10 +6,11 @@
 //! Stage 2 validation still checks operator legality and upstream timing.
 //! Potential shared non-summary nodes also receive query materialization; Stage 2
 //! checks highest-shared eligibility on the selected graph, not all possible consumers.
-use asap_types::stages::{SupplierCandidates, SupplierSetInterner};
+use asap_types::stages::{ProducerCandidates, ProducerSetInterner};
 use std::collections::HashMap;
 
 use crate::summary_materialization_eligibility;
+use asap_types::ir::operator::{agg_has_exact_per_entity_kernel, Reduction};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use asap_types::physical::{Materialization, Medium};
@@ -19,7 +20,8 @@ use super::inventory::CandidateInventory;
 use asap_types::ir::QueryRoot;
 use asap_types::stages::{
     output_references, MemoGroupId, OperatorNodeOfCandidateForMemoGroupId,
-    PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, ReaderConstraint,
+    PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PhysicalCandidateKey,
+    PruneReason, PrunedCandidate, ReaderConstraint,
 };
 
 /// [`PhysicalCandidate::may_keep_across_evaluations_per_sole_reader_query`] for `node` configured
@@ -66,8 +68,8 @@ pub enum ConfigurationError {
 }
 
 /// Each operator node of `source` with every timing and materialization
-/// Stage 2 allows, and its execution-scope copies. `query_roots` are the
-/// memo's; their group references are `source`'s output references.
+/// Stage 2 allows, one candidate each. `query_roots` are the memo's; their
+/// group references are `source`'s output references.
 pub fn enumerate_candidate_configurations_before(
     source: &CandidateInventory,
     query_roots: &[QueryRoot<MemoGroupId>],
@@ -113,7 +115,7 @@ pub fn enumerate_candidate_configurations_before(
             if !potential[candidate.0][query] {
                 potential[candidate.0][query] = true;
                 pending.extend(
-                    source.supplier_nodes_per_input[candidate.0]
+                    source.producer_nodes_per_input[candidate.0]
                         .iter()
                         .flat_map(|input| input.iter().copied()),
                 );
@@ -122,6 +124,7 @@ pub fn enumerate_candidate_configurations_before(
     }
     let mut candidates = Vec::new();
     let mut reader_constraints = Vec::new();
+    let mut pruned_candidates = Vec::new();
     let mut source_configurations = vec![Vec::new(); source_count];
     for source_id in 0..source_count {
         super::check_deadline(deadline)?;
@@ -200,12 +203,35 @@ pub fn enumerate_candidate_configurations_before(
                 ExecutionTiming::QueryTime,
             ));
         }
-        // This is the same deployment restriction enforced by PlanSelector's
-        // raw_data_violation. Encode it before solving instead of excluding
-        // each complete plan that uses an unavailable query-time raw scan.
+        // Configurations the deployment cannot run are not generated; each is
+        // recorded as pruned.
+        let group = source.operator_nodes_of_candidates_for_memo_groups[source_id].group();
+        let mut prune_modes = |reason, applies: &dyn Fn(ExecutionTiming) -> bool| {
+            modes.retain(|&(materialization, timing)| {
+                let pruned = applies(timing);
+                if pruned {
+                    pruned_candidates.push(PrunedCandidate {
+                        group,
+                        candidate: PhysicalCandidateKey {
+                            operator_node: OperatorNodeOfCandidateForMemoGroupId(source_id),
+                            timing,
+                            materialization,
+                        },
+                        reason,
+                    });
+                }
+                !pruned
+            });
+        };
+        if !per_entity_aggregate_executable(node) {
+            prune_modes(PruneReason::PerEntityAggregateNotExecutable, &|_| true);
+        }
+        // Without raw data retained, only ingestion-time work reads raw rows.
         if !raw_data_retained && matches!(node.operator, Operator::NonASAP(NonASAPOp::Scan { .. }))
         {
-            modes.retain(|(_, timing)| *timing == ExecutionTiming::IngestionTime);
+            prune_modes(PruneReason::RawDataNotRetained, &|timing| {
+                timing != ExecutionTiming::IngestionTime
+            });
         }
         for (materialization, timing) in modes {
             let id = PhysicalCandidateId(candidates.len());
@@ -214,7 +240,7 @@ pub fn enumerate_candidate_configurations_before(
                 operator_node: OperatorNodeOfCandidateForMemoGroupId(source_id),
                 timing,
                 materialization,
-                supplier_candidates_per_input: Vec::new(),
+                producer_candidates_per_input: Vec::new(),
                 may_produce_query_output: may_produce_query_output[source_id]
                     && timing == ExecutionTiming::QueryTime,
                 may_keep_across_evaluations_per_sole_reader_query:
@@ -292,14 +318,14 @@ pub fn enumerate_candidate_configurations_before(
             }
         }
     }
-    let mut supplier_sets = SupplierSetInterner::default();
+    let mut producer_sets = ProducerSetInterner::default();
     // Compatibility depends on consumer timing and producer mode/timing only.
     // Evaluate each source configuration once per timing, then reuse this exact
     // index; reader eligibility remains expressed by separate graph constraints.
     let mut timing_index = Vec::with_capacity(source_configurations.len());
     for configurations in &source_configurations {
         super::check_deadline(deadline)?;
-        let mut by_timing = [SupplierCandidates::default(), SupplierCandidates::default()];
+        let mut by_timing = [ProducerCandidates::default(), ProducerCandidates::default()];
         for (timing_index, timing) in [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime]
             .into_iter()
             .enumerate()
@@ -311,19 +337,19 @@ pub fn enumerate_candidate_configurations_before(
                     compatible.push(producer);
                 }
             }
-            by_timing[timing_index] = supplier_sets.intern(compatible);
+            by_timing[timing_index] = producer_sets.intern(compatible);
         }
         timing_index.push(by_timing);
     }
-    let mut input_cache: HashMap<(SupplierCandidates, ExecutionTiming), SupplierCandidates> =
+    let mut input_cache: HashMap<(ProducerCandidates, ExecutionTiming), ProducerCandidates> =
         HashMap::new();
     for candidate in &mut candidates {
         super::check_deadline(deadline)?;
         let mut requirements = Vec::new();
-        for input in &source.supplier_nodes_per_input[candidate.operator_node.0] {
+        for input in &source.producer_nodes_per_input[candidate.operator_node.0] {
             let key = (input.clone(), candidate.timing);
-            let compatible_producers = if let Some(suppliers) = input_cache.get(&key) {
-                suppliers.clone()
+            let compatible_producers = if let Some(producer_candidates) = input_cache.get(&key) {
+                producer_candidates.clone()
             } else {
                 let timing = match candidate.timing {
                     ExecutionTiming::QueryTime => 0,
@@ -334,60 +360,47 @@ pub fn enumerate_candidate_configurations_before(
                     super::check_deadline(deadline)?;
                     compatible.extend(timing_index[producer.0][timing].iter().copied());
                 }
-                let suppliers = supplier_sets.intern(compatible);
-                input_cache.insert(key, suppliers.clone());
-                suppliers
+                let producer_candidates = producer_sets.intern(compatible);
+                input_cache.insert(key, producer_candidates.clone());
+                producer_candidates
             };
             requirements.push(compatible_producers);
         }
-        candidate.supplier_candidates_per_input = requirements;
+        candidate.producer_candidates_per_input = requirements;
     }
-    let result = PhysicalASAPMemoCandidates::new(
+    let mut result = PhysicalASAPMemoCandidates::new(
         source.operator_nodes_of_candidates_for_memo_groups.clone(),
         candidates,
         query_roots.to_vec(),
         reader_constraints,
     );
+    result.pruned_candidates = pruned_candidates;
     super::validate_candidates(&result).map_err(|error| invalid(&error))?;
-    // Repeated identical workload entries and identical logical outputs have
-    // identical timing, accuracy and pricing requirements. Their request counts
-    // remain in the evaluator, but they do not require distinct binding scopes.
-    let mut context_ids = std::collections::HashMap::new();
-    let mut output_contexts = Vec::new();
-    for (output, root) in source.query_output_nodes.iter().enumerate() {
-        let suppliers: Vec<_> = root.iter().map(|id| id.0).collect();
-        let key = serde_json::to_string(&(&entries[output_queries[output]], suppliers))
-            .map_err(|error| invalid(&error.to_string()))?;
-        let next = context_ids.len();
-        output_contexts.push(*context_ids.entry(key).or_insert(next));
-    }
-    let mut uses = vec![std::collections::HashSet::new(); source_count];
-    for (consumer, inputs) in source.supplier_nodes_per_input.iter().enumerate() {
-        super::check_deadline(deadline)?;
-        let group = source.operator_nodes_of_candidates_for_memo_groups[consumer].group();
-        for (position, input) in inputs.iter().enumerate() {
-            for producer in input {
-                uses[producer.0].insert((group, position));
-            }
+    super::check_deadline(deadline)?;
+    Ok(result)
+}
+
+/// Whether the executor can run `node`: false only for an exact per-entity
+/// `Aggregate` (a per-series range reduction over raw data samples) that
+/// has more than one measure, a measure without an exact per-entity kernel
+/// ([`agg_has_exact_per_entity_kernel`]), a measure filter or a `HAVING`.
+/// The rule reads one operator node, so Stage 2 does not generate the node
+/// rather than Stage 3 rejecting each plan that reads it.
+fn per_entity_aggregate_executable(node: &OperatorNode) -> bool {
+    match &node.operator {
+        Operator::NonASAP(NonASAPOp::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures,
+            filters,
+            having,
+            ..
+        }) => {
+            matches!(measures.as_slice(), [measure] if agg_has_exact_per_entity_kernel(measure))
+                && filters.iter().all(Option::is_none)
+                && having.is_none()
         }
+        _ => true,
     }
-    let mut root_uses = vec![std::collections::HashSet::new(); source_count];
-    for (output, root) in source.query_output_nodes.iter().enumerate() {
-        for candidate in root {
-            root_uses[candidate.0].insert(output_contexts[output]);
-        }
-    }
-    let original_uses: Vec<_> = uses
-        .iter()
-        .zip(root_uses)
-        .map(|(uses, roots)| uses.len() + roots.len())
-        .collect();
-    super::scopes::expand_execution_scopes_before(
-        result,
-        &original_uses,
-        &output_contexts,
-        deadline,
-    )
 }
 
 pub fn compatible_timing(consumer_timing: ExecutionTiming, producer: &PhysicalCandidate) -> bool {

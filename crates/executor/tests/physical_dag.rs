@@ -574,15 +574,15 @@ fn bind_physical_asap_dag_before_execution() {
                 }),
             ),
         ],
-        edges: vec![PhysicalASAPDAGEdge {
-            producer: 0,
-            consumer: 1,
-            role: EdgeRole::Input,
-            intermediate_schema: (*schema).clone(),
-            data_state: ExecutionDataState::QUERY_ROWS,
-            grouping: GroupingEdgeCompatibility::NotApplicable,
-            window: WindowEdgeCompatibility::NotApplicable,
-        }],
+        edges: vec![PhysicalASAPDAGEdge::new(
+            0,
+            1,
+            EdgeRole::Input,
+            (*schema).clone(),
+            ExecutionDataState::QUERY_ROWS,
+            GroupingEdgeCompatibility::NotApplicable,
+            WindowEdgeCompatibility::NotApplicable,
+        )],
         roots: vec![1],
         scalar_roots: vec![],
     };
@@ -704,16 +704,17 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         guarantee: None,
         retention_ms: None,
     };
-    let edge =
-        |producer, consumer, role, schema: &asap_executor::values::SchemaRef| PhysicalASAPDAGEdge {
+    let edge = |producer, consumer, role, schema: &asap_executor::values::SchemaRef| {
+        PhysicalASAPDAGEdge::new(
             producer,
             consumer,
             role,
-            intermediate_schema: (**schema).clone(),
-            data_state: ExecutionDataState::QUERY_ROWS,
-            grouping: GroupingEdgeCompatibility::NotApplicable,
-            window: WindowEdgeCompatibility::NotApplicable,
-        };
+            (**schema).clone(),
+            ExecutionDataState::QUERY_ROWS,
+            GroupingEdgeCompatibility::NotApplicable,
+            WindowEdgeCompatibility::NotApplicable,
+        )
+    };
     let groups = GroupKeys::by(vec![0]);
     let dag = PhysicalASAPDAG {
         nodes: vec![
@@ -785,7 +786,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
             node.output_state.timing = phase;
         }
         for edge in &mut dag.edges {
-            edge.data_state.timing = phase;
+            edge.data_state_mut().timing = phase;
         }
         let store = with_table(
             Default::default(),
@@ -1140,14 +1141,16 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
         guarantee: None,
         retention_ms: None,
     };
-    let edge = |producer, consumer| PhysicalASAPDAGEdge {
-        producer,
-        consumer,
-        role: EdgeRole::Input,
-        intermediate_schema: (*input).clone(),
-        data_state: ExecutionDataState::QUERY_ROWS,
-        grouping: GroupingEdgeCompatibility::NotApplicable,
-        window: WindowEdgeCompatibility::NotApplicable,
+    let edge = |producer, consumer| {
+        PhysicalASAPDAGEdge::new(
+            producer,
+            consumer,
+            EdgeRole::Input,
+            (*input).clone(),
+            ExecutionDataState::QUERY_ROWS,
+            GroupingEdgeCompatibility::NotApplicable,
+            WindowEdgeCompatibility::NotApplicable,
+        )
     };
     let dag = PhysicalASAPDAG {
         nodes: vec![

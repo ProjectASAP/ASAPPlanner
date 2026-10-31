@@ -9,7 +9,7 @@
 //! *witness*: `W`'s selected logical plan plus `q'` derived from `q`'s
 //! node by one operator. Stage 2 and Stage 3 implement and price the
 //! witness exactly as they price any candidate
-//! ([`optimize_physical_asap`], [`select_plan`]), and the relation
+//! ([`optimize_physical_asap`], the reference pricer), and the relation
 //!
 //! ```text
 //! cost(W ∪ {q'}) − cost(W) ≤ derive_cost + tolerance,
@@ -44,8 +44,7 @@ use serde_json::{json, Value};
 use asap_cost::CostInputs;
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_physical_asap_optimization::optimize_physical_asap;
-use asap_plan_selection::pass::Stage1ToStage3Search;
-use asap_plan_selection::{select_plan, PlanningModels};
+use asap_planner::{PlanSearchSettings, PlanningModels};
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::sketch::SketchAlgorithm;
 use asap_types::ir::QueryRoot;
@@ -399,11 +398,8 @@ impl Planner {
         }
     }
 
-    fn plan_selection_settings(&self) -> CostInputs {
-        CostInputs {
-            ignore_accuracy_guarantees: !self.settings.enforce_accuracy_guarantees,
-            ..CostInputs::default()
-        }
+    fn cost_inputs(&self) -> CostInputs {
+        CostInputs::default()
     }
 
     /// The frontends' roots of `workload`, one per query.
@@ -435,11 +431,12 @@ impl Planner {
         let planning = workload.planning_workload();
         let entries: Vec<_> = planning.query_workload.entries().collect();
         let data = workload.data.clone();
-        let plan_selection = self.plan_selection_settings();
+        let cost_inputs = self.cost_inputs();
         let deployment = workload.deployment();
         let models = PlanningModels::builtin()
-            .with_plan_selection(&plan_selection)
-            .with_deployment_capabilities(&deployment);
+            .with_cost_inputs(&cost_inputs)
+            .with_deployment_capabilities(&deployment)
+            .with_ignore_accuracy_guarantees(!self.settings.enforce_accuracy_guarantees);
         let run = match self.settings.search {
             SearchKind::Exhaustive => run_planning_stages_over(
                 roots.clone(),
@@ -453,41 +450,66 @@ impl Planner {
                 &entries,
                 &data,
                 models,
-                Stage1ToStage3Search::default(),
+                PlanSearchSettings::default(),
+                None,
             ),
         }
         .map_err(|e| e.to_string())?;
-        let selection = run
-            .stage3_plan_selection
-            .as_ref()
-            .map_err(|e| format!("selection: {e}"))?;
-        let cost_per_second = selection.costs[&selection.selected]
-            .cost_per_second
-            .ok_or("no cost per second (cost model 3)")?;
-        let from_logical = run
-            .stage2_physical_asap_optimization
-            .iter()
-            .find(|p| p.id == selection.selected)
-            .map(|p| p.from_logical.clone());
-        let logical_roots = from_logical.and_then(|id| {
-            run.stage1_logical_asap_optimization
-                .iter()
-                .find(|c| c.id == id)
-                .and_then(|c| c.roots.as_ref().ok().cloned())
-        });
-        Ok(Planned {
-            selected: selection.selected.clone(),
-            cost_per_second,
-            stage0_roots: roots,
-            logical_roots,
-        })
+        match &run.reference {
+            // The reference pricer's selection among the enumerated plans.
+            Some(reference) => {
+                let selection = reference
+                    .selection
+                    .as_ref()
+                    .map_err(|e| format!("selection: {e}"))?;
+                let cost_per_second = selection.costs[&selection.selected]
+                    .cost_per_second
+                    .ok_or("no cost per second (cost model 3)")?;
+                let from_logical = reference
+                    .physical
+                    .iter()
+                    .find(|p| p.id == selection.selected)
+                    .map(|p| p.from_logical.clone());
+                let logical_roots = from_logical.and_then(|id| {
+                    reference
+                        .choices
+                        .iter()
+                        .find(|c| c.id == id)
+                        .and_then(|c| c.roots.as_ref().ok().cloned())
+                });
+                Ok(Planned {
+                    selected: selection.selected.clone(),
+                    cost_per_second,
+                    stage0_roots: roots,
+                    logical_roots,
+                })
+            }
+            None => {
+                let selection = run
+                    .run
+                    .selection
+                    .as_ref()
+                    .map_err(|e| format!("selection: {e}"))?;
+                let cost_per_second = selection
+                    .cost
+                    .cost_per_second
+                    .ok_or("no cost per second (cost model 3)")?;
+                Ok(Planned {
+                    selected: "selected".into(),
+                    cost_per_second,
+                    stage0_roots: roots,
+                    logical_roots: run.run.selected_plan.clone(),
+                })
+            }
+        }
     }
 
     /// Stage 2 and Stage 3 over the logical plan `roots` of `workload`'s
     /// queries (one root per query, in order): every materialization
     /// assignment implemented and priced, the cheapest selected, with the
     /// same models as [`plan`](Self::plan). Guarantees are composed again
-    /// first, so a derived node carries the guarantee of what it reads.
+    /// first, so a derived node carries the guarantee of what it reads, and
+    /// summaries are sized for their readers as Pass 1 sizes them.
     /// With `last_root_is_key_filter`, the last root is a `Filter` on
     /// group-key columns only and keeps its input's guarantee (whole groups
     /// selected by an exact key keep each remaining row's bound), which
@@ -505,18 +527,31 @@ impl Planner {
         }
         let mut roots = asap_accuracy::propagation::recompose_guarantees(roots)
             .map_err(|e| format!("witness guarantees: {e}"))?;
+        let planning = workload.planning_workload();
+        let entries: Vec<_> = planning.query_workload.entries().collect();
+        // A witness is built outside the memo: size its summaries as Pass 1
+        // sizes a candidate for these readers, which Stage 3 only checks.
+        let targets: Vec<_> = entries
+            .iter()
+            .map(|entry| entry.requirements.accuracy.clone())
+            .collect();
+        roots = asap_accuracy::sizing::with_summaries_sized_for_targets(
+            &roots,
+            &targets,
+            &workload.data,
+        )
+        .map_err(|e| format!("witness sizing: {e}"))?;
         if let (true, Some(last)) = (last_root_is_key_filter, roots.last_mut()) {
             let filter = last.as_operator().ok_or("a scalar root")?;
             let input = filter.operator.children()[0].guarantee.clone();
             *last = QueryRoot::Operator(Rc::new((**filter).clone().with_guarantee(input)));
         }
-        let planning = workload.planning_workload();
-        let entries: Vec<_> = planning.query_workload.entries().collect();
-        let plan_selection = self.plan_selection_settings();
+        let cost_inputs = self.cost_inputs();
         let deployment = workload.deployment();
         let models = PlanningModels::builtin()
-            .with_plan_selection(&plan_selection)
-            .with_deployment_capabilities(&deployment);
+            .with_cost_inputs(&cost_inputs)
+            .with_deployment_capabilities(&deployment)
+            .with_ignore_accuracy_guarantees(!self.settings.enforce_accuracy_guarantees);
         let mut candidates = optimize_physical_asap(
             "witness",
             &roots,
@@ -528,8 +563,9 @@ impl Planner {
         for (index, candidate) in candidates.iter_mut().enumerate() {
             candidate.id = format!("witness-m{index}");
         }
-        let selection = select_plan(&candidates, &entries, &workload.data, models)
-            .map_err(|e| format!("witness Stage 3: {e}"))?;
+        let selection =
+            crate::memo_pricing::reference_select(&candidates, &entries, &workload.data, models)
+                .map_err(|e| format!("witness Stage 3: {e}"))?;
         let cost = &selection.costs[&selection.selected];
         let cost_per_second = cost
             .cost_per_second

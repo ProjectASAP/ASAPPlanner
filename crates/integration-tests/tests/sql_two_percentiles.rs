@@ -85,7 +85,6 @@ async fn run(queries: &[&str]) -> Run {
     // Every output accepted whatever its guarantee, as `stage_pipeline`
     // plans by default: this test checks the answers against the bound.
     let settings = CostInputs {
-        ignore_accuracy_guarantees: true,
         ..CostInputs::default()
     };
     let candidates = stage1(queries)
@@ -97,7 +96,9 @@ async fn run(queries: &[&str]) -> Run {
         &workload,
         roots,
         candidates,
-        asap_plan_selection::PlanningModels::builtin().with_plan_selection(&settings),
+        asap_planner::PlanningModels::builtin()
+            .with_cost_inputs(&settings)
+            .with_ignore_accuracy_guarantees(true),
     )
 }
 
@@ -293,32 +294,32 @@ async fn q1_with_one_exact_and_one_sketched_percentile_compiles_and_matches() {
 
 /// The id and query roots of every Stage 1 candidate of `queries`.
 async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
     };
-    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+    use asap_logical_asap_optimization::test_support::{
         pane_candidates, window_composition_pass2_candidates,
     };
+    use asap_types::stages::HowToComputeAggregateMeasure;
     let workload = workload(queries);
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let mut roots = Vec::new();
-    for (q, entry) in entries.iter().enumerate() {
-        roots.push((
-            q,
-            QueryRoot::Operator(
-                lower_sql_dialect(
-                    &entry.query.0,
-                    &catalog(),
-                    SqlDialect::DataFusionSQL,
-                    entry.requirements.accuracy.clone(),
-                )
-                .await
-                .unwrap(),
-            ),
+    for entry in &entries {
+        roots.push(QueryRoot::Operator(
+            lower_sql_dialect(
+                &entry.query.0,
+                &catalog(),
+                SqlDialect::DataFusionSQL,
+                entry.requirements.accuracy.clone(),
+            )
+            .await
+            .unwrap(),
         ));
     }
-    let local = generate_per_computation_candidates(roots).unwrap();
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
+    )
+    .unwrap();
     // Explicit fixture configurations: exact; one local substitution at a
     // time (mixed percentiles); and all quantiles using each supported family.
     // Do not enumerate a Cartesian product of complete workload choices.
@@ -338,7 +339,7 @@ async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
         }
     }
     let share = |roots: Vec<QueryRoot>| {
-        asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
+        asap_logical_asap_optimization::test_support::share_common_sub_dags(
             roots
                 .into_iter()
                 .enumerate()
@@ -358,13 +359,7 @@ async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
         .collect::<Vec<_>>();
     let mut candidates = Vec::new();
     for choice in choices {
-        let roots = share(
-            compose_logical_candidate(&local, &choice)
-                .unwrap()
-                .into_iter()
-                .map(|(_, root)| root)
-                .collect(),
-        );
+        let roots = share(compose_logical_candidate(&local, &choice).unwrap());
         candidates.push(roots.clone());
         let panes = pane_candidates(&roots, &grids);
         if !panes.is_empty() {

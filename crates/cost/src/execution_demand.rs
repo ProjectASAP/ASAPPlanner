@@ -3,8 +3,8 @@
 //! This preserves the configured accounting policy, not an exact timestamp
 //! union: different fixed intervals add, unknown phases join a known phase,
 //! estimated rates add, and one-off/scheduled demand uses a batch maximum.
-//! Call `evaluation_rate` on the chosen reader subset only; it does not enumerate
-//! subsets. For retained query-time state pass `None` for each range evaluation
+//! Call `schedule_groups` or `evaluation_rate` on the chosen reader subset
+//! only; neither enumerates subsets. For retained query-time state pass `None` for each range evaluation
 //! to price once per request, as `computations` does.
 
 use super::analytical::AnalyticalCostError;
@@ -13,34 +13,64 @@ use asap_types::physical::Materialization;
 use asap_types::workload::{QueryRecurrence, RangeEvaluation, RepeatedDemand};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-/// Evaluations per second of a node computed once for `queries` together,
-/// each a recurrence with its range evaluation: a request with a range
-/// evaluation is [`RangeEvaluation::evaluations_per_request`] evaluations,
-/// one without it one. Repeating queries with equal intervals and equal
-/// phases on them are evaluated together, every request ending at the
-/// same instant: a node they share is computed once per distinct instant
-/// their steps fall on, `end − k · step_ms` for `k · step_ms ≤ span_ms`. A
-/// query of unknown phase runs with the first known phase on its interval,
-/// if any. A query evaluated once per request (no range, or one step)
-/// evaluates only at the end. Queries on different intervals or phases add
-/// (an over-estimate for intervals whose instants coincide, e.g. every 20 s
-/// and every 30 s meet every 60 s); estimated rates add. One-off, scheduled and unknown queries run as one
-/// batch: the most evaluations among them, spread over
-/// `non_repeating_query_horizon_seconds`.
-pub fn evaluation_rate<'r>(
-    queries: impl IntoIterator<Item = (&'r QueryRecurrence, Option<RangeEvaluation>)>,
+/// How a [`ScheduleGroup`]'s evaluations add to the others'.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Schedule {
+    /// Repeating readers on one interval and phase: evaluated together,
+    /// once per distinct instant their steps fall on.
+    FixedInterval,
+    /// One reader with an estimated rate: its rate times its steps.
+    EstimatedRate,
+    /// The one-off, scheduled and unknown readers, run as one batch: the
+    /// most evaluations among them, spread over the horizon.
+    NonRepeating,
+}
+
+/// Readers of one node that are evaluated together, and how often the node
+/// is computed for them. Groups add ([`evaluation_rate`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScheduleGroup {
+    /// The readers in the group, as positions in the reader list given to
+    /// [`schedule_groups`], ascending.
+    pub readers: Vec<usize>,
+    /// How often the node is computed per second for these readers.
+    pub evaluations_per_second: f64,
+    /// Which kind of group it is.
+    pub schedule: Schedule,
+}
+
+/// One fixed (interval, phase) schedule's readers: each step in ms they
+/// use with the longest span in ms at that step, and the readers.
+type FixedSchedule = (BTreeMap<u64, u64>, Vec<usize>);
+
+/// The groups of `readers` evaluated together (each a recurrence with its
+/// range evaluation), in the order [`evaluation_rate`] adds them: fixed
+/// intervals by (interval, phase), then each estimated rate, then the
+/// non-repeating batch. A request with a range evaluation is
+/// [`RangeEvaluation::evaluations_per_request`] evaluations, one without it
+/// one. Repeating readers with equal intervals and equal phases form one
+/// group, every request ending at the same instant: a node they share is
+/// computed once per distinct instant their steps fall on,
+/// `end − k · step_ms` for `k · step_ms ≤ span_ms`. A reader of unknown
+/// phase joins the group of the first known phase on its interval, if any.
+/// A reader evaluated once per request (no range, or one step) evaluates
+/// only at the end. Different intervals or phases are different groups (an
+/// over-estimate for intervals whose instants coincide, e.g. every 20 s and
+/// every 30 s meet every 60 s); each estimated rate is its own group.
+/// One-off, scheduled and unknown readers form one batch group: the most
+/// evaluations among them, spread over `non_repeating_query_horizon_seconds`.
+pub fn schedule_groups<'r>(
+    readers: impl IntoIterator<Item = (&'r QueryRecurrence, Option<RangeEvaluation>)>,
     non_repeating_query_horizon_seconds: f64,
-) -> Result<f64, AnalyticalCostError> {
+) -> Result<Vec<ScheduleGroup>, AnalyticalCostError> {
     // Per interval in ms and phase in ms on it (`None`: unknown), each step
-    // in ms its readers use and the longest span in ms at that step; once
-    // per request is the interval with span 0.
-    let mut longest_span_ms_by_step_ms_by_schedule: BTreeMap<
-        (u32, Option<u64>),
-        BTreeMap<u64, u64>,
-    > = BTreeMap::new();
-    let mut estimated = 0.0;
+    // in ms its readers use and the longest span in ms at that step, with
+    // the readers; once per request is the interval with span 0.
+    let mut by_schedule: BTreeMap<(u32, Option<u64>), FixedSchedule> = BTreeMap::new();
+    let mut estimated = Vec::new();
     let mut invocations = 0u64;
-    for (recurrence, range_evaluation) in queries {
+    let mut non_repeating = Vec::new();
+    for (reader, (recurrence, range_evaluation)) in readers.into_iter().enumerate() {
         let steps = range_evaluation.map_or(1, |range| range.evaluations_per_request());
         match recurrence {
             QueryRecurrence::Repeated(
@@ -62,62 +92,107 @@ pub fn evaluation_rate<'r>(
                     .map_or((u64::from(interval.0), 0), |range| {
                         (range.step_ms, range.span_ms)
                     });
-                let longest_span_ms = longest_span_ms_by_step_ms_by_schedule
-                    .entry((interval.0, phase_ms))
-                    .or_default()
-                    .entry(step_ms)
-                    .or_default();
+                let (longest_span_ms_by_step_ms, members) =
+                    by_schedule.entry((interval.0, phase_ms)).or_default();
+                let longest_span_ms = longest_span_ms_by_step_ms.entry(step_ms).or_default();
                 *longest_span_ms = (*longest_span_ms).max(span_ms);
+                members.push(reader);
             }
             QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(estimate)) => {
                 let rate = estimate.expected_rate.0;
                 if !rate.is_finite() || rate < 0.0 {
                     return Err(AnalyticalCostError::InvalidRecurrence);
                 }
-                estimated += rate * steps as f64;
+                estimated.push(ScheduleGroup {
+                    readers: vec![reader],
+                    evaluations_per_second: rate * steps as f64,
+                    schedule: Schedule::EstimatedRate,
+                });
             }
             QueryRecurrence::Repeated(RepeatedDemand::Scheduled(times)) => {
                 invocations = invocations.max(times.len() as u64 * steps);
+                non_repeating.push(reader);
             }
             QueryRecurrence::OneTime {
                 invocations: count, ..
-            } => invocations = invocations.max(*count * steps),
-            QueryRecurrence::Unknown => invocations = invocations.max(steps),
+            } => {
+                invocations = invocations.max(*count * steps);
+                non_repeating.push(reader);
+            }
+            QueryRecurrence::Unknown => {
+                invocations = invocations.max(steps);
+                non_repeating.push(reader);
+            }
         }
     }
-    // Queries of unknown phase run with the first known phase on their
+    // Readers of unknown phase run with the first known phase on their
     // interval.
-    let unknown_phase_intervals_ms: Vec<u32> = longest_span_ms_by_step_ms_by_schedule
+    let unknown_phase_intervals_ms: Vec<u32> = by_schedule
         .keys()
         .filter(|(_, phase_ms)| phase_ms.is_none())
         .map(|&(interval_ms, _)| interval_ms)
         .collect();
     for interval_ms in unknown_phase_intervals_ms {
-        let known = longest_span_ms_by_step_ms_by_schedule
+        let known = by_schedule
             .range((interval_ms, Some(0))..=(interval_ms, Some(u64::MAX)))
             .next()
             .map(|(&schedule, _)| schedule);
         if let Some(known) = known {
-            let unknown = longest_span_ms_by_step_ms_by_schedule
-                .remove(&(interval_ms, None))
-                .unwrap_or_default();
-            let with = longest_span_ms_by_step_ms_by_schedule
-                .get_mut(&known)
-                .expect("found above");
+            let (unknown, unknown_readers) =
+                by_schedule.remove(&(interval_ms, None)).unwrap_or_default();
+            let (with, members) = by_schedule.get_mut(&known).expect("found above");
             for (step_ms, span_ms) in unknown {
                 let longest_span_ms = with.entry(step_ms).or_default();
                 *longest_span_ms = (*longest_span_ms).max(span_ms);
             }
+            members.extend(unknown_readers);
+            members.sort_unstable();
         }
     }
-    let repeated: f64 = longest_span_ms_by_step_ms_by_schedule
+    let mut groups: Vec<ScheduleGroup> = by_schedule
         .into_iter()
-        .map(|((interval_ms, _), longest_span_ms_by_step_ms)| {
-            1_000.0 / f64::from(interval_ms)
-                * distinct_instants_per_request(&longest_span_ms_by_step_ms) as f64
-        })
-        .sum();
-    Ok(repeated + estimated + invocations as f64 / non_repeating_query_horizon_seconds)
+        .map(
+            |((interval_ms, _), (longest_span_ms_by_step_ms, readers))| ScheduleGroup {
+                readers,
+                evaluations_per_second: 1_000.0 / f64::from(interval_ms)
+                    * distinct_instants_per_request(&longest_span_ms_by_step_ms) as f64,
+                schedule: Schedule::FixedInterval,
+            },
+        )
+        .collect();
+    groups.extend(estimated);
+    if !non_repeating.is_empty() {
+        groups.push(ScheduleGroup {
+            readers: non_repeating,
+            evaluations_per_second: invocations as f64 / non_repeating_query_horizon_seconds,
+            schedule: Schedule::NonRepeating,
+        });
+    }
+    Ok(groups)
+}
+
+/// Evaluations per second of a node computed once for `queries` together:
+/// the sum of their [`schedule_groups`].
+pub fn evaluation_rate<'r>(
+    queries: impl IntoIterator<Item = (&'r QueryRecurrence, Option<RangeEvaluation>)>,
+    non_repeating_query_horizon_seconds: f64,
+) -> Result<f64, AnalyticalCostError> {
+    let groups = schedule_groups(queries, non_repeating_query_horizon_seconds)?;
+    let rates = |schedule| {
+        groups
+            .iter()
+            .filter(move |group| group.schedule == schedule)
+            .map(|group| group.evaluations_per_second)
+    };
+    // Added as fixed intervals, estimated rates and the batch, each kind
+    // summed on its own first.
+    let repeated: f64 = rates(Schedule::FixedInterval).sum();
+    let mut estimated = 0.0;
+    for rate in rates(Schedule::EstimatedRate) {
+        estimated += rate;
+    }
+    let batch = rates(Schedule::NonRepeating).next().unwrap_or(0.0);
+    Ok(repeated + estimated + batch)
 }
 
 /// Number of offsets common to nonempty arithmetic progressions
@@ -205,6 +280,59 @@ pub fn query_starts(dag: &PhysicalASAPDAG) -> Vec<Vec<PhysicalASAPNodeId>> {
         .collect()
 }
 
+/// What computes a `NotMaterialized` node once per its own execution
+/// ([`consumers`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Consumer {
+    /// Query `.0` (an operator or scalar root), at its own rate.
+    Query(usize),
+    /// A materialized node, at that node's rate.
+    Materialized(PhysicalASAPNodeId),
+}
+
+/// The consumers of each `NotMaterialized` node of `dag` that any consumer
+/// reaches ([`computations`]): the queries and the materialized nodes whose
+/// walk down their inputs reaches it before meeting a materialized node,
+/// each once; the queries first, in order, then the materialized nodes in
+/// `dag`'s node order.
+pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consumer>> {
+    let materialized: Vec<PhysicalASAPNodeId> = dag
+        .nodes
+        .iter()
+        .filter(|n| n.materialization != Materialization::NotMaterialized)
+        .map(|n| n.id)
+        .collect();
+    let is_materialized: HashSet<PhysicalASAPNodeId> = materialized.iter().copied().collect();
+    let inputs = |id: PhysicalASAPNodeId| {
+        dag.edges
+            .iter()
+            .filter(move |e| e.consumer == id)
+            .map(|e| e.producer)
+    };
+    let walks = query_starts(dag)
+        .into_iter()
+        .enumerate()
+        .map(|(query, start)| (Consumer::Query(query), start))
+        .chain(
+            materialized
+                .iter()
+                .map(|&id| (Consumer::Materialized(id), inputs(id).collect())),
+        );
+    let mut consumers: HashMap<_, Vec<Consumer>> = HashMap::new();
+    for (consumer, start) in walks {
+        let mut seen = HashSet::new();
+        let mut stack: Vec<PhysicalASAPNodeId> = start;
+        while let Some(id) = stack.pop() {
+            if is_materialized.contains(&id) || !seen.insert(id) {
+                continue;
+            }
+            consumers.entry(id).or_default().push(consumer);
+            stack.extend(inputs(id));
+        }
+    }
+    consumers
+}
+
 /// How often each node of `dag` is computed: `(multiplier, per_second)`
 /// (module doc, "Cost model"). A materialized node is computed once for all
 /// its readers: once per second at ingestion time (`MatAtIngestion`), at
@@ -213,7 +341,7 @@ pub fn query_starts(dag: &PhysicalASAPDAG) -> Vec<Vec<PhysicalASAPNodeId>> {
 /// kept across evaluations, whose request builds only its newest pane
 /// however many range steps it evaluates. `range_evaluations[q]` is query
 /// `q`'s range evaluation (none when missing). A `NotMaterialized` node is computed once per
-/// consumer that reaches it, at that consumer's rate. A consumer is a query
+/// consumer that reaches it ([`consumers`]), at that consumer's rate. A consumer is a query
 /// (operator or scalar root), at its own rate, or a materialized node, at
 /// that node's rate; a walk stops at the first materialized node it meets,
 /// and a node read several times within one consumer's walk counts once for
@@ -271,33 +399,26 @@ pub fn computations(
         };
         rate_of_materialized.insert(id, rate);
     }
-    // Each consumer's starting nodes and its rate.
-    let mut consumers = Vec::new();
-    for (query, start) in starts.into_iter().enumerate() {
-        let rate = match root_rates.and_then(|rates| rates.get(query)) {
+    // Each query consumer's rate.
+    let mut query_rates = Vec::new();
+    for query in 0..starts.len() {
+        query_rates.push(match root_rates.and_then(|rates| rates.get(query)) {
             Some(&rate) => rate,
             None => evaluation_rate(
                 recurrence.get(query).map(|r| (r, range_of(query))),
                 non_repeating_query_horizon_seconds,
             )?,
-        };
-        consumers.push((start, rate));
-    }
-    for (&id, &rate) in &rate_of_materialized {
-        consumers.push((inputs(id).collect(), rate));
+        });
     }
     let mut count: HashMap<_, (u64, f64)> = HashMap::new();
-    for (start, rate) in consumers {
-        let mut seen = HashSet::new();
-        let mut stack: Vec<PhysicalASAPNodeId> = start;
-        while let Some(id) = stack.pop() {
-            if materialized.contains_key(&id) || !seen.insert(id) {
-                continue;
-            }
-            let entry = count.entry(id).or_default();
+    for (id, of_node) in consumers(dag) {
+        let entry = count.entry(id).or_default();
+        for consumer in of_node {
             entry.0 += 1;
-            entry.1 += rate;
-            stack.extend(inputs(id));
+            entry.1 += match consumer {
+                Consumer::Query(query) => query_rates[query],
+                Consumer::Materialized(node) => rate_of_materialized[&node],
+            };
         }
     }
     Ok(dag

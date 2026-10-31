@@ -60,15 +60,15 @@ fn raw_node(id: usize, payload: NonASAPOp<usize>) -> PhysicalASAPDAGNode {
 
 /// An edge carrying raw samples.
 fn raw_edge(producer: usize, consumer: usize) -> PhysicalASAPDAGEdge {
-    PhysicalASAPDAGEdge {
+    PhysicalASAPDAGEdge::new(
         producer,
         consumer,
-        role: EdgeRole::Input,
-        intermediate_schema: sample_schema(),
-        data_state: ExecutionDataState::QUERY_ROWS,
-        grouping: GroupingEdgeCompatibility::NotApplicable,
-        window: WindowEdgeCompatibility::NotApplicable,
-    }
+        EdgeRole::Input,
+        sample_schema(),
+        ExecutionDataState::QUERY_ROWS,
+        GroupingEdgeCompatibility::NotApplicable,
+        WindowEdgeCompatibility::NotApplicable,
+    )
 }
 
 // A projection over a summary may reorder/rename its columns; recovery must retain
@@ -159,15 +159,15 @@ fn summary_projection_survives_recovery() {
         edges: vec![
             raw_edge(2, 3),
             raw_edge(3, 0),
-            PhysicalASAPDAGEdge {
-                producer: 0,
-                consumer: 1,
-                role: EdgeRole::Input,
-                intermediate_schema: (*schema).clone(),
-                data_state: ExecutionDataState::INGESTION_SUMMARY,
-                grouping: GroupingEdgeCompatibility::NotApplicable,
-                window: WindowEdgeCompatibility::NotApplicable,
-            },
+            PhysicalASAPDAGEdge::new(
+                0,
+                1,
+                EdgeRole::Input,
+                (*schema).clone(),
+                ExecutionDataState::INGESTION_SUMMARY,
+                GroupingEdgeCompatibility::NotApplicable,
+                WindowEdgeCompatibility::NotApplicable,
+            ),
         ],
         roots: vec![1],
         scalar_roots: vec![],

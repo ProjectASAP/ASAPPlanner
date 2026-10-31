@@ -48,13 +48,13 @@ missing fact.
 Without `--enforce-accuracy-guarantees`, `stage_pipeline` ignores accuracy
 guarantees: every output is accepted whatever its guarantee, and plans are
 compared on cost alone. The document's top-level `accuracy_guarantees` says
-`ignored` or `enforced`. The document's `stage3_plan_selection.selected` names the selected plan, and
-`stage3_plan_selection.costs` holds each shown plan's `cost_per_second`.
-For this query, `selected` is `P1`, the exact plan. The Count-Min top-k
-plan is discarded because the command declares no metric type, so the
-samples are not proven non-negative, and the CountSketch top-k plan
-because its output has no guarantee;
-`stage3_plan_selection.search.queries[0].discarded` gives each `cause`
+`ignored` or `enforced`. The document's `stage3_plan_selection.selected_dag`
+names the selected physical candidates, and `stage3_plan_selection.cost`
+holds the selected plan's `cost_per_second`. For this query the selected plan
+is the exact plan. The Count-Min top-k plan is not selected because the
+command declares no metric type, so the samples are not proven non-negative,
+and the CountSketch top-k plan because its output has no guarantee. Under
+`--exhaustive`, `reference_pricing.pruned_candidates` gives each plan's `cause`
 (`count_min_weights_not_proven_non_negative`, `no_accuracy_guarantee`) and
 reason.
 Open the document in the [Stage Viewer](stage-viewer.md) to see every

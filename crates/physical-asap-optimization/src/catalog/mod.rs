@@ -1,6 +1,6 @@
 //! Stage 2's physical candidates: implement each memo candidate's
 //! operators, enumerate its timing and materialization, record which
-//! candidates can supply each input, and prune what cannot be used
+//! candidates can produce each input, and prune what cannot be used
 //! ([`generate_physical_asap_memo_candidates`]); and realize one selected
 //! assignment as a physical plan (#1047). The output type,
 //! `PhysicalASAPMemoCandidates`, lives in `asap_types::stages`; Stage 3
@@ -11,13 +11,10 @@ mod inventory;
 mod pruning;
 mod realize;
 mod reconstruction;
-mod scopes;
 
-pub use asap_types::stages::{PhysicalCandidateError, SelectedPhysicalCandidate};
 pub use configurations::ConfigurationError;
 pub use inventory::CandidateInventoryError;
-pub use realize::{materialize_selected_candidates, Stage2AssignmentRealizer};
-pub use reconstruction::{reconstruct_selected_candidates, ReconstructedCandidates};
+pub use realize::Stage2AssignmentRealizer;
 
 use asap_types::stages::{
     LogicalASAPMemoCandidates, PhysicalASAPMemoCandidates, PhysicalCandidateId, ReaderConstraint,
@@ -30,7 +27,7 @@ pub enum ErrorGeneratingPhysicalASAPMemoCandidates {
     /// Lowering the memo's candidates to operator nodes failed.
     #[error(transparent)]
     Inventory(#[from] CandidateInventoryError),
-    /// Enumerating timings, materializations and scope copies failed.
+    /// Enumerating timings and materializations failed.
     #[error(transparent)]
     Configuration(#[from] ConfigurationError),
     /// Structural pruning found the candidates malformed.
@@ -52,8 +49,11 @@ impl ErrorGeneratingPhysicalASAPMemoCandidates {
 /// Stage 2: implement every operator node of every candidate in `logical`'s
 /// memo, enumerate the timings and materializations the data and deployment
 /// allow (`query_time_results_retained`; no query-time raw scans unless
-/// `raw_data_retained`), record which candidates may supply each input, and
-/// prune what cannot be used. Prices nothing.
+/// `raw_data_retained`; no exact per-entity aggregate the executor cannot
+/// run), record which candidates may produce each input, and prune what
+/// cannot be used. Every configuration not generated and every candidate
+/// pruned is recorded in the output's `pruned_candidates` with its
+/// `PruneReason`. Prices nothing.
 pub fn generate_physical_asap_memo_candidates(
     logical: &LogicalASAPMemoCandidates,
     entries: &[QueryWorkloadEntry],
@@ -101,7 +101,7 @@ fn validate_ids(ids: &[PhysicalCandidateId], count: usize, context: &str) -> Res
     Ok(())
 }
 
-/// Every supplier, operator node and reader constraint of `physical` names an
+/// Every producer, operator node and reader constraint of `physical` names an
 /// existing candidate or output reference, and each query reader constraint
 /// partitions the output references.
 fn validate_candidates(physical: &PhysicalASAPMemoCandidates) -> Result<(), String> {
@@ -109,27 +109,9 @@ fn validate_candidates(physical: &PhysicalASAPMemoCandidates) -> Result<(), Stri
     let outputs_count = physical.output_reference_count();
     let invalid = |message: &str| format!("invalid physical ASAP memo candidates: {message}");
     for constraint in &physical.reader_constraints {
-        let (candidate, outputs) = match constraint {
-            ReaderConstraint::ActivationRequires {
-                candidate,
-                required_candidate,
-            } => {
-                if required_candidate.0 >= count || candidate == required_candidate {
-                    return Err(invalid(
-                        "activation constraint references missing or identical candidate",
-                    ));
-                }
-                (*candidate, Vec::new())
-            }
-            ReaderConstraint::MinimumQueryReaders {
-                candidate,
-                query_outputs,
-                ..
-            }
-            | ReaderConstraint::HighestSharedQueryMaterialization {
-                candidate,
-                query_outputs,
-            } => {
+        let outputs = match constraint {
+            ReaderConstraint::MinimumQueryReaders { query_outputs, .. }
+            | ReaderConstraint::HighestSharedQueryMaterialization { query_outputs, .. } => {
                 let outputs: Vec<_> = query_outputs.iter().flatten().copied().collect();
                 let unique: std::collections::HashSet<_> = outputs.iter().copied().collect();
                 if outputs.len() != outputs_count || unique.len() != outputs.len() {
@@ -137,18 +119,14 @@ fn validate_candidates(physical: &PhysicalASAPMemoCandidates) -> Result<(), Stri
                         "query reader buckets must partition every output exactly once",
                     ));
                 }
-                (*candidate, outputs)
+                outputs
             }
-            ReaderConstraint::AllowedOutputs { candidate, outputs } => {
-                (*candidate, outputs.clone())
-            }
-            ReaderConstraint::IncompatibleOutputs {
-                candidate,
-                left,
-                right,
-            } => (*candidate, vec![*left, *right]),
+            ReaderConstraint::AllowedOutputs { outputs, .. } => outputs.clone(),
+            ReaderConstraint::IncompatibleOutputs { left, right, .. } => vec![*left, *right],
         };
-        if candidate.0 >= count || outputs.iter().any(|&output| output >= outputs_count) {
+        if constraint.candidate().0 >= count
+            || outputs.iter().any(|&output| output >= outputs_count)
+        {
             return Err(invalid(
                 "reader constraint references missing candidate or output",
             ));
@@ -161,9 +139,11 @@ fn validate_candidates(physical: &PhysicalASAPMemoCandidates) -> Result<(), Stri
                 "candidate {index} references missing operator node"
             )));
         }
-        for (input, suppliers) in candidate.supplier_candidates_per_input.iter().enumerate() {
+        for (input, producer_candidates) in
+            candidate.producer_candidates_per_input.iter().enumerate()
+        {
             validate_ids(
-                suppliers,
+                producer_candidates,
                 count,
                 &format!("candidate {index}, requirement {input}"),
             )
@@ -184,34 +164,6 @@ fn check_deadline(
     }
 }
 
-/// [`validate_selected_connections`](asap_types::stages::validate_selected_connections) against `physical`'s candidates.
-fn validate_selected_graph(
-    physical: &PhysicalASAPMemoCandidates,
-    selected: &asap_types::stages::SelectedCandidateGraph,
-) -> Result<(), String> {
-    let query_output_candidates: Vec<Vec<_>> = (0..physical.output_reference_count())
-        .map(|output| physical.query_output_candidates(output).collect())
-        .collect();
-    let query_output_candidates: Vec<&[_]> =
-        query_output_candidates.iter().map(Vec::as_slice).collect();
-    asap_types::stages::validate_selected_connections(
-        physical.candidates.len(),
-        |candidate| {
-            physical.candidates[candidate.0]
-                .supplier_candidates_per_input
-                .len()
-        },
-        |candidate, input| {
-            physical.candidates[candidate.0]
-                .supplier_candidates_per_input
-                .get(input)
-        },
-        &query_output_candidates,
-        &physical.reader_constraints,
-        selected,
-    )
-}
-
 /// Catalog internals that plan selection's unit tests exercise together with
 /// its solver.
 #[cfg(feature = "test-support")]
@@ -227,9 +179,11 @@ pub mod test_support {
         build_candidate_inventory_before, build_with_compatible_producers_cache, CandidateInventory,
     };
     pub use super::pruning::{prune, usable_candidates};
-    pub use super::realize::{ordered_output_references, restore_query_roots};
+    pub use super::realize::{
+        materialize_selected_candidates, ordered_output_references, restore_query_roots,
+    };
     pub use super::reconstruction::{
         ordered_inputs, output_contract_satisfied, paired_node_identities,
+        reconstruct_selected_candidates, ReconstructedCandidates,
     };
-    pub use super::scopes::expand_execution_scopes_before;
 }

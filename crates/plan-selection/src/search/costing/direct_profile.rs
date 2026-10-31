@@ -1,14 +1,14 @@
-//! Local cost certification shared by fixed and supplier-dependent profiles.
+//! Local cost certification shared by fixed and producer-dependent profiles.
 //!
-//! Price each operation from its actual supplier output and state configuration.
-//! The fixed-profile adapter admits one interface; supplier_price_options keeps
+//! Price each operation from its actual producer output and state configuration.
+//! The fixed-profile adapter admits one interface; producer_price_options keeps
 //! compatible interfaces as joint MILP choices. Ingestion worker counts require
 //! certified unary upstream work, never statistics from a template child.
 use crate::search::candidates::dag::PhysicalCandidatesWithCosts;
 use crate::search::milp::direct_cost::{DirectCostProfile, NodeCostProfile, QueryScheduleRates};
 use crate::search::refinement::planner::CandidatePlanningContext;
-use crate::{PricedNode, ProducerOutput};
 use asap_cost::CostModel;
+use asap_cost::{NodeUsage, ProducerOutput};
 use asap_types::ir::physical_export::PhysicalASAPDAGNode;
 use asap_types::ir::properties::execution_data_state::{DataPrimitive, ExecutionDataState};
 use asap_types::ir::properties::{AccuracyScope, ExecutionTiming};
@@ -32,7 +32,7 @@ pub(in crate::search) enum DirectProfileError {
 pub(in crate::search) struct DirectProfileExtraction {
     pub profile: DirectCostProfile,
     pub supported: Vec<bool>,
-    /// The sole input's certified suppliers; empty for scans/unsupported nodes.
+    /// The sole input's certified producers; empty for scans/unsupported nodes.
     pub suppliers: Vec<Vec<PhysicalCandidateId>>,
 }
 
@@ -94,7 +94,7 @@ fn prepare_profile(
     context: &CandidatePlanningContext<'_>,
     prefer_latest_pane: bool,
 ) -> Result<Option<PreparedProfile>, DirectProfileError> {
-    let settings = context.models.plan_selection;
+    let settings = context.models.cost_inputs;
     let CostModel::UsageOverTime(_prices) = &settings.cost_model else {
         return Ok(None);
     };
@@ -102,11 +102,11 @@ fn prepare_profile(
         return Ok(None);
     };
     if context
-        .original_roots
+        .query_roots
         .iter()
         .any(|root| !matches!(root, QueryRoot::Operator(_)))
-        || context.original_roots.len() != context.entries.len()
-        || context.original_roots.len() != configured.dag.query_roots.len()
+        || context.query_roots.len() != context.entries.len()
+        || context.query_roots.len() != configured.dag.query_roots.len()
     {
         return Ok(None);
     }
@@ -196,10 +196,6 @@ fn prepare_profile(
                             ) || (configuration.materialization
                                 == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
                                 && matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
-                                && context
-                                    .models
-                                    .deployment_capabilities
-                                    .query_time_results_retained
                                 && configuration
                                     .may_keep_across_evaluations_per_sole_reader_query
                                     .iter()
@@ -275,7 +271,7 @@ fn prepare_profile(
                 continue;
             }
             if candidate
-                .supplier_candidates_per_input
+                .producer_candidates_per_input
                 .iter()
                 .any(|input| input.candidates.contains(&PhysicalCandidateId(id)))
             {
@@ -366,7 +362,7 @@ fn extract_scan_class(
     let mut nodes = nodes;
     for (id, node) in nodes.iter_mut().enumerate() {
         if configured.dag.candidates[id]
-            .supplier_candidates_per_input
+            .producer_candidates_per_input
             .len()
             > 1
         {
@@ -374,7 +370,7 @@ fn extract_scan_class(
         }
     }
     let count = nodes.len();
-    let settings = context.models.plan_selection;
+    let settings = context.models.cost_inputs;
     let CostModel::UsageOverTime(prices) = &settings.cost_model else {
         return Ok(None);
     };
@@ -452,12 +448,12 @@ fn extract_scan_class(
 }
 
 fn profile_for_priced(
-    priced: &PricedNode<'_>,
+    priced: &NodeUsage<'_>,
     node: &PhysicalASAPDAGNode,
     compaction_seconds: f64,
     context: &CandidatePlanningContext<'_>,
 ) -> Result<NodeCostProfile, DirectProfileError> {
-    let CostModel::UsageOverTime(prices) = &context.models.plan_selection.cost_model else {
+    let CostModel::UsageOverTime(prices) = &context.models.cost_inputs.cost_model else {
         return Err(DirectProfileError::Unsupported(
             "non-usage objective".into(),
         ));
@@ -478,7 +474,7 @@ fn profile_for_priced(
         ingestion: node.output_state.timing == ExecutionTiming::IngestionTime,
         standing_cost_per_second: priced.average_memory_bytes * prices.cost_per_memory_byte_second
             + priced.disk_bytes as f64 * prices.cost_per_disk_byte_second,
-        work_seconds: priced.work_ms / 1000.0,
+        work_seconds: priced.work_ms_per_execution / 1000.0,
         compaction_seconds,
         held_memory_cost_per_second: priced.held.map_or(0.0, |(bytes, _, _)| {
             bytes as f64 * prices.cost_per_memory_byte_second
@@ -502,7 +498,7 @@ fn price<'a>(
     context: &'a CandidatePlanningContext<'_>,
     nodes: &'a [Option<PhysicalASAPDAGNode>],
     lookbacks: &[Option<u64>],
-    cache: &mut [Option<PricedNode<'a>>],
+    cache: &mut [Option<NodeUsage<'a>>],
     visited: &mut [bool],
     visiting: &mut [bool],
     suppliers: &mut [Vec<PhysicalCandidateId>],
@@ -523,7 +519,7 @@ fn price<'a>(
         return Ok(());
     };
     visiting[id] = true;
-    let requirements = &configured.dag.candidates[id].supplier_candidates_per_input;
+    let requirements = &configured.dag.candidates[id].producer_candidates_per_input;
     let options: Vec<Vec<PhysicalCandidateId>> = input_override.map_or_else(
         || {
             requirements.first().map_or_else(
@@ -680,15 +676,15 @@ fn price<'a>(
             }
             _ => (1, None),
         };
-        let Ok(priced) = crate::price_node(
+        let Ok(priced) = asap_cost::node_usage(
             node,
             &views,
             (1, 1.0),
-            crate::trailing_window(lookbacks[id]),
+            asap_cost::trailing_window(lookbacks[id]),
             retained_panes,
             ingestion_window,
             context.data,
-            context.models.plan_selection,
+            context.models.cost_inputs,
             context.calibration.factor(),
         ) else {
             continue;
@@ -702,8 +698,10 @@ fn price<'a>(
             |inputs| inputs.upstream_work,
         );
         let closure_work = WorkBounds {
-            minimum: (prior.minimum + priced.work_ms).next_down().max(0.0),
-            maximum: (prior.maximum + priced.work_ms).next_up(),
+            minimum: (prior.minimum + priced.work_ms_per_execution)
+                .next_down()
+                .max(0.0),
+            maximum: (prior.maximum + priced.work_ms_per_execution).next_up(),
         };
         if !closure_work.maximum.is_finite() {
             continue;
@@ -715,7 +713,7 @@ fn price<'a>(
                 continue;
             };
             // Same local price does not imply the same upstream worker count.
-            // Restrict this producer to one proven bucket of supplier bindings.
+            // Restrict this producer to one proven bucket of producer bindings.
             if worker_counts[id].is_some_and(|prior| prior != workers) {
                 continue;
             }
@@ -785,7 +783,7 @@ fn failure_budget(
     let result = (|| {
         let population = || {
             let mut sources = HashSet::new();
-            for root in context.original_roots {
+            for root in context.query_roots {
                 let QueryRoot::Operator(root) = root else {
                     return None;
                 };
@@ -848,7 +846,7 @@ fn failure_budget(
             }
             let mut cache = std::collections::HashMap::new();
             context
-                .original_roots
+                .query_roots
                 .iter()
                 .map(|root| match root {
                     QueryRoot::Operator(node) => {
@@ -983,11 +981,11 @@ fn certified_workers(work: WorkBounds, node_count: usize) -> Option<u64> {
 
 fn state_compaction_seconds(
     node: &PhysicalASAPDAGNode,
-    priced: &PricedNode<'_>,
+    priced: &NodeUsage<'_>,
     workers: u64,
     context: &CandidatePlanningContext<'_>,
 ) -> f64 {
-    let settings = context.models.plan_selection;
+    let settings = context.models.cost_inputs;
     let measured = crate::lookup(
         &settings.measured_operation_costs,
         asap_cost::OperatorKind::SummaryMerge,
@@ -999,7 +997,7 @@ fn state_compaction_seconds(
         settings.resource_speed.ms_per_cpu_op * context.calibration.factor(),
         |unit| (unit.ns_per_unit + unit.ns_per_invocation) * 1e-6,
     );
-    let states = priced.output.rows / crate::panes_of(node);
+    let states = priced.output.rows / asap_cost::panes_of(node);
     (workers - 1) as f64 * states as f64 * merge_ms / 1000.0
 }
 
@@ -1011,7 +1009,7 @@ fn check_deadline(deadline: Option<std::time::Instant>) -> Result<(), DirectProf
     }
 }
 
-fn same_price(a: &PricedNode<'_>, b: &PricedNode<'_>) -> bool {
+fn same_price(a: &NodeUsage<'_>, b: &NodeUsage<'_>) -> bool {
     let family = match (a.family, b.family) {
         (crate::StateFamily::None, crate::StateFamily::None) => true,
         (crate::StateFamily::Exact(a), crate::StateFamily::Exact(b)) => a == b,
@@ -1024,15 +1022,15 @@ fn same_price(a: &PricedNode<'_>, b: &PricedNode<'_>) -> bool {
         }
         _ => false,
     };
-    let bits = |p: &PricedNode<'_>| {
+    let bits = |p: &NodeUsage<'_>| {
         [
-            p.work_ms.to_bits(),
+            p.work_ms_per_execution.to_bits(),
             p.cpu_ops_per_second.to_bits(),
             p.scanned_bytes_per_second.to_bits(),
             p.average_memory_bytes.to_bits(),
         ]
     };
-    let held = |p: &PricedNode<'_>| {
+    let held = |p: &NodeUsage<'_>| {
         p.held
             .map(|(bytes, rate, per_reader)| (bytes, rate.to_bits(), per_reader))
     };
@@ -1078,7 +1076,7 @@ mod tests {
     use asap_types::ir::{Operator, OperatorNode, ProjectItem, ScalarExpr};
 
     use crate::search::candidates::dag::{
-        DagOfPhysicalCandidatesWithCosts, InputSupplierCandidates, PhysicalCandidateWithCost,
+        DagOfPhysicalCandidatesWithCosts, InputProducerCandidates, PhysicalCandidateWithCost,
         QueryOutputCandidates,
     };
 
@@ -1120,7 +1118,7 @@ mod tests {
     // Equal-priced plain-output consumers retain both exact and sketch paths.
     // The sketch-count bound controls later resizing, not the price interface.
     #[test]
-    fn plain_reader_keeps_exact_and_kmv_supplier_interfaces() {
+    fn plain_reader_keeps_exact_and_kmv_producer_interfaces() {
         use asap_types::ir::schema::{SketchAlgorithm, SketchKind, SketchStatistic};
         use std::rc::Rc;
         let target = AccuracyTarget::max_error(0.05)
@@ -1187,7 +1185,7 @@ mod tests {
                 0.0,
                 inputs
                     .into_iter()
-                    .map(|supplier| InputSupplierCandidates {
+                    .map(|supplier| InputProducerCandidates {
                         candidates: vec![supplier].into(),
                     })
                     .collect(),
@@ -1197,7 +1195,7 @@ mod tests {
         let exact_id = append(exact, &mut configured);
         let estimate_id = append(estimate, &mut configured);
         let project_id = append(project.clone(), &mut configured);
-        configured.dag.candidates[project_id.0].supplier_candidates_per_input[0].candidates =
+        configured.dag.candidates[project_id.0].producer_candidates_per_input[0].candidates =
             vec![exact_id, estimate_id].into();
         configured.sync_physical_for_tests();
         configured.dag.query_roots.push(QueryOutputCandidates {
@@ -1221,11 +1219,11 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: crate::PlanningModels::builtin(),
+            models: crate::SelectionModels::builtin(),
             calibration: asap_cost::CalibrationFit::default(),
         };
         let extracted = extract(&configured, &context).unwrap().unwrap();
@@ -1240,11 +1238,11 @@ mod tests {
     // direct costs include working memory and agree with the complete evaluator.
     #[test]
     fn fixed_sketch_profiles_match_the_real_evaluator() {
-        use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+        use asap_logical_asap_optimization::test_support::{
             compose_logical_candidate, generate_per_computation_candidates,
-            HowToComputeAggregateMeasure,
         };
         use asap_types::ir::schema::SketchAlgorithm;
+        use asap_types::stages::HowToComputeAggregateMeasure;
         use std::rc::Rc;
         fn append(
             node: Rc<OperatorNode>,
@@ -1261,7 +1259,7 @@ mod tests {
                 0.0,
                 inputs
                     .into_iter()
-                    .map(|supplier| InputSupplierCandidates {
+                    .map(|supplier| InputProducerCandidates {
                         candidates: vec![supplier].into(),
                     })
                     .collect(),
@@ -1287,29 +1285,21 @@ mod tests {
                     "quantile_over_time(0.95, latency[5m])"
                 };
                 let original = lower_promql(query, target.clone());
-                let generated = generate_per_computation_candidates(vec![(
-                    0,
-                    QueryRoot::Operator(original.clone()),
-                )])
+                let generated = generate_per_computation_candidates(
+                    &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+                        QueryRoot::Operator(original.clone()),
+                    ]),
+                )
                 .unwrap();
                 let choice = generated.targets[0].ways_to_compute.iter().position(|candidate|
                     matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == algorithm)).unwrap();
-                let roots: Vec<_> = compose_logical_candidate(&generated, &[choice])
-                    .unwrap()
-                    .into_iter()
-                    .map(|(_, root)| root)
-                    .collect();
+                let roots: Vec<_> = compose_logical_candidate(&generated, &[choice]).unwrap();
                 let data: DataWorkload = serde_json::from_value(serde_json::json!({
                     "arrival":{"ingesting":{"rows_per_second":100.0}},
                     "sources":{"latency":{"series_count":2,"rows_held":30000,"values_non_negative":true,"max_distinct_per_evaluation":1000}}
                 })).unwrap();
-                // A legal finite configuration is sized before direct pricing.
-                let sized = crate::resize_for_failure_probability(
-                    &roots,
-                    std::slice::from_ref(&target),
-                    &data,
-                )
-                .unwrap();
+                // Sized as Pass 1 sizes it: Stage 3 prices and checks that size.
+                let sized = crate::sized_as_pass1(&roots, std::slice::from_ref(&target), &data);
                 let mut configured = PhysicalCandidatesWithCosts::empty_for_tests();
                 let QueryRoot::Operator(root) = &sized[0] else {
                     panic!("operator")
@@ -1335,11 +1325,11 @@ mod tests {
                 let context = CandidatePlanningContext {
                     deadline: None,
                     refine_materialization: false,
-                    seed_separate_plans: false,
-                    original_roots: &originals,
+                    query_roots: &originals,
+                    realizer: &crate::search::test_realizer(&originals, &entries, &data),
                     entries: &entries,
                     data: &data,
-                    models: crate::PlanningModels::builtin(),
+                    models: crate::SelectionModels::builtin(),
                     calibration: asap_cost::CalibrationFit::default(),
                 };
                 let extracted = extract(&configured, &context).unwrap().unwrap();
@@ -1446,11 +1436,11 @@ mod tests {
         mode: Materialization,
         range_evaluation: Option<asap_types::workload::RangeEvaluation>,
     ) {
-        use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+        use asap_logical_asap_optimization::test_support::{
             compose_logical_candidate, generate_per_computation_candidates,
-            HowToComputeAggregateMeasure,
         };
         use asap_types::ir::schema::SketchAlgorithm;
+        use asap_types::stages::HowToComputeAggregateMeasure;
         use std::rc::Rc;
         fn append(
             node: Rc<OperatorNode>,
@@ -1482,7 +1472,7 @@ mod tests {
                 0.0,
                 inputs
                     .into_iter()
-                    .map(|supplier| InputSupplierCandidates {
+                    .map(|supplier| InputProducerCandidates {
                         candidates: vec![supplier].into(),
                     })
                     .collect(),
@@ -1516,35 +1506,26 @@ mod tests {
                         "quantile_over_time(0.95, latency[5m])"
                     };
                     let original = lower_promql(query, target.clone());
-                    let generated = generate_per_computation_candidates(vec![(
-                        0,
-                        QueryRoot::Operator(original.clone()),
-                    )])
+                    let generated = generate_per_computation_candidates(
+                        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+                            QueryRoot::Operator(original.clone()),
+                        ]),
+                    )
                     .unwrap();
                     let choice = generated.targets[0].ways_to_compute.iter().position(|candidate|
                     matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == algorithm)).unwrap();
-                    let roots: Vec<_> = compose_logical_candidate(&generated, &[choice])
-                        .unwrap()
-                        .into_iter()
-                        .map(|(_, root)| root)
-                        .collect();
-                    let pane_rules =
-                        asap_logical_asap_optimization::pass2::asap_aware_cse::pane_candidates(
-                            &roots,
-                            &[Some(width)],
-                        );
-                    let roots = asap_logical_asap_optimization::pass2::asap_aware_cse::window_composition_pass2_candidates(&roots, &pane_rules).unwrap().pop().unwrap().roots.unwrap();
+                    let roots: Vec<_> = compose_logical_candidate(&generated, &[choice]).unwrap();
+                    let pane_rules = asap_logical_asap_optimization::test_support::pane_candidates(
+                        &roots,
+                        &[Some(width)],
+                    );
+                    let roots = asap_logical_asap_optimization::test_support::window_composition_pass2_candidates(&roots, &pane_rules).unwrap().pop().unwrap().roots.unwrap();
                     let data: DataWorkload = serde_json::from_value(serde_json::json!({
                     "arrival":{"ingesting":{"rows_per_second":rows_per_second}},
                     "sources":{"latency":{"series_count":series_count,"rows_held":rows_per_second * 300,"values_non_negative":true,"max_distinct_per_evaluation":1000}}
                 })).unwrap();
-                    // A legal finite configuration is sized before direct pricing.
-                    let sized = crate::resize_for_failure_probability(
-                        &roots,
-                        std::slice::from_ref(&target),
-                        &data,
-                    )
-                    .unwrap();
+                    // Sized as Pass 1 sizes it: Stage 3 prices and checks that size.
+                    let sized = crate::sized_as_pass1(&roots, std::slice::from_ref(&target), &data);
                     let mut configured = PhysicalCandidatesWithCosts::empty_for_tests();
                     let QueryRoot::Operator(root) = &sized[0] else {
                         panic!("operator")
@@ -1595,13 +1576,15 @@ mod tests {
                     let context = CandidatePlanningContext {
                         deadline: None,
                         refine_materialization: false,
-                        seed_separate_plans: false,
-                        original_roots: &originals,
+                        query_roots: &originals,
+                        realizer: &asap_physical_asap_optimization::Stage2AssignmentRealizer {
+                            query_time_results_retained: deployment.query_time_results_retained,
+                            ..crate::search::test_realizer(&originals, &entries, &data)
+                        },
                         entries: &entries,
                         data: &data,
-                        models: crate::PlanningModels {
-                            deployment_capabilities: &deployment,
-                            ..crate::PlanningModels::builtin().with_plan_selection(&settings)
+                        models: crate::SelectionModels {
+                            ..crate::SelectionModels::builtin().with_cost_inputs(&settings)
                         },
                         calibration: asap_cost::CalibrationFit::default(),
                     };
@@ -1672,8 +1655,7 @@ mod tests {
                             non_negative: true,
                         },
                     );
-                    let CostModel::UsageOverTime(prices) =
-                        &context.models.plan_selection.cost_model
+                    let CostModel::UsageOverTime(prices) = &context.models.cost_inputs.cost_model
                     else {
                         unreachable!()
                     };
@@ -1724,8 +1706,8 @@ mod tests {
                         boundary_settings.resource_speed.ms_per_cpu_op *= 1000.0 / work_ms;
                         boundary_settings.resource_speed.ms_per_scanned_byte *= 1000.0 / work_ms;
                         let boundary_context = CandidatePlanningContext {
-                            models: crate::PlanningModels {
-                                plan_selection: &boundary_settings,
+                            models: crate::SelectionModels {
+                                cost_inputs: &boundary_settings,
                                 ..context.models
                             },
                             ..context
@@ -1755,8 +1737,8 @@ mod tests {
                                 },
                             );
                             let measured_context = CandidatePlanningContext {
-                                models: crate::PlanningModels {
-                                    plan_selection: &measured,
+                                models: crate::SelectionModels {
+                                    cost_inputs: &measured,
                                     ..context.models
                                 },
                                 ..context
@@ -1804,11 +1786,11 @@ mod tests {
                             ExecutionTiming::QueryTime,
                             Materialization::MatAtQuery(Medium::Memory),
                             chain_candidate.local_cost,
-                            chain_candidate.supplier_candidates_per_input,
+                            chain_candidate.producer_candidates_per_input,
                         );
                         assert_eq!(pushed, normal_chain);
                         for candidate in &mut configured.dag.candidates {
-                            for input in &mut candidate.supplier_candidates_per_input {
+                            for input in &mut candidate.producer_candidates_per_input {
                                 if input.candidates.contains(&PhysicalCandidateId(chain)) {
                                     input.candidates.push(normal_chain);
                                 }
@@ -1870,21 +1852,6 @@ mod tests {
                             (actual - modeled).abs() <= 1e-9 * actual.max(1e-15),
                             "full-window class: {actual} vs {modeled}"
                         );
-                        let forbidden =
-                            asap_logical_asap_optimization::DeploymentCapabilities::default();
-                        let no_retention = CandidatePlanningContext {
-                            models: crate::PlanningModels {
-                                deployment_capabilities: &forbidden,
-                                ..context.models
-                            },
-                            ..context
-                        };
-                        assert!(
-                            !extract(&configured, &no_retention)
-                                .unwrap()
-                                .unwrap()
-                                .supported[chain]
-                        );
                     }
                     if algorithm == SketchAlgorithm::Hll {
                         let mut unsupported = data.clone();
@@ -1939,11 +1906,11 @@ mod tests {
     // including two equal frequencies whose different phases cannot coalesce.
     #[test]
     fn heterogeneous_shared_sketch_profiles_match_the_real_evaluator() {
-        use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+        use asap_logical_asap_optimization::test_support::{
             compose_logical_candidate, generate_per_computation_candidates,
-            HowToComputeAggregateMeasure,
         };
         use asap_types::ir::schema::SketchAlgorithm;
+        use asap_types::stages::HowToComputeAggregateMeasure;
         use asap_types::workload::TimestampMs;
         use std::rc::Rc;
         fn append(
@@ -1972,7 +1939,7 @@ mod tests {
                 0.0,
                 children
                     .into_iter()
-                    .map(|id| InputSupplierCandidates {
+                    .map(|id| InputProducerCandidates {
                         candidates: vec![id].into(),
                     })
                     .collect(),
@@ -1994,19 +1961,17 @@ mod tests {
                     })
                     .collect();
                 let generated = generate_per_computation_candidates(
-                    originals.iter().cloned().enumerate().collect(),
+                    &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(
+                        &originals,
+                    ),
                 )
                 .unwrap();
                 let choices: Vec<_> = generated.targets.iter().map(|target| target.ways_to_compute.iter().position(|candidate|
                     matches!(candidate,HowToComputeAggregateMeasure::Summary(found) if *found==algorithm)).unwrap()).collect();
-                let roots: Vec<_> = compose_logical_candidate(&generated, &choices)
-                    .unwrap()
-                    .into_iter()
-                    .map(|(_, root)| root)
-                    .collect();
+                let roots: Vec<_> = compose_logical_candidate(&generated, &choices).unwrap();
                 // Identical sub-DAGs made one node, as the memo's groups are.
                 let shared: Vec<_> =
-                    asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
+                    asap_logical_asap_optimization::test_support::share_common_sub_dags(
                         roots
                             .iter()
                             .enumerate()
@@ -2065,11 +2030,11 @@ mod tests {
                 let context = CandidatePlanningContext {
                     deadline: None,
                     refine_materialization: false,
-                    seed_separate_plans: false,
-                    original_roots: &originals,
+                    query_roots: &originals,
+                    realizer: &crate::search::test_realizer(&originals, &entries, &data),
                     entries: &entries,
                     data: &data,
-                    models: crate::PlanningModels::builtin(),
+                    models: crate::SelectionModels::builtin(),
                     calibration: asap_cost::CalibrationFit::default(),
                 };
                 let extracted = extract(&configured, &context).unwrap().unwrap();
@@ -2121,11 +2086,11 @@ mod tests {
         }
     }
 
-    // A template child is not evidence that every supplier has the same rows.
+    // A template child is not evidence that every producer has the same rows.
     // Two deliberately different source alternatives exercise cost-interface
     // filtering independently of the logical compatibility check upstream.
     #[test]
-    fn different_supplier_statistics_are_not_priced_as_the_template_child() {
+    fn different_producer_statistics_are_not_priced_as_the_template_child() {
         let scan = |metric| {
             OperatorNode::reachable(&lower_promql(metric, AccuracyTarget::exact()))
                 .into_iter()
@@ -2154,8 +2119,8 @@ mod tests {
                 candidates: (0..3)
                     .map(|id| PhysicalCandidateWithCost {
                         local_cost: 0.0,
-                        supplier_candidates_per_input: if id == 2 {
-                            vec![InputSupplierCandidates {
+                        producer_candidates_per_input: if id == 2 {
+                            vec![InputProducerCandidates {
                                 candidates: vec![PhysicalCandidateId(0), PhysicalCandidateId(1)]
                                     .into(),
                             }]
@@ -2194,11 +2159,11 @@ mod tests {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: crate::PlanningModels::builtin(),
+            models: crate::SelectionModels::builtin(),
             calibration: asap_cost::CalibrationFit::default(),
         };
         let extracted = extract(&configured, &context).unwrap().unwrap();
@@ -2208,7 +2173,7 @@ mod tests {
             extracted.profile.nodes[1].execution_cost > extracted.profile.nodes[0].execution_cost
         );
         assert_eq!(
-            configured.dag.candidates[2].supplier_candidates_per_input[0]
+            configured.dag.candidates[2].producer_candidates_per_input[0]
                 .candidates
                 .len(),
             2,
@@ -2225,9 +2190,9 @@ mod tests {
     }
 }
 
-#[path = "supplier_price_options.rs"]
-mod supplier_price_options;
-pub(in crate::search) use supplier_price_options::extract_price_options;
+#[path = "producer_price_options.rs"]
+mod producer_price_options;
+pub(in crate::search) use producer_price_options::extract_price_options;
 
 #[cfg(test)]
 #[path = "direct_price_options_tests.rs"]

@@ -209,7 +209,7 @@ pub enum DataType {
     /// Wall-clock timestamp. PromQL leaves carry exactly one of these
     /// (the `time_index` column); SQL leaves may or may not.
     Timestamp,
-    /// The type of a [`ScalarValue::Interval`] — a calendar duration, not an
+    /// The type of a [`ScalarValue::Interval`](crate::ir::scalar::expr_ir::ScalarValue::Interval) — a calendar duration, not an
     /// instant. Carried so `infer_expr_type` can give an interval literal a
     /// type and type `Timestamp ± Interval`; no column is ever declared with it.
     Interval,
@@ -348,6 +348,7 @@ impl Schema {
     }
 
     /// Whether this schema has *any* provable unique key.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn has_unique_key(&self) -> bool {
         !self.unique_keys.is_empty()
     }

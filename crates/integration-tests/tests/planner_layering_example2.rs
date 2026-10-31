@@ -158,20 +158,36 @@ async fn lower_sql(workload: &PlanningWorkload) -> Vec<QueryRoot> {
     roots
 }
 
-// Targeted rule fixtures: exact, each local summary in isolation, and the
-// all/pairwise UnivMon consumers needed by compatibility and cost assertions.
+// Targeted rule fixtures: exact, each local summary in isolation, and every
+// query on its own UnivMon, needed by compatibility and cost assertions.
+// Shared UnivMons come from the memo (`shared_pipeline`).
 // Production optimization is tested separately; this is not a Cartesian search.
 fn rule_fixture(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    let computations = rule_fixture_computations(workload, &roots);
+    run_explicit_candidates(
+        workload,
+        roots,
+        computations,
+        asap_planner::PlanningModels::builtin(),
+    )
+}
+
+/// [`rule_fixture`]'s plans, before Stage 2 and plan selection.
+fn rule_fixture_computations(
+    workload: &PlanningWorkload,
+    roots: &[QueryRoot],
+) -> Vec<Vec<QueryRoot>> {
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
     };
-    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
-        capability_sharing_candidates, pane_candidates, summary_capability_pass2_candidates,
-        window_composition_pass2_candidates,
+    use asap_logical_asap_optimization::test_support::{
+        pane_candidates, window_composition_pass2_candidates,
     };
-    let local =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    use asap_types::stages::HowToComputeAggregateMeasure;
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(roots),
+    )
+    .unwrap();
     let exact = vec![0; local.targets.len()];
     let mut choices = BTreeSet::from([exact.clone()]);
     let mut univmon = exact.clone();
@@ -213,23 +229,12 @@ fn rule_fixture(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
         if local.absorbed_choice_varies(&choice) {
             continue;
         }
-        let whole: Vec<_> = compose_logical_candidate(&local, &choice)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let whole: Vec<_> = compose_logical_candidate(&local, &choice).unwrap();
         computations.push(whole.clone());
         let shared = share_identical(&whole);
         if distinct_nodes(&shared) < distinct_nodes(&whole) {
             computations.push(shared);
         }
-        let capabilities = capability_sharing_candidates(&whole);
-        computations.extend(
-            summary_capability_pass2_candidates(&whole, &capabilities)
-                .unwrap()
-                .into_iter()
-                .map(|candidate| candidate.roots.unwrap()),
-        );
         let panes = pane_candidates(&whole, &grid);
         // Isolate one pane configuration at a time; no Cartesian products of
         // independent window implementations are needed for the error tests.
@@ -242,12 +247,7 @@ fn rule_fixture(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
             );
         }
     }
-    run_explicit_candidates(
-        workload,
-        roots,
-        computations,
-        asap_plan_selection::PlanningModels::builtin(),
-    )
+    computations
 }
 
 #[test]
@@ -290,14 +290,44 @@ fn pipeline_with_distinct_bound(bound: Option<u64>) -> Run {
 /// on its own UnivMon; and, per UnivMon state group the memo shares between
 /// queries, those queries reading it.
 fn memo_pipeline() -> Run {
+    let workload = standin_workload();
+    let roots = lower_promql(&workload);
+    let computations = memo_computations(&workload, &roots);
+    run_explicit_candidates(
+        &workload,
+        roots,
+        computations,
+        asap_planner::PlanningModels::builtin(),
+    )
+}
+
+/// [`rule_fixture`]'s plans and [`memo_pipeline`]'s together, so the
+/// memo's shared UnivMons compete with every query's own options.
+fn shared_pipeline(workload: &PlanningWorkload, roots: Vec<QueryRoot>) -> Run {
+    let mut computations = rule_fixture_computations(workload, &roots);
+    computations.extend(memo_computations(workload, &roots));
+    run_explicit_candidates(
+        workload,
+        roots,
+        computations,
+        asap_planner::PlanningModels::builtin(),
+    )
+}
+
+/// [`shared_pipeline`] over the stand-in.
+fn standin_shared_pipeline() -> Run {
+    let workload = standin_workload();
+    shared_pipeline(&workload, lower_promql(&workload))
+}
+
+/// [`memo_pipeline`]'s plans of `roots`, before Stage 2 and plan selection.
+fn memo_computations(workload: &PlanningWorkload, roots: &[QueryRoot]) -> Vec<Vec<QueryRoot>> {
     use asap_integration_tests::planning::{compose_memo_plan, expanded_memo, own_choices};
     use asap_types::ir::schema::FieldDataType;
     use asap_types::ir::{ASAPOp, OperatorNode};
     use asap_types::stages::{CandidateForMemoGroup, OriginOfCandidateForMemoGroup};
-    let workload = standin_workload();
-    let roots = lower_promql(&workload);
     let entries: Vec<_> = workload.query_workload.entries().collect();
-    let memo = expanded_memo(roots.iter().cloned().enumerate().collect(), &entries);
+    let memo = expanded_memo(roots.to_vec(), &entries);
     let queries = roots.len();
     let is_univmon = |node: &std::rc::Rc<OperatorNode>| {
         matches!(node.asap(), Some(ASAPOp::SummaryAgg {
@@ -332,7 +362,7 @@ fn memo_pipeline() -> Run {
             .collect();
         choices.extend(reading);
     }
-    let computations = choices
+    choices
         .iter()
         .map(|choice| {
             compose_memo_plan(&memo, queries, choice)
@@ -340,13 +370,7 @@ fn memo_pipeline() -> Run {
                 .map(QueryRoot::Operator)
                 .collect()
         })
-        .collect();
-    run_explicit_candidates(
-        &workload,
-        roots,
-        computations,
-        asap_plan_selection::PlanningModels::builtin(),
-    )
+        .collect()
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -461,12 +485,12 @@ async fn stage1_logical_asap_optimization_sql_has_the_standin_options() {
     }
 }
 
-/// The doc's SQL workload itself gets the summary-capability rule's shared
-/// candidate: one UnivMon read by Q1, Q2 and Q3.
+/// The doc's SQL workload itself gets the memo's shared candidate: one
+/// UnivMon read by Q1, Q2 and Q3.
 #[tokio::test]
 async fn stage1_logical_asap_optimization_sql_adds_one_univmon_for_all_three() {
     let workload = sql_workload();
-    let run = rule_fixture(&workload, lower_sql(&workload).await);
+    let run = shared_pipeline(&workload, lower_sql(&workload).await);
     assert!(
         run.logical.iter().any(|c| {
             let ums = univmons(c);
@@ -567,21 +591,6 @@ fn stage1_logical_asap_optimization_summary_capability_adds_one_univmon_for_all_
     }
 }
 
-/// For each pair, a candidate shares one UnivMon between the two while the third keeps each of its own options.
-#[test]
-fn stage1_logical_asap_optimization_summary_capability_adds_pairwise_shared_univmons() {
-    let run = pipeline();
-    for (pair, third) in [([0, 1], 2), ([0, 2], 1), ([1, 2], 0)] {
-        let thirds: BTreeSet<_> = run
-            .logical
-            .iter()
-            .filter(|c| shared_univmon(c, &pair).is_some())
-            .map(|c| query_option(&c.dag, &c.query_roots, third))
-            .collect();
-        assert_eq!(thirds, options(&run, third), "pair {pair:?}");
-    }
-}
-
 /// A UnivMon shared by several statistics is sized for every consumer:
 /// each consumer is sized alone, and the shared build takes each
 /// parameter's largest value among them.
@@ -634,7 +643,7 @@ fn stage1_logical_asap_optimization_univmon_is_sized_per_accuracy_target() {
 /// Only a UnivMon, never a specialized summary, is shared across the statistics.
 #[test]
 fn stage1_logical_asap_optimization_only_univmon_is_shared_across_statistics() {
-    let run = pipeline();
+    let run = standin_shared_pipeline();
     for c in &run.logical {
         for (id, algorithm, _) in sketch_builds(&c.dag) {
             if readers(&c.dag, &c.query_roots, id).len() > 1 {
@@ -792,14 +801,15 @@ fn stage3_plan_selection_accepts_hll_given_a_distinct_bound() {
     }
 }
 
-/// A bound too large for the precision Pass 1 chose (17 certifies at most
-/// 1,842 distinct items) is met by a larger precision: plan selection
-/// enlarges HLL until its failure probability over the bound at ε = 0.02
-/// meets the target, up to precision 18 (#669b), which certifies up to
-/// 3,791. Past that, up to Example 2's 10M source IPs, classic HLL's
-/// linear-counting contract certifies nothing.
+/// A bound too large for the precision sized for ε alone (17 certifies at
+/// most 1,842 distinct items) is met by a larger precision: Pass 1's sizing
+/// for the failure probability raises HLL's precision until its failure
+/// probability over the bound at ε = 0.02 meets the target, up to precision
+/// 18 (#669b), which certifies up to 3,791; Stage 3 only checks it. Past
+/// that, up to Example 2's 10M source IPs, classic HLL's linear-counting
+/// contract certifies nothing.
 #[test]
-fn stage3_plan_selection_enlarges_hll_for_a_larger_distinct_bound() {
+fn pass1_sizing_enlarges_hll_for_a_larger_distinct_bound() {
     let run = pipeline_with_distinct_bound(Some(3_000));
     for id in hll_only_candidates(&run) {
         assert!(run.cost(id).is_some(), "{id}: {:?}", run.invalid().get(id));
@@ -879,12 +889,12 @@ fn tumbling<'a>(run: &Run, ids: Vec<&'a str>) -> Vec<&'a str> {
         .collect()
 }
 
-/// Plan selection's enlargement reaches a sketch carried by a tumbling-pane
+/// The enlarged precision reaches a sketch carried by a tumbling-pane
 /// `PaneChain` too (#713): Q1's HLL over a bound of 3,000 is valid only at
-/// precision 18, above Pass 1's 17, so a valid tumbling-pane HLL candidate
-/// had its chain's precision enlarged.
+/// precision 18, above the 17 sized for ε alone, so a valid tumbling-pane
+/// HLL candidate carries precision 18 in its chain.
 #[test]
-fn stage3_plan_selection_enlarges_tumbling_pane_hll() {
+fn pass1_sizing_enlarges_tumbling_pane_hll() {
     let run = pipeline_with_distinct_bound(Some(3_000));
     let hll = tumbling(&run, hll_only_candidates(&run));
     assert!(!hll.is_empty(), "a tumbling-pane HLL candidate answers Q1");
@@ -1033,7 +1043,7 @@ async fn stage3_plan_selection_accepts_sql_univmon_l2_beside_its_exact_populatio
 #[test]
 #[ignore = "needs a UnivMon entropy accuracy model (#788): without one, the shared UnivMon candidate is left unpriced"]
 fn stage3_plan_selection_shared_univmon_costs_no_more_than_three() {
-    let run = pipeline();
+    let run = standin_shared_pipeline();
     let cost = |c: &Logical| run.cost(&run.physical_of(c).next().unwrap().id);
     let separate: Vec<_> = run
         .logical
@@ -1066,7 +1076,7 @@ fn stage3_plan_selection_shared_univmon_costs_no_more_than_three() {
 /// The selected plan updates at most one UnivMon per flow record: separate UnivMons are dominated by the shared one.
 #[test]
 fn stage3_plan_selection_selected_plan_has_at_most_one_univmon() {
-    let run = pipeline();
+    let run = standin_shared_pipeline();
     let selected = run.physical(&run.selection.selected);
     let count = sketch_builds(selected.dag())
         .iter()
@@ -1083,11 +1093,11 @@ fn stage3_plan_selection_selected_plan_has_at_most_one_univmon() {
 /// binding").
 #[test]
 fn stage3_plan_selection_selected_kmv_plan_executes_end_to_end() {
+    use asap_devtools::memo_pricing::reference_select as select_plan;
     use asap_executor::physical_planner::{compile, promql_rows};
     use asap_executor::runtime::Scope;
     use asap_executor::values::Value;
-    use asap_plan_selection::select_plan;
-    use asap_plan_selection::PlanningModels;
+    use asap_planner::PlanningModels;
 
     let workload = standin_workload();
     let roots = lower_promql(&workload);

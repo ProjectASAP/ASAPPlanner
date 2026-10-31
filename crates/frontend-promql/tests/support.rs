@@ -139,44 +139,6 @@ pub fn declared_data(root: &Rc<OperatorNode>) -> DataWorkload {
     }
 }
 
-/// Every planning stage's output for the single query `root` at `accuracy`,
-/// with the built-in models.
-#[allow(dead_code)]
-pub fn run_stage1_to_stage3(
-    root: Rc<OperatorNode>,
-    accuracy: AccuracyTarget,
-) -> asap_plan_selection::Stage1ToStage3Run<usize> {
-    let data = declared_data(&root);
-    asap_plan_selection::run_stage1_to_stage3_with(
-        vec![(0, asap_types::ir::QueryRoot::Operator(root))],
-        &[asap_types::workload::QueryWorkloadEntry {
-            query: Default::default(),
-            requirements: asap_types::workload::QueryRequirements {
-                accuracy,
-                max_latency_ms: None,
-            },
-            predictability: Default::default(),
-            recurrence: Default::default(),
-            range_evaluation: None,
-        }],
-        &data,
-        asap_plan_selection::PlanningModels::builtin(),
-        asap_plan_selection::Stage1ToStage3Search::default(),
-    )
-    .expect("Pass 1 accepts the query")
-}
-
-/// The logical DAG the planner pipeline selects for the single query `root`
-/// at `accuracy`.
-#[allow(dead_code)]
-pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
-    let run = run_stage1_to_stage3(root, accuracy);
-    match run.selected_logical().expect("a plan is selected") {
-        [asap_types::ir::QueryRoot::Operator(node)] => Rc::clone(node),
-        other => panic!("one operator root: {other:?}"),
-    }
-}
-
 /// Local computation candidates for frontend binding tests. Other computations
 /// keep their default choices; a timed MILP archive is not a candidate catalog.
 #[allow(dead_code)]
@@ -185,12 +147,16 @@ pub fn logical_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
 }
 
 fn local_computation_candidates(root: Rc<OperatorNode>) -> Result<Vec<Rc<OperatorNode>>, String> {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_types::ir::QueryRoot;
-    let inventory = generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))])
-        .map_err(|error| error.to_string())?;
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+            QueryRoot::Operator(root),
+        ]),
+    )
+    .map_err(|error| error.to_string())?;
     let mut choices = vec![vec![0; inventory.targets.len()]];
     for (index, target) in inventory.targets.iter().enumerate() {
         for choice in 1..target.choice_count() {
@@ -204,7 +170,7 @@ fn local_computation_candidates(root: Rc<OperatorNode>) -> Result<Vec<Rc<Operato
         .map(|choice| {
             let mut roots = compose_logical_candidate(&inventory, &choice)
                 .map_err(|error| error.to_string())?;
-            match roots.remove(0).1 {
+            match roots.remove(0) {
                 QueryRoot::Operator(root) => Ok(root),
                 QueryRoot::Scalar(_) => Err("expected an operator root".into()),
             }
@@ -212,10 +178,17 @@ fn local_computation_candidates(root: Rc<OperatorNode>) -> Result<Vec<Rc<Operato
         .collect()
 }
 
+/// A composed logical candidate, or why it does not compose.
+#[allow(dead_code)]
+pub struct LogicalCandidate {
+    pub id: String,
+    pub roots: Result<Vec<asap_types::ir::QueryRoot>, String>,
+}
+
 /// Fail on a rejected candidate rather than silently dropping it from assertions.
 #[allow(dead_code)]
 pub fn require_composed_operator_candidates(
-    candidates: Vec<asap_plan_selection::search::LogicalCandidate>,
+    candidates: Vec<LogicalCandidate>,
 ) -> Vec<Rc<OperatorNode>> {
     candidates
         .into_iter()

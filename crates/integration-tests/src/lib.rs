@@ -14,6 +14,7 @@
 pub mod fixtures {
 
     use asap_types::ir::properties::AccuracyTarget;
+
     use asap_types::ir::schema::{DataType, Field, Schema};
     use asap_types::ir::OperatorNode;
     use asap_types::workload::{
@@ -140,7 +141,8 @@ pub mod physical_export {
     }
 }
 
-/// Plans and candidates from the planner pipeline (`run_stage1_to_stage3`) for one
+/// Plans and candidates from the planner pipeline (the facade's
+/// `run_planning`, with the developer tools' reference enumeration) for one
 /// query, with the built-in models.
 pub mod planning {
     use asap_types::ir::properties::AccuracyTarget;
@@ -182,14 +184,24 @@ pub mod planning {
         }
     }
 
-    /// Every planning stage's output for the single query `root`.
+    /// Every planning stage's output for the single query `root`, with
+    /// the reference enumeration of its memo.
     pub fn run_stage1_to_stage3(
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
-    ) -> asap_plan_selection::Stage1ToStage3Run<usize> {
+    ) -> asap_devtools::planning_stages::PlanningStagesRun {
+        run_stage1_to_stage3_with(root, accuracy, asap_planner::PlanningModels::builtin())
+    }
+
+    /// [`run_stage1_to_stage3`] with `models`.
+    fn run_stage1_to_stage3_with(
+        root: Rc<OperatorNode>,
+        accuracy: AccuracyTarget,
+        models: asap_planner::PlanningModels<'_>,
+    ) -> asap_devtools::planning_stages::PlanningStagesRun {
         let data = declared_data(&root);
-        asap_plan_selection::run_stage1_to_stage3_with(
-            vec![(0, QueryRoot::Operator(root))],
+        asap_devtools::planning_stages::run_planning_stages_over(
+            vec![QueryRoot::Operator(root)],
             &[asap_types::workload::QueryWorkloadEntry {
                 query: Default::default(),
                 requirements: asap_types::workload::QueryRequirements {
@@ -201,8 +213,8 @@ pub mod planning {
                 range_evaluation: None,
             }],
             &data,
-            asap_plan_selection::PlanningModels::builtin(),
-            asap_plan_selection::Stage1ToStage3Search::exhaustive(),
+            None,
+            models,
         )
         .expect("Pass 1 accepts the query")
     }
@@ -210,7 +222,11 @@ pub mod planning {
     /// The logical DAG the planner pipeline selects for the single query
     /// `root` at `accuracy`.
     pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
-        match run_stage1_to_stage3(root, accuracy).selected_logical() {
+        match run_stage1_to_stage3(root, accuracy)
+            .run
+            .selected_plan
+            .as_deref()
+        {
             Some([QueryRoot::Operator(node)]) => Rc::clone(node),
             other => panic!("one selected operator root: {other:?}"),
         }
@@ -219,11 +235,15 @@ pub mod planning {
     /// Exact computation and each explicit single-target rule application.
     /// This fixture catalog is independent of the bounded MILP's visited plans.
     pub fn explicit_local_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
-        use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+        use asap_logical_asap_optimization::test_support::{
             compose_logical_candidate, generate_per_computation_candidates,
         };
-        let local =
-            generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+        let local = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+                QueryRoot::Operator(root),
+            ]),
+        )
+        .unwrap();
         let mut choices = std::collections::BTreeSet::from([vec![0; local.targets.len()]]);
         for (target, options) in local.targets.iter().enumerate() {
             for choice in 1..options.choice_count() {
@@ -238,7 +258,6 @@ pub mod planning {
                 match compose_logical_candidate(&local, &choice)
                     .expect("explicit local rule composes")
                     .remove(0)
-                    .1
                 {
                     QueryRoot::Operator(node) => node,
                     QueryRoot::Scalar(_) => panic!("operator fixture"),
@@ -253,18 +272,21 @@ pub mod planning {
         root: Rc<OperatorNode>,
         family: asap_types::ir::schema::SketchAlgorithm,
     ) -> Rc<OperatorNode> {
-        use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+        use asap_logical_asap_optimization::test_support::{
             compose_logical_candidate, generate_per_computation_candidates,
-            HowToComputeAggregateMeasure,
         };
-        let local =
-            generate_per_computation_candidates(vec![(0, QueryRoot::Operator(root))]).unwrap();
+        use asap_types::stages::HowToComputeAggregateMeasure;
+        let local = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+                QueryRoot::Operator(root),
+            ]),
+        )
+        .unwrap();
         let choices = local.targets.iter().map(|target| target.ways_to_compute.iter()
             .position(|candidate| matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == family)).unwrap_or(0)).collect::<Vec<_>>();
         match compose_logical_candidate(&local, &choices)
             .expect("explicit family choices compose")
             .remove(0)
-            .1
         {
             QueryRoot::Operator(node) => node,
             QueryRoot::Scalar(_) => panic!("operator fixture"),
@@ -279,13 +301,30 @@ pub mod planning {
         accuracy: AccuracyTarget,
     ) -> Vec<Rc<OperatorNode>> {
         require_composed_operator_candidates(
-            run_stage1_to_stage3(root, accuracy).stage1_logical_asap_optimization,
+            run_stage1_to_stage3(root, accuracy).logical_candidates(),
+        )
+    }
+
+    /// [`logical_candidates`] with every output accepted whatever its
+    /// accuracy guarantee (`ignore_accuracy_guarantees`), so Pass 1 keeps
+    /// the summaries no query can use for `accuracy`
+    /// (`PruneReason::NoErrorBoundForQueryTarget`). For tests of a
+    /// rewrite's structure or execution over a summary whose output has no
+    /// guarantee that meets `accuracy` (e.g. a value filter over an
+    /// estimate), not of accuracy acceptance.
+    pub fn logical_candidates_ignoring_guarantees(
+        root: Rc<OperatorNode>,
+        accuracy: AccuracyTarget,
+    ) -> Vec<Rc<OperatorNode>> {
+        let models = asap_planner::PlanningModels::builtin().with_ignore_accuracy_guarantees(true);
+        require_composed_operator_candidates(
+            run_stage1_to_stage3_with(root, accuracy, models).logical_candidates(),
         )
     }
 
     /// Fail on rejected composition rather than silently skipping a candidate.
     pub fn require_composed_operator_candidates(
-        candidates: Vec<asap_plan_selection::search::LogicalCandidate>,
+        candidates: Vec<asap_devtools::planning_stages::ShownLogicalCandidate>,
     ) -> Vec<Rc<OperatorNode>> {
         candidates
             .into_iter()
@@ -305,16 +344,19 @@ pub mod planning {
     /// on the seed grids (no query pruning). Rule tests read a group's
     /// candidates by `OriginOfCandidateForMemoGroup`.
     pub fn expanded_memo(
-        roots: Vec<(usize, QueryRoot)>,
+        roots: Vec<QueryRoot>,
         entries: &[asap_types::workload::QueryWorkloadEntry],
-    ) -> asap_types::stages::CandidateMemo {
-        use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
-        use asap_logical_asap_optimization::pass2::memo::{
-            candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
-            window_candidates::add_local_window_composition, DagOfLogicalMemoGroups,
+    ) -> asap_types::stages::MemoCandidates {
+        use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
+        use asap_logical_asap_optimization::test_support::{
+            add_local_window_composition, try_populate_pass1,
         };
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let inventory = generate_per_computation_candidates(roots).unwrap();
+        use asap_logical_asap_optimization::PaneWidthDomain;
+        let initial = asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots);
+        let inventory = generate_per_computation_candidates(
+            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
+        )
+        .unwrap();
         let mut memo = try_populate_pass1(initial, &inventory).unwrap();
         add_local_window_composition(&mut memo, entries);
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
@@ -328,11 +370,11 @@ pub mod planning {
     /// each query's first root group's DAG, every group `choice` does not
     /// name implemented by its first candidate.
     pub fn compose_memo_plan(
-        memo: &asap_types::stages::CandidateMemo,
+        memo: &asap_types::stages::MemoCandidates,
         queries: usize,
         choice: &std::collections::BTreeMap<usize, usize>,
     ) -> Vec<Rc<OperatorNode>> {
-        use asap_logical_asap_optimization::pass2::memo::enumeration::build_logical_asap_dags_from_chosen_candidates;
+        use asap_logical_asap_optimization::build_logical_asap_dags_from_chosen_candidates;
         use asap_types::stages::MemoGroupId;
         let choice = choice
             .iter()
@@ -359,16 +401,24 @@ pub mod planning {
         entries: &[asap_types::workload::QueryWorkloadEntry],
         data: &DataWorkload,
     ) -> (
-        Vec<asap_physical_asap_optimization::PhysicalWorkloadPlan>,
-        asap_plan_selection::Selection,
+        Vec<asap_types::physical::PhysicalWorkloadPlan>,
+        asap_plan_selection::reference_pricer::WholePlanSelection,
     ) {
-        let models = asap_plan_selection::PlanningModels::builtin();
+        let models = asap_planner::PlanningModels::builtin();
         let mut physical = Vec::new();
         for (name, roots) in variants {
             // Composed nodes lose their guarantees; recompose them as
             // `run_explicit_candidates` does.
             let roots = asap_accuracy::propagation::recompose_guarantees(roots)
                 .unwrap_or_else(|error| panic!("{name} composes guarantees: {error}"));
+            // Composed outside the memo: sized as Pass 1 sizes a candidate.
+            let targets: Vec<_> = entries
+                .iter()
+                .map(|entry| entry.requirements.accuracy.clone())
+                .collect();
+            let roots =
+                asap_accuracy::sizing::with_summaries_sized_for_targets(&roots, &targets, data)
+                    .unwrap_or_else(|error| panic!("{name} sizes its summaries: {error}"));
             let mut plans = asap_physical_asap_optimization::optimize_physical_asap(
                 name,
                 &roots,
@@ -382,7 +432,9 @@ pub mod planning {
             }
             physical.extend(plans);
         }
-        let selection = asap_plan_selection::select_plan(&physical, entries, data, models).unwrap();
+        let selection =
+            asap_devtools::memo_pricing::reference_select(&physical, entries, data, models)
+                .unwrap();
         (physical, selection)
     }
 
@@ -401,7 +453,7 @@ pub mod planning {
     /// alone) candidates `keep` accepts; those of the topmost group (the
     /// fewest child edges below `q`'s root) first.
     pub fn own_choices(
-        memo: &asap_types::stages::CandidateMemo,
+        memo: &asap_types::stages::MemoCandidates,
         q: usize,
         keep: impl Fn(&asap_types::stages::CandidateForMemoGroup) -> bool,
     ) -> Vec<(usize, usize)> {
@@ -457,7 +509,7 @@ pub mod planning {
     /// - `shared{g}`: every query reads the summary state group `g`, its own
     ///   estimate or a regrouping merge of it, when every query can.
     pub fn select_rollup(
-        memo: &asap_types::stages::CandidateMemo,
+        memo: &asap_types::stages::MemoCandidates,
         queries: usize,
         entries: &[asap_types::workload::QueryWorkloadEntry],
         data: &DataWorkload,
@@ -570,82 +622,15 @@ pub mod planning {
 
     /// The lowest price per second among `selection`'s plans whose id starts
     /// with `name`.
-    pub fn cheapest_of(selection: &asap_plan_selection::Selection, name: &str) -> f64 {
+    pub fn cheapest_of(
+        selection: &asap_plan_selection::reference_pricer::WholePlanSelection,
+        name: &str,
+    ) -> f64 {
         selection
             .costs
             .iter()
             .filter(|(id, _)| id.starts_with(&format!("{name}-")))
             .filter_map(|(_, cost)| cost.cost_per_second)
             .fold(f64::INFINITY, f64::min)
-    }
-
-    /// Apply sharing rules and Stage 2 to a small explicitly supplied fixture set,
-    /// then price it with the production evaluator. No workload product search.
-    pub fn explicit_assignment_plans(
-        inventory: asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidates<usize>,
-        assignments: Vec<Vec<usize>>,
-        entries: &[asap_types::workload::QueryWorkloadEntry],
-        data: &asap_types::workload::DataWorkload,
-    ) -> asap_plan_selection::Stage1ToStage3Run<usize> {
-        use asap_accuracy::propagation::recompose_guarantees;
-        use asap_logical_asap_optimization::pass2::workload_candidates::stage1_candidates_of_choice;
-        use asap_plan_selection::{search::LogicalCandidate, PlanningModels, Stage1ToStage3Run};
-        let mut logical = Vec::new();
-        let mut physical = Vec::new();
-        for assignment in assignments {
-            for candidate in
-                stage1_candidates_of_choice(&inventory, entries, &assignment, &|_| true)
-            {
-                let roots = recompose_guarantees(&candidate.unwrap()).unwrap();
-                let id = format!("L{}", logical.len() + 1);
-                physical.extend(
-                    asap_physical_asap_optimization::optimize_physical_asap(
-                        &id,
-                        &roots,
-                        entries,
-                        data,
-                        PlanningModels::builtin()
-                            .deployment_capabilities
-                            .query_time_results_retained,
-                    )
-                    .expect("explicit rewrite is executable"),
-                );
-                logical.push(LogicalCandidate {
-                    id,
-                    roots: Ok(roots),
-                });
-            }
-        }
-        for (index, plan) in physical.iter_mut().enumerate() {
-            plan.id = format!("fixture-{index}");
-        }
-        let selection =
-            asap_plan_selection::select_plan(&physical, entries, data, PlanningModels::builtin())
-                .unwrap();
-        let selected = physical
-            .iter()
-            .find(|plan| plan.id == selection.selected)
-            .unwrap()
-            .clone();
-        let source = logical
-            .iter()
-            .find(|candidate| candidate.id == selected.from_logical)
-            .unwrap();
-        let selected_logical = LogicalCandidate {
-            id: source.id.clone(),
-            roots: Ok(source.roots.as_ref().unwrap().clone()),
-        };
-        Stage1ToStage3Run {
-            combinations: inventory.combinations(),
-            stage1_pass1_per_computation: inventory,
-            stage1_logical_asap_optimization: logical,
-            stage2_physical_asap_optimization: physical,
-            stage2_pruned: vec![],
-            stage3_selected_logical: Some(selected.roots.clone()),
-            stage3_selected: Some(selected),
-            stage1_selected: Some(selected_logical),
-            stage3_plan_selection: Ok(selection),
-            memo_steps: None,
-        }
     }
 }

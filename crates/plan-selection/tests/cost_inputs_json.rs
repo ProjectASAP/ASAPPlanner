@@ -54,7 +54,7 @@ fn settings_round_trip_and_refuse_unknown_fields() {
             memory_bytes: 64 << 30,
             disk_bytes: 1 << 40,
             cpu_cores: None,
-            objective: ClusterObjective::ParetoFront,
+            objective: ClusterObjective::LeastMemory,
         }),
         ..CostInputs::default()
     };

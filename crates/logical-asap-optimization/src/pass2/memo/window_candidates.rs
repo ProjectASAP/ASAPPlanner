@@ -8,7 +8,7 @@ use crate::pass2::asap_aware_cse::{pane_candidates, window_composition_pass2_can
 use asap_types::ir::flat::flatten;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::stages::{
-    CandidateForMemoGroup, CandidateMemo as Memo, OriginOfCandidateForMemoGroup,
+    CandidateForMemoGroup, MemoCandidates as Memo, OriginOfCandidateForMemoGroup,
 };
 use asap_types::stages::{MemoGroup, MemoGroupId as GroupId};
 use asap_types::workload::QueryWorkloadEntry;
@@ -20,10 +20,12 @@ use std::time::Instant;
 
 /// Offer each supported reader-grid configuration. Stage 2 checks the actual
 /// chosen consumers, including ingestion alignment and range evaluation steps.
+#[cfg(any(test, feature = "test-support"))]
 pub fn add_local_window_composition(memo: &mut Memo, entries: &[QueryWorkloadEntry]) {
     add_local_window_composition_in_domain(memo, entries, PaneWidthDomain::Complete);
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub fn add_local_window_composition_in_domain(
     memo: &mut Memo,
     entries: &[QueryWorkloadEntry],
@@ -34,7 +36,8 @@ pub fn add_local_window_composition_in_domain(
 }
 
 /// On timeout the caller must discard this memo, which may contain partial work.
-pub fn try_add_local_window_composition_in_domain(
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn try_add_local_window_composition_in_domain(
     memo: &mut Memo,
     entries: &[QueryWorkloadEntry],
     domain: PaneWidthDomain,
@@ -45,7 +48,7 @@ pub fn try_add_local_window_composition_in_domain(
 
 /// Extend a pre-state-expansion memo with only newly exposed pane widths.
 /// `previous` must describe widths already generated for this memo.
-pub fn extend_local_window_composition(
+pub(crate) fn extend_local_window_composition(
     memo: &mut Memo,
     entries: &[QueryWorkloadEntry],
     previous: Option<PaneWidthDomain>,
@@ -91,7 +94,8 @@ pub fn extend_local_window_composition(
 }
 
 /// Expand legal pane widths while preserving canonical memo inputs.
-pub fn local_pane_candidates(
+#[cfg(test)]
+fn local_pane_candidates(
     memo: &Memo,
     entries: &[QueryWorkloadEntry],
 ) -> Vec<(usize, CandidateForMemoGroup)> {
@@ -99,6 +103,7 @@ pub fn local_pane_candidates(
         .expect("generation without a deadline cannot time out")
 }
 
+#[cfg(test)]
 fn local_pane_candidates_before(
     memo: &Memo,
     entries: &[QueryWorkloadEntry],
@@ -338,7 +343,8 @@ fn candidate_signature(candidate: &CandidateForMemoGroup) -> Result<String, serd
 mod tests {
     use super::*;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::{candidates::try_populate_pass1, DagOfLogicalMemoGroups};
+    use crate::pass2::memo::generate_dag_of_logical_memo_groups;
+    use crate::pass2::memo::groups::try_populate_pass1;
     use crate::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
@@ -411,11 +417,12 @@ mod tests {
         let root = lower_promql("quantile_over_time(0.95, latency[15m])", target.clone());
         let roots: Vec<_> = recurrences
             .iter()
-            .enumerate()
-            .map(|(id, _)| (id, QueryRoot::Operator(Rc::clone(&root))))
+            .map(|_| QueryRoot::Operator(Rc::clone(&root)))
             .collect();
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let generated = generate_per_computation_candidates(roots).unwrap();
+        let initial = generate_dag_of_logical_memo_groups(&roots);
+        let generated =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap();
         let memo = try_populate_pass1(initial, &generated).unwrap();
         let entries = recurrences
             .iter()

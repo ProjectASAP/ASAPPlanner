@@ -101,22 +101,18 @@ async fn roots(workload: &PlanningWorkload) -> Vec<QueryRoot> {
 async fn run(deployment: &DeploymentCapabilities) -> Run {
     let workload = workload();
     let roots = roots(&workload).await;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
     };
-    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+    use asap_logical_asap_optimization::test_support::{
         pane_candidates, window_composition_pass2_candidates,
     };
-    let local =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
-    let compose = |choices: &[usize]| {
-        compose_logical_candidate(&local, choices)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect::<Vec<_>>()
-    };
+    use asap_types::stages::HowToComputeAggregateMeasure;
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
+    )
+    .unwrap();
+    let compose = |choices: &[usize]| compose_logical_candidate(&local, choices).unwrap();
     let exact = compose(&vec![0; local.targets.len()]);
     let choices = local
         .targets
@@ -157,8 +153,8 @@ async fn run(deployment: &DeploymentCapabilities) -> Run {
         &workload,
         roots,
         candidates,
-        asap_plan_selection::PlanningModels::builtin()
-            .with_plan_selection(&settings)
+        asap_planner::PlanningModels::builtin()
+            .with_cost_inputs(&settings)
             .with_deployment_capabilities(deployment),
     )
 }

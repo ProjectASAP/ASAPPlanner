@@ -42,7 +42,7 @@ fn priced_exact(workload: &PlanningWorkload) -> Run {
         workload,
         roots.clone(),
         vec![roots],
-        asap_plan_selection::PlanningModels::builtin(),
+        asap_planner::PlanningModels::builtin(),
     )
 }
 

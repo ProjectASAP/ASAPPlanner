@@ -45,7 +45,7 @@ pub enum ResolveDAGError {
 use crate::canonicalize::canonicalize;
 
 /// Resolve the whole tree rooted at `tree`: bind every `ColumnRef` to a
-/// `ColumnId` via the [`SchemaResolver`], then canonicalize the result.
+/// `ColumnId` via the `SchemaResolver`, then canonicalize the result.
 pub fn resolve_root(tree: &UnresolvedOp) -> Result<Rc<OperatorNode>, ResolveDAGError> {
     resolve_root_with_inherited(tree, &[])
 }
@@ -463,7 +463,7 @@ fn inherited_names(schema: &Schema) -> Vec<String> {
 /// Resolve a name-based scalar expression against `schema`. Operators it
 /// reads (`scalar(v)`, subqueries) are bound as roots in their own scope,
 /// inheriting `schema`'s label names.
-pub fn resolve_expr(
+pub(crate) fn resolve_expr(
     expr: &UnresolvedScalar,
     schema: &Schema,
 ) -> Result<ScalarExpr, ResolveDAGError> {

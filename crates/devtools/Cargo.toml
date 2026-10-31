@@ -13,9 +13,9 @@ asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-sql = { path = "../frontend-sql" }
 asap-accuracy = { path = "../accuracy" }
 asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
-asap-physical-asap-optimization = { path = "../physical-asap-optimization" }
+asap-physical-asap-optimization = { path = "../physical-asap-optimization", features = ["reference-pricer"] }
 asap-cost = { path = "../cost" }
-asap-plan-selection = { path = "../plan-selection" }
+asap-plan-selection = { path = "../plan-selection", features = ["reference-pricer"] }
 # The installable plan of the selected candidate (`installable_plan_of`),
 # whose stored outputs `stage_pipeline` writes.
 asap-planner = { path = "../planner" }
@@ -35,6 +35,8 @@ tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
 asap-physical-asap-optimization = { path = "../physical-asap-optimization", features = ["test-support"] }
+# Pass 1's target list (`per_computation_candidates`) for the tests.
+asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
 
 
 [[test]]

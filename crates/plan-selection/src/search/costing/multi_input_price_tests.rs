@@ -30,7 +30,7 @@ fn append(
         0.0,
         inputs
             .into_iter()
-            .map(|producer| InputSupplierCandidates {
+            .map(|producer| InputProducerCandidates {
                 candidates: vec![producer].into(),
             })
             .collect(),
@@ -51,7 +51,7 @@ fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
             .dag
             .candidates
             .iter()
-            .any(|candidate| candidate.supplier_candidates_per_input.len() == 2));
+            .any(|candidate| candidate.producer_candidates_per_input.len() == 2));
         let roots = vec![QueryRoot::Operator(logical)];
         let entries = vec![QueryWorkloadEntry {
             query: Query(query.into()),
@@ -73,11 +73,11 @@ fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
-            seed_separate_plans: false,
-            original_roots: &roots,
+            query_roots: &roots,
+            realizer: &crate::search::test_realizer(&roots, &entries, &data),
             entries: &entries,
             data: &data,
-            models: crate::PlanningModels::builtin(),
+            models: crate::SelectionModels::builtin(),
             calibration: asap_cost::CalibrationFit::default(),
         };
         let profile = extract_price_options(&configured, &context)
@@ -123,7 +123,7 @@ fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
                 .candidates
                 .iter()
                 .enumerate()
-                .find(|(_, candidate)| candidate.supplier_candidates_per_input.len() == 2)
+                .find(|(_, candidate)| candidate.producer_candidates_per_input.len() == 2)
                 .unwrap()
                 .0;
             let edges: Vec<_> = proposal
@@ -143,12 +143,12 @@ fn binary_prices_match_evaluator_with_distinct_and_shared_inputs() {
 // budgets; pricing may not silently resize either state after selection.
 #[test]
 fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
     };
     use asap_types::ir::properties::{AccuracyMetric, AccuracyScope};
     use asap_types::ir::schema::SketchAlgorithm;
+    use asap_types::stages::HowToComputeAggregateMeasure;
     let query = "quantile_over_time(0.99, m[5m]) / quantile_over_time(0.5, n[5m])";
     let target = AccuracyTarget::max_error(0.05)
         .accuracy_metric(AccuracyMetric::Relative)
@@ -159,9 +159,12 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
         .failure_probability(0.01)
         .accuracy_scope(AccuracyScope::PerValue);
     let original = lower_promql(query, planned);
-    let generated =
-        generate_per_computation_candidates(vec![(0, QueryRoot::Operator(original.clone()))])
-            .unwrap();
+    let generated = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
+            QueryRoot::Operator(original.clone()),
+        ]),
+    )
+    .unwrap();
     let choices: Vec<_> = generated
         .targets
         .iter()
@@ -179,19 +182,14 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
         })
         .collect();
     assert_eq!(choices.len(), 2);
-    let roots: Vec<_> = compose_logical_candidate(&generated, &choices)
-        .unwrap()
-        .into_iter()
-        .map(|(_, root)| root)
-        .collect();
+    let roots: Vec<_> = compose_logical_candidate(&generated, &choices).unwrap();
     let data: DataWorkload = serde_json::from_value(serde_json::json!({
         "arrival":{"ingesting":{"rows_per_second":100.0}},
         "sources":{"m":{"rows_held":3000,"series_count":1,"values_non_negative":true},
                    "n":{"rows_held":3000,"series_count":1,"values_non_negative":true}}
     }))
     .unwrap();
-    let sized = crate::resize_for_failure_probability(&roots, std::slice::from_ref(&target), &data)
-        .unwrap();
+    let sized = crate::sized_as_pass1(&roots, std::slice::from_ref(&target), &data);
     let QueryRoot::Operator(root) = &sized[0] else {
         panic!("operator root")
     };
@@ -217,11 +215,11 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
     let context = CandidatePlanningContext {
         deadline: None,
         refine_materialization: false,
-        seed_separate_plans: false,
-        original_roots: &original,
+        query_roots: &original,
+        realizer: &crate::search::test_realizer(&original, &entries, &data),
         entries: &entries,
         data: &data,
-        models: crate::PlanningModels::builtin(),
+        models: crate::SelectionModels::builtin(),
         calibration: asap_cost::CalibrationFit::default(),
     };
     let profile = extract_price_options(&configured, &context)

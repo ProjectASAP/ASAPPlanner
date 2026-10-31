@@ -30,25 +30,21 @@ const LAST_HOUR_BY_MINUTE: RangeEvaluation = RangeEvaluation {
 /// This fixture controls its pane width; a timed MILP archive is not a catalog
 /// of every legal materialization or a stable source of P1/P2 identifiers.
 fn run_explicit_for(workload: &PlanningWorkload, deployment: &DeploymentCapabilities) -> Run {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
     };
-    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+    use asap_logical_asap_optimization::test_support::{
         pane_candidates, window_composition_pass2_candidates,
     };
     use asap_types::ir::schema::SketchAlgorithm;
+    use asap_types::stages::HowToComputeAggregateMeasure;
     let roots = lower_promql(workload);
-    let inventory =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
+    )
+    .unwrap();
     assert_eq!(inventory.targets.len(), 1);
-    let compose = |choice| {
-        compose_logical_candidate(&inventory, &[choice])
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect::<Vec<_>>()
-    };
+    let compose = |choice| compose_logical_candidate(&inventory, &[choice]).unwrap();
     let mut candidates = vec![compose(0)];
     if let Some(choice) = inventory.targets[0]
         .ways_to_compute
@@ -82,8 +78,8 @@ fn run_explicit_for(workload: &PlanningWorkload, deployment: &DeploymentCapabili
         workload,
         roots,
         candidates,
-        asap_plan_selection::PlanningModels::builtin()
-            .with_plan_selection(&settings)
+        asap_planner::PlanningModels::builtin()
+            .with_cost_inputs(&settings)
             .with_deployment_capabilities(deployment),
     )
 }

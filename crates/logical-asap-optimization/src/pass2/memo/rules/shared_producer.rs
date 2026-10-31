@@ -6,7 +6,7 @@
 //! identity, and add no candidates here.
 use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::state_groups::StateGroupExpansionError;
-use asap_types::stages::CandidateMemo;
+use asap_types::stages::MemoCandidates;
 use std::time::Instant;
 
 /// One reader of a kind of shared producer: its memo group and its need.
@@ -25,7 +25,7 @@ pub(in crate::pass2::memo) trait SharedProducer {
     /// one producer; in memo order.
     fn sets(
         &mut self,
-        memo: &CandidateMemo,
+        memo: &MemoCandidates,
         deadline: Option<Instant>,
     ) -> Result<Vec<Vec<Reader<Self::Need>>>, StateGroupExpansionError>;
     /// The coverings to offer the readers of `set`.
@@ -38,7 +38,7 @@ pub(in crate::pass2::memo) trait SharedProducer {
     /// producer serves it; the number of candidates added.
     fn derive(
         &mut self,
-        memo: &mut CandidateMemo,
+        memo: &mut MemoCandidates,
         reader: &Reader<Self::Need>,
         covering: &Self::Covering,
     ) -> Result<usize, StateGroupExpansionError>;
@@ -53,7 +53,7 @@ pub(in crate::pass2::memo) fn spans_groups<N>(set: &[Reader<N>]) -> bool {
 /// Gives every reader of a set spanning two or more groups its derivation
 /// from each of the set's coverings; the number of candidates added.
 pub(in crate::pass2::memo) fn add_shared_producer_candidates<P: SharedProducer>(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     producer: &mut P,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {

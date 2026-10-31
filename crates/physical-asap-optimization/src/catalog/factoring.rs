@@ -1,12 +1,12 @@
-//! Memoize identical supplier interfaces and quotient equivalent terminal readers.
-//! Scope copies preserve independent bindings; internal computations are never merged.
+//! Memoize identical producer interfaces and quotient equivalent terminal readers.
+//! Internal computations are never merged.
 use std::collections::HashMap;
 
 use asap_types::ir::OperatorNode;
 use asap_types::stages::MemoGroupId;
 
 use asap_types::stages::{CandidateForMemoGroupId, PhysicalCandidateId};
-use asap_types::stages::{SupplierCandidates, SupplierSetInterner};
+use asap_types::stages::{ProducerCandidates, ProducerSetInterner};
 
 #[derive(Hash, PartialEq, Eq)]
 pub struct MemoGroupOutputKey(Vec<u8>);
@@ -24,8 +24,8 @@ impl MemoGroupOutputKey {
 
 #[derive(Default)]
 pub struct MemoGroupOutputToCompatibleProducersCache {
-    results: HashMap<MemoGroupOutputKey, SupplierCandidates>,
-    lists: SupplierSetInterner,
+    results: HashMap<MemoGroupOutputKey, ProducerCandidates>,
+    lists: ProducerSetInterner,
     #[cfg(feature = "test-support")]
     disabled: bool,
     #[cfg(feature = "test-support")]
@@ -33,7 +33,7 @@ pub struct MemoGroupOutputToCompatibleProducersCache {
 }
 
 impl MemoGroupOutputToCompatibleProducersCache {
-    pub fn get(&self, key: &MemoGroupOutputKey) -> Option<SupplierCandidates> {
+    pub fn get(&self, key: &MemoGroupOutputKey) -> Option<ProducerCandidates> {
         #[cfg(feature = "test-support")]
         if self.disabled {
             return None;
@@ -62,27 +62,29 @@ impl MemoGroupOutputToCompatibleProducersCache {
     pub fn remember(
         &mut self,
         key: MemoGroupOutputKey,
-        suppliers: Vec<PhysicalCandidateId>,
-    ) -> SupplierCandidates {
-        let suppliers = self.lists.intern(suppliers);
-        self.results.insert(key, suppliers.clone());
-        suppliers
+        producer_candidates: Vec<PhysicalCandidateId>,
+    ) -> ProducerCandidates {
+        let producer_candidates = self.lists.intern(producer_candidates);
+        self.results.insert(key, producer_candidates.clone());
+        producer_candidates
     }
 }
 
 /// Quotient only terminal unary summary readers. Internal consumers and merge
-/// operators retain their original identities. Scope expansion must retain one
-/// independently bound reader copy per possible output reference; then every
-/// old selection maps to these copies, and each new binding expands to an old
-/// reader with the same complete interface.
+/// operators retain their original identities. A selection binds the
+/// factored reader independently per output reference (one selected node
+/// each), so every selection of the unfactored readers maps to one of the
+/// factored reader, and each binding of it is an unfactored reader with the
+/// same complete interface.
 ///
 /// These operators bypass ConcreteRows' witness-based row certification.
 /// certified_price checks every supplied producer; template-based proposal
 /// prices remain advisory. Execution and accuracy are recomputed from selected
-/// suppliers, never from the representative template's child witness.
+/// producers, never from the representative template's child witness.
 ///
 /// A kept node's `candidates_for_memo_group` becomes the union, ascending,
-/// of the candidates of the nodes factored into it.
+/// of the candidates of the nodes factored into it, and its
+/// `accuracy_budget_parts` the largest of theirs.
 pub fn factor_terminal_readers(
     inventory: &mut super::inventory::CandidateInventory,
     deadline: Option<std::time::Instant>,
@@ -92,7 +94,7 @@ pub fn factor_terminal_readers(
     let invalid = |error: String| CandidateInventoryError::InvalidMemo(error);
     let count = inventory.operator_nodes_of_candidates_for_memo_groups.len();
     let mut internal = vec![false; count];
-    for inputs in &inventory.supplier_nodes_per_input {
+    for inputs in &inventory.producer_nodes_per_input {
         super::check_deadline(deadline)?;
         for input in inputs {
             for producer in input {
@@ -114,7 +116,7 @@ pub fn factor_terminal_readers(
         let node = &inventory.operator_nodes_of_candidates_for_memo_groups[id];
         if internal[id]
             || outputs[id].is_empty()
-            || inventory.supplier_nodes_per_input[id].len() != 1
+            || inventory.producer_nodes_per_input[id].len() != 1
         {
             continue;
         }
@@ -167,22 +169,26 @@ pub fn factor_terminal_readers(
     let mut unions = HashMap::<usize, Vec<PhysicalCandidateId>>::new();
     let mut known = HashMap::<usize, std::collections::HashSet<PhysicalCandidateId>>::new();
     let mut candidates_for_memo_group = HashMap::<usize, Vec<CandidateForMemoGroupId>>::new();
+    let mut accuracy_budget_parts = HashMap::<usize, usize>::new();
     for (id, &rep) in representative.iter().enumerate() {
         super::check_deadline(deadline)?;
         if eligible[id] {
-            let suppliers = unions.entry(rep).or_default();
+            let producer_candidates = unions.entry(rep).or_default();
             let known = known.entry(rep).or_default();
-            for &supplier in &inventory.supplier_nodes_per_input[id][0] {
-                if known.insert(supplier) {
-                    suppliers.push(supplier);
+            for &producer_id in &inventory.producer_nodes_per_input[id][0] {
+                if known.insert(producer_id) {
+                    producer_candidates.push(producer_id);
                 }
             }
         }
         if id != rep {
-            candidates_for_memo_group.entry(rep).or_default().extend(
-                &inventory.operator_nodes_of_candidates_for_memo_groups[id]
-                    .candidates_for_memo_group,
-            );
+            let factored = &inventory.operator_nodes_of_candidates_for_memo_groups[id];
+            candidates_for_memo_group
+                .entry(rep)
+                .or_default()
+                .extend(&factored.candidates_for_memo_group);
+            let parts = accuracy_budget_parts.entry(rep).or_insert(0);
+            *parts = (*parts).max(factored.accuracy_budget_parts);
         }
     }
     let mut new_ids = vec![PhysicalCandidateId(0); count];
@@ -196,9 +202,9 @@ pub fn factor_terminal_readers(
     for (id, &rep) in representative.iter().enumerate() {
         new_ids[id] = new_ids[rep];
     }
-    let mut lists = SupplierSetInterner::default();
+    let mut lists = ProducerSetInterner::default();
     let mut nodes = Vec::with_capacity(next);
-    let mut supplier_nodes_per_input = Vec::with_capacity(next);
+    let mut producer_nodes_per_input = Vec::with_capacity(next);
     for (id, node) in inventory
         .operator_nodes_of_candidates_for_memo_groups
         .iter()
@@ -214,15 +220,18 @@ pub fn factor_terminal_readers(
             node.candidates_for_memo_group.sort_unstable();
             node.candidates_for_memo_group.dedup();
         }
-        let mut inputs = inventory.supplier_nodes_per_input[id].clone();
-        if let Some(suppliers) = unions.remove(&id) {
-            inputs[0] = suppliers.into();
+        if let Some(parts) = accuracy_budget_parts.remove(&id) {
+            node.accuracy_budget_parts = node.accuracy_budget_parts.max(parts);
+        }
+        let mut inputs = inventory.producer_nodes_per_input[id].clone();
+        if let Some(producer_candidates) = unions.remove(&id) {
+            inputs[0] = producer_candidates.into();
         }
         for input in &mut inputs {
             *input = lists.intern(input.iter().map(|id| new_ids[id.0]).collect::<Vec<_>>());
         }
         nodes.push(node);
-        supplier_nodes_per_input.push(inputs);
+        producer_nodes_per_input.push(inputs);
     }
     let remap = |ids: &mut Vec<PhysicalCandidateId>| {
         let mut seen = std::collections::HashSet::new();
@@ -239,7 +248,7 @@ pub fn factor_terminal_readers(
         remap(group);
     }
     inventory.operator_nodes_of_candidates_for_memo_groups = nodes;
-    inventory.supplier_nodes_per_input = supplier_nodes_per_input;
+    inventory.producer_nodes_per_input = producer_nodes_per_input;
     inventory.validate().map_err(invalid)?;
     Ok(removed)
 }

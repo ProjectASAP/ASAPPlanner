@@ -13,6 +13,7 @@ use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::{
     explicit_local_candidates, explicit_summary_candidate, selected_dag,
 };
+use asap_physical_asap_optimization::test_support::split_shared_by_timing;
 use asap_types::ir::operator::Source;
 use asap_types::ir::physical_export::{
     compile_physical_asap_dag, PhysicalASAPDAG, PhysicalASAPOperatorPayload,
@@ -83,9 +84,15 @@ fn placements() -> [MaterializationAssignment; 2] {
     ]
 }
 
+/// `root` timed under `assignment`, as Stage 2 times a plan: a node read at
+/// two timings (Pass 1 composes identical inputs as one memo group's node,
+/// e.g. the scan of two quantiles of one metric) is split first, one copy
+/// per timing.
 fn timed_dag(root: &Rc<OperatorNode>, assignment: &MaterializationAssignment) -> PhysicalASAPDAG {
+    let (split, assignment) = split_shared_by_timing(std::slice::from_ref(root), assignment);
     let timed =
-        apply_materialization_timings(root, assignment, &mut NodeToTimedNodeCache::new()).unwrap();
+        apply_materialization_timings(&split[0], &assignment, &mut NodeToTimedNodeCache::new())
+            .unwrap();
     compile_physical_asap_dag(&timed).unwrap()
 }
 

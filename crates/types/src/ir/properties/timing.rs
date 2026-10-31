@@ -36,8 +36,9 @@
 //! error ([`ExecutionDataStateError::UnstoredIngestionRoot`]).
 //!
 //! A node reached from two consumers that need different timings cannot be
-//! executed once for both; [`split_shared_by_timing`] copies such a sub-DAG
-//! for one side before the assignment is applied, and the pass itself
+//! executed once for both; Stage 2's `split_shared_by_timing` copies such a
+//! sub-DAG for one side (by [`timing_under_consumer`]) before the assignment
+//! is applied, and the pass itself
 //! rejects a conflict it still finds.
 //!
 //! ## Edge rules (checked after the write)
@@ -122,7 +123,7 @@ impl MaterializationAssignment {
     }
 
     /// The explicit assignment of `node`, if any.
-    fn get(&self, node: &OperatorNode) -> Option<Materialization> {
+    pub fn get(&self, node: &OperatorNode) -> Option<Materialization> {
         self.assigned
             .get(&(node as *const OperatorNode))
             .map(|(_, m)| *m)
@@ -203,7 +204,7 @@ impl NodeToTimedNodeCache {
     }
 
     /// The timed node produced for `input`, if the pass has reached it.
-    pub fn timed(&self, input: &Rc<OperatorNode>) -> Option<&Rc<OperatorNode>> {
+    pub(crate) fn timed(&self, input: &Rc<OperatorNode>) -> Option<&Rc<OperatorNode>> {
         self.timed_node_of.get(&Rc::as_ptr(input))
     }
 }
@@ -447,16 +448,20 @@ fn placement(
     })
 }
 
-/// The timing `node` takes when its consumer runs at `consumer`, for
-/// [`split_shared_by_timing`]: an assignment that cannot be honored is
+/// The timing `node` takes when its consumer runs at `consumer`, by the
+/// placement rules [`apply_materialization_timings`] applies, for Stage 2's
+/// `split_shared_by_timing`: an assignment that cannot be honored is
 /// reported later by [`apply_materialization_timings`].
-fn own_timing(
+/// `query_time_forced` caches, per node, whether something at or below it
+/// can only run at query time: pass an empty map and reuse it across the
+/// calls of one assignment.
+pub fn timing_under_consumer(
     node: &Rc<OperatorNode>,
     consumer: ExecutionTiming,
     assignment: &MaterializationAssignment,
-    forced: &mut HashMap<*const OperatorNode, bool>,
+    query_time_forced: &mut HashMap<*const OperatorNode, bool>,
 ) -> ExecutionTiming {
-    placement(node, consumer, assignment, forced)
+    placement(node, consumer, assignment, query_time_forced)
         .map_or(ExecutionTiming::QueryTime, |(timing, _)| timing)
 }
 
@@ -839,111 +844,6 @@ fn validate_non_asap(
     Ok(())
 }
 
-/// Copy, for one consumer, every sub-DAG that `assignment` would reach with
-/// two different timings from `roots` (one query each, or the roots of one
-/// query), so that a workload whose CSE shared a `Scan` between an
-/// ingestion-time summary and a query-time computation, in one query or
-/// across queries, can still be timed. Only the conflicting sub-DAGs are
-/// copied, one copy per timing; a sub-DAG reached with one timing stays one
-/// `Rc`, shared by the roots that read it. Returns the (possibly rewritten)
-/// roots, in order, and `assignment` remapped onto them: a rebuilt node
-/// keeps its original's explicit materialization.
-pub fn split_shared_by_timing(
-    roots: &[Rc<OperatorNode>],
-    assignment: &MaterializationAssignment,
-) -> (Vec<Rc<OperatorNode>>, MaterializationAssignment) {
-    // First pass: the set of timings each node is reached with.
-    let mut reached: HashMap<*const OperatorNode, Vec<ExecutionTiming>> = HashMap::new();
-    let mut forced = HashMap::new();
-    fn collect(
-        node: &Rc<OperatorNode>,
-        consumer: ExecutionTiming,
-        assignment: &MaterializationAssignment,
-        reached: &mut HashMap<*const OperatorNode, Vec<ExecutionTiming>>,
-        forced: &mut HashMap<*const OperatorNode, bool>,
-    ) {
-        let timing = own_timing(node, consumer, assignment, forced);
-        let entry = reached.entry(Rc::as_ptr(node)).or_default();
-        if entry.contains(&timing) {
-            return;
-        }
-        entry.push(timing);
-        for child in node.children() {
-            collect(child, timing, assignment, reached, forced);
-        }
-    }
-    for root in roots {
-        collect(
-            root,
-            ExecutionTiming::QueryTime,
-            assignment,
-            &mut reached,
-            &mut forced,
-        );
-    }
-    if reached.values().all(|timings| timings.len() <= 1) {
-        return (roots.to_vec(), assignment.clone());
-    }
-    // Second pass: rebuild, giving each (node, timing) pair its own copy.
-    let mut copies: HashMap<(*const OperatorNode, ExecutionTiming), Rc<OperatorNode>> =
-        HashMap::new();
-    fn rebuild(
-        node: &Rc<OperatorNode>,
-        consumer: ExecutionTiming,
-        assignment: &MaterializationAssignment,
-        reached: &HashMap<*const OperatorNode, Vec<ExecutionTiming>>,
-        copies: &mut HashMap<(*const OperatorNode, ExecutionTiming), Rc<OperatorNode>>,
-        forced: &mut HashMap<*const OperatorNode, bool>,
-    ) -> Rc<OperatorNode> {
-        let timing = own_timing(node, consumer, assignment, forced);
-        let key = (Rc::as_ptr(node), timing);
-        if let Some(done) = copies.get(&key) {
-            return Rc::clone(done);
-        }
-        let conflicted = reached
-            .get(&Rc::as_ptr(node))
-            .is_some_and(|timings| timings.len() > 1);
-        let mut changed = conflicted;
-        let operator = node.operator.map_children(|child| {
-            let rebuilt = rebuild(child, timing, assignment, reached, copies, forced);
-            changed |= !Rc::ptr_eq(&rebuilt, child);
-            rebuilt
-        });
-        let out = if changed {
-            Rc::new(
-                OperatorNode::with_schema(operator, node.schema.clone())
-                    .with_guarantee(node.guarantee.clone())
-                    .with_timing(node.timing)
-                    .with_materialization(node.materialization),
-            )
-        } else {
-            Rc::clone(node)
-        };
-        copies.insert(key, Rc::clone(&out));
-        out
-    }
-    let split = roots
-        .iter()
-        .map(|root| {
-            rebuild(
-                root,
-                ExecutionTiming::QueryTime,
-                assignment,
-                &reached,
-                &mut copies,
-                &mut forced,
-            )
-        })
-        .collect();
-    let mut remapped = assignment.clone();
-    for ((original, _), copy) in &copies {
-        if let Some((_, materialization)) = assignment.assigned.get(original) {
-            remapped.set(copy, *materialization);
-        }
-    }
-    (split, remapped)
-}
-
 /// Ingestion-time arithmetic needs the same per-series population on both sides.
 fn per_series_rows(node: &OperatorNode) -> Option<&OperatorNode> {
     use crate::ir::schema::ExactKind;
@@ -1265,8 +1165,8 @@ mod tests {
     }
 
     /// One shared sub-DAG reached as ingestion-time input and as query-time
-    /// input cannot be executed once for both; splitting it by timing first
-    /// makes the plan timeable.
+    /// input cannot be executed once for both (Stage 2's
+    /// `split_shared_by_timing` copies it first).
     #[test]
     fn a_shared_subtree_reached_at_two_timings_conflicts() {
         let shared = scan();
@@ -1285,14 +1185,6 @@ mod tests {
                 second: ExecutionDataState::QUERY_ROWS,
             })
         );
-        let (split, assignment) =
-            split_shared_by_timing(std::slice::from_ref(&root), &all_at_ingestion());
-        assert!(apply_materialization_timings(
-            &split[0],
-            &assignment,
-            &mut NodeToTimedNodeCache::new()
-        )
-        .is_ok());
     }
 
     /// A finalize pinned to ingestion time (as fixed-window rate candidates
@@ -1319,32 +1211,6 @@ mod tests {
                 operator: "FinalizeExactAccumulator"
             })
         );
-    }
-
-    /// Splitting rebuilds the ancestors of a copied sub-DAG; an explicit
-    /// assignment on one of them follows it onto the rebuilt node.
-    #[test]
-    fn split_keeps_explicit_assignments() {
-        let shared = scan();
-        let summary = agg(Rc::clone(&shared), kll());
-        let root = OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Concat {
-            children: vec![max(estimate(Rc::clone(&summary))), max(Rc::clone(&shared))],
-            discriminator_unique_key: None,
-        }))
-        .unwrap();
-        let mut assignment = MaterializationAssignment::default();
-        assignment.set(&summary, AT_INGESTION);
-        let (split, assignment) = split_shared_by_timing(std::slice::from_ref(&root), &assignment);
-        let timed =
-            apply_materialization_timings(&split[0], &assignment, &mut NodeToTimedNodeCache::new())
-                .unwrap();
-        let summary = child(&child(&child(&timed)));
-        assert!(matches!(
-            summary.operator,
-            Operator::ASAP(ASAPOp::SummaryAgg { .. })
-        ));
-        assert_eq!(summary.materialization, AT_INGESTION);
-        assert_eq!(summary.timing, Some(ExecutionTiming::IngestionTime));
     }
 
     /// Any node may be materialized, not only a summary state: stored rows
@@ -1437,60 +1303,6 @@ mod tests {
             Materialization::NotMaterialized
         );
         assert!(validate_at_ingestion(&child(&timed), ExecutionTiming::QueryTime).is_ok());
-    }
-
-    /// Two queries share a scan: one reads it through a summary built at
-    /// ingestion time, the other at query time. Splitting the workload's
-    /// roots together copies the scan for one phase, so one timing pass
-    /// over both roots succeeds; a node both queries reach at one timing
-    /// stays one node.
-    #[test]
-    fn split_across_roots_copies_only_what_two_queries_read_at_two_timings() {
-        let shared = scan();
-        let summary = agg(Rc::clone(&shared), kll());
-        let by_summary = max(estimate(Rc::clone(&summary)));
-        let raw = max(Rc::clone(&shared));
-        let common = max(estimate(agg(scan(), kll())));
-        let roots = [
-            concat(vec![Rc::clone(&by_summary), Rc::clone(&common)]),
-            concat(vec![raw, Rc::clone(&common)]),
-        ];
-        let mut assignment = MaterializationAssignment::default();
-        assignment.set(&summary, AT_INGESTION);
-        let timed_unsplit = {
-            let mut cache = NodeToTimedNodeCache::new();
-            roots
-                .iter()
-                .map(|root| apply_materialization_timings(root, &assignment, &mut cache))
-                .collect::<Result<Vec<_>, _>>()
-        };
-        assert!(matches!(
-            timed_unsplit,
-            Err(ExecutionDataStateError::ConflictingTiming { .. })
-        ));
-        let (split, assignment) = split_shared_by_timing(&roots, &assignment);
-        assert_eq!(split.len(), 2);
-        let mut cache = NodeToTimedNodeCache::new();
-        let timed: Vec<_> = split
-            .iter()
-            .map(|root| apply_materialization_timings(root, &assignment, &mut cache).unwrap())
-            .collect();
-        let summary = child(&child(&child(&timed[0])));
-        assert_eq!(summary.materialization, AT_INGESTION);
-        assert_eq!(child(&summary).timing, Some(ExecutionTiming::IngestionTime));
-        assert_eq!(
-            child(&child(&timed[1])).timing,
-            Some(ExecutionTiming::QueryTime)
-        );
-        assert!(Rc::ptr_eq(timed[0].children()[1], timed[1].children()[1]));
-    }
-
-    fn concat(children: Vec<Rc<OperatorNode>>) -> Rc<OperatorNode> {
-        OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Concat {
-            children,
-            discriminator_unique_key: None,
-        }))
-        .unwrap()
     }
 
     fn finalize(child: Rc<OperatorNode>) -> Rc<OperatorNode> {
@@ -1600,45 +1412,6 @@ mod tests {
         let read = child(&timed);
         assert_eq!(read.timing, Some(ExecutionTiming::QueryTime));
         assert_eq!(read.materialization, Materialization::NotMaterialized);
-    }
-
-    /// Splitting a workload that also shares a scan at two timings keeps a
-    /// conflicting assignment on a fixed-timing node: the split roots still
-    /// fail with the conflict instead of dropping the assignment.
-    #[test]
-    fn a_fixed_timing_conflict_survives_the_split() {
-        let shared = scan();
-        let summary = agg(Rc::clone(&shared), kll());
-        let pair = concat(vec![
-            max(estimate(Rc::clone(&summary))),
-            max(Rc::clone(&shared)),
-        ]);
-        let state = agg(Rc::clone(&shared), exact_sum());
-        let read = Rc::new(
-            (*finalize(Rc::clone(&state)))
-                .clone()
-                .with_timing(Some(ExecutionTiming::QueryTime)),
-        );
-        let mut assignment = MaterializationAssignment::default();
-        assignment.set(&summary, AT_INGESTION);
-        assignment.set(&state, AT_INGESTION);
-        assignment.set(&read, AT_INGESTION);
-        let (split, assignment) = split_shared_by_timing(&[pair, read], &assignment);
-        let mut cache = NodeToTimedNodeCache::new();
-        let timed: Result<Vec<_>, _> = split
-            .iter()
-            .map(|root| apply_materialization_timings(root, &assignment, &mut cache))
-            .collect();
-        assert_eq!(
-            timed.err(),
-            Some(
-                ExecutionDataStateError::MaterializationConflictsWithFixedTiming {
-                    operator: "FinalizeExactAccumulator",
-                    fixed: ExecutionTiming::QueryTime,
-                    materialization: AT_INGESTION,
-                }
-            )
-        );
     }
 
     /// A query-time summary build cannot read ingestion-time rows that are

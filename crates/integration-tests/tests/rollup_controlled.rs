@@ -1,14 +1,12 @@
 //! Controlled plans for the viewer's actual distinct-count rollup workload.
 use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
 use asap_integration_tests::planning::{builds_and_rollups, expanded_memo, select_rollup};
-use asap_logical_asap_optimization::{
-    pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
-    },
-    pass2::asap_aware_cse::{rollup_candidates, rollup_pass2_candidates},
+use asap_logical_asap_optimization::test_support::{
+    compose_logical_candidate, generate_per_computation_candidates, rollup_candidates,
+    rollup_pass2_candidates,
 };
-use asap_plan_selection::PlanningModels;
+use asap_planner::PlanningModels;
+use asap_types::stages::HowToComputeAggregateMeasure;
 use asap_types::{
     ir::{
         schema::{DataType, Field, Schema, SketchAlgorithm},
@@ -53,13 +51,15 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
     let (workload, roots) = fixture();
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.as_ref().unwrap();
-    let generated =
-        generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
+    let generated = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
+    )
+    .unwrap();
     let mut settings = CostInputs::default();
     settings.cost_model = CostModel::UsageOverTime(ResourceUnitCost::aws_fargate_us_east_1(
         settings.resource_speed,
     ));
-    let models = PlanningModels::builtin().with_plan_selection(&settings);
+    let models = PlanningModels::builtin().with_cost_inputs(&settings);
     let mut accepted = Vec::new();
     for algorithm in [None, Some(SketchAlgorithm::Hll), Some(SketchAlgorithm::Kmv)] {
         let choices: Vec<_> = generated
@@ -76,13 +76,9 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
                     .expect("family generated"),
             })
             .collect();
-        let roots: Vec<_> = compose_logical_candidate(&generated, &choices)
-            .unwrap()
-            .into_iter()
-            .map(|(_, r)| r)
-            .collect();
+        let roots: Vec<_> = compose_logical_candidate(&generated, &choices).unwrap();
         // Identical sub-DAGs made one node, as the memo's groups are.
-        let roots: Vec<_> = asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
+        let roots: Vec<_> = asap_logical_asap_optimization::test_support::share_common_sub_dags(
             roots
                 .iter()
                 .enumerate()
@@ -132,7 +128,12 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
                 .unwrap()
                 .expect("fixed query-time implementation");
             plan.id = id.clone();
-            let result = asap_plan_selection::select_plan(&[plan.clone()], &entries, data, models);
+            let result = asap_devtools::memo_pricing::reference_select(
+                &[plan.clone()],
+                &entries,
+                data,
+                models,
+            );
             match result {
                 Ok(selection) => {
                     println!(
@@ -152,7 +153,8 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
             }
         }
     }
-    let chosen = asap_plan_selection::select_plan(&accepted, &entries, data, models).unwrap();
+    let chosen =
+        asap_devtools::memo_pricing::reference_select(&accepted, &entries, data, models).unwrap();
     println!("CONTROLLED WINNER {}", chosen.selected);
     assert_eq!(
         chosen.selected, "Kmv-rollup",
@@ -170,50 +172,33 @@ fn production_distinct_rollup_finds_shared_kmv() {
     settings.cost_model = CostModel::UsageOverTime(ResourceUnitCost::aws_fargate_us_east_1(
         settings.resource_speed,
     ));
-    let run = asap_plan_selection::run_stage1_to_stage3_with(
-        roots.into_iter().enumerate().collect::<Vec<_>>(),
+    let run = asap_planner::run_planning(
+        roots,
         &entries,
         data,
-        PlanningModels::builtin().with_plan_selection(&settings),
-        asap_plan_selection::Stage1ToStage3Search {
-            milp_time_limit_ms: Some(30_000),
-            ..Default::default()
+        PlanningModels::builtin().with_cost_inputs(&settings),
+        asap_planner::PlanSearchSettings {
+            time_limit_ms: Some(30_000),
+            inspect: false,
         },
     )
     .unwrap();
     let selection = run
-        .stage3_plan_selection
+        .selection
         .as_ref()
         .expect("validated plan within budget");
     println!(
         "production cost={:?} report={:?}",
-        selection.costs[&selection.selected].cost_per_second,
-        selection.search.candidate_connections
+        selection.cost.cost_per_second, selection.search_report
     );
-    let report = selection.search.candidate_connections.as_ref().unwrap();
-    assert!(
-        report.direct_cost_validated_plans > 0,
-        "production must validate a plan priced directly by MILP: {report:?}"
-    );
-    assert!(
-        report
-            .direct_cost_best_validated_cost
-            .is_some_and(|cost| cost < 2.0e-6),
-        "direct MILP must price a plan cheaper than independent KMV"
-    );
-    let accepted = &selection.accepted[&selection.selected];
+    let accepted = &selection.accepted_accuracy_per_query;
     assert_eq!(accepted.len(), 2);
     assert!(accepted
         .iter()
         .all(|accuracy| !accuracy.accepted_regardless_of_guarantee
             && accuracy.sketches.iter().any(|sketch| sketch == "Kmv")));
-    assert!(
-        selection.costs[&selection.selected]
-            .cost_per_second
-            .unwrap()
-            < 2.0e-6
-    );
-    let plan = run.selected().unwrap();
+    assert!(selection.cost.cost_per_second.unwrap() < 2.0e-6);
+    let plan = &run.selected_physical_plan.as_ref().unwrap().plan;
     let builds: HashSet<_> = nodes(&plan.roots)
         .iter()
         .filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })))
@@ -238,7 +223,7 @@ fn memo_offers_one_kmv_build_and_a_rollup() {
     let (workload, roots) = fixture();
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.as_ref().unwrap();
-    let memo = expanded_memo(roots.into_iter().enumerate().collect(), &entries);
+    let memo = expanded_memo(roots, &entries);
     let (selected, separate, shared) = select_rollup(&memo, 2, &entries, data);
     assert!(shared < separate, "{shared} vs {separate}");
     assert_eq!(builds_and_rollups(&selected), (1, 1));

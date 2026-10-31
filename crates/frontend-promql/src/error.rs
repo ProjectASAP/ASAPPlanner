@@ -10,7 +10,7 @@ use asap_types::workload::WorkloadError;
 ///
 /// Carries no DataFusion type — the PromQL front end never depends on the SQL
 /// stack. The language-neutral variants (`UnsupportedFeature` / `WrongLanguage`
-/// / `Convert`) are mirrored by [`asap_frontend_sql::SqlError`] rather than
+/// / `Convert`) are mirrored by `asap_frontend_sql::SqlError` rather than
 /// shared, so neither front end pulls the other's parser.
 #[derive(Debug)]
 pub enum PromqlError {

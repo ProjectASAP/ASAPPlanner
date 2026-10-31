@@ -2,61 +2,16 @@
 //! common-subexpression elimination, as defined in
 //! `docs/design_docs/proposals/planner-layering.md` (Algorithm 2).
 //!
-//! Its three rules are implemented: the identical-expression rule, the
-//! summary-capability rule and, for tumbling panes, the
-//! window-composition rule; so are two reuse rules (#680), rollup and exact
-//! top-k reuse.
-//!
-//! # Identical-expression rule
-//!
-//! A *sharing candidate* ([`SharingCandidate`]) of a whole-workload
-//! candidate is a set of two or more of its nodes with identical input and
-//! computation semantics that are legal to share: the `pass2::cse` interning
-//! merges ASAP nodes and non-ASAP nodes that return the same rows for the
-//! same input rows.
-//! [`identical_expression_pass2_candidates`] returns one Pass 2 candidate
-//! per non-empty subset of the sharing candidates (Algorithm 2, line 31):
-//! each sharing candidate in the subset becomes one node serving every
-//! consumer, and every other stays separate. The caller keeps the
-//! independent candidate beside them, so plan selection compares all of
-//! them; nothing is capped.
-//!
-//! Sharing a node shares the sub-DAG below it. A subset that leaves out a
-//! sharing candidate whose nodes all lie below the nodes of one it shares
-//! gives the same Pass 2 candidate as the subset with it; such a Pass 2
-//! candidate is returned once, under the subset it actually shares.
+//! The memo rules (`pass2::memo::rules`) are built on these helpers: the
+//! window-composition rule for tumbling panes, and two reuse rules (#680),
+//! rollup and exact top-k reuse. Identical expressions are shared by memo
+//! group identity, and summary builds of one family at different sizes by
+//! the memo's shared-producer rule (`memo::rules::shared_producer`); both
+//! rules' whole-workload forms are gone.
 //!
 //! Scans of one metric that project different labels read the same rows.
 //! [`with_union_scan_labels`] widens them to the union of their labels, so
-//! interning finds them identical; the caller also lists the Pass 2
-//! candidates of the widened roots that share a scan.
-//!
-//! # Summary-capability rule
-//!
-//! Composition sizes each consumer's summary build alone, for its own
-//! accuracy target. The *members* of a [`CapabilitySharingCandidate`] are summary
-//! builds of one candidate that chose the same family (the same
-//! [`SketchAlgorithm`](asap_types::ir::schema::SketchAlgorithm) at any
-//! size, or the same per-series exact accumulator) over the same input
-//! sub-DAG (window, `WHERE` and time range included), item and weight,
-//! grouping and filter, and whose every reader is an estimate the family
-//! answers ([`FamilyCapability::answers`]) or, for an exact accumulator,
-//! its finalization. They differ in their sizes, or, for per-series builds
-//! over one metric's scans without label matchers, in the labels those
-//! scans project: the shared build is over the scan with every member's
-//! labels, and each other member's readers keep only their own columns.
-//! [`summary_capability_pass2_candidates`] returns one Pass 2 candidate per
-//! choice, for each capability sharing candidate, of no sharing or one
-//! subset of two or more of its members
-//! whose sizes differ (Q1: partial sharing too): the subset becomes one
-//! build serving all its readers, sized with each parameter's largest value
-//! among them ([`size_for_all_readers`]: each consumer sized alone, the shared
-//! build the per-parameter maximum, a KLL's failure probability the
-//! minimum and its `k` the largest after each is resized to that minimum),
-//! and every guarantee above it is composed again, so plan
-//! selection checks each consumer against the shared state. Members of
-//! equal size are the identical-expression rule's; builds that are not
-//! shared are untouched, and a consumer never changes family.
+//! interning finds them identical (`memo::rules::scan_labels`).
 //!
 //! # Window-composition rule
 //!
@@ -137,7 +92,7 @@
 //! alone, and every sketch rollup of one finest build together, since they
 //! share its size. A chosen sketch choice sizes the finest build for every
 //! reader, its own and each coarse one's (the strictest consumer, as the
-//! summary-capability rule sizes a shared build), and composes every
+//! shared-producer rule sizes a shared build), and composes every
 //! guarantee above it again. So 15 groupings of one window are one choice,
 //! not 2^14 subsets.
 //!
@@ -146,14 +101,13 @@
 //! Exact top-k computations of one input and partition with different `k`
 //! read one ranking: the rows of the largest top-k, `Limit(k_max)` over
 //! `Sort`, which hold every smaller top-k ([`topk_reuse_candidates`],
-//! [`topk_reuse_pass2_candidates`]). Only exact computations over exact input are
+//! `memo::rules::topk`). Only exact computations over exact input are
 //! reused; a sketch's heap is not, as its membership has no guarantee yet.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use crate::pass2::cse::share_common_sub_dags;
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{
@@ -171,86 +125,16 @@ use crate::pass1::per_computation_candidates::PerComputationCandidateError;
 use asap_accuracy::estimators::size_for_all_readers;
 use asap_accuracy::propagation::recompose_guarantees;
 
-/// A Pass 2 candidate of the identical-expression rule: the candidate's
-/// roots with each of `sharing_candidates` made one node.
-#[derive(Debug, Clone)]
-pub struct IdenticalExpressionPass2Candidate {
-    /// The sharing candidates made one node, in [`sharing_candidates`]
-    /// order.
-    pub sharing_candidates: Vec<SharingCandidate>,
-    /// The candidate's roots with those nodes shared.
-    pub roots: Vec<QueryRoot>,
-}
-
-/// Identical nodes the identical-expression rule can make one node, in the
-/// order a children-first walk of the roots meets them.
-#[derive(Debug, Clone)]
-pub struct SharingCandidate {
-    /// Two or more nodes with identical input and computation.
-    pub nodes: Vec<Rc<OperatorNode>>,
-}
-
-/// The sharing candidates of the candidate with query roots `roots`, children
-/// before parents.
-pub fn sharing_candidates(roots: &[QueryRoot]) -> Vec<SharingCandidate> {
-    let operators: Vec<Rc<OperatorNode>> = roots.iter().flat_map(root_operators).cloned().collect();
-    let interned = share_common_sub_dags(operators.iter().cloned().enumerate().collect());
-    // Each node's interned representative: interning rebuilds every node
-    // over its children in order, so the two DAGs are walked side by side.
-    let mut representative: HashMap<*const OperatorNode, *const OperatorNode> = HashMap::new();
-    let mut order = Vec::new();
-    for (original, (_, merged)) in operators.iter().zip(&interned) {
-        pair(original, merged, &mut representative, &mut order);
-    }
-    let mut members: HashMap<*const OperatorNode, Vec<Rc<OperatorNode>>> = HashMap::new();
-    let mut first_seen = Vec::new();
-    for node in order {
-        let key = representative[&Rc::as_ptr(&node)];
-        let entry = members.entry(key).or_default();
-        if entry.is_empty() {
-            first_seen.push(key);
-        }
-        entry.push(node);
-    }
-    first_seen
-        .into_iter()
-        .filter_map(|key| {
-            let nodes = members.remove(&key)?;
-            (nodes.len() >= 2).then_some(SharingCandidate { nodes })
-        })
-        .collect()
-}
-
-/// Record `original`'s representative `merged` and recurse into the
-/// children, then list `original` (children first, each node once).
-fn pair(
-    original: &Rc<OperatorNode>,
-    merged: &Rc<OperatorNode>,
-    representative: &mut HashMap<*const OperatorNode, *const OperatorNode>,
-    order: &mut Vec<Rc<OperatorNode>>,
-) {
-    if representative.contains_key(&Rc::as_ptr(original)) {
-        return;
-    }
-    representative.insert(Rc::as_ptr(original), Rc::as_ptr(merged));
-    for (child, merged_child) in original.children().into_iter().zip(merged.children()) {
-        pair(child, merged_child, representative, order);
-    }
-    order.push(Rc::clone(original));
-}
-
 /// `roots` with the time-series scans of one metric made identical when
-/// they project different labels, so that [`sharing_candidates`] finds
-/// them: the PromQL frontend projects only the labels each query uses
+/// they project different labels, so that interning finds them identical: the PromQL frontend projects only the labels each query uses
 /// (`ts, value, job, …` for `quantile by (job) (0.5, data)`), and
 /// structural CSE shares only nodes with equal schemas. Every scan of a
 /// metric without predicates projects the union of the labels its scans
 /// project, in the order the walk meets them (before the series identity,
 /// with the unique keys moved along).
-/// The nodes that pass the labels on ([`passes_labels_on`]) keep the wider
+/// The nodes that pass the labels on (`passes_labels_on`) keep the wider
 /// rows above a widened scan; any other consumer reads them through a
-/// `Project` that keeps the columns it read, by name, as
-/// `relabeled_estimate` does. `None` when every metric's scans already
+/// `Project` that keeps the columns it read, by name. `None` when every metric's scans already
 /// agree, when two of them give one label different types or one is closed
 /// and the other not, when a node would change arity, or when a consumer
 /// would have to narrow a summary state or a grouped or filtered pane chain
@@ -459,250 +343,6 @@ fn narrowed(
     ))?))
 }
 
-/// Every Pass 2 candidate of the identical-expression rule for the
-/// candidate with query roots `roots` and sharing candidates `candidates`
-/// ([`sharing_candidates`]): one per non-empty subset of them that gives a
-/// distinct Pass 2 candidate, in binary-counter order of the subsets (the
-/// first sharing candidate the lowest bit). Empty when nothing is
-/// identical.
-///
-/// Sharing a set of sharing candidates also shares every one whose
-/// remaining nodes it leaves as one; that closure maps each subset to the
-/// Pass 2 candidate it gives, and the distinct ones are the closed sets.
-/// They are enumerated directly (Ganter's Next Closure, one closure per
-/// step and sharing candidate) rather than by trying all `2^g` subsets,
-/// which repeat when sharing candidates nest.
-pub fn identical_expression_pass2_candidates(
-    roots: &[QueryRoot],
-    candidates: &[SharingCandidate],
-) -> Vec<IdenticalExpressionPass2Candidate> {
-    let n = candidates.len();
-    let mut closed_sets = Vec::new();
-    // The closed sets in lectic order, from the closure of the empty set
-    // (which shares nothing).
-    let mut closed = vec![false; n];
-    'next: loop {
-        for i in (0..n).rev() {
-            if closed[i] {
-                continue;
-            }
-            let mut candidate: Vec<bool> = (0..n).map(|g| g < i && closed[g]).collect();
-            candidate[i] = true;
-            let (shared_roots, merged) = apply(roots, candidates, &candidate);
-            // Lectic successor: adds nothing below `i` that `closed` lacks.
-            if (0..i).all(|g| !merged[g] || closed[g]) {
-                // `merged` is closed: applying it gives the same candidate.
-                closed_sets.push((merged.clone(), shared_roots));
-                closed = merged;
-                continue 'next;
-            }
-        }
-        break;
-    }
-    // Binary-counter order of the subsets: compare from the highest candidate.
-    closed_sets.sort_by(|(a, _), (b, _)| a.iter().rev().cmp(b.iter().rev()));
-    closed_sets
-        .into_iter()
-        .map(|(subset, roots)| IdenticalExpressionPass2Candidate {
-            sharing_candidates: (0..n)
-                .filter(|&g| subset[g])
-                .map(|g| candidates[g].clone())
-                .collect(),
-            roots,
-        })
-        .collect()
-}
-
-/// `roots` with the sharing candidates `subset` selects made one node each
-/// (and the ones that leaves one node): one identical-expression Pass 2
-/// candidate, for a search that decides which nodes to share rather than
-/// listing every closed set ([`identical_expression_pass2_candidates`]).
-pub fn with_shared_candidates(
-    roots: &[QueryRoot],
-    candidates: &[SharingCandidate],
-    subset: &[bool],
-) -> Vec<QueryRoot> {
-    apply(roots, candidates, subset).0
-}
-
-/// `roots` with the sharing candidates in `subset` shared, and the ones
-/// that leaves shared: those whose every node still read became one node (a
-/// node below a shared node other than the one kept is no longer read).
-fn apply(
-    roots: &[QueryRoot],
-    candidates: &[SharingCandidate],
-    subset: &[bool],
-) -> (Vec<QueryRoot>, Vec<bool>) {
-    let candidate_of: HashMap<*const OperatorNode, usize> = candidates
-        .iter()
-        .enumerate()
-        .flat_map(|(index, candidate)| candidate.nodes.iter().map(move |n| (Rc::as_ptr(n), index)))
-        .collect();
-    let mut sharing = Sharing {
-        subset,
-        candidate_of: &candidate_of,
-        rebuilt: HashMap::new(),
-        node_of_shared_candidate: HashMap::new(),
-    };
-    let shared_roots: Vec<QueryRoot> = roots.iter().map(|r| sharing.root(r)).collect();
-    let merged = candidates
-        .iter()
-        .map(|candidate| {
-            let mut nodes = candidate.nodes.iter().filter_map(|node| {
-                let (_, rebuilt) = sharing.rebuilt.get(&Rc::as_ptr(node))?;
-                Some(Rc::as_ptr(rebuilt))
-            });
-            let first = nodes.next();
-            nodes.all(|node| Some(node) == first)
-        })
-        .collect();
-    (shared_roots, merged)
-}
-
-/// Binary increment of `subset`, the first entry the lowest bit; `false`
-/// once every subset has been visited.
-#[cfg(test)]
-fn next_subset(subset: &mut [bool]) -> bool {
-    for bit in subset.iter_mut() {
-        *bit = !*bit;
-        if *bit {
-            return true;
-        }
-    }
-    false
-}
-
-/// One application of the rule: the sharing candidates in `subset` shared.
-struct Sharing<'a> {
-    subset: &'a [bool],
-    /// Node → the index of the sharing candidate it belongs to.
-    candidate_of: &'a HashMap<*const OperatorNode, usize>,
-    /// Original node → (original, rebuilt). The original is kept alive so
-    /// its address cannot be reused while it is a key.
-    rebuilt: HashMap<*const OperatorNode, (Rc<OperatorNode>, Rc<OperatorNode>)>,
-    /// Shared candidate's index → the one node all its nodes become.
-    node_of_shared_candidate: HashMap<usize, Rc<OperatorNode>>,
-}
-
-impl Sharing<'_> {
-    fn root(&mut self, root: &QueryRoot) -> QueryRoot {
-        match root {
-            QueryRoot::Operator(node) => QueryRoot::Operator(self.node(node)),
-            QueryRoot::Scalar(expr) => {
-                QueryRoot::Scalar(expr.map_operator_refs(&mut |node| self.node(node)))
-            }
-        }
-    }
-
-    fn node(&mut self, node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-        if let Some((_, rebuilt)) = self.rebuilt.get(&Rc::as_ptr(node)) {
-            return Rc::clone(rebuilt);
-        }
-        let candidate = self
-            .candidate_of
-            .get(&Rc::as_ptr(node))
-            .copied()
-            .filter(|&c| self.subset[c]);
-        let rebuilt = match candidate.and_then(|c| self.node_of_shared_candidate.get(&c)) {
-            Some(shared) => Rc::clone(shared),
-            None => {
-                let rebuilt = self.over_rebuilt_children(node);
-                if let Some(c) = candidate {
-                    self.node_of_shared_candidate.insert(c, Rc::clone(&rebuilt));
-                }
-                rebuilt
-            }
-        };
-        self.rebuilt
-            .insert(Rc::as_ptr(node), (Rc::clone(node), Rc::clone(&rebuilt)));
-        rebuilt
-    }
-
-    /// `node` over its rebuilt children; the same `Rc` when none changed.
-    /// Every child is replaced by an identical node, so `node`'s schema,
-    /// guarantee, timing and materialization stay valid.
-    fn over_rebuilt_children(&mut self, node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
-        let mut changed = false;
-        let operator = node.operator.map_children(|child| {
-            let rebuilt = self.node(child);
-            changed |= !Rc::ptr_eq(&rebuilt, child);
-            rebuilt
-        });
-        if !changed {
-            return Rc::clone(node);
-        }
-        Rc::new(
-            OperatorNode::with_schema(operator, node.schema.clone())
-                .with_guarantee(node.guarantee.clone())
-                .with_timing(node.timing)
-                .with_materialization(node.materialization),
-        )
-    }
-}
-
-/// Summary builds the summary-capability rule can make one build: builds
-/// of one family over the same input data that differ only in size, or in
-/// the labels their per-series scans project, in the order a children-first
-/// walk of the roots meets them.
-#[derive(Debug, Clone)]
-pub struct CapabilitySharingCandidate {
-    /// The family the first member builds: every member builds this sketch
-    /// algorithm at some size, or this exact accumulator.
-    pub family: FieldDataType,
-    /// The summary builds (`SummaryAgg`), at least two, not all equal (in
-    /// size or in the labels their scans project).
-    pub members: Vec<Rc<OperatorNode>>,
-}
-
-/// A Pass 2 candidate of the summary-capability rule: the candidate's
-/// roots with each set of builds in `shared_builds` made one build, sized
-/// for all their readers, and every guarantee composed again; the error
-/// when that composition fails, which leaves the other Pass 2 candidates
-/// unaffected.
-#[derive(Debug)]
-pub struct SummaryCapabilityPass2Candidate {
-    /// Each set of summary builds made one build: two or more members of
-    /// one [`CapabilitySharingCandidate`], at most one set per candidate.
-    pub shared_builds: Vec<Vec<Rc<OperatorNode>>>,
-    /// The candidate's roots with those builds shared.
-    pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
-}
-
-/// The capability sharing candidates of the candidate with query roots
-/// `roots`: at least two builds each, whose sizes are not all equal.
-pub fn capability_sharing_candidates(roots: &[QueryRoot]) -> Vec<CapabilitySharingCandidate> {
-    let mut nodes = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for node in roots.iter().flat_map(root_operators) {
-        collect_children_first(node, &mut seen, &mut nodes);
-    }
-    // Every node that reads each build, by the build's address.
-    let mut readers: HashMap<*const OperatorNode, Vec<&Rc<OperatorNode>>> = HashMap::new();
-    for node in &nodes {
-        for child in node.children() {
-            readers.entry(Rc::as_ptr(child)).or_default().push(node);
-        }
-    }
-    let mut candidates: Vec<CapabilitySharingCandidate> = Vec::new();
-    for node in &nodes {
-        let Some(family) = shareable_family(node, readers.get(&Rc::as_ptr(node))) else {
-            continue;
-        };
-        match candidates
-            .iter_mut()
-            .find(|c| same_family(&c.family, &family) && same_input_data(&c.members[0], node))
-        {
-            Some(candidate) => candidate.members.push(Rc::clone(node)),
-            None => candidates.push(CapabilitySharingCandidate {
-                family,
-                members: vec![Rc::clone(node)],
-            }),
-        }
-    }
-    candidates.retain(|c| !all_equal(c.members.iter()));
-    candidates
-}
-
 fn collect_children_first(
     node: &Rc<OperatorNode>,
     seen: &mut std::collections::HashSet<*const OperatorNode>,
@@ -717,42 +357,6 @@ fn collect_children_first(
     out.push(Rc::clone(node));
 }
 
-/// The family of a per-subpopulation sketch build whose every reader is an
-/// estimate the family answers, or of a per-series exact accumulator whose
-/// every reader finalizes it; `None` for any other node.
-fn shareable_family(
-    node: &OperatorNode,
-    readers: Option<&Vec<&Rc<OperatorNode>>>,
-) -> Option<FieldDataType> {
-    let readers = readers?;
-    match node.asap() {
-        Some(ASAPOp::SummaryAgg {
-            family: family @ FieldDataType::Sketch(_, GroupingStrategy::PerSubpopulationInstance),
-            ..
-        }) => {
-            let capability = FamilyCapability::of(family);
-            readers
-                .iter()
-                .all(|reader| {
-                    matches!(
-                        reader.asap(),
-                        Some(ASAPOp::SummaryEstimate { query, .. }) if capability.answers(query)
-                    )
-                })
-                .then(|| family.clone())
-        }
-        Some(ASAPOp::SummaryAgg {
-            family: family @ FieldDataType::ExactAggregate(..),
-            reduction: Reduction::PerEntity,
-            ..
-        }) => readers
-            .iter()
-            .all(|reader| matches!(reader.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. })))
-            .then(|| family.clone()),
-        _ => None,
-    }
-}
-
 /// Whether builds of families `a` and `b` can be one build: one sketch
 /// algorithm and grouping at any sizes, or one exact accumulator.
 fn same_family(a: &FieldDataType, b: &FieldDataType) -> bool {
@@ -762,280 +366,6 @@ fn same_family(a: &FieldDataType, b: &FieldDataType) -> bool {
         }
         _ => a == b,
     }
-}
-
-/// Whether two builds of one family read the same data the same way: the
-/// same input sub-DAG, item and weight, grouping and filter. Two
-/// per-series builds over one metric's samples also do when their scans
-/// project different labels ([`same_rows`]): a per-series state is keyed by
-/// the series identity, which determines every label, so a build over the
-/// scan with the most labels holds every member's states and its readers
-/// keep the labels each needs ([`share_summaries`]).
-fn same_input_data(a: &OperatorNode, b: &OperatorNode) -> bool {
-    match (a.asap(), b.asap()) {
-        (
-            Some(ASAPOp::SummaryAgg {
-                child,
-                input,
-                reduction,
-                grouping,
-                filter,
-                ..
-            }),
-            Some(ASAPOp::SummaryAgg {
-                child: child_b,
-                input: input_b,
-                reduction: reduction_b,
-                grouping: grouping_b,
-                filter: filter_b,
-                ..
-            }),
-        ) => {
-            let same_child = Rc::ptr_eq(child, child_b)
-                || child == child_b
-                || (*reduction == Reduction::PerEntity
-                    && filter.is_none()
-                    && child.schema.has_promql_series_identity()
-                    && child_b.schema.has_promql_series_identity()
-                    && same_rows(child, child_b));
-            same_child
-                && input == input_b
-                && reduction == reduction_b
-                && grouping == grouping_b
-                && filter == filter_b
-        }
-        _ => false,
-    }
-}
-
-/// The names of the columns of a build's input: for a per-series build,
-/// the labels its scan projects, among others.
-fn input_column_names(build: &OperatorNode) -> Vec<&str> {
-    match build.asap() {
-        Some(ASAPOp::SummaryAgg { child, .. }) => child
-            .schema
-            .fields
-            .iter()
-            .map(|f| f.name.as_str())
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn all_equal<'a>(mut nodes: impl Iterator<Item = &'a Rc<OperatorNode>>) -> bool {
-    let Some(first) = nodes.next() else {
-        return true;
-    };
-    nodes.all(|node| Rc::ptr_eq(node, first) || **node == **first)
-}
-
-/// The most summary builds one capability sharing candidate may have:
-/// every subset of two or more is a Pass 2 candidate, about a million at 20.
-pub const MAX_CAPABILITY_SHARING_MEMBERS: usize = 20;
-
-/// Every Pass 2 candidate of the summary-capability rule for the candidate
-/// with query roots `roots` and capability sharing candidates `candidates`
-/// ([`capability_sharing_candidates`]): one per choice, for each, of no
-/// sharing or one subset of two or more members whose sizes are not all
-/// equal, other than sharing nothing. An error only for one of more than
-/// [`MAX_CAPABILITY_SHARING_MEMBERS`] members; a Pass 2 candidate whose
-/// composition fails carries its own error. The first capability sharing
-/// candidate varies slowest; within one, subsets come in binary-counter
-/// order (the first member the lowest bit).
-pub fn summary_capability_pass2_candidates(
-    roots: &[QueryRoot],
-    candidates: &[CapabilitySharingCandidate],
-) -> Result<Vec<SummaryCapabilityPass2Candidate>, PerComputationCandidateError> {
-    // Every subset of a capability sharing candidate is a Pass 2
-    // candidate: 2^n of them. Past MAX_CAPABILITY_SHARING_MEMBERS that is
-    // no longer a list plan selection can price.
-    let largest = candidates
-        .iter()
-        .map(|candidate| candidate.members.len())
-        .max()
-        .unwrap_or(0);
-    if largest > MAX_CAPABILITY_SHARING_MEMBERS {
-        return Err(PerComputationCandidateError::TooManyCandidates {
-            counted: "summary builds in one capability sharing candidate",
-            found: largest,
-            max: MAX_CAPABILITY_SHARING_MEMBERS,
-        });
-    }
-    // Each capability sharing candidate's options: `None` (no sharing),
-    // then its subsets.
-    let options: Vec<Vec<Option<Vec<usize>>>> = candidates
-        .iter()
-        .map(|candidate| {
-            let n = candidate.members.len();
-            let mut options = vec![None];
-            for mask in 1u64..(1u64 << n) {
-                let members: Vec<usize> = (0..n).filter(|&m| mask >> m & 1 == 1).collect();
-                if members.len() >= 2 && !all_equal(members.iter().map(|&m| &candidate.members[m]))
-                {
-                    options.push(Some(members));
-                }
-            }
-            options
-        })
-        .collect();
-    let mut choice = vec![0usize; candidates.len()];
-    let mut pass2_candidates = Vec::new();
-    loop {
-        // Mixed-radix increment, the last candidate varying fastest.
-        let mut carried = true;
-        for (digit, candidate_options) in choice.iter_mut().zip(&options).rev() {
-            *digit += 1;
-            if *digit < candidate_options.len() {
-                carried = false;
-                break;
-            }
-            *digit = 0;
-        }
-        if carried {
-            break;
-        }
-        let shared_builds: Vec<Vec<Rc<OperatorNode>>> = choice
-            .iter()
-            .zip(candidates.iter().zip(&options))
-            .filter_map(|(&option, (candidate, candidate_options))| {
-                let members = candidate_options[option].as_ref()?;
-                Some(
-                    members
-                        .iter()
-                        .map(|&m| Rc::clone(&candidate.members[m]))
-                        .collect(),
-                )
-            })
-            .collect();
-        match share_summaries(roots, &shared_builds) {
-            Ok(None) => {}
-            Ok(Some(roots)) => pass2_candidates.push(SummaryCapabilityPass2Candidate {
-                shared_builds,
-                roots: Ok(roots),
-            }),
-            Err(error) => pass2_candidates.push(SummaryCapabilityPass2Candidate {
-                shared_builds,
-                roots: Err(error),
-            }),
-        }
-    }
-    Ok(pass2_candidates)
-}
-
-/// `roots` with each set of `shared_builds` made one build sized for all
-/// its members, and every guarantee composed again; `None` when the
-/// members' sizes have no shared size.
-fn share_summaries(
-    roots: &[QueryRoot],
-    shared_builds: &[Vec<Rc<OperatorNode>>],
-) -> Result<Option<Vec<QueryRoot>>, PerComputationCandidateError> {
-    let mut replaced: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
-    // Every node that reads each build, by the build's address.
-    let mut nodes = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for node in roots.iter().flat_map(root_operators) {
-        collect_children_first(node, &mut seen, &mut nodes);
-    }
-    let mut readers: HashMap<*const OperatorNode, Vec<&Rc<OperatorNode>>> = HashMap::new();
-    for node in &nodes {
-        for child in node.children() {
-            readers.entry(Rc::as_ptr(child)).or_default().push(node);
-        }
-    }
-    for members in shared_builds {
-        let mut members: Vec<&Rc<OperatorNode>> = members.iter().collect();
-        // The build is over the input with every member's columns (the
-        // scan with the most labels); none such, no shared build.
-        let Some(host) = members.iter().position(|candidate| {
-            let columns = input_column_names(candidate);
-            members.iter().all(|member| {
-                input_column_names(member)
-                    .iter()
-                    .all(|c| columns.contains(c))
-            })
-        }) else {
-            return Ok(None);
-        };
-        members.swap(0, host);
-        let Some(build) = sized_for_all(&members)? else {
-            return Ok(None);
-        };
-        for member in members {
-            if member.schema == build.schema {
-                replaced.insert(Rc::as_ptr(member), Rc::clone(&build));
-                continue;
-            }
-            // A member over fewer labels: each of its estimates reads the
-            // shared build and keeps the member's columns, by name.
-            for reader in readers.get(&Rc::as_ptr(member)).into_iter().flatten() {
-                let Some(estimate) = relabeled_estimate(reader, &build)? else {
-                    return Ok(None);
-                };
-                replaced.insert(Rc::as_ptr(reader), estimate);
-            }
-        }
-    }
-    let mut rebuilt: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
-    let mut rebuild = |node: &Rc<OperatorNode>| rebuild(node, &replaced, &mut rebuilt);
-    let mut out = Vec::new();
-    for root in roots {
-        out.push(match root {
-            QueryRoot::Operator(node) => QueryRoot::Operator(rebuild(node)?),
-            QueryRoot::Scalar(expr) => {
-                let mut nodes = HashMap::new();
-                for node in expr.operator_refs() {
-                    nodes.insert(Rc::as_ptr(node), rebuild(node)?);
-                }
-                QueryRoot::Scalar(
-                    expr.map_operator_refs(&mut |node| nodes[&Rc::as_ptr(node)].clone()),
-                )
-            }
-        });
-    }
-    Ok(Some(recompose_guarantees(&out)?))
-}
-
-/// `reader`, an estimate or finalization of a per-series build over fewer
-/// labels, as the same read of `build` with only `reader`'s columns, by
-/// name; `None` for another reader or a missing column.
-fn relabeled_estimate(
-    reader: &OperatorNode,
-    build: &Rc<OperatorNode>,
-) -> Result<Option<Rc<OperatorNode>>, PerComputationCandidateError> {
-    use asap_types::ir::ProjectItem;
-    let operator = match reader.asap() {
-        Some(ASAPOp::SummaryEstimate { query, .. }) => ASAPOp::SummaryEstimate {
-            summary_input: Rc::clone(build),
-            query: query.clone(),
-        },
-        Some(ASAPOp::FinalizeExactAccumulator { .. }) => ASAPOp::FinalizeExactAccumulator {
-            child: Rc::clone(build),
-        },
-        _ => return Ok(None),
-    };
-    let estimate = Rc::new(OperatorNode::new(Operator::ASAP(operator))?);
-    let mut cols = Vec::with_capacity(reader.schema.fields.len());
-    for field in &reader.schema.fields {
-        let Some(column) = estimate
-            .schema
-            .fields
-            .iter()
-            .position(|f| f.name == field.name && f.table == field.table)
-        else {
-            return Ok(None);
-        };
-        cols.push(ProjectItem {
-            alias: Some(field.name.clone()),
-            expr: ScalarExpr::Column(column),
-        });
-    }
-    Ok(Some(Rc::new(OperatorNode::new(Operator::NonASAP(
-        NonASAPOp::Project {
-            cols,
-            qualifier: None,
-            child: estimate,
-        },
-    ))?)))
 }
 
 /// One build serving every member: the first member with the members'
@@ -1130,6 +460,8 @@ impl PaneCandidate {
 #[derive(Debug)]
 pub struct WindowCompositionPass2Candidate {
     /// The builds built as tumbling panes, in [`pane_candidates`] order.
+    /// Only tests read it.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     pub pane_candidates: Vec<PaneCandidate>,
     /// The chains each shared by several of `pane_candidates`
     /// ([`nested_window_groups`] or [`gcd_window_groups`]); empty when each
@@ -1156,7 +488,7 @@ pub struct SharedPaneChain {
 /// The most pane candidates one candidate may have: every non-empty subset
 /// is a Pass 2 candidate, and with shared grids up to three, about three
 /// million at 20.
-pub const MAX_PANE_CANDIDATES: usize = 20;
+pub(crate) const MAX_PANE_CANDIDATES: usize = 20;
 
 /// The pane candidates of the candidate with query roots `roots`, children
 /// first. `evaluation_grid_ms[q]` is the grid query `q`'s evaluations fall
@@ -1253,13 +585,13 @@ fn pane_window_ms(build: &OperatorNode) -> Option<u64> {
 /// its panes; every other build is untouched. A subset whose builds can
 /// share chains is followed by one Pass 2 candidate per shared grid, in
 /// which each group reads one shared chain, each member merging its newest
-/// panes: the finest member's panes ([`nested_window_groups`]), then the
+/// panes: the finest member's panes (`nested_window_groups`), then the
 /// gcd of the members' widths when that groups them differently
-/// ([`gcd_window_groups`]); and by one error candidate per group whose
+/// (`gcd_window_groups`); and by one error candidate per group whose
 /// sizing fails. Each grid groups every build of a subset at once: a
 /// shared gcd grid over only some of the builds that could share it is not
 /// listed. An error only for more than
-/// [`MAX_PANE_CANDIDATES`] pane candidates; a Pass 2 candidate whose
+/// `MAX_PANE_CANDIDATES` pane candidates; a Pass 2 candidate whose
 /// composition fails carries its own error.
 pub fn window_composition_pass2_candidates(
     roots: &[QueryRoot],
@@ -1759,7 +1091,7 @@ fn in_panes(
 /// panes covering its own window (its newest panes, or its whole chain),
 /// which `pane_width_ms` divides and the new chain covers; every guarantee
 /// is composed again.
-pub fn with_pane_chain(
+pub(crate) fn with_pane_chain(
     roots: &[QueryRoot],
     merge: &Rc<OperatorNode>,
     family: FieldDataType,
@@ -1836,7 +1168,7 @@ pub fn with_pane_chain(
 /// `roots` with the summary build `build` (a `SummaryAgg` of `roots`)
 /// built at family `family` instead (the same algorithm at another size),
 /// its output names kept; every guarantee is composed again.
-pub fn with_resized_build(
+pub(crate) fn with_resized_build(
     roots: &[QueryRoot],
     build: &Rc<OperatorNode>,
     family: FieldDataType,
@@ -1990,14 +1322,14 @@ pub struct RollupPass2Candidate {
 
 /// The most rollup or top-k reuse candidates one candidate may have: every
 /// non-empty subset is a Pass 2 candidate, about a million at 20.
-pub const MAX_REUSE_CANDIDATES: usize = 20;
+pub(crate) const MAX_REUSE_CANDIDATES: usize = 20;
 
 /// The exact accumulator that merges finalized values of `family` across
 /// disjoint groups, by the family-capability table: a family whose states
 /// merge over disjoint (or overlapping) selections into an exact state.
 /// `None` for a family without such a merge: counter states merge only
 /// consecutive windows, and sketch states have no regrouping merge in the IR.
-pub fn rollup_kind(family: &FieldDataType) -> Option<ExactKind> {
+pub(crate) fn rollup_kind(family: &FieldDataType) -> Option<ExactKind> {
     let FieldDataType::ExactAggregate(kind, _) = family else {
         return None;
     };
@@ -2020,7 +1352,8 @@ pub fn rollup_kind(family: &FieldDataType) -> Option<ExactKind> {
 /// finalized value, with its coarsest finer build of the same family over
 /// the same rows that the candidate finalizes; then each coarse sketch build
 /// read only by estimates, with the finest build of its algorithm over the
-/// same rows whose keys include its own ([`sketch_rollup_candidates`]).
+/// same rows whose keys include its own (`sketch_rollup_candidates`).
+#[cfg(any(test, feature = "test-support"))]
 pub fn rollup_candidates(roots: &[QueryRoot]) -> Vec<RollupCandidate> {
     rollup_candidates_of(roots, None)
 }
@@ -2029,7 +1362,7 @@ pub fn rollup_candidates(roots: &[QueryRoot]) -> Vec<RollupCandidate> {
 /// [`rollup_candidates`]`(roots)`, the first when several, computed for that
 /// build alone (each coarse build's candidate depends only on `roots`, not
 /// on the other coarse builds).
-pub fn rollup_candidate_for(
+pub(crate) fn rollup_candidate_for(
     roots: &[QueryRoot],
     coarse: *const OperatorNode,
 ) -> Option<RollupCandidate> {
@@ -2042,7 +1375,8 @@ pub fn rollup_candidate_for(
 /// no reader of `coarse` or of any build that could answer it (a reader
 /// reaches what it reads), no such build, and leaves the walk order of the
 /// other nodes as it was, so [`rollup_candidate_for`] is unchanged.
-pub fn may_change_rollup_candidate(coarse: &Rc<OperatorNode>, root: &Rc<OperatorNode>) -> bool {
+#[cfg(test)]
+fn may_change_rollup_candidate(coarse: &Rc<OperatorNode>, root: &Rc<OperatorNode>) -> bool {
     OperatorNode::reachable(root).iter().any(|node| {
         Rc::ptr_eq(node, coarse)
             || finer_keys(coarse, node).is_some()
@@ -2591,7 +1925,7 @@ fn rolled_up(
 /// ([`rollup_candidates`]), in order: each exact accumulator's alone, and
 /// every sketch candidate of one finest build together, since they share
 /// that build's size.
-pub fn rollup_choices(candidates: &[RollupCandidate]) -> Vec<Vec<RollupCandidate>> {
+pub(crate) fn rollup_choices(candidates: &[RollupCandidate]) -> Vec<Vec<RollupCandidate>> {
     let mut choices: Vec<Vec<RollupCandidate>> = Vec::new();
     for candidate in candidates {
         let sketch = is_sketch_build(&candidate.finer);
@@ -2619,12 +1953,12 @@ fn is_sketch_build(node: &OperatorNode) -> bool {
 
 /// Every Pass 2 candidate of the rollup rule for the candidate with query
 /// roots `roots` and rollup candidates `candidates` ([`rollup_candidates`]):
-/// one per non-empty subset of their choices ([`rollup_choices`]), in
+/// one per non-empty subset of their choices (`rollup_choices`), in
 /// binary-counter order (the first the lowest bit). A chosen sketch choice
 /// resizes its finest build for every reader, its own and each coarse
-/// build's ([`sized_for_all`]: the strictest consumer's size), and each
+/// build's (`sized_for_all`: the strictest consumer's size), and each
 /// coarse build becomes the regrouping merge of the resized build's
-/// states. An error only for more than [`MAX_REUSE_CANDIDATES`] choices; a
+/// states. An error only for more than `MAX_REUSE_CANDIDATES` choices; a
 /// Pass 2 candidate whose composition fails carries its own error.
 pub fn rollup_pass2_candidates(
     roots: &[QueryRoot],
@@ -2808,7 +2142,7 @@ fn replace_all(
 /// ranking they all read in a reuse candidate: `Limit(k_max)` over `Sort`
 /// of the input, partitioned as they are.
 #[derive(Debug, Clone)]
-pub struct TopKReuseCandidate {
+pub(crate) struct TopKReuseCandidate {
     /// The plain `Aggregate` top-k nodes of one input and partition, in
     /// children-first order; at least two different `k`.
     pub members: Vec<Rc<OperatorNode>>,
@@ -2817,22 +2151,10 @@ pub struct TopKReuseCandidate {
     pub ranking: Rc<OperatorNode>,
 }
 
-/// A Pass 2 candidate of the exact top-k reuse rule: the candidate's roots
-/// with every member of each chosen top-k reuse candidate reading its
-/// ranking, and every guarantee composed again; the error when that fails.
-#[derive(Debug)]
-pub struct TopKReusePass2Candidate {
-    /// The candidate's roots with every member of those candidates reading
-    /// its ranking and every guarantee composed again; `Err` when the
-    /// rebuilt DAG does not derive or compose, which drops only this
-    /// candidate.
-    pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
-}
-
 /// The exact top-k reuse candidates of the candidate with query roots `roots`:
 /// plain (exact) `Aggregate` top-k nodes over an exact input, unfiltered and
 /// grouped by listed keys, grouped by equal input and partition.
-pub fn topk_reuse_candidates(roots: &[QueryRoot]) -> Vec<TopKReuseCandidate> {
+pub(crate) fn topk_reuse_candidates(roots: &[QueryRoot]) -> Vec<TopKReuseCandidate> {
     let mut nodes = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for node in roots.iter().flat_map(root_operators) {
@@ -2922,71 +2244,11 @@ fn ranking(child: &Rc<OperatorNode>, by: &Reduction, k: usize) -> Option<Rc<Oper
     .ok()
 }
 
-/// Every Pass 2 candidate of the exact top-k reuse rule for the candidate
-/// with query roots `roots` and top-k reuse candidates `candidates`
-/// ([`topk_reuse_candidates`]): one per non-empty subset of them, in
-/// binary-counter order. An error only for more than
-/// [`MAX_REUSE_CANDIDATES`] of them.
-pub fn topk_reuse_pass2_candidates(
-    roots: &[QueryRoot],
-    candidates: &[TopKReuseCandidate],
-) -> Result<Vec<TopKReusePass2Candidate>, PerComputationCandidateError> {
-    let candidates: Vec<&TopKReuseCandidate> = candidates.iter().collect();
-    Ok(subsets(&candidates, "top-k reuse")?
-        .into_iter()
-        .map(|chosen| {
-            let mut replaced = HashMap::new();
-            let mut failed = None;
-            for candidate in &chosen {
-                for member in &candidate.members {
-                    match member.with_new_children(|_| Rc::clone(&candidate.ranking)) {
-                        Ok(node) => {
-                            replaced.insert(Rc::as_ptr(member), Rc::new(node));
-                        }
-                        Err(error) => failed = Some(error.into()),
-                    }
-                }
-            }
-            TopKReusePass2Candidate {
-                roots: match failed {
-                    Some(error) => Err(error),
-                    None => replace_all(roots, &replaced),
-                },
-            }
-        })
-        .collect())
-}
-
 fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
     match root {
         QueryRoot::Operator(node) => vec![node],
         QueryRoot::Scalar(expr) => expr.operator_refs(),
     }
-}
-
-/// Distinct nodes (by identity) reachable from `roots`.
-#[cfg(test)]
-fn distinct_nodes(roots: &[QueryRoot]) -> usize {
-    roots
-        .iter()
-        .flat_map(root_operators)
-        .flat_map(OperatorNode::reachable)
-        .map(|node| Rc::as_ptr(&node))
-        .collect::<HashSet<_>>()
-        .len()
-}
-
-/// Nodes reachable from both `a` and `b`.
-#[cfg(test)]
-fn common_nodes(a: &QueryRoot, b: &QueryRoot) -> HashSet<*const OperatorNode> {
-    let reach = |root: &QueryRoot| -> HashSet<*const OperatorNode> {
-        root_operators(root)
-            .into_iter()
-            .flat_map(OperatorNode::reachable)
-            .map(|node| Rc::as_ptr(&node))
-            .collect()
-    };
-    reach(a).intersection(&reach(b)).copied().collect()
 }
 
 #[cfg(test)]
@@ -3007,19 +2269,6 @@ mod tests {
             .collect()
     }
 
-    fn kinds(sharing_candidate: &SharingCandidate) -> &'static str {
-        sharing_candidate.nodes[0].operator.kind_name()
-    }
-
-    /// The positions in `all` (by their nodes) of the sharing candidates
-    /// `pass2_candidate` shares.
-    fn shared_positions(
-        all: &[SharingCandidate],
-        pass2_candidate: &IdenticalExpressionPass2Candidate,
-    ) -> Vec<usize> {
-        positions(all, &pass2_candidate.sharing_candidates, |c| &c.nodes[0])
-    }
-
     /// The positions in `all` of the items of `chosen`, matched by the node
     /// `node` gives for each.
     fn positions<T>(all: &[T], chosen: &[T], node: impl Fn(&T) -> &Rc<OperatorNode>) -> Vec<usize> {
@@ -3034,13 +2283,11 @@ mod tests {
     }
 
     /// `sum by (job) (m)` and `max by (host, job) (m)` scan `m` with other
-    /// labels, so nothing is shared until the scans are widened to
-    /// `job, host`: then the scans and the instant time ranges above them
-    /// are sharing candidates, and each root keeps its columns.
+    /// labels; widened to `job, host`, both scans project the same
+    /// columns, and each root keeps its columns.
     #[test]
     fn scans_of_one_metric_with_other_labels_share_once_widened() {
         let roots = roots(&["sum by (job) (m)", "max by (host, job) (m)"]);
-        assert!(sharing_candidates(&roots).is_empty());
         let widened = with_union_scan_labels(&roots).unwrap().unwrap();
         let scan_labels = |root: &QueryRoot| {
             let QueryRoot::Operator(node) = root else {
@@ -3074,8 +2321,6 @@ mod tests {
             .find(|n| matches!(n.non_asap(), Some(NonASAPOp::Scan { .. })))
             .unwrap();
         assert_eq!(scan.schema.unique_keys, [vec![4, 0]]);
-        let kinds: Vec<_> = sharing_candidates(&widened).iter().map(kinds).collect();
-        assert_eq!(kinds, ["Scan", "TimeRange"]);
         for (root, wide) in roots.iter().zip(&widened) {
             let (QueryRoot::Operator(root), QueryRoot::Operator(wide)) = (root, wide) else {
                 unreachable!()
@@ -3086,158 +2331,6 @@ mod tests {
         assert!(with_union_scan_labels(&widened).unwrap().is_none());
     }
 
-    /// Two queries over the same range selector have two sharing candidates,
-    /// the scans and the time ranges. Sharing the time range shares the
-    /// scan below it, so there are two Pass 2 candidates: the scan alone shared, and
-    /// both shared. Each query's value is unchanged.
-    #[test]
-    fn identical_range_selector_gives_one_pass2_candidate_per_distinct_subset() {
-        let roots = roots(&[
-            "sum by (job) (rate(m[1m]))",
-            "topk by (job) (10, sum_over_time(m[1m]))",
-        ]);
-        let sharing = sharing_candidates(&roots);
-        assert_eq!(
-            sharing.iter().map(kinds).collect::<Vec<_>>(),
-            ["Scan", "TimeRange"]
-        );
-        let pass2_candidates =
-            identical_expression_pass2_candidates(&roots, &sharing_candidates(&roots));
-        assert_eq!(
-            pass2_candidates
-                .iter()
-                .map(|v| shared_positions(&sharing, v))
-                .collect::<Vec<_>>(),
-            [vec![0], vec![0, 1]]
-        );
-        for pass2_candidate in &pass2_candidates {
-            assert_eq!(pass2_candidate.roots, roots, "values are unchanged");
-            assert!(distinct_nodes(&pass2_candidate.roots) < distinct_nodes(&roots));
-        }
-        assert_eq!(
-            common_nodes(&pass2_candidates[0].roots[0], &pass2_candidates[0].roots[1]).len(),
-            1
-        );
-        assert_eq!(
-            common_nodes(&pass2_candidates[1].roots[0], &pass2_candidates[1].roots[1]).len(),
-            2
-        );
-    }
-
-    /// Two pairs of queries over different metrics: each pair has a scan
-    /// group and an instant-selector group, with two distinct ways to share
-    /// (the scan, or the scan and the selector) or none, so 3 × 3 − 1 = 8
-    /// Pass 2 candidates; each pair is shared alone or with the other.
-    #[test]
-    fn independent_sharing_candidates_give_every_non_empty_subset() {
-        let roots = roots(&["sum(a)", "max(a)", "sum(b)", "max(b)"]);
-        assert_eq!(
-            sharing_candidates(&roots)
-                .iter()
-                .map(kinds)
-                .collect::<Vec<_>>(),
-            ["Scan", "TimeRange", "Scan", "TimeRange"]
-        );
-        let pass2_candidates =
-            identical_expression_pass2_candidates(&roots, &sharing_candidates(&roots));
-        assert_eq!(pass2_candidates.len(), 8);
-        let shares = |v: &IdenticalExpressionPass2Candidate| {
-            (
-                !common_nodes(&v.roots[0], &v.roots[1]).is_empty(),
-                !common_nodes(&v.roots[2], &v.roots[3]).is_empty(),
-            )
-        };
-        assert_eq!(
-            pass2_candidates.iter().map(shares).collect::<HashSet<_>>(),
-            HashSet::from([(true, false), (false, true), (true, true)])
-        );
-        assert!(pass2_candidates.iter().all(|v| v.roots == roots));
-    }
-
-    /// Queries with nothing in common have no Pass 2 candidate.
-    #[test]
-    fn nothing_identical_gives_no_pass2_candidate() {
-        assert!({
-            let roots = roots(&["sum(rate(a[1m]))", "sum(rate(b[1m]))"]);
-            identical_expression_pass2_candidates(&roots, &sharing_candidates(&roots))
-        }
-        .is_empty());
-    }
-
-    /// Every non-empty subset of the sharing candidates, applied, kept when it gives a
-    /// distinct candidate: the definition the direct enumeration follows.
-    fn brute_force(roots: &[QueryRoot]) -> Vec<Vec<usize>> {
-        let sharing = sharing_candidates(roots);
-        let mut subset = vec![false; sharing.len()];
-        let mut out = Vec::new();
-        while next_subset(&mut subset) {
-            let (_, merged) = apply(roots, &sharing, &subset);
-            if merged == subset {
-                out.push((0..sharing.len()).filter(|&g| subset[g]).collect());
-            }
-        }
-        out
-    }
-
-    /// The direct enumeration gives exactly the brute force's candidates, in
-    /// the same order, on nested and independent groups.
-    #[test]
-    fn direct_enumeration_matches_the_brute_force() {
-        for queries in [
-            &[
-                "sum by (job) (rate(m[1m]))",
-                "topk by (job) (10, sum_over_time(m[1m]))",
-            ][..],
-            &["sum(a)", "max(a)", "sum(b)", "max(b)"],
-            &["sum(abs(a))", "max(abs(a))", "min(a)", "sum(b)", "max(b)"],
-            &["sum(abs(ceil(a)))", "max(abs(ceil(a)))", "min(ceil(a))"],
-        ] {
-            let roots = roots(queries);
-            let sharing = sharing_candidates(&roots);
-            let direct: Vec<_> = identical_expression_pass2_candidates(&roots, &sharing)
-                .iter()
-                .map(|v| shared_positions(&sharing, v))
-                .collect();
-            assert_eq!(direct, brute_force(&roots), "{queries:?}");
-        }
-    }
-
-    /// Twenty nested sharing candidates (two identical chains of a keyed scan and 19
-    /// filters) have 20 distinct candidates, one per depth shared, not 2^20
-    /// subsets to try.
-    #[test]
-    fn twenty_nested_sharing_candidates_enumerate_quickly() {
-        use crate::test_support::{filter, metric_scan_with_keys};
-        use asap_types::ir::scalar::expr_ir::CompareOpKind;
-        use asap_types::ir::ScalarExpr;
-        let chain = || {
-            let mut node = metric_scan_with_keys(&["job"], vec![vec![0, 2]]);
-            for i in 0..19 {
-                node = filter(
-                    ScalarExpr::Compare {
-                        left: Box::new(ScalarExpr::Column(1)),
-                        op: CompareOpKind::Gt,
-                        right: Box::new(ScalarExpr::literal_f64(i as f64)),
-                        semantics: asap_types::ir::ExprSemantics::Promql,
-                    },
-                    node,
-                );
-            }
-            QueryRoot::Operator(node)
-        };
-        let roots = [chain(), chain()];
-        let sharing = sharing_candidates(&roots);
-        assert_eq!(sharing.len(), 20);
-        let start = std::time::Instant::now();
-        let pass2_candidates = identical_expression_pass2_candidates(&roots, &sharing);
-        assert_eq!(pass2_candidates.len(), 20);
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(5),
-            "{:?}",
-            start.elapsed()
-        );
-    }
-
     /// A count over a window, read from a Count-Min built in tumbling
     /// panes, keeps the guarantee of one build over the window: Pass 1
     /// offers Count-Min for counts, and its merged counters add.
@@ -3245,16 +2338,16 @@ mod tests {
     fn a_count_from_count_min_panes_keeps_its_guarantee() {
         use crate::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates,
-            HowToComputeAggregateMeasure,
         };
         let root = lower_promql(
             "count_over_time(m[5m])",
             asap_types::ir::properties::AccuracyTarget::max_error(0.01).failure_probability(0.001),
         );
-        let inventory = generate_per_computation_candidates(vec![(
-            0,
-            QueryRoot::Operator(with_promql_series_identity(&root).unwrap()),
-        )])
+        let inventory = generate_per_computation_candidates(
+            &crate::pass2::memo::generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(
+                with_promql_series_identity(&root).unwrap(),
+            )]),
+        )
         .unwrap();
         let choice: Vec<usize> = inventory
             .targets
@@ -3262,15 +2355,15 @@ mod tests {
             .map(|t| {
                 t.ways_to_compute
                     .iter()
-                    .position(|c| *c == HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Cms))
+                    .position(|c| {
+                        *c == asap_types::stages::HowToComputeAggregateMeasure::Summary(
+                            SketchAlgorithm::Cms,
+                        )
+                    })
                     .expect("Count-Min is offered for a count")
             })
             .collect();
-        let roots: Vec<QueryRoot> = compose_logical_candidate(&inventory, &choice)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let roots: Vec<QueryRoot> = compose_logical_candidate(&inventory, &choice).unwrap();
         let candidates = pane_candidates(&roots, &[Some(60_000)]);
         let pass2_candidates = window_composition_pass2_candidates(&roots, &candidates).unwrap();
         let [pass2_candidate] = pass2_candidates.as_slice() else {
@@ -3288,7 +2381,7 @@ mod tests {
     /// The composed candidate of `queries` (each at its own ε, δ = 0.01)
     /// in which every target chose `family`.
     fn chose(queries: &[(&str, f64)], family: SketchAlgorithm) -> Vec<QueryRoot> {
-        use crate::pass1::per_computation_candidates::HowToComputeAggregateMeasure;
+        use asap_types::stages::HowToComputeAggregateMeasure;
         chose_where(queries, |c| {
             *c == HowToComputeAggregateMeasure::Summary(family)
         })
@@ -3298,28 +2391,27 @@ mod tests {
     /// in which every target chose the first candidate `pick` accepts.
     fn chose_where(
         queries: &[(&str, f64)],
-        pick: impl Fn(&crate::pass1::per_computation_candidates::HowToComputeAggregateMeasure) -> bool,
+        pick: impl Fn(&asap_types::stages::HowToComputeAggregateMeasure) -> bool,
     ) -> Vec<QueryRoot> {
         use crate::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates,
         };
-        let roots = queries
+        let roots: Vec<_> = queries
             .iter()
-            .enumerate()
-            .map(|(i, (q, epsilon))| {
+            .map(|(q, epsilon)| {
                 let root = lower_promql(
                     q,
                     asap_types::ir::properties::AccuracyTarget::max_error(*epsilon)
                         .failure_probability(0.01)
                         .accuracy_metric(asap_types::ir::properties::AccuracyMetric::Rank),
                 );
-                (
-                    i,
-                    QueryRoot::Operator(with_promql_series_identity(&root).unwrap()),
-                )
+                QueryRoot::Operator(with_promql_series_identity(&root).unwrap())
             })
             .collect();
-        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let inventory = generate_per_computation_candidates(
+            &crate::pass2::memo::generate_dag_of_logical_memo_groups(&roots),
+        )
+        .unwrap();
         let choice: Vec<usize> = inventory
             .targets
             .iter()
@@ -3330,11 +2422,7 @@ mod tests {
                     .expect("the family is a candidate")
             })
             .collect();
-        compose_logical_candidate(&inventory, &choice)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect()
+        compose_logical_candidate(&inventory, &choice).unwrap()
     }
 
     /// The summary builds `roots` read, by address, with each one's KLL `k`.
@@ -3369,201 +2457,6 @@ mod tests {
             .as_ref()
             .and_then(|g| g.spec.error.evaluate())
             .expect("a constant bound")
-    }
-
-    /// p50 at ε = 0.01 and p99 at ε = 0.001 over one window, each with its
-    /// own KLL: the rule shares one KLL with the larger `k`, and p50's
-    /// guarantee is the shared KLL's, tighter than its own.
-    #[test]
-    fn quantiles_at_different_targets_share_one_kll_with_the_larger_k() {
-        let roots = chose(
-            &[
-                ("quantile_over_time(0.5, lat[5m])", 0.01),
-                ("quantile_over_time(0.99, lat[5m])", 0.001),
-            ],
-            SketchAlgorithm::Kll,
-        );
-        let own = kll_builds(&roots);
-        assert_eq!(own.len(), 2);
-        assert!(own[0].1 < own[1].1);
-        let sharing = capability_sharing_candidates(&roots);
-        assert_eq!(sharing.len(), 1);
-        assert!(
-            matches!(&sharing[0].family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::Kll)
-        );
-        let pass2_candidates = summary_capability_pass2_candidates(&roots, &sharing).unwrap();
-        assert_eq!(pass2_candidates.len(), 1);
-        let [shared_builds] = pass2_candidates[0].shared_builds.as_slice() else {
-            panic!("one shared build: {:?}", pass2_candidates[0].shared_builds)
-        };
-        assert_eq!(positions(&sharing[0].members, shared_builds, |m| m), [0, 1]);
-        let shared = kll_builds(pass2_candidates[0].roots.as_ref().unwrap());
-        assert_eq!(shared.len(), 1, "one KLL serves both");
-        assert_eq!(shared[0].1, own[1].1);
-        assert!(
-            root_bound(&pass2_candidates[0].roots.as_ref().unwrap()[0]) < root_bound(&roots[0])
-        );
-        assert_eq!(
-            root_bound(&pass2_candidates[0].roots.as_ref().unwrap()[1]),
-            root_bound(&roots[1])
-        );
-    }
-
-    /// Three consumers at three targets: every subset of two or more of
-    /// them shares one build (three pairs and all three), the others keep
-    /// their own.
-    #[test]
-    fn every_subset_of_two_or_more_consumers_shares_one_build() {
-        let roots = chose(
-            &[
-                ("quantile_over_time(0.5, lat[5m])", 0.05),
-                ("quantile_over_time(0.9, lat[5m])", 0.01),
-                ("quantile_over_time(0.99, lat[5m])", 0.001),
-            ],
-            SketchAlgorithm::Kll,
-        );
-        let sharing = capability_sharing_candidates(&roots);
-        let pass2_candidates = summary_capability_pass2_candidates(&roots, &sharing).unwrap();
-        assert_eq!(
-            pass2_candidates
-                .iter()
-                .map(|v| positions(&sharing[0].members, &v.shared_builds[0], |m| m))
-                .collect::<Vec<_>>(),
-            [vec![0, 1], vec![0, 2], vec![1, 2], vec![0, 1, 2]]
-        );
-        for pass2_candidate in &pass2_candidates {
-            let builds = kll_builds(pass2_candidate.roots.as_ref().unwrap());
-            assert_eq!(builds.len(), 4 - pass2_candidate.shared_builds[0].len());
-        }
-    }
-
-    /// A capability sharing candidate of more than 20 members (over a million sharing subsets)
-    /// is an error, not a silent skip or an endless enumeration.
-    #[test]
-    fn a_capability_sharing_candidate_past_20_members_is_an_error() {
-        let roots = chose(
-            &[
-                ("quantile_over_time(0.5, lat[5m])", 0.01),
-                ("quantile_over_time(0.99, lat[5m])", 0.001),
-            ],
-            SketchAlgorithm::Kll,
-        );
-        let mut sharing = capability_sharing_candidates(&roots);
-        let members = sharing[0].members.clone();
-        sharing[0].members = members
-            .iter()
-            .cycle()
-            .take(MAX_CAPABILITY_SHARING_MEMBERS + 1)
-            .cloned()
-            .collect();
-        let error = summary_capability_pass2_candidates(&roots, &sharing).unwrap_err();
-        assert!(matches!(
-            error,
-            PerComputationCandidateError::TooManyCandidates {
-                max: MAX_CAPABILITY_SHARING_MEMBERS,
-                ..
-            }
-        ));
-        // The message names the count found and the cap from its constant.
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "found {} summary builds in one capability sharing candidate, more than \
-                 {MAX_CAPABILITY_SHARING_MEMBERS}",
-                MAX_CAPABILITY_SHARING_MEMBERS + 1
-            )
-        );
-    }
-
-    /// Equal targets give identical builds, which are the
-    /// identical-expression rule's; a different window or family is a
-    /// different input or capability, never shared.
-    #[test]
-    fn equal_sizes_other_windows_and_other_families_are_not_capability_sharing_candidates() {
-        let equal = chose(
-            &[
-                ("quantile_over_time(0.5, lat[5m])", 0.01),
-                ("quantile_over_time(0.99, lat[5m])", 0.01),
-            ],
-            SketchAlgorithm::Kll,
-        );
-        assert!(capability_sharing_candidates(&equal).is_empty());
-        assert!(
-            !identical_expression_pass2_candidates(&equal, &sharing_candidates(&equal)).is_empty()
-        );
-        let windows = chose(
-            &[
-                ("quantile_over_time(0.5, lat[5m])", 0.01),
-                ("quantile_over_time(0.99, lat[10m])", 0.001),
-            ],
-            SketchAlgorithm::Kll,
-        );
-        assert!(capability_sharing_candidates(&windows).is_empty());
-        let families = chose(
-            &[
-                ("quantile_over_time(0.5, lat[5m])", 0.01),
-                ("quantile_over_time(0.99, lat[5m])", 0.001),
-            ],
-            SketchAlgorithm::DDSketch,
-        );
-        assert_eq!(capability_sharing_candidates(&families).len(), 1);
-        assert!(matches!(
-            &capability_sharing_candidates(&families)[0].family,
-            FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::DDSketch
-        ));
-    }
-
-    /// Quantiles over other groupings share no capability build.
-    #[test]
-    fn different_groupings_are_not_capability_sharing_candidates() {
-        let groupings = chose(
-            &[
-                ("quantile by (job) (0.5, lat)", 0.01),
-                ("quantile (0.99, lat)", 0.001),
-            ],
-            SketchAlgorithm::Kll,
-        );
-        assert!(capability_sharing_candidates(&groupings).is_empty());
-    }
-
-    /// Each candidate's label (the groups it shares) and its roots agree:
-    /// applying the label gives the same roots, sharing exactly the
-    /// labelled groups.
-    #[test]
-    fn labels_and_roots_agree() {
-        for queries in [
-            &[
-                "sum by (job) (rate(m[1m]))",
-                "topk by (job) (10, sum_over_time(m[1m]))",
-            ][..],
-            &["sum(a)", "max(a)", "sum(b)", "max(b)"],
-            &["sum(abs(a))", "max(abs(a))", "min(a)", "sum(b)", "max(b)"],
-        ] {
-            let roots = roots(queries);
-            let sharing = sharing_candidates(&roots);
-            for pass2_candidate in identical_expression_pass2_candidates(&roots, &sharing) {
-                let shared = shared_positions(&sharing, &pass2_candidate);
-                let label: Vec<bool> = (0..sharing.len()).map(|g| shared.contains(&g)).collect();
-                let (applied, merged) = apply(&roots, &sharing, &label);
-                assert_eq!(merged, label, "{queries:?}");
-                assert_eq!(applied, pass2_candidate.roots, "{queries:?}");
-                assert_eq!(
-                    distinct_nodes(&applied),
-                    distinct_nodes(&pass2_candidate.roots),
-                    "{queries:?} {:?}",
-                    shared
-                );
-                for (a, b) in [(0, 1), (2, 3)] {
-                    if b < roots.len() {
-                        assert_eq!(
-                            common_nodes(&applied[a], &applied[b]).len(),
-                            common_nodes(&pass2_candidate.roots[a], &pass2_candidate.roots[b])
-                                .len()
-                        );
-                    }
-                }
-            }
-        }
     }
 
     /// The pane candidates of `roots` as (pane width, pane count).
@@ -3670,7 +2563,7 @@ mod tests {
     /// the last two samples of the window, does not.
     #[test]
     fn exact_accumulators_that_merge_get_panes() {
-        use crate::pass1::per_computation_candidates::HowToComputeAggregateMeasure;
+        use asap_types::stages::HowToComputeAggregateMeasure;
         let accumulator = |c: &HowToComputeAggregateMeasure| {
             matches!(c, HowToComputeAggregateMeasure::ExactAccumulator(_))
         };
@@ -4140,7 +3033,7 @@ mod tests {
     /// The composed candidate of `queries` with every target at its exact
     /// option (an exact accumulator, or plain exact execution).
     fn exact(queries: &[&str]) -> Vec<QueryRoot> {
-        use crate::pass1::per_computation_candidates::HowToComputeAggregateMeasure as C;
+        use asap_types::stages::HowToComputeAggregateMeasure as C;
         let queries: Vec<(&str, f64)> = queries.iter().map(|q| (*q, 0.01)).collect();
         chose_where(&queries, |c| matches!(c, C::Exact | C::ExactAccumulator(_)))
     }
@@ -4534,48 +3427,6 @@ mod tests {
         assert!(rollup_candidates(&other_metric).is_empty());
     }
 
-    /// Two exact top-k over the same per-job sums: both read one ranking,
-    /// the 10 highest sums, and the top-5 is computed from it; each keeps
-    /// its `k`, output and exact value.
-    #[test]
-    fn exact_topk_reuses_the_larger_ranking() {
-        let roots = exact(&["topk(5, sum by (job) (m))", "topk(10, sum by (job) (m))"]);
-        let rule_candidates = topk_reuse_candidates(&roots);
-        let [rule_candidate] = rule_candidates.as_slice() else {
-            panic!("one candidate: {rule_candidates:?}")
-        };
-        assert_eq!(rule_candidate.members.len(), 2);
-        let Some(NonASAPOp::Limit { n: Some(10), .. }) = rule_candidate.ranking.non_asap() else {
-            panic!("{:?}", rule_candidate.ranking.operator)
-        };
-        let pass2_candidate = topk_reuse_pass2_candidates(&roots, &rule_candidates)
-            .unwrap()
-            .remove(0);
-        let reused = pass2_candidate.roots.unwrap();
-        let read = |root: &QueryRoot| {
-            let Some(NonASAPOp::Aggregate {
-                child, measures, ..
-            }) = operator(root).non_asap()
-            else {
-                panic!("top-k aggregate")
-            };
-            (Rc::clone(child), measures[0].clone())
-        };
-        let ((a, small), (b, large)) = (read(&reused[0]), read(&reused[1]));
-        assert!(Rc::ptr_eq(&a, &b), "one ranking");
-        assert!(matches!(small, AggIntent::TopK { k: 5, .. }));
-        assert!(matches!(large, AggIntent::TopK { k: 10, .. }));
-        for (before, after) in roots.iter().zip(&reused) {
-            let (before, after) = (operator(before), operator(after));
-            after.validate_structure().unwrap();
-            assert_eq!(before.schema, after.schema);
-            assert!(after
-                .guarantee
-                .as_ref()
-                .is_some_and(asap_types::ir::properties::AccuracyGuarantee::is_exact));
-        }
-    }
-
     /// Top-k over other partitions or inputs, or of one `k`, share no
     /// ranking; a top-k a heap sketch answers is not reused.
     #[test]
@@ -4599,24 +3450,25 @@ mod tests {
         }
         use crate::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates,
-            HowToComputeAggregateMeasure as C,
         };
+        use asap_types::stages::HowToComputeAggregateMeasure as C;
         let inventory = generate_per_computation_candidates(
-            [
-                "topk by (job) (5, sum_over_time(m[1m]))",
-                "topk by (job) (10, sum_over_time(m[1m]))",
-            ]
-            .iter()
-            .enumerate()
-            .map(|(i, q)| {
-                let root = lower_promql(
-                    q,
-                    asap_types::ir::properties::AccuracyTarget::max_error(0.01)
-                        .failure_probability(0.01),
-                );
-                (i, QueryRoot::Operator(root))
-            })
-            .collect(),
+            &crate::pass2::memo::generate_dag_of_logical_memo_groups(
+                &[
+                    "topk by (job) (5, sum_over_time(m[1m]))",
+                    "topk by (job) (10, sum_over_time(m[1m]))",
+                ]
+                .iter()
+                .map(|q| {
+                    let root = lower_promql(
+                        q,
+                        asap_types::ir::properties::AccuracyTarget::max_error(0.01)
+                            .failure_probability(0.01),
+                    );
+                    QueryRoot::Operator(root)
+                })
+                .collect::<Vec<_>>(),
+            ),
         )
         .unwrap();
         // The CountSketch heap, the top-k's fused whole-expression one.
@@ -4630,11 +3482,7 @@ mod tests {
                     .unwrap_or(0)
             })
             .collect();
-        let heaps: Vec<QueryRoot> = compose_logical_candidate(&inventory, &choice)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let heaps: Vec<QueryRoot> = compose_logical_candidate(&inventory, &choice).unwrap();
         assert!(OperatorNode::reachable(operator(&heaps[0]))
             .iter()
             .any(|n| matches!(n.asap(), Some(ASAPOp::SummaryEstimate { .. }))));

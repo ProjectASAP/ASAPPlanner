@@ -1,28 +1,20 @@
-//! Validity checks on one candidate: accuracy targets, latency, raw-data
-//! retention and executor support.
+//! Validity checks on one candidate: accuracy targets and latency. What
+//! the executor or deployment cannot run (per-entity aggregates without a
+//! kernel, query-time scans of raw data not retained) Stage 2 prunes.
 
-use std::collections::HashSet;
-
-use asap_cost::{CandidateCost, QueryLatency};
-use asap_physical_asap_optimization::PhysicalWorkloadPlan;
-use asap_types::ir::operator::{agg_has_exact_per_entity_kernel, Reduction};
-use asap_types::ir::physical_export::{
-    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
-};
+use asap_cost::{family_name, PlanCost, QueryLatency};
 use asap_types::ir::properties::{
-    AccuracyGuarantee, AccuracyMetric, AccuracyScope, AccuracyTarget, ExecutionTiming,
+    AccuracyGuarantee, AccuracyMetric, AccuracyScope, AccuracyTarget,
 };
-use asap_types::ir::schema::{FieldDataType, GroupingStrategy, SketchAlgorithm, WeightDomain};
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
+use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, WeightDomain};
+use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
+use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::accuracy_binding::{bound_root_guarantee, root_operators};
-use crate::pricing::query_time_lookback_ms;
 use crate::report::{AcceptedAccuracy, RejectionCause};
-use crate::PlanningModels;
-use asap_types::workload::bounds::{
-    confirmed_weights, series_read, source_name, values_per_result,
-};
+use crate::SelectionModels;
+use asap_types::workload::bounds::{confirmed_weights, series_read, values_per_result};
 
 /// The first query whose latency per evaluation is over its
 /// `max_latency_ms` bound or, with no bound broken, over its repeat
@@ -30,7 +22,7 @@ use asap_types::workload::bounds::{
 /// than `I` falls further behind with every evaluation), as a rejection
 /// cause and reason.
 pub(crate) fn latency_violation(
-    cost: &CandidateCost,
+    cost: &PlanCost,
     entries: &[QueryWorkloadEntry],
 ) -> Option<(RejectionCause, String)> {
     let per_query = || cost.usage.latency_per_query.iter().zip(entries).enumerate();
@@ -103,7 +95,7 @@ pub(crate) fn accuracy_targets(entries: &[QueryWorkloadEntry]) -> Vec<AccuracyTa
 /// [`RejectionCause::CountMinWeightsNotProvenNonNegative`]: the executor
 /// cannot run such a plan. Then the deployment's accuracy model is asked
 /// ([`AccuracyModel::accepts_output_regardless_of_guarantee`], through
-/// [`PlanningModels::effective_accuracy`]): an output it accepts is accepted
+/// `SelectionModels::accuracy`): an output it accepts is accepted
 /// whatever its guarantee says, and the guarantee check's rejection, if any,
 /// is only recorded ([`AcceptedAccuracy::guarantee_check_rejection`]).
 /// Otherwise, an output with no guarantee from either
@@ -114,7 +106,7 @@ pub(crate) fn accuracy_check(
     candidate: &PhysicalWorkloadPlan,
     targets: &[AccuracyTarget],
     data: &DataWorkload,
-    models: &PlanningModels<'_>,
+    models: &SelectionModels<'_>,
 ) -> Result<Vec<AcceptedAccuracy>, CheckFailure> {
     let mut accepted = Vec::with_capacity(targets.len());
     for (query, (root, target)) in candidate.roots.iter().zip(targets).enumerate() {
@@ -177,7 +169,7 @@ pub(crate) fn accuracy_check(
         // The deployment's model may accept the output directly, whatever
         // its guarantee says; the check's result is then only recorded.
         if models
-            .effective_accuracy()
+            .accuracy
             .accepts_output_regardless_of_guarantee(root, target)
         {
             accepted.push(AcceptedAccuracy {
@@ -224,7 +216,7 @@ pub(crate) fn guarantee_check(
     root: &QueryRoot,
     target: &AccuracyTarget,
     data: &DataWorkload,
-    models: &PlanningModels<'_>,
+    models: &SelectionModels<'_>,
 ) -> Result<Option<AccuracyMetric>, CheckFailure> {
     // A guarantee per value is stated over the values the target's scope
     // covers: the whole result's `G`, or at most `⌊1 / share⌋` groups.
@@ -232,7 +224,7 @@ pub(crate) fn guarantee_check(
     let values = values_per_result(root, series, data);
     let over_scope = |g: AccuracyGuarantee| g.over_scope(target.accuracy_scope, values);
     let guarantee = bound_root_guarantee(root, series, data, models).map(over_scope);
-    let meets = |g: &AccuracyGuarantee| models.effective_accuracy().satisfies(g, target);
+    let meets = |g: &AccuracyGuarantee| models.accuracy.satisfies(g, target);
     // The deployment's evidence is read only when the theoretical
     // guarantee does not meet the target.
     let evidence = || models.evidence.output_guarantee(root).map(over_scope);
@@ -248,9 +240,7 @@ pub(crate) fn guarantee_check(
     }
     // Whether the deployment's model or evidence may judge another size of
     // the plan's summaries otherwise.
-    let model_or_evidence_may_judge = models
-        .effective_accuracy()
-        .may_accept_regardless_of_guarantee()
+    let model_or_evidence_may_judge = models.accuracy.may_accept_regardless_of_guarantee()
         || models.evidence.may_provide_evidence();
     if guarantee.is_none() && evidence.is_none() {
         return Err(CheckFailure {
@@ -309,80 +299,5 @@ pub(crate) fn guarantee_check(
                  evidence that it meets target {target:?}"
             ),
         },
-    })
-}
-
-pub(crate) fn family_name(family: &FieldDataType) -> String {
-    match family {
-        // A shared (Hydra) structure is named by its Hydra kind, e.g. `HydraCms`.
-        FieldDataType::Sketch(_, GroupingStrategy::SharedMultiSubpopulation { kind, .. }) => {
-            format!("{kind:?}")
-        }
-        FieldDataType::Sketch(kind, _) => format!("{:?}", kind.algorithm()),
-        FieldDataType::ExactAggregate(kind, _) => format!("exact {kind:?} accumulator"),
-        other => format!("{other:?}"),
-    }
-}
-
-/// For a deployment that does not retain raw data, every query-time scan
-/// of `dag` with the window it would read, as a rejection reason (`None`
-/// without one). Raw data samples are then not kept after they arrive, so no
-/// window of them is there to scan at query time: only ingestion-time work
-/// reads raw rows. `kept_chains` are `dag`'s ([`kept_pane_chains`](crate::pricing::kept_pane_chains)).
-pub(crate) fn raw_data_violation(
-    dag: &PhysicalASAPDAG,
-    kept_chains: &HashSet<PhysicalASAPNodeId>,
-) -> Option<String> {
-    let scans: Vec<String> = dag
-        .nodes
-        .iter()
-        .filter_map(|node| match &node.payload {
-            Payload::NonASAP(NonASAPOp::Scan { source, .. })
-                if node.output_state.timing != ExecutionTiming::IngestionTime =>
-            {
-                Some(match query_time_lookback_ms(dag, node.id, kept_chains) {
-                    Some(lookback) => format!("{lookback} ms of raw {}", source_name(source)),
-                    None => format!("all raw {}", source_name(source)),
-                })
-            }
-            _ => None,
-        })
-        .collect();
-    (!scans.is_empty()).then(|| {
-        format!(
-            "scans {} at query time, but the deployment does not retain raw data",
-            scans.join(", ")
-        )
-    })
-}
-
-/// Why the executor cannot compile `dag`, if it cannot: an exact per-entity
-/// `Aggregate` (a per-series range reduction over raw data samples) the executor
-/// does not run. It runs one with a single measure that has an exact
-/// per-entity kernel ([`agg_has_exact_per_entity_kernel`]), no measure
-/// filter and no `HAVING`.
-pub(crate) fn per_entity_aggregate_violation(dag: &PhysicalASAPDAG) -> Option<String> {
-    dag.nodes.iter().find_map(|node| match &node.payload {
-        Payload::NonASAP(NonASAPOp::Aggregate {
-            reduction: Reduction::PerEntity,
-            measures,
-            filters,
-            having,
-            ..
-        }) => {
-            let one_kernel = match measures.as_slice() {
-                [measure] => agg_has_exact_per_entity_kernel(measure),
-                _ => false,
-            };
-            let executable = one_kernel && filters.iter().all(Option::is_none) && having.is_none();
-            (!executable).then(|| {
-                format!(
-                    "node {}: the executor has no exact per-series aggregate {measures:?} \
-                     over raw samples",
-                    node.id
-                )
-            })
-        }
-        _ => None,
     })
 }

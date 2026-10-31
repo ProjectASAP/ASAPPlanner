@@ -19,6 +19,12 @@
 //! it in the group's place (a query's top-k root, which no parent reads,
 //! may output the ranked value beside the key).
 //!
+//! A fused computation is one more candidate of the outer group, whatever
+//! else reads the groups it absorbs: those keep their own candidates for
+//! their other readers. A candidate equal to one the group already has (the
+//! same structural id, input groups, fused groups and accuracy budget parts) is not
+//! added again.
+//!
 //! A query whose value combines `n` approximate inputs splits its budget
 //! into `n` equal shares, so a summary's size depends on its readers: each
 //! sketch candidate is offered once per share `1..=n`, `n` the most
@@ -28,36 +34,37 @@
 //! the resulting error contract. The connection planner may select a conservative
 //! larger configuration, and validates the recomposed query-root guarantee.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use asap_types::stages::HowToComputeAggregateMeasure;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use super::DagOfLogicalMemoGroups;
 use crate::pass1::per_computation_candidates::{
-    compose_logical_candidate_with_budget_share, HowToComputeAggregateMeasure,
-    PerComputationCandidates,
+    compose_logical_candidate_with_accuracy_budget_parts, PerComputationCandidates,
 };
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 
 use super::candidates::CandidatePopulationError;
 use asap_types::stages::{
-    CandidateForMemoGroup, CandidateMemo, MemoGroup, MemoGroupId, OriginOfCandidateForMemoGroup,
+    CandidateForMemoGroup, DagOfLogicalMemoGroups, MemoCandidates, MemoGroup, MemoGroupId,
+    OriginOfCandidateForMemoGroup,
 };
 
 /// Populate implementation candidates without changing initial group identities.
-/// The inventory must retain the original ordered root dependencies. This phase
-/// consumes existing Pass 1 choices; it does not yet generate rules per group.
-pub fn try_populate_pass1<Id: Clone>(
+/// The inventory must have walked `initial`'s groups
+/// (`PerComputationCandidates::walked`); its targets name them by id.
+pub fn try_populate_pass1(
     initial: DagOfLogicalMemoGroups,
-    per_computation: &PerComputationCandidates<Id>,
-) -> Result<CandidateMemo, CandidatePopulationError> {
-    if !initial.matches_root_dependencies(&per_computation.roots) {
+    per_computation: &PerComputationCandidates,
+) -> Result<MemoCandidates, CandidatePopulationError> {
+    if !per_computation.walked(&initial) {
         return Err(CandidatePopulationError::RootDependenciesChanged);
     }
     for (index, target) in per_computation.targets.iter().enumerate() {
-        if initial.group_for_node(&target.aggregate).is_none()
-            || !matches!(target.aggregate.non_asap(), Some(asap_types::ir::NonASAPOp::Aggregate { measures, .. }) if target.measure_index < measures.len())
-        {
+        if !matches!(
+            per_computation.aggregate(target).non_asap(),
+            Some(asap_types::ir::NonASAPOp::Aggregate { measures, .. }) if target.measure_index < measures.len()
+        ) {
             return Err(CandidatePopulationError::InvalidTarget { target: index });
         }
         if let Some(fused) = &target.fused_computation {
@@ -73,8 +80,8 @@ pub fn try_populate_pass1<Id: Clone>(
             }
         }
     }
-    let candidates = pass1_candidates(per_computation, &initial.groups, &initial);
-    Ok(CandidateMemo {
+    let candidates = pass1_candidates(per_computation, &initial.groups);
+    Ok(MemoCandidates {
         groups: initial.groups,
         query_roots: initial.query_roots,
         candidates,
@@ -91,26 +98,25 @@ fn reach(groups: &[MemoGroup], g: MemoGroupId, reached: &mut HashSet<MemoGroupId
 }
 
 /// Every group's Pass 1 candidates, by group index.
-fn pass1_candidates<Id: Clone>(
-    per_computation: &PerComputationCandidates<Id>,
+fn pass1_candidates(
+    per_computation: &PerComputationCandidates,
     groups: &[MemoGroup],
-    group_of: &DagOfLogicalMemoGroups,
 ) -> Vec<Vec<CandidateForMemoGroup>> {
-    // Each target aggregate group's targets, one per measure (identical
-    // aggregates of several queries are one group with one target each).
+    // Each target aggregate group's targets, one per measure: Pass 1 walks
+    // the groups, so an aggregate several queries read has one target per
+    // measure.
     let mut targets_of: HashMap<MemoGroupId, Vec<usize>> = HashMap::new();
     for (t, target) in per_computation.targets.iter().enumerate() {
-        let g = group_of
-            .group_for_node(&target.aggregate)
-            .expect("target belongs to logical memo");
-        let targets = targets_of.entry(g).or_default();
-        if targets
-            .iter()
-            .all(|&other| per_computation.targets[other].measure_index != target.measure_index)
-        {
-            targets.push(t);
-        }
+        targets_of
+            .entry(target.aggregate_group)
+            .or_default()
+            .push(t);
     }
+    // The groups' own nodes, which the composed candidates read.
+    let logical_nodes: Rc<[Rc<OperatorNode>]> = groups
+        .iter()
+        .map(|group| Rc::clone(&group.logical_node))
+        .collect();
     let own = |g: usize| CandidateForMemoGroup {
         fused_groups: Vec::new(),
         root_node: Rc::clone(&groups[g].logical_node),
@@ -144,7 +150,7 @@ fn pass1_candidates<Id: Clone>(
             Some(targets) => target_candidates(
                 per_computation,
                 groups,
-                group_of,
+                &logical_nodes,
                 MemoGroupId(g as u32),
                 targets,
                 groups[g]
@@ -164,15 +170,15 @@ fn pass1_candidates<Id: Clone>(
 /// are `targets`: one per combination of their Pass 1 candidates (the last
 /// target varying fastest), each the aggregate composed alone with that
 /// choice. `None` when none composes.
-fn target_candidates<Id: Clone>(
-    per_computation: &PerComputationCandidates<Id>,
+fn target_candidates(
+    per_computation: &PerComputationCandidates,
     groups: &[MemoGroup],
-    group_of: &DagOfLogicalMemoGroups,
+    logical_nodes: &Rc<[Rc<OperatorNode>]>,
     g: MemoGroupId,
     targets: &[usize],
-    max_budget_share: usize,
+    max_accuracy_budget_parts: usize,
 ) -> Option<Vec<CandidateForMemoGroup>> {
-    let aggregate = Rc::clone(&per_computation.targets[targets[0]].aggregate);
+    let aggregate = Rc::clone(&groups[g.0 as usize].logical_node);
     // The groups a candidate's private nodes may bottom out at, by key.
     let mut below = HashSet::new();
     for &child in &groups[g.0 as usize].child_groups {
@@ -188,8 +194,11 @@ fn target_candidates<Id: Clone>(
             .or_insert(d);
     }
     let own_key = structural_ids.structural_id(&groups[g.0 as usize].logical_node);
-    let root_groups = asap_types::stages::root_groups(&group_of.query_roots);
     let mut candidates = Vec::new();
+    // Each candidate's identity in the memo: its node's structural id, its
+    // input groups, the groups it fuses and its accuracy budget parts. A candidate
+    // equal to one already listed is not added again.
+    let mut known = HashSet::new();
     let mut choice = vec![0; per_computation.targets.len()];
     loop {
         let mut implements = vec![g];
@@ -197,26 +206,28 @@ fn target_candidates<Id: Clone>(
             if let Some((_, Some(absorbs))) = per_computation.targets[t].computation_for(choice[t])
             {
                 for &a in absorbs {
-                    let absorbed = group_of
-                        .group_for_node(&per_computation.targets[a].aggregate)
-                        .expect("absorbed target belongs to logical memo");
+                    let absorbed = per_computation.targets[a].aggregate_group;
                     if !implements.contains(&absorbed) {
                         implements.push(absorbed);
                     }
                 }
             }
         }
-        private_absorbed(groups, &root_groups, &mut implements);
-        for budget_share in 1..=max_budget_share {
-            let Ok(composed) =
-                compose_alone(per_computation, &aggregate, targets, &choice, budget_share)
-            else {
+        for accuracy_budget_parts in 1..=max_accuracy_budget_parts {
+            let Ok(composed) = compose_alone(
+                per_computation,
+                logical_nodes,
+                &aggregate,
+                targets,
+                &choice,
+                accuracy_budget_parts,
+            ) else {
                 continue;
             };
-            let Some((_, QueryRoot::Operator(root))) = composed.into_iter().next() else {
+            let Some(QueryRoot::Operator(root)) = composed.into_iter().next() else {
                 continue;
             };
-            if budget_share > 1 && !builds_a_sketch(&root) {
+            if accuracy_budget_parts > 1 && !builds_a_sketch(&root) {
                 break;
             }
             let (node, children) = if structural_ids.structural_id(&root) == own_key {
@@ -253,12 +264,20 @@ fn target_candidates<Id: Clone>(
                 };
                 (node, children)
             };
+            if !known.insert((
+                structural_ids.structural_id(&node),
+                children.clone(),
+                implements[1..].to_vec(),
+                accuracy_budget_parts,
+            )) {
+                continue;
+            }
             candidates.push(CandidateForMemoGroup {
                 fused_groups: implements[1..].to_vec(),
                 root_node: node,
                 input_groups: children,
                 origin: OriginOfCandidateForMemoGroup::Pass1,
-                accuracy_budget_parts: budget_share,
+                accuracy_budget_parts,
             });
         }
         // Mixed-radix over this group's targets only.
@@ -278,51 +297,19 @@ fn target_candidates<Id: Clone>(
     (!candidates.is_empty()).then_some(candidates)
 }
 
-/// Keeps in `implements` (the group, then the groups its fused computation
-/// absorbs) only the absorbed groups no other reader needs: no query's root,
-/// and every parent in `implements`. Pass 1 fuses an aggregate only into its
-/// single consumer within one query; the memo merges equal nodes across
-/// queries, so an absorbed group may also be another query's root or
-/// another group's child. Such a group (and, in turn, what only it reads)
-/// is computed privately inside the fused candidate and stays its own group
-/// for its other readers, so e.g. `topk(5, sum by (job) (…))` by a heap
-/// never answers a second query's `sum by (job) (…)`.
-fn private_absorbed(
-    groups: &[MemoGroup],
-    root_groups: &BTreeSet<MemoGroupId>,
-    implements: &mut Vec<MemoGroupId>,
-) {
-    loop {
-        let shared = implements[1..].iter().position(|a| {
-            root_groups.contains(a)
-                || groups[a.0 as usize]
-                    .parents
-                    .iter()
-                    .any(|p| !implements.contains(p))
-        });
-        match shared {
-            Some(i) => {
-                implements.remove(i + 1);
-            }
-            None => break,
-        }
-    }
-}
-
 /// `aggregate` composed alone with `choice[t]` for each of its measures'
 /// `targets`, every other target left exact: the inventory holds only
 /// `targets`, and the targets a chosen fused computation absorbs (not
 /// computed then).
-fn compose_alone<Id: Clone>(
-    per_computation: &PerComputationCandidates<Id>,
+fn compose_alone(
+    per_computation: &PerComputationCandidates,
+    logical_nodes: &Rc<[Rc<OperatorNode>]>,
     aggregate: &Rc<OperatorNode>,
     targets: &[usize],
     choice: &[usize],
-    budget_share: usize,
-) -> Result<
-    Vec<(usize, QueryRoot)>,
-    crate::pass1::per_computation_candidates::PerComputationCandidateError,
-> {
+    accuracy_budget_parts: usize,
+) -> Result<Vec<QueryRoot>, crate::pass1::per_computation_candidates::PerComputationCandidateError>
+{
     let mut kept: Vec<usize> = targets.to_vec();
     for &t in targets {
         if let Some((_, Some(absorbs))) = per_computation.targets[t].computation_for(choice[t]) {
@@ -335,7 +322,8 @@ fn compose_alone<Id: Clone>(
     }
     let position = |t: usize| kept.iter().position(|&k| k == t);
     let alone = PerComputationCandidates {
-        roots: vec![(0usize, QueryRoot::Operator(Rc::clone(aggregate)))],
+        roots: vec![QueryRoot::Operator(Rc::clone(aggregate))],
+        logical_nodes: Rc::clone(logical_nodes),
         targets: kept
             .iter()
             .map(|&t| {
@@ -362,7 +350,11 @@ fn compose_alone<Id: Clone>(
         .iter()
         .map(|&t| if targets.contains(&t) { choice[t] } else { 0 })
         .collect();
-    compose_logical_candidate_with_budget_share(&alone, &alone_choice, budget_share)
+    compose_logical_candidate_with_accuracy_budget_parts(
+        &alone,
+        &alone_choice,
+        accuracy_budget_parts,
+    )
 }
 
 /// `node` with each first node on a path down from its children that
@@ -417,7 +409,7 @@ fn over_groups(
     })
 }
 
-/// Whether `node`'s private nodes build a sketch, which a budget share sizes.
+/// Whether `node`'s private nodes build a sketch, which its accuracy budget parts size.
 fn builds_a_sketch(node: &Rc<OperatorNode>) -> bool {
     OperatorNode::reachable(node).iter().any(|n| {
         matches!(
@@ -440,13 +432,13 @@ fn builds_a_sketch(node: &Rc<OperatorNode>) -> bool {
 /// derives. Memoized per node (the cache keeps each node alive, so its
 /// address is not reused).
 #[derive(Default)]
-pub struct NodeToStructuralIdCache {
+pub(crate) struct NodeToStructuralIdCache {
     id_of_node: HashMap<*const OperatorNode, (Rc<OperatorNode>, u64)>,
     id_of_encoded_operator: HashMap<Vec<u8>, u64>,
 }
 
 impl NodeToStructuralIdCache {
-    pub fn structural_id(&mut self, node: &Rc<OperatorNode>) -> u64 {
+    pub(crate) fn structural_id(&mut self, node: &Rc<OperatorNode>) -> u64 {
         if let Some((_, key)) = self.id_of_node.get(&Rc::as_ptr(node)) {
             return *key;
         }
@@ -472,6 +464,7 @@ impl NodeToStructuralIdCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pass2::memo::generate_dag_of_logical_memo_groups;
 
     #[test]
     fn structural_keys_preserve_nonfinite_and_signed_zero_literals() {
@@ -514,18 +507,16 @@ mod tests {
         );
     }
 
-    fn populate_pass1<Id: Clone>(
+    fn populate_pass1(
         initial: DagOfLogicalMemoGroups,
-        inventory: &PerComputationCandidates<Id>,
-    ) -> CandidateMemo {
+        inventory: &PerComputationCandidates,
+    ) -> MemoCandidates {
         try_populate_pass1(initial, inventory).unwrap()
     }
 
-    fn memo_of<Id: Clone>(inventory: &PerComputationCandidates<Id>) -> CandidateMemo {
-        populate_pass1(
-            DagOfLogicalMemoGroups::from_roots(&inventory.roots),
-            inventory,
-        )
+    fn memo_of(inventory: &PerComputationCandidates) -> MemoCandidates {
+        let roots: Vec<_> = inventory.roots.clone();
+        populate_pass1(generate_dag_of_logical_memo_groups(&roots), inventory)
     }
     use crate::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
@@ -538,22 +529,20 @@ mod tests {
     /// The cross-stage API rejects mismatched root identities without panicking.
     #[test]
     fn population_rejects_an_inventory_from_other_roots() {
-        let roots = vec![(
-            0,
-            QueryRoot::Operator(lower_promql(
-                "quantile_over_time(0.95, m[5m])",
-                AccuracyTarget::max_error(0.01),
-            )),
-        )];
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let other_roots = vec![(
-            0,
-            QueryRoot::Operator(lower_promql(
-                "quantile_over_time(0.95, m[5m])",
-                AccuracyTarget::max_error(0.01),
-            )),
-        )];
-        let inventory = generate_per_computation_candidates(other_roots).unwrap();
+        let roots = vec![QueryRoot::Operator(lower_promql(
+            "quantile_over_time(0.95, m[5m])",
+            AccuracyTarget::max_error(0.01),
+        ))];
+        let initial = generate_dag_of_logical_memo_groups(&roots);
+        // An inventory is tied to its roots by structure: the same query
+        // text lowered again is the same DAG, so the other roots must differ.
+        let other_roots = vec![QueryRoot::Operator(lower_promql(
+            "quantile_over_time(0.5, n[1m])",
+            AccuracyTarget::max_error(0.01),
+        ))];
+        let inventory =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&other_roots))
+                .unwrap();
         assert!(matches!(
             try_populate_pass1(initial, &inventory),
             Err(CandidatePopulationError::RootDependenciesChanged)
@@ -563,15 +552,14 @@ mod tests {
     /// Invalid target and fusion indices fail at the stage boundary, not in composition.
     #[test]
     fn population_checks_target_and_absorption_indices() {
-        let roots = vec![(
-            0,
-            QueryRoot::Operator(lower_promql(
-                "quantile_over_time(0.95, m[5m])",
-                AccuracyTarget::max_error(0.01),
-            )),
-        )];
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let roots = vec![QueryRoot::Operator(lower_promql(
+            "quantile_over_time(0.95, m[5m])",
+            AccuracyTarget::max_error(0.01),
+        ))];
+        let initial = generate_dag_of_logical_memo_groups(&roots);
+        let inventory =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap();
         let mut invalid_measure = inventory.clone();
         invalid_measure.targets[0].measure_index = usize::MAX;
         assert!(matches!(
@@ -581,7 +569,7 @@ mod tests {
         let mut invalid_absorption = inventory;
         let missing = invalid_absorption.targets.len();
         invalid_absorption.targets[0].fused_computation =
-            Some(crate::pass1::per_computation_candidates::FusedComputation {
+            Some(asap_types::stages::FusedComputation {
                 absorbed_targets: vec![missing],
                 ways_to_compute: Vec::new(),
             });
@@ -597,18 +585,12 @@ mod tests {
             "quantile_over_time(0.99, m[5m])",
         ]
         .iter()
-        .enumerate()
-        .map(|(query, text)| {
-            (
-                query,
-                QueryRoot::Operator(lower_promql(text, AccuracyTarget::max_error(0.01))),
-            )
-        })
+        .map(|text| QueryRoot::Operator(lower_promql(text, AccuracyTarget::max_error(0.01))))
         .collect();
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+        let initial = generate_dag_of_logical_memo_groups(&roots);
         let original_groups = initial.groups.clone();
         let original_roots = initial.query_roots.clone();
-        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let inventory = generate_per_computation_candidates(&initial).unwrap();
         let expanded = populate_pass1(initial.clone(), &inventory);
         let restricted_inventory = inventory.without_unsupported_summaries(Some(&[]));
         let restricted = populate_pass1(initial, &restricted_inventory);
@@ -634,18 +616,20 @@ mod tests {
     }
 
     /// The memo of PromQL `queries`, each with accuracy target `target`.
-    fn memo(queries: &[&str], target: AccuracyTarget) -> CandidateMemo {
-        let roots = queries
+    fn memo(queries: &[&str], target: AccuracyTarget) -> MemoCandidates {
+        let roots: Vec<_> = queries
             .iter()
             .map(|q| QueryRoot::Operator(lower_promql(q, target.clone())))
-            .enumerate()
             .collect();
-        memo_of(&generate_per_computation_candidates(roots).unwrap())
+        memo_of(
+            &generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap(),
+        )
     }
 
     /// The group of the first node of `kind` reached from query `q`'s root,
     /// walking down the groups' first children.
-    fn group_of_kind(memo: &CandidateMemo, q: usize, kind: &str) -> usize {
+    fn group_of_kind(memo: &MemoCandidates, q: usize, kind: &str) -> usize {
         let mut g = memo.query_roots[q].as_operator().unwrap().0 as usize;
         while memo.groups[g].logical_node.operator.kind_name() != kind {
             g = memo.groups[g].child_groups[0].0 as usize;
@@ -793,12 +777,13 @@ mod tests {
         target: &AccuracyTarget,
         algorithm: &str,
     ) -> Vec<String> {
-        let roots = queries
+        let roots: Vec<_> = queries
             .iter()
             .map(|q| QueryRoot::Operator(lower_promql(q, target.clone())))
-            .enumerate()
             .collect();
-        let inventory = generate_per_computation_candidates(roots).unwrap();
+        let inventory =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap();
         let choice: Vec<usize> = inventory
             .targets
             .iter()
@@ -812,7 +797,7 @@ mod tests {
             })
             .collect();
         let composed = compose_logical_candidate(&inventory, &choice).unwrap();
-        let QueryRoot::Operator(root) = &composed[0].1 else {
+        let QueryRoot::Operator(root) = &composed[0] else {
             unreachable!("an operator root")
         };
         OperatorNode::reachable(root)
@@ -825,8 +810,8 @@ mod tests {
     }
 
     /// The sketch candidates of `memo`'s group `g`: each one's summary and
-    /// budget share.
-    fn sketch_shares(memo: &CandidateMemo, g: usize) -> Vec<(String, usize)> {
+    /// accuracy budget parts.
+    fn sketch_shares(memo: &MemoCandidates, g: usize) -> Vec<(String, usize)> {
         memo.candidates[g]
             .iter()
             .filter(|c| !algorithms(c).is_empty())
@@ -843,7 +828,7 @@ mod tests {
     /// whole-budget candidate is the exhaustive search's sizing, and the
     /// half-budget one, larger, is never the cheaper valid one.
     #[test]
-    fn a_ratio_operand_has_a_candidate_per_budget_share() {
+    fn a_ratio_operand_has_a_candidate_per_accuracy_budget_parts() {
         let queries = [
             "quantile_over_time(0.9, m[5m]) / quantile_over_time(0.5, m[5m])",
             "quantile_over_time(0.9, m[5m])",
@@ -1031,7 +1016,7 @@ mod tests {
     /// composition derives), and each child group's node is matched by a
     /// candidate of that group in turn.
     struct Combination<'a> {
-        memo: &'a CandidateMemo,
+        memo: &'a MemoCandidates,
         matched: HashMap<(usize, *const OperatorNode), bool>,
         own: HashMap<*const OperatorNode, (Rc<OperatorNode>, serde_json::Value)>,
     }
@@ -1101,7 +1086,7 @@ mod tests {
             for seed in 1..=60u64 {
                 let roots = random_roots(seed, gauges);
                 let inventory = generate_per_computation_candidates(
-                    roots.iter().cloned().enumerate().collect(),
+                    &generate_dag_of_logical_memo_groups(&roots),
                 )
                 .unwrap();
                 if inventory.combinations() > 400 {
@@ -1112,7 +1097,9 @@ mod tests {
                 let group_of = |t: usize| {
                     memo.groups
                         .iter()
-                        .position(|group| *group.logical_node == *inventory.targets[t].aggregate)
+                        .position(|group| {
+                            *group.logical_node == **inventory.aggregate(&inventory.targets[t])
+                        })
                         .unwrap()
                 };
                 for (t, target) in inventory.targets.iter().enumerate() {
@@ -1159,7 +1146,7 @@ mod tests {
                 loop {
                     if !inventory.absorbed_choice_varies(&choice) {
                         if let Ok(composed) = compose_logical_candidate(&inventory, &choice) {
-                            for (q, (_, root)) in composed.iter().enumerate() {
+                            for (q, root) in composed.iter().enumerate() {
                                 let QueryRoot::Operator(node) = root else {
                                     continue;
                                 };
@@ -1220,10 +1207,13 @@ mod tests {
         };
         let sum = || AggIntent::Sum { col: Some(1) };
         let roots = vec![
-            (0, QueryRoot::Operator(agg(vec![2], sum(), table()))),
-            (1, QueryRoot::Operator(agg(vec![3], sum(), table()))),
+            QueryRoot::Operator(agg(vec![2], sum(), table())),
+            QueryRoot::Operator(agg(vec![3], sum(), table())),
         ];
-        let memo = memo_of(&generate_per_computation_candidates(roots).unwrap());
+        let memo = memo_of(
+            &generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap(),
+        );
         assert_eq!(memo.groups.len(), 3);
         assert_eq!(memo.groups[0].logical_node.operator.kind_name(), "Scan");
         assert_eq!(memo.groups[0].queries, vec![0, 1]);

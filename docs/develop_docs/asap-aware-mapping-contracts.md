@@ -15,10 +15,10 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 | --- | --- | --- |
 | Stage 0 (frontends) | `NonASAPOp` nodes only; aggregates carry `AggIntent` measures with each query's `AccuracyTarget` as written | none |
 | Stage 1 (`compose_logical_candidate`, Pass 2 rules) | `ASAPOp` nodes where a candidate chose an exact accumulator or a summary (`SummaryAgg`, `PaneChain`, `SummaryMerge`, `SummaryEstimate`, `FinalizeExactAccumulator`); everything else stays `NonASAPOp` | none: Stage 1 never decides when anything runs |
-| Stage 2 (`optimize_physical_asap`) | the same operators, with a `Materialization` on each summary build | every node timed from the candidate's `MaterializationAssignment` |
+| Stage 2 (`generate_physical_asap_memo_candidates`; a selected plan built by `Stage2AssignmentRealizer`) | the same operators, with a `Materialization` on each summary build | every node timed from the candidate's `MaterializationAssignment` |
 
 - Structurally equal sub-DAGs are interned before Stage 1
-  (`asap_logical_asap_optimization::pass2::cse`), so Stage 1 compares nodes by structure and Pass 2
+  (`pass2/cse.rs` in `asap_logical_asap_optimization`), so Stage 1 compares nodes by structure and Pass 2
   matches readers structurally, never by pointer.
 - Timing is applied with `apply_materialization_timings`, which validates
   every data-state edge. A violation is an `ExecutionDataStateError`:
@@ -88,23 +88,34 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
   (`P<n>`, then `P<n>-m<k>`). An assignment that puts a build at ingestion
   time over one that is not is not generated. A logical candidate Stage 2
   cannot implement becomes a `PrunedCandidate` with its reason.
+- On the memo (`generate_physical_asap_memo_candidates`), every physical
+  candidate Stage 2 prunes is recorded in
+  `PhysicalASAPMemoCandidates::pruned_candidates` as
+  `PrunedCandidate<PhysicalCandidateKey>` with a `PruneReason`: an exact
+  per-entity `Aggregate` the executor cannot run
+  (`PerEntityAggregateNotExecutable`) and, without raw data retained, a
+  query-time scan of raw data (`RawDataNotRetained`) are not generated; a
+  candidate no buildable input, query output or reader count can use is
+  removed (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`,
+  `TooFewQueryReaders`). Stage 2 emits one candidate per operator node,
+  timing and materialization; it makes no execution-scope copies.
 
 ## 5. Stage 3
 
-- `select_plan` validates its inputs first: `SelectionError::InvalidSettings`,
-  `EntryCount` and `InvalidDeploymentCapabilities` are bad input and fail the
-  whole selection.
+- `select_plan` validates its inputs first: `ErrorSelectingPlan::InvalidSettings`
+  and `EntryCount` are bad input and fail the whole selection. The facade
+  validates the deployment's capabilities before any stage
+  (`asap_planner::SelectionError::InvalidDeploymentCapabilities`).
 - Each candidate is then either invalid or valid, recorded as a `Rejection`
   with its `cause` (`RejectionCause`) and reason: a failed check
-  (`FailureProbabilityResizeFailed`, `AccuracyTargetMissed`,
-  `CountMinWeightsNotProvenNonNegative`, `PerEntityAggregateNotExecutable`,
-  `NoAccuracyGuarantee`, `RawDataNotRetained`, `LatencyBoundExceeded`, `LatencyOverRepeatInterval`
+  (`AccuracyTargetMissed`,
+  `CountMinWeightsNotProvenNonNegative`,
+  `NoAccuracyGuarantee`, `LatencyBoundExceeded`, `LatencyOverRepeatInterval`
   (a repeating query's latency per evaluation is over its repeat interval,
   checked with or without a latency bound), or `OverClusterCapacity` under
   cost model 3) or a loss under the cost model (`Costlier`, `Slower`,
-  `MoreMemory`, `NotLowestLatencyOnParetoFront`, `Dominated`,
-  `TiedLostOnEnumerationOrder`). A candidate that cannot be resized for its failure
-  probability is rejected alone.
+  `MoreMemory`, `TiedLostOnEnumerationOrder`). Stage 3 never resizes a summary: a candidate
+  whose Stage 1 sizes miss its composed accuracy target is rejected alone.
 - Usage (`ResourceUsage`) is measured without prices; the `CostModel` in
   `CostInputs` turns it into a choice. Ties keep enumeration order
   under every cost model.

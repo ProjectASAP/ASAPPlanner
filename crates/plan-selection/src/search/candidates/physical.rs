@@ -1,15 +1,14 @@
 //! Unit tests of Stage 2's realization of a selected assignment
-//! (`asap_physical_asap_optimization::catalog`) that select with the solver.
+//! (`asap_physical_asap_optimization::test_support::catalog`) that select with the solver.
 use std::rc::Rc;
 
-use asap_physical_asap_optimization::catalog::test_support::{
-    ordered_output_references, output_contract_satisfied, restore_query_roots,
-};
-use asap_physical_asap_optimization::catalog::{
-    materialize_selected_candidates, PhysicalCandidateError,
+use asap_physical_asap_optimization::test_support::catalog::{
+    materialize_selected_candidates, ordered_output_references, output_contract_satisfied,
+    restore_query_roots,
 };
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::physical::Materialization;
+use asap_types::stages::PhysicalCandidateError;
 
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
@@ -18,17 +17,18 @@ mod tests {
     use super::*;
     use crate::search::candidates::inventory::{build_candidate_inventory, InventoryForTests};
     use crate::search::milp::model::select_candidates;
-    use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
-    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
+    use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
+    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups;
+    use asap_logical_asap_optimization::test_support::try_populate_pass1;
+    use asap_logical_asap_optimization::DeploymentCapabilities;
+    use asap_logical_asap_optimization::PaneWidthDomain;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::{ASAPOp, NonASAPOp};
     use asap_types::physical::Medium;
+    use asap_types::stages::*;
 
     use asap_types::workload::{
         DataArrival, Predictability, Query, QueryRecurrence, QueryRequirements, RepeatedDemand,
@@ -52,14 +52,16 @@ mod tests {
         ];
         let roots = queries
             .iter()
-            .enumerate()
-            .map(|(id, query)| (id, QueryRoot::Operator(lower_promql(query, target.clone()))))
+            .map(|query| QueryRoot::Operator(lower_promql(query, target.clone())))
             .collect::<Vec<_>>();
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+        let initial = generate_dag_of_logical_memo_groups(&roots);
         let output_groups = (0..2)
             .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect::<Vec<_>>();
-        let candidates = generate_per_computation_candidates(roots.clone()).unwrap();
+        let candidates = generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(
+            &roots.clone(),
+        ))
+        .unwrap();
         let memo = sharing_rules_and_shared_state_groups(
             try_populate_pass1(initial, &candidates).unwrap(),
             PaneWidthDomain::Complete,
@@ -96,7 +98,7 @@ mod tests {
             .collect();
         (
             inventory,
-            roots.into_iter().map(|(_, root)| root).collect(),
+            roots,
             entries,
             DataWorkload {
                 arrival: DataArrival::Ingesting {
@@ -186,16 +188,16 @@ mod tests {
         }
         let physical = materialize_selected_candidates(
             &configured.physical,
-            &selected,
-            &assignments,
+            &selected.to_selected_dag(),
+            &selected.materializations_by_node(&assignments),
             &roots,
             &entries,
             &data,
             deployment.query_time_results_retained,
         )
         .unwrap();
-        assert_eq!(physical.physical.dag.nodes.len(), 1);
-        assert_eq!(physical.physical.dag.nodes[0].materialization, mode);
+        assert_eq!(physical.plan.dag.nodes.len(), 1);
+        assert_eq!(physical.plan.dag.nodes[0].materialization, mode);
         let same_query =
             enumerate_candidate_configurations(&source, &[0, 0], &entries[..1], &data, &deployment)
                 .unwrap();
@@ -219,8 +221,8 @@ mod tests {
         assert!(matches!(
             materialize_selected_candidates(
                 &inventory.configured_for_tests().physical,
-                &selected,
-                &modes,
+                &selected.to_selected_dag(),
+                &selected.materializations_by_node(&modes),
                 &roots,
                 &entries,
                 &DataWorkload::default(),
@@ -252,8 +254,8 @@ mod tests {
             modes[build] = Some(mode);
             let result = materialize_selected_candidates(
                 &inventory.configured_for_tests().physical,
-                &selected,
-                &modes,
+                &selected.to_selected_dag(),
+                &selected.materializations_by_node(&modes),
                 &roots,
                 &entries,
                 &data,
@@ -261,13 +263,12 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                result.nodes_by_candidate[build]
-                    .as_ref()
-                    .unwrap()
+                result.operator_node_of_selected_node
+                    [selected.node_of(PhysicalCandidateId(build)).unwrap().0]
                     .materialization,
                 mode
             );
-            let outputs = ordered_output_references(&result.physical.roots);
+            let outputs = ordered_output_references(&result.plan.roots);
             let states = outputs
                 .iter()
                 .map(|root| {
@@ -280,7 +281,8 @@ mod tests {
             assert!(Rc::ptr_eq(&states[0], &states[1]));
             assert!(Rc::ptr_eq(
                 &states[0],
-                result.nodes_by_candidate[build].as_ref().unwrap()
+                &result.operator_node_of_selected_node
+                    [selected.node_of(PhysicalCandidateId(build)).unwrap().0]
             ));
         }
     }
@@ -301,8 +303,8 @@ mod tests {
         }
         let result = materialize_selected_candidates(
             &inventory.configured_for_tests().physical,
-            &selected,
-            &modes,
+            &selected.to_selected_dag(),
+            &selected.materializations_by_node(&modes),
             &roots,
             &entries,
             &data,

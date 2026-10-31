@@ -90,10 +90,10 @@ async fn export_carries_the_selected_materialization() {
         .iter()
         .any(|n| n.output_state.timing == ExecutionTiming::IngestionTime));
     // Exactly Stage 3's selected plan, as Stage 3 timed it.
-    let selection = output.selection.as_ref().expect("Stage 3 selected");
+    assert!(output.selection.is_some(), "Stage 3 selected");
     assert_eq!(
         dag,
-        compile_physical_asap_workload(&selection.plan).expect("the selected plan exports")
+        compile_physical_asap_workload(&output.roots()).expect("the selected plan exports")
     );
 }
 
@@ -202,7 +202,7 @@ async fn reference_plan_runs_the_installable_plan_at_query_time() {
     assert!(reference.materialized_views().unwrap().is_empty());
     // The reference reads the raw data the plan's views were refreshed from.
     let [retention] = reference.raw_data_retention().unwrap().try_into().unwrap();
-    assert_eq!(retention.lookback_ms, Some(3_600_000));
+    assert_eq!(retention.lookback_ms(), Some(3_600_000));
     assert!(reference
         .dag
         .nodes
@@ -321,7 +321,7 @@ async fn raw_data_windows_of_unsupported_shapes_are_refused() {
         .unwrap();
     // 10 minutes of data ending 5 minutes back reaches 15 minutes back.
     let [retention] = plain.raw_data_retention().unwrap().try_into().unwrap();
-    assert_eq!(retention.lookback_ms, Some(900_000));
+    assert_eq!(retention.lookback_ms(), Some(900_000));
 }
 
 /// Example 4b answered as the last hour at 10-minute steps (a range
@@ -336,7 +336,7 @@ async fn stored_panes_carry_stage3_pane_retention() {
         .materialized_views()
         .unwrap()
         .iter()
-        .all(|v| v.retention_ms == 3_600_000));
+        .all(|v| v.retention_ms() == 3_600_000));
     let mut json = serde_json::to_value(&workload).unwrap();
     json["query_workload"]["repeating_queries"][0]["range_evaluation"] =
         serde_json::json!({"step_ms": 600000, "span_ms": 3600000});
@@ -347,13 +347,10 @@ async fn stored_panes_carry_stage3_pane_retention() {
         .materialized_views()
         .unwrap()
         .iter()
-        .all(|v| v.retention_ms == 7_200_000));
-    let selection = plan(&workload, &without_raw_data())
-        .await
-        .selection
-        .unwrap();
+        .all(|v| v.retention_ms() == 7_200_000));
+    let output = plan(&workload, &without_raw_data()).await;
     assert_eq!(
-        selection
+        output
             .pane_retention_ms
             .values()
             .copied()
@@ -406,7 +403,7 @@ async fn an_offset_chain_keeps_its_panes_for_its_window_plus_the_offset() {
             .map(|(retention, _)| retention)
             .max()
             .expect("materialized pane is consumed");
-        assert_eq!(view.retention_ms, required);
+        assert_eq!(view.retention_ms(), required);
     }
     plan.validate().unwrap();
 }
@@ -420,11 +417,14 @@ fn assert_pane_coverage(plan: &InstallablePlan, root: PhysicalASAPNodeId, start:
         .iter()
         .filter(|view| below.contains(&view.node_id))
         .map(|view| {
-            let [window] = view.inputs.raw_data_windows.as_slice() else {
+            let [window] = view.inputs.raw_data_windows() else {
                 panic!("pane reads one raw interval: {:?}", view.inputs);
             };
-            assert!(window.width_ms > 0 && 600_000 % window.width_ms == 0);
-            (window.end_offset_ms, window.end_offset_ms + window.width_ms)
+            assert!(window.width_ms() > 0 && 600_000 % window.width_ms() == 0);
+            (
+                window.end_offset_ms(),
+                window.end_offset_ms() + window.width_ms(),
+            )
         })
         .collect();
     intervals.sort_unstable();

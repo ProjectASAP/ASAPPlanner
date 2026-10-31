@@ -10,8 +10,8 @@ use crate::planner_layering_common;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use asap_plan_selection::select_plan;
-use asap_plan_selection::PlanningModels;
+use asap_devtools::memo_pricing::reference_select as select_plan;
+use asap_planner::PlanningModels;
 use asap_types::ir::flat::NodeId;
 use asap_types::ir::schema::{FieldDataType, GroupingStrategy, HydraKind, SketchAlgorithm};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot, ScalarExpr, SortKey};
@@ -28,16 +28,18 @@ fn pipeline() -> Run {
 // stays exact, and exercise source sharing and ten-second panes. This is not
 // a production workload search or an exhaustive memo archive.
 fn rule_fixture(workload: &asap_types::workload::PlanningWorkload) -> Run {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
     };
-    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+    use asap_logical_asap_optimization::test_support::{
         pane_candidates, window_composition_pass2_candidates,
     };
+    use asap_types::stages::HowToComputeAggregateMeasure;
     let roots = lower_promql(workload);
-    let local =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
+    )
+    .unwrap();
     let mut computations = Vec::new();
     for family in [
         None,
@@ -61,11 +63,7 @@ fn rule_fixture(workload: &asap_types::workload::PlanningWorkload) -> Run {
                 .expect("documented heap family offered locally");
             choice[target] = option;
         }
-        let whole: Vec<_> = compose_logical_candidate(&local, &choice)
-            .unwrap()
-            .into_iter()
-            .map(|(_, root)| root)
-            .collect();
+        let whole = unshare(&compose_logical_candidate(&local, &choice).unwrap());
         let mut windows = vec![whole.clone()];
         let panes = pane_candidates(&whole, &[Some(10_000), Some(10_000)]);
         windows.extend(
@@ -818,17 +816,15 @@ fn materialized_case() -> Run {
     let mut workload = example1();
     let repeating = workload.query_workload.repeating_queries.as_mut().unwrap();
     repeating.truncate(1);
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     let roots = lower_promql(&workload);
-    let local =
-        generate_per_computation_candidates(roots.iter().cloned().enumerate().collect()).unwrap();
-    let exact = compose_logical_candidate(&local, &vec![0; local.targets.len()])
-        .unwrap()
-        .into_iter()
-        .map(|(_, root)| root)
-        .collect();
+    let local = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
+    )
+    .unwrap();
+    let exact = compose_logical_candidate(&local, &vec![0; local.targets.len()]).unwrap();
     let run = run_explicit_candidates(&workload, roots, vec![exact], PlanningModels::builtin());
     let mut p = run.physical[0].clone();
     p.candidate.roots = vec![p.candidate.roots[0].clone(); 2];

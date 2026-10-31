@@ -8,7 +8,9 @@ use std::rc::Rc;
 use asap_accuracy::propagation::recompose_guarantees;
 use asap_types::ir::{OperatorNode, QueryRoot};
 
-use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, SelectedCandidateGraph};
+use asap_types::stages::{
+    DagOfSelectedCandidates, PhysicalASAPMemoCandidates, PhysicalCandidateId,
+};
 
 /// Enumerate in exactly the traversal order used when rebinding. `children()`
 /// puts direct children before scalar references; `map_children` follows fields.
@@ -51,86 +53,102 @@ pub fn output_contract_satisfied(
 
 pub struct ReconstructedCandidates {
     pub outputs: Vec<Rc<OperatorNode>>,
-    /// Recomputed guarantees and the same globally unique candidate identity.
-    pub(crate) nodes_by_candidate: Vec<Option<Rc<OperatorNode>>>,
+    /// The operator node each selected node became, indexed by
+    /// [`SelectedNodeId`](asap_types::stages::SelectedNodeId), with
+    /// guarantees recomputed; each a distinct operator node.
+    pub(crate) operator_node_of_selected_node: Vec<Rc<OperatorNode>>,
 }
 
-/// The selected candidates of `physical` rebuilt over their selected
-/// suppliers, with guarantees recomposed. Checks the selection's structure,
-/// not its cost.
+/// The nodes of `selected` rebuilt over their selected producers, one
+/// operator node each, with guarantees recomposed. Checks the selection's
+/// structure, not its cost.
 pub fn reconstruct_selected_candidates(
     physical: &PhysicalASAPMemoCandidates,
-    selected: &SelectedCandidateGraph,
+    selected: &DagOfSelectedCandidates,
 ) -> Result<ReconstructedCandidates, String> {
     super::validate_candidates(physical)?;
-    super::validate_selected_graph(physical, selected)?;
-    let count = physical.candidates.len();
-    let mut inputs = physical
-        .candidates
+    selected.validate(physical)?;
+    let count = selected.candidate_of_node.len();
+    let mut inputs = selected
+        .candidate_of_node
         .iter()
-        .map(|candidate| vec![None; candidate.supplier_candidates_per_input.len()])
+        .map(|candidate| {
+            vec![
+                None;
+                physical.candidates[candidate.0]
+                    .producer_candidates_per_input
+                    .len()
+            ]
+        })
         .collect::<Vec<_>>();
     let mut consumers = vec![Vec::new(); count];
-    for connection in &selected.connections {
-        inputs[connection.consumer.0][connection.requirement] = Some(connection.producer);
-        consumers[connection.producer.0].push(connection.consumer.0);
+    for edge in &selected.edges {
+        inputs[edge.consumer.0][edge.input] = Some(edge.producer.0);
+        consumers[edge.producer.0].push(edge.consumer.0);
     }
     let mut remaining = inputs.iter().map(Vec::len).collect::<Vec<_>>();
     let mut ready = Vec::new();
-    for &PhysicalCandidateId(id) in &selected.selected_candidates {
-        let template = physical.physical_node(PhysicalCandidateId(id));
-        if template.children().len() != inputs[id].len() {
+    for (node, candidate) in selected.candidate_of_node.iter().enumerate() {
+        let template = physical.physical_node(*candidate);
+        if template.children().len() != inputs[node].len() {
             return Err(format!(
-                "candidate {id} template inputs do not match producer requirements"
+                "candidate {} template inputs do not match producer requirements",
+                candidate.0
             ));
         }
-        if remaining[id] == 0 {
-            ready.push(id);
+        if remaining[node] == 0 {
+            ready.push(node);
         }
     }
     let mut rebuilt: Vec<Option<Rc<OperatorNode>>> = vec![None; count];
-    while let Some(id) = ready.pop() {
+    while let Some(node) = ready.pop() {
+        let id = selected.candidate_of_node[node].0;
         let template = physical.physical_node(PhysicalCandidateId(id));
         let expected = ordered_inputs(template);
-        let mut producers = Vec::with_capacity(inputs[id].len());
-        for (position, producer) in inputs[id].iter().enumerate() {
-            let producer = rebuilt[producer.unwrap().0].as_ref().unwrap();
-            if !output_contract_satisfied(&expected[position], producer)? {
-                return Err(format!("candidate {id} input {position} has incompatible schema or state configuration"));
+        let mut producers = Vec::with_capacity(inputs[node].len());
+        for (input, producer) in inputs[node].iter().enumerate() {
+            let producer = rebuilt[producer.unwrap()].as_ref().unwrap();
+            if !output_contract_satisfied(&expected[input], producer)? {
+                return Err(format!(
+                    "candidate {id} input {input} has incompatible schema or state configuration"
+                ));
             }
             producers.push(Rc::clone(producer));
         }
-        let mut position = 0;
+        let mut next = 0;
         // Re-derive structural metadata over the selected inputs, preserving
         // only explicit naming overrides. Logical rewrite templates can retain
         // pre-rewrite keys/nullability; copying their entire schema is invalid.
-        let node = Rc::new(
+        let rebuilt_node = Rc::new(
             template
                 .with_new_children(|_| {
-                    let producer = Rc::clone(&producers[position]);
-                    position += 1;
+                    let producer = Rc::clone(&producers[next]);
+                    next += 1;
                     producer
                 })
                 .map_err(|e| format!("candidate {id}: {e}"))?
                 .with_guarantee(template.guarantee.clone()),
         );
-        node.validate_structure()
+        rebuilt_node
+            .validate_structure()
             .map_err(|e| format!("candidate {id}: {e}"))?;
-        rebuilt[id] = Some(node);
-        for &consumer in &consumers[id] {
+        rebuilt[node] = Some(rebuilt_node);
+        for &consumer in &consumers[node] {
             remaining[consumer] -= 1;
             if remaining[consumer] == 0 {
                 ready.push(consumer);
             }
         }
     }
-    let mut roots = vec![None; physical.output_reference_count()];
-    for root in &selected.query_roots {
-        roots[root.query_root] = Some(QueryRoot::Operator(Rc::clone(
-            rebuilt[root.candidate.0].as_ref().unwrap(),
-        )));
-    }
-    let roots = roots.into_iter().map(Option::unwrap).collect::<Vec<_>>();
+    let rebuilt = rebuilt
+        .into_iter()
+        .map(|node| node.ok_or_else(|| "selected nodes form a cycle".to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let roots = selected
+        .node_of_output_reference
+        .iter()
+        .map(|node| QueryRoot::Operator(Rc::clone(&rebuilt[node.0])))
+        .collect::<Vec<_>>();
     let outputs = recompose_guarantees(&roots)
         .map_err(|e| e.to_string())?
         .into_iter()
@@ -147,21 +165,18 @@ pub fn reconstruct_selected_candidates(
         })
         .collect::<Vec<_>>();
     let identities = paired_node_identities(&old_outputs, &outputs)?;
-    let nodes_by_candidate = rebuilt
+    let operator_node_of_selected_node = rebuilt
         .into_iter()
         .map(|node| {
-            node.map(|node| {
-                identities
-                    .get(&Rc::as_ptr(&node))
-                    .cloned()
-                    .ok_or_else(|| "candidate lost during guarantee recomposition".to_string())
-            })
-            .transpose()
+            identities
+                .get(&Rc::as_ptr(&node))
+                .cloned()
+                .ok_or_else(|| "selected node lost during guarantee recomposition".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ReconstructedCandidates {
         outputs,
-        nodes_by_candidate,
+        operator_node_of_selected_node,
     })
 }
 
@@ -184,7 +199,7 @@ pub fn paired_node_identities(
     while let Some((old, new)) = pending.pop() {
         if let Some(existing) = identities.get(&Rc::as_ptr(&old)) {
             if !Rc::ptr_eq(existing, &new) {
-                return Err("selected candidate was split into multiple physical instances".into());
+                return Err("selected node was split into multiple physical nodes".into());
             }
             continue;
         }
@@ -192,7 +207,7 @@ pub fn paired_node_identities(
             .insert(Rc::as_ptr(&new), Rc::as_ptr(&old))
             .is_some_and(|previous| previous != Rc::as_ptr(&old))
         {
-            return Err("distinct selected candidates were merged".into());
+            return Err("distinct selected nodes were merged".into());
         }
         let old_operator = old.operator.map_children(|_| ());
         let new_operator = new.operator.map_children(|_| ());

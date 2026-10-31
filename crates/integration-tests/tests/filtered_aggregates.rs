@@ -13,7 +13,7 @@ use asap_executor::{
     values::{Batch, Value},
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_integration_tests::planning::{logical_candidates, selected_dag};
+use asap_integration_tests::planning::{logical_candidates_ignoring_guarantees, selected_dag};
 use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{DataType, Field, Schema};
@@ -194,7 +194,10 @@ async fn measure_filter(sql: &str) -> (Predicate, Schema) {
 }
 
 /// The logical candidates for `sql` whose single `SummaryAgg` has a family
-/// matching `family`, with that `SummaryAgg`'s filter set by hand.
+/// matching `family`, with that `SummaryAgg`'s filter set by hand. Every
+/// guarantee is accepted: a grouped quantile's per-value guarantee meets no
+/// whole-result target over groups the data does not bound, so Pass 1
+/// would prune the sketch these execution tests run.
 async fn hand_filtered(
     sql: &str,
     family: impl Fn(&FieldDataType) -> bool,
@@ -202,7 +205,7 @@ async fn hand_filtered(
 ) -> Vec<Rc<OperatorNode>> {
     let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     let mut result = vec![];
-    for root in logical_candidates(lower(sql, target.clone()).await, target) {
+    for root in logical_candidates_ignoring_guarantees(lower(sql, target.clone()).await, target) {
         let builds: Vec<_> = OperatorNode::reachable(&root)
             .into_iter()
             .filter(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
@@ -266,10 +269,11 @@ async fn hand_filtered_kll_compiles_and_executes() {
     }
 }
 
-/// The KLL candidates of `sql`, unchanged.
+/// The KLL candidates of `sql`, unchanged, every guarantee accepted (as
+/// [`hand_filtered`]).
 async fn kll_candidates(sql: &str) -> Vec<Rc<OperatorNode>> {
     let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
-    let roots: Vec<_> = logical_candidates(lower(sql, target.clone()).await, target)
+    let roots: Vec<_> = logical_candidates_ignoring_guarantees(lower(sql, target.clone()).await, target)
         .into_iter()
         .filter(|root| {
             OperatorNode::reachable(root).iter().any(|n| {

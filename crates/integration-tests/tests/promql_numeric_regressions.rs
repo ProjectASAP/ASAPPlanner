@@ -32,8 +32,8 @@ fn aggregate(node: &OperatorNode) -> (&FieldDataType, &SummaryUpdate, &Reduction
         Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => aggregate(summary_input),
         Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => aggregate(child),
         // A value operation (Project/Filter/Sort/Limit/...) over the state.
-        Operator::NonASAP(op) if op.children().len() == 1 && node.contains_asap() => {
-            aggregate(op.children()[0])
+        Operator::NonASAP(_) if node.children().len() == 1 && node.contains_asap() => {
+            aggregate(node.children()[0])
         }
         other => panic!("not a maintained accumulator: {other:?}"),
     }
@@ -335,11 +335,10 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
 #[test]
 #[should_panic(expected = "does not compose")]
 fn logical_candidates_fails_on_a_candidate_that_does_not_compose() {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidateError;
     asap_integration_tests::planning::require_composed_operator_candidates(vec![
-        asap_plan_selection::search::LogicalCandidate {
+        asap_devtools::planning_stages::ShownLogicalCandidate {
             id: "invalid-composition".into(),
-            roots: Err(PerComputationCandidateError::InvalidChoice),
+            roots: Err("invalid choice".into()),
         },
     ]);
 }

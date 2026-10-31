@@ -6,7 +6,7 @@ This document is for library integrators such as ASAPQuery-backend, not users
 submitting queries through a backend.
 
 ASAPPlanner is a **planning library**. Its input is a planning workload plus
-the deployment's inputs: its accuracy model, plan selection settings (the
+the deployment's inputs: its accuracy model, cost inputs (the
 cost model) and capabilities. Its output is one selected physical plan for
 the workload, with every alternative it considered and why each was not
 selected.
@@ -28,8 +28,8 @@ and [frontend dependencies](#frontend-specific-dependencies).
 
 | Output | Fields or contents | Meaning |
 |---|---|---|
-| `PlanOutput` | `plans`: one `QueryPlan { entry_index, root }` per query; `selection`: Stage 3's `Selection` (`selected`, `plan`, `costs`, `accepted`, `rejected`, `front`), set by the default pass `Stage1ToStage3Pass`; standalone scalar queries in `scalar_roots` and `scalar_plans` | The selected plan; `physical_asap_dag()` exports it as one `PhysicalASAPDAG` |
-| `Stage1ToStage3Run<Id>` (from `run_stage1_to_stage3`) | Every stage's candidates: Pass 1's per-computation candidates, the logical candidates, the physical candidates, Stage 2's pruned candidates, and the selection | For callers that inspect or display the alternatives |
+| `PlanOutput` | `plans`: one `QueryPlan { entry_index, root }` per query; `selection`: Stage 3's `Selection` (`selected_dag`, `nodes_with_proven_non_negative_weights`, `cost`, `accepted_accuracy_per_query`, `pruned_candidates`, `search_report`), set by the default pass `Stage1ToStage3Pass`; `pane_retention_ms`: how long each kept pane chain keeps its panes; standalone scalar queries in `scalar_roots` and `scalar_plans` | The selected plan; `physical_asap_dag()` exports it as one `PhysicalASAPDAG` |
+| `PlanningRun` (from `asap_planner::run_planning`) | Every stage's output: Pass 1's per-computation candidates, the selected round's Pass 2 and Stage 2 outputs (with Stage 2's pruned candidates), the selection, the selected plan, the memo after each step and a report per pane-width round | For callers that inspect or display the alternatives |
 
 The selected plan is a planning artifact. ASAPPlanner does **not** deploy
 it; downstream systems compile it, choose placement and storage, deploy state
@@ -282,19 +282,21 @@ candidate whose output has no guarantee for an approximate target.
 `PlanOutput` holds the selected plan and Stage 3's record of the selection:
 
 * `plans`: one plan root per query, in `QueryWorkload::entries()` order;
-* `selection.selected`: the id of the selected physical candidate, and
-  `selection.plan` its roots;
-* `selection.costs`: each valid candidate's resource usage and, under cost
+* `selection.selected_dag`: the selected plan as a `DagOfSelectedCandidates`:
+  the physical candidate each node runs (one node per run, so a candidate
+  run twice is two nodes), the edge feeding each input of each node, and the
+  node producing each query output;
+* `selection.cost`: the selected plan's resource usage and, under cost
   models 1 and 2, its cost per second;
-* `selection.accepted`: per valid candidate and query, the accuracy metric
+* `selection.accepted_accuracy_per_query`: per query, the accuracy metric
   Stage 3 accepted;
-* `selection.rejected`: every other candidate with its reason, whether it
-  failed a check or lost under the cost model;
-* `selection.front`: the Pareto front under cost model 3's Pareto objective.
+* `selection.pruned_candidates`: the candidates Stage 3 ruled out;
+* `selection.search_report`: how the search ended (`Optimal` or
+  `DeadlineReached`), its lower bound, the MILP's size and its times.
 
 Planner selects because it now has the inputs a backend used to own: the
 deployment declares its cost model, measurements and capabilities, and every
-alternative stays visible in `selection` and in `Stage1ToStage3Run`.
+alternative stays visible in `PlanningRun`.
 
 ## Workflows
 
@@ -310,12 +312,11 @@ PlanningWorkload + frontend dependencies + PlanningModels
 | Purpose | Operation | Result |
 |---|---|---|
 | Plan a workload end to end | `asap_planner::e2e_plan` | `PlanOutput` |
-| Plan already-lowered roots and inspect every stage | `asap_plan_selection::run_stage1_to_stage3` | `Stage1ToStage3Run`, whose `stage3_plan_selection` is the `Selection` |
+| Plan already-lowered roots and inspect every stage | `asap_planner::run_planning` | `PlanningRun`, whose `selection` is the `Selection` |
 | Inspect a workload's stages as a document | `stage_pipeline` (devtools) | The stage document the [Stage Viewer](../../user_guide_docs/stage-viewer.md) shows |
 
-The integration associates each lowered root with a caller-owned `Id` and its
-workload entry (accuracy target, latency bound, recurrence); `Id` correlates
-results, not query semantics. See the
+The integration associates each lowered root, by its position, with its
+workload entry (accuracy target, latency bound, recurrence). See the
 [public library reference](../../develop_docs/library-api.md) for arguments.
 
 ## Replanning (future support)

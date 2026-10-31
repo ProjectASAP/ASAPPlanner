@@ -10,9 +10,10 @@ use std::rc::Rc;
 use asap_accuracy::test_support::{default_size_params, DEFAULT_DELTA};
 use asap_frontend_promql::{lower_promql_query_workload, promql_metric_names};
 use asap_frontend_sql::SqlCatalog;
-use asap_plan_selection::pass::{PlanOutput, PlanningModels, QueryPlan};
+use asap_plan_selection::reference_pricer::WholePlanSelection;
 use asap_plan_selection::RejectionCause;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
+use asap_planner::{PlanOutput, PlanningModels, QueryPlan};
 use asap_types::ir::operator::agg_intent::default_quantile;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
@@ -95,17 +96,19 @@ async fn plan_promql(queries: &[(&str, f64)]) -> PlanOutput {
 fn composed_summary_candidates(
     queries: &[(&str, f64)],
 ) -> (
-    Vec<asap_physical_asap_optimization::PhysicalWorkloadPlan>,
-    asap_plan_selection::Selection,
+    Vec<asap_types::physical::PhysicalWorkloadPlan>,
+    WholePlanSelection,
 ) {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
     };
+    use asap_types::stages::HowToComputeAggregateMeasure;
     let workload = promql_workload(queries);
     let roots = lower_promql_query_workload(&workload).expect("lowers");
-    let inventory =
-        generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
+    )
+    .unwrap();
     let mut assignments = vec![vec![0; inventory.targets.len()]];
     for family in [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch] {
         let choices: Vec<_> = inventory
@@ -135,11 +138,7 @@ fn composed_summary_candidates(
         .into_iter()
         .enumerate()
         .map(|(index, choices)| {
-            let roots: Vec<_> = compose_logical_candidate(&inventory, &choices)
-                .unwrap()
-                .into_iter()
-                .map(|(_, root)| root)
-                .collect();
+            let roots: Vec<_> = compose_logical_candidate(&inventory, &choices).unwrap();
             let mut candidate =
                 asap_physical_asap_optimization::test_support::optimize_physical_asap_chosen(
                     "explicit-composition",
@@ -155,42 +154,38 @@ fn composed_summary_candidates(
             candidate
         })
         .collect();
-    let selection = asap_plan_selection::select_plan(&candidates, &entries, data, models)
+    let selection = select_plan(&candidates, &entries, data, models)
         .expect("the exact candidate meets the requested accuracy");
     (candidates, selection)
 }
 
 /// Construct a legal shared-KLL candidate explicitly. Sharing capability must
 /// not depend on which prefix a time-limited optimization search visits.
-fn shared_kll_candidate(
-    workload: &PlanningWorkload,
-) -> asap_physical_asap_optimization::PhysicalWorkloadPlan {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+fn shared_kll_candidate(workload: &PlanningWorkload) -> asap_types::physical::PhysicalWorkloadPlan {
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_types::physical::Materialization;
     let roots = lower_promql_query_workload(workload).unwrap();
-    let inventory =
-        generate_per_computation_candidates(roots.into_iter().enumerate().collect()).unwrap();
+    let inventory = generate_per_computation_candidates(
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
+    )
+    .unwrap();
     let mut choices = vec![0; inventory.targets.len()];
     for index in 0..choices.len() {
         choices[index] = (1..inventory.targets[index].choice_count()).find(|choice| {
             let mut trial = vec![0; choices.len()];
             trial[index] = *choice;
-            compose_logical_candidate(&inventory, &trial).unwrap().iter().any(|(_, root)| {
+            compose_logical_candidate(&inventory, &trial).unwrap().iter().any(|root| {
                 root_operators(root).into_iter().flat_map(OperatorNode::reachable).any(|node| {
                     matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if matches!(kind.params(), SketchParams::Kll { .. }))
                 })
             })
         }).expect("KLL implementation exists");
     }
-    let roots: Vec<_> = compose_logical_candidate(&inventory, &choices)
-        .unwrap()
-        .into_iter()
-        .map(|(_, root)| root)
-        .collect();
+    let roots: Vec<_> = compose_logical_candidate(&inventory, &choices).unwrap();
     // Every identical sub-DAG of the two queries made one node.
-    let roots: Vec<_> = asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
+    let roots: Vec<_> = asap_logical_asap_optimization::test_support::share_common_sub_dags(
         roots
             .into_iter()
             .enumerate()
@@ -215,7 +210,7 @@ fn shared_kll_candidate(
         .unwrap()
         .unwrap();
     physical.id = "shared-kll".into();
-    asap_plan_selection::select_plan(
+    select_plan(
         std::slice::from_ref(&physical),
         &workload.query_workload.entries().collect::<Vec<_>>(),
         workload.data_workload.as_ref().unwrap(),
@@ -766,4 +761,20 @@ async fn exact_state_roots_are_finalized() {
             "{query}"
         );
     }
+}
+
+/// The reference pricer over `candidates`, every candidate kept.
+fn select_plan(
+    candidates: &[asap_types::physical::PhysicalWorkloadPlan],
+    entries: &[asap_types::workload::QueryWorkloadEntry],
+    data: &asap_types::workload::DataWorkload,
+    models: PlanningModels<'_>,
+) -> Result<WholePlanSelection, asap_plan_selection::ErrorSelectingPlan> {
+    asap_plan_selection::reference_pricer::select_among_plans(
+        candidates,
+        entries,
+        data,
+        &models.accuracy_check_inputs(),
+        models.cost_inputs,
+    )
 }

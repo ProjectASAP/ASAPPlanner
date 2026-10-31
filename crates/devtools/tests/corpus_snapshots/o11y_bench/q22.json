@@ -265,7 +265,7 @@
   "pane_retention_ms": {
     "1": 3900000
   },
-  "proven_optimal": false,
+  "proven_optimal": true,
   "query": "sum(rate(http_requests_total{job=\"order-service\"}[5m]))",
   "selected": {
     "accepted": [
