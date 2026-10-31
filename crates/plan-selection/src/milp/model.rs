@@ -51,8 +51,9 @@
 //! 9. Accuracy (A1, revised 2026-10-30): `N[q] = Σ a[q, i]` over the
 //!    approximate instances `q` may reach; per value `p` of `parts`, `A[q,
 //!    p] ≥ a[q, i]` for its instances and `N[q] ≤ p + M (1 − A[q, p])`;
-//!    `a[q, i] = 0` for a denominator with `parts < 2` and for an unusable
-//!    position.
+//!    `a[q, i] = 0` for an instance unusable for `q`, and `a[q, i] + a[q, j]
+//!    ≤ 1` for a pair excluded together (both from the composition, see
+//!    [`crate::owners`]).
 //!
 //! The solve starts from [`super::warm_start`]'s plan (with every variable's
 //! value), so a deadline ends with a plan.
@@ -1186,7 +1187,10 @@ fn region_latency(milp: &mut SelectionMilp<'_>, instance: usize) -> (f64, Option
     (own_ms, Some((region, most)))
 }
 
-/// Row 9: accuracy (A1, revised 2026-10-30), per instance read.
+/// Row 9: accuracy (A1, revised 2026-10-30), per instance read: an
+/// instance unusable for the query is never read, two whose pair is
+/// excluded are not read together, and the shares read are at most each
+/// read instance's `parts`.
 fn accuracy_rows(milp: &mut SelectionMilp<'_>) {
     let inputs = milp.inputs;
     for query in 0..milp.query_count() {
@@ -1206,7 +1210,6 @@ fn accuracy_rows(milp: &mut SelectionMilp<'_>) {
                 None => continue,
                 Some(_) if exact_target => false,
                 Some(AccuracyWeight::One) => true,
-                Some(AccuracyWeight::Two) => parts >= 2,
                 Some(AccuracyWeight::Unusable(_)) => false,
             };
             if usable {
@@ -1214,6 +1217,25 @@ fn accuracy_rows(milp: &mut SelectionMilp<'_>) {
             } else {
                 milp.builder.row("9 accuracy", constraint!(reach <= 0.0));
             }
+        }
+        // Pairs usable alone that miss the target together: at most one of
+        // them per plan of the query.
+        let reaches = |class| -> Vec<Variable> {
+            counted
+                .iter()
+                .filter(|&&(instance, _)| milp.instances[instance].class == class)
+                .map(|&(instance, _)| milp.reach[&(query, instance)])
+                .collect()
+        };
+        let mut pairs: Vec<(Variable, Variable)> = Vec::new();
+        for &(first, second) in &inputs.accuracy_excluded_pairs[query] {
+            for one in reaches(first) {
+                pairs.extend(reaches(second).into_iter().map(|other| (one, other)));
+            }
+        }
+        for (one, other) in pairs {
+            milp.builder
+                .row("9 accuracy (pair)", constraint!(one + other <= 1.0));
         }
         // `N_q` as one variable; per distinct `parts`, an indicator that the
         // query reads some instance sized for that many shares.

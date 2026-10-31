@@ -123,6 +123,7 @@ use asap_types::physical::Materialization;
 use thiserror::Error;
 
 use asap_accuracy::composition::parse_raw_data_samples_sign_statistic;
+use asap_accuracy::estimators::hll;
 use asap_accuracy::propagation::{
     approximate_inputs, bind_guarantees, raw_data_samples_of_metric, root_guarantee,
     with_guarantees,
@@ -546,9 +547,11 @@ impl PerComputationCandidates {
     /// Pass 1 cannot see Pass 2's reuse of one group's summary by another
     /// group (rollup, window rollup, finer-aggregate reuse, top-k reuse), so
     /// a summary is also kept whenever another target, over another
-    /// aggregate reading one of the same sources, offers the same family:
-    /// Pass 2 may build that target's state from this one. This keeps more
-    /// than those rules' preconditions need. Exact candidates are never
+    /// aggregate reading one of the same sources, offers the same family
+    /// and some query reading that target can use it: Pass 2 may build that
+    /// target's state from this one, and the reused state composes through
+    /// that target's queries as its own would. This keeps more than those
+    /// rules' preconditions need. Exact candidates are never
     /// pruned, and with every fused summary pruned the fusion is not
     /// offered. A summary whose composition fails is kept.
     ///
@@ -588,19 +591,10 @@ impl PerComputationCandidates {
                 .collect()
         };
         let offered: Vec<Vec<SketchAlgorithm>> = self.targets.iter().map(families).collect();
-        // Whether Pass 2 may reuse target `index`'s `family` for another
-        // target's aggregate.
-        let reusable = |index: usize, family: &SketchAlgorithm| {
-            let aggregate = self.targets[index].aggregate_group;
-            self.targets.iter().enumerate().any(|(other, target)| {
-                target.aggregate_group != aggregate
-                    && offered[other].contains(family)
-                    && sources[other]
-                        .iter()
-                        .any(|source| sources[index].contains(source))
-            })
-        };
-        let mut unusable: Vec<(usize, usize)> = Vec::new();
+        // Per target, its summary choices no query reading its aggregate can
+        // use; a target no query reaches, or whose composition fails, keeps
+        // every choice.
+        let mut unusable_by_own_queries: Vec<Vec<usize>> = vec![Vec::new(); self.targets.len()];
         for (index, target) in self.targets.iter().enumerate() {
             let aggregate = Rc::as_ptr(self.aggregate(target));
             let queries: Vec<usize> = (0..self.roots.len())
@@ -611,14 +605,11 @@ impl PerComputationCandidates {
             }
             let roots: Vec<QueryRoot> = queries.iter().map(|&q| self.roots[q].clone()).collect();
             for choice in 0..target.choice_count() {
-                let Some((HowToComputeAggregateMeasure::Summary(family), _)) =
+                let Some((HowToComputeAggregateMeasure::Summary(_), _)) =
                     target.computation_for(choice)
                 else {
                     continue;
                 };
-                if reusable(index, family) {
-                    continue;
-                }
                 let mut choices = vec![0; self.targets.len()];
                 choices[index] = choice;
                 let Ok(composed) = compose_with_budget_share(&self, &roots, &choices, Some(1))
@@ -630,6 +621,48 @@ impl PerComputationCandidates {
                     .zip(&composed)
                     .any(|(&q, root)| output_can_meet_target(root, &query_targets[q], data, model))
                 {
+                    unusable_by_own_queries[index].push(choice);
+                }
+            }
+        }
+        // The families each target's own queries can use.
+        let usable_families: Vec<Vec<SketchAlgorithm>> = self
+            .targets
+            .iter()
+            .enumerate()
+            .map(|(index, target)| {
+                (0..target.choice_count())
+                    .filter(|choice| !unusable_by_own_queries[index].contains(choice))
+                    .filter_map(|choice| match target.computation_for(choice) {
+                        Some((HowToComputeAggregateMeasure::Summary(family), _)) => Some(*family),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect();
+        // Whether Pass 2 may reuse target `index`'s `family` for another
+        // target's aggregate whose own queries can use it: a reused state
+        // composes through that target's queries as its own would.
+        let reusable = |index: usize, family: &SketchAlgorithm| {
+            let aggregate = self.targets[index].aggregate_group;
+            self.targets.iter().enumerate().any(|(other, target)| {
+                target.aggregate_group != aggregate
+                    && offered[other].contains(family)
+                    && usable_families[other].contains(family)
+                    && sources[other]
+                        .iter()
+                        .any(|source| sources[index].contains(source))
+            })
+        };
+        let mut unusable: Vec<(usize, usize)> = Vec::new();
+        for (index, choices) in unusable_by_own_queries.iter().enumerate() {
+            for &choice in choices {
+                let Some((HowToComputeAggregateMeasure::Summary(family), _)) =
+                    self.targets[index].computation_for(choice)
+                else {
+                    continue;
+                };
+                if !reusable(index, family) {
                     unusable.push((index, choice));
                 }
             }
@@ -703,8 +736,12 @@ fn sources_read(node: &Rc<OperatorNode>) -> Vec<Source> {
 /// target's scope covers, as plan selection states it. The sign of a
 /// metric's samples is bound as plan selection binds it, proven only when
 /// `data` declares the metric a counter or non-negative
-/// ([`declared_non_negative`]); every other statistic (row and series
-/// counts, stream norms, distinct bounds, operand domains) is assumed
+/// ([`declared_non_negative`]). Classic HLL's failure probability is bound
+/// from `data`'s declared distinct bound for its source at the largest
+/// precision the contract covers: a bound outside the contract there (no
+/// certificate, failure probability 1) is outside it at every size, so it
+/// stays unbound. Every other statistic (row and series counts, stream
+/// norms, an undeclared distinct bound, operand domains) is assumed
 /// bindable, so no candidate is pruned for one plan selection may bind.
 /// The number of values a whole-result target covers is `data`'s
 /// ([`values_per_result`]): when it is not bound, a per-value guarantee
@@ -717,12 +754,27 @@ pub fn output_can_meet_target(
     model: &dyn AccuracyModel,
 ) -> bool {
     let bind = |guarantee: &AccuracyGuarantee| {
-        guarantee.bind(
-            &|statistic| match parse_raw_data_samples_sign_statistic(statistic) {
-                Some(metric) => declared_non_negative(data, metric).then_some(1.0),
-                None => Some(1.0),
-            },
-        )
+        guarantee.bind(&|statistic| {
+            if let Some(metric) = parse_raw_data_samples_sign_statistic(statistic) {
+                return declared_non_negative(data, metric).then_some(1.0);
+            }
+            if let Some((_, relative_error, source)) =
+                hll::parse_classic_failure_statistic(statistic)
+            {
+                // At the largest precision the contract covers: no
+                // certificate there, none at any size.
+                let declared = data
+                    .sources
+                    .get(source)
+                    .and_then(|facts| facts.max_distinct_per_evaluation);
+                if let Some(bound) = declared {
+                    let best =
+                        hll::classic_failure_probability(hll::MAX_PRECISION, relative_error, bound);
+                    return (best < 1.0).then_some(best);
+                }
+            }
+            Some(1.0)
+        })
     };
     let guarantee = match root_guarantee(root) {
         Some(guarantee) => Some(bind(&guarantee)),
@@ -4992,5 +5044,70 @@ mod tests {
         let bound = usable_inventory(&[(query, whole)], &x_data(false).with_series_count(10_000));
         let (pruned, offered) = pruned_and_offered(&bound, reason);
         assert!(offered.contains(&SketchAlgorithm::Kll), "{pruned:?}");
+    }
+
+    /// The reuse escape keeps a summary only for another target whose own
+    /// queries can use the family: two averages of p99s over different
+    /// windows of one metric at a rank target both offer KLL, and neither
+    /// can use it (a rank error has no rule through `avg`), so it is
+    /// pruned for both. Before, each kept it for the other.
+    #[test]
+    fn a_summary_no_reusing_target_can_use_is_pruned() {
+        let rank = target_in(AccuracyMetric::Rank);
+        let inventory = usable_inventory(
+            &[
+                ("avg(quantile_over_time(0.99, x[5m]))", rank.clone()),
+                ("avg(quantile_over_time(0.99, x[10m]))", rank),
+            ],
+            &x_data(false),
+        );
+        let (pruned, offered) =
+            pruned_and_offered(&inventory, PruneReason::NoErrorBoundForQueryTarget);
+        assert_eq!(
+            pruned
+                .iter()
+                .filter(|&&family| family == SketchAlgorithm::Kll)
+                .count(),
+            2,
+            "{pruned:?}"
+        );
+        assert!(!offered.contains(&SketchAlgorithm::Kll), "{offered:?}");
+    }
+
+    /// Classic HLL is pruned when its source's declared distinct bound is
+    /// outside the contract at every precision (above 2^17 distinct items):
+    /// its failure probability is 1 at any size. Under the bound it is kept,
+    /// and with no declared bound too (plan selection may bind one). Two
+    /// queries over the same metric do not keep it for each other.
+    #[test]
+    fn hll_over_a_distinct_bound_outside_its_contract_is_pruned() {
+        let relative = target_in(AccuracyMetric::Relative);
+        let queries = [
+            ("distinct_over_time(x[5m])", relative.clone()),
+            ("distinct_over_time(x[10m])", relative),
+        ];
+        let with_bound = |bound: Option<u64>| {
+            let mut data = x_data(true);
+            data.sources
+                .get_mut("x")
+                .unwrap()
+                .max_distinct_per_evaluation = bound;
+            data
+        };
+        let reason = PruneReason::NoErrorBoundForQueryTarget;
+        let (_, offered) =
+            pruned_and_offered(&usable_inventory(&queries, &with_bound(None)), reason);
+        assert!(offered.contains(&SketchAlgorithm::Hll), "{offered:?}");
+        let (_, offered) = pruned_and_offered(
+            &usable_inventory(&queries, &with_bound(Some(1_000))),
+            reason,
+        );
+        assert!(offered.contains(&SketchAlgorithm::Hll), "{offered:?}");
+        let (pruned, offered) = pruned_and_offered(
+            &usable_inventory(&queries, &with_bound(Some(1_000_000))),
+            reason,
+        );
+        assert!(pruned.contains(&SketchAlgorithm::Hll), "{pruned:?}");
+        assert!(!offered.contains(&SketchAlgorithm::Hll), "{offered:?}");
     }
 }

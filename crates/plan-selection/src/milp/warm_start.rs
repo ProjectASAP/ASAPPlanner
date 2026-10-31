@@ -11,14 +11,15 @@
 //! number of queries reaching it).
 //!
 //! Rows the derivation could break are checked per query and repaired:
-//! - candidates the query may not use: approximate ones at an unusable
-//!   position or in a denominator with `parts < 2`, any approximate one for
-//!   an exact target, candidates needing two or more readers
+//! - candidates the query may not use: approximate ones unusable for it
+//!   (`AccuracyWeight::Unusable`), any approximate one for an exact target, candidates needing two or more readers
 //!   (`MinimumQueryReaders`), candidates whose `AllowedOutputs` exclude the
 //!   query;
 //! - accuracy: if the plan reads `N` approximate instances and one has
 //!   `parts < N`, candidates with `parts < N` are excluded and the query is
-//!   planned again, down to an exact plan;
+//!   planned again, down to an exact plan; if it reads both candidates of
+//!   a pair excluded together, the second is excluded and it is planned
+//!   again;
 //! - latency: if the plan is over the query's bound, the query is planned
 //!   again by latency alone; still over it, no plan exists for the query.
 //!
@@ -222,11 +223,10 @@ impl QueryData {
                 }
                 if data.approximate {
                     excluded[candidate] |= exact_target
-                        || match inputs.accuracy_weights[query].get(&id) {
-                            None | Some(AccuracyWeight::One) => false,
-                            Some(AccuracyWeight::Two) => data.accuracy_budget_parts < 2,
-                            Some(AccuracyWeight::Unusable(_)) => true,
-                        };
+                        || matches!(
+                            inputs.accuracy_weights[query].get(&id),
+                            Some(AccuracyWeight::Unusable(_))
+                        );
                 }
                 for constraint in constraints.get(&id).into_iter().flatten() {
                     excluded[candidate] |= match constraint {
@@ -300,6 +300,14 @@ fn derive_alone(
                     excluded[candidate] = true;
                 }
             }
+            continue;
+        }
+        // A pair excluded together: drop its second candidate and plan again.
+        if let Some(&(_, second)) = inputs.accuracy_excluded_pairs[query]
+            .iter()
+            .find(|(first, second)| approximate.contains(first) && approximate.contains(second))
+        {
+            excluded[second.0] = true;
             continue;
         }
         let latency = request_ms + plan.latency_ms;

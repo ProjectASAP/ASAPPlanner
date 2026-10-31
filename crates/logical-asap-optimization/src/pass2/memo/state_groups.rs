@@ -144,12 +144,20 @@ fn add_shared_summary_state_groups_with_index(
             parents: Vec::new(),
             queries,
         });
+        // The build is its readers' own build, so it is sized for their
+        // shares of the budget (equal builds have equal sizes).
+        let accuracy_budget_parts = build
+            .readers
+            .iter()
+            .map(|(group, index, _)| memo.candidates[*group][*index].accuracy_budget_parts)
+            .max()
+            .unwrap_or(1);
         memo.candidates.push(vec![CandidateForMemoGroup {
             fused_groups: Vec::new(),
             root_node: Rc::clone(&build.build),
             input_groups: build.children,
             origin: OriginOfCandidateForMemoGroup::SharedBuild,
-            accuracy_budget_parts: 1,
+            accuracy_budget_parts,
         }]);
         for (group, index, own_build) in build.readers {
             check_generation_deadline(deadline)?;
@@ -1158,6 +1166,13 @@ mod tests {
             })
             .expect("average has shared state input");
         assert_eq!(reader.accuracy_budget_parts, 2);
+        // The shared build is the readers' own, sized for two shares too.
+        for state in &expanded.state_groups {
+            assert_eq!(
+                expanded.memo.candidates[state.0 as usize][0].accuracy_budget_parts,
+                2
+            );
+        }
         assert!(
             reader
                 .input_groups

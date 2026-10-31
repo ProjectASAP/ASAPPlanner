@@ -522,12 +522,14 @@ fn cost_models_2_and_3_are_unsupported() {
     }
 }
 
-// Accuracy rows: under `parts = 2` an approximate numerator and an
-// approximate denominator compose; an approximate denominator sized for
-// the whole budget (`parts = 1`) is never read.
+// Accuracy rows on `q0.5 / q0.9` over metric `m` declared non-negative,
+// weights from the composition: a candidate unusable for the query (every
+// KLL: a rank error composes no guarantee through the quotient; a DDSketch
+// denominator sized for the whole target) is never read; two DDSketches at
+// `parts = 2` are read together; and a pair excluded together is not.
 #[test]
-fn accuracy_rows_admit_a_ratio_at_two_parts_and_reject_a_lone_denominator() {
-    let fixture = through_stages(
+fn accuracy_rows_follow_the_composition_on_a_ratio() {
+    let mut fixture = through_stages(
         &[approximate(
             "quantile_over_time(0.5, m[5m]) / quantile_over_time(0.9, m[5m])",
             60_000,
@@ -535,31 +537,71 @@ fn accuracy_rows_admit_a_ratio_at_two_parts_and_reject_a_lone_denominator() {
         )],
         true,
     );
-    let at = |weight: AccuracyWeight, parts: usize| {
-        move |milp: &SelectionMilp<'_>| -> Vec<PhysicalCandidateId> {
-            milp.inputs.accuracy_weights[0]
-                .iter()
-                .filter(|(class, known)| {
-                    **known == weight
-                        && milp.inputs.candidate_data[class.0].accuracy_budget_parts == parts
-                })
-                .map(|(class, _)| *class)
-                .collect()
-        }
+    fixture
+        .data
+        .sources
+        .get_mut("m")
+        .expect("m")
+        .values_non_negative = true;
+    let costs = cost_inputs();
+    let inputs = prepare_milp_inputs(&fixture.physical, &fixture.entries, &fixture.data, &costs);
+    let of = |wanted: &dyn Fn(&AccuracyWeight, usize) -> bool| -> Vec<PhysicalCandidateId> {
+        inputs.accuracy_weights[0]
+            .iter()
+            .filter(|(class, weight)| {
+                wanted(weight, inputs.candidate_data[class.0].accuracy_budget_parts)
+            })
+            .map(|(class, _)| *class)
+            .collect()
     };
-    let admitted = solve_and_check(&fixture, &cost_inputs(), |milp| {
-        let numerators = at(AccuracyWeight::One, 2)(milp);
-        let denominators = at(AccuracyWeight::Two, 2)(milp);
-        require_one_of(milp, &numerators);
-        require_one_of(milp, &denominators);
-    });
-    assert!(admitted.is_ok(), "{:?}", admitted.err());
-    let lone = solve_and_check(&fixture, &cost_inputs(), |milp| {
-        let denominators = at(AccuracyWeight::Two, 1)(milp);
-        assert!(!denominators.is_empty());
-        require_one_of(milp, &denominators);
-    });
-    assert_eq!(lone.err(), Some(SelectionMilpError::Infeasible));
+    let unusable = of(&|weight, _| matches!(weight, AccuracyWeight::Unusable(_)));
+    let usable_at_two = of(&|weight, parts| *weight == AccuracyWeight::One && parts == 2);
+    assert!(!unusable.is_empty() && usable_at_two.len() >= 2);
+    let solve = |inputs: &MilpInputs, restrict: &dyn Fn(&mut SelectionMilp<'_>)| {
+        let mut milp = build_selection_milp(
+            &fixture.physical,
+            inputs,
+            &fixture.entries,
+            &costs,
+            SelectionMilpOptions {
+                enforce_accuracy: true,
+            },
+        )
+        .unwrap();
+        restrict(&mut milp);
+        solve_selection_milp(milp, None, 0).map(|_| ())
+    };
+    // No unusable candidate is read.
+    assert_eq!(
+        solve(&inputs, &|milp| require_one_of(milp, &unusable)).err(),
+        Some(SelectionMilpError::Infeasible)
+    );
+    // Two candidates usable at two parts are read together, unless every
+    // pair of them is excluded.
+    let two_of = |milp: &mut SelectionMilp<'_>| {
+        let sum: Expression = usable_at_two
+            .iter()
+            .flat_map(|class| {
+                milp.instances_of_candidate
+                    .get(class)
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .map(|instance| milp.active[instance])
+            .sum();
+        milp.builder.row("test", constraint!(sum >= 2.0));
+    };
+    assert!(solve(&inputs, &two_of).is_ok());
+    let mut excluded = inputs.clone();
+    for (index, &first) in usable_at_two.iter().enumerate() {
+        for &second in &usable_at_two[index + 1..] {
+            excluded.accuracy_excluded_pairs[0].push((first, second));
+        }
+    }
+    assert_eq!(
+        solve(&excluded, &two_of).err(),
+        Some(SelectionMilpError::Infeasible)
+    );
 }
 
 // The warm start is a feasible plan: with every binary fixed to it, the

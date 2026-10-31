@@ -95,19 +95,43 @@ fn production_roots(workload: &PlanningWorkload) -> Vec<(usize, QueryRoot)> {
 
 /// The production run of Stages 1 to 3 over `workload`.
 fn production_run(workload: &PlanningWorkload, search: PlanSearchSettings) -> PlanningRun {
+    production_run_with(workload, search, PlanningModels::builtin())
+}
+
+/// [`production_run`] with `models`.
+fn production_run_with(
+    workload: &PlanningWorkload,
+    search: PlanSearchSettings,
+    models: PlanningModels<'_>,
+) -> PlanningRun {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
     let roots = production_roots(workload)
         .into_iter()
         .map(|(_, root)| root)
         .collect();
-    run_planning(roots, &entries, &data, PlanningModels::builtin(), search).unwrap()
+    run_planning(roots, &entries, &data, models, search).unwrap()
+}
+
+/// A deployment model that may accept an output whatever its guarantee, so
+/// Pass 1 prunes no summary for its target, and accepts none: Stage 3
+/// validates no plan, and the run records its last round's memo.
+struct AcceptsNoOutput;
+
+impl asap_accuracy::AccuracyModel for AcceptsNoOutput {
+    fn satisfies(
+        &self,
+        _guarantee: &asap_types::ir::properties::AccuracyGuarantee,
+        _target: &asap_types::ir::properties::AccuracyTarget,
+    ) -> bool {
+        false
+    }
 }
 
 /// Rounds up to the complete pane-width domain, with a time limit a slow
-/// machine's Pass 2 does not reach. Stage 3 may use the whole budget: on the
-/// ratio of quantiles with guarantees enforced it validates no plan, so it
-/// searches until the deadline; the memo steps are recorded either way.
+/// machine's Pass 2 does not reach. Stage 3 may use the whole budget: when
+/// it validates no plan, it searches until the deadline; the memo steps are
+/// recorded either way.
 fn complete_domain_round() -> PlanSearchSettings {
     PlanSearchSettings {
         time_limit_ms: Some(90_000),
@@ -274,7 +298,18 @@ fn assert_pass1_memo_and_whole_workload_plans(run: &PlanningRun) -> (usize, usiz
 /// of the state-configuration rule's rewrites (one test: one planning run).
 #[test]
 fn ratio_of_quantiles_production_memo() {
-    let run = production_run(&ratio_of_quantiles(), complete_domain_round());
+    // With the built-in model, Pass 1 prunes every summary of the quantile
+    // groups: no query has a guarantee through `/` and `+` over a KLL rank
+    // error or a DDSketch relative one. The memo below is planned with a
+    // model that prunes none and accepts no output, so its summaries stay
+    // and its last round, over the complete pane-width domain, is recorded.
+    let enforced = production_run(&ratio_of_quantiles(), PlanSearchSettings::default());
+    assert_eq!(candidate_count(&memo_steps(&enforced).pass1), 7);
+    let run = production_run_with(
+        &ratio_of_quantiles(),
+        complete_domain_round(),
+        PlanningModels::builtin().with_accuracy(&AcceptsNoOutput),
+    );
     let steps = memo_steps(&run);
     // Stage 0: series identity makes the two `quantile 0.5` one group.
     assert_eq!(steps.stage0.groups.len(), 7);
@@ -308,13 +343,14 @@ fn ratio_of_quantiles_production_memo() {
     }
     // The state-configuration rule rewrites a candidate's KLL to the size
     // the readers of a state share; the rewrite is a copy of the candidate
-    // (`derive` in `pass2/memo/rules/shared_configuration_readers.rs`), so it keeps its
-    // `accuracy_budget_parts`. In each quantile group the `accuracy_budget_parts` 1 KLL `k` 567
-    // (sized for the whole result) gets copies at `k` 567 and 1184, both
-    // with `accuracy_budget_parts` 1; the `accuracy_budget_parts` 2 KLL `k` 1184 keeps 2.
-    // The `k` 1184 copy with `accuracy_budget_parts` 1 composes the same DAG as the
-    // `accuracy_budget_parts` 2 candidate: one sketch, sized for half the budget,
-    // which also meets the whole budget, so the label is sound.
+    // (`derive` in `pass2/memo/rules/shared_configuration_readers.rs`) with
+    // the `accuracy_budget_parts` its new size was made for. In each quantile
+    // group the `accuracy_budget_parts` 1 KLL `k` 567 (sized for the whole
+    // result) gets copies at `k` 567 (parts 1) and 1184 (parts 2, the size of
+    // the half-budget KLL); the `accuracy_budget_parts` 2 KLL `k` 1184 keeps
+    // 2. The `k` 1184 copy composes the same DAG as the original
+    // `accuracy_budget_parts` 2 candidate: one sketch, sized for half the
+    // budget.
     let pass1 = &steps.pass1;
     let quantile_groups: Vec<_> = (0..pass1.groups.len())
         .filter(|&group| pass1.candidates[group].len() == 5)
@@ -332,20 +368,20 @@ fn ratio_of_quantiles_production_memo() {
         let candidates = &last.candidates[group];
         assert_eq!(
             sizes(candidates),
-            [(567, 1), (1184, 2), (567, 1), (1184, 1)]
+            [(567, 1), (1184, 2), (567, 1), (1184, 2)]
         );
-        let at = |k: u32, share: usize| {
-            candidates
-                .iter()
-                .position(|c| {
-                    c.origin == OriginOfCandidateForMemoGroup::Pass1
-                        && c.accuracy_budget_parts == share
-                        && kll(c).first().is_some_and(|&(kk, _)| kk == k)
-                })
-                .unwrap()
-        };
+        let at_k: Vec<usize> = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.origin == OriginOfCandidateForMemoGroup::Pass1
+                    && kll(c).first().is_some_and(|&(k, _)| k == 1184)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(at_k.len(), 2);
         let alone = |index: usize| composed(last, &[(MemoGroupId(group as u32), index)].into());
-        assert_eq!(alone(at(1184, 1)), alone(at(1184, 2)));
+        assert_eq!(alone(at_k[0]), alone(at_k[1]));
     }
 }
 

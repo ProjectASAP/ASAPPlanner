@@ -2433,7 +2433,7 @@ fn document_with_milp_search(args: &[&str]) -> Value {
 
 /// #1095 C5: with the new search on, example 1 and the RangeHeavy T5
 /// q0.5 + q0.9 workload select a plan through the real pipeline, solved to
-/// optimality, whose `plan_cost` equals the MILP's objective exactly (the
+/// optimality or stopped at the deadline, whose `plan_cost` equals the MILP's objective exactly (the
 /// search errors on a difference and reports `inexact_objective` when the
 /// model encoded a term inexactly) and which passes every query's accuracy
 /// check.
@@ -2462,7 +2462,13 @@ fn milp_search_objective_equals_plan_cost_on_example1_and_rangeheavy() {
         let selection = &document["stage3_plan_selection"];
         assert!(selects_a_plan(selection), "{args:?}: {selection}");
         let report = &selection["search_report"];
-        assert_eq!(report["status"], "optimal", "{args:?}: {report}");
+        // Optimal or not by the deadline, the selected plan's `plan_cost`
+        // equals the MILP's objective: the search errors on a difference,
+        // and no term is encoded inexactly here.
+        assert!(
+            report["status"] == "optimal" || report["status"] == "deadline_reached",
+            "{args:?}: {report}"
+        );
         assert!(
             report.get("inexact_objective").is_none(),
             "{args:?}: {report}"
@@ -2474,5 +2480,108 @@ fn milp_search_objective_equals_plan_cost_on_example1_and_rangeheavy() {
         for query in accepted {
             assert_eq!(query["accepted_regardless_of_guarantee"], false, "{query}");
         }
+    }
+}
+
+/// #1127 regressions: with the new search on and guarantees enforced, the
+/// memo examples on which the A1 rows admitted a plan that `satisfies`
+/// rejects now select a plan that passes every query's accuracy check:
+/// ratio-of-quantiles (KLL rank errors compose no guarantee through the
+/// quotient, so no query can use KLL) and rollupheavy-t11 (HLL's
+/// failure probability is 1 over the declared 10^6 distinct users, above
+/// its contract's 2^17, so Pass 1 prunes it for both queries).
+#[test]
+fn milp_search_selects_checked_plans_on_ratio_and_rollupheavy() {
+    let root =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/dag-viewer/memo-examples");
+    let tables: Vec<String> = serde_json::from_str::<Vec<Value>>(
+        &std::fs::read_to_string(root.join("sql/tables.json")).unwrap(),
+    )
+    .unwrap()
+    .iter()
+    .map(Value::to_string)
+    .collect();
+    for (workload, pruned_family) in [
+        ("promql/ratio-of-quantiles-5m.json", "Kll"),
+        ("sql/rollupheavy-t11-service-endpoint-5m.json", "Hll"),
+    ] {
+        let path = root.join(workload);
+        let mut args = vec![
+            "--workload",
+            path.to_str().unwrap(),
+            "--deployment-capabilities",
+            r#"{"raw_data_retained": true, "query_time_results_retained": false}"#,
+            "--cost-model",
+            "aws-fargate-us-east-1",
+            "--enforce-accuracy-guarantees",
+        ];
+        if workload.starts_with("sql/") {
+            for table in &tables {
+                args.extend(["--table", table.as_str()]);
+            }
+        }
+        let document = document_with_milp_search(&args);
+        let selection = &document["stage3_plan_selection"];
+        assert!(selects_a_plan(selection), "{workload}: {selection}");
+        let queries = document["workload"]["queries"].as_array().unwrap().len();
+        let accepted = selection["accepted_accuracy_per_query"].as_array().unwrap();
+        assert_eq!(accepted.len(), queries);
+        for query in accepted {
+            assert_eq!(query["accepted_regardless_of_guarantee"], false, "{query}");
+            assert!(
+                !query["sketches"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|sketch| sketch == pruned_family),
+                "{workload}: {query}"
+            );
+        }
+        let pruned = &document["stage1_logical_asap_optimization"]["pass1_pruned"];
+        let pruned_for_target: Vec<&Value> = pruned
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|target| target["pruned"].as_array().unwrap())
+            .filter(|pruned| pruned["reason"] == "NoErrorBoundForQueryTarget")
+            .map(|pruned| &pruned["candidate"])
+            .collect();
+        assert!(
+            pruned_for_target
+                .iter()
+                .any(|family| *family == pruned_family),
+            "{workload}: {pruned}"
+        );
+    }
+}
+
+/// #1095 C5: on RangeHeavy T8+T5 (`q0.9 / q0.5` with both operands also
+/// queried alone), the new search selects a DDSketch plan that passes every
+/// query's accuracy check (the A1 rows admitted KLL there, which the check
+/// rejects). Which chains it shares depends on the deadline; the weights
+/// that let one chain serve all three queries are checked in
+/// `owners::tests::one_pane_chain_serves_a_ratio_and_its_operands`.
+#[test]
+fn milp_search_selects_a_checked_ddsketch_plan_for_a_ratio_and_its_operands() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/dag-viewer/memo-examples/promql/rangeheavy-t8-t5-1h.json");
+    let document = document_with_milp_search(&[
+        "--workload",
+        path.to_str().unwrap(),
+        "--deployment-capabilities",
+        r#"{"raw_data_retained": true, "query_time_results_retained": false}"#,
+        "--cost-model",
+        "aws-fargate-us-east-1",
+        "--enforce-accuracy-guarantees",
+    ]);
+    let selection = &document["stage3_plan_selection"];
+    assert!(selects_a_plan(selection), "{selection}");
+    for query in selection["accepted_accuracy_per_query"].as_array().unwrap() {
+        assert_eq!(query["accepted_regardless_of_guarantee"], false, "{query}");
+        assert_eq!(
+            query["sketches"],
+            serde_json::json!(["DDSketch"]),
+            "{query}"
+        );
     }
 }

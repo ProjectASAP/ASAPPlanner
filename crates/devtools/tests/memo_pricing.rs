@@ -229,15 +229,23 @@ fn example1_no_listed_choice_is_cheaper_than_the_selected_plan() {
 /// The issue's ratio of quantiles as `stage_pipeline` lowers it (series
 /// identity: the two `quantile 0.5` share one group): no listed DAG is
 /// cheaper than the selection, with accuracy guarantees ignored (the
-/// default) or enforced.
+/// default) or enforced. Enforced, Pass 1 prunes every summary: no query
+/// has a guarantee through `/` and `+` over a KLL rank error or a DDSketch
+/// relative one, so every listed DAG is exact and valid.
 #[test]
 fn ratio_of_quantiles_no_listed_choice_is_cheaper_than_the_selected_plan() {
-    for enforce in [&[][..], &["--enforce-accuracy-guarantees"][..]] {
-        let mut args = vec!["--workload", RATIO_OF_QUANTILES_WORKLOAD];
-        args.extend_from_slice(enforce);
-        let choices = assert_no_listed_choice_is_cheaper(&priced_document(&args));
-        assert!(choices.len() >= 25);
-    }
+    let ignored = assert_no_listed_choice_is_cheaper(&priced_document(&[
+        "--workload",
+        RATIO_OF_QUANTILES_WORKLOAD,
+    ]));
+    assert!(ignored.len() >= 25);
+    let enforced = assert_no_listed_choice_is_cheaper(&priced_document(&[
+        "--workload",
+        RATIO_OF_QUANTILES_WORKLOAD,
+        "--enforce-accuracy-guarantees",
+    ]));
+    assert!(!enforced.is_empty());
+    assert!(enforced.iter().all(|choice| choice["valid"] == true));
 }
 
 /// Lowered without series identity, the two `quantile 0.5` have no unique
