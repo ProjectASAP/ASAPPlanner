@@ -216,7 +216,7 @@ const FAILED_CHECK_CAUSES = [
   'accuracy_target_missed',
   'count_min_weights_not_proven_non_negative',
   'no_accuracy_guarantee', 'latency_bound_exceeded', 'latency_over_repeat_interval',
-  'over_cluster_capacity',
+  'over_cluster_capacity', 'infeasible',
 ];
 // Every `reference_pricing.pruned_candidates[].cause` the reference pricer
 // writes: the failed checks, then the losses under the cost model (priced,
