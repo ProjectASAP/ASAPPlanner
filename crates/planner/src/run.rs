@@ -617,6 +617,22 @@ fn clone_error(error: &ErrorSelectingPlan) -> ErrorSelectingPlan {
         ErrorSelectingPlan::RealizerRejected(reason) => {
             ErrorSelectingPlan::RealizerRejected(reason.clone())
         }
+        ErrorSelectingPlan::UnsupportedCostModel(model) => {
+            ErrorSelectingPlan::UnsupportedCostModel(model.clone())
+        }
+        &ErrorSelectingPlan::ObjectiveDiffersFromPlanCost {
+            objective_per_second,
+            plan_cost_per_second,
+        } => ErrorSelectingPlan::ObjectiveDiffersFromPlanCost {
+            objective_per_second,
+            plan_cost_per_second,
+        },
+        ErrorSelectingPlan::SelectedPlanFailedCheck { cause, reason } => {
+            ErrorSelectingPlan::SelectedPlanFailedCheck {
+                cause: *cause,
+                reason: reason.clone(),
+            }
+        }
         error => ErrorSelectingPlan::Solver(error.to_string()),
     }
 }

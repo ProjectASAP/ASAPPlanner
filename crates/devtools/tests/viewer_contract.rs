@@ -353,6 +353,7 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
         C::LatencyBoundExceeded,
         C::LatencyOverRepeatInterval,
         C::OverClusterCapacity,
+        C::Infeasible,
         C::Costlier,
         C::Slower,
         C::MoreMemory,
@@ -366,6 +367,7 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
             | C::LatencyBoundExceeded
             | C::LatencyOverRepeatInterval
             | C::OverClusterCapacity
+            | C::Infeasible
             | C::Costlier
             | C::Slower
             | C::MoreMemory

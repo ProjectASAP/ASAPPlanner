@@ -240,22 +240,21 @@ mod accuracy_binding;
 mod checks;
 mod models;
 // #1095 C3: the MILP's inputs; the candidate MILP (C4) reads them.
-#[cfg_attr(not(test), allow(dead_code))]
 mod owners;
-// #1095 C4: the selection MILP; C5 decodes its solution and wires it into
-// `select_plan`.
-#[cfg_attr(not(test), allow(dead_code))]
+// #1095 C4/C5: the selection MILP and the decode of its solution.
 mod milp;
 mod report;
 mod search;
+// #1095 C5: the new search behind `select_plan`'s internal switch.
+mod select;
 mod selector;
 pub(crate) use accuracy_binding::bound_root_guarantee;
 pub(crate) use checks::{accuracy_targets, guarantee_check};
 pub use models::AccuracyCheckInputs;
 pub(crate) use models::SelectionModels;
 pub use report::{
-    large_peak_memory_warning, AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, SearchReport,
-    SearchStatus, Selection,
+    large_peak_memory_warning, AcceptedAccuracy, ErrorSelectingPlan, InexactObjective,
+    RejectionCause, SearchReport, SearchStatus, Selection,
 };
 pub(crate) use report::{Rejection, WholePlanSelection};
 pub use search::select::select_plan;
