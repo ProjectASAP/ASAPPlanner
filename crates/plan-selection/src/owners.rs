@@ -323,15 +323,10 @@ pub(crate) struct InstanceOwners {
     pub(crate) region: OwnerRegion,
 }
 
-/// `w(q, k)`, ordered by size.
+/// `w(q, k)`: one share of `q`'s budget, or unusable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum AccuracyWeight {
     One,
-    /// Two shares. No longer produced: the composition decides each
-    /// position ([`accuracy_positions`]); kept while the warm start still
-    /// matches it.
-    #[allow(dead_code)]
-    Two,
     /// `∞`: `k` is unusable for `q`.
     Unusable(UnusableReason),
 }

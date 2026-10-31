@@ -51,8 +51,9 @@
 //! 9. Accuracy (A1, revised 2026-10-30): `N[q] = Σ a[q, i]` over the
 //!    approximate instances `q` may reach; per value `p` of `parts`, `A[q,
 //!    p] ≥ a[q, i]` for its instances and `N[q] ≤ p + M (1 − A[q, p])`;
-//!    `a[q, i] = 0` for a denominator with `parts < 2` and for an unusable
-//!    position.
+//!    `a[q, i] = 0` for an instance unusable for `q`, and `a[q, i] + a[q, j]
+//!    ≤ 1` for a pair excluded together (both from the composition, see
+//!    [`crate::owners`]).
 //!
 //! The solve starts from [`super::warm_start`]'s plan (with every variable's
 //! value), so a deadline ends with a plan.
@@ -1209,7 +1210,6 @@ fn accuracy_rows(milp: &mut SelectionMilp<'_>) {
                 None => continue,
                 Some(_) if exact_target => false,
                 Some(AccuracyWeight::One) => true,
-                Some(AccuracyWeight::Two) => parts >= 2,
                 Some(AccuracyWeight::Unusable(_)) => false,
             };
             if usable {
