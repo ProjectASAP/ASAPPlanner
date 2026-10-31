@@ -575,8 +575,7 @@ mod tests {
     fn workload_with_identity(queries: &[(&str, f64)], identity: bool) -> MemoCandidates {
         let roots: Vec<_> = queries
             .iter()
-            .enumerate()
-            .map(|(id, (query, error))| {
+            .map(|(query, error)| {
                 let root = crate::test_support::lower_promql(
                     query,
                     AccuracyTarget::max_error(*error).failure_probability(0.001),
@@ -587,7 +586,7 @@ mod tests {
                 } else {
                     root
                 };
-                (id, QueryRoot::Operator(root))
+                QueryRoot::Operator(root)
             })
             .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
@@ -1304,22 +1303,16 @@ mod tests {
             accuracy: AccuracyTarget::max_error(0.01),
         };
         let roots = vec![
-            (
-                0,
-                QueryRoot::Operator(agg(
-                    vec![],
-                    quantile(0.5),
-                    time_range(std::time::Duration::from_secs(300), scan()),
-                )),
-            ),
-            (
-                1,
-                QueryRoot::Operator(agg(
-                    vec![1],
-                    quantile(0.9),
-                    time_range(std::time::Duration::from_secs(1200), scan()),
-                )),
-            ),
+            QueryRoot::Operator(agg(
+                vec![],
+                quantile(0.5),
+                time_range(std::time::Duration::from_secs(300), scan()),
+            )),
+            QueryRoot::Operator(agg(
+                vec![1],
+                quantile(0.9),
+                time_range(std::time::Duration::from_secs(1200), scan()),
+            )),
         ];
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let generated = generate_per_computation_candidates(

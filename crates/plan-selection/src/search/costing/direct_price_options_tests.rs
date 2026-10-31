@@ -411,10 +411,9 @@ fn producer_worker_buckets_remain_joint_choices_and_match_evaluator() {
         .accuracy_scope(AccuracyScope::PerValue);
     let original = lower_promql("quantile_over_time(0.95, latency[5m])", target.clone());
     let generated = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            0,
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(original.clone()),
-        )]),
+        ]),
     )
     .unwrap();
     let choice = generated.targets[0]

@@ -76,10 +76,9 @@ async fn check_every_choice(
         "{sql}"
     );
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            0,
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(root),
-        )]),
+        ]),
     )
     .unwrap();
     // The cartesian product of every target's candidates.

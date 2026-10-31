@@ -271,11 +271,6 @@ pub struct ComputationTarget {
     /// directly beneath it, offered beside this target's own candidates;
     /// `None` when no fusion applies.
     pub fused_computation: Option<FusedComputation>,
-    /// The metric whose raw data samples, or plain sums of them, are every value
-    /// the aggregate reads ([`raw_data_samples_of_metric`](asap_accuracy::propagation::raw_data_samples_of_metric)); `None` otherwise. A
-    /// heap-sketch weight read from them carries the open requirement
-    /// [`WeightDomain::RawDataSamplesOfMetric`], which plan selection confirms.
-    pub raw_data_samples_of: Option<String>,
 }
 
 /// A target's measure computed together with the targets beneath it, which
@@ -347,6 +342,10 @@ impl ComputationTarget {
 
 /// Compact Pass 1 inventory over the memo groups it walked: one target per
 /// measure of each aggregate group, however many queries read the group.
+/// Pass 1's working form, not its output:
+/// [`generate_per_computation_logical_memo_candidates`](crate::pass1::generate_per_computation_logical_memo_candidates)
+/// builds, prunes and attaches it to the memo groups. Public only to tests
+/// (feature `test-support`).
 #[derive(Debug, Clone)]
 pub struct PerComputationCandidates {
     /// Each query's root over the memo groups' logical nodes, in workload
@@ -422,6 +421,7 @@ impl PerComputationCandidates {
     /// the product over the targets it absorbs that no other of them
     /// absorbs, each counted the same way. It is exactly the number of
     /// choices enumeration keeps ([`Self::absorbed_choice_varies`]).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn combinations(&self) -> usize {
         let absorbed: HashSet<usize> = absorbed_targets(&self.targets).collect();
         (0..self.targets.len())
@@ -431,6 +431,7 @@ impl PerComputationCandidates {
     }
 
     /// [`Self::combinations`] of target `index` with the targets it absorbs.
+    #[cfg(any(test, feature = "test-support"))]
     fn combinations_of(&self, index: usize) -> usize {
         let target = &self.targets[index];
         let n = target.ways_to_compute.len();
@@ -457,6 +458,7 @@ impl PerComputationCandidates {
     /// Whether `choice` picks a fused computation and a candidate other
     /// than the first for a target it absorbs: the same whole-workload
     /// candidate as the one with the first, so enumeration skips it.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn absorbed_choice_varies(&self, choice: &[usize]) -> bool {
         self.targets.iter().zip(choice).any(|(target, &index)| {
             target
@@ -469,6 +471,7 @@ impl PerComputationCandidates {
     /// The ways to compute target `target`'s measure that Pass 1 pruned,
     /// with their reasons, in pruning order: its own, or its fused
     /// computation's when `of_fused_computation`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn pruned_of_target(
         &self,
         target: usize,
@@ -796,6 +799,7 @@ pub fn output_can_meet_target(
 }
 
 /// The indices of `targets` some target's fused computation absorbs.
+#[cfg(any(test, feature = "test-support"))]
 fn absorbed_targets(targets: &[ComputationTarget]) -> impl Iterator<Item = usize> + '_ {
     targets
         .iter()
@@ -1092,10 +1096,6 @@ pub fn generate_per_computation_candidates(
                 measure_filter: filters.get(measure).cloned().flatten(),
                 having_filters: entries.clone(),
                 fused_computation: None,
-                raw_data_samples_of: node.non_asap().and_then(|op| match op {
-                    NonASAPOp::Aggregate { child, .. } => raw_data_samples_of_metric(child),
-                    _ => None,
-                }),
             });
         }
     }
@@ -1538,6 +1538,7 @@ fn with_raw_data_samples_requirement(
 /// `HAVING` is applied as its target records. A sub-DAG shared between roots
 /// stays shared. Every node carries the guarantee `asap_accuracy::propagation::composed_guarantee`
 /// gives it.
+#[cfg(any(test, feature = "test-support"))]
 pub fn compose_logical_candidate(
     inventory: &PerComputationCandidates,
     choice: &[usize],
@@ -1797,6 +1798,11 @@ fn substitute(
                 .map_operator_refs(&mut |node| cache[&Rc::as_ptr(node)].clone()),
         )
     };
+    // The metric whose raw data samples, or plain sums of them, are every
+    // value the aggregate reads: a heap-sketch weight read from them carries
+    // the open requirement `WeightDomain::RawDataSamplesOfMetric`, which
+    // plan selection confirms.
+    let raw_data_samples = raw_data_samples_of_metric(child);
     let mut input = cache[&Rc::as_ptr(child)].clone();
     for entry in having {
         if entry.placement == HavingPlacement::BelowAggregate {
@@ -1819,13 +1825,7 @@ fn substitute(
                 .find(|chosen| chosen.target.measure_index == measure)
                 .map_or(
                     (&HowToComputeAggregateMeasure::Exact, None, false),
-                    |chosen| {
-                        (
-                            chosen.candidate,
-                            chosen.target.raw_data_samples_of.as_deref(),
-                            chosen.fused,
-                        )
-                    },
+                    |chosen| (chosen.candidate, raw_data_samples.as_deref(), chosen.fused),
                 );
             let filter = filters.get(measure).and_then(Option::as_ref).map(rewritten);
             let key = (Rc::as_ptr(target), measure);
@@ -3336,10 +3336,7 @@ mod tests {
         let root = asap_types::ir::schema::schema_support::with_promql_series_identity(&root)
             .unwrap_or(root);
         generate_per_computation_candidates(
-            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-                0,
-                QueryRoot::Operator(root),
-            )]),
+            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[QueryRoot::Operator(root)]),
         )
         .unwrap()
     }
@@ -3455,10 +3452,7 @@ mod tests {
             AccuracyTarget::max_error(0.1),
         );
         let inventory = generate_per_computation_candidates(
-            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-                0,
-                QueryRoot::Operator(root),
-            )]),
+            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[QueryRoot::Operator(root)]),
         )
         .unwrap();
         let topk = topk_target(&inventory);
@@ -4589,10 +4583,7 @@ mod tests {
     fn inventory_at(query: &str, accuracy: AccuracyTarget) -> PerComputationCandidates {
         let root = crate::test_support::lower_promql(query, accuracy);
         generate_per_computation_candidates(
-            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-                0,
-                QueryRoot::Operator(root),
-            )]),
+            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[QueryRoot::Operator(root)]),
         )
         .unwrap()
     }
@@ -4863,12 +4854,11 @@ mod tests {
         queries: &[(&str, AccuracyTarget)],
         data: &DataWorkload,
     ) -> PerComputationCandidates {
-        let roots: Vec<(usize, QueryRoot)> = queries
+        let roots: Vec<QueryRoot> = queries
             .iter()
-            .enumerate()
-            .map(|(id, (query, target))| {
+            .map(|(query, target)| {
                 let root = crate::test_support::lower_promql(query, target.clone());
-                (id, QueryRoot::Operator(root))
+                QueryRoot::Operator(root)
             })
             .collect();
         let targets: Vec<AccuracyTarget> =

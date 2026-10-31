@@ -6,9 +6,7 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    HowToComputeAggregateMeasure, PerComputationCandidates,
-};
+use asap_logical_asap_optimization::pass1::HowToComputeAggregateMeasure;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::NonASAPOp;
@@ -95,28 +93,6 @@ fn connected_candidate_label(roots: &[QueryRoot]) -> String {
     shared.sort();
     labels.extend(shared);
     labels.join(" · ")
-}
-
-/// The query (index into `inventory.roots`) each target of `inventory` is
-/// listed under: the first that reads it.
-pub fn query_of_each_target(inventory: &PerComputationCandidates) -> Vec<usize> {
-    inventory
-        .targets
-        .iter()
-        .map(|target| {
-            inventory
-                .roots
-                .iter()
-                .position(|root| {
-                    root_operators(root).into_iter().any(|node| {
-                        OperatorNode::reachable(node)
-                            .iter()
-                            .any(|n| Rc::ptr_eq(n, inventory.aggregate(target)))
-                    })
-                })
-                .expect("every target is reached from a root")
-        })
-        .collect()
 }
 
 /// A Pass 1 per-computation candidate, e.g. "exact", "Sum acc" or "Kll".
@@ -302,11 +278,7 @@ mod tests {
         let workload = example1();
         let inventory = generate_per_computation_candidates(
             &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                &lower_promql_roots(&workload)
-                    .unwrap()
-                    .into_iter()
-                    .enumerate()
-                    .collect::<Vec<_>>(),
+                &lower_promql_roots(&workload).unwrap(),
             ),
         )
         .unwrap();
@@ -323,11 +295,7 @@ mod tests {
         let workload = example1();
         let inventory = generate_per_computation_candidates(
             &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                &lower_promql_roots(&workload)
-                    .unwrap()
-                    .into_iter()
-                    .enumerate()
-                    .collect::<Vec<_>>(),
+                &lower_promql_roots(&workload).unwrap(),
             ),
         )
         .unwrap();
@@ -363,11 +331,7 @@ mod tests {
         .unwrap();
         let inventory = generate_per_computation_candidates(
             &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                &lower_promql_roots(&workload)
-                    .unwrap()
-                    .into_iter()
-                    .enumerate()
-                    .collect::<Vec<_>>(),
+                &lower_promql_roots(&workload).unwrap(),
             ),
         )
         .unwrap();

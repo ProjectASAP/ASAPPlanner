@@ -343,13 +343,7 @@ mod tests {
     fn a_rollup_reads_the_finer_query_result_itself() {
         let roots: Vec<_> = ["sum by (job) (m)", "sum by (job, instance) (m)"]
             .into_iter()
-            .enumerate()
-            .map(|(query, text)| {
-                (
-                    query,
-                    QueryRoot::Operator(lower_promql(text, AccuracyTarget::exact())),
-                )
-            })
+            .map(|text| QueryRoot::Operator(lower_promql(text, AccuracyTarget::exact())))
             .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = generate_per_computation_candidates(

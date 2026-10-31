@@ -158,11 +158,8 @@ fn scalar_root_producers_are_discovered_once() {
         accuracy: approximate(),
     });
     let roots = vec![
-        (
-            "scalar",
-            QueryRoot::Scalar(ScalarExpr::ScalarSubquery(producer.clone())),
-        ),
-        ("relation", QueryRoot::Operator(producer.clone())),
+        QueryRoot::Scalar(ScalarExpr::ScalarSubquery(producer.clone())),
+        QueryRoot::Operator(producer.clone()),
     ];
     let candidates = generate_per_computation_candidates(
         &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
@@ -215,9 +212,7 @@ fn exact_promql(query: &str) -> Vec<QueryRoot> {
 fn example_1_exact_q1_keeps_exact_accumulators_only() {
     let roots = exact_promql("sum by (job) (rate(http_requests_total[1m]))");
     let candidates = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-            &roots.into_iter().enumerate().collect::<Vec<_>>(),
-        ),
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let found: Vec<_> = candidates
@@ -253,10 +248,9 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
     producer.timing = Some(asap_types::ir::properties::ExecutionTiming::QueryTime);
     assert!(matches!(
         generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-                0,
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
                 QueryRoot::Operator(Rc::new(producer.clone()))
-            )])
+            ])
         ),
         Err(PerComputationCandidateError::AssignedPhysicalAnnotation)
     ));
@@ -268,10 +262,9 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
         asap_types::physical::Materialization::MatAtQuery(asap_types::physical::Medium::Memory);
     assert!(matches!(
         generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-                0,
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
                 QueryRoot::Operator(Rc::new(stored.clone()))
-            )])
+            ])
         ),
         Err(PerComputationCandidateError::AssignedPhysicalAnnotation)
     ));
@@ -281,7 +274,7 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
         assert!(matches!(
             generate_per_computation_candidates(
                 &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                    &[(0, QueryRoot::Operator(root))]
+                    &[QueryRoot::Operator(root)]
                 )
             ),
             Err(PerComputationCandidateError::AssignedPhysicalAnnotation)
@@ -307,10 +300,9 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
     .unwrap();
     assert!(matches!(
         generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-                0,
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
                 QueryRoot::Operator(summary)
-            )])
+            ])
         ),
         Err(PerComputationCandidateError::ContainsAsap)
     ));
@@ -352,10 +344,9 @@ fn assigned_physical_annotation_asap_input_and_invalid_accuracy_are_rejected() {
         None,
     );
     let error = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            0,
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(invalid),
-        )]),
+        ]),
     )
     .unwrap_err();
     assert!(
@@ -416,10 +407,9 @@ fn multi_measure_aggregate_has_one_target_per_measure() {
         None,
     );
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            0,
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(node),
-        )]),
+        ]),
     )
     .unwrap();
     let candidates = &inventory.targets;
@@ -447,10 +437,9 @@ fn aggregate_without_realization_is_not_a_target() {
         population: true,
     });
     assert!(generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            0,
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(node)
-        )])
+        ])
     )
     .unwrap()
     .targets
@@ -471,10 +460,9 @@ fn filtered_measure_keeps_candidates_and_records_its_filter() {
         None,
     );
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            0,
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(filtered),
-        )]),
+        ]),
     )
     .unwrap();
     let targets = &inventory.targets;
@@ -574,10 +562,9 @@ fn key_only_having_is_pushed_below_and_keeps_candidates() {
     let node = grouped_count(None);
     let root = having_filter(node.clone(), equals(0, ScalarValue::Utf8("a".into())));
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            0,
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(root.clone()),
-        )]),
+        ]),
     )
     .unwrap();
     let targets = &inventory.targets;
@@ -601,11 +588,8 @@ fn value_having_stays_above_output_and_keeps_candidates() {
     let value = || equals(1, ScalarValue::Int64(10));
     let inventory = generate_per_computation_candidates(
         &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
-            (
-                0,
-                QueryRoot::Operator(having_filter(grouped_count(None), value())),
-            ),
-            (1, QueryRoot::Operator(grouped_count(Some(value())))),
+            QueryRoot::Operator(having_filter(grouped_count(None), value())),
+            QueryRoot::Operator(grouped_count(Some(value()))),
         ]),
     )
     .unwrap();
@@ -629,14 +613,8 @@ fn avg_rewrites_to_sum_and_count_states() {
     let avg = || vec![AggIntent::Avg { col: None }];
     let inventory = generate_per_computation_candidates(
         &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
-            (
-                0,
-                QueryRoot::Operator(aggregate_over(scan(false), avg(), vec![], None)),
-            ),
-            (
-                1,
-                QueryRoot::Operator(aggregate_over(scan(true), avg(), vec![], None)),
-            ),
+            QueryRoot::Operator(aggregate_over(scan(false), avg(), vec![], None)),
+            QueryRoot::Operator(aggregate_over(scan(true), avg(), vec![], None)),
         ]),
     )
     .unwrap();
@@ -670,8 +648,8 @@ fn having_on_one_consumer_of_a_shared_aggregate_stays_above() {
     let filtered = having_filter(node.clone(), key.clone());
     let targets = generate_per_computation_candidates(
         &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
-            (0, QueryRoot::Operator(filtered.clone())),
-            (1, QueryRoot::Operator(node.clone())),
+            QueryRoot::Operator(filtered.clone()),
+            QueryRoot::Operator(node.clone()),
         ]),
     )
     .unwrap()
@@ -691,8 +669,8 @@ fn having_on_one_consumer_of_a_shared_aggregate_stays_above() {
     let second = having_filter(node, key);
     let targets = generate_per_computation_candidates(
         &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
-            (0, QueryRoot::Operator(first)),
-            (1, QueryRoot::Operator(second)),
+            QueryRoot::Operator(first),
+            QueryRoot::Operator(second),
         ]),
     )
     .unwrap()
@@ -722,8 +700,8 @@ fn a_scalar_reference_consumer_keeps_a_key_only_having_above() {
     );
     let inventory = generate_per_computation_candidates(
         &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
-            (0, QueryRoot::Operator(filtered.clone())),
-            (1, QueryRoot::Operator(exists)),
+            QueryRoot::Operator(filtered.clone()),
+            QueryRoot::Operator(exists),
         ]),
     )
     .unwrap();
@@ -751,10 +729,9 @@ fn only_the_adjacent_of_stacked_filters_is_having() {
     let inner = having_filter(node.clone(), inner_key.clone());
     let outer = having_filter(inner.clone(), equals(0, ScalarValue::Utf8("b".into())));
     let targets = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            0,
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(outer),
-        )]),
+        ]),
     )
     .unwrap()
     .targets;
@@ -781,17 +758,11 @@ fn global_aggregate_having_stays_above() {
     let never = Predicate(ScalarExpr::Literal(ScalarValue::Boolean(false)));
     let targets = generate_per_computation_candidates(
         &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
-            (
-                0,
-                QueryRoot::Operator(having_filter(
-                    aggregate_over(scan(false), count(), vec![], None),
-                    never.clone(),
-                )),
-            ),
-            (
-                1,
-                QueryRoot::Operator(aggregate_over(scan(false), count(), vec![], Some(never))),
-            ),
+            QueryRoot::Operator(having_filter(
+                aggregate_over(scan(false), count(), vec![], None),
+                never.clone(),
+            )),
+            QueryRoot::Operator(aggregate_over(scan(false), count(), vec![], Some(never))),
         ]),
     )
     .unwrap()
@@ -814,9 +785,7 @@ fn global_aggregate_having_stays_above() {
 fn example_1_exact_q2_prunes_topk_heaps() {
     let roots = exact_promql("topk by (job) (10, sum_over_time(http_requests_total[1m]))");
     let candidates = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-            &roots.into_iter().enumerate().collect::<Vec<_>>(),
-        ),
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let found: Vec<_> = candidates
@@ -888,10 +857,9 @@ fn scalar_reference_filter_is_not_having() {
     let agg = aggregate_over(scan(false), count(), vec![], None);
     let root = having_filter(scan(false), above_scalar(1, agg.clone()));
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            0,
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(root),
-        )]),
+        ]),
     )
     .unwrap();
     let targets = &inventory.targets;
@@ -906,10 +874,9 @@ fn scalar_reference_filter_is_not_having() {
     let agg = aggregate_over(scan(false), count(), vec![], None);
     let root = having_filter(agg.clone(), above_scalar(0, agg.clone()));
     let targets = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            0,
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(root.clone()),
-        )]),
+        ]),
     )
     .unwrap()
     .targets;
@@ -929,9 +896,7 @@ fn scalar_reference_filter_is_not_having() {
 fn promql_scalar_operand_is_not_having() {
     let roots = exact_promql("http_requests_total > scalar(sum(http_requests_total))");
     let targets = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-            &roots.into_iter().enumerate().collect::<Vec<_>>(),
-        ),
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap()
     .targets;
@@ -946,9 +911,7 @@ fn promql_scalar_operand_is_not_having() {
 
     let roots = exact_promql("sum by (job) (x) > scalar(count(x))");
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-            &roots.into_iter().enumerate().collect::<Vec<_>>(),
-        ),
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     assert!(having_of(&inventory, |intent| matches!(
@@ -978,8 +941,8 @@ fn having_shared_with_a_project_consumer_stays_above() {
     .unwrap();
     let targets = generate_per_computation_candidates(
         &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
-            (0, QueryRoot::Operator(filtered)),
-            (1, QueryRoot::Operator(project)),
+            QueryRoot::Operator(filtered),
+            QueryRoot::Operator(project),
         ]),
     )
     .unwrap()
@@ -1016,10 +979,9 @@ fn without_and_per_entity_having_stays_above() {
         .unwrap();
         let root = having_filter(node, equals(0, ScalarValue::Utf8("a".into())));
         let targets = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-                0,
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
                 QueryRoot::Operator(root),
-            )]),
+            ]),
         )
         .unwrap()
         .targets;
@@ -1048,10 +1010,9 @@ fn composed_candidate_replaces_chosen_target_with_summary_evaluation() {
         accuracy: approximate(),
     });
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            0,
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(producer.clone()),
-        )]),
+        ]),
     )
     .unwrap();
     let exact = compose_logical_candidate(&inventory, &[0]).unwrap();
@@ -1091,8 +1052,7 @@ fn composed(roots: Vec<Rc<OperatorNode>>, choice: &[usize]) -> Vec<Rc<OperatorNo
         &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
             &roots
                 .into_iter()
-                .enumerate()
-                .map(|(id, node)| (id, QueryRoot::Operator(node)))
+                .map(QueryRoot::Operator)
                 .collect::<Vec<_>>(),
         ),
     )
@@ -1359,10 +1319,9 @@ fn own_having_subquery_is_substituted() {
     let inner = aggregate(quantile());
     let outer = grouped_quantile(Some(above_scalar(1, inner.clone())));
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            0,
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(outer.clone()),
-        )]),
+        ]),
     )
     .unwrap();
     assert_eq!(inventory.targets.len(), 2);
@@ -1469,12 +1428,9 @@ fn memo_cached_rules_preserve_occurrence_specific_having() {
     let other = grouped_count(None);
     let key = equals(0, ScalarValue::Utf8("a".into()));
     let roots = vec![
-        (
-            0,
-            QueryRoot::Operator(having_filter(shared.clone(), key.clone())),
-        ),
-        (1, QueryRoot::Operator(shared)),
-        (2, QueryRoot::Operator(having_filter(other, key))),
+        QueryRoot::Operator(having_filter(shared.clone(), key.clone())),
+        QueryRoot::Operator(shared),
+        QueryRoot::Operator(having_filter(other, key)),
     ];
     let memo = DagOfLogicalMemoGroups::from_roots(&roots);
     let cached = generate_per_computation_candidates(&memo).unwrap();

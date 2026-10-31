@@ -200,14 +200,13 @@ mod tests {
             "quantile_over_time(0.9, data[5m])",
             target.clone(),
         ))];
-        let identified = roots.iter().cloned().enumerate().collect::<Vec<_>>();
-        let initial = DagOfLogicalMemoGroups::from_roots(&identified);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let output = *initial.query_roots[0].as_operator().unwrap();
         let memo = try_populate_pass1(
             initial,
             &generate_per_computation_candidates(
                 &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                    &identified,
+                    &roots,
                 ),
             )
             .unwrap(),

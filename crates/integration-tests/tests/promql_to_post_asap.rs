@@ -728,10 +728,9 @@ fn ddsketch_ratio_selection(
         generate_per_computation_candidates, HowToComputeAggregateMeasure,
     };
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            0,
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(root),
-        )]),
+        ]),
     )
     .unwrap();
     let exact = vec![0; inventory.targets.len()];

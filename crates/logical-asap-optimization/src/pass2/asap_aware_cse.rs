@@ -2341,9 +2341,8 @@ mod tests {
             asap_types::ir::properties::AccuracyTarget::max_error(0.01).failure_probability(0.001),
         );
         let inventory = generate_per_computation_candidates(
-            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-                0,
-                QueryRoot::Operator(with_promql_series_identity(&root).unwrap()),
+            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[QueryRoot::Operator(
+                with_promql_series_identity(&root).unwrap(),
             )]),
         )
         .unwrap();
@@ -2392,18 +2391,14 @@ mod tests {
         };
         let roots: Vec<_> = queries
             .iter()
-            .enumerate()
-            .map(|(i, (q, epsilon))| {
+            .map(|(q, epsilon)| {
                 let root = lower_promql(
                     q,
                     asap_types::ir::properties::AccuracyTarget::max_error(*epsilon)
                         .failure_probability(0.01)
                         .accuracy_metric(asap_types::ir::properties::AccuracyMetric::Rank),
                 );
-                (
-                    i,
-                    QueryRoot::Operator(with_promql_series_identity(&root).unwrap()),
-                )
+                QueryRoot::Operator(with_promql_series_identity(&root).unwrap())
             })
             .collect();
         let inventory = generate_per_computation_candidates(
@@ -3457,14 +3452,13 @@ mod tests {
                     "topk by (job) (10, sum_over_time(m[1m]))",
                 ]
                 .iter()
-                .enumerate()
-                .map(|(i, q)| {
+                .map(|q| {
                     let root = lower_promql(
                         q,
                         asap_types::ir::properties::AccuracyTarget::max_error(0.01)
                             .failure_probability(0.01),
                     );
-                    (i, QueryRoot::Operator(root))
+                    QueryRoot::Operator(root)
                 })
                 .collect::<Vec<_>>(),
             ),

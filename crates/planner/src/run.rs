@@ -10,12 +10,9 @@ use std::time::{Duration, Instant};
 
 use asap_cost::PlanRanking;
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilitiesError;
-use asap_logical_asap_optimization::pass1::logical_memo_candidates::{
-    generate_per_computation_logical_memo_candidates, PerComputationLogicalMemoCandidatesError,
-};
-use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    generate_per_computation_candidates, HowToComputeAggregateMeasure,
-    PerComputationCandidateError, PerComputationCandidates,
+use asap_logical_asap_optimization::pass1::{
+    generate_per_computation_logical_memo_candidates, PerComputationCandidateError,
+    PerComputationLogicalMemoCandidates, PerComputationLogicalMemoCandidatesError,
 };
 use asap_logical_asap_optimization::pass2::logical_memo_candidates::{
     generate_logical_asap_memo_candidates, LogicalASAPMemoCandidatesError, Pass2RoundState,
@@ -69,12 +66,8 @@ pub struct PlanSearchSettings {
 #[derive(Debug, Clone)]
 pub struct MemoSteps {
     /// After hash-consing the frontends' roots: groups, no candidates.
+    /// (The memo after Pass 1 is [`PlanningRun::per_computation_candidates`].)
     pub stage0: MemoCandidates,
-    /// After Pass 1 (per-computation candidates, then accuracy-scoped sizes).
-    pub pass1: MemoCandidates,
-    /// The ways to compute a measure Pass 1 pruned, each on its aggregate's
-    /// group of `pass1`.
-    pub pass1_pruned_candidates: Vec<PrunedCandidate<HowToComputeAggregateMeasure>>,
     /// After local window composition (pane candidates).
     pub pass2: MemoCandidates,
     /// After concrete summary-state group expansion: the memo Stage 2
@@ -160,9 +153,10 @@ pub struct PlanningReport {
 /// Every stage's output for one workload ([`run_planning`]).
 #[derive(Debug)]
 pub struct PlanningRun {
-    /// Stage 1, Pass 1: the per-computation candidates (query `i` has id
-    /// `i`), with the roots they read, after the deployment's summaries.
-    pub per_computation_candidates: PerComputationCandidates,
+    /// Stage 1, Pass 1's output: the memo groups with their per-computation
+    /// candidates, the computation targets and the pruned candidates.
+    /// `None` when Pass 1 failed.
+    pub per_computation_candidates: Option<PerComputationLogicalMemoCandidates>,
     /// The selected round's Pass 2 output (the last round's when none is
     /// selected).
     pub logical_asap_candidates: Option<LogicalASAPMemoCandidates>,
@@ -207,37 +201,45 @@ pub fn run_planning(
     for root in &roots {
         root.validate_structure()?;
     }
-    let with_ids: Vec<(usize, QueryRoot)> = roots.iter().cloned().enumerate().collect();
     // Stage 0: the memo of logical groups.
-    let initial = DagOfLogicalMemoGroups::from_roots(&with_ids);
-    // Pass 1: the per-computation candidates the deployment can run.
-    let mut per_computation = generate_per_computation_candidates(&initial)?
-        .without_unsupported_summaries(
-            models
-                .deployment_capabilities
-                .supported_summaries
-                .as_deref(),
-        );
-    // ... and some query can use: unless Stage 3 may accept an output
-    // without its guarantee, a summary with which no query reading it has
-    // an error bound that can meet its target is pruned.
+    let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+    let stage0 = MemoCandidates {
+        candidates: vec![Vec::new(); initial.groups.len()],
+        groups: initial.groups.clone(),
+        query_roots: initial.query_roots.clone(),
+    };
+    let has_pane_window = has_pane_window(&initial);
+    let has_groups = !initial.groups.is_empty();
+    // Pass 1: the per-computation candidates the deployment can run and
+    // some query can use.
+    let accuracy_targets: Vec<_> = entries
+        .iter()
+        .map(|entry| entry.requirements.accuracy.clone())
+        .collect();
     let accuracy = models.accuracy_check_inputs();
-    if !accuracy.model.may_accept_regardless_of_guarantee()
-        && !accuracy.evidence.may_provide_evidence()
-    {
-        let targets: Vec<_> = entries
-            .iter()
-            .map(|entry| entry.requirements.accuracy.clone())
-            .collect();
-        per_computation =
-            per_computation.without_summaries_no_query_can_use(&targets, data, accuracy.model);
-    }
+    let pass1 = generate_per_computation_logical_memo_candidates(
+        initial,
+        &accuracy_targets,
+        accuracy.model,
+        accuracy.evidence,
+        data,
+        models
+            .deployment_capabilities
+            .supported_summaries
+            .as_deref(),
+        global_deadline,
+    );
+    // A query Pass 1 cannot plan is an input error.
+    let pass1 = match pass1 {
+        Err(PerComputationLogicalMemoCandidatesError::PerComputation(error)) => return Err(error),
+        pass1 => pass1,
+    };
     let mut report = PlanningReport {
         time_limit_ms,
         ..PlanningReport::default()
     };
     let mut run = PlanningRun {
-        per_computation_candidates: per_computation.clone(),
+        per_computation_candidates: pass1.as_ref().ok().cloned(),
         logical_asap_candidates: None,
         physical_asap_candidates: None,
         selection: Err(SelectionError::DeadlineReached),
@@ -251,20 +253,7 @@ pub fn run_planning(
         run.report = report;
         return Ok(run);
     }
-    let stage0 = MemoCandidates {
-        candidates: vec![Vec::new(); initial.groups.len()],
-        groups: initial.groups.clone(),
-        query_roots: initial.query_roots.clone(),
-    };
-    let has_pane_window = has_pane_window(&initial);
-    let has_groups = !initial.groups.is_empty();
-    let pass1 = match generate_per_computation_logical_memo_candidates(
-        initial,
-        per_computation,
-        entries,
-        data,
-        global_deadline,
-    ) {
+    let pass1 = match pass1 {
         Ok(pass1) => pass1,
         Err(error) => {
             // A Pass 1 deadline is the planning budget running out.
@@ -280,8 +269,6 @@ pub fn run_planning(
         }
     };
     report.pass1_ms = elapsed_ms(started);
-    let pass1_memo = pass1.memo.clone();
-    let pass1_pruned = pass1.pruned_candidates.clone();
     let mut state = Some(Pass2RoundState::new(pass1));
 
     let realizer = Stage2AssignmentRealizer {
@@ -413,8 +400,6 @@ pub fn run_planning(
     };
     let mut memo_steps = MemoSteps {
         stage0,
-        pass1: pass1_memo,
-        pass1_pruned_candidates: pass1_pruned,
         pass2: round.pass2,
         concrete_states: round.logical.memo.clone(),
         stage2_operator_nodes: round

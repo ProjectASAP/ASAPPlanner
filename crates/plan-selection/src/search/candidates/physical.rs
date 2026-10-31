@@ -52,8 +52,7 @@ mod tests {
         ];
         let roots = queries
             .iter()
-            .enumerate()
-            .map(|(id, query)| (id, QueryRoot::Operator(lower_promql(query, target.clone()))))
+            .map(|query| QueryRoot::Operator(lower_promql(query, target.clone())))
             .collect::<Vec<_>>();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let output_groups = (0..2)
@@ -101,7 +100,7 @@ mod tests {
             .collect();
         (
             inventory,
-            roots.into_iter().map(|(_, root)| root).collect(),
+            roots,
             entries,
             DataWorkload {
                 arrival: DataArrival::Ingesting {

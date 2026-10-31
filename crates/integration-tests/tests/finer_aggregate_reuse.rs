@@ -50,7 +50,6 @@ fn expanded(queries: &[String]) -> MemoCandidates {
         .lower(&workload(queries))
         .unwrap()
         .into_iter()
-        .enumerate()
         .collect();
     let initial = DagOfLogicalMemoGroups::from_roots(&roots);
     let inventory = generate_per_computation_candidates(

@@ -158,10 +158,9 @@ async fn stage1_offers_exact_and_summary_l2_candidates() {
         .await
         .unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            0,
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(root),
-        )]),
+        ]),
     )
     .unwrap();
     let l2 = inventory

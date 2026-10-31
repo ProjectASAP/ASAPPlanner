@@ -43,10 +43,9 @@ pub fn computation_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
         compose_logical_candidate, generate_per_computation_candidates,
     };
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            0,
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(root),
-        )]),
+        ]),
     )
     .expect("Pass 1 accepts the query");
     let mut choices = vec![vec![0; inventory.targets.len()]];

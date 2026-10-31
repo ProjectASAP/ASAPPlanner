@@ -35,14 +35,13 @@ const EVALUATION_MS: i64 = 300_000;
 
 /// `queries` lowered at `accuracy`, with series identity, as the planner
 /// receives them.
-fn roots(queries: &[(&str, AccuracyTarget)]) -> Vec<(usize, QueryRoot)> {
+fn roots(queries: &[(&str, AccuracyTarget)]) -> Vec<QueryRoot> {
     queries
         .iter()
-        .enumerate()
-        .map(|(i, (query, accuracy))| {
+        .map(|(query, accuracy)| {
             let root = lower_promql(query, accuracy.clone()).unwrap();
             let root = promql_rows::with_series_identity(&root).unwrap();
-            (i, QueryRoot::Operator(root))
+            QueryRoot::Operator(root)
         })
         .collect()
 }

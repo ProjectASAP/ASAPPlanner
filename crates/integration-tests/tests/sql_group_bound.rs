@@ -71,9 +71,7 @@ fn run_group_choices(workload: &PlanningWorkload) -> Run {
     };
     let roots = lower_sql_roots(workload, &http_catalog()).expect("lowers");
     let local = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-            &roots.iter().cloned().enumerate().collect::<Vec<_>>(),
-        ),
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     assert_eq!(local.targets.len(), 1, "one grouped statistic per fixture");

@@ -54,9 +54,7 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.as_ref().unwrap();
     let generated = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-            &roots.into_iter().enumerate().collect::<Vec<_>>(),
-        ),
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let mut settings = CostInputs::default();
@@ -226,7 +224,7 @@ fn memo_offers_one_kmv_build_and_a_rollup() {
     let (workload, roots) = fixture();
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.as_ref().unwrap();
-    let memo = expanded_memo(roots.into_iter().enumerate().collect(), &entries);
+    let memo = expanded_memo(roots, &entries);
     let (selected, separate, shared) = select_rollup(&memo, 2, &entries, data);
     assert!(shared < separate, "{shared} vs {separate}");
     assert_eq!(builds_and_rollups(&selected), (1, 1));

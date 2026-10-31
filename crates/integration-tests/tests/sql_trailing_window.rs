@@ -109,9 +109,7 @@ async fn run(deployment: &DeploymentCapabilities) -> Run {
         pane_candidates, window_composition_pass2_candidates,
     };
     let local = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-            &roots.iter().cloned().enumerate().collect::<Vec<_>>(),
-        ),
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let compose = |choices: &[usize]| compose_logical_candidate(&local, choices).unwrap();

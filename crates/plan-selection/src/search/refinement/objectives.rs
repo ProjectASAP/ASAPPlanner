@@ -330,12 +330,12 @@ mod tests {
             AccuracyTarget::exact(),
         ));
         let roots = vec![root];
-        let identified = vec![(0usize, roots[0].clone())];
-        let initial = DagOfLogicalMemoGroups::from_roots(&identified);
+        let query_roots = vec![roots[0].clone()];
+        let initial = DagOfLogicalMemoGroups::from_roots(&query_roots);
         let output = *initial.query_roots[0].as_operator().unwrap();
         let generated = generate_per_computation_candidates(
             &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                &identified,
+                &query_roots,
             ),
         )
         .unwrap();

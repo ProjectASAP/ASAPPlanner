@@ -40,9 +40,7 @@ fn run_explicit_for(workload: &PlanningWorkload, deployment: &DeploymentCapabili
     use asap_types::ir::schema::SketchAlgorithm;
     let roots = lower_promql(workload);
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-            &roots.iter().cloned().enumerate().collect::<Vec<_>>(),
-        ),
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     assert_eq!(inventory.targets.len(), 1);

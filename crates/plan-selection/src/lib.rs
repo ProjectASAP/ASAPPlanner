@@ -506,7 +506,7 @@ mod tests {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let root = lower_promql("topk by (job) (10, sum_over_time(m[1m]))", target.clone());
         let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&
-            [(0, QueryRoot::Operator(root))],
+            [QueryRoot::Operator(root)],
         ))
         .unwrap();
         let topk = inventory
@@ -1154,7 +1154,7 @@ mod tests {
     ) -> Vec<PhysicalWorkloadPlan> {
         let root = lower_promql(query, target.clone());
         let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&
-            [(0, QueryRoot::Operator(root))],
+            [QueryRoot::Operator(root)],
         ))
         .unwrap();
         let mut choices = vec![vec![]];
@@ -1516,10 +1516,9 @@ mod tests {
     fn exact_dag(queries: &[&str], data: &DataWorkload) -> PhysicalASAPDAG {
         let roots: Vec<_> = queries
             .iter()
-            .enumerate()
-            .map(|(index, query)| {
+            .map(|query| {
                 let root = lower_promql(query, AccuracyTarget::exact());
-                (index, QueryRoot::Operator(root))
+                QueryRoot::Operator(root)
             })
             .collect();
         let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots))
@@ -2753,11 +2752,8 @@ mod tests {
         use asap_logical_asap_optimization::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates,
         };
-        let with_ids: Vec<_> = roots.iter().cloned().enumerate().collect();
         let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                &with_ids,
-            ),
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(roots),
         )
         .unwrap();
         let mut choices = vec![vec![]];
@@ -3012,10 +3008,9 @@ mod tests {
             target.clone(),
         );
         let inventory = pcc::generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-                0,
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
                 QueryRoot::Operator(root),
-            )]),
+            ]),
         )
         .unwrap();
         // Exercise the intended approximation directly; a joint optimizer may
@@ -3358,7 +3353,7 @@ mod tests {
             AccuracyTarget::max_error(0.01).failure_probability(0.01),
         );
         let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&
-            [(0, QueryRoot::Operator(root))],
+            [QueryRoot::Operator(root)],
         ))
         .unwrap();
         let choice: Vec<_> = inventory
@@ -3405,7 +3400,7 @@ mod tests {
     fn first_candidate_dag(query: &str) -> PhysicalASAPDAG {
         let root = lower_promql(query, AccuracyTarget::exact());
         let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&
-            [(0, QueryRoot::Operator(root))],
+            [QueryRoot::Operator(root)],
         ))
         .unwrap();
         let choice = vec![0; inventory.targets.len()];
@@ -3890,7 +3885,7 @@ mod tests {
     ) -> Vec<PhysicalWorkloadPlan> {
         let root = lower_promql("quantile_over_time(0.99, m[5m])", p99_target());
         let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&
-            [(0, QueryRoot::Operator(root))],
+            [QueryRoot::Operator(root)],
         ))
         .unwrap();
         let kll = inventory.targets[0]
@@ -4668,10 +4663,7 @@ mod tests {
             &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
                 &queries
                     .iter()
-                    .enumerate()
-                    .map(|(q, (query, _))| {
-                        (q, QueryRoot::Operator(lower_promql(query, p99_target())))
-                    })
+                    .map(|(query, _)| QueryRoot::Operator(lower_promql(query, p99_target())))
                     .collect::<Vec<_>>(),
             ),
         )
@@ -5148,7 +5140,7 @@ mod tests {
     fn quantile_candidates() -> Vec<PhysicalWorkloadPlan> {
         let root = lower_promql("quantile_over_time(0.99, m[5m])", p99_target());
         let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&
-            [(0, QueryRoot::Operator(root))],
+            [QueryRoot::Operator(root)],
         ))
         .unwrap();
         let mut out = Vec::new();

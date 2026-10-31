@@ -133,15 +133,11 @@ mod tests {
     fn quantile_memo() -> (MemoCandidates, Vec<MemoGroupId>) {
         let roots = [0.95, 0.99]
             .into_iter()
-            .enumerate()
-            .map(|(query, quantile)| {
-                (
-                    query,
-                    QueryRoot::Operator(lower_promql(
-                        &format!("quantile_over_time({quantile}, latency[5m])"),
-                        AccuracyTarget::max_error(0.01).failure_probability(0.001),
-                    )),
-                )
+            .map(|quantile| {
+                QueryRoot::Operator(lower_promql(
+                    &format!("quantile_over_time({quantile}, latency[5m])"),
+                    AccuracyTarget::max_error(0.01).failure_probability(0.001),
+                ))
             })
             .collect::<Vec<_>>();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
@@ -371,13 +367,8 @@ mod tests {
             .collect();
         let roots: Vec<_> = queries
             .into_iter()
-            .enumerate()
-            .map(|(id, query)| {
-                (
-                    id,
-                    QueryRoot::Operator(lower_promql(query, targets[id].clone())),
-                )
-            })
+            .zip(&targets)
+            .map(|(query, target)| QueryRoot::Operator(lower_promql(query, target.clone())))
             .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let outputs: Vec<_> = (0..roots.len())
@@ -466,7 +457,6 @@ mod tests {
         for id in &selected.selected_candidates {
             modes[id.0] = Some(configured.physical.candidates[id.0].materialization);
         }
-        let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
         let mut physical = materialize_selected_candidates(
             &configured.physical,
             &selected.to_selected_dag(),
@@ -563,8 +553,7 @@ mod tests {
             let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
             let roots: Vec<_> = queries
                 .into_iter()
-                .enumerate()
-                .map(|(id, query)| (id, QueryRoot::Operator(lower_promql(query, target.clone()))))
+                .map(|query| QueryRoot::Operator(lower_promql(query, target.clone())))
                 .collect();
             let initial = DagOfLogicalMemoGroups::from_roots(&roots);
             let outputs: Vec<_> = (0..2)
@@ -643,7 +632,6 @@ mod tests {
             for id in &selected.selected_candidates {
                 modes[id.0] = Some(Materialization::NotMaterialized);
             }
-            let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
             let mut data = DataWorkload {
                 arrival: asap_types::workload::DataArrival::Ingesting {
                     rows_per_second: 1000.0,
@@ -708,12 +696,9 @@ mod tests {
                 .collect();
             let roots: Vec<_> = queries
                 .iter()
-                .enumerate()
-                .map(|(id, (query, _))| {
-                    (
-                        id,
-                        QueryRoot::Operator(lower_promql(query, targets[id].clone())),
-                    )
+                .zip(&targets)
+                .map(|((query, _), target)| {
+                    QueryRoot::Operator(lower_promql(query, target.clone()))
                 })
                 .collect();
             let initial = DagOfLogicalMemoGroups::from_roots(&roots);
@@ -824,7 +809,6 @@ mod tests {
                     )
                 })
                 .collect();
-            let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
             let mut data = DataWorkload {
                 arrival: asap_types::workload::DataArrival::Ingesting {
                     rows_per_second: 1000.0,
@@ -880,7 +864,7 @@ mod tests {
             asap_types::ir::schema::FieldDataType::Plain(asap_types::ir::schema::DataType::Float64)
         );
         assert!(root.schema.unique_keys.is_empty());
-        let roots = vec![(0, QueryRoot::Operator(Rc::clone(&root)))];
+        let roots = vec![QueryRoot::Operator(Rc::clone(&root))];
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let output = initial.group_for_node(&root).unwrap();
         let original_input = Rc::clone(
@@ -924,7 +908,7 @@ mod tests {
             &inventory.configured_for_tests().physical,
             &selected.to_selected_dag(),
             &selected.materializations_by_node(&modes),
-            &roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>(),
+            &roots,
             &entries,
             &DataWorkload::default(),
             false,
@@ -948,13 +932,7 @@ mod tests {
         }
         let roots = queries
             .iter()
-            .enumerate()
-            .map(|(query, text)| {
-                (
-                    query,
-                    QueryRoot::Operator(lower_promql(text, AccuracyTarget::exact())),
-                )
-            })
+            .map(|text| QueryRoot::Operator(lower_promql(text, AccuracyTarget::exact())))
             .collect::<Vec<_>>();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let outputs = (0..queries.len())
@@ -1158,7 +1136,7 @@ mod tests {
 
         let target = AccuracyTarget::max_error(0.01).accuracy_metric(AccuracyMetric::Relative);
         let query = "quantile_over_time(0.99, m[1m]) / quantile_over_time(0.5, m[1m])";
-        let roots = vec![(0, QueryRoot::Operator(lower_promql(query, target.clone())))];
+        let roots = vec![QueryRoot::Operator(lower_promql(query, target.clone()))];
         let logical = DagOfLogicalMemoGroups::from_roots(&roots);
         let output = *logical.query_roots[0].as_operator().unwrap();
         let generated = generate_per_computation_candidates(

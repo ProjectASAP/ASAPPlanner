@@ -411,8 +411,7 @@ mod tests {
         let root = lower_promql("quantile_over_time(0.95, latency[15m])", target.clone());
         let roots: Vec<_> = recurrences
             .iter()
-            .enumerate()
-            .map(|(id, _)| (id, QueryRoot::Operator(Rc::clone(&root))))
+            .map(|_| QueryRoot::Operator(Rc::clone(&root)))
             .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let generated = generate_per_computation_candidates(

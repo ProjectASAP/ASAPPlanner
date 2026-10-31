@@ -42,6 +42,8 @@ asap-plan-selection = { path = "../plan-selection", features = ["reference-price
 # The tests compare installed plans with `test_support::query_time_reference`.
 asap-planner = { path = ".", features = ["test-support"] }
 asap-physical-asap-optimization = { path = "../physical-asap-optimization", features = ["test-support"] }
+# Pass 1's target list (`per_computation_candidates`) for the tests.
+asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
 # The deployment accuracy model tests implement `AccuracyModel`.
 asap-accuracy = { path = "../accuracy", features = ["test-support"] }
 # The SQL frontend plans through DataFusion, which is async; `e2e_plan` is

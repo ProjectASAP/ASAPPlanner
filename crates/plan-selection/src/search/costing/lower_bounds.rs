@@ -696,7 +696,7 @@ mod tests {
     use crate::search::milp::model::{solve_candidate_proposal, ObservedAssignment};
     use crate::{PlanSelector, SelectionModels};
     use asap_cost::CalibrationFit;
-    use asap_logical_asap_optimization::pass1::logical_memo_candidates::generate_per_computation_logical_memo_candidates;
+    use asap_logical_asap_optimization::pass1::generate_per_computation_logical_memo_candidates;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::asap_aware_cse::{
         pane_candidates, window_composition_pass2_candidates,
@@ -759,10 +759,13 @@ mod tests {
                 format!("quantile_over_time({q}, latency[5m])")
             };
             let root = QueryRoot::Operator(lower_promql(&query, target.clone()));
-            let roots_with_ids = vec![(0usize, root)];
+            let query_roots = vec![root];
             let memo = try_populate_pass1(
-                DagOfLogicalMemoGroups::from_roots(&roots_with_ids),
-                &generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots_with_ids)).unwrap(),
+                DagOfLogicalMemoGroups::from_roots(&query_roots),
+                &generate_per_computation_candidates(&DagOfLogicalMemoGroups::from_roots(
+                    &query_roots,
+                ))
+                .unwrap(),
             )
             .unwrap();
             let root_group = memo.query_roots[0].as_operator().unwrap().0 as usize;
@@ -1333,10 +1336,9 @@ mod tests {
         settings: &asap_cost::CostInputs,
         pick: fn(&OperatorNode) -> bool,
     ) -> (PhysicalCandidatesWithCosts, f64, f64) {
-        let roots_with_ids: Vec<_> = queries
+        let roots: Vec<_> = queries
             .iter()
-            .enumerate()
-            .map(|(id, query)| (id, QueryRoot::Operator(lower_promql(query, target.clone()))))
+            .map(|query| QueryRoot::Operator(lower_promql(query, target.clone())))
             .collect();
         let entries: Vec<_> = queries
             .iter()
@@ -1363,16 +1365,14 @@ mod tests {
             .into_iter()
             .collect(),
         };
+        let targets = vec![target.clone(); queries.len()];
         let memo = generate_per_computation_logical_memo_candidates(
-            DagOfLogicalMemoGroups::from_roots(&roots_with_ids),
-            generate_per_computation_candidates(
-                &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                    &roots_with_ids,
-                ),
-            )
-            .unwrap(),
-            &entries,
+            DagOfLogicalMemoGroups::from_roots(&roots),
+            &targets,
+            &asap_accuracy::IgnoreAccuracyGuarantees,
+            &asap_accuracy::NoAccuracyEvidence,
             &data,
+            None,
             None,
         )
         .unwrap()

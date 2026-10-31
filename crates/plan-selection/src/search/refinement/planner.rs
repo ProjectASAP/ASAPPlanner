@@ -1174,15 +1174,11 @@ mod tests {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let roots: Vec<_> = [0.95, 0.99]
             .into_iter()
-            .enumerate()
-            .map(|(id, q)| {
-                (
-                    id,
-                    QueryRoot::Operator(lower_promql(
-                        &format!("quantile_over_time({q}, latency[5m])"),
-                        target.clone(),
-                    )),
-                )
+            .map(|q| {
+                QueryRoot::Operator(lower_promql(
+                    &format!("quantile_over_time({q}, latency[5m])"),
+                    target.clone(),
+                ))
             })
             .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
@@ -1263,12 +1259,7 @@ mod tests {
                 );
             }
         }
-        (
-            configured,
-            roots.into_iter().map(|(_, root)| root).collect(),
-            entries,
-            data,
-        )
+        (configured, roots, entries, data)
     }
 
     /// Restricting a seed removes all query-time scan paths and repairs every
@@ -1373,12 +1364,11 @@ mod tests {
             facts.values_non_negative = true;
         }
         let roots = vec![original[0].clone(), original[0].clone()];
-        let identified: Vec<_> = roots.iter().cloned().enumerate().collect();
-        let initial = DagOfLogicalMemoGroups::from_roots(&identified);
+        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let output = *initial.query_roots[0].as_operator().unwrap();
         let generated = generate_per_computation_candidates(
             &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                &identified,
+                &roots,
             ),
         )
         .unwrap();
@@ -1470,12 +1460,12 @@ mod tests {
             "quantile_over_time(0.9, latency[1h]) / quantile_over_time(0.5, latency[1h])",
             target.clone(),
         ));
-        let identified = vec![(0, root.clone())];
-        let initial = DagOfLogicalMemoGroups::from_roots(&identified);
+        let query_roots = vec![root.clone()];
+        let initial = DagOfLogicalMemoGroups::from_roots(&query_roots);
         let output = *initial.query_roots[0].as_operator().unwrap();
         let generated = generate_per_computation_candidates(
             &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                &identified,
+                &query_roots,
             ),
         )
         .unwrap();
@@ -1559,8 +1549,7 @@ mod tests {
             "topk by (job) (3, sum_over_time(requests[5m]))",
         ]
         .into_iter()
-        .enumerate()
-        .map(|(id, query)| (id, QueryRoot::Operator(lower_promql(query, target.clone()))))
+        .map(|query| QueryRoot::Operator(lower_promql(query, target.clone())))
         .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let outputs: Vec<_> = (0..roots.len())
@@ -1618,7 +1607,6 @@ mod tests {
         let configured =
             enumerate_candidate_configurations(&source, &[0, 1], &entries, &data, &deployment)
                 .unwrap();
-        let roots: Vec<_> = roots.into_iter().map(|(_, root)| root).collect();
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
@@ -1910,13 +1898,10 @@ mod tests {
         use asap_types::ir::{NonASAPOp, Operator};
         use asap_types::physical::Medium;
         let (mut configured, roots, entries, data) = fixture();
-        let exact = vec![(
-            0usize,
-            QueryRoot::Operator(lower_promql(
-                "sum_over_time(latency[20m])",
-                AccuracyTarget::exact(),
-            )),
-        )];
+        let exact = vec![QueryRoot::Operator(lower_promql(
+            "sum_over_time(latency[20m])",
+            AccuracyTarget::exact(),
+        ))];
         let memo = try_populate_pass1(
             DagOfLogicalMemoGroups::from_roots(&exact),
             &generate_per_computation_candidates(
@@ -2323,14 +2308,11 @@ mod tests {
     /// budget, whose outputs have no guarantee, and missed the exact plan.
     #[test]
     fn quantile_operands_count_reads_not_shared_nodes() {
-        let frontend = vec![(
-            0usize,
-            QueryRoot::Operator(lower_promql(
-                "avg by (job) (quantile_over_time(0.5, data[5m]) \
+        let frontend = vec![QueryRoot::Operator(lower_promql(
+            "avg by (job) (quantile_over_time(0.5, data[5m]) \
                  / quantile_over_time(0.5, data[5m]) + quantile_over_time(0.9, data[5m]))",
-                AccuracyTarget::max_error(0.01).failure_probability(0.001),
-            )),
-        )];
+            AccuracyTarget::max_error(0.01).failure_probability(0.001),
+        ))];
         let over_groups = DagOfLogicalMemoGroups::from_roots(&frontend).roots_over_groups();
         // The two `quantile 0.5` are one node over the groups.
         let QueryRoot::Operator(root) = &over_groups[0] else {
@@ -2349,7 +2331,7 @@ mod tests {
             })
             .count();
         assert_eq!(distinct_quantile_nodes, 2);
-        assert_eq!(quantile_operands(&frontend[0].1), 3);
+        assert_eq!(quantile_operands(&frontend[0]), 3);
         assert_eq!(quantile_operands(&over_groups[0]), 3);
     }
 

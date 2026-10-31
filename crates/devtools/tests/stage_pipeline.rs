@@ -223,10 +223,26 @@ fn display_cap_is_recorded_and_keeps_the_selection() {
     }
 }
 
+/// Stage 1's `pruned_candidates`: each candidate Pass 1 pruned, with its
+/// reason, in pruning order.
+fn pass1_pruned(document: &serde_json::Value) -> Vec<(String, String)> {
+    document["stage1_logical_asap_optimization"]["pruned_candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pruned| {
+            (
+                pruned["candidate"].as_str().unwrap().to_string(),
+                pruned["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
 /// A top-k partitioned by every label of its input has no item, so a heap
 /// over it could not be composed; such a heap reads one row per item and
 /// is pruned in Pass 1 (`TopKHeapOverOneRowPerItem`), listed under
-/// `pass1_pruned`, and every candidate left composes.
+/// `pruned_candidates`, and every candidate left composes.
 #[test]
 fn a_topk_heap_over_one_row_per_item_is_pruned_with_its_reason() {
     let document = document_of(&[
@@ -239,16 +255,14 @@ fn a_topk_heap_over_one_row_per_item_is_pruned_with_its_reason() {
     ]);
     let stage1 = &document["stage1_logical_asap_optimization"];
     assert_eq!(
-        stage1["pass1_pruned"],
-        serde_json::json!([{
-            "target": 0,
-            "query": "Q1",
-            "pruned": [
-                { "candidate": "CMS+heap", "reason": "TopKHeapOverOneRowPerItem" },
-                { "candidate": "CountSketch+heap", "reason": "TopKHeapOverOneRowPerItem" },
-            ],
-            "fused_pruned": [],
-        }])
+        pass1_pruned(&document),
+        [
+            ("CMS+heap".into(), "TopKHeapOverOneRowPerItem".into()),
+            (
+                "CountSketch+heap".into(),
+                "TopKHeapOverOneRowPerItem".into()
+            ),
+        ]
     );
     for candidate in stage1["candidates"].as_array().unwrap() {
         validated_dag(&candidate["dag"], 1);
@@ -884,7 +898,7 @@ fn aws_fargate_preset_prices_example_4_in_dollars() {
 /// without the flag, every summary supported, raw data retained, no
 /// query-time result retained). For Pattern B with KLL only and query-time
 /// results retained: no DDSketch candidate is offered, and Stage 1's
-/// `pass1_pruned` says why; the KLL panes gain B3, built at query time and
+/// `pruned_candidates` says why; the KLL panes gain B3, built at query time and
 /// kept (`P3-m2`, 436.59 cost/s); the whole-window KLL (`P2`) is still
 /// selected. Without raw data, every query-time scan is invalid and B1
 /// (`P3-m1`) is selected when guarantees are enforced. A deployment with an
@@ -925,18 +939,10 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
     assert!(!physical.is_empty());
     // Pass 1 lists why DDSketch is gone.
     assert_eq!(
-        kll_kept["stage1_logical_asap_optimization"]["pass1_pruned"],
-        serde_json::json!([{
-            "target": 0,
-            "query": "Q1",
-            "pruned": [{ "candidate": "DDSketch", "reason": "UnsupportedByDeployment" }],
-            "fused_pruned": [],
-        }])
+        pass1_pruned(&kll_kept),
+        [("DDSketch".into(), "UnsupportedByDeployment".into())]
     );
-    assert_eq!(
-        default["stage1_logical_asap_optimization"]["pass1_pruned"],
-        serde_json::json!([])
-    );
+    assert!(pass1_pruned(&default).is_empty());
     assert!(selects_a_plan(&kll_kept["stage3_plan_selection"]));
     assert!(kll_kept["stage2_physical_asap_optimization"]["candidates"]
         .as_array()
@@ -1153,11 +1159,7 @@ fn workload_file_with_a_range_evaluation_is_planned() {
         let data = parsed.data_workload.clone().unwrap();
         let inventory = generate_per_computation_candidates(
             &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                &lower_promql_roots(&parsed)
-                    .unwrap()
-                    .into_iter()
-                    .enumerate()
-                    .collect::<Vec<_>>(),
+                &lower_promql_roots(&parsed).unwrap(),
             ),
         )
         .unwrap();
@@ -1614,10 +1616,7 @@ fn undeclared_supported_summaries_default_to_the_executors_families() {
         );
     }
     assert!(labels.iter().all(|label| !label.contains("CountSketch")));
-    assert_eq!(
-        document["stage1_logical_asap_optimization"]["pass1_pruned"],
-        serde_json::json!([])
-    );
+    assert!(pass1_pruned(&document).is_empty());
     assert_eq!(
         document["deployment_capabilities"]["supported_summaries"],
         serde_json::to_value(asap_executor::supported_summary_families()).unwrap()

@@ -185,9 +185,7 @@ fn rule_fixture_computations(
         pane_candidates, window_composition_pass2_candidates,
     };
     let local = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-            &roots.iter().cloned().enumerate().collect::<Vec<_>>(),
-        ),
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(roots),
     )
     .unwrap();
     let exact = vec![0; local.targets.len()];
@@ -329,7 +327,7 @@ fn memo_computations(workload: &PlanningWorkload, roots: &[QueryRoot]) -> Vec<Ve
     use asap_types::ir::{ASAPOp, OperatorNode};
     use asap_types::stages::{CandidateForMemoGroup, OriginOfCandidateForMemoGroup};
     let entries: Vec<_> = workload.query_workload.entries().collect();
-    let memo = expanded_memo(roots.iter().cloned().enumerate().collect(), &entries);
+    let memo = expanded_memo(roots.to_vec(), &entries);
     let queries = roots.len();
     let is_univmon = |node: &std::rc::Rc<OperatorNode>| {
         matches!(node.asap(), Some(ASAPOp::SummaryAgg {

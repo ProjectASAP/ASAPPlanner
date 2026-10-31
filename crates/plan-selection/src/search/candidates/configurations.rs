@@ -210,8 +210,7 @@ mod tests {
         ];
         let roots = queries
             .iter()
-            .enumerate()
-            .map(|(id, query)| (id, QueryRoot::Operator(lower_promql(query, target.clone()))))
+            .map(|query| QueryRoot::Operator(lower_promql(query, target.clone())))
             .collect::<Vec<_>>();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let outputs = (0..2)
