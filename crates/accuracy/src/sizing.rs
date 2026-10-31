@@ -182,7 +182,7 @@ pub fn per_input_failure_probability(
 /// distinct bound of the source it counts (keeping the relative error it
 /// was sized for). Never smaller than `params`. `None` keeps `params`: an
 /// HLL whose source declares no distinct bound.
-pub fn sized_for_failure_probability(
+fn sized_for_failure_probability(
     state: &OperatorNode,
     params: &SketchParams,
     failure_probability: f64,
