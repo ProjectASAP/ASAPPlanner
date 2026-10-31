@@ -1650,7 +1650,11 @@ fn accuracy_rows(milp: &mut SelectionMilp<'_>) {
                 .row("8 accuracy (pair)", constraint!(one + other <= 1.0));
         }
         // The most values `q` can depend on together.
-        let most = places.len() as f64;
+        let most = if tests_loose_big_m() {
+            counted.len() as f64
+        } else {
+            places.len() as f64
+        };
         if counted.iter().all(|&(_, _, parts)| parts as f64 >= most) {
             continue;
         }
@@ -1768,8 +1772,9 @@ pub(crate) fn independent_parts(milp: &SelectionMilp<'_>) -> Vec<IndependentPart
         }
     }
     for (index, row) in milp.builder.rows.iter().enumerate() {
-        // A row without a variable is a constant check: kept in the first
-        // part.
+        // A row without a variable is a constant check: kept in the part
+        // without a query when there is one (`None` sorts first), else in
+        // the first query's part.
         let key = row
             .expression()
             .linear_coefficients()
@@ -1843,6 +1848,10 @@ pub(crate) fn solve_selection_milp(
     let start = warm_start::warm_start(&milp, &completion, Some(search_budget));
     let warm_start_ms = warm_started.elapsed().as_millis() as u64;
     let warm_start_cost_per_second = start.as_ref().map(|start| start.cost_per_second);
+    // The diagnosis's LP solves do not count against the deadline: it is
+    // pushed back by their time.
+    #[cfg(feature = "lp-diagnosis")]
+    let diagnosis_started = Instant::now();
     #[cfg(feature = "lp-diagnosis")]
     let diagnosis = {
         let column_of: HashMap<Variable, usize> = milp
@@ -1862,6 +1871,8 @@ pub(crate) fn solve_selection_milp(
         super::lp_diagnosis::Diagnosis::run(&milp, start_columns.as_deref())
             .map(|diagnosis| (diagnosis, start_columns))
     };
+    #[cfg(feature = "lp-diagnosis")]
+    let deadline = deadline.map(|deadline| deadline + diagnosis_started.elapsed());
     let parts = if milp.split_into_parts {
         independent_parts(&milp)
     } else {
@@ -2159,10 +2170,17 @@ fn solve_part(
             status: format!("{:?}", solved.status()),
         });
     }
-    let dual_bound = solved
-        .double_info_value(c"mip_dual_bound")
-        .unwrap_or(f64::NAN)
-        / scale;
+    // HiGHS leaves `mip_dual_bound` at 0 for a part without binaries (an
+    // LP): its optimal objective is its bound.
+    let dual_bound = if binaries > 0 {
+        solved
+            .double_info_value(c"mip_dual_bound")
+            .unwrap_or(f64::NAN)
+    } else if status == SelectionMilpStatus::Optimal {
+        solved.objective_value()
+    } else {
+        f64::NAN
+    } / scale;
     Ok(SolvedPart {
         status,
         columns: solved.get_solution().columns().to_vec(),
@@ -2181,7 +2199,7 @@ fn solve_part(
 }
 
 /// HiGHS's threads (its `threads` option).
-const HIGHS_THREADS: i32 = 4;
+pub(crate) const HIGHS_THREADS: i32 = 4;
 
 /// HiGHS's time limit when the warm start used up the time to the deadline.
 const MOMENT_TO_READ_THE_START_S: f64 = 1e-3;
@@ -2192,7 +2210,7 @@ const WARM_START_MOST_TIME: std::time::Duration = std::time::Duration::from_secs
 /// The factor the objective is multiplied by for HiGHS: the warm start's
 /// cost becomes about 1,000, its largest coefficient at most 10⁷; without
 /// a warm start cost, the largest coefficient becomes 1,000.
-fn objective_scale(terms: &[(Variable, f64)], start: Option<&[(Variable, f64)]>) -> f64 {
+pub(crate) fn objective_scale(terms: &[(Variable, f64)], start: Option<&[(Variable, f64)]>) -> f64 {
     let largest = terms
         .iter()
         .map(|(_, coefficient)| coefficient.abs())
@@ -2210,6 +2228,18 @@ fn objective_scale(terms: &[(Variable, f64)], start: Option<&[(Variable, f64)]>)
     } else {
         1_000.0 / largest
     }
+}
+
+/// Whether this thread builds the big-M bounds as before #1095 step 1
+/// (tests only: to compare the tightened bounds with the looser ones).
+#[cfg(test)]
+pub(crate) fn tests_loose_big_m() -> bool {
+    tests::LOOSE_BIG_M.with(|loose| loose.get())
+}
+
+#[cfg(not(test))]
+pub(crate) fn tests_loose_big_m() -> bool {
+    false
 }
 
 #[cfg(test)]

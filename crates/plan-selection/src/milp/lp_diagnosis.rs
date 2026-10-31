@@ -13,13 +13,17 @@
 //!   incumbent, so `incumbent − lp` splits into one share per family;
 //! - `runs`: the charged `p` and `x` variables with the largest difference
 //!   between the incumbent and the LP, with their values in both.
+//!
+//! The deadline is pushed back by the diagnosis's time, so the MILP keeps
+//! its budget; a diagnosed run's wall time (and the facade's later rounds)
+//! is still not comparable with an undiagnosed one.
 use std::collections::BTreeMap;
 use std::time::Instant;
 
 use good_lp::solvers::highs::highs;
 use good_lp::{constraint, variable, Constraint, Expression, ProblemVariables, SolverModel};
 
-use super::model::SelectionMilp;
+use super::model::{objective_scale, SelectionMilp, HIGHS_THREADS};
 
 /// The environment variable naming the file the diagnosis appends to.
 const DIAGNOSIS_ENV: &str = "ASAP_STAGE3_LP_DIAGNOSIS";
@@ -28,7 +32,7 @@ const DIAGNOSIS_ENV: &str = "ASAP_STAGE3_LP_DIAGNOSIS";
 const RUNS_SHOWN: usize = 40;
 
 /// The time limit of each LP and of the root node.
-const LIMIT_S: f64 = 300.0;
+const LP_TIME_LIMIT_S: f64 = 300.0;
 
 /// One LP (or root node) solved.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -77,7 +81,14 @@ impl Diagnosis {
             .iter()
             .map(|&(variable, coefficient)| (column_of[&variable], coefficient))
             .collect();
-        let scale = scale_of(&objective, start);
+        let start_values: Option<Vec<_>> = start.map(|start| {
+            definitions
+                .iter()
+                .map(|(variable, _)| *variable)
+                .zip(start.iter().copied())
+                .collect()
+        });
+        let scale = objective_scale(&milp.objective_terms, start_values.as_deref());
         // The relaxation: the same variables (same indices), none integral.
         let relaxed = || {
             let mut variables = ProblemVariables::new();
@@ -103,8 +114,8 @@ impl Diagnosis {
                 .with_all(rows);
             let mut model = problem.try_into_inner().expect("a HiGHS model");
             model.set_option("output_flag", false);
-            model.set_option("threads", 4);
-            model.set_option("time_limit", LIMIT_S);
+            model.set_option("threads", HIGHS_THREADS);
+            model.set_option("time_limit", LP_TIME_LIMIT_S);
             if root {
                 // The root node, then stop: its bound is the root bound.
                 model.set_option("mip_max_nodes", 1);
@@ -289,26 +300,4 @@ fn cover_rows(milp: &SelectionMilp<'_>) -> Vec<Constraint> {
         rows.push(constraint!(sum >= run));
     }
     rows
-}
-
-/// The objective's scale for HiGHS, as the MILP's solve sets it.
-fn scale_of(objective: &[(usize, f64)], start: Option<&[f64]>) -> f64 {
-    let largest = objective
-        .iter()
-        .map(|(_, coefficient)| coefficient.abs())
-        .fold(0.0, f64::max);
-    if !(largest > 0.0 && largest.is_finite()) {
-        return 1.0;
-    }
-    let start_cost: f64 = start.map_or(0.0, |start| {
-        objective
-            .iter()
-            .map(|&(column, coefficient)| coefficient * start[column])
-            .sum()
-    });
-    if start_cost > 0.0 && start_cost.is_finite() {
-        (1_000.0 / start_cost).min(1e7 / largest)
-    } else {
-        1_000.0 / largest
-    }
 }

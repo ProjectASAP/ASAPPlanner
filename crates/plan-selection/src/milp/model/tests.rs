@@ -1025,3 +1025,83 @@ fn independent_query_sets_solve_apart_to_the_same_plan() {
     );
     assert_eq!(apart.dag.candidate_of_node, whole.dag.candidate_of_node);
 }
+
+thread_local! {
+    /// Set by a test to build the big-M bounds as before #1095 step 1
+    /// ([`super::tests_loose_big_m`]).
+    pub(crate) static LOOSE_BIG_M: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Per row of family `family` in `fixture`'s model (built with the loose
+/// big-M bounds when `loose`), the largest coefficient on an `x` variable.
+fn big_m_per_row(fixture: &Fixture, family: &str, loose: bool) -> Vec<f64> {
+    LOOSE_BIG_M.with(|cell| cell.set(loose));
+    let costs = aws_fargate_cost_inputs();
+    let inputs = prepare_milp_inputs(&fixture.physical, &fixture.entries, &fixture.data, &costs);
+    let milp = build_selection_milp(
+        &fixture.physical,
+        &inputs,
+        &fixture.entries,
+        &costs,
+        SelectionMilpOptions {
+            enforce_accuracy: true,
+            split_into_parts: true,
+        },
+    )
+    .unwrap();
+    LOOSE_BIG_M.with(|cell| cell.set(false));
+    let selected: std::collections::HashSet<Variable> = milp.selected.values().copied().collect();
+    milp.builder
+        .rows
+        .iter()
+        .zip(&milp.builder.row_families)
+        .filter(|(_, &f)| f == family)
+        .map(|(row, _)| {
+            row.expression()
+                .linear_coefficients()
+                .filter(|(variable, _)| selected.contains(variable))
+                .map(|(_, coefficient)| coefficient.abs())
+                .fold(0.0, f64::max)
+        })
+        .collect()
+}
+
+// #1095 step 1: `Ē[m]` in `V ≥ E − Ē (x[m] − z)` is the sum over the
+// context's slots of its costliest run. With a rollup read every 20 s and
+// every 30 s, a shared context has slots with several runs, so the bound is
+// below the old sum over every run; the plan and its cost are unchanged.
+#[test]
+fn a_tighter_context_execution_bound_keeps_the_plan() {
+    let fixture = through_stages(
+        &[
+            query("sum by (job) (sum_over_time(m[10m]))", 20_000),
+            query("sum(sum_over_time(m[10m]))", 30_000),
+        ],
+        true,
+    );
+    let family = "V (context execution at a rate component)";
+    let tight = big_m_per_row(&fixture, family, false);
+    let loose = big_m_per_row(&fixture, family, true);
+    assert_eq!(tight.len(), loose.len());
+    assert!(tight
+        .iter()
+        .zip(&loose)
+        .all(|(t, l)| *t <= l * (1.0 + 1e-12)));
+    assert!(tight.iter().zip(&loose).any(|(t, l)| *t < l * (1.0 - 1e-9)));
+
+    let tightened = solve_and_check(&fixture, &aws_fargate_cost_inputs(), |_| {}).unwrap();
+    LOOSE_BIG_M.with(|cell| cell.set(true));
+    let looser = solve_and_check(&fixture, &aws_fargate_cost_inputs(), |_| {});
+    LOOSE_BIG_M.with(|cell| cell.set(false));
+    let looser = looser.unwrap();
+    assert_eq!(tightened.solution.status, SelectionMilpStatus::Optimal);
+    assert_eq!(looser.solution.status, SelectionMilpStatus::Optimal);
+    let tolerance = 1e-9 * looser.solution.cost_per_second.abs();
+    assert!(
+        (tightened.solution.cost_per_second - looser.solution.cost_per_second).abs() <= tolerance
+    );
+    assert_eq!(
+        tightened.dag.candidate_of_node,
+        looser.dag.candidate_of_node
+    );
+}

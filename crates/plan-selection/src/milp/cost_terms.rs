@@ -1110,7 +1110,15 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
     // component `z`, `Ē` the most `E` can be: per slot, its costliest run.
     milp.builder.scope = Scope::SharedContexts;
     for (context, (sum, most_per_slot)) in context_execution {
-        let most: f64 = most_per_slot.values().sum();
+        let most: f64 = if super::model::tests_loose_big_m() {
+            // Before: every term's cost.
+            sum.clone()
+                .linear_coefficients()
+                .map(|(_, cost)| cost)
+                .sum()
+        } else {
+            most_per_slot.values().sum()
+        };
         let ContextRate::Components(components) = &rates[context] else {
             continue;
         };
