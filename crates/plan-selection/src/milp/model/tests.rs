@@ -562,23 +562,70 @@ fn accuracy_rows_admit_a_ratio_at_two_parts_and_reject_a_lone_denominator() {
     assert_eq!(lone.err(), Some(SelectionMilpError::Infeasible));
 }
 
-// The warm start is a feasible plan with no sharing: with every binary
-// fixed to it, the model is feasible and costs what `plan_cost` says.
+// The warm start is a feasible plan: with every binary fixed to it, the
+// model is feasible, and the warm start's own cost (its completion's
+// objective) equals what `plan_cost` says of the plan it decodes to.
 #[test]
 fn the_warm_start_is_a_feasible_plan() {
     for fixture in [shared_sum(), two_windows()] {
-        solve_and_check(&fixture, &cost_inputs(), |milp| {
-            let start: HashMap<Variable, f64> = crate::milp::warm_start::warm_start(milp)
-                .expect("a plan for every query")
-                .into_iter()
-                .collect();
+        let mut start_cost = None;
+        let checked = solve_and_check(&fixture, &cost_inputs(), |milp| {
+            let start =
+                crate::milp::warm_start::warm_start(milp, None).expect("a plan for every query");
+            start_cost = start.cost_per_second;
+            let values: HashMap<Variable, f64> = start.values.into_iter().collect();
             for binary in milp.builder.binaries.clone() {
-                let value = start.get(&binary).copied().unwrap_or(0.0);
+                let value = values.get(&binary).copied().unwrap_or(0.0);
                 milp.builder.row("test", constraint!(binary == value));
             }
         })
         .unwrap();
+        let start_cost = start_cost.expect("the completion costs the warm start");
+        let tolerance = 1e-6 * start_cost.abs().max(1e-12);
+        assert!(
+            (checked.solution.cost_per_second - start_cost).abs() <= tolerance,
+            "warm start {start_cost:e} != plan_cost {:e}",
+            checked.solution.cost_per_second
+        );
     }
+}
+
+// The warm start shares: two queries over the same sum, alone each on its
+// own not-materialized aggregate (about twice the optimum), move together
+// onto one materialized result both read, which is within 1% of the
+// optimum.
+#[test]
+fn the_warm_start_shares_where_that_is_cheaper() {
+    let fixture = through_stages(
+        &[query("sum(m)", 60_000), query("sum(m) * 2", 60_000)],
+        true,
+    );
+    let mut shared = None;
+    let checked = solve_and_check(&fixture, &cost_inputs(), |milp| {
+        let start = crate::milp::warm_start::warm_start(milp, None).expect("a plan");
+        shared = start.cost_per_second;
+    })
+    .unwrap();
+    let shared = shared.expect("the completion costs the warm start");
+    let optimum = checked.solution.cost_per_second;
+    assert!(optimum <= shared * (1.0 + 1e-9));
+    assert!(shared <= optimum * 1.01, "{shared:e} vs {optimum:e}");
+}
+
+// A deadline the warm start used up: HiGHS only reads the warm start back,
+// and the solve reports the deadline, never "optimal", with the warm
+// start's plan.
+#[test]
+fn a_deadline_the_warm_start_used_up_reports_the_deadline() {
+    let fixture = two_windows();
+    let checked =
+        solve_and_check_by(&fixture, &cost_inputs(), |_| {}, Some(Duration::ZERO)).unwrap();
+    assert_eq!(checked.solution.status, SelectionMilpStatus::TimeLimit);
+    let start = checked
+        .solution
+        .warm_start_cost_per_second
+        .expect("the warm start was costed");
+    assert!(checked.solution.cost_per_second <= start * (1.0 + 1e-9));
 }
 
 // A deadline yields a plan: HiGHS starts from the warm start, so even a

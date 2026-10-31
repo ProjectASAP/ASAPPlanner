@@ -30,6 +30,14 @@
 //! level `ℓ` or wider; the scan reads the widest one, and a reader of it
 //! is costed at that window through `AND(read, λ[i, low] − λ[i, high + 1])`.
 //!
+//! The ANDs are kept only where the usage really differs: a reader's
+//! choices of a producer's outputs with equal usage are one choice when no
+//! reader of the reader tells its own outputs apart
+//! ([`outputs_that_matter`]), and the scan levels below a reader's own
+//! widest window (which its read already rules out) count as its own
+//! level, so a reader whose usage does not change from its own window up
+//! needs none.
+//!
 //! **Executions per second** of instance `i`:
 //! - a fixed `rate · x[i]`: at ingestion time (once per second), for a
 //!   materialized instance whose possible readers form one schedule group
@@ -48,15 +56,21 @@
 //!
 //! A query owner's node runs at its query's rate. An instance owner's nodes
 //! other than the instance's own plain term are summed once, `E[i] ≥ Σ
-//! cost · indicator`, and charged per rate component, `V ≥ E[i] − Ē[i] (1 −
-//! u)`.
+//! cost · indicator`, and charged per rate component, `V ≥ E[i] − Ē[i] (x[i]
+//! − u)`, with `Σ rate · V ≥ (slowest rate) · E[i]` (an active instance runs
+//! at one rate component at least).
+//!
+//! Rows written `− x[i]` where `− 1` would do (the AND rows of `y`, `V`) are
+//! the same at every plan, since what they combine is 0 when `x[i]` is; they
+//! are tighter in the LP relaxation.
 //!
 //! **Held memory** (`plan_cost`'s `held`): a `MatAtQuery` result is held
-//! for the longest reader's latency, `H[i] ≥ L[q] − M (1 − a[q, i])`, once
-//! per execution: `H` at a fixed rate, or `W ≥ H − M (1 − u)` per rate
-//! component. A not-materialized node's working memory is held for each
-//! consumer query's latency at its rate: `G[q, ·] ≥ L[q] − M (1 − reach)`,
-//! charged `rate(q) · bytes · unit memory cost`.
+//! for the longest reader's latency, `H[i] ≥ L[q] − L̄[q] (1 − a[q, i])`
+//! with each reader's own most latency `L̄[q]`, once per execution: `H` at a
+//! fixed rate, or `W ≥ H − max_q L̄[q] (1 − u)` per rate component. A
+//! not-materialized node's working memory is held for each consumer query's
+//! latency at its rate: `G[q, ·] ≥ L[q] − M (1 − reach)`, charged `rate(q) ·
+//! bytes · unit memory cost`.
 //!
 //! **Raw retention**: per source, levels at each distinct raw-data size a
 //! scan may keep, `v[src, ℓ] ≥` each scan's indicator of keeping at least
@@ -196,6 +210,51 @@ pub(crate) fn node_terms(
     }]
 }
 
+/// Per candidate, whether some reader's usage (or an output that matters)
+/// depends on which of its outputs it gives: otherwise its readers' choices
+/// of its outputs with equal usage are one choice, and need no AND with the
+/// producer's terms. A fixpoint from "no candidate's outputs matter"; a
+/// reader with several changing inputs tells every producer output apart.
+pub(crate) fn outputs_that_matter(inputs: &crate::owners::MilpInputs) -> Vec<bool> {
+    let count = inputs.candidate_data.len();
+    let mut matters = vec![false; count];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (reader, data) in inputs.candidate_data.iter().enumerate() {
+            let mut gives_per_choice: HashMap<PhysicalCandidateId, Vec<Option<UsageAndOutput>>> =
+                HashMap::new();
+            for (choices, gives) in &data.usage_per_producers {
+                if data.inputs_changing_usage.len() != 1 {
+                    for choice in choices {
+                        if choice.output.is_some() && !matters[choice.class.0] {
+                            matters[choice.class.0] = true;
+                            changed = true;
+                        }
+                    }
+                    continue;
+                }
+                let Some(choice) = choices.first() else {
+                    continue;
+                };
+                let gives =
+                    gives.map(|(usage, output)| (usage, if matters[reader] { output } else { 0 }));
+                gives_per_choice
+                    .entry(choice.class)
+                    .or_default()
+                    .push(gives);
+            }
+            for (producer, gives) in gives_per_choice {
+                if !matters[producer.0] && gives.windows(2).any(|pair| pair[0] != pair[1]) {
+                    matters[producer.0] = true;
+                    changed = true;
+                }
+            }
+        }
+    }
+    matters
+}
+
 /// One link of a node's input: the link's variable and the producer node
 /// (its owner and candidate).
 #[derive(Debug, Clone, Copy)]
@@ -323,7 +382,17 @@ fn producer_terms(
     let base = *data.usage.as_ref().expect("costed");
     // The choices, each with the outputs it stands for; for one changing
     // input, the outputs of a producer that give the same usage and output
-    // are one choice.
+    // are one choice (the same usage alone, when no reader of `class`
+    // tells its outputs apart).
+    let output_matters = milp.output_matters[class.0];
+    let same = |known: &Option<UsageAndOutput>, gives: &Option<UsageAndOutput>| match (known, gives)
+    {
+        (Some((known_usage, known_output)), Some((usage, output))) => {
+            known_usage == usage && (!output_matters || known_output == output)
+        }
+        (None, None) => true,
+        _ => false,
+    };
     let mut table: Vec<(Vec<OutputsOfProducer>, Option<UsageAndOutput>)> = Vec::new();
     for (choices, gives) in &data.usage_per_producers {
         let choices: Vec<OutputsOfProducer> = choices
@@ -338,7 +407,7 @@ fn producer_terms(
         if changing.len() == 1 {
             if let Some((known, _)) = table
                 .iter_mut()
-                .find(|(known, known_gives)| known[0].0 == choices[0].0 && known_gives == gives)
+                .find(|(known, known_gives)| known[0].0 == choices[0].0 && same(known_gives, gives))
             {
                 if let (Some(outputs), Some(more)) = (&mut known[0].1, &choices[0].1) {
                     outputs.extend(more);
@@ -366,7 +435,7 @@ fn producer_terms(
                 .filter(|link| link.producer == *class_chosen)
             {
                 covered[position].insert(*class_chosen);
-                let indicator = match scan_window_of(milp, link, outputs.as_ref()) {
+                let indicator = match scan_window_of(milp, class, link, outputs.as_ref()) {
                     Some(window_indicator) => window_indicator,
                     None => link_output_indicator(milp, link, outputs.as_ref()),
                 };
@@ -446,6 +515,7 @@ fn producer_terms(
 /// gives `output`.
 fn scan_window_of(
     milp: &mut SelectionMilp<'_>,
+    reader: PhysicalCandidateId,
     link: Link,
     outputs: Option<&BTreeSet<usize>>,
 ) -> Option<Option<Expression>> {
@@ -459,10 +529,20 @@ fn scan_window_of(
     }
     let outputs = outputs?;
     // Per level (narrowest first), whether the scan gives one of `outputs`.
-    let gives: Vec<bool> = sorted_windows(milp, scan)
+    let windows = sorted_windows(milp, scan);
+    let mut gives: Vec<bool> = windows
         .iter()
         .map(|(_, _, given)| outputs.contains(given))
         .collect();
+    // The read itself makes the scan read at least the reader's own widest
+    // window (`window_terms`): the levels below it never hold when the read
+    // is taken, so they count as the reader's own level does.
+    if let Some(own) = reader_level(milp, scan, reader, &windows) {
+        let at_own = gives[own];
+        for level in &mut gives[..own] {
+            *level = at_own;
+        }
+    }
     if gives.iter().all(|&gives| gives) {
         return Some(Some(link.variable.into()));
     }
@@ -495,6 +575,28 @@ fn scan_window_of(
             .and_at_least("t_producers (AND)", &[link.variable.into(), within_runs])
             .into(),
     ))
+}
+
+/// The level (in `windows`, [`sorted_windows`] of `scan`) of the widest
+/// window `reader` reads `scan` at, as [`window_terms`] places its reads;
+/// `None` when it reads a window `asap-cost` did not cost.
+fn reader_level(
+    milp: &SelectionMilp<'_>,
+    scan: PhysicalCandidateId,
+    reader: PhysicalCandidateId,
+    windows: &[(ScanWindow, NodeNumbers, usize)],
+) -> Option<usize> {
+    let read_windows = milp.inputs.candidate_data[scan.0]
+        .windows_per_reader
+        .iter()
+        .find(|(known, _)| *known == reader)
+        .map(|(_, read)| read.clone())
+        .unwrap_or_else(|| vec![ScanWindow::Unbounded]);
+    read_windows
+        .iter()
+        .map(|window| windows.iter().position(|(known, _, _)| known == window))
+        .collect::<Option<Vec<usize>>>()
+        .and_then(|levels| levels.into_iter().max())
 }
 
 /// A windowed scan class's windows with their numbers and outputs,
@@ -697,9 +799,7 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
             }
         }
     };
-    // The longest latency any query can have, for products with a latency.
-    let most_latency = milp.latency_max_ms.iter().copied().fold(0.0, f64::max);
-    let mut held_time: HashMap<usize, Variable> = HashMap::new();
+    let mut held_time: HashMap<usize, (Variable, f64)> = HashMap::new();
     // Per instance at a varying rate, the execution cost of its nodes other
     // than its own plain term, and the most it can be.
     let mut region_execution: BTreeMap<usize, (Expression, f64)> = BTreeMap::new();
@@ -779,20 +879,25 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
                              not the rate-weighted mean)",
                         );
                     }
-                    let longest = *held_time.entry(instance).or_insert_with(|| {
+                    // `H ≥ L[q] − L̄[q] (1 − a[q, i])`, with each query's own
+                    // most latency `L̄[q]`; `H ≤ max_q L̄[q]`.
+                    let (longest, most_held) = *held_time.entry(instance).or_insert_with(|| {
                         let longest = milp
                             .builder
                             .continuous("H (held time of an instance)", None);
+                        let mut most_held: f64 = 0.0;
                         for &query in &milp.inputs.queries_reaching[instance_class.0] {
                             if let Some(&reach) = milp.reach.get(&(query, instance)) {
                                 let latency = milp.latency[query];
+                                let most = milp.latency_max_ms[query];
+                                most_held = most_held.max(most);
                                 milp.builder.row(
                                     "H (held time of an instance)",
-                                    constraint!(longest >= latency - most_latency * (1.0 - reach)),
+                                    constraint!(longest >= latency - most * (1.0 - reach)),
                                 );
                             }
                         }
-                        longest
+                        (longest, most_held)
                     });
                     for (component, rate) in components {
                         // `held ≥ H − M (slack − Σ indicators)` over the
@@ -816,7 +921,7 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
                             .continuous("W (held time × schedule group)", None);
                         milp.builder.row(
                             "W (held time × schedule group)",
-                            constraint!(held >= longest - most_latency * (slack - both)),
+                            constraint!(held >= longest - most_held * (slack - both)),
                         );
                         charge(&held.into(), per_byte_ms * rate);
                     }
@@ -864,15 +969,32 @@ pub(crate) fn encode_objective(milp: &mut SelectionMilp<'_>) -> Result<(), Selec
             "V (region execution at a rate component)",
             constraint!(region >= sum),
         );
+        // `V_u ≥ E_i − Ē_i (x[i] − u)`: `E_i ≤ Ē_i x[i]` and `u ≤ x[i]` at
+        // every plan, so this is `E_i · u`, tighter than `(1 − u)` at a
+        // fractional `x[i]`. An active instance runs at its slowest
+        // component's rate at least: `Σ rate · V_u ≥ min rate · E_i`.
+        let active = milp.active[instance];
+        let slowest = components
+            .iter()
+            .map(|&(_, rate)| rate)
+            .fold(f64::INFINITY, f64::min);
+        let mut at_rates = Expression::from(0.0);
         for &(component, rate) in components {
             let at_rate = milp
                 .builder
                 .continuous("V (region execution at a rate component)", None);
             milp.builder.row(
                 "V (region execution at a rate component)",
-                constraint!(at_rate >= region - most * (1.0 - component)),
+                constraint!(at_rate >= region - most * (active - component)),
             );
             charge(&at_rate.into(), rate);
+            at_rates += rate * at_rate;
+        }
+        if slowest.is_finite() && slowest > 0.0 {
+            milp.builder.row(
+                "V (slowest rate)",
+                constraint!(at_rates >= slowest * region),
+            );
         }
     }
     raw_retention(milp, unit_cost.cost_per_disk_byte_second, &mut charge);
@@ -1135,10 +1257,13 @@ fn instance_rates(
                 .filter(|((_, _, read), _)| *read == instance)
                 .map(|(_, variable)| *variable)
                 .collect();
+            // `y ≥ above ∧ read`, as `above + read − x[reader]` (both are at
+            // most `x[reader]` at every plan).
+            let active = milp.active[reader];
             for read in reads {
                 milp.builder.row(
                     "y (consumers through not-materialized nodes)",
-                    constraint!(y >= above + read - 1.0),
+                    constraint!(y >= above + read - active),
                 );
             }
         }
