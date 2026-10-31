@@ -288,8 +288,9 @@ window; that requires supported boundary handling or a different candidate.
 ## 3. Materialization → Physical DAG
 
 Operator names in the diagrams of this section and §4 (`NativeKllBuild`,
-`NativeKllMerge`, `NativeP50`, `NativeQuantile`, `KllStateOutput`) are
-illustrative. The executor implements them as `SummaryAgg` (a KLL build),
+`NativeDDSketchBuild`, `NativeKllMerge`, `NativeP50`, `NativeQuantile`,
+`KllStateOutput`) are illustrative. The executor implements them as
+`SummaryAgg` (a KLL or DDSketch build),
 `SummaryMerge` and `SummaryEvaluation` (a quantile readout).
 
 The **Physical Plan Compiler** consumes both computation semantics and maintenance
@@ -586,13 +587,17 @@ family and where the state is kept do not enter. A view with an unbounded
 window is a group of its own.
 
 A **refresh group** is the set of views refreshed at ingestion that have one
-refresh window. A runtime refreshes the views of one refresh group in one
-ingestion run:
+refresh window `(W, p)`. A runtime refreshes a refresh group with one
+ingestion run per window `(e - W, e]`, `e ≡ p (mod W)`:
 
-- It compiles the DAG once per group, with every view of the group as a root
-  and, as materialized view slots, only the views of other groups that the
-  group reads. A view of the group that another view of the group reads is
-  computed in the run, not read from a slot.
+- The run's roots are the views of the group whose state for the window
+  ending at `e` is not stored yet. Pane `i` of a chain at evaluation `T` is
+  the same state as the newest pane at `T - i·W`, so in steady state the
+  roots are the newest pane of each chain of the group; the older panes are
+  already stored.
+- A view of the group that a root reads is computed in the run, not read
+  from a slot. The views of other groups that the roots read are
+  materialized view slots.
 - The executor runs a node that several roots share once per run, so a `Scan`
   below several views of the group reads its raw data once per window.
 - Views of different refresh windows are refreshed in different runs. With a
@@ -602,14 +607,9 @@ ingestion run:
 
 The refresh window is derived from the DAG alone (time ranges, shifts and pane
 widths), like the views and their retention. Sealing, lateness, threading and
-the alignment of the window grid stay the deployment's.
-
-The plan's cost assumes this grouping: a stateless ingestion-time node is
-charged once per refresh window of the views above it, not once per view. A
-runtime that splits a group (for example, because its sources seal at
-different times) computes the same states at a higher cost than priced, the
-same status pane reuse has. A runtime that updates states sample by sample
-passes each sample once whatever the windows, so it runs cheaper than priced.
+the alignment of the window grid stay the deployment's. A runtime that
+splits a group (for example, because its sources seal at different times)
+computes the same states with more runs.
 
 ### Running example
 
@@ -620,14 +620,16 @@ error answered by a DDSketch chain with one-minute panes over the same `Scan`:
 ```text
 Install (once):
     views     = plan.materialized_views()?          // [KLL and DDSketch pane nodes, refresh = at ingestion, retention]
-    // both chains have refresh window (1m, 0): one refresh group
-    refresh   = compile(dag, [], [kll_pane_0, dd_pane_0])
+    // both chains have refresh window (1m, 0): one refresh group of ten pane views
+    refresh   = compile(dag, [], [kll_pane_0, dd_pane_0])  // the newest pane of each chain
                 // Scan → TimeRange(1m) → NativeKllBuild(k=200)
                 //                      → NativeDDSketchBuild(α=0.01)
     query     = compile(dag, views[kll_pane_0..kll_pane_4], [p50, p99])  // 5 materialized view slots → NativeKllMerge → NativeP50, NativeP99
     (the p99.9 query DAG reads dd_pane_0..dd_pane_4 the same way)
 
-Each complete pane (12:04, 12:05], in one ingestion run:
+Each complete pane (12:04, 12:05], in one ingestion run whose roots are the
+group's views with no stored state for the pane ending 12:05 (kll_pane_0 and
+dd_pane_0; the older panes were stored by earlier runs):
     refresh.instantiate(store)
         Scan calls read_raw_data(TimeSeries { latency }, time_range_ms = (12:04, 12:05]) once;
         both builds read its rows
@@ -679,7 +681,7 @@ The complete example makes the ownership boundary explicit:
 | **Physical Plan Compiler** | Lower to native KLL build, merge, and readout operators |
 | **Physical DAG** | Define precompute and query DAGs with typed input/output boundaries |
 | **Deployment interface** | Read the `latency` raw data slot with `read_raw_data`, and each pane's materialized view slot with `read_materialized_view`, from one `DataStore` |
-| **Deployment** | Schedule one ingestion run per refresh group and pane, store and resolve panes, run queries |
+| **Deployment** | Schedule one ingestion run per refresh group and window, store and resolve panes, run queries |
 
 ```text
 Logical:
