@@ -138,10 +138,11 @@
         throw new Error('the viewer could not show the planner output (see above)');
       }
       const selection = selectionTable(result);
-      const cost = selection.costs[selection.selected];
-      plannerStatus.textContent = selection.selected
-        ? `Stage 3 selected ${selection.selected} (cost ${cost.cost_per_second} ${cost.cost_unit}) of ${result.stage1_logical_asap_optimization.combinations} candidates.`
-        : `Stage 3 selected no plan: ${selection.error || result.stage1_logical_asap_optimization.error || selection.rejected.map((r) => `${r.id}: ${r.reason}`).join('; ')}`;
+      const selected = selection.selected_candidate;
+      const cost = selection.cost_per_candidate[selected];
+      plannerStatus.textContent = selected
+        ? `Stage 3 selected ${selected} (cost ${cost.cost_per_second} ${cost.cost_unit}) of ${result.stage1_logical_asap_optimization.combinations} candidates.`
+        : `Stage 3 selected no plan: ${selection.error || result.stage1_logical_asap_optimization.error || 'no reason given'}`;
     } catch (error) {
       // Without a response the page is not served by server.py.
       plannerStatus.textContent = response

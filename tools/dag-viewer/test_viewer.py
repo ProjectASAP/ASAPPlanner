@@ -511,15 +511,40 @@ class DefaultSearchTests(unittest.TestCase):
 
     def test_rejections_of_candidates_not_kept_are_rows_after_the_others(self):
         # The reference pricer's rejections of candidates the document does
-        # not show (`reference_pricing.search_rejected`).
+        # not enumerate (`reference_pricing.pruned_candidates_not_enumerated`).
         doc = dict(self.doc, reference_pricing={
-            "costs": {}, "accepted": {}, "selected": None, "rejected": [], "rejected_by_cause": {},
-            "search_rejected": [{"id": "P7", "cause": "accuracy_target_missed", "reason": "q2: misses its target"}],
+            "cost_per_candidate": {}, "accepted_accuracy_per_candidate": {}, "selected_candidate": None,
+            "pruned_candidates": [], "pruned_candidate_count_by_cause": {},
+            "pruned_candidates_not_enumerated": [
+                {"candidate": "P7", "cause": "accuracy_target_missed", "reason": "q2: misses its target"}],
         })
         self.assertEqual(self.js.call("validateStagePipeline", doc), [])
         rows = self.js.call("stageCandidateRows", doc)
         self.assertEqual(rows[0]["status"], "selected")
         self.assertEqual((rows[-1]["id"], rows[-1]["status"], rows[-1]["reason"]), ("P7", "not kept", "q2: misses its target"))
+
+
+@unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
+@unittest.skipUnless(server.BINARY.exists(), "needs a built stage_pipeline")
+class ReferencePricingTests(unittest.TestCase):
+    """A fresh `--exhaustive` document's `reference_pricing` (keys named as
+    Stage 3's `Selection` names its fields) fills the selection table: the
+    facade's plan first, the reference pricer's pick marked, the pruned
+    candidates with their causes, and the header's counts by cause."""
+
+    def test_reference_pricing_rows_and_header(self):
+        doc = stage_pipeline("--example", "planner-layering-1", "--exhaustive", "--enforce-accuracy-guarantees")
+        js = stages_js()
+        self.assertEqual(js.call("validateStagePipeline", doc), [])
+        reference = doc["reference_pricing"]
+        rows = js.call("stageCandidateRows", doc)
+        status = {r["id"]: r["status"] for r in rows}
+        self.assertEqual(rows[0]["id"], "P1")
+        self.assertEqual(status[reference["selected_candidate"]], "reference selected")
+        for pruned in reference["pruned_candidates"]:
+            self.assertIn(status[pruned["candidate"]], ("rejected", "costlier"))
+        if reference["pruned_candidate_count_by_cause"]:
+            self.assertRegex(js.call("searchText", doc), r"pruned: [a-z ]+ ×\d+")
 
 
 @unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
@@ -615,9 +640,9 @@ class WorkloadViewTests(unittest.TestCase):
         self.assertIn("discarded before composition: no accuracy guarantee ×7 (q3, q4, q5, q6, q7) · ", text)
         self.assertIn("Stage 2 assignments skipped: they scan raw data at query time", text)
 
-    def test_exhaustive_header_counts_rejections_by_cause(self):
+    def test_exhaustive_header_counts_pruned_candidates_by_cause(self):
         text = self.js.call("searchText", example1())
-        self.assertRegex(text, r"rejected: [a-z ]+ ×\d+")
+        self.assertRegex(text, r"pruned: [a-z ]+ ×\d+")
 
     def test_pane_chain_box_shows_its_panes(self):
         selected = self.doc["stage2_physical_asap_optimization"]["candidates"][0]

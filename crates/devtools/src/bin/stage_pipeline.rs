@@ -96,15 +96,17 @@
 //     pane-width round, Pass 2's and Stage 2's counts and each stage's time,
 //     with Stage 3's search report or error;
 //   - reference_pricing (with `--exhaustive`): the reference pricer's
-//     selection among the enumerated plans: the shown candidates' `costs`
-//     and `accepted`, its pick `selected`, every other shown candidate under
-//     `rejected` with its `cause` (a failed check: `accuracy_target_missed`,
+//     selection among the enumerated plans, named as Stage 3's `Selection`
+//     names its fields: the shown candidates' `cost_per_candidate` and
+//     `accepted_accuracy_per_candidate`, its pick `selected_candidate`,
+//     every other shown candidate under `pruned_candidates` with its
+//     `cause` (a failed check: `accuracy_target_missed`,
 //     `count_min_weights_not_proven_non_negative`, `no_accuracy_guarantee`,
 //     `latency_bound_exceeded`, `latency_over_repeat_interval`,
 //     `over_cluster_capacity`; or a loss under the cost model: `costlier`,
 //     `slower`, `more_memory`, `tied_lost_on_enumeration_order`),
-//     `search_rejected` (rejections of candidates not shown) and
-//     `rejected_by_cause`.
+//     `pruned_candidates_not_enumerated` (rejections naming no enumerated
+//     candidate) and `pruned_candidate_count_by_cause`.
 // `memo` (unless `--no-memo`) is the memo the search built, from the
 // planning round whose plan was selected (`MemoSteps`): `nodes`, one node
 // table for the whole section (`MemoNodes`: each distinct node once, matched
@@ -1266,51 +1268,55 @@ fn reference_pricing_json(
     shown: impl Fn(&str) -> bool,
     is_candidate: impl Fn(&str) -> bool,
 ) -> Value {
-    let rejections_json = |rejected: &[Rejection]| -> Vec<Value> {
-        rejections_json(rejected.iter().filter(|r| shown(&r.id)))
+    let pruned_candidates_json = |rejected: &[Rejection]| -> Vec<Value> {
+        pruned_candidates_json(rejected.iter().filter(|r| shown(&r.id)))
     };
     // The rejections of candidates the run did not keep (the default
     // search keeps only the best; it records the first rejection of each
     // cause) and the search's own, which name no candidate: a query whose
     // every own candidate was discarded, or the candidates it skipped.
-    let search_rejected = |rejected: &[Rejection]| -> Vec<Value> {
-        self::rejections_json(rejected.iter().filter(|r| !is_candidate(&r.id)))
+    let not_enumerated = |rejected: &[Rejection]| -> Vec<Value> {
+        self::pruned_candidates_json(rejected.iter().filter(|r| !is_candidate(&r.id)))
     };
     let selection = match selection {
         Ok(selection) => selection,
         Err(ErrorSelectingPlan::NoValidCandidate(rejected)) => {
-            let search_rejected = search_rejected(rejected);
             return json!({
-                "costs": {},
-                "selected": null,
-                "rejected": rejections_json(rejected),
-                "search_rejected": search_rejected,
-                "rejected_by_cause": rejected_by_cause(rejected),
+                "cost_per_candidate": {},
+                "selected_candidate": null,
+                "pruned_candidates": pruned_candidates_json(rejected),
+                "pruned_candidates_not_enumerated": not_enumerated(rejected),
+                "pruned_candidate_count_by_cause": count_by_cause(rejected),
             });
         }
         Err(error) => {
-            return json!({ "costs": {}, "selected": null, "rejected": [], "error": error.to_string() });
+            return json!({
+                "cost_per_candidate": {},
+                "selected_candidate": null,
+                "pruned_candidates": [],
+                "error": error.to_string(),
+            });
         }
     };
-    let costs: serde_json::Map<_, _> = selection
+    let cost_per_candidate: serde_json::Map<_, _> = selection
         .costs
         .iter()
         .filter(|(id, _)| shown(id))
         .map(|(id, cost)| (id.clone(), cost_json(cost)))
         .collect();
-    let accepted: serde_json::Map<_, _> = selection
+    let accepted_accuracy_per_candidate: serde_json::Map<_, _> = selection
         .accepted
         .iter()
         .filter(|(id, _)| shown(id))
         .map(|(id, queries)| (id.clone(), accepted_json(queries)))
         .collect();
     json!({
-        "costs": costs,
-        "accepted": accepted,
-        "selected": selection.selected,
-        "rejected": rejections_json(&selection.rejected),
-        "search_rejected": search_rejected(&selection.rejected),
-        "rejected_by_cause": rejected_by_cause(&selection.rejected),
+        "cost_per_candidate": cost_per_candidate,
+        "accepted_accuracy_per_candidate": accepted_accuracy_per_candidate,
+        "selected_candidate": selection.selected,
+        "pruned_candidates": pruned_candidates_json(&selection.rejected),
+        "pruned_candidates_not_enumerated": not_enumerated(&selection.rejected),
+        "pruned_candidate_count_by_cause": count_by_cause(&selection.rejected),
         "pane_retention_ms": selection
             .pane_retention_ms
             .iter()
@@ -1433,7 +1439,7 @@ fn usage_json(usage: &ResourceUsage) -> Value {
 /// How many of `rejected` have each cause, by cause: over every candidate
 /// under `--exhaustive`; under the default search, the rejections it
 /// recorded (the first of each cause).
-fn rejected_by_cause(rejected: &[Rejection]) -> Value {
+fn count_by_cause(rejected: &[Rejection]) -> Value {
     let mut counts = serde_json::Map::new();
     for rejection in rejected {
         let cause = serde_json::to_value(rejection.cause)
@@ -1446,9 +1452,11 @@ fn rejected_by_cause(rejected: &[Rejection]) -> Value {
     Value::Object(counts)
 }
 
-fn rejections_json<'a>(rejected: impl Iterator<Item = &'a Rejection>) -> Vec<Value> {
+/// One entry per rejection, as `Selection.pruned_candidates` names it:
+/// the `candidate` id, its `cause` and `reason`.
+fn pruned_candidates_json<'a>(rejected: impl Iterator<Item = &'a Rejection>) -> Vec<Value> {
     rejected
-        .map(|r| json!({ "id": r.id, "cause": r.cause, "reason": r.reason }))
+        .map(|r| json!({ "candidate": r.id, "cause": r.cause, "reason": r.reason }))
         .collect()
 }
 
@@ -2058,8 +2066,8 @@ mod tests {
         assert_eq!(MAX_COMBINATIONS, 10_000);
     }
 
-    /// With no valid candidate, the document is still written: `selected`
-    /// is null and every rejection is listed.
+    /// With no valid candidate, the document is still written:
+    /// `selected_candidate` is null and every rejection is listed.
     #[test]
     fn failed_selection_lists_rejections_without_a_selection() {
         let rejected = vec![Rejection {
@@ -2075,15 +2083,15 @@ mod tests {
         assert_eq!(
             document,
             json!({
-                "costs": {},
-                "selected": null,
-                "rejected": [{
-                    "id": "P1",
+                "cost_per_candidate": {},
+                "selected_candidate": null,
+                "pruned_candidates": [{
+                    "candidate": "P1",
                     "cause": "accuracy_target_missed",
                     "reason": "q1: misses target",
                 }],
-                "search_rejected": [],
-                "rejected_by_cause": { "accuracy_target_missed": 1 },
+                "pruned_candidates_not_enumerated": [],
+                "pruned_candidate_count_by_cause": { "accuracy_target_missed": 1 },
             })
         );
     }
@@ -2106,16 +2114,21 @@ mod tests {
             run_planning_stages(&workload, lower_promql_roots(&workload).unwrap(), None).unwrap();
         let entries: Vec<_> = workload.query_workload.entries().collect();
         let document = stage_pipeline(workload_queries(&workload), &entries, &run, 0);
-        let selected = document["reference_pricing"]["selected"].as_str().unwrap();
+        let selected = document["reference_pricing"]["selected_candidate"]
+            .as_str()
+            .unwrap();
         let physical = document["stage2_physical_asap_optimization"]["candidates"]
             .as_array()
             .unwrap();
         // The facade's selected plan (`P1`) and the reference pricer's.
         assert_eq!(physical.len(), 2);
         assert!(physical.iter().any(|p| p["id"] == selected));
-        assert!(document["reference_pricing"]["costs"]
+        assert!(document["reference_pricing"]["cost_per_candidate"]
             .get(selected)
             .is_some());
-        assert_eq!(document["reference_pricing"]["rejected"], json!([]));
+        assert_eq!(
+            document["reference_pricing"]["pruned_candidates"],
+            json!([])
+        );
     }
 }
