@@ -216,7 +216,7 @@ const FAILED_CHECK_CAUSES = [
   'accuracy_target_missed',
   'count_min_weights_not_proven_non_negative',
   'no_accuracy_guarantee', 'latency_bound_exceeded', 'latency_over_repeat_interval',
-  'over_cluster_capacity', 'infeasible',
+  'over_cluster_capacity',
 ];
 // Every `stage3_plan_selection.rejected[].cause` Stage 3 writes: the failed
 // checks, then the losses under the cost model (priced, not selected).
