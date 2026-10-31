@@ -1753,6 +1753,102 @@ fn a_scan_two_queries_share_is_offered_built_once_per_evaluation() {
 /// charged once per evaluation. The optimizer may instead select cheaper
 /// partial sharing: a wide five-minute scan can cost more than a narrow long
 /// scan plus a wide fifteen-second scan.
+/// A scan and a time range that already have every label of their metric
+/// are not widened, so no memo group's candidate reads its own group, and
+/// Stage 2's candidates, whose producers are its input groups' candidates,
+/// read no candidate that reads them back. Before, each such group got an
+/// identity `Project` over itself, and Stage 2 wired that candidate (and
+/// its execution-scope copies) to itself.
+#[test]
+fn widened_scans_keep_memo_groups_and_stage2_candidates_acyclic() {
+    use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
+    let query = |q: &str| {
+        serde_json::json!({
+            "query": q,
+            "demand": {"fixed_interval": 10000},
+            "requirements": {"accuracy": {"max_error": 0.01, "failure_probability": 0.001}},
+            "predictability": {"predictable": {"known_at": null}},
+        })
+    };
+    let workload: PlanningWorkload = serde_json::from_value(serde_json::json!({
+        "query_workload": {
+            "language": "promql",
+            "query_batch": null,
+            "repeating_queries": [
+                query("sum by (job, region) (rate(data[5m]))"),
+                query("sum by (job) (rate(data[5m]))"),
+                query("sum by (job, region) (data)"),
+                query("sum by (job) (data)"),
+            ],
+        },
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 666.67}},
+            "sources": {"data": {"series_count": 10000, "metric_type": "counter", "sample_interval": 15000}},
+        },
+    }))
+    .unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let deployment = DeploymentCapabilities {
+        raw_data_retained: true,
+        ..DeploymentCapabilities::default()
+    };
+    let run = asap_devtools::planning_stages::run_default_search_over(
+        lower_promql_roots(&workload).unwrap(),
+        &entries,
+        workload.data_workload.as_ref().unwrap(),
+        asap_planner::PlanningModels::builtin().with_deployment_capabilities(&deployment),
+    )
+    .unwrap()
+    .run;
+    let memo = &run.logical_asap_candidates.as_ref().unwrap().memo;
+    assert!(memo
+        .candidates
+        .iter()
+        .flatten()
+        .any(|candidate| candidate.origin
+            == asap_types::stages::OriginOfCandidateForMemoGroup::WidenedScans));
+    // Whether `to` is reachable from `from` along `edges`.
+    fn reaches(edges: &dyn Fn(usize) -> Vec<usize>, from: usize, to: usize) -> bool {
+        let mut seen = HashSet::new();
+        let mut pending = edges(from);
+        while let Some(next) = pending.pop() {
+            if next == to {
+                return true;
+            }
+            if seen.insert(next) {
+                pending.extend(edges(next));
+            }
+        }
+        false
+    }
+    let group_reads = |group: usize| -> Vec<usize> {
+        memo.candidates[group]
+            .iter()
+            .flat_map(|candidate| candidate.input_groups.iter().map(|g| g.0 as usize))
+            .collect()
+    };
+    for group in 0..memo.groups.len() {
+        assert!(
+            !reaches(&group_reads, group, group),
+            "memo group {group} reads itself"
+        );
+    }
+    let physical = run.physical_asap_candidates.as_ref().unwrap();
+    let candidate_reads = |candidate: usize| -> Vec<usize> {
+        physical.candidates[candidate]
+            .producer_candidates_per_input
+            .iter()
+            .flat_map(|producers| producers.iter().map(|id| id.0))
+            .collect()
+    };
+    for candidate in 0..physical.candidates.len() {
+        assert!(
+            !reaches(&candidate_reads, candidate, candidate),
+            "Stage 2 candidate {candidate} reads itself"
+        );
+    }
+}
+
 #[test]
 fn scans_projecting_different_labels_are_shared() {
     let query = |q: &str| {

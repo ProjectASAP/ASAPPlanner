@@ -69,7 +69,8 @@ impl MemoCandidates {
     /// The groups, each after every group it or one of its candidates
     /// reads, the lower index first among those ready: a dependency order for
     /// candidate traversal, whatever order transformations appended
-    /// groups in. `None` when those reads form a cycle.
+    /// groups in. `None` when those reads form a cycle, a group reading
+    /// itself included.
     pub fn topological_order(&self) -> Option<Vec<MemoGroupId>> {
         let count = self.groups.len();
         let mut reads: Vec<HashSet<usize>> = vec![HashSet::new(); count];
@@ -80,9 +81,8 @@ impl MemoCandidates {
                 .iter()
                 .chain(candidates.iter().flat_map(|c| &c.input_groups))
             {
-                if child.0 as usize != g {
-                    reads[g].insert(child.0 as usize);
-                }
+                // A group reading itself never becomes ready: a cycle.
+                reads[g].insert(child.0 as usize);
             }
         }
         let mut readers: Vec<Vec<usize>> = vec![Vec::new(); count];
