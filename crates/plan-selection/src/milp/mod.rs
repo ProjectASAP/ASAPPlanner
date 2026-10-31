@@ -7,11 +7,12 @@
 //! - [`cost_terms`]: the cost model 1 objective, every coefficient a
 //!   number `asap-cost` computed (§3);
 //! - [`warm_start`]: a feasible plan with no sharing, HiGHS's first
-//!   incumbent.
+//!   incumbent;
+//! - [`decode`]: the solution as a `DagOfSelectedCandidates`, one node per
+//!   candidate run.
 //!
-//! Decoding the solution into a `DagOfSelectedCandidates`, the realizer call and the
-//! `plan_cost` equality check are #1095 C5; nothing calls this module yet
-//! outside its tests.
+//! [`crate::select`] runs them, realizes the plan once and checks it.
 pub(crate) mod cost_terms;
+pub(crate) mod decode;
 pub(crate) mod model;
 pub(crate) mod warm_start;

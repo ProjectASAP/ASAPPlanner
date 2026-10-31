@@ -6,9 +6,7 @@ use super::*;
 use crate::owners::{prepare_milp_inputs, AccuracyWeight};
 use asap_cost::{node_map, plan_cost, PlanCost, ResourceUnitCost};
 use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::stages::{
-    AssignmentRealizer, DagOfSelectedCandidates, SelectedEdge, SelectedNodeId,
-};
+use asap_types::stages::AssignmentRealizer;
 use asap_types::workload::{DataWorkload, DurationMs};
 
 // ---------------------------------------------------------------------------
@@ -17,25 +15,25 @@ use asap_types::workload::{DataWorkload, DurationMs};
 
 /// A workload through the real Stages 1 and 2, with the roots the
 /// realizer rebuilds plans from.
-struct Fixture {
-    physical: PhysicalASAPMemoCandidates,
-    roots: Vec<QueryRoot>,
-    entries: Vec<QueryWorkloadEntry>,
-    data: DataWorkload,
-    query_time_results_retained: bool,
+pub(crate) struct Fixture {
+    pub(crate) physical: PhysicalASAPMemoCandidates,
+    pub(crate) roots: Vec<QueryRoot>,
+    pub(crate) entries: Vec<QueryWorkloadEntry>,
+    pub(crate) data: DataWorkload,
+    pub(crate) query_time_results_retained: bool,
 }
 
 /// One query of a fixture: PromQL over metric `m`, its repeat interval in
 /// ms, its relative error target (`None`: exact) and its latency bound.
 #[derive(Clone, Copy)]
-struct Query<'a> {
+pub(crate) struct Query<'a> {
     promql: &'a str,
     interval_ms: u32,
     max_error: Option<f64>,
     max_latency_ms: Option<f64>,
 }
 
-fn query(promql: &str, interval_ms: u32) -> Query<'_> {
+pub(crate) fn query(promql: &str, interval_ms: u32) -> Query<'_> {
     Query {
         promql,
         interval_ms,
@@ -44,7 +42,7 @@ fn query(promql: &str, interval_ms: u32) -> Query<'_> {
     }
 }
 
-fn approximate(promql: &str, interval_ms: u32, max_error: f64) -> Query<'_> {
+pub(crate) fn approximate(promql: &str, interval_ms: u32, max_error: f64) -> Query<'_> {
     Query {
         max_error: Some(max_error),
         ..query(promql, interval_ms)
@@ -54,7 +52,7 @@ fn approximate(promql: &str, interval_ms: u32, max_error: f64) -> Query<'_> {
 /// `queries` through Stage 1 and Stage 2 as the facade runs them, over the
 /// complete pane-width domain, metric `m` with 100 series sampled every
 /// second.
-fn through_stages(queries: &[Query<'_>], raw_data_retained: bool) -> Fixture {
+pub(crate) fn through_stages(queries: &[Query<'_>], raw_data_retained: bool) -> Fixture {
     use asap_logical_asap_optimization::pass1::logical_memo_candidates::generate_per_computation_logical_memo_candidates;
     use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
     use asap_logical_asap_optimization::pass2::logical_memo_candidates::{
@@ -130,101 +128,6 @@ fn through_stages(queries: &[Query<'_>], raw_data_retained: bool) -> Fixture {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Decoding for the tests (#1095 C5 decodes for `select_plan`)
-// ---------------------------------------------------------------------------
-
-/// The solution as a DAG of selected candidates: one node per owner's use
-/// of a stateless candidate and one per active instance; only what the
-/// outputs reach is kept.
-fn decode(
-    solution: &SelectionMilpSolution,
-    query_of_reference: &[usize],
-) -> DagOfSelectedCandidates {
-    #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-    enum Key {
-        Use(usize, PhysicalCandidateId),
-        Instance(PhysicalCandidateId, usize),
-    }
-    let mut producers: HashMap<Key, Vec<(usize, Key)>> = HashMap::new();
-    let mut add_owner =
-        |owner_key: usize, owner: &ChosenOwner, own: Option<(PhysicalCandidateId, usize)>| {
-            for &(reader, input, producer) in &owner.links {
-                let consumer = match own {
-                    Some((candidate, index))
-                        if candidate == reader && !owner.classes.contains(&reader) =>
-                    {
-                        Key::Instance(candidate, index)
-                    }
-                    _ => Key::Use(owner_key, reader),
-                };
-                let producer = match producer {
-                    ChosenProducer::Stateless(candidate) => Key::Use(owner_key, candidate),
-                    ChosenProducer::Instance { class, index } => Key::Instance(class, index),
-                };
-                producers
-                    .entry(consumer)
-                    .or_default()
-                    .push((input, producer));
-            }
-        };
-    for (query, owner) in solution.query_owners.iter().enumerate() {
-        add_owner(query, owner, None);
-    }
-    for (number, (class, index, owner)) in solution.instances.iter().enumerate() {
-        add_owner(
-            solution.query_owners.len() + number,
-            owner,
-            Some((*class, *index)),
-        );
-    }
-    let outputs: Vec<Key> = solution
-        .outputs
-        .iter()
-        .enumerate()
-        .map(|(reference, output)| match *output {
-            ChosenProducer::Stateless(candidate) => {
-                Key::Use(query_of_reference[reference], candidate)
-            }
-            ChosenProducer::Instance { class, index } => Key::Instance(class, index),
-        })
-        .collect();
-    let mut node_of: BTreeMap<Key, SelectedNodeId> = BTreeMap::new();
-    let mut candidate_of_node = Vec::new();
-    let mut stack = outputs.clone();
-    while let Some(key) = stack.pop() {
-        if node_of.contains_key(&key) {
-            continue;
-        }
-        node_of.insert(key, SelectedNodeId(candidate_of_node.len()));
-        candidate_of_node.push(match key {
-            Key::Use(_, candidate) | Key::Instance(candidate, _) => candidate,
-        });
-        stack.extend(
-            producers
-                .get(&key)
-                .into_iter()
-                .flatten()
-                .map(|&(_, producer)| producer),
-        );
-    }
-    let mut edges = Vec::new();
-    for (key, &consumer) in &node_of {
-        for &(input, producer) in producers.get(key).into_iter().flatten() {
-            edges.push(SelectedEdge {
-                producer: node_of[&producer],
-                consumer,
-                input,
-            });
-        }
-    }
-    DagOfSelectedCandidates {
-        candidate_of_node,
-        edges,
-        node_of_output_reference: outputs.iter().map(|key| node_of[key]).collect(),
-    }
-}
-
 /// What one checked solve gives.
 struct Checked {
     solution: SelectionMilpSolution,
@@ -273,9 +176,11 @@ fn solve_and_check_by(
         );
     }
     restrict(&mut milp);
-    let query_of_reference = milp.query_of_reference.clone();
     let solution = solve_selection_milp(milp, limit.map(|limit| Instant::now() + limit), 0)?;
-    let selected = decode(&solution, &query_of_reference);
+    let selected = crate::milp::decode::decode(&fixture.physical, &solution);
+    selected
+        .validate(&fixture.physical)
+        .expect("the decoded selection is valid");
     let realizer = asap_physical_asap_optimization::catalog::Stage2AssignmentRealizer {
         original_roots: &fixture.roots,
         entries: &fixture.entries,
@@ -320,7 +225,7 @@ fn solve_and_check_by(
     Ok(Checked { solution, plan })
 }
 
-fn cost_inputs() -> CostInputs {
+pub(crate) fn cost_inputs() -> CostInputs {
     CostInputs {
         frozen_calibration_factor: Some(1.0),
         ..CostInputs::default()
@@ -394,7 +299,7 @@ fn classes_of(
 
 /// `sum(m)` repeating every minute and `sum(m) + max(m)` every 30 s: the
 /// second query does more work, so its evaluations take longer.
-fn shared_sum() -> Fixture {
+pub(crate) fn shared_sum() -> Fixture {
     through_stages(
         &[query("sum(m)", 60_000), query("sum(m) + max(m)", 30_000)],
         true,
@@ -443,7 +348,7 @@ fn held_memory_of_a_result_readers_of_different_latency_share() {
 /// `sum_over_time(m[5m])` and `sum_over_time(m[1h])` over raw data, with
 /// pane chains and ingestion-time states left out: every plan scans raw
 /// data at query time.
-fn two_windows() -> Fixture {
+pub(crate) fn two_windows() -> Fixture {
     through_stages(
         &[
             query("sum_over_time(m[5m])", 60_000),

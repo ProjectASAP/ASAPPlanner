@@ -1467,4 +1467,4 @@ pub(crate) fn candidates_below(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
