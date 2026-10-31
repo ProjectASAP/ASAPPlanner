@@ -507,7 +507,7 @@ mod tests {
         let root = lower_promql("topk by (job) (10, sum_over_time(m[1m]))", target.clone());
         let inventory =
             asap_logical_asap_optimization::test_support::generate_per_computation_candidates(
-                &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+                &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
                     QueryRoot::Operator(root),
                 ]),
             )
@@ -1153,7 +1153,7 @@ mod tests {
         let root = lower_promql(query, target.clone());
         let inventory =
             asap_logical_asap_optimization::test_support::generate_per_computation_candidates(
-                &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+                &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
                     QueryRoot::Operator(root),
                 ]),
             )
@@ -1519,7 +1519,7 @@ mod tests {
             .collect();
         let inventory =
             asap_logical_asap_optimization::test_support::generate_per_computation_candidates(
-                &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
+                &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
             )
             .unwrap();
         let choice = vec![0; inventory.targets.len()];
@@ -2752,7 +2752,7 @@ mod tests {
             compose_logical_candidate, generate_per_computation_candidates,
         };
         let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(roots),
+            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(roots),
         )
         .unwrap();
         let mut choices = vec![vec![]];
@@ -3001,14 +3001,14 @@ mod tests {
     #[test]
     fn average_over_relative_estimates_needs_the_sign() {
         use asap_logical_asap_optimization::test_support as pcc;
-        use asap_logical_asap_optimization::HowToComputeAggregateMeasure;
+        use asap_types::stages::HowToComputeAggregateMeasure;
         let target = AccuracyTarget::max_error(0.01);
         let root = lower_promql(
             "avg by (job) (quantile_over_time(0.99, m[1m]))",
             target.clone(),
         );
         let inventory = pcc::generate_per_computation_candidates(
-            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
                 QueryRoot::Operator(root),
             ]),
         )
@@ -3354,7 +3354,7 @@ mod tests {
         );
         let inventory =
             asap_logical_asap_optimization::test_support::generate_per_computation_candidates(
-                &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+                &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
                     QueryRoot::Operator(root),
                 ]),
             )
@@ -3366,7 +3366,7 @@ mod tests {
                 t.ways_to_compute
                     .iter()
                     .position(|c| {
-                        *c == asap_logical_asap_optimization::HowToComputeAggregateMeasure::Summary(
+                        *c == asap_types::stages::HowToComputeAggregateMeasure::Summary(
                             SketchAlgorithm::Kll,
                         )
                     })
@@ -3403,7 +3403,7 @@ mod tests {
         let root = lower_promql(query, AccuracyTarget::exact());
         let inventory =
             asap_logical_asap_optimization::test_support::generate_per_computation_candidates(
-                &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+                &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
                     QueryRoot::Operator(root),
                 ]),
             )
@@ -3891,7 +3891,7 @@ mod tests {
         let root = lower_promql("quantile_over_time(0.99, m[5m])", p99_target());
         let inventory =
             asap_logical_asap_optimization::test_support::generate_per_computation_candidates(
-                &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+                &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
                     QueryRoot::Operator(root),
                 ]),
             )
@@ -3902,9 +3902,7 @@ mod tests {
             .position(|c| {
                 matches!(
                     c,
-                    asap_logical_asap_optimization::HowToComputeAggregateMeasure::Summary(
-                        SketchAlgorithm::Kll
-                    )
+                    asap_types::stages::HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll)
                 )
             })
             .unwrap();
@@ -4666,9 +4664,9 @@ mod tests {
         rows_per_s: f64,
     ) -> PhysicalWorkloadPlan {
         use asap_logical_asap_optimization::test_support as pcc;
-        use asap_logical_asap_optimization::HowToComputeAggregateMeasure;
+        use asap_types::stages::HowToComputeAggregateMeasure;
         let inventory = pcc::generate_per_computation_candidates(
-            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(
+            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(
                 &queries
                     .iter()
                     .map(|(query, _)| QueryRoot::Operator(lower_promql(query, p99_target())))
@@ -5148,7 +5146,7 @@ mod tests {
         let root = lower_promql("quantile_over_time(0.99, m[5m])", p99_target());
         let inventory =
             asap_logical_asap_optimization::test_support::generate_per_computation_candidates(
-                &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+                &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
                     QueryRoot::Operator(root),
                 ]),
             )

@@ -6,13 +6,13 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::HowToComputeAggregateMeasure;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::NonASAPOp;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::physical::Materialization;
 use asap_types::physical::PhysicalWorkloadPlan;
+use asap_types::stages::HowToComputeAggregateMeasure;
 
 use crate::planning_stages::PlanningStagesRun;
 
@@ -277,7 +277,7 @@ mod tests {
     fn connected_labels_describe_selected_states() {
         let workload = example1();
         let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(
+            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(
                 &lower_promql_roots(&workload).unwrap(),
             ),
         )
@@ -294,7 +294,7 @@ mod tests {
     fn connected_labels_name_actual_shared_state() {
         let workload = example1();
         let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(
+            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(
                 &lower_promql_roots(&workload).unwrap(),
             ),
         )
@@ -330,7 +330,7 @@ mod tests {
         )
         .unwrap();
         let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(
+            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(
                 &lower_promql_roots(&workload).unwrap(),
             ),
         )

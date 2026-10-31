@@ -1487,7 +1487,7 @@ mod tests {
         );
         let inventory =
             asap_logical_asap_optimization::test_support::generate_per_computation_candidates(
-                &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+                &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
                     QueryRoot::Operator(root),
                 ]),
             )
@@ -1535,7 +1535,7 @@ mod tests {
         );
         let inventory =
             asap_logical_asap_optimization::test_support::generate_per_computation_candidates(
-                &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+                &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
                     QueryRoot::Operator(root),
                 ]),
             )

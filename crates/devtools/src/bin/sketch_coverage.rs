@@ -20,12 +20,11 @@ use asap_devtools::corpora::{
 };
 use asap_devtools::{lower_promql_with_sample_interval, SqlCatalog};
 use asap_frontend_sql::lower_sql_dialect;
-use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
-use asap_logical_asap_optimization::{
-    generate_per_computation_logical_memo_candidates, HowToComputeAggregateMeasure,
-};
+use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
+use asap_logical_asap_optimization::generate_per_computation_logical_memo_candidates;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::stages::HowToComputeAggregateMeasure;
 use asap_types::workload::{DataWorkload, SqlDialect};
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -62,7 +61,7 @@ fn analyze_corpus(
     let mut summaries = Vec::new();
     for (id, root) in roots {
         let Ok(pass1) = generate_per_computation_logical_memo_candidates(
-            DagOfLogicalMemoGroups::from_roots(&[QueryRoot::Operator(root)]),
+            generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(root)]),
             std::slice::from_ref(accuracy),
             &IgnoreAccuracyGuarantees,
             &NoAccuracyEvidence,

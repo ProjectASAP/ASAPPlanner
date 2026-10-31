@@ -23,7 +23,9 @@ use std::time::Instant;
 
 use crate::pass2::cse::share_common_sub_dags;
 use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::stages::{CandidateGenerationTimeout, MemoGroup, MemoGroupId};
+use asap_types::stages::{
+    CandidateGenerationTimeout, DagOfLogicalMemoGroups, MemoGroup, MemoGroupId,
+};
 
 pub(crate) fn check_generation_deadline(
     deadline: Option<Instant>,
@@ -35,58 +37,22 @@ pub(crate) fn check_generation_deadline(
     }
 }
 
-/// Initial logical groups, without implementation choices or solver state.
-#[derive(Debug, Clone)]
-pub struct DagOfLogicalMemoGroups {
-    pub groups: Vec<MemoGroup>,
-    /// Each query's root over groups, by index in the workload: its
-    /// operator's group, or its scalar expression with every operator
-    /// reference replaced by that operator's group.
-    pub query_roots: Vec<QueryRoot<MemoGroupId>>,
-    group_of: GroupOf,
-}
-
-impl DagOfLogicalMemoGroups {
-    /// Stage 0: the memo groups of the workload's query roots, query `i`
-    /// being `roots[i]`.
-    pub fn from_roots(roots: &[QueryRoot]) -> Self {
-        let (groups, group_of) = hash_consed(roots);
-        let group = |node: &Rc<OperatorNode>| group_of[&Rc::as_ptr(node)];
-        let query_roots = roots
-            .iter()
-            .map(|root| match root {
-                QueryRoot::Operator(node) => QueryRoot::Operator(group(node)),
-                QueryRoot::Scalar(expr) => {
-                    QueryRoot::Scalar(expr.map_operator_refs(&mut |node| group(node)))
-                }
-            })
-            .collect();
-        Self {
-            groups,
-            query_roots,
-            group_of,
-        }
-    }
-
-    /// Group of a node from the original workload, not a rewritten candidate.
-    pub fn group_for_node(&self, node: &Rc<OperatorNode>) -> Option<MemoGroupId> {
-        self.group_of.get(&Rc::as_ptr(node)).copied()
-    }
-
-    /// Each query's root over the groups' logical nodes, in workload order:
-    /// a group several queries read is one node.
-    pub fn roots_over_groups(&self) -> Vec<QueryRoot> {
-        let node = |g: &MemoGroupId| Rc::clone(&self.groups[g.0 as usize].logical_node);
-        self.query_roots
-            .iter()
-            .map(|root| match root {
-                QueryRoot::Operator(g) => QueryRoot::Operator(node(g)),
-                QueryRoot::Scalar(expr) => {
-                    QueryRoot::Scalar(expr.map_operator_refs(&mut |g| node(g)))
-                }
-            })
-            .collect()
-    }
+/// Stage 0: the memo groups of the workload's query roots, query `i`
+/// being `roots[i]`, by hash-consing identical logical sub-expressions
+/// (`share_common_sub_dags`).
+pub fn generate_dag_of_logical_memo_groups(roots: &[QueryRoot]) -> DagOfLogicalMemoGroups {
+    let (groups, group_of) = hash_consed(roots);
+    let group = |node: &Rc<OperatorNode>| group_of[&Rc::as_ptr(node)];
+    let query_roots = roots
+        .iter()
+        .map(|root| match root {
+            QueryRoot::Operator(node) => QueryRoot::Operator(group(node)),
+            QueryRoot::Scalar(expr) => {
+                QueryRoot::Scalar(expr.map_operator_refs(&mut |node| group(node)))
+            }
+        })
+        .collect();
+    DagOfLogicalMemoGroups::new(groups, query_roots, group_of)
 }
 
 /// Each original node (of `roots`), by address, to its group.
@@ -222,7 +188,7 @@ mod tests {
             query("quantile_over_time(0.95, m[5m])"),
             query("quantile_over_time(0.99, m[5m])"),
         ];
-        let memo = DagOfLogicalMemoGroups::from_roots(&roots);
+        let memo = generate_dag_of_logical_memo_groups(&roots);
         let root_group = |q: usize| *memo.query_roots[q].as_operator().unwrap();
         assert_eq!(root_group(0), root_group(1));
         assert_ne!(root_group(2), root_group(3));
@@ -248,7 +214,7 @@ mod tests {
                 "avg by (job) (quantile_over_time(0.5, data[5m]) / quantile_over_time(0.5, data[5m]) + quantile_over_time(0.9, data[5m]))",
                 AccuracyTarget::max_error(0.01).failure_probability(0.001),
             ))];
-        let memo = DagOfLogicalMemoGroups::from_roots(&roots);
+        let memo = generate_dag_of_logical_memo_groups(&roots);
         let division = memo
             .groups
             .iter()
@@ -275,11 +241,11 @@ mod tests {
             QueryRoot::Scalar(ScalarExpr::PromqlScalarFromVector(node.clone())),
             QueryRoot::Operator(node.clone()),
         ];
-        let memo = DagOfLogicalMemoGroups::from_roots(&roots);
+        let memo = generate_dag_of_logical_memo_groups(&roots);
         let id = memo.group_for_node(&node).unwrap();
         assert_eq!(queries_rooted_at(&memo.query_roots, id), vec![1, 2]);
         assert_eq!(memo.groups[id.0 as usize].reached_by_queries(), [1, 2]);
-        assert!(DagOfLogicalMemoGroups::from_roots(&roots[..1])
+        assert!(generate_dag_of_logical_memo_groups(&roots[..1])
             .groups
             .is_empty());
     }

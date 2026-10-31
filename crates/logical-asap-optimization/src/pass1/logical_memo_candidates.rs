@@ -16,29 +16,15 @@ use asap_accuracy::{AccuracyEvidenceProvider, AccuracyModel};
 
 use crate::deployment_capabilities::SupportedSummary;
 use crate::pass1::per_computation_candidates::{
-    generate_per_computation_candidates, ComputationTarget, HowToComputeAggregateMeasure,
-    PerComputationCandidateError,
+    generate_per_computation_candidates, PerComputationCandidateError,
 };
 use crate::pass2::memo::candidates::CandidatePopulationError;
+use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::groups::try_populate_pass1;
-use crate::pass2::memo::{check_generation_deadline, DagOfLogicalMemoGroups};
-use asap_types::stages::{CandidateGenerationTimeout, MemoCandidates, PrunedCandidate};
-
-/// Stage 1, Pass 1's output: the workload's memo groups, each with its
-/// Pass 1 candidates, and the computation targets they were built from.
-/// It is also Pass 2's input.
-#[derive(Debug, Clone)]
-pub struct PerComputationLogicalMemoCandidates {
-    /// The groups moved from the [`DagOfLogicalMemoGroups`], its query
-    /// roots, and every group's candidates (origin
-    /// [`Pass1`](asap_types::stages::OriginOfCandidateForMemoGroup::Pass1)).
-    pub memo: MemoCandidates,
-    /// One per aggregate measure: what Pass 1 chose among.
-    pub computation_targets: Vec<ComputationTarget>,
-    /// The ways to compute a target's measure that Pass 1 pruned, each on
-    /// its target's aggregate group, in pruning order.
-    pub pruned_candidates: Vec<PrunedCandidate<HowToComputeAggregateMeasure>>,
-}
+use asap_types::stages::{
+    CandidateGenerationTimeout, DagOfLogicalMemoGroups, MemoCandidates,
+    PerComputationLogicalMemoCandidates, PrunedCandidate,
+};
 
 /// Why [`generate_per_computation_logical_memo_candidates`] failed.
 #[derive(Debug, thiserror::Error)]
@@ -167,6 +153,7 @@ fn size_for_failure_probability(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pass2::memo::generate_dag_of_logical_memo_groups;
     use crate::pass2::memo::shared_configurations::PaneWidthDomain;
     use crate::test_support::{
         lower_promql, shared_summary_state_groups, sharing_rules_and_shared_state_groups,
@@ -209,7 +196,7 @@ mod tests {
         let targets: Vec<AccuracyTarget> =
             queries.iter().map(|(_, target)| target.clone()).collect();
         generate_per_computation_logical_memo_candidates(
-            DagOfLogicalMemoGroups::from_roots(&roots),
+            generate_dag_of_logical_memo_groups(&roots),
             &targets,
             &IgnoreAccuracyGuarantees,
             &NoAccuracyEvidence,

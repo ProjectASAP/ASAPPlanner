@@ -12,7 +12,7 @@ Preserve supported accuracy semantics, physical eligibility, cost objectives, sc
 
 | Scope | Current implementation | Responsibility |
 | --- | --- | --- |
-| Logical identity | `logical-asap-optimization/src/pass2/memo.rs`; `types/src/stages/` | `DagOfLogicalMemoGroups`, `MemoGroup` (`asap_types::stages`), stable initial query/group references. |
+| Logical identity | `logical-asap-optimization/src/pass2/memo.rs`; `types/src/stages/` | `DagOfLogicalMemoGroups`, `MemoGroup` (`asap_types::stages`; built by `generate_dag_of_logical_memo_groups`), stable initial query/group references. |
 | Computation and sharing rules | `logical-asap-optimization/src/pass2/memo/{candidates,rules,state_groups,shared_configurations,window_candidates}` | Populate groups, retain local candidates, expose shared states and compatible rewrites. |
 | Physical legality | `physical-asap-optimization` | Executable operators, timing, materialization eligibility, and `PhysicalWorkloadPlan`. |
 | Candidate dependency inventory | `physical-asap-optimization/src/catalog`; `types/src/stages/physical` | Local `PhysicalCandidate`, `ProducerRequirement` (`asap_types::stages`), compatible producers, structural pruning, the selected DAG (`DagOfSelectedCandidates`, one node per run of a candidate), and reconstruction. Stage 2 makes no execution-scope copies; today's Stage 3 engine makes its own (`plan-selection/src/search/candidates/scopes.rs`). |

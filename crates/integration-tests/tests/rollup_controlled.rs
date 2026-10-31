@@ -1,14 +1,12 @@
 //! Controlled plans for the viewer's actual distinct-count rollup workload.
 use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
 use asap_integration_tests::planning::{builds_and_rollups, expanded_memo, select_rollup};
-use asap_logical_asap_optimization::{
-    test_support::{
-        compose_logical_candidate, generate_per_computation_candidates, rollup_candidates,
-        rollup_pass2_candidates,
-    },
-    HowToComputeAggregateMeasure,
+use asap_logical_asap_optimization::test_support::{
+    compose_logical_candidate, generate_per_computation_candidates, rollup_candidates,
+    rollup_pass2_candidates,
 };
 use asap_planner::PlanningModels;
+use asap_types::stages::HowToComputeAggregateMeasure;
 use asap_types::{
     ir::{
         schema::{DataType, Field, Schema, SketchAlgorithm},
@@ -54,7 +52,7 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.as_ref().unwrap();
     let generated = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
     let mut settings = CostInputs::default();

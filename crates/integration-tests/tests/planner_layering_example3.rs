@@ -19,10 +19,10 @@ use planner_layering_common::*;
 // Fixed algorithm/window fixtures keep numerical evaluator checks independent
 // of a time-bounded production search's archived incumbents.
 fn run_a() -> Run {
-    use asap_logical_asap_optimization::{
-        test_support::{compose_logical_candidate, generate_per_computation_candidates},
-        HowToComputeAggregateMeasure,
+    use asap_logical_asap_optimization::test_support::{
+        compose_logical_candidate, generate_per_computation_candidates,
     };
+    use asap_types::stages::HowToComputeAggregateMeasure;
     let workload = pattern_a(
         PatternARecurrence::OnceAdHoc,
         DataArrival::Mixed {
@@ -31,7 +31,7 @@ fn run_a() -> Run {
     );
     let roots = lower_promql(&workload);
     let local = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
     let mut computations = Vec::new();
@@ -71,16 +71,16 @@ fn run_a() -> Run {
 
 fn run_b() -> Run {
     use asap_logical_asap_optimization::test_support::{
+        compose_logical_candidate, generate_per_computation_candidates,
+    };
+    use asap_logical_asap_optimization::test_support::{
         pane_candidates, window_composition_pass2_candidates,
     };
-    use asap_logical_asap_optimization::{
-        test_support::{compose_logical_candidate, generate_per_computation_candidates},
-        HowToComputeAggregateMeasure,
-    };
+    use asap_types::stages::HowToComputeAggregateMeasure;
     let workload = pattern_b();
     let roots = lower_promql(&workload);
     let local = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
     let mut computations = vec![roots.clone()];

@@ -6,9 +6,9 @@ use asap_devtools::memo_pricing::{price_choices, PricedChoice, SelectedBaseline}
 use asap_devtools::planner_layering_examples::example1;
 use asap_devtools::planning_stages::{lower_promql_roots, run_default_search_over};
 use asap_logical_asap_optimization::enumerate;
+use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
 use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
 use asap_logical_asap_optimization::test_support::try_populate_pass1;
-use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_planner::PlanningModels;
 use asap_types::ir::properties::AccuracyTarget;
@@ -78,9 +78,9 @@ fn planned(workload: &PlanningWorkload, series_identity: bool) -> Planned {
             .into_iter()
             .collect()
     };
-    let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+    let initial = generate_dag_of_logical_memo_groups(&roots);
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
     Planned {

@@ -308,10 +308,10 @@ mod tests {
     use crate::search::milp::model::solve_candidate_proposal;
     use crate::SelectionModels;
     use asap_cost::CostInputs;
+    use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
     use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
     use asap_logical_asap_optimization::test_support::try_populate_pass1;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
-    use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
     use asap_types::ir::{properties::AccuracyTarget, QueryRoot};
     use asap_types::workload::{
         DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry,
@@ -331,12 +331,11 @@ mod tests {
         ));
         let roots = vec![root];
         let query_roots = vec![roots[0].clone()];
-        let initial = DagOfLogicalMemoGroups::from_roots(&query_roots);
+        let initial = generate_dag_of_logical_memo_groups(&query_roots);
         let output = *initial.query_roots[0].as_operator().unwrap();
-        let generated = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&query_roots),
-        )
-        .unwrap();
+        let generated =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&query_roots))
+                .unwrap();
         let memo = try_populate_pass1(initial, &generated).unwrap();
         let inventory = build_candidate_inventory(&memo, &[output], |_| Ok(0.0)).unwrap();
         let mut entry = entry_with(

@@ -43,7 +43,7 @@ pub fn computation_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
         compose_logical_candidate, generate_per_computation_candidates,
     };
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
             QueryRoot::Operator(root),
         ]),
     )

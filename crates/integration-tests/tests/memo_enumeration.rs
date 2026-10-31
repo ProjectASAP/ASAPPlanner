@@ -34,6 +34,7 @@
 //!
 //! The memo's other choices size an operand's summary for a share of the
 //! budget (a ratio's operands); the whole-workload path has no such plans.
+use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
 use std::rc::Rc;
 
 use asap_devtools::planning_stages::lower_promql_roots;
@@ -41,7 +42,6 @@ use asap_integration_tests::planning::expanded_memo;
 use asap_logical_asap_optimization::test_support::{
     compose_logical_candidate, generate_per_computation_candidates, PerComputationCandidates,
 };
-use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
 use asap_logical_asap_optimization::{
     build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
 };
@@ -160,7 +160,7 @@ fn pass1_inventory(
 ) -> PerComputationCandidates {
     let roots = production_roots(workload);
     let inventory =
-        generate_per_computation_candidates(&DagOfLogicalMemoGroups::from_roots(&roots))
+        generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
             .unwrap()
             .without_unsupported_summaries(
                 models

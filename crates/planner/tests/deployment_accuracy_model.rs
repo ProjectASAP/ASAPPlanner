@@ -94,7 +94,7 @@ fn physical_candidates(
 
     let roots = lower_promql_query_workload(workload).expect("lowers");
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
     .unwrap();
     let mut choices = BTreeSet::from([vec![0; inventory.targets.len()]]);

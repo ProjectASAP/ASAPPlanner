@@ -1,10 +1,11 @@
 //! Stage 1, Pass 1: per-computation candidate generation and composition,
 //! and the summary realizations it offers. Its one entry is
 //! [`generate_per_computation_logical_memo_candidates`], whose output
-//! ([`PerComputationLogicalMemoCandidates`]) Pass 2 extends.
+//! ([`PerComputationLogicalMemoCandidates`](asap_types::stages::PerComputationLogicalMemoCandidates))
+//! Pass 2 extends.
 
 /// Stage 1, Pass 1's entry and output: the per-computation candidates on
-/// the memo groups ([`logical_memo_candidates::PerComputationLogicalMemoCandidates`]).
+/// the memo groups ([`PerComputationLogicalMemoCandidates`](asap_types::stages::PerComputationLogicalMemoCandidates)).
 pub(crate) mod logical_memo_candidates;
 /// Stage 1, Pass 1's computation targets, their candidates and their
 /// composition. No execution timing is assigned: that is a Stage 2
@@ -18,10 +19,6 @@ mod per_computation_candidates_tests;
 pub(crate) mod realization;
 
 pub use logical_memo_candidates::{
-    generate_per_computation_logical_memo_candidates, PerComputationLogicalMemoCandidates,
-    PerComputationLogicalMemoCandidatesError,
+    generate_per_computation_logical_memo_candidates, PerComputationLogicalMemoCandidatesError,
 };
-pub use per_computation_candidates::{
-    ComputationTarget, FusedComputation, HavingEntry, HavingPlacement,
-    HowToComputeAggregateMeasure, PerComputationCandidateError,
-};
+pub use per_computation_candidates::PerComputationCandidateError;

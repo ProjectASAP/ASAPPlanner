@@ -34,20 +34,20 @@
 //! the resulting error contract. The connection planner may select a conservative
 //! larger configuration, and validates the recomposed query-root guarantee.
 
+use asap_types::stages::HowToComputeAggregateMeasure;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use super::DagOfLogicalMemoGroups;
 use crate::pass1::per_computation_candidates::{
-    compose_logical_candidate_with_accuracy_budget_parts, HowToComputeAggregateMeasure,
-    PerComputationCandidates,
+    compose_logical_candidate_with_accuracy_budget_parts, PerComputationCandidates,
 };
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 
 use super::candidates::CandidatePopulationError;
 use asap_types::stages::{
-    CandidateForMemoGroup, MemoCandidates, MemoGroup, MemoGroupId, OriginOfCandidateForMemoGroup,
+    CandidateForMemoGroup, DagOfLogicalMemoGroups, MemoCandidates, MemoGroup, MemoGroupId,
+    OriginOfCandidateForMemoGroup,
 };
 
 /// Populate implementation candidates without changing initial group identities.
@@ -464,6 +464,7 @@ impl NodeToStructuralIdCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pass2::memo::generate_dag_of_logical_memo_groups;
 
     #[test]
     fn structural_keys_preserve_nonfinite_and_signed_zero_literals() {
@@ -515,7 +516,7 @@ mod tests {
 
     fn memo_of(inventory: &PerComputationCandidates) -> MemoCandidates {
         let roots: Vec<_> = inventory.roots.clone();
-        populate_pass1(DagOfLogicalMemoGroups::from_roots(&roots), inventory)
+        populate_pass1(generate_dag_of_logical_memo_groups(&roots), inventory)
     }
     use crate::pass1::per_computation_candidates::{
         compose_logical_candidate, generate_per_computation_candidates,
@@ -532,17 +533,16 @@ mod tests {
             "quantile_over_time(0.95, m[5m])",
             AccuracyTarget::max_error(0.01),
         ))];
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+        let initial = generate_dag_of_logical_memo_groups(&roots);
         // An inventory is tied to its roots by structure: the same query
         // text lowered again is the same DAG, so the other roots must differ.
         let other_roots = vec![QueryRoot::Operator(lower_promql(
             "quantile_over_time(0.5, n[1m])",
             AccuracyTarget::max_error(0.01),
         ))];
-        let inventory = generate_per_computation_candidates(
-            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&other_roots),
-        )
-        .unwrap();
+        let inventory =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&other_roots))
+                .unwrap();
         assert!(matches!(
             try_populate_pass1(initial, &inventory),
             Err(CandidatePopulationError::RootDependenciesChanged)
@@ -556,11 +556,10 @@ mod tests {
             "quantile_over_time(0.95, m[5m])",
             AccuracyTarget::max_error(0.01),
         ))];
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
-        let inventory = generate_per_computation_candidates(
-            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
-        )
-        .unwrap();
+        let initial = generate_dag_of_logical_memo_groups(&roots);
+        let inventory =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap();
         let mut invalid_measure = inventory.clone();
         invalid_measure.targets[0].measure_index = usize::MAX;
         assert!(matches!(
@@ -570,7 +569,7 @@ mod tests {
         let mut invalid_absorption = inventory;
         let missing = invalid_absorption.targets.len();
         invalid_absorption.targets[0].fused_computation =
-            Some(crate::pass1::per_computation_candidates::FusedComputation {
+            Some(asap_types::stages::FusedComputation {
                 absorbed_targets: vec![missing],
                 ways_to_compute: Vec::new(),
             });
@@ -588,7 +587,7 @@ mod tests {
         .iter()
         .map(|text| QueryRoot::Operator(lower_promql(text, AccuracyTarget::max_error(0.01))))
         .collect();
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+        let initial = generate_dag_of_logical_memo_groups(&roots);
         let original_groups = initial.groups.clone();
         let original_roots = initial.query_roots.clone();
         let inventory = generate_per_computation_candidates(&initial).unwrap();
@@ -623,10 +622,8 @@ mod tests {
             .map(|q| QueryRoot::Operator(lower_promql(q, target.clone())))
             .collect();
         memo_of(
-            &generate_per_computation_candidates(
-                &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
-            )
-            .unwrap(),
+            &generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap(),
         )
     }
 
@@ -784,10 +781,9 @@ mod tests {
             .iter()
             .map(|q| QueryRoot::Operator(lower_promql(q, target.clone())))
             .collect();
-        let inventory = generate_per_computation_candidates(
-            &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
-        )
-        .unwrap();
+        let inventory =
+            generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap();
         let choice: Vec<usize> = inventory
             .targets
             .iter()
@@ -1090,7 +1086,7 @@ mod tests {
             for seed in 1..=60u64 {
                 let roots = random_roots(seed, gauges);
                 let inventory = generate_per_computation_candidates(
-                    &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+                    &generate_dag_of_logical_memo_groups(&roots),
                 )
                 .unwrap();
                 if inventory.combinations() > 400 {
@@ -1215,10 +1211,8 @@ mod tests {
             QueryRoot::Operator(agg(vec![3], sum(), table())),
         ];
         let memo = memo_of(
-            &generate_per_computation_candidates(
-                &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
-            )
-            .unwrap(),
+            &generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap(),
         );
         assert_eq!(memo.groups.len(), 3);
         assert_eq!(memo.groups[0].logical_node.operator.kind_name(), "Scan");

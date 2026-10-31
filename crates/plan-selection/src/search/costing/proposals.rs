@@ -182,10 +182,10 @@ mod tests {
     use crate::search::candidates::inventory::build_candidate_inventory;
     use crate::SelectionModels;
     use asap_cost::CalibrationFit;
+    use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
     use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
     use asap_logical_asap_optimization::test_support::try_populate_pass1;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
-    use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::QueryRoot;
@@ -200,14 +200,12 @@ mod tests {
             "quantile_over_time(0.9, data[5m])",
             target.clone(),
         ))];
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+        let initial = generate_dag_of_logical_memo_groups(&roots);
         let output = *initial.query_roots[0].as_operator().unwrap();
         let memo = try_populate_pass1(
             initial,
-            &generate_per_computation_candidates(
-                &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
-            )
-            .unwrap(),
+            &generate_per_computation_candidates(&generate_dag_of_logical_memo_groups(&roots))
+                .unwrap(),
         )
         .unwrap();
         let inventory = build_candidate_inventory(&memo, &[output], |_| Ok(0.0)).unwrap();

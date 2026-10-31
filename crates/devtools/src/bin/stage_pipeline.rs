@@ -274,7 +274,6 @@ use asap_devtools::planning_stages::{
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{counter_function_over_gauge_warnings, promql_metric_names};
 use asap_logical_asap_optimization::DeploymentCapabilities;
-use asap_logical_asap_optimization::PerComputationLogicalMemoCandidates;
 use asap_logical_asap_optimization::{
     build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
 };
@@ -289,6 +288,7 @@ use asap_types::ir::operator::node::OperatorNode;
 use asap_types::ir::properties::{default_metric_for_root, AccuracyMetric, AccuracyTarget};
 use asap_types::ir::QueryRoot;
 use asap_types::physical::PhysicalWorkloadPlan;
+use asap_types::stages::PerComputationLogicalMemoCandidates;
 use asap_types::stages::{queries_rooted_at, MemoGroupId};
 use asap_types::stages::{MemoCandidates, OriginOfCandidateForMemoGroup};
 use asap_types::workload::{

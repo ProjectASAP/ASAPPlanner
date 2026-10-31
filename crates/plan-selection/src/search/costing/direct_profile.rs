@@ -1238,11 +1238,11 @@ mod tests {
     // direct costs include working memory and agree with the complete evaluator.
     #[test]
     fn fixed_sketch_profiles_match_the_real_evaluator() {
-        use asap_logical_asap_optimization::{
-            test_support::{compose_logical_candidate, generate_per_computation_candidates},
-            HowToComputeAggregateMeasure,
+        use asap_logical_asap_optimization::test_support::{
+            compose_logical_candidate, generate_per_computation_candidates,
         };
         use asap_types::ir::schema::SketchAlgorithm;
+        use asap_types::stages::HowToComputeAggregateMeasure;
         use std::rc::Rc;
         fn append(
             node: Rc<OperatorNode>,
@@ -1286,7 +1286,7 @@ mod tests {
                 };
                 let original = lower_promql(query, target.clone());
                 let generated = generate_per_computation_candidates(
-                    &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+                    &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
                         QueryRoot::Operator(original.clone()),
                     ]),
                 )
@@ -1436,11 +1436,11 @@ mod tests {
         mode: Materialization,
         range_evaluation: Option<asap_types::workload::RangeEvaluation>,
     ) {
-        use asap_logical_asap_optimization::{
-            test_support::{compose_logical_candidate, generate_per_computation_candidates},
-            HowToComputeAggregateMeasure,
+        use asap_logical_asap_optimization::test_support::{
+            compose_logical_candidate, generate_per_computation_candidates,
         };
         use asap_types::ir::schema::SketchAlgorithm;
+        use asap_types::stages::HowToComputeAggregateMeasure;
         use std::rc::Rc;
         fn append(
             node: Rc<OperatorNode>,
@@ -1507,7 +1507,7 @@ mod tests {
                     };
                     let original = lower_promql(query, target.clone());
                     let generated = generate_per_computation_candidates(
-                        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+                        &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
                             QueryRoot::Operator(original.clone()),
                         ]),
                     )
@@ -1906,11 +1906,11 @@ mod tests {
     // including two equal frequencies whose different phases cannot coalesce.
     #[test]
     fn heterogeneous_shared_sketch_profiles_match_the_real_evaluator() {
-        use asap_logical_asap_optimization::{
-            test_support::{compose_logical_candidate, generate_per_computation_candidates},
-            HowToComputeAggregateMeasure,
+        use asap_logical_asap_optimization::test_support::{
+            compose_logical_candidate, generate_per_computation_candidates,
         };
         use asap_types::ir::schema::SketchAlgorithm;
+        use asap_types::stages::HowToComputeAggregateMeasure;
         use asap_types::workload::TimestampMs;
         use std::rc::Rc;
         fn append(
@@ -1961,7 +1961,9 @@ mod tests {
                     })
                     .collect();
                 let generated = generate_per_computation_candidates(
-                    &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&originals),
+                    &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(
+                        &originals,
+                    ),
                 )
                 .unwrap();
                 let choices: Vec<_> = generated.targets.iter().map(|target| target.ways_to_compute.iter().position(|candidate|

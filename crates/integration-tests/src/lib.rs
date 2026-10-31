@@ -14,6 +14,7 @@
 pub mod fixtures {
 
     use asap_types::ir::properties::AccuracyTarget;
+
     use asap_types::ir::schema::{DataType, Field, Schema};
     use asap_types::ir::OperatorNode;
     use asap_types::workload::{
@@ -238,7 +239,7 @@ pub mod planning {
             compose_logical_candidate, generate_per_computation_candidates,
         };
         let local = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
                 QueryRoot::Operator(root),
             ]),
         )
@@ -271,12 +272,12 @@ pub mod planning {
         root: Rc<OperatorNode>,
         family: asap_types::ir::schema::SketchAlgorithm,
     ) -> Rc<OperatorNode> {
-        use asap_logical_asap_optimization::{
-            test_support::{compose_logical_candidate, generate_per_computation_candidates},
-            HowToComputeAggregateMeasure,
+        use asap_logical_asap_optimization::test_support::{
+            compose_logical_candidate, generate_per_computation_candidates,
         };
+        use asap_types::stages::HowToComputeAggregateMeasure;
         let local = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&[
                 QueryRoot::Operator(root),
             ]),
         )
@@ -350,10 +351,10 @@ pub mod planning {
         use asap_logical_asap_optimization::test_support::{
             add_local_window_composition, try_populate_pass1,
         };
-        use asap_logical_asap_optimization::{DagOfLogicalMemoGroups, PaneWidthDomain};
-        let initial = DagOfLogicalMemoGroups::from_roots(&roots);
+        use asap_logical_asap_optimization::PaneWidthDomain;
+        let initial = asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots);
         let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
+            &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
         )
         .unwrap();
         let mut memo = try_populate_pass1(initial, &inventory).unwrap();
