@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use crate::analytical::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceEstimate,
 };
-use crate::execution_demand::{computations, evaluation_rate, query_starts};
+use crate::execution_demand::{computations, consumers, evaluation_rate, query_starts, Consumer};
 use crate::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
@@ -96,7 +96,7 @@ pub fn plan_cost(
     let mut work_ms: HashMap<PhysicalASAPNodeId, f64> = HashMap::new();
     // Query-time memory held only while one evaluation runs, a MatAtQuery
     // state in memory or a NotMaterialized node's working memory: (bytes,
-    // per second, whether each reading query computes its own copy),
+    // per second, whether each consumer computes its own copy),
     // counted once the evaluations' latencies are known, in node order so
     // the sum is the same in every run.
     let mut held: BTreeMap<PhysicalASAPNodeId, (u64, f64, bool)> = BTreeMap::new();
@@ -248,38 +248,53 @@ pub fn plan_cost(
     }
     // Query-time memory is held for one evaluation: a MatAtQuery state from
     // its build until the longest query reading it finishes, about that
-    // query's latency; a NotMaterialized node's copy for each reading query
-    // for that query's latency, so its rate-weighted mean.
-    for (id, (state, per_second, computed_per_reader)) in held {
-        let readers = reach
+    // query's latency, once per execution. A NotMaterialized node's working
+    // memory is computed once per consumer ([`consumers`]), and each copy is
+    // held while its consumer's evaluation runs: a query's for that query's
+    // latency, at its rate; a materialized node's until the longest query
+    // reading that node finishes, at the node's rate, as its MatAtQuery
+    // state is.
+    let longest_reader_ms = |id: PhysicalASAPNodeId| {
+        reach
             .iter()
-            .enumerate()
             .zip(&latency)
-            .filter(|((_, reached), _)| reached.contains(&id));
-        let longest_ms = readers
-            .clone()
+            .filter(|(reached, _)| reached.contains(&id))
             .map(|(_, l)| l.total_ms())
-            .fold(0.0, f64::max);
-        let mut rate_weighted_ms = 0.0;
-        let mut evaluations_per_second = 0.0;
-        if computed_per_reader {
-            for ((query, _), l) in readers {
-                let rate = evaluation_rate(
-                    recurrence
-                        .get(query)
-                        .map(|r| (r, range_evaluations.get(query).copied().flatten())),
-                    settings.non_repeating_query_horizon_seconds,
-                )
-                .map_err(|error| (id, error))?;
-                rate_weighted_ms += rate * l.total_ms();
-                evaluations_per_second += rate;
+            .fold(0.0, f64::max)
+    };
+    let consumers_of = consumers(dag);
+    for (id, (state, per_second, computed_per_consumer)) in held {
+        // The milliseconds it is held per second: each execution's held
+        // time times its executions per second, summed.
+        let held_ms_per_second = match computed_per_consumer {
+            false => per_second * longest_reader_ms(id),
+            true => {
+                let mut sum = 0.0;
+                for &consumer in consumers_of.get(&id).into_iter().flatten() {
+                    sum += match consumer {
+                        Consumer::Query(query) => {
+                            let rate = evaluation_rate(
+                                recurrence
+                                    .get(query)
+                                    .map(|r| (r, range_evaluations.get(query).copied().flatten())),
+                                settings.non_repeating_query_horizon_seconds,
+                            )
+                            .map_err(|error| (id, error))?;
+                            rate * latency.get(query).map_or(0.0, QueryLatency::total_ms)
+                        }
+                        Consumer::Materialized(node) => {
+                            multipliers[&node].1 * longest_reader_ms(node)
+                        }
+                    };
+                }
+                sum
             }
-        }
-        let evaluation_ms = match evaluations_per_second > 0.0 {
-            true => rate_weighted_ms / evaluations_per_second,
-            false => longest_ms,
         };
-        let byte_seconds = state as f64 * evaluation_ms / 1_000.0 * per_second;
+        let evaluation_ms = match per_second > 0.0 {
+            true => held_ms_per_second / per_second,
+            false => 0.0,
+        };
+        let byte_seconds = state as f64 * held_ms_per_second / 1_000.0;
         let node = per_node.get_mut(&id).expect("every node is measured");
         usage.average_memory_bytes += byte_seconds;
         node.detail += &format!("; holds {state} bytes for {evaluation_ms:.1} ms");
@@ -513,7 +528,9 @@ pub struct NodeUsage<'a> {
     pub peak_memory_bytes: u64,
     pub disk_bytes: u64,
     /// Query-time memory held while an evaluation runs: (bytes, computations
-    /// per second, whether each reading query computes its own copy).
+    /// per second, whether each consumer computes its own copy, held while
+    /// that consumer's evaluation runs ([`plan_cost`]), rather than one copy
+    /// held until the longest query reading the node finishes).
     pub held: Option<(u64, f64, bool)>,
     /// An in-memory ingestion-time state's bytes per window.
     pub maintained: Option<u64>,
@@ -1102,7 +1119,9 @@ pub fn node_usage<'a>(
     // aggregate keeps per group when that is more. A computation that
     // keeps nothing holds its working memory while it runs, once per
     // consumer that recomputes it; at query time, that is held for the
-    // evaluation too (counted below, as a MatAtQuery state is).
+    // evaluation too (counted in [`plan_cost`], per consumer: a query's
+    // latency, or a materialized consumer's longest reader's, as a
+    // MatAtQuery state is).
     let state = out.bytes.max(estimate.peak_memory_bytes());
     let (kept, medium) = match (node.materialization, &node.payload) {
         (Materialization::NotMaterialized, _) => {

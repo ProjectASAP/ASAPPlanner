@@ -280,6 +280,59 @@ pub fn query_starts(dag: &PhysicalASAPDAG) -> Vec<Vec<PhysicalASAPNodeId>> {
         .collect()
 }
 
+/// What computes a `NotMaterialized` node once per its own execution
+/// ([`consumers`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Consumer {
+    /// Query `.0` (an operator or scalar root), at its own rate.
+    Query(usize),
+    /// A materialized node, at that node's rate.
+    Materialized(PhysicalASAPNodeId),
+}
+
+/// The consumers of each `NotMaterialized` node of `dag` that any consumer
+/// reaches ([`computations`]): the queries and the materialized nodes whose
+/// walk down their inputs reaches it before meeting a materialized node,
+/// each once; the queries first, in order, then the materialized nodes in
+/// `dag`'s node order.
+pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consumer>> {
+    let materialized: Vec<PhysicalASAPNodeId> = dag
+        .nodes
+        .iter()
+        .filter(|n| n.materialization != Materialization::NotMaterialized)
+        .map(|n| n.id)
+        .collect();
+    let is_materialized: HashSet<PhysicalASAPNodeId> = materialized.iter().copied().collect();
+    let inputs = |id: PhysicalASAPNodeId| {
+        dag.edges
+            .iter()
+            .filter(move |e| e.consumer == id)
+            .map(|e| e.producer)
+    };
+    let walks = query_starts(dag)
+        .into_iter()
+        .enumerate()
+        .map(|(query, start)| (Consumer::Query(query), start))
+        .chain(
+            materialized
+                .iter()
+                .map(|&id| (Consumer::Materialized(id), inputs(id).collect())),
+        );
+    let mut consumers: HashMap<_, Vec<Consumer>> = HashMap::new();
+    for (consumer, start) in walks {
+        let mut seen = HashSet::new();
+        let mut stack: Vec<PhysicalASAPNodeId> = start;
+        while let Some(id) = stack.pop() {
+            if is_materialized.contains(&id) || !seen.insert(id) {
+                continue;
+            }
+            consumers.entry(id).or_default().push(consumer);
+            stack.extend(inputs(id));
+        }
+    }
+    consumers
+}
+
 /// How often each node of `dag` is computed: `(multiplier, per_second)`
 /// (module doc, "Cost model"). A materialized node is computed once for all
 /// its readers: once per second at ingestion time (`MatAtIngestion`), at
@@ -288,7 +341,7 @@ pub fn query_starts(dag: &PhysicalASAPDAG) -> Vec<Vec<PhysicalASAPNodeId>> {
 /// kept across evaluations, whose request builds only its newest pane
 /// however many range steps it evaluates. `range_evaluations[q]` is query
 /// `q`'s range evaluation (none when missing). A `NotMaterialized` node is computed once per
-/// consumer that reaches it, at that consumer's rate. A consumer is a query
+/// consumer that reaches it ([`consumers`]), at that consumer's rate. A consumer is a query
 /// (operator or scalar root), at its own rate, or a materialized node, at
 /// that node's rate; a walk stops at the first materialized node it meets,
 /// and a node read several times within one consumer's walk counts once for
@@ -346,33 +399,26 @@ pub fn computations(
         };
         rate_of_materialized.insert(id, rate);
     }
-    // Each consumer's starting nodes and its rate.
-    let mut consumers = Vec::new();
-    for (query, start) in starts.into_iter().enumerate() {
-        let rate = match root_rates.and_then(|rates| rates.get(query)) {
+    // Each query consumer's rate.
+    let mut query_rates = Vec::new();
+    for query in 0..starts.len() {
+        query_rates.push(match root_rates.and_then(|rates| rates.get(query)) {
             Some(&rate) => rate,
             None => evaluation_rate(
                 recurrence.get(query).map(|r| (r, range_of(query))),
                 non_repeating_query_horizon_seconds,
             )?,
-        };
-        consumers.push((start, rate));
-    }
-    for (&id, &rate) in &rate_of_materialized {
-        consumers.push((inputs(id).collect(), rate));
+        });
     }
     let mut count: HashMap<_, (u64, f64)> = HashMap::new();
-    for (start, rate) in consumers {
-        let mut seen = HashSet::new();
-        let mut stack: Vec<PhysicalASAPNodeId> = start;
-        while let Some(id) = stack.pop() {
-            if materialized.contains_key(&id) || !seen.insert(id) {
-                continue;
-            }
-            let entry = count.entry(id).or_default();
+    for (id, of_node) in consumers(dag) {
+        let entry = count.entry(id).or_default();
+        for consumer in of_node {
             entry.0 += 1;
-            entry.1 += rate;
-            stack.extend(inputs(id));
+            entry.1 += match consumer {
+                Consumer::Query(query) => query_rates[query],
+                Consumer::Materialized(node) => rate_of_materialized[&node],
+            };
         }
     }
     Ok(dag

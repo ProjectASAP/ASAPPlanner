@@ -74,7 +74,10 @@
 //! longest query reading it, once per evaluation. A query-time
 //! `NotMaterialized` node's working memory (a sketch being built, an exact
 //! aggregate's values) is charged once per consumer that recomputes it:
-//! its bytes times each reading query's latency, at that query's rate.
+//! for a query, its bytes times that query's latency, at its rate; for a
+//! materialized node reading it (directly or through other
+//! `NotMaterialized` nodes), its bytes times the latency of the longest
+//! query reading that node, at the node's rate, as a `MatAtQuery` state is.
 //! A `MatAtQueryKeptAcrossEvaluations` tumbling-pane chain (#509 Example
 //! 4's B3, offered by Stage 2 when the deployment keeps query-time results,
 //! `DeploymentCapabilities::query_time_results_retained`) is kept across

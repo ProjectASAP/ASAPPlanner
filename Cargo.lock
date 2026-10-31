@@ -294,6 +294,8 @@ name = "asap-cost"
 version = "0.1.0"
 dependencies = [
  "asap-executor",
+ "asap-logical-asap-optimization",
+ "asap-physical-asap-optimization",
  "asap-types",
  "asap_sketchlib",
  "serde",
