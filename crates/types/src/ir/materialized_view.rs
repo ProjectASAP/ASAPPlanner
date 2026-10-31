@@ -18,10 +18,13 @@
 //! before it. A runtime refreshes a view once all of its inputs are
 //! complete: each raw-data window's samples have arrived (sealed) and each
 //! view it reads is refreshed. It compiles the DAG with the executor for
-//! that view's node, with each view it reads as a materialized view slot
-//! and raw data read by `Source` at each `Scan`. It refreshes the view in an
-//! ingestion run ([`MaterializedViewRefresh::AtIngestion`]) or in the query
-//! run of the evaluation that first reads it
+//! that view's node (for a view refreshed at ingestion, together with the
+//! rest of its refresh group, below), with each view it reads that the run
+//! does not refresh as a materialized view slot and raw data read by
+//! `Source` at each `Scan`. It
+//! refreshes the view in an ingestion run
+//! ([`MaterializedViewRefresh::AtIngestion`]) or in the query run of the
+//! evaluation that first reads it
 //! ([`MaterializedViewRefresh::OnFirstRead`]), keeps the result, and binds
 //! it the same way wherever the DAG reads that node. An ingestion run over
 //! `(window_start_ms, window_end_ms]` refreshes the windows ending at
@@ -34,6 +37,21 @@
 //! refused ([`InstallableDagError::IngestionBuildReadsWindowsOfDifferentOffsets`]).
 //! A query run binds the views it reaches from the roots without passing
 //! another view; a view only other views read is read through them.
+//!
+//! ## Refresh groups
+//!
+//! Views refreshed in an ingestion run are refreshed by **refresh group**:
+//! the views whose windows have one width `W` and end at one offset `p`
+//! modulo `W` (their **refresh window**; a view with an unbounded window is
+//! a group of its own). A runtime refreshes a group with one ingestion run
+//! per window `(e - W, e]`, `e ≡ p (mod W)`. The run's roots are the views of
+//! the group whose state for the window ending at `e` is not stored yet: in
+//! steady state the newest pane of each chain, since older panes are the
+//! same states, stored by earlier runs. A view of the group that a root
+//! reads is computed in the run; views of other groups are materialized
+//! view slots. A node several roots share runs once per run, so a `Scan`
+//! below a KLL pane chain and a DDSketch pane chain of equal pane width
+//! reads each pane's raw data once.
 //!
 //! Each view's `coverage` says what its stored state is: a stable id of its
 //! definition (what it computes) and its selection (which rows went in,
