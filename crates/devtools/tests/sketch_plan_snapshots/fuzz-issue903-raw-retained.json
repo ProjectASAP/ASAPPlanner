@@ -30,14 +30,14 @@
       }
     ],
     "cost": {
-      "cost_per_second": 1.86933125237e-9,
+      "cost_per_second": 1.8693312527e-9,
       "cost_unit": "cost_per_second",
       "cpu_core_seconds_per_second": 0.000166,
       "per_node": {
         "0": {
-          "cost_per_second": 9.44496004969e-10,
+          "cost_per_second": 9.444960053e-10,
           "cpu_core_seconds_per_second": 0.000084,
-          "detail": "scan 200000 samples; x 0.1000/s; keeps 6400000 bytes of raw data on disk; holds 32 bytes for 1.3 ms",
+          "detail": "scan 200000 samples; x 0.1000/s; keeps 6400000 bytes of raw data on disk; holds 32 bytes for 1.4 ms",
           "multiplier": 1,
           "operator": "Scan",
           "price_source": "analytical",
@@ -91,7 +91,7 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 2458.088352,
+        "average_memory_bytes": 2458.08864,
         "cpu_ops_per_second": 102000.0,
         "disk_bytes": 6400000,
         "latency_per_query": [
@@ -277,8 +277,8 @@
                       "algorithm": "Kll",
                       "params": {
                         "Kll": {
-                          "failure_probability": 0.001,
-                          "k": 345
+                          "failure_probability": 1e-7,
+                          "k": 567
                         }
                       }
                     },
@@ -654,8 +654,8 @@
                       "algorithm": "Kll",
                       "params": {
                         "Kll": {
-                          "failure_probability": 0.001,
-                          "k": 345
+                          "failure_probability": 1e-7,
+                          "k": 567
                         }
                       }
                     },
@@ -697,8 +697,8 @@
                       "algorithm": "Kll",
                       "params": {
                         "Kll": {
-                          "failure_probability": 0.001,
-                          "k": 345
+                          "failure_probability": 1e-7,
+                          "k": 567
                         }
                       }
                     },
@@ -730,8 +730,8 @@
                 "kind": "sketch_evaluation",
                 "params": {
                   "Kll": {
-                    "failure_probability": 0.001,
-                    "k": 345
+                    "failure_probability": 1e-7,
+                    "k": 567
                   }
                 },
                 "query": "Quantile { q: 0.9 }"
@@ -742,11 +742,11 @@
               "accuracy_scope": "per_value",
               "error": {
                 "op": "constant",
-                "value": 0.00999536643866
+                "value": 0.00998173834561
               },
               "failure_probability": {
                 "op": "constant",
-                "value": 0.001
+                "value": 1e-7
               }
             }
           },
@@ -814,8 +814,8 @@
                 "kind": "sketch_evaluation",
                 "params": {
                   "Kll": {
-                    "failure_probability": 0.001,
-                    "k": 345
+                    "failure_probability": 1e-7,
+                    "k": 567
                   }
                 },
                 "query": "Quantile { q: 0.9 }"
@@ -826,11 +826,11 @@
               "accuracy_scope": "per_value",
               "error": {
                 "op": "constant",
-                "value": 0.00999536643866
+                "value": 0.00998173834561
               },
               "failure_probability": {
                 "op": "constant",
-                "value": 0.001
+                "value": 1e-7
               }
             }
           },

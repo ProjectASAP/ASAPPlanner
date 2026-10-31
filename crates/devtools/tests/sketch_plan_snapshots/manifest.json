@@ -18,7 +18,8 @@
       "id": "shared-quantiles-1h-mvp",
       "covers": "two queries share one DDSketch pane chain (q0.5 and q0.9 over 1 h)",
       "workload": "tools/dag-viewer/memo-examples/promql/rangeheavy-t5-q05-q09-1h.json",
-      "deployment": "mvp"
+      "deployment": "mvp",
+      "deadline_reached_reason": "the MILP stalls numerically (lower bound about 8e-7 relative below the cost) and reports deadline_reached; the plan and cost are the same as when it was proven optimal"
     },
     {
       "id": "nested-windows-15m-1h-mvp",
@@ -36,7 +37,8 @@
       "id": "quantile-single-mvp",
       "covers": "single quantile with an accuracy target selects a KLL pane chain",
       "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/quantile-single.json",
-      "deployment": "mvp"
+      "deployment": "mvp",
+      "deadline_reached_reason": "the MILP stalls numerically (lower bound about 8e-7 relative below the cost) and reports deadline_reached; the plan and cost are the same as when it was proven optimal"
     },
     {
       "id": "quantile-grouped-mvp",

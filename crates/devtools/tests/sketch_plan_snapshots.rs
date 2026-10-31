@@ -22,7 +22,11 @@
 //! each), so a search that stops at a budget, of time or of evaluations, can
 //! select a different plan on a slower machine. Only a search that proves its
 //! plan optimal is independent of speed, so every workload must end with
-//! status `optimal`; any other status fails instead of being recorded. Each
+//! status `optimal` and no pane width left unsearched; any other ending
+//! fails instead of being recorded. A workload with a
+//! `deadline_reached_reason` in the manifest may instead end with status
+//! `deadline_reached` (no pane width left unsearched); its snapshot records
+//! that status, so the plan, cost and status must still match. Each
 //! kept workload gave the same plan in three runs and on one core.
 //! Workloads whose search stops at a budget (the raw-retained memo examples,
 //! full random-mixed workloads, three or more quantile queries over 10,000
@@ -34,7 +38,8 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 
 use super::{
-    first_difference, first_differing_path, hit_time_limit, plan_snapshot, rounded, stage_pipeline,
+    first_difference, first_differing_path, hit_time_limit, plan_snapshot, proven_optimal, rounded,
+    search_status, stage_pipeline,
 };
 
 fn repository_root() -> PathBuf {
@@ -90,7 +95,7 @@ fn snapshot_of(document: &Value) -> Value {
         .map(|query| query["text"].clone())
         .collect();
     snapshot.insert("queries".into(), Value::Array(queries));
-    let status = &document["stage3_plan_selection"]["search"]["candidate_connections"]["status"];
+    let status = search_status(document);
     if !status.is_null() {
         snapshot.insert("search_status".into(), status.clone());
     }
@@ -141,13 +146,18 @@ fn sketch_plans_match_snapshots() {
             ));
             continue;
         }
-        let status =
-            &document["stage3_plan_selection"]["search"]["candidate_connections"]["status"];
-        if status != "optimal" {
+        // A `deadline_reached_reason` accepts a search that ended at its
+        // deadline after every pane width; plan and cost are still compared.
+        let deadline_accepted = entry.get("deadline_reached_reason").is_some()
+            && search_status(&document) == "deadline_reached"
+            && document["planning_report"]["pane_widths_pending"] != json!(true);
+        if !proven_optimal(&document) && !deadline_accepted {
             failures.push(format!(
-                "{id}: the search ended with status {status}, not optimal, so a \
-                 round's wall-clock budget may have chosen its plan; drop the \
-                 workload or make it smaller"
+                "{id}: the plan is not proven optimal (status {}, pane widths \
+                 pending {}), so a round's budget may have chosen it; drop the \
+                 workload or make it smaller",
+                search_status(&document),
+                document["planning_report"]["pane_widths_pending"]
             ));
             continue;
         }
@@ -222,13 +232,12 @@ fn snapshot_keeps_the_queries_and_search_status() {
         "accuracy_guarantees": "enforced",
         "workload": {"queries": [{"text": "q1"}, {"text": "q2"}]},
         "stage2_physical_asap_optimization": {"candidates": [
-            {"id": "plan-1", "display_name": "plan A", "dag": {"nodes": [1]}},
+            {"id": "P1", "display_name": "plan A", "dag": {"nodes": [1]}},
         ]},
         "stage3_plan_selection": {
-            "selected": "plan-1",
-            "costs": {"plan-1": {"cost_per_second": 0.1 + 0.2}},
-            "accepted": {"plan-1": []},
-            "search": {"candidate_connections": {"status": "optimal", "solver_ms": 1.5}},
+            "cost": {"cost_per_second": 0.1 + 0.2},
+            "accepted_accuracy_per_query": [],
+            "search_report": {"status": "optimal", "solver_ms": 1},
         },
     });
     let snapshot = snapshot_of(&document);

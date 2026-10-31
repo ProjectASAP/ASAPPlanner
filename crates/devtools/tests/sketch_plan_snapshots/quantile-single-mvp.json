@@ -1145,11 +1145,11 @@
   "pane_retention_ms": {
     "1": 300000
   },
-  "proven_optimal": true,
+  "proven_optimal": false,
   "queries": [
     "quantile_over_time(0.99, data[5m])"
   ],
-  "search_status": "optimal",
+  "search_status": "deadline_reached",
   "selected": {
     "accepted": [
       {
@@ -1304,7 +1304,8 @@
                       "algorithm": "Kll",
                       "params": {
                         "Kll": {
-                          "k": 52
+                          "failure_probability": 0.00003,
+                          "k": 86
                         }
                       }
                     },
@@ -1361,7 +1362,8 @@
                       "algorithm": "Kll",
                       "params": {
                         "Kll": {
-                          "k": 52
+                          "failure_probability": 0.00003,
+                          "k": 86
                         }
                       }
                     },
@@ -1576,7 +1578,8 @@
                       "algorithm": "Kll",
                       "params": {
                         "Kll": {
-                          "k": 52
+                          "failure_probability": 0.00003,
+                          "k": 86
                         }
                       }
                     },
@@ -1618,7 +1621,8 @@
                       "algorithm": "Kll",
                       "params": {
                         "Kll": {
-                          "k": 52
+                          "failure_probability": 0.00003,
+                          "k": 86
                         }
                       }
                     },
@@ -1665,7 +1669,8 @@
                       "algorithm": "Kll",
                       "params": {
                         "Kll": {
-                          "k": 52
+                          "failure_probability": 0.00003,
+                          "k": 86
                         }
                       }
                     },
@@ -1712,11 +1717,12 @@
             "provenance": [
               {
                 "algorithm": "Kll",
-                "contract": "apache_datasketches_kll_empirical_99_a9b42755072b",
+                "contract": "apache_datasketches_kll_empirical_99_delta_scaled_a9b42755072b",
                 "kind": "sketch_evaluation",
                 "params": {
                   "Kll": {
-                    "k": 52
+                    "failure_probability": 0.00003,
+                    "k": 86
                   }
                 },
                 "query": "Quantile { q: 0.99 }"
@@ -1727,11 +1733,11 @@
               "accuracy_scope": "per_value",
               "error": {
                 "op": "constant",
-                "value": 0.0492608422138
+                "value": 0.0489371726995
               },
               "failure_probability": {
                 "op": "constant",
-                "value": 0.01
+                "value": 0.00003
               }
             }
           },
@@ -1795,11 +1801,12 @@
             "provenance": [
               {
                 "algorithm": "Kll",
-                "contract": "apache_datasketches_kll_empirical_99_a9b42755072b",
+                "contract": "apache_datasketches_kll_empirical_99_delta_scaled_a9b42755072b",
                 "kind": "sketch_evaluation",
                 "params": {
                   "Kll": {
-                    "k": 52
+                    "failure_probability": 0.00003,
+                    "k": 86
                   }
                 },
                 "query": "Quantile { q: 0.99 }"
@@ -1810,11 +1817,11 @@
               "accuracy_scope": "per_value",
               "error": {
                 "op": "constant",
-                "value": 0.0492608422138
+                "value": 0.0489371726995
               },
               "failure_probability": {
                 "op": "constant",
-                "value": 0.01
+                "value": 0.00003
               }
             }
           },

@@ -2285,12 +2285,12 @@
   "pane_retention_ms": {
     "1": 3600000
   },
-  "proven_optimal": true,
+  "proven_optimal": false,
   "queries": [
     "quantile_over_time(0.5, data[1h])",
     "quantile_over_time(0.9, data[1h])"
   ],
-  "search_status": "optimal",
+  "search_status": "deadline_reached",
   "selected": {
     "accepted": [
       {
