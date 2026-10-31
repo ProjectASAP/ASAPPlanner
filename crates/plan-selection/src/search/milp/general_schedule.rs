@@ -67,7 +67,9 @@ pub(super) fn encode(
     }
     // Per node, its demands `(used, rate, holder)`: a materialized node's own
     // executions, and an unmaterialized node's per consumer, each held for
-    // its holder's lifetime.
+    // its holder's lifetime; the consumers maintained at ingestion of one
+    // refresh window share one ingestion run, one demand used when any of
+    // them uses the node.
     let mut demands: Vec<Vec<(Variable, f64, Holder)>> = materialized
         .iter()
         .enumerate()
@@ -78,6 +80,9 @@ pub(super) fn encode(
                 .collect()
         })
         .collect();
+    // Per (node, refresh window), the uses of the node by that window's
+    // consumers, and one of them, whose lifetime holds the run's result.
+    let mut runs: BTreeMap<(usize, RefreshWindow), (Vec<Variable>, usize)> = BTreeMap::new();
     for flow in boundary_flows(
         graph,
         profile,
@@ -102,14 +107,28 @@ pub(super) fn encode(
             } else {
                 let consumer = flow.boundary - queries;
                 for (used, rate) in &materialized[consumer] {
-                    demands[id].push((
-                        both(variables, constraints, reached, *used),
-                        *rate,
-                        Holder::Node(consumer),
-                    ));
+                    let use_of_node = both(variables, constraints, reached, *used);
+                    match profile.nodes[consumer].refresh_window {
+                        Some(window) => runs
+                            .entry((id, window))
+                            .or_insert_with(|| (Vec::new(), consumer))
+                            .0
+                            .push(use_of_node),
+                        None => demands[id].push((use_of_node, *rate, Holder::Node(consumer))),
+                    }
                 }
             }
         }
+    }
+    // One ingestion run per (node, refresh window), at the ingestion rate:
+    // used when any consumer of the window uses the node (minimization keeps
+    // it at the largest use).
+    for ((id, _), (uses, consumer)) in runs {
+        let run = variables.add(variable().min(0).max(1));
+        for use_of_node in uses {
+            constraints.push(constraint!(run >= use_of_node));
+        }
+        demands[id].push((run, 1.0, Holder::Node(consumer)));
     }
     let mut objective = Expression::from(profile.request_cost / divisor);
     let mut retained = BTreeMap::<&str, Vec<(usize, f64)>>::new();

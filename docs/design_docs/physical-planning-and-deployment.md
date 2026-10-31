@@ -619,9 +619,15 @@ ingestion run per window `(e - W, e]`, `e ≡ p (mod W)`:
 
 The refresh window is derived from the DAG alone (time ranges, shifts and pane
 widths), like the views and their retention. Sealing, lateness, threading and
-the alignment of the window grid stay the deployment's. A runtime that
-splits a group (for example, because its sources seal at different times)
-computes the same states with more runs.
+the alignment of the window grid stay the deployment's.
+
+Stage 3's cost assumes this grouping (`asap_cost::execution_demand::computations`):
+a stateless ingestion-time node is charged once per refresh window of the
+views above it, not once per view. A runtime that splits a group (for
+example, because its sources seal at different times) computes the same
+states at a higher cost than priced, the same status pane reuse has. A
+runtime that updates states sample by sample passes each sample once
+whatever the windows, so it runs cheaper than priced.
 
 ### Running example
 
