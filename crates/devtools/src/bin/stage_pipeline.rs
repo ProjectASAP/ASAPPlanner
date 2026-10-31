@@ -72,8 +72,12 @@
 //     accepted regardless of guarantee, `accepted_regardless_of_guarantee`,
 //     `guarantee_check_rejection`, the sketches read and a one-line summary),
 //     `pruned_candidates` and `search_report` (`SearchReport`: `status`,
-//     `cost_lower_bound_per_second`, MILP size and timings); `error` when no
-//     plan was selected. `tumbling_window_retention_ms` maps each tumbling-window chain the
+//     `cost_lower_bound_per_second`, MILP size and timings, and
+//     `inexact_objective` when the new search's objective and `plan_cost`
+//     differ over terms the MILP encodes inexactly). With the environment
+//     variable `ASAP_STAGE3_SEARCH=milp`, Stage 3 runs #1095's selection MILP
+//     instead of the old engine (until it becomes the default); `error` when no
+//     plan was selected. `tumbling_window_retention_ms` maps each pane chain the
 //     selected plan keeps beyond one evaluation (by node id in `P1`) to how
 //     far back the runtime must keep its tumbling windows (`RealizedPlan::tumbling_window_retention_ms`).
 //     `materialized_views` are the selected plan's materialized views as
