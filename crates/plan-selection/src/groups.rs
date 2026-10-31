@@ -724,8 +724,9 @@ pub(crate) fn ingestion_pipeline(
 /// Each ingestion-time shareable candidate's refresh window, as
 /// `asap_cost::execution_demand::computations` computes it on the realized
 /// plan ([`PhysicalASAPDAG::refresh_windows`]): on the DAG of the candidates
-/// below it, each input read from its first producer candidate (the
-/// candidates of one memo group read one window).
+/// below it, each input read from its first producer candidate. That is
+/// exact when the producer candidates of each input read one window, which
+/// is debug-asserted ([`producer_window_disagreements`]).
 fn refresh_windows(
     physical: &PhysicalASAPMemoCandidates,
     links: &CandidateLinks,
@@ -737,25 +738,71 @@ fn refresh_windows(
                 && physical.candidates[class.0].timing == ExecutionTiming::IngestionTime
         })
         .collect();
+    let dag = dag_below(physical, links, &views);
+    debug_assert!(
+        producer_window_disagreements(links, &dag).is_empty(),
+        "producer candidates of one input read different windows: {:?}",
+        producer_window_disagreements(links, &dag)
+    );
+    dag.refresh_windows(views.iter().map(|view| view.0))
+        .into_iter()
+        .map(|(id, window)| (PhysicalCandidateId(id), window))
+        .collect()
+}
+
+/// The DAG of `tops` and every candidate below them, without edges: each
+/// candidate a node ([`catalog_node`]) whose inputs are its first producer
+/// candidates.
+fn dag_below(
+    physical: &PhysicalASAPMemoCandidates,
+    links: &CandidateLinks,
+    tops: &[PhysicalCandidateId],
+) -> PhysicalASAPDAG {
     let mut nodes = Vec::new();
     let mut seen = HashSet::new();
-    let mut stack = views.clone();
+    let mut stack = tops.to_vec();
     while let Some(class) = stack.pop() {
         if seen.insert(class) {
             nodes.push(catalog_node(physical, links, class));
-            stack.extend(
-                links.producers_per_input[class.0]
-                    .iter()
-                    .filter_map(|producers| producers.first()),
-            );
+            stack.extend(links.producers_per_input[class.0].iter().flatten());
         }
     }
     let nodes: Vec<&PhysicalASAPDAGNode> = nodes.iter().collect();
     nodes_dag(&nodes)
-        .refresh_windows(views.iter().map(|view| view.0))
-        .into_iter()
-        .map(|(id, window)| (PhysicalCandidateId(id), window))
-        .collect()
+}
+
+/// The `(candidate, input)` pairs of `dag`'s candidates
+/// ([`dag_below`]) whose producer candidates have different view windows
+/// ([`PhysicalASAPDAG::view_windows`]).
+fn producer_window_disagreements(
+    links: &CandidateLinks,
+    dag: &PhysicalASAPDAG,
+) -> Vec<(PhysicalCandidateId, usize)> {
+    let windows = dag.view_windows(dag.nodes.iter().map(|node| node.id));
+    let mut disagreements = Vec::new();
+    for node in &dag.nodes {
+        for (input, producers) in links.producers_per_input[node.id].iter().enumerate() {
+            let mut read = producers.iter().map(|producer| windows[&producer.0]);
+            if let Some(first) = read.next() {
+                if read.any(|window| window != first) {
+                    disagreements.push((PhysicalCandidateId(node.id), input));
+                }
+            }
+        }
+    }
+    disagreements
+}
+
+/// [`producer_window_disagreements`] over every candidate of `physical`.
+#[cfg(test)]
+pub(crate) fn producer_window_disagreements_of_all(
+    physical: &PhysicalASAPMemoCandidates,
+) -> Vec<(PhysicalCandidateId, usize)> {
+    let links = CandidateLinks::new(physical);
+    let all: Vec<PhysicalCandidateId> = (0..physical.candidates.len())
+        .map(PhysicalCandidateId)
+        .collect();
+    producer_window_disagreements(&links, &dag_below(physical, &links, &all))
 }
 
 /// One execution context and the candidates that may give a result in it.

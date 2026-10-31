@@ -909,3 +909,189 @@ fn kept_builds_match_fresh_builds_of(roots: Vec<QueryRoot>) -> MilpInputs {
     assert_eq!(kept.accuracy_excluded_pairs, fresh.accuracy_excluded_pairs);
     kept
 }
+
+// ---------------------------------------------------------------------------
+// Ingestion pipelines per refresh window
+// ---------------------------------------------------------------------------
+
+/// Ingestion-time views of metric `m`, each read by its own query:
+/// - candidates 2 and 3: a KLL and a DDSketch over `TimeRange(10 s)` (one
+///   refresh window, (10 s, 0));
+/// - 5: a KLL over `TimeRange(60 s)`, window (60 s, 0);
+/// - 8: a KLL over `TimeRange(10 s)` over `TimeShift(5 s)`, window
+///   (10 s, 5 s), through two `NotMaterialized` ingestion-time nodes;
+/// - 9: a KLL over the whole scan, an unbounded window.
+///
+/// Candidates 0, 1, 4, 6 and 7 (the scan, ranges and shift) are
+/// `NotMaterialized` at ingestion time; 10–14 are the query-time readers.
+fn ingestion_views_of_three_windows_and_an_unbounded_one() -> PhysicalASAPMemoCandidates {
+    use asap_types::ir::operator::{Reduction, Source, TimeShift};
+    use asap_types::ir::scalar::ColumnRef;
+    use asap_types::ir::schema::{GroupingStrategy, SketchKind, SketchParams, SummaryUpdate};
+    use asap_types::ir::TimeRangeKind;
+    use std::time::Duration;
+    let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::TimeSeries { metric: "m".into() },
+        predicates: vec![],
+        schema: Schema::with_time_index(
+            vec![
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("value", DataType::Float64, false),
+                Field::plain("job", DataType::Utf8, true),
+            ],
+            0,
+            vec![],
+        ),
+    }))
+    .unwrap();
+    let range = |seconds: u64, child: &Rc<OperatorNode>| {
+        OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(seconds),
+            kind: TimeRangeKind::Range,
+            child: Rc::clone(child),
+        }))
+        .unwrap()
+    };
+    let sketch = |algorithm: SketchAlgorithm, child: &Rc<OperatorNode>| {
+        let params = match algorithm {
+            SketchAlgorithm::Kll => SketchParams::Kll {
+                k: 200,
+                failure_probability: None,
+            },
+            _ => SketchParams::DDSketch { alpha: 0.01 },
+        };
+        OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+            child: Rc::clone(child),
+            family: FieldDataType::Sketch(SketchKind::new(algorithm, params), Default::default()),
+            input: SummaryUpdate::column(ColumnRef::Named("value".into())),
+            reduction: Reduction::by(vec![2]),
+            grouping: GroupingStrategy::default(),
+            filter: None,
+        }))
+        .unwrap()
+    };
+    let range_10s = range(10, &scan);
+    let range_60s = range(60, &scan);
+    let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
+        shift: TimeShift {
+            offset_ms: 5_000,
+            at: None,
+        },
+        child: Rc::clone(&scan),
+    }))
+    .unwrap();
+    let range_10s_shifted = range(10, &shifted);
+    let views = [
+        sketch(SketchAlgorithm::Kll, &range_10s),
+        sketch(SketchAlgorithm::DDSketch, &range_10s),
+        sketch(SketchAlgorithm::Kll, &range_60s),
+        sketch(SketchAlgorithm::Kll, &range_10s_shifted),
+        sketch(SketchAlgorithm::Kll, &scan),
+    ];
+    let mut nodes = vec![
+        (scan, 0),
+        (range_10s, 1),
+        (views[0].clone(), 2),
+        (views[1].clone(), 3),
+        (range_60s, 4),
+        (views[2].clone(), 5),
+        (shifted, 6),
+        (range_10s_shifted, 7),
+        (views[3].clone(), 8),
+        (views[4].clone(), 9),
+    ];
+    let at_ingestion = |node: usize, producers: &[&[usize]], view: bool| PhysicalCandidate {
+        timing: ExecutionTiming::IngestionTime,
+        materialization: if view {
+            Materialization::MatAtIngestion(Medium::Memory)
+        } else {
+            Materialization::NotMaterialized
+        },
+        ..candidate(node, producers, false)
+    };
+    let mut candidates = vec![
+        at_ingestion(0, &[], false),
+        at_ingestion(1, &[&[0]], false),
+        at_ingestion(2, &[&[1]], true),
+        at_ingestion(3, &[&[1]], true),
+        at_ingestion(4, &[&[0]], false),
+        at_ingestion(5, &[&[4]], true),
+        at_ingestion(6, &[&[0]], false),
+        at_ingestion(7, &[&[6]], false),
+        at_ingestion(8, &[&[7]], true),
+        at_ingestion(9, &[&[0]], true),
+    ];
+    let mut roots = Vec::new();
+    for (index, view) in [2, 3, 5, 8, 9].into_iter().enumerate() {
+        let group = 10 + index as u32;
+        nodes.push((reader_of(&nodes[view].0), group));
+        candidates.push(candidate(10 + index, &[&[view]], true));
+        roots.push(root(group));
+    }
+    catalog(nodes, candidates, roots)
+}
+
+// One `I_r` per refresh window: the two views over `TimeRange(10 s)` share
+// one; the 60 s view and the shifted 10 s view (window (10 s, 5 s), through
+// a `NotMaterialized` shift and range) have their own; the unbounded view
+// gets an `Alone` one. Each `I_r` holds the scan and the stateless nodes
+// below its views, and each view's context reads across into its `I_r`.
+#[test]
+fn execution_contexts_have_one_ingestion_pipeline_per_refresh_window() {
+    let physical = ingestion_views_of_three_windows_and_an_unbounded_one();
+    let links = CandidateLinks::new(&physical);
+    let alive = vec![true; physical.candidates.len()];
+    let windows = refresh_windows(&physical, &links);
+    let window = |width_ms, phase_ms| RefreshWindow { width_ms, phase_ms };
+    assert_eq!(
+        windows,
+        HashMap::from([
+            (id(2), Some(window(10_000, 0))),
+            (id(3), Some(window(10_000, 0))),
+            (id(5), Some(window(60_000, 0))),
+            (id(8), Some(window(10_000, 5_000))),
+            (id(9), None),
+        ])
+    );
+    let contexts = execution_contexts(
+        &physical,
+        &links.kind,
+        &producer_candidates_left(&links, &alive),
+        &output_candidates(&physical, &alive),
+        &windows,
+        |_| true,
+    );
+    let ingestion: Vec<(ContextKind, Vec<PhysicalCandidateId>)> = contexts.contexts[5..9]
+        .iter()
+        .map(|context| (context.kind, context.options.clone()))
+        .collect();
+    let pipeline = |width_ms, phase_ms| {
+        ContextKind::Ingestion(IngestionPipeline::Window(window(width_ms, phase_ms)))
+    };
+    assert_eq!(
+        ingestion,
+        vec![
+            (pipeline(10_000, 0), vec![id(0), id(1)]),
+            (pipeline(10_000, 5_000), vec![id(0), id(6), id(7)]),
+            (pipeline(60_000, 0), vec![id(0), id(4)]),
+            (
+                ContextKind::Ingestion(IngestionPipeline::Alone(id(9))),
+                vec![id(0)]
+            ),
+        ]
+    );
+    assert_eq!(
+        contexts.ingestion_context_of_shareable,
+        BTreeMap::from([(id(2), 5), (id(3), 5), (id(5), 7), (id(8), 6), (id(9), 8)])
+    );
+    let shared = contexts.context_of_shareable[&id(8)];
+    assert_eq!(contexts.contexts[shared].options, vec![id(7)]);
+}
+
+// Every producer candidate of every input reads one view window, the
+// assumption behind computing a refresh window from first producers.
+#[test]
+fn producers_of_an_input_read_one_view_window() {
+    let physical = ingestion_views_of_three_windows_and_an_unbounded_one();
+    assert!(producer_window_disagreements_of_all(&physical).is_empty());
+}

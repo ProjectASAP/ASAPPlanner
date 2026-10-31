@@ -637,6 +637,15 @@ fn choice_variables(milp: &mut SelectionMilp<'_>) {
 fn structural_rows(milp: &mut SelectionMilp<'_>) {
     let inputs = milp.inputs;
     let output_refs = output_references(&milp.physical.query_roots);
+    // Per `I_r`, the contexts of the ingestion-time shareable candidates of
+    // refresh window `r`.
+    let mut readers_of_ingestion: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (m, &at) in &inputs.ingestion_context_of_shareable {
+        readers_of_ingestion
+            .entry(at)
+            .or_default()
+            .push(inputs.context_of_shareable[m]);
+    }
     // 1. Coverage.
     milp.builder.scope = Scope::Queries;
     for (reference, (query, _)) in output_refs.iter().enumerate() {
@@ -768,14 +777,9 @@ fn structural_rows(milp: &mut SelectionMilp<'_>) {
             }
             // A candidate of `I_r` is also read by the contexts of the
             // ingestion-time shareable candidates of refresh window `r`.
-            if let ContextKind::Ingestion(_) = data.kind {
-                for (&m, &at) in &inputs.ingestion_context_of_shareable {
-                    if at == context {
-                        let other = inputs.context_of_shareable[&m];
-                        if let Some(&read) = milp.choice[other].get(&option) {
-                            reads += read;
-                        }
-                    }
+            for &other in readers_of_ingestion.get(&context).into_iter().flatten() {
+                if let Some(&read) = milp.choice[other].get(&option) {
+                    reads += read;
                 }
             }
             milp.builder
@@ -1277,7 +1281,7 @@ fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
                             ContextKind::Shared(m) => reach_count(milp, &queries, m).0,
                             ContextKind::Ingestion(_) => {
                                 milp.note_inexact(
-                                    "minimum readers of a candidate of I (forbidden)",
+                                    "minimum readers of a candidate of an I_r (forbidden)",
                                 );
                                 Expression::from(0.0)
                             }
@@ -1338,7 +1342,7 @@ fn reader_constraint_rows(milp: &mut SelectionMilp<'_>) {
                             }
                             ContextKind::Ingestion(_) => {
                                 milp.note_inexact(
-                                    "highest shared materialization in I (forbidden)",
+                                    "highest shared materialization in an I_r (forbidden)",
                                 );
                                 milp.builder
                                     .row("9 reader constraints", constraint!(used <= 0.0));
@@ -1424,7 +1428,7 @@ fn forbid_reach(
                 }
             }
             ContextKind::Ingestion(_) => {
-                milp.note_inexact("a reader constraint on a candidate of I (forbidden)");
+                milp.note_inexact("a reader constraint on a candidate of an I_r (forbidden)");
                 milp.builder
                     .row("9 reader constraints", constraint!(used <= 0.0));
             }
@@ -1623,7 +1627,7 @@ fn accuracy_rows(milp: &mut SelectionMilp<'_>) {
                     None => None,
                 },
                 ContextKind::Ingestion(_) => {
-                    milp.note_inexact("an approximate candidate of I (forbidden)");
+                    milp.note_inexact("an approximate candidate of an I_r (forbidden)");
                     let p = milp.choice[context][&candidate];
                     milp.builder.row("8 accuracy", constraint!(p <= 0.0));
                     None

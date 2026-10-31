@@ -567,7 +567,7 @@ fn a_shared_results_not_materialized_input_runs_once() {
 }
 
 // One ingestion scan read by sketches of two configurations (two quantile
-// targets) runs once in `I` and is costed once.
+// targets) runs once in its `I_r` and is costed once.
 #[test]
 fn one_ingestion_scan_shared_by_two_sketch_configurations_is_charged_once() {
     let fixture = through_stages_with(
@@ -742,6 +742,49 @@ fn ingestion_scans_under_chains_of_two_refresh_windows_are_charged_twice() {
         scans,
         vec![BTreeSet::from([10_000]), BTreeSet::from([60_000])]
     );
+}
+
+// Every producer candidate of every input reads one view window on real
+// Stage 2 output (ingesting, and not), so a refresh window computed from
+// first producers is the realized plan's.
+#[test]
+fn producers_of_an_input_read_one_view_window_through_stages() {
+    let fixtures = [
+        through_stages_with(
+            &[
+                approximate("quantile_over_time(0.5, m[10s])", 10_000, 0.01),
+                approximate("quantile_over_time(0.9, m[5m])", 60_000, 0.05),
+            ],
+            true,
+            true,
+        ),
+        through_stages_with(
+            &[
+                query("sum by (job) (rate(m[1m]))", 30_000),
+                query("sum(increase(m[5m] offset 1m))", 60_000),
+                approximate(
+                    "quantile_over_time(0.5, m[5m]) / quantile_over_time(0.9, m[5m])",
+                    60_000,
+                    0.05,
+                ),
+            ],
+            true,
+            true,
+        ),
+        through_stages(
+            &[
+                query("avg_over_time(m[5m])", 60_000),
+                query("max_over_time(m[1m])", 60_000),
+            ],
+            true,
+        ),
+    ];
+    for fixture in &fixtures {
+        assert_eq!(
+            crate::groups::producer_window_disagreements_of_all(&fixture.physical),
+            Vec::new()
+        );
+    }
 }
 
 // A stateless subtree read by two state nodes of one query evaluation
@@ -1105,7 +1148,7 @@ fn a_widened_scan_reading_its_own_memo_group_plans_exactly() {
     }
 }
 
-// #1095 §5 (3a): queries over two metrics share no candidate, run of `I` or
+// #1095 §5 (3a): queries over two metrics share no candidate, run of an `I_r` or
 // source, so the model splits into one part per metric; solving the parts
 // apart gives the plan and cost of one solve of the whole model.
 #[test]

@@ -486,3 +486,25 @@ fn a_node_above_an_unexpanded_chain_has_the_window_of_its_panes() {
         })
     );
 }
+
+/// A non-chain view (a KLL over `TimeRange(1 min)` shifted 15 s) has the
+/// same refresh window, (60 s, 15 s), on a DAG of its nodes alone (no
+/// edges, what Stage 3 builds from candidates): `view_windows` walks each
+/// operator's inputs.
+#[test]
+fn a_view_has_its_refresh_window_on_a_dag_without_edges() {
+    let view = pane(&scan_m(), 15_000);
+    let mut assignment = MaterializationAssignment::default();
+    assignment.set(&view, Materialization::MatAtIngestion(Medium::Memory));
+    let timed = apply_materialization_timings(&view, &assignment, &mut NodeToTimedNodeCache::new())
+        .unwrap();
+    let mut dag = compile_physical_asap_dag(&timed).unwrap();
+    let view_id = dag.roots[0];
+    let window = Some(RefreshWindow {
+        width_ms: 60_000,
+        phase_ms: 15_000,
+    });
+    assert_eq!(dag.refresh_window(view_id), window);
+    dag.edges.clear();
+    assert_eq!(dag.refresh_window(view_id), window);
+}
