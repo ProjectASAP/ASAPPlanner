@@ -87,8 +87,8 @@ To run it, see [RUNNING.md](RUNNING.md).
   origin when the step's memo lists the candidate; a group a choice does not
   name takes candidate 0). The selected choice is over the last memo step;
   when an earlier step was enumerated, the header says so and only each
-  row's own groups are compared. A row also shows `budget share < 1` when
-  a chosen candidate shares its budget, and, when priced, its cost and
+  row's own groups are compared. A row also shows `accuracy budget parts > 1`
+  when a chosen candidate is sized for a part of its budget, and, when priced, its cost and
   validity (`✗ invalid` with the cause). A row cheaper than the selected
   plan is red; the selected choice says `✓ selected`. Clicking a row draws
   its DAG in the Stage 1 lane; the document holds every listed choice's
@@ -407,7 +407,7 @@ are ignored, `stage_pipeline`'s default.
   `node`, the group's node in `nodes`) and their candidates (`candidate_count`,
   `candidate_count_by_origin`, `candidates_capped`, and the first
   `--max-memo-candidates`, default 64, under `candidates`: `index`,
-  `implements`, `children`, `origin`, `budget_share`, `added`, `label`,
+  `implements`, `children`, `origin`, `accuracy_budget_parts`, `added`, `label`,
   `node`, and `group_of_node`: the `nodes` indices below it that are a
   child group's node, to that group's id); `selected_choice`, the selected plan's
   candidate index per group of the last step (null with

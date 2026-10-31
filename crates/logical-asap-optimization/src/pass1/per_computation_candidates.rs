@@ -24,7 +24,7 @@
 //! - Summary choices here are unsized families. Attaching them to memo
 //!   groups creates sized candidates, one per split of the accuracy budget
 //!   (`CandidateForMemoGroup::accuracy_budget_parts`), each sized for ε, its
-//!   budget share and δ over the values its readers' targets cover; Pass 2
+//!   accuracy budget parts and δ over the values its readers' targets cover; Pass 2
 //!   inherits sizes or takes the strictest shared reader's, and Stage 3 only
 //!   checks.
 //! - Candidates are pruned only when provably unable to meet the accuracy
@@ -612,7 +612,8 @@ impl PerComputationCandidates {
                 };
                 let mut choices = vec![0; self.targets.len()];
                 choices[index] = choice;
-                let Ok(composed) = compose_with_budget_share(&self, &roots, &choices, Some(1))
+                let Ok(composed) =
+                    compose_with_accuracy_budget_parts(&self, &roots, &choices, Some(1))
                 else {
                     continue;
                 };
@@ -1533,7 +1534,7 @@ fn with_raw_data_samples_requirement(
 /// aggregate; several measures are joined back on the group keys. A summary
 /// is sized here for its measure's accuracy requirement; Pass 1 leaves it
 /// unsized; several approximate inputs of one query share its budget
-/// equally ([`budget_shares`]). A measure filter becomes `SummaryAgg.filter`;
+/// equally ([`accuracy_budget_parts_per_measure`]). A measure filter becomes `SummaryAgg.filter`;
 /// `HAVING` is applied as its target records. A sub-DAG shared between roots
 /// stays shared. Every node carries the guarantee `asap_accuracy::propagation::composed_guarantee`
 /// gives it.
@@ -1541,31 +1542,38 @@ pub fn compose_logical_candidate(
     inventory: &PerComputationCandidates,
     choice: &[usize],
 ) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
-    compose_with_budget_share(inventory, &inventory.roots, choice, None)
+    compose_with_accuracy_budget_parts(inventory, &inventory.roots, choice, None)
 }
 
 /// [`compose_logical_candidate`] with every sketch summary sized for one of
-/// `share` equal shares of its measure's budget, whatever the roots
-/// compose: the size a summary gets when it is one of `share` approximate
-/// inputs of a query ([`budget_shares`]). `share` 1 sizes for the whole
-/// budget. The sub-expression memo composes one aggregate alone this way,
-/// once per share its readers may give it.
-pub fn compose_logical_candidate_with_budget_share(
+/// `accuracy_budget_parts` equal parts of its measure's budget, whatever the
+/// roots compose: the size a summary gets when it is one of
+/// `accuracy_budget_parts` approximate inputs of a query
+/// ([`accuracy_budget_parts_per_measure`]). `accuracy_budget_parts` 1 sizes
+/// for the whole budget. The sub-expression memo composes one aggregate
+/// alone this way, once per number of parts its readers may give it.
+pub fn compose_logical_candidate_with_accuracy_budget_parts(
     inventory: &PerComputationCandidates,
     choice: &[usize],
-    share: usize,
+    accuracy_budget_parts: usize,
 ) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
-    compose_with_budget_share(inventory, &inventory.roots, choice, Some(share))
+    compose_with_accuracy_budget_parts(
+        inventory,
+        &inventory.roots,
+        choice,
+        Some(accuracy_budget_parts),
+    )
 }
 
 /// [`compose_logical_candidate`] of `roots` (some of `inventory.roots`),
-/// each summary sized for `budget_share` shares of its budget, or as
-/// [`budget_shares`] splits it when `None`.
-fn compose_with_budget_share(
+/// each summary sized for one of `accuracy_budget_parts` equal parts of its
+/// budget, or as
+/// [`accuracy_budget_parts_per_measure`] splits it when `None`.
+fn compose_with_accuracy_budget_parts(
     inventory: &PerComputationCandidates,
     roots: &[QueryRoot],
     choice: &[usize],
-    budget_share: Option<usize>,
+    accuracy_budget_parts: Option<usize>,
 ) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
     if choice.len() != inventory.targets.len() {
         return Err(PerComputationCandidateError::InvalidChoice);
@@ -1595,11 +1603,11 @@ fn compose_with_budget_share(
         .collect();
     // Each summary is first sized for its measure's whole budget. A query
     // whose value composes several approximate inputs is then composed
-    // again with each sized for an equal share ([`budget_shares`]).
+    // again with each sized for an equal share ([`accuracy_budget_parts_per_measure`]).
     let whole = Sizing::default();
     let composed = compose_roots(roots, &chosen, &pushed_below, &whole)?;
-    let shares = match budget_share {
-        None => budget_shares(&composed, &whole.built.into_inner()),
+    let shares = match accuracy_budget_parts {
+        None => accuracy_budget_parts_per_measure(&composed, &whole.built.into_inner()),
         Some(share) if share > 1 => whole
             .built
             .into_inner()
@@ -1638,7 +1646,7 @@ struct Sizing {
 /// of `n` equal shares of the query's target. A state several queries read
 /// takes the largest `n`. Only states `built` lists (by the measure they
 /// size) are split. Empty when no query composes two approximate inputs.
-fn budget_shares(
+fn accuracy_budget_parts_per_measure(
     roots: &[QueryRoot],
     built: &[(Rc<OperatorNode>, MeasureKey)],
 ) -> HashMap<MeasureKey, usize> {

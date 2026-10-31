@@ -68,7 +68,7 @@ function validateMemoEnumeration(doc) {
       || !entry.roots.every((id) => Number.isInteger(id) && id >= 0 && Array.isArray(memo.nodes) && id < memo.nodes.length)) {
       errors.push(`${where}.roots must index memo.nodes`);
     }
-    ['budget_share_1', 'selected'].forEach((field) => {
+    ['accuracy_budget_parts_1', 'selected'].forEach((field) => {
       if (typeof entry[field] !== 'boolean') errors.push(`${where}.${field} must be true or false`);
     });
     // Present only when the run priced the enumerated DAGs.
@@ -148,7 +148,7 @@ function enumerationView(doc) {
         : 'the selected choice',
       nodes: entry.roots ? memoNodeDag(memo.nodes, entry.roots).nodes.length : null,
       error: entry.roots ? null : entry.error,
-      budgetShare1: entry.budget_share_1,
+      accuracyBudgetParts1: entry.accuracy_budget_parts_1,
       selected: entry.selected,
       priced: 'valid' in entry,
       valid: entry.valid,
@@ -190,7 +190,7 @@ function enumerationRowHtml(row, pressed) {
     row.cheaper ? '<span class="chip cheaper">cheaper than selected</span>' : '',
     row.priced && row.valid === false ? '<span class="chip invalid">✗ invalid</span>' : '',
     row.priced && row.valid === true && !row.selected && !row.cheaper ? '<span class="chip costlier">valid</span>' : '',
-    row.budgetShare1 ? '' : '<span class="chip">budget share &lt; 1</span>',
+    row.accuracyBudgetParts1 ? '' : '<span class="chip">accuracy budget parts &gt; 1</span>',
   ].join('');
   const cost = row.cost === null ? (row.priced ? '—' : '') : String(Number(row.cost.toPrecision(4)));
   return `<li><button type="button" data-id="${esc(row.id)}" aria-pressed="${row.id === pressed}"${row.cheaper ? ' class="cheaper"' : ''}${row.error ? ' disabled' : ''}>` +

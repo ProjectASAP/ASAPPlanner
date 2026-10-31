@@ -5,13 +5,13 @@ use super::reuse::{append_producer, append_reader, eligible, replace};
 use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::state_groups::{direct_input_builds, StateGroupExpansionError};
 use asap_types::ir::{ASAPOp, OperatorNode};
-use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{MemoCandidates, OriginOfCandidateForMemoGroup};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 
 pub(crate) fn factor_summary_results(
-    memo: &mut CandidateMemo,
+    memo: &mut MemoCandidates,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {
     check_generation_deadline(deadline)?;

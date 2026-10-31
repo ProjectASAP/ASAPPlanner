@@ -47,7 +47,7 @@ use asap_planner::{run_planning, MemoSteps, PlanSearchSettings, PlanningModels, 
 use asap_types::ir::schema::{FieldDataType, SketchParams};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use asap_types::stages::{queries_rooted_at, MemoGroupId};
-use asap_types::stages::{CandidateForMemoGroup, CandidateMemo, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{CandidateForMemoGroup, MemoCandidates, OriginOfCandidateForMemoGroup};
 use asap_types::workload::{PlanningWorkload, Query, RepeatedDemand, RepetitionInterval};
 
 const RATIO_OF_QUANTILES: &str = concat!(
@@ -144,7 +144,7 @@ fn memo_steps(run: &PlanningRun) -> &MemoSteps {
         .expect("a planning round recorded its memo within the time budget")
 }
 
-fn candidate_count(memo: &CandidateMemo) -> usize {
+fn candidate_count(memo: &MemoCandidates) -> usize {
     memo.candidates.iter().map(Vec::len).sum()
 }
 
@@ -180,7 +180,7 @@ fn whole_workload_plans(inventory: &PerComputationCandidates) -> Vec<(Vec<usize>
 }
 
 /// `choice`'s DAG, one root per query.
-fn composed(memo: &CandidateMemo, choice: &ChosenCandidatePerMemoGroup) -> Plan {
+fn composed(memo: &MemoCandidates, choice: &ChosenCandidatePerMemoGroup) -> Plan {
     let mut roots = build_logical_asap_dags_from_chosen_candidates(memo, choice)
         .expect("an enumerated choice composes");
     roots.sort_by_key(|(group, _)| {
@@ -192,7 +192,7 @@ fn composed(memo: &CandidateMemo, choice: &ChosenCandidatePerMemoGroup) -> Plan 
 }
 
 fn chosen<'a>(
-    memo: &'a CandidateMemo,
+    memo: &'a MemoCandidates,
     choice: &'a ChosenCandidatePerMemoGroup,
 ) -> impl Iterator<Item = &'a CandidateForMemoGroup> {
     choice

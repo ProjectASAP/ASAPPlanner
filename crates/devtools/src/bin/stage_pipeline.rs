@@ -122,7 +122,7 @@
 // candidates (`candidate_count`, `candidate_count_by_origin`, and the first
 // `--max-memo-candidates` (default 64) under `candidates`, with
 // `candidates_capped`): each with its `index` in the group, `implements`,
-// `children`, `origin` (`OriginOfCandidateForMemoGroup` in snake case), `budget_share`,
+// `children`, `origin` (`OriginOfCandidateForMemoGroup` in snake case), `accuracy_budget_parts`,
 // `added` (not in the group at the step before), a one-line `label`, its
 // `node` in `nodes` and `group_of_node` (the `nodes` indices below it that
 // are a child group's node, to that group's id).
@@ -137,7 +137,7 @@
 // the last step. Each choice has its `id` (`E1`, ...), `choice`, `roots`
 // (`memo::enumeration::build_logical_asap_dags_from_chosen_candidates`'s roots, one per root group, as indices
 // into `nodes`; null with `error` when it does not
-// compose), `budget_share_1` (every chosen candidate sized for the whole
+// compose), `accuracy_budget_parts_1` (every chosen candidate sized for the whole
 // budget) and `selected` (it is `selected_choice`). With
 // `--price-enumerated <n>` (off by default), each of the first `n` listed
 // choices is also run through Stage 2 and the reference pricer, and its
@@ -293,7 +293,7 @@ use asap_types::ir::properties::{default_metric_for_root, AccuracyMetric, Accura
 use asap_types::ir::QueryRoot;
 use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::stages::{queries_rooted_at, MemoGroupId};
-use asap_types::stages::{CandidateMemo, OriginOfCandidateForMemoGroup, PruneReason};
+use asap_types::stages::{MemoCandidates, OriginOfCandidateForMemoGroup, PruneReason};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
     QueryRecurrence, QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand,
@@ -1648,7 +1648,7 @@ fn memo_json(steps: &MemoSteps, caps: &MemoCaps, pricing: &Pricing<'_>) -> Value
         ),
     ];
     let mut table = MemoNodes::default();
-    let mut previous: Option<&CandidateMemo> = None;
+    let mut previous: Option<&MemoCandidates> = None;
     let mut json_steps = Vec::new();
     let mut per_step = serde_json::Map::new();
     // The last step (with candidates) enumerated completely within `enumerated`.
@@ -1696,7 +1696,7 @@ fn memo_json(steps: &MemoSteps, caps: &MemoCaps, pricing: &Pricing<'_>) -> Value
             let mut entry = json!({
                 "id": format!("E{}", index + 1),
                 "choice": choice_json(choice),
-                "budget_share_1": choice.iter().all(|(group, &candidate)| {
+                "accuracy_budget_parts_1": choice.iter().all(|(group, &candidate)| {
                     memo.candidates[group.0 as usize][candidate].accuracy_budget_parts == 1
                 }),
                 "selected": step == "concrete_states" && selected == Some(choice),
@@ -1803,8 +1803,8 @@ impl MemoNodes {
 /// children.
 fn memo_groups_json(
     table: &mut MemoNodes,
-    memo: &CandidateMemo,
-    previous: Option<&CandidateMemo>,
+    memo: &MemoCandidates,
+    previous: Option<&MemoCandidates>,
     max_candidates: usize,
 ) -> Vec<Value> {
     let ids = |groups: &[MemoGroupId]| groups.iter().map(|g| g.0).collect::<Vec<_>>();
@@ -1852,7 +1852,7 @@ fn memo_groups_json(
                             .collect::<Vec<_>>(),
                         "children": ids(&candidate.input_groups),
                         "origin": origin_name(&candidate.origin),
-                        "budget_share": candidate.accuracy_budget_parts,
+                        "accuracy_budget_parts": candidate.accuracy_budget_parts,
                         "added": !earlier.iter().any(|before| {
                             Rc::ptr_eq(&before.root_node, &candidate.root_node)
                                 && before.input_groups == candidate.input_groups

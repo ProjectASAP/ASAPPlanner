@@ -17,10 +17,10 @@ use asap_types::workload::{
 /// Production runs these through
 /// [`generate_logical_asap_memo_candidates`](crate::pass2::logical_memo_candidates::generate_logical_asap_memo_candidates).
 pub fn sharing_rules_and_shared_state_groups(
-    mut memo: asap_types::stages::CandidateMemo,
+    mut memo: asap_types::stages::MemoCandidates,
     domain: crate::pass2::memo::shared_configurations::PaneWidthDomain,
 ) -> Result<
-    asap_types::stages::CandidateMemo,
+    asap_types::stages::MemoCandidates,
     crate::pass2::memo::state_groups::StateGroupExpansionError,
 > {
     crate::pass2::logical_memo_candidates::apply_sharing_rules(&mut memo, domain, None)?;
@@ -33,7 +33,7 @@ pub fn sharing_rules_and_shared_state_groups(
 /// shared build (origin `SharedBuild`); no other group's candidates are
 /// only that.
 pub fn shared_summary_state_groups(
-    memo: &asap_types::stages::CandidateMemo,
+    memo: &asap_types::stages::MemoCandidates,
 ) -> Vec<asap_types::stages::MemoGroupId> {
     memo.candidates
         .iter()

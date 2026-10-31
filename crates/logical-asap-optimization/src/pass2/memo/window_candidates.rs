@@ -8,7 +8,7 @@ use crate::pass2::asap_aware_cse::{pane_candidates, window_composition_pass2_can
 use asap_types::ir::flat::flatten;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::stages::{
-    CandidateForMemoGroup, CandidateMemo as Memo, OriginOfCandidateForMemoGroup,
+    CandidateForMemoGroup, MemoCandidates as Memo, OriginOfCandidateForMemoGroup,
 };
 use asap_types::stages::{MemoGroup, MemoGroupId as GroupId};
 use asap_types::workload::QueryWorkloadEntry;

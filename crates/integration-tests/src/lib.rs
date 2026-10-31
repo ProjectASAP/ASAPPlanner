@@ -347,7 +347,7 @@ pub mod planning {
     pub fn expanded_memo(
         roots: Vec<(usize, QueryRoot)>,
         entries: &[asap_types::workload::QueryWorkloadEntry],
-    ) -> asap_types::stages::CandidateMemo {
+    ) -> asap_types::stages::MemoCandidates {
         use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
         use asap_logical_asap_optimization::pass2::memo::{
             candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
@@ -373,7 +373,7 @@ pub mod planning {
     /// each query's first root group's DAG, every group `choice` does not
     /// name implemented by its first candidate.
     pub fn compose_memo_plan(
-        memo: &asap_types::stages::CandidateMemo,
+        memo: &asap_types::stages::MemoCandidates,
         queries: usize,
         choice: &std::collections::BTreeMap<usize, usize>,
     ) -> Vec<Rc<OperatorNode>> {
@@ -456,7 +456,7 @@ pub mod planning {
     /// alone) candidates `keep` accepts; those of the topmost group (the
     /// fewest child edges below `q`'s root) first.
     pub fn own_choices(
-        memo: &asap_types::stages::CandidateMemo,
+        memo: &asap_types::stages::MemoCandidates,
         q: usize,
         keep: impl Fn(&asap_types::stages::CandidateForMemoGroup) -> bool,
     ) -> Vec<(usize, usize)> {
@@ -512,7 +512,7 @@ pub mod planning {
     /// - `shared{g}`: every query reads the summary state group `g`, its own
     ///   estimate or a regrouping merge of it, when every query can.
     pub fn select_rollup(
-        memo: &asap_types::stages::CandidateMemo,
+        memo: &asap_types::stages::MemoCandidates,
         queries: usize,
         entries: &[asap_types::workload::QueryWorkloadEntry],
         data: &DataWorkload,
