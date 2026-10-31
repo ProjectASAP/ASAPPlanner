@@ -22,7 +22,7 @@ impl EdgeStatistics {
 
 /// Input and output evidence for a unary physical operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UnaryEdgeStatistics {
+pub(crate) struct UnaryEdgeStatistics {
     pub input: EdgeStatistics,
     pub output: EdgeStatistics,
     /// Time-series shape on the same logical edges. This is edge metadata,
@@ -35,7 +35,7 @@ pub struct UnaryEdgeStatistics {
 /// beside its row input: the edge from a `PromqlVectorToScalar` child.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ScalarInputStatistics {
+pub(crate) struct ScalarInputStatistics {
     pub(crate) edge: EdgeStatistics,
     #[serde(default)]
     pub(crate) promql: Option<PromqlEdgeStatistics>,
@@ -44,7 +44,7 @@ pub struct ScalarInputStatistics {
 /// Input and output evidence for a binary physical operator. The input order
 /// is the physical operator's left/right order and must match its DAG children.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BinaryEdgeStatistics {
+pub(crate) struct BinaryEdgeStatistics {
     pub(crate) inputs: [EdgeStatistics; 2],
     pub(crate) output: EdgeStatistics,
     #[serde(default)]
@@ -53,7 +53,7 @@ pub struct BinaryEdgeStatistics {
 
 /// PromQL value shape carried alongside rows/bytes on a physical edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PromqlEdgeStatistics {
+pub(crate) struct PromqlEdgeStatistics {
     pub(crate) series: u64,
     pub(crate) evaluation_steps: u64,
     pub(crate) value_kind: PromqlValueKind,
@@ -70,7 +70,7 @@ pub(crate) enum PromqlValueKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PromqlUnaryEdgeStatistics {
+pub(crate) struct PromqlUnaryEdgeStatistics {
     pub(crate) input: PromqlEdgeStatistics,
     pub(crate) output: PromqlEdgeStatistics,
 }
@@ -82,7 +82,7 @@ pub(crate) struct PromqlBinaryEdgeStatistics {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PromqlNaryEdgeStatistics {
+pub(crate) struct PromqlNaryEdgeStatistics {
     pub(crate) inputs: Vec<PromqlEdgeStatistics>,
     pub(crate) output: PromqlEdgeStatistics,
 }
@@ -91,7 +91,7 @@ pub struct PromqlNaryEdgeStatistics {
 /// The checked sum of these edges must equal the operator input. A global sort
 /// has exactly one partition; an empty input has no partitions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PartitionStatistics {
+pub(crate) struct PartitionStatistics {
     pub partitions: Vec<EdgeStatistics>,
 }
 
@@ -110,7 +110,7 @@ pub struct PartitionStatistics {
 /// of `Option`s.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operator", rename_all = "snake_case", deny_unknown_fields)]
-pub enum OperatorStatistics {
+pub(crate) enum OperatorStatistics {
     Scan {
         edges: UnaryEdgeStatistics,
         /// Physical bytes read from storage, independent of decoded logical
