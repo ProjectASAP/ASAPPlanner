@@ -235,7 +235,7 @@ async fn plan_with_report_for(
     // The models Stages 1-3 read: built-in accuracy, the deployment inputs.
     let models = PlanningModels::builtin()
         .with_deployment_capabilities(capabilities)
-        .with_plan_selection(&settings);
+        .with_cost_inputs(&settings);
     // The one Planner call: the selected plan, ready to install.
     plan_installable(UserInput::new(
         &workload,
@@ -2230,7 +2230,7 @@ async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
         FrontendInput::Promql { histograms: None },
         PlanningModels::builtin()
             .with_deployment_capabilities(&capabilities)
-            .with_plan_selection(&settings)
+            .with_cost_inputs(&settings)
             .with_ignore_accuracy_guarantees(true),
     ))
     .await
@@ -2264,7 +2264,7 @@ async fn plan_p99(
     let settings = CostInputs::default();
     let models = PlanningModels::builtin()
         .with_deployment_capabilities(&capabilities)
-        .with_plan_selection(&settings)
+        .with_cost_inputs(&settings)
         .with_ignore_accuracy_guarantees(ignore_accuracy);
     plan_installable(UserInput::new(
         &workload,
@@ -2492,7 +2492,7 @@ async fn ignoring_guarantees_counter_topk_plans_compile_and_answer_exactly() {
             FrontendInput::Promql { histograms: None },
             PlanningModels::builtin()
                 .with_deployment_capabilities(&capabilities)
-                .with_plan_selection(&settings)
+                .with_cost_inputs(&settings)
                 .with_ignore_accuracy_guarantees(true),
         ))
         .await
@@ -2790,7 +2790,7 @@ async fn plan_ignoring_guarantees(
     let heap_only = heap.map(HeapPlansOnly);
     let models = PlanningModels::builtin()
         .with_deployment_capabilities(&capabilities)
-        .with_plan_selection(&settings)
+        .with_cost_inputs(&settings)
         .with_ignore_accuracy_guarantees(heap.is_none());
     let models = match &heap_only {
         Some(model) => models.with_accuracy(model),

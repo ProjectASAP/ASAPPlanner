@@ -61,7 +61,7 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
     settings.cost_model = CostModel::UsageOverTime(ResourceUnitCost::aws_fargate_us_east_1(
         settings.resource_speed,
     ));
-    let models = PlanningModels::builtin().with_plan_selection(&settings);
+    let models = PlanningModels::builtin().with_cost_inputs(&settings);
     let mut accepted = Vec::new();
     for algorithm in [None, Some(SketchAlgorithm::Hll), Some(SketchAlgorithm::Kmv)] {
         let choices: Vec<_> = generated
@@ -178,7 +178,7 @@ fn production_distinct_rollup_finds_shared_kmv() {
         roots,
         &entries,
         data,
-        PlanningModels::builtin().with_plan_selection(&settings),
+        PlanningModels::builtin().with_cost_inputs(&settings),
         asap_planner::PlanSearchSettings {
             time_limit_ms: Some(30_000),
             inspect: false,

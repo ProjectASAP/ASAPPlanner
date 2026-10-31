@@ -39,7 +39,7 @@ fn display_cost(cost_per_second: f64) -> String {
 /// run or that miss a query's accuracy target or latency bound (or, under
 /// cost model 3, the cluster's capacity), measure the rest's resource
 /// usage per second and choose one under the deployment's cost model
-/// (`models.plan_selection`): the cheapest under cost models 1 and 2, the
+/// (`models.cost_inputs`): the cheapest under cost models 1 and 2, the
 /// best by the cluster objective under cost model 3 (the first on ties). `entries[i]` is the workload
 /// entry of `candidate.roots[i]`: its accuracy target, its latency bound and
 /// how often it is evaluated. Every candidate is kept in the selection
@@ -101,7 +101,7 @@ impl<'a> PlanSelector<'a> {
         keep_every_candidate: bool,
     ) -> Result<Self, ErrorSelectingPlan> {
         models
-            .plan_selection
+            .cost_inputs
             .validate()
             .map_err(ErrorSelectingPlan::InvalidSettings)?;
         Ok(Self {
@@ -111,17 +111,14 @@ impl<'a> PlanSelector<'a> {
             targets: accuracy_targets(entries),
             recurrence: entries.iter().map(|e| e.recurrence.clone()).collect(),
             range_evaluations: entries.iter().map(|e| e.range_evaluation).collect(),
-            ranking: Ranking::of(&models.plan_selection.cost_model),
+            ranking: Ranking::of(&models.cost_inputs.cost_model),
             keep_every_candidate,
             candidates_checked: 0,
             costs: BTreeMap::new(),
             accepted: BTreeMap::new(),
             rejected: Vec::new(),
             kept: Vec::new(),
-            formula_scale: models
-                .plan_selection
-                .frozen_calibration_factor
-                .unwrap_or(1.0),
+            formula_scale: models.cost_inputs.frozen_calibration_factor.unwrap_or(1.0),
         })
     }
 
@@ -133,13 +130,10 @@ impl<'a> PlanSelector<'a> {
     /// the sum to [`Self::set_calibration`] before the first
     /// [`Self::offer`].
     pub fn needs_calibration(&self) -> bool {
-        self.models
-            .plan_selection
-            .frozen_calibration_factor
-            .is_none()
+        self.models.cost_inputs.frozen_calibration_factor.is_none()
             && !self
                 .models
-                .plan_selection
+                .cost_inputs
                 .measured_operation_costs
                 .operators
                 .is_empty()
@@ -171,7 +165,7 @@ impl<'a> PlanSelector<'a> {
             &self.recurrence,
             &self.range_evaluations,
             self.data,
-            self.models.plan_selection,
+            self.models.cost_inputs,
             1.0,
         )
         .map_err(|(node, error)| ErrorSelectingPlan::Cost {
@@ -187,7 +181,7 @@ impl<'a> PlanSelector<'a> {
     pub fn set_calibration(&mut self, fit: CalibrationFit) {
         self.formula_scale = self
             .models
-            .plan_selection
+            .cost_inputs
             .frozen_calibration_factor
             .unwrap_or_else(|| fit.factor());
     }
@@ -231,7 +225,7 @@ impl<'a> PlanSelector<'a> {
             };
         let nodes = node_map(&candidate.dag);
         let kept_chains = kept_pane_chains(&candidate.dag);
-        let settings = self.models.plan_selection;
+        let settings = self.models.cost_inputs;
         let (cost, _) = plan_cost(
             &candidate.dag,
             &nodes,

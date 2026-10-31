@@ -39,7 +39,7 @@ use asap_types::ir::physical_export::PhysicalASAPNodeId;
 static BUILTIN_ACCURACY_MODEL: BuiltinAccuracyModel = BuiltinAccuracyModel;
 static IGNORE_ACCURACY_GUARANTEES: IgnoreAccuracyGuarantees = IgnoreAccuracyGuarantees;
 static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
-static DEFAULT_PLAN_SELECTION: std::sync::LazyLock<CostInputs> =
+static DEFAULT_COST_INPUTS: std::sync::LazyLock<CostInputs> =
     std::sync::LazyLock::new(CostInputs::default);
 static DEFAULT_DEPLOYMENT: std::sync::LazyLock<DeploymentCapabilities> =
     std::sync::LazyLock::new(DeploymentCapabilities::default);
@@ -53,7 +53,7 @@ static DEFAULT_DEPLOYMENT: std::sync::LazyLock<DeploymentCapabilities> =
 /// of `deployment_capabilities`, Stage 2 its retention, and Stage 3
 /// (plan selection) checks each candidate's guarantee with `accuracy` and
 /// `evidence` ([`AccuracyCheckInputs`]) and compares candidates under
-/// `plan_selection` ([`CostInputs`]).
+/// `cost_inputs` ([`CostInputs`]).
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct PlanningModels<'a> {
@@ -65,10 +65,10 @@ pub struct PlanningModels<'a> {
     /// Deployment facts the guarantees need (operand domains, observed
     /// guarantees); [`NoAccuracyEvidence`] by default.
     pub evidence: &'a dyn AccuracyEvidenceProvider,
-    /// The deployment's plan selection settings: the cost model (default
+    /// The deployment's cost inputs: the cost model (default
     /// cost model 1 with illustrative unit costs), the resource speed and
     /// the non-repeating query horizon.
-    pub plan_selection: &'a CostInputs,
+    pub cost_inputs: &'a CostInputs,
     /// What the deployment's executor can run and keep: the summaries it
     /// supports (Stage 1), whether it retains raw data (Stage 3) and
     /// whether it keeps query-time results across evaluations (Stage 2);
@@ -94,7 +94,7 @@ impl<'a> PlanningModels<'a> {
         Self {
             accuracy,
             evidence,
-            plan_selection: &DEFAULT_PLAN_SELECTION,
+            cost_inputs: &DEFAULT_COST_INPUTS,
             deployment_capabilities: &DEFAULT_DEPLOYMENT,
             ignore_accuracy_guarantees: false,
         }
@@ -105,7 +105,7 @@ impl<'a> PlanningModels<'a> {
         PlanningModels {
             accuracy: &BUILTIN_ACCURACY_MODEL,
             evidence: &NO_ACCURACY_EVIDENCE,
-            plan_selection: &DEFAULT_PLAN_SELECTION,
+            cost_inputs: &DEFAULT_COST_INPUTS,
             deployment_capabilities: &DEFAULT_DEPLOYMENT,
             ignore_accuracy_guarantees: false,
         }
@@ -141,10 +141,10 @@ impl<'a> PlanningModels<'a> {
         self
     }
 
-    /// These models with the deployment's plan selection settings (cost
+    /// These models with the deployment's cost inputs (cost
     /// model, resource speed, non-repeating query horizon).
-    pub fn with_plan_selection(mut self, plan_selection: &'a CostInputs) -> Self {
-        self.plan_selection = plan_selection;
+    pub fn with_cost_inputs(mut self, cost_inputs: &'a CostInputs) -> Self {
+        self.cost_inputs = cost_inputs;
         self
     }
 

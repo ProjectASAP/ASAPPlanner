@@ -136,7 +136,7 @@ fn plan_every_candidate(
         &workload.query_workload.entries().collect::<Vec<_>>(),
         workload.data_workload.as_ref().unwrap(),
         &models.accuracy_check_inputs(),
-        models.plan_selection,
+        models.cost_inputs,
     )?;
     let plans = selection
         .plan

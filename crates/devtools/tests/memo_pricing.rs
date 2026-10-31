@@ -98,7 +98,7 @@ fn models<'a>(
     deployment: &'a DeploymentCapabilities,
 ) -> PlanningModels<'a> {
     PlanningModels::builtin()
-        .with_plan_selection(&settings.cost_inputs)
+        .with_cost_inputs(&settings.cost_inputs)
         .with_deployment_capabilities(deployment)
         .with_ignore_accuracy_guarantees(settings.ignore_accuracy_guarantees)
 }

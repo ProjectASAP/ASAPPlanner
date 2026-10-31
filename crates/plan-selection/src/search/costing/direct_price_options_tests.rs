@@ -549,7 +549,7 @@ fn producer_worker_buckets_remain_joint_choices_and_match_evaluator() {
         });
     let context = CandidatePlanningContext {
         models: crate::SelectionModels {
-            plan_selection: &settings,
+            cost_inputs: &settings,
             ..context.models
         },
         ..context

@@ -309,7 +309,7 @@ fn cost(queries: &[String]) -> f64 {
     let settings = CostInputs::default();
     let deployment = w.deployment();
     let models = PlanningModels::builtin()
-        .with_plan_selection(&settings)
+        .with_cost_inputs(&settings)
         .with_deployment_capabilities(&deployment);
     let run = run_search_over(
         roots,

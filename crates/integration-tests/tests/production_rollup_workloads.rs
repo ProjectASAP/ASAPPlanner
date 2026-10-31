@@ -78,7 +78,7 @@ fn production(
         roots,
         entries,
         data,
-        PlanningModels::builtin().with_plan_selection(&settings),
+        PlanningModels::builtin().with_cost_inputs(&settings),
         PlanSearchSettings {
             time_limit_ms: Some(30_000),
             inspect: false,
@@ -256,7 +256,7 @@ fn independent_kll_cost(
     settings.cost_model = CostModel::UsageOverTime(ResourceUnitCost::aws_fargate_us_east_1(
         settings.resource_speed,
     ));
-    let models = PlanningModels::builtin().with_plan_selection(&settings);
+    let models = PlanningModels::builtin().with_cost_inputs(&settings);
     let plan = asap_physical_asap_optimization::test_support::optimize_physical_asap_chosen(
         "independent",
         &roots,

@@ -277,7 +277,7 @@ pub fn run_planning(
         data,
         query_time_results_retained: models.deployment_capabilities.query_time_results_retained,
     };
-    let ranking = PlanRanking::of(&models.plan_selection.cost_model);
+    let ranking = PlanRanking::of(&models.cost_inputs.cost_model);
     let mut best: Option<Round> = None;
     let mut last: Option<Round> = None;
     let mut final_error: Option<SelectionError> = None;
@@ -326,7 +326,7 @@ pub fn run_planning(
         })
     };
     let seed_enabled = has_pane_window
-        && calibration_is_frozen(models.plan_selection)
+        && calibration_is_frozen(models.cost_inputs)
         && remaining() >= SEED_ROUND_MIN_REMAINING;
     if !seed_enabled {
         let end = run_round(
@@ -564,7 +564,7 @@ fn plan_round(
         entries,
         data,
         &models.accuracy_check_inputs(),
-        models.plan_selection,
+        models.cost_inputs,
         realizer,
         deadline,
     );

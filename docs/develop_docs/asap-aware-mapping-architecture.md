@@ -74,7 +74,7 @@ same pipeline behind the `OptimizationPass` trait.
 | The analytical per-operator resource model Stage 3 measures with | `asap-cost`, `analytical.rs` and `operator_statistics.rs` |
 | The accuracy algebra: per-family guarantees, composition, budget split; guarantee propagation through a DAG; sizing a summary for its target, (ε, δ) budget and default sizes | `asap-accuracy` (`AccuracyModel`, `BuiltinAccuracyModel`, `estimators/`, `composition.rs`, `budget.rs`, `propagation.rs`, `sizing.rs`) |
 | What the executor supports (`DeploymentCapabilities`) | `asap-logical-asap-optimization`, `deployment_capabilities.rs`; Pass 1 receives only `supported_summaries` and Stage 2 only `query_time_results_retained` and `raw_data_retained` (`bool` arguments, so Stage 2 does not depend on the Stage 1 crate); Stage 3 reads none of it |
-| The inputs every stage reads (`PlanningModels`: accuracy model, evidence, plan selection settings, deployment capabilities) and the `OptimizationPass` trait | `asap-planner`, `pass.rs`; the facade gives Stage 3 only `AccuracyCheckInputs` and `CostInputs` |
+| The inputs every stage reads (`PlanningModels`: accuracy model, evidence, cost inputs, deployment capabilities) and the `OptimizationPass` trait | `asap-planner`, `pass.rs`; the facade gives Stage 3 only `AccuracyCheckInputs` and `CostInputs` |
 
 The current production search organizes these computations in memo result/state
 groups and jointly selects physical candidates and connections; it does not

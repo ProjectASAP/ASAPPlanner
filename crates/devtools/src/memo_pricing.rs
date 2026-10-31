@@ -88,11 +88,11 @@ pub fn price_choices(
     models: PlanningModels<'_>,
     selected: Option<SelectedBaseline>,
 ) -> Vec<PricedChoice> {
-    let mut settings = models.plan_selection.clone();
+    let mut settings = models.cost_inputs.clone();
     if settings.frozen_calibration_factor.is_none() {
         settings.frozen_calibration_factor = selected.and_then(|s| s.calibration_factor);
     }
-    let models = models.with_plan_selection(&settings);
+    let models = models.with_cost_inputs(&settings);
     let selected_cost = selected.and_then(|s| s.cost_per_second);
     // Which root group each query's operator references name is the same
     // for every choice.
@@ -237,7 +237,7 @@ pub fn reference_select(
         entries,
         data,
         &models.accuracy_check_inputs(),
-        models.plan_selection,
+        models.cost_inputs,
     )
 }
 

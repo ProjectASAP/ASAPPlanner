@@ -94,7 +94,7 @@ fn prepare_profile(
     context: &CandidatePlanningContext<'_>,
     prefer_latest_pane: bool,
 ) -> Result<Option<PreparedProfile>, DirectProfileError> {
-    let settings = context.models.plan_selection;
+    let settings = context.models.cost_inputs;
     let CostModel::UsageOverTime(_prices) = &settings.cost_model else {
         return Ok(None);
     };
@@ -370,7 +370,7 @@ fn extract_scan_class(
         }
     }
     let count = nodes.len();
-    let settings = context.models.plan_selection;
+    let settings = context.models.cost_inputs;
     let CostModel::UsageOverTime(prices) = &settings.cost_model else {
         return Ok(None);
     };
@@ -453,7 +453,7 @@ fn profile_for_priced(
     compaction_seconds: f64,
     context: &CandidatePlanningContext<'_>,
 ) -> Result<NodeCostProfile, DirectProfileError> {
-    let CostModel::UsageOverTime(prices) = &context.models.plan_selection.cost_model else {
+    let CostModel::UsageOverTime(prices) = &context.models.cost_inputs.cost_model else {
         return Err(DirectProfileError::Unsupported(
             "non-usage objective".into(),
         ));
@@ -684,7 +684,7 @@ fn price<'a>(
             retained_panes,
             ingestion_window,
             context.data,
-            context.models.plan_selection,
+            context.models.cost_inputs,
             context.calibration.factor(),
         ) else {
             continue;
@@ -985,7 +985,7 @@ fn state_compaction_seconds(
     workers: u64,
     context: &CandidatePlanningContext<'_>,
 ) -> f64 {
-    let settings = context.models.plan_selection;
+    let settings = context.models.cost_inputs;
     let measured = crate::lookup(
         &settings.measured_operation_costs,
         asap_cost::OperatorKind::SummaryMerge,
@@ -1577,7 +1577,7 @@ mod tests {
                         entries: &entries,
                         data: &data,
                         models: crate::SelectionModels {
-                            ..crate::SelectionModels::builtin().with_plan_selection(&settings)
+                            ..crate::SelectionModels::builtin().with_cost_inputs(&settings)
                         },
                         calibration: asap_cost::CalibrationFit::default(),
                     };
@@ -1648,8 +1648,7 @@ mod tests {
                             non_negative: true,
                         },
                     );
-                    let CostModel::UsageOverTime(prices) =
-                        &context.models.plan_selection.cost_model
+                    let CostModel::UsageOverTime(prices) = &context.models.cost_inputs.cost_model
                     else {
                         unreachable!()
                     };
@@ -1701,7 +1700,7 @@ mod tests {
                         boundary_settings.resource_speed.ms_per_scanned_byte *= 1000.0 / work_ms;
                         let boundary_context = CandidatePlanningContext {
                             models: crate::SelectionModels {
-                                plan_selection: &boundary_settings,
+                                cost_inputs: &boundary_settings,
                                 ..context.models
                             },
                             ..context
@@ -1732,7 +1731,7 @@ mod tests {
                             );
                             let measured_context = CandidatePlanningContext {
                                 models: crate::SelectionModels {
-                                    plan_selection: &measured,
+                                    cost_inputs: &measured,
                                     ..context.models
                                 },
                                 ..context

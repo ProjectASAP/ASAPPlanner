@@ -80,7 +80,7 @@ for workload, source-fact, and SQL examples.
 | `--cost-model aws-fargate-us-east-1` | Compare plans using the configured AWS Fargate pricing model. Other supported names are `usage-over-time`, `provisioned-capacity`, and `cluster-capacity`. |
 | `--max-displayed 64` | Limit candidates shown in the document; this is not a search budget. |
 | `--exhaustive --max-combinations 10000` | Enumerate up to this many memo choices of the selected round, implement each with Stage 2 and price every resulting plan with the whole-workload reference pricer; its selection, costs and rejections are under `reference_pricing`. It is a reference, not Stage 3's search. |
-| `--plan-selection-settings settings.json` | Load selection settings instead of `--cost-model`, cluster flags, or `--measured-operation-costs`. |
+| `--cost-inputs cost_inputs.json` | Load the cost inputs (`CostInputs` JSON) instead of `--cost-model`, cluster flags, or `--measured-operation-costs`. |
 | `--no-memo` | Leave out the `memo` section (the memo after each step and the enumerated candidate DAGs), for a smaller document. |
 | `--price-enumerated 50` | Cost the first 50 enumerated candidate DAGs through Stage 2 and Stage 3, and flag any cheaper than the selected plan. Off by default. |
 

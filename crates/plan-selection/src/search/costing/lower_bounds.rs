@@ -38,7 +38,7 @@ pub(in crate::search) fn apply(
     let mut metrics = LowerBoundMetrics::default();
     let mut costs = vec![0.0; count];
     if matches!(
-        context.models.plan_selection.cost_model,
+        context.models.cost_inputs.cost_model,
         CostModel::UsageOverTime(_)
     ) {
         // A selected query-time node must serve at least one query boundary.
@@ -53,7 +53,7 @@ pub(in crate::search) fn apply(
                         [(&entry.recurrence, None)],
                         context
                             .models
-                            .plan_selection
+                            .cost_inputs
                             .non_repeating_query_horizon_seconds,
                     )
                     .map(|rate| minimum.min(rate))
@@ -444,7 +444,7 @@ impl ConcreteRows {
                     1,
                     None,
                     context.data,
-                    context.models.plan_selection,
+                    context.models.cost_inputs,
                     context.calibration.factor(),
                 )
                 .ok()
@@ -664,7 +664,7 @@ fn certified_price<'a>(
             retained,
             maintained_window,
             context.data,
-            context.models.plan_selection,
+            context.models.cost_inputs,
             context.calibration.factor(),
         )
         .ok())
@@ -1156,7 +1156,7 @@ mod tests {
                     {"operator": "FinalizeExactAccumulator", "phase": "query_time", "exact": "Sum", "ns_per_unit": 900.0, "ns_per_invocation": 400.0}
                 ]})).unwrap();
             }
-            let models = SelectionModels::builtin().with_plan_selection(&settings);
+            let models = SelectionModels::builtin().with_cost_inputs(&settings);
             let calibration = CalibrationFit::from_factor(2.0).unwrap();
             let context = CandidatePlanningContext {
                 deadline: None,
@@ -1430,7 +1430,7 @@ mod tests {
             .iter()
             .map(|candidate| QueryRoot::Operator(Rc::clone(&candidate.root_node)))
             .collect();
-        let models = SelectionModels::builtin().with_plan_selection(settings);
+        let models = SelectionModels::builtin().with_cost_inputs(settings);
         let context = CandidatePlanningContext {
             deadline: None,
             refine_materialization: false,
