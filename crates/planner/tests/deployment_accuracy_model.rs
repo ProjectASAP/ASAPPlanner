@@ -86,7 +86,7 @@ fn reads_sketch(root: &Rc<OperatorNode>) -> bool {
 fn physical_candidates(
     workload: &PlanningWorkload,
 ) -> Vec<asap_types::physical::PhysicalWorkloadPlan> {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_physical_asap_optimization::test_support::optimize_physical_asap_chosen;
@@ -94,7 +94,7 @@ fn physical_candidates(
 
     let roots = lower_promql_query_workload(workload).expect("lowers");
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let mut choices = BTreeSet::from([vec![0; inventory.targets.len()]]);

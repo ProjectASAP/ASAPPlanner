@@ -4,11 +4,8 @@ use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, FuzzWorkload, Pl
 use asap_devtools::planning_stages::run_search_over;
 use asap_executor::values::Value;
 use asap_logical_asap_optimization::{
-    pass1::per_computation_candidates::generate_per_computation_candidates,
-    pass2::memo::{
-        candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
-        DagOfLogicalMemoGroups,
-    },
+    test_support::{generate_per_computation_candidates, try_populate_pass1},
+    DagOfLogicalMemoGroups, PaneWidthDomain,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode};
 use asap_types::stages::{CandidateForMemoGroup, MemoCandidates, OriginOfCandidateForMemoGroup};
@@ -53,7 +50,7 @@ fn expanded(queries: &[String]) -> MemoCandidates {
         .collect();
     let initial = DagOfLogicalMemoGroups::from_roots(&roots);
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();

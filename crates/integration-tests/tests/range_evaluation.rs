@@ -30,17 +30,17 @@ const LAST_HOUR_BY_MINUTE: RangeEvaluation = RangeEvaluation {
 /// This fixture controls its pane width; a timed MILP archive is not a catalog
 /// of every legal materialization or a stable source of P1/P2 identifiers.
 fn run_explicit_for(workload: &PlanningWorkload, deployment: &DeploymentCapabilities) -> Run {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
-    };
-    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+    use asap_logical_asap_optimization::test_support::{
         pane_candidates, window_composition_pass2_candidates,
+    };
+    use asap_logical_asap_optimization::{
+        test_support::{compose_logical_candidate, generate_per_computation_candidates},
+        HowToComputeAggregateMeasure,
     };
     use asap_types::ir::schema::SketchAlgorithm;
     let roots = lower_promql(workload);
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     assert_eq!(inventory.targets.len(), 1);

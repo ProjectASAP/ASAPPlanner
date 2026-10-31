@@ -2,9 +2,10 @@
 //! optimization: from the query-language frontends' logical DAGs to the
 //! CandidateLogicalASAPDAGs.
 //!
-//! Identical-sub-DAG sharing over the logical DAG ([`pass2::cse`])
-//! runs before the stages; Stage 1 adds the ASAP-aware sharing that is
-//! invisible at the logical level ([`asap_aware_cse`](pass2::asap_aware_cse), Pass 2), e.g.
+//! Identical-sub-DAG sharing over the logical DAG (Stage 0, the `cse`
+//! module, behind [`DagOfLogicalMemoGroups::from_roots`]) runs before the
+//! stages; Stage 1 adds the ASAP-aware sharing that is invisible at the
+//! logical level (Pass 2, the `asap_aware_cse` module), e.g.
 //! `Quantile(x, 0.99)` and `Quantile(x, 0.95)` reading one built sketch.
 //!
 //! It depends only on `asap-types` and the shared accuracy model
@@ -23,13 +24,21 @@
 //!
 //! ## Components
 //!
-//! - [`per_computation_candidates`](pass1::per_computation_candidates) — Pass 1: per-computation candidate
-//!   generation and composition.
-//! - [`asap_aware_cse`](pass2::asap_aware_cse) — Pass 2: ASAP-aware common-subexpression elimination.
-//! - [`realization`](pass1::realization) — the summary families that can serve an aggregate
+//! The modules are crate-private; the crate root re-exports the items other
+//! crates use, one path each, and `test_support` (feature `test-support`)
+//! re-exports the internals other crates' tests call.
+//!
+//! - `pass1::per_computation_candidates` — Pass 1: per-computation candidate
+//!   generation and composition, behind
+//!   [`generate_per_computation_logical_memo_candidates`].
+//! - `pass2::asap_aware_cse` and `pass2::memo` — Pass 2: ASAP-aware
+//!   common-subexpression elimination and the memo rules, behind
+//!   [`generate_logical_asap_memo_candidates`].
+//! - `pass1::realization` — the summary families that can serve an aggregate
 //!   intent, the intent's accuracy target and `(ε, δ)` budget, and default
 //!   sketch sizing, shared by Pass 1 and Pass 2.
-//! - [`deployment_capabilities`] — the deployment's supported summaries.
+//! - `deployment_capabilities` — the deployment's supported summaries
+//!   ([`DeploymentCapabilities`]).
 //!
 //! Accuracy guarantees come from the built-in analytical accuracy rules in
 //! `asap-accuracy` (per-family estimators, composition and budget
@@ -44,15 +53,40 @@
 //! `AccuracyTarget` with the deployment's `AccuracyModel` before pricing it.
 
 /// The deployment's capabilities: supported summaries and what it retains.
-pub mod deployment_capabilities;
-/// Test helpers shared by the stage crates' tests (feature `test-support`).
+mod deployment_capabilities;
+mod pass1;
+mod pass2;
+/// Test helpers shared by the stage crates' tests, and the Stage 1
+/// internals those tests call (feature `test-support`).
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub use deployment_capabilities::{
-    summary_supported, DeploymentCapabilities, DeploymentCapabilitiesError, SupportedSummary,
-};
-pub use pass1::realization::summary_candidates;
+// Stage 1's public API: one path per item, for the planner facade and the
+// developer tools. Every other item is crate-private; the ones other crates'
+// tests call are re-exported by `test_support`.
 
-pub mod pass1;
-pub mod pass2;
+pub use deployment_capabilities::{
+    DeploymentCapabilities, DeploymentCapabilitiesError, SupportedSummary,
+};
+// Stage 0: the memo groups of the workload's query roots.
+pub use pass2::memo::DagOfLogicalMemoGroups;
+// Pass 1: its entry, its output and the types the output holds.
+pub use pass1::{
+    generate_per_computation_logical_memo_candidates, ComputationTarget, FusedComputation,
+    HavingEntry, HavingPlacement, HowToComputeAggregateMeasure, PerComputationCandidateError,
+    PerComputationLogicalMemoCandidates, PerComputationLogicalMemoCandidatesError,
+};
+// Pass 2: its entry, the state it keeps between pane-width rounds, and the
+// pane-width domain of a round.
+pub use pass2::logical_memo_candidates::{
+    generate_logical_asap_memo_candidates, LogicalASAPMemoCandidatesError, Pass2RoundState,
+};
+pub use pass2::memo::candidates::CandidatePopulationError;
+pub use pass2::memo::shared_configurations::{PaneWidthDomain, PaneWidthFrontier};
+pub use pass2::memo::state_groups::StateGroupExpansionError;
+// The CandidateLogicalASAPDAGs a memo stands for (developer tools'
+// reference pricing).
+pub use pass2::memo::enumeration::{
+    build_logical_asap_dags_from_chosen_candidates, enumerate, AllChosenCandidatesPerMemoGroup,
+    ChosenCandidatePerMemoGroup, ErrorBuildingLogicalASAPDagsFromChosenCandidates,
+};

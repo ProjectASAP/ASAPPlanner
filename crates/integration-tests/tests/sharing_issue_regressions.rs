@@ -119,12 +119,12 @@ fn grouped_filtered_quantile_plans() {
 /// #886: SQL count-ranked TopK offers a heap over raw rows, absorbing the count.
 #[test]
 fn sql_count_topk_has_a_fused_raw_row_heap() {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
+    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
     let roots = Planner::new(FuzzSettings::default())
         .lower(&workload(886))
         .unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let (index, target) = inventory
@@ -136,11 +136,10 @@ fn sql_count_topk_has_a_fused_raw_row_heap() {
     for choice in target.ways_to_compute.len()..target.choice_count() {
         let mut selected = vec![0; inventory.targets.len()];
         selected[index] = choice;
-        let composed =
-            asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate(
-                &inventory, &selected,
-            )
-            .unwrap();
+        let composed = asap_logical_asap_optimization::test_support::compose_logical_candidate(
+            &inventory, &selected,
+        )
+        .unwrap();
         let roots: Vec<_> = composed;
         let root = roots[0].as_operator().unwrap();
         for node in asap_types::ir::OperatorNode::reachable(root) {
@@ -202,11 +201,8 @@ fn sql_count_topk_has_a_fused_raw_row_heap() {
 #[test]
 fn exact_rollup_catalog_crosses_identical_per_series_average() {
     use asap_logical_asap_optimization::{
-        pass1::per_computation_candidates::generate_per_computation_candidates,
-        pass2::memo::{
-            candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
-            DagOfLogicalMemoGroups,
-        },
+        test_support::{generate_per_computation_candidates, try_populate_pass1},
+        DagOfLogicalMemoGroups, PaneWidthDomain,
     };
     use asap_types::stages::OriginOfCandidateForMemoGroup;
     let roots: Vec<_> = Planner::new(FuzzSettings::default())
@@ -216,7 +212,7 @@ fn exact_rollup_catalog_crosses_identical_per_series_average() {
         .collect();
     let initial = DagOfLogicalMemoGroups::from_roots(&roots);
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
@@ -243,11 +239,8 @@ use crate::physical_common;
 fn filtered_group_preserves_sql_empty_and_null_semantics() {
     use asap_executor::values::Value;
     use asap_logical_asap_optimization::{
-        pass1::per_computation_candidates::generate_per_computation_candidates,
-        pass2::memo::{
-            candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
-            DagOfLogicalMemoGroups,
-        },
+        test_support::{generate_per_computation_candidates, try_populate_pass1},
+        DagOfLogicalMemoGroups, PaneWidthDomain,
     };
     use asap_types::ir::{operator::AggIntent, NonASAPOp};
     use asap_types::stages::OriginOfCandidateForMemoGroup;
@@ -258,7 +251,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
         .collect();
     let initial = DagOfLogicalMemoGroups::from_roots(&roots);
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
@@ -275,15 +268,15 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
     // The same readout keeps a KLL's rank bound: it selects a whole group,
     // never predicates on an approximate value or combines populations.
     use asap_accuracy::propagation::recompose_guarantees;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, HowToComputeAggregateMeasure,
+    use asap_logical_asap_optimization::{
+        test_support::compose_logical_candidate, HowToComputeAggregateMeasure,
     };
     use asap_types::ir::{schema::SketchAlgorithm, QueryRoot};
     use std::rc::Rc;
     let filter = candidate.root_node.children()[0];
     let grouped = filter.children()[0];
     let inv = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(Rc::clone(grouped)),
         ]),
     )
@@ -406,11 +399,8 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
 fn sql_count_rollup_executes_with_integer_results() {
     use asap_executor::values::Value;
     use asap_logical_asap_optimization::{
-        pass1::per_computation_candidates::generate_per_computation_candidates,
-        pass2::memo::{
-            candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
-            DagOfLogicalMemoGroups,
-        },
+        test_support::{generate_per_computation_candidates, try_populate_pass1},
+        DagOfLogicalMemoGroups, PaneWidthDomain,
     };
     use asap_types::ir::ASAPOp;
     use asap_types::stages::OriginOfCandidateForMemoGroup;
@@ -430,9 +420,7 @@ fn sql_count_rollup_executes_with_integer_results() {
             .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                &roots,
-            ),
+            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
         )
         .unwrap();
         let memo = try_populate_pass1(initial, &inventory).unwrap();
@@ -539,11 +527,8 @@ fn sql_sum_shares_nested_windows_and_slower_readers() {
 #[test]
 fn sketch_rollup_crosses_inner_range_function() {
     use asap_logical_asap_optimization::{
-        pass1::per_computation_candidates::generate_per_computation_candidates,
-        pass2::memo::{
-            candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
-            DagOfLogicalMemoGroups,
-        },
+        test_support::{generate_per_computation_candidates, try_populate_pass1},
+        DagOfLogicalMemoGroups, PaneWidthDomain,
     };
     use asap_types::stages::OriginOfCandidateForMemoGroup;
     let mut w = workload(923);
@@ -559,7 +544,7 @@ fn sketch_rollup_crosses_inner_range_function() {
         .collect();
     let initial = DagOfLogicalMemoGroups::from_roots(&roots);
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let memo = try_populate_pass1(initial, &inventory).unwrap();
@@ -579,15 +564,15 @@ fn sketch_rollup_crosses_inner_range_function() {
 /// the exact counter and separately typed raw-row TopK fusion remain available.
 #[test]
 fn sql_grouped_count_sketches_are_not_offered() {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        generate_per_computation_candidates, HowToComputeAggregateMeasure,
+    use asap_logical_asap_optimization::{
+        test_support::generate_per_computation_candidates, HowToComputeAggregateMeasure,
     };
     use asap_types::ir::{operator::AggIntent, NonASAPOp};
     use asap_types::stages::PruneReason;
     let w = workload(886);
     let roots = Planner::new(FuzzSettings::default()).lower(&w).unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let (index, target) = inventory.targets.iter().enumerate().find(|(_, target)| matches!(inventory.aggregate(target).non_asap(), Some(NonASAPOp::Aggregate { measures, .. }) if matches!(measures.as_slice(), [AggIntent::Count { .. }]))).unwrap();

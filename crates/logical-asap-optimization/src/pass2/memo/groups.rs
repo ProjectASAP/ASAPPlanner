@@ -432,13 +432,13 @@ fn builds_a_sketch(node: &Rc<OperatorNode>) -> bool {
 /// derives. Memoized per node (the cache keeps each node alive, so its
 /// address is not reused).
 #[derive(Default)]
-pub struct NodeToStructuralIdCache {
+pub(crate) struct NodeToStructuralIdCache {
     id_of_node: HashMap<*const OperatorNode, (Rc<OperatorNode>, u64)>,
     id_of_encoded_operator: HashMap<Vec<u8>, u64>,
 }
 
 impl NodeToStructuralIdCache {
-    pub fn structural_id(&mut self, node: &Rc<OperatorNode>) -> u64 {
+    pub(crate) fn structural_id(&mut self, node: &Rc<OperatorNode>) -> u64 {
         if let Some((_, key)) = self.id_of_node.get(&Rc::as_ptr(node)) {
             return *key;
         }

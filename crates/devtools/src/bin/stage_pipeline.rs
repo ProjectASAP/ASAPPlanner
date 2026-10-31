@@ -273,11 +273,11 @@ use asap_devtools::planning_stages::{
 };
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{counter_function_over_gauge_warnings, promql_metric_names};
-use asap_logical_asap_optimization::pass1::PerComputationLogicalMemoCandidates;
-use asap_logical_asap_optimization::pass2::memo::enumeration::{
+use asap_logical_asap_optimization::DeploymentCapabilities;
+use asap_logical_asap_optimization::PerComputationLogicalMemoCandidates;
+use asap_logical_asap_optimization::{
     build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
 };
-use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_plan_selection::reference_pricer::{Rejection, WholePlanSelection};
 use asap_plan_selection::{
     large_peak_memory_warning, AcceptedAccuracy, ErrorSelectingPlan, Selection,

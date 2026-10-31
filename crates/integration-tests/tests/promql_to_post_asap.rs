@@ -724,11 +724,11 @@ fn ddsketch_ratio_selection(
     for facts in data.sources.values_mut() {
         facts.values_non_negative = non_negative;
     }
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        generate_per_computation_candidates, HowToComputeAggregateMeasure,
+    use asap_logical_asap_optimization::{
+        test_support::generate_per_computation_candidates, HowToComputeAggregateMeasure,
     };
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(root),
         ]),
     )
@@ -760,7 +760,7 @@ fn ddsketch_ratio_selection(
     // Pass 1 choices composed and implemented by Stage 2; one query, so no
     // sharing rule applies.
     use asap_accuracy::propagation::recompose_guarantees;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate;
+    use asap_logical_asap_optimization::test_support::compose_logical_candidate;
     let models = asap_planner::PlanningModels::builtin();
     let mut physical = Vec::new();
     for choice in [exact, dds] {

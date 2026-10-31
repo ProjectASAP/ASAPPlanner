@@ -28,16 +28,16 @@ fn pipeline() -> Run {
 // stays exact, and exercise source sharing and ten-second panes. This is not
 // a production workload search or an exhaustive memo archive.
 fn rule_fixture(workload: &asap_types::workload::PlanningWorkload) -> Run {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
-    };
-    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+    use asap_logical_asap_optimization::test_support::{
         pane_candidates, window_composition_pass2_candidates,
+    };
+    use asap_logical_asap_optimization::{
+        test_support::{compose_logical_candidate, generate_per_computation_candidates},
+        HowToComputeAggregateMeasure,
     };
     let roots = lower_promql(workload);
     let local = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let mut computations = Vec::new();
@@ -816,12 +816,12 @@ fn materialized_case() -> Run {
     let mut workload = example1();
     let repeating = workload.query_workload.repeating_queries.as_mut().unwrap();
     repeating.truncate(1);
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     let roots = lower_promql(&workload);
     let local = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let exact = compose_logical_candidate(&local, &vec![0; local.targets.len()]).unwrap();

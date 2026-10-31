@@ -234,11 +234,11 @@ pub mod planning {
     /// Exact computation and each explicit single-target rule application.
     /// This fixture catalog is independent of the bounded MILP's visited plans.
     pub fn explicit_local_candidates(root: Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
-        use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+        use asap_logical_asap_optimization::test_support::{
             compose_logical_candidate, generate_per_computation_candidates,
         };
         let local = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
+            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
                 QueryRoot::Operator(root),
             ]),
         )
@@ -271,12 +271,12 @@ pub mod planning {
         root: Rc<OperatorNode>,
         family: asap_types::ir::schema::SketchAlgorithm,
     ) -> Rc<OperatorNode> {
-        use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-            compose_logical_candidate, generate_per_computation_candidates,
+        use asap_logical_asap_optimization::{
+            test_support::{compose_logical_candidate, generate_per_computation_candidates},
             HowToComputeAggregateMeasure,
         };
         let local = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
+            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
                 QueryRoot::Operator(root),
             ]),
         )
@@ -346,16 +346,14 @@ pub mod planning {
         roots: Vec<QueryRoot>,
         entries: &[asap_types::workload::QueryWorkloadEntry],
     ) -> asap_types::stages::MemoCandidates {
-        use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
-        use asap_logical_asap_optimization::pass2::memo::{
-            candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
-            window_candidates::add_local_window_composition, DagOfLogicalMemoGroups,
+        use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
+        use asap_logical_asap_optimization::test_support::{
+            add_local_window_composition, try_populate_pass1,
         };
+        use asap_logical_asap_optimization::{DagOfLogicalMemoGroups, PaneWidthDomain};
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                &roots,
-            ),
+            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
         )
         .unwrap();
         let mut memo = try_populate_pass1(initial, &inventory).unwrap();
@@ -375,7 +373,7 @@ pub mod planning {
         queries: usize,
         choice: &std::collections::BTreeMap<usize, usize>,
     ) -> Vec<Rc<OperatorNode>> {
-        use asap_logical_asap_optimization::pass2::memo::enumeration::build_logical_asap_dags_from_chosen_candidates;
+        use asap_logical_asap_optimization::build_logical_asap_dags_from_chosen_candidates;
         use asap_types::stages::MemoGroupId;
         let choice = choice
             .iter()

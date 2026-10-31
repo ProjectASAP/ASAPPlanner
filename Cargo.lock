@@ -420,7 +420,6 @@ version = "0.1.0"
 dependencies = [
  "asap-accuracy",
  "asap-frontend-promql",
- "asap-logical-asap-optimization",
  "asap-types",
  "asap_sketchlib",
  "rmp-serde",

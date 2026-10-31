@@ -64,7 +64,7 @@ pub fn with_promql_series_identity(
                 // A series has at most one sample per timestamp, so the full
                 // identity and the timestamp key each row. Pass 2's
                 // identical-expression rule reads this key: only a keyed
-                // node is legal to share (`asap_logical_asap_optimization::pass2::cse`).
+                // node is legal to share (Stage 0 hash-consing, `cse` in `asap_logical_asap_optimization`).
                 if let Some(time) = schema.time_index {
                     schema.add_unique_key(vec![schema.fields.len() - 1, time]);
                 }

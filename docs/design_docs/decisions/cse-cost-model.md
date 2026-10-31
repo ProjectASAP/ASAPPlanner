@@ -16,7 +16,7 @@ elimination) to identify eligible, structurally identical computations. A
 shared logical node records an opportunity for reuse; selecting maintained
 state or independent execution is a separate planning decision.
 
-[`asap_logical_asap_optimization::pass2::cse::share_common_sub_dags`](../../../crates/logical-asap-optimization/src/pass2/cse.rs)
+[`share_common_sub_dags`](../../../crates/logical-asap-optimization/src/pass2/cse.rs)
 (issue #223 stages 1-2, PR #235) already *detects* every structurally-identical,
 legally-shareable (`Schema::unique_keys`-gated) sub-DAG and shares it
 **unconditionally** — there is no cost gate on top of legality. This document

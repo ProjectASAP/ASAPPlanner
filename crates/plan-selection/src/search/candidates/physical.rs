@@ -17,13 +17,13 @@ mod tests {
     use super::*;
     use crate::search::candidates::inventory::{build_candidate_inventory, InventoryForTests};
     use crate::search::milp::model::select_candidates;
-    use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
-    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
+    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups;
+    use asap_logical_asap_optimization::test_support::try_populate_pass1;
+    use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
+    use asap_logical_asap_optimization::DeploymentCapabilities;
+    use asap_logical_asap_optimization::PaneWidthDomain;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::{ASAPOp, NonASAPOp};
@@ -59,9 +59,7 @@ mod tests {
             .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect::<Vec<_>>();
         let candidates = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                &roots.clone(),
-            ),
+            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots.clone()),
         )
         .unwrap();
         let memo = sharing_rules_and_shared_state_groups(

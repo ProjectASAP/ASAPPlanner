@@ -24,8 +24,6 @@ asap-frontend-promql = { path = "../frontend-promql", optional = true }
 test-support = ["dep:asap-frontend-promql"]
 
 [dev-dependencies]
-# The integration tests read Pass 1's target list (`per_computation_candidates`).
-asap-logical-asap-optimization = { path = ".", features = ["test-support"] }
 asap-types = { path = "../types", features = ["test-support"] }
 asap-accuracy = { path = "../accuracy", features = ["test-support"] }
 asap-frontend-promql = { path = "../frontend-promql" }

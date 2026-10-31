@@ -1,7 +1,7 @@
 //! Post-lowering canonicalization of the operator DAG.
 //!
 //! Rewrites equivalent spellings of a query into one shape, so that common
-//! sub-DAG sharing (`asap_logical_asap_optimization::pass2::cse`) can match
+//! sub-DAG sharing (Stage 0 hash-consing, `cse` in `asap_logical_asap_optimization`) can match
 //! them by structural equality, whichever front end produced them.
 //!
 //! ## Heavy-hitter promotion

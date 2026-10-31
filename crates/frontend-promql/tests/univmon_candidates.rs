@@ -3,7 +3,7 @@ use std::rc::Rc;
 use crate::planner_support::run_stage1_to_stage3;
 use crate::support;
 use asap_accuracy::test_support::{local_guarantee, satisfies};
-use asap_logical_asap_optimization::pass2::cse::share_common_sub_dags;
+use asap_logical_asap_optimization::test_support::share_common_sub_dags;
 use asap_types::ir::properties::AccuracyMetric;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr};

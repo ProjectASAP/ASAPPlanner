@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::pass1::HowToComputeAggregateMeasure;
+use asap_logical_asap_optimization::HowToComputeAggregateMeasure;
 use asap_types::ir::physical_export::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
 use asap_types::ir::NonASAPOp;
@@ -268,7 +268,7 @@ mod tests {
     use super::*;
     use crate::planner_layering_examples::example1;
     use crate::planning_stages::lower_promql_roots;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
 
@@ -277,7 +277,7 @@ mod tests {
     fn connected_labels_describe_selected_states() {
         let workload = example1();
         let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(
                 &lower_promql_roots(&workload).unwrap(),
             ),
         )
@@ -294,7 +294,7 @@ mod tests {
     fn connected_labels_name_actual_shared_state() {
         let workload = example1();
         let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(
                 &lower_promql_roots(&workload).unwrap(),
             ),
         )
@@ -311,7 +311,7 @@ mod tests {
     /// have the same family and pane count (6 × 10s for Q1, 6 × 30s for Q2).
     #[test]
     fn physical_labels_name_the_pane_chain_maintained_at_ingestion() {
-        use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+        use asap_logical_asap_optimization::test_support::{
             pane_candidates, window_composition_pass2_candidates,
         };
         use asap_physical_asap_optimization::optimize_physical_asap;
@@ -330,7 +330,7 @@ mod tests {
         )
         .unwrap();
         let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(
                 &lower_promql_roots(&workload).unwrap(),
             ),
         )

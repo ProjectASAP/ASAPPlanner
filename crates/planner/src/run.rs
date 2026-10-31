@@ -9,19 +9,17 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use asap_cost::PlanRanking;
-use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilitiesError;
-use asap_logical_asap_optimization::pass1::{
+use asap_logical_asap_optimization::ChosenCandidatePerMemoGroup;
+use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
+use asap_logical_asap_optimization::DeploymentCapabilitiesError;
+use asap_logical_asap_optimization::{
+    generate_logical_asap_memo_candidates, LogicalASAPMemoCandidatesError, Pass2RoundState,
+};
+use asap_logical_asap_optimization::{
     generate_per_computation_logical_memo_candidates, PerComputationCandidateError,
     PerComputationLogicalMemoCandidates, PerComputationLogicalMemoCandidatesError,
 };
-use asap_logical_asap_optimization::pass2::logical_memo_candidates::{
-    generate_logical_asap_memo_candidates, LogicalASAPMemoCandidatesError, Pass2RoundState,
-};
-use asap_logical_asap_optimization::pass2::memo::enumeration::ChosenCandidatePerMemoGroup;
-use asap_logical_asap_optimization::pass2::memo::shared_configurations::{
-    PaneWidthDomain, PaneWidthFrontier,
-};
-use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
+use asap_logical_asap_optimization::{PaneWidthDomain, PaneWidthFrontier};
 use asap_physical_asap_optimization::{
     generate_physical_asap_memo_candidates, Stage2AssignmentRealizer,
 };

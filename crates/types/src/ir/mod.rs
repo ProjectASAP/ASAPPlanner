@@ -19,6 +19,6 @@ pub mod materialized_view;
 pub mod physical_export;
 pub use properties::timing::{
     apply_materialization_timings, apply_materialization_timings_to_roots, data_state,
-    is_filtered_build, planned_data_state, split_shared_by_timing, validate_at_ingestion,
+    is_filtered_build, planned_data_state, timing_under_consumer, validate_at_ingestion,
     MaterializationAssignment, NodeToTimedNodeCache,
 };

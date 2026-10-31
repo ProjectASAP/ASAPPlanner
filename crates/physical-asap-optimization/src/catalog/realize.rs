@@ -236,13 +236,13 @@ pub fn restore_query_roots(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
-    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
+    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
+    use asap_logical_asap_optimization::test_support::try_populate_pass1;
     use asap_logical_asap_optimization::test_support::{
         entry, lower_promql, sharing_rules_and_shared_state_groups,
     };
+    use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
+    use asap_logical_asap_optimization::PaneWidthDomain;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::stages::{
         LogicalASAPMemoCandidates, PhysicalCandidateId, SelectedEdge, SelectedNodeId,
@@ -292,9 +292,9 @@ mod tests {
         let roots = vec![root.clone()];
         let initial = DagOfLogicalMemoGroups::from_roots(&[root]);
         let per_computation = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
-                roots[0].clone(),
-            ]),
+            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(
+                &[roots[0].clone()],
+            ),
         )
         .unwrap();
         let memo = try_populate_pass1(initial, &per_computation).unwrap();

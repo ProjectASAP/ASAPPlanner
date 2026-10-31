@@ -1145,10 +1145,10 @@ fn workload_file_with_a_range_evaluation_is_planned() {
     // integration-tests/tests/range_evaluation.rs.
     let kept_panes = {
         use asap_accuracy::propagation::recompose_guarantees;
-        use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+        use asap_logical_asap_optimization::test_support::{
             compose_logical_candidate, generate_per_computation_candidates,
         };
-        use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+        use asap_logical_asap_optimization::test_support::{
             pane_candidates, window_composition_pass2_candidates,
         };
         use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
@@ -1158,7 +1158,7 @@ fn workload_file_with_a_range_evaluation_is_planned() {
         let entries: Vec<_> = parsed.query_workload.entries().collect();
         let data = parsed.data_workload.clone().unwrap();
         let inventory = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
+            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(
                 &lower_promql_roots(&parsed).unwrap(),
             ),
         )
@@ -1757,7 +1757,7 @@ fn a_scan_two_queries_share_is_offered_built_once_per_evaluation() {
 /// its execution-scope copies) to itself.
 #[test]
 fn widened_scans_keep_memo_groups_and_stage2_candidates_acyclic() {
-    use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
+    use asap_logical_asap_optimization::DeploymentCapabilities;
     let query = |q: &str| {
         serde_json::json!({
             "query": q,
@@ -1890,12 +1890,12 @@ fn scans_projecting_different_labels_are_shared() {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.as_ref().unwrap();
     let roots = lower_promql_roots(&workload).unwrap();
-    use asap_logical_asap_optimization::pass2::asap_aware_cse::with_union_scan_labels;
+    use asap_logical_asap_optimization::test_support::with_union_scan_labels;
     use asap_types::physical::{Materialization, Medium};
     // Plans `roots` with identical sub-DAGs made one node, as the memo's
     // groups are, and a node read by several roots kept for the evaluation.
     let plan = |name: &str, roots: &[asap_types::ir::QueryRoot]| {
-        let shared: Vec<_> = asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
+        let shared: Vec<_> = asap_logical_asap_optimization::test_support::share_common_sub_dags(
             roots
                 .iter()
                 .enumerate()

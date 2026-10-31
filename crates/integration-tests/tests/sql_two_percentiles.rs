@@ -294,12 +294,12 @@ async fn q1_with_one_exact_and_one_sketched_percentile_compiles_and_matches() {
 
 /// The id and query roots of every Stage 1 candidate of `queries`.
 async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
-    };
-    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+    use asap_logical_asap_optimization::test_support::{
         pane_candidates, window_composition_pass2_candidates,
+    };
+    use asap_logical_asap_optimization::{
+        test_support::{compose_logical_candidate, generate_per_computation_candidates},
+        HowToComputeAggregateMeasure,
     };
     let workload = workload(queries);
     let entries: Vec<_> = workload.query_workload.entries().collect();
@@ -317,7 +317,7 @@ async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
         ));
     }
     let local = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     // Explicit fixture configurations: exact; one local substitution at a
@@ -339,7 +339,7 @@ async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
         }
     }
     let share = |roots: Vec<QueryRoot>| {
-        asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
+        asap_logical_asap_optimization::test_support::share_common_sub_dags(
             roots
                 .into_iter()
                 .enumerate()

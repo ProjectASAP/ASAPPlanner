@@ -1148,12 +1148,12 @@ mod tests {
     use crate::search::candidates::configurations::enumerate_candidate_configurations;
     use crate::search::candidates::inventory::build_candidate_inventory;
     use crate::search::refinement::search::CandidateSearchStatus;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain;
-    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
+    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
     use asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups;
+    use asap_logical_asap_optimization::test_support::try_populate_pass1;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
+    use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
+    use asap_logical_asap_optimization::PaneWidthDomain;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::{ASAPOp, OperatorNode};
@@ -1186,9 +1186,7 @@ mod tests {
             .map(|q| *initial.query_roots[q].as_operator().unwrap())
             .collect();
         let generated = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                &roots.clone(),
-            ),
+            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots.clone()),
         )
         .unwrap();
         let mut memo = sharing_rules_and_shared_state_groups(
@@ -1367,9 +1365,7 @@ mod tests {
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let output = *initial.query_roots[0].as_operator().unwrap();
         let generated = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                &roots,
-            ),
+            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
         )
         .unwrap();
         let mut memo = try_populate_pass1(initial, &generated).unwrap();
@@ -1378,10 +1374,10 @@ mod tests {
         entries[1].recurrence = QueryRecurrence::Unknown;
         entries[1].predictability = Predictability::Unknown;
         // This test isolates selected-consumer eligibility, not width search.
-        asap_logical_asap_optimization::pass2::memo::window_candidates::add_local_window_composition_in_domain(
+        asap_logical_asap_optimization::test_support::add_local_window_composition_in_domain(
             &mut memo,
             &entries,
-            asap_logical_asap_optimization::pass2::memo::shared_configurations::PaneWidthDomain::SeedGrids,
+            asap_logical_asap_optimization::PaneWidthDomain::SeedGrids,
         );
         let source = build_candidate_inventory(&memo, &[output, output], |_| Ok(0.0)).unwrap();
         let models = SelectionModels::builtin();
@@ -1464,9 +1460,7 @@ mod tests {
         let initial = DagOfLogicalMemoGroups::from_roots(&query_roots);
         let output = *initial.query_roots[0].as_operator().unwrap();
         let generated = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                &query_roots,
-            ),
+            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&query_roots),
         )
         .unwrap();
         let memo = sharing_rules_and_shared_state_groups(
@@ -1556,9 +1550,7 @@ mod tests {
             .map(|query| *initial.query_roots[query].as_operator().unwrap())
             .collect();
         let generated = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                &roots.clone(),
-            ),
+            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots.clone()),
         )
         .unwrap();
         let mut memo = try_populate_pass1(initial, &generated).unwrap();
@@ -1574,7 +1566,7 @@ mod tests {
                 entry
             })
             .collect();
-        asap_logical_asap_optimization::pass2::memo::window_candidates::add_local_window_composition(
+        asap_logical_asap_optimization::test_support::add_local_window_composition(
             &mut memo, &entries,
         );
         let memo = sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap();
@@ -1905,9 +1897,7 @@ mod tests {
         let memo = try_populate_pass1(
             DagOfLogicalMemoGroups::from_roots(&exact),
             &generate_per_computation_candidates(
-                &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                    &exact,
-                ),
+                &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&exact),
             )
             .unwrap(),
         )

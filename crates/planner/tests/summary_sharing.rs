@@ -99,14 +99,14 @@ fn composed_summary_candidates(
     Vec<asap_types::physical::PhysicalWorkloadPlan>,
     WholePlanSelection,
 ) {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates,
+    use asap_logical_asap_optimization::{
+        test_support::{compose_logical_candidate, generate_per_computation_candidates},
         HowToComputeAggregateMeasure,
     };
     let workload = promql_workload(queries);
     let roots = lower_promql_query_workload(&workload).expect("lowers");
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let mut assignments = vec![vec![0; inventory.targets.len()]];
@@ -162,13 +162,13 @@ fn composed_summary_candidates(
 /// Construct a legal shared-KLL candidate explicitly. Sharing capability must
 /// not depend on which prefix a time-limited optimization search visits.
 fn shared_kll_candidate(workload: &PlanningWorkload) -> asap_types::physical::PhysicalWorkloadPlan {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_types::physical::Materialization;
     let roots = lower_promql_query_workload(workload).unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let mut choices = vec![0; inventory.targets.len()];
@@ -185,7 +185,7 @@ fn shared_kll_candidate(workload: &PlanningWorkload) -> asap_types::physical::Ph
     }
     let roots: Vec<_> = compose_logical_candidate(&inventory, &choices).unwrap();
     // Every identical sub-DAG of the two queries made one node.
-    let roots: Vec<_> = asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
+    let roots: Vec<_> = asap_logical_asap_optimization::test_support::share_common_sub_dags(
         roots
             .into_iter()
             .enumerate()

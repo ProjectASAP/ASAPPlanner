@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use asap_logical_asap_optimization::pass2::memo::enumeration::{
+use asap_logical_asap_optimization::{
     build_logical_asap_dags_from_chosen_candidates, ChosenCandidatePerMemoGroup,
 };
 use asap_physical_asap_optimization::optimize_physical_asap;
@@ -274,7 +274,7 @@ pub fn reference_enumeration(
     models: PlanningModels<'_>,
     max_choices: usize,
 ) -> Option<ReferenceEnumeration> {
-    use asap_logical_asap_optimization::pass2::memo::enumeration::enumerate;
+    use asap_logical_asap_optimization::enumerate;
     let memo = &run.memo_steps.as_ref()?.concrete_states;
     let enumeration = enumerate(memo, max_choices.saturating_add(1));
     let capped = !enumeration.complete || enumeration.all_chosen_candidates.len() > max_choices;

@@ -11,7 +11,8 @@ use crate::time_series;
 use asap_executor::physical_planner::compile;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, Value};
-use asap_logical_asap_optimization::pass1::per_computation_candidates::HowToComputeAggregateMeasure;
+use asap_logical_asap_optimization::HowToComputeAggregateMeasure;
+use asap_physical_asap_optimization::test_support::split_shared_by_timing;
 use asap_planner::{
     plan_installable, run_planning, CostInputs, DeploymentCapabilities, FrontendInput,
     InstallablePlan, InstallablePlanError, MaterializedView, MaterializedViewRefresh, OperatorKind,
@@ -22,8 +23,8 @@ use asap_planner::{
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::ir::{
-    apply_materialization_timings_to_roots, split_shared_by_timing, ASAPOp,
-    MaterializationAssignment, OperatorNode, QueryRoot,
+    apply_materialization_timings_to_roots, ASAPOp, MaterializationAssignment, OperatorNode,
+    QueryRoot,
 };
 use asap_types::physical::{Materialization, Medium};
 use asap_types::stages::PruneReason;

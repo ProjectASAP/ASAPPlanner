@@ -327,7 +327,7 @@ pub(crate) fn add_window_rollup_candidates(
 #[cfg(test)]
 mod tests {
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::candidates::try_populate_pass1;
+    use crate::pass2::memo::groups::try_populate_pass1;
     use crate::pass2::memo::shared_configurations::PaneWidthDomain;
     use crate::pass2::memo::DagOfLogicalMemoGroups;
     use crate::test_support::{lower_promql, sharing_rules_and_shared_state_groups};

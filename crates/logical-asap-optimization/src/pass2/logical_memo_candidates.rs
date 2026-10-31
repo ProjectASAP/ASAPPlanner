@@ -38,11 +38,6 @@ impl Pass2RoundState {
         }
     }
 
-    /// The pane widths of the last round, `None` before the first.
-    pub fn previous_domain(&self) -> Option<PaneWidthDomain> {
-        self.previous_domain
-    }
-
     /// The memo after the last round's local window composition, before
     /// the other Pass 2 rules (Pass 1's memo before the first round).
     pub fn unexpanded_memo(&self) -> &MemoCandidates {
