@@ -69,8 +69,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::physical_export::{
-    PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError, PhysicalASAPNodeId,
-    ScanWindow,
+    offset_below, PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError,
+    PhysicalASAPNodeId, ScanWindow,
 };
 use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::{Operator, OperatorNode};
@@ -260,12 +260,31 @@ pub struct RefreshWindow {
     pub phase_ms: u64,
 }
 
-/// The views refreshed at ingestion that a runtime refreshes in one
-/// ingestion run ([`PhysicalASAPDAG::ingestion_refresh_groups`]).
+impl RefreshWindow {
+    /// The refresh window of the window `(T - end_offset_ms - width_ms, T -
+    /// end_offset_ms]`: `(width_ms, end_offset_ms mod width_ms)`; `None` for
+    /// an empty window (`width_ms <= 0`).
+    pub fn of_window(end_offset_ms: i64, width_ms: i64) -> Option<Self> {
+        let phase_ms = end_offset_ms
+            .checked_rem_euclid(width_ms)
+            .filter(|_| width_ms > 0)?;
+        Some(RefreshWindow {
+            width_ms: u64::try_from(width_ms).ok()?,
+            phase_ms: u64::try_from(phase_ms).ok()?,
+        })
+    }
+}
+
+/// The views refreshed at ingestion that share one refresh window
+/// ([`PhysicalASAPDAG::ingestion_refresh_groups`]). A runtime refreshes
+/// them with one ingestion run per window `(e - W, e]`; each run's roots are
+/// the views whose state for the window ending at `e` is not stored yet (in
+/// steady state the newest pane of each chain), and a view of the group a
+/// root reads is computed in the run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IngestionRefreshGroup {
     /// The refresh window of every view of the group; `None` for a view
-    /// whose window is unbounded, which is a group of its own.
+    /// whose window is unbounded or empty, which is a group of its own.
     pub refresh_window: Option<RefreshWindow>,
     /// The views, in dependency order.
     pub views: Vec<MaterializedView>,
@@ -416,17 +435,27 @@ impl PhysicalASAPDAG {
 
     /// The views refreshed at ingestion, by refresh group: the views with
     /// one [`RefreshWindow`] ([`Self::refresh_window`]) form one group,
-    /// which a runtime refreshes in one ingestion run per window, compiled
-    /// once with every view of the group as a root. Each group lists its
-    /// views in dependency order and comes after the groups whose views it
-    /// reads. Errs as [`Self::materialized_views`].
+    /// which a runtime refreshes with one ingestion run per window
+    /// ([`IngestionRefreshGroup`]). Each group lists its views in dependency
+    /// order and comes after the groups whose views it reads. Errs as
+    /// [`Self::materialized_views`].
     pub fn ingestion_refresh_groups(
         &self,
     ) -> Result<Vec<IngestionRefreshGroup>, InstallableDagError> {
-        let views: Vec<MaterializedView> = self
-            .materialized_views()?
-            .into_iter()
+        Ok(self.ingestion_refresh_groups_of(&self.materialized_views()?))
+    }
+
+    /// [`Self::ingestion_refresh_groups`] of `views`, this DAG's
+    /// materialized views ([`Self::materialized_views`]), for a caller that
+    /// already derived them.
+    pub fn ingestion_refresh_groups_of(
+        &self,
+        views: &[MaterializedView],
+    ) -> Vec<IngestionRefreshGroup> {
+        let views: Vec<MaterializedView> = views
+            .iter()
             .filter(|view| view.refresh == MaterializedViewRefresh::AtIngestion)
+            .cloned()
             .collect();
         let refresh_windows = self.refresh_windows(views.iter().map(|view| view.node_id));
         let mut groups: Vec<IngestionRefreshGroup> = Vec::new();
@@ -481,19 +510,19 @@ impl PhysicalASAPDAG {
             visit(group, &reads, &mut placed, &mut order);
         }
         let mut groups: Vec<Option<IngestionRefreshGroup>> = groups.into_iter().map(Some).collect();
-        Ok(order
+        order
             .into_iter()
             .filter_map(|group| groups[group].take())
-            .collect())
+            .collect()
     }
 
-    /// The refresh window of `node` ([`RefreshWindow`]): for a `PaneChain`
-    /// (a DAG with its chains unexpanded), its newest pane's, `(pane_width,
-    /// s mod pane_width)` with `s` the sum of the offsets of the `TimeShift`s
-    /// below it; for any other node, `(W, o mod W)` for its window
-    /// `(T - o - W, T - o]` ([`Self::view_windows`]). A chain and each of its
-    /// expanded panes have the same one. `None` when the window is
-    /// unbounded or empty. O(nodes + edges).
+    /// The refresh window of `node` ([`RefreshWindow::of_window`]): for a
+    /// `PaneChain` (a DAG with its chains unexpanded), its newest pane's,
+    /// `(pane_width, s mod pane_width)` with `s` the sum of the offsets of
+    /// the `TimeShift`s below it; for any other node, that of its window
+    /// ([`Self::view_windows`], which counts a chain below it as all its
+    /// panes). A chain and each of its expanded panes have the same one.
+    /// `None` when the window is unbounded or empty. O(nodes + edges).
     pub fn refresh_window(&self, node: PhysicalASAPNodeId) -> Option<RefreshWindow> {
         self.refresh_windows([node])[&node]
     }
@@ -511,15 +540,6 @@ impl PhysicalASAPDAG {
                 Some(Operator::ASAP(ASAPOp::PaneChain { .. }))
             )
         });
-        // The window `(T - end_offset_ms - width_ms, T - end_offset_ms]`'s refresh window.
-        let of_window = |end_offset_ms: i64, width_ms: i64| {
-            let width_ms = u64::try_from(width_ms).ok().filter(|&width| width > 0)?;
-            let phase_ms = end_offset_ms.rem_euclid(i64::try_from(width_ms).ok()?);
-            Some(RefreshWindow {
-                width_ms,
-                phase_ms: u64::try_from(phase_ms).ok()?,
-            })
-        };
         let mut windows: HashMap<PhysicalASAPNodeId, Option<RefreshWindow>> = self
             .view_windows(others)
             .into_iter()
@@ -528,7 +548,7 @@ impl PhysicalASAPDAG {
                     ScanWindow::Within {
                         end_offset_ms,
                         width_ms,
-                    } => of_window(end_offset_ms, width_ms),
+                    } => RefreshWindow::of_window(end_offset_ms, width_ms),
                     ScanWindow::Unbounded => None,
                 };
                 (id, refresh_window)
@@ -544,18 +564,11 @@ impl PhysicalASAPDAG {
                 continue;
             };
             // The newest pane ends at the offsets of the shifts below the chain.
-            let mut end_offset_ms = Some(0i64);
-            let mut below = payloads.get(child);
-            while let Some(Operator::NonASAP(NonASAPOp::TimeShift { shift, child })) = below {
-                end_offset_ms = end_offset_ms
-                    .filter(|_| shift.at.is_none())
-                    .and_then(|offset| offset.checked_add(shift.offset_ms));
-                below = payloads.get(child);
-            }
+            let end_offset_ms = offset_below(*child, |id| payloads.get(&id).copied());
             let width_ms = i64::try_from(*pane_width_ms).unwrap_or(0);
             windows.insert(
                 chain,
-                end_offset_ms.and_then(|offset| of_window(offset, width_ms)),
+                end_offset_ms.and_then(|offset| RefreshWindow::of_window(offset, width_ms)),
             );
         }
         windows
