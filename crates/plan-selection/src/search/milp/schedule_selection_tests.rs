@@ -60,10 +60,12 @@ fn root(id: usize) -> QueryOutputCandidates {
     }
 }
 
-// Boundary demand is the evaluator's union rate; upstream held memory uses
-// the rate-weighted mean, not the arithmetic mean or the sum of root rates.
+// Boundary demand is the evaluator's union rate; upstream held memory is
+// computed once per boundary execution, at that union rate, and held for the
+// boundary's longest reader (7.5 s), not the rate-weighted mean (6.83 s) nor
+// at the sum of root rates.
 #[test]
-fn heterogeneous_intervals_price_boundary_rates_and_weighted_lifetimes() {
+fn heterogeneous_intervals_price_boundary_rates_and_longest_reader_lifetimes() {
     let queries = [500, 1000]
         .map(|ms| QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(ms))));
     let graph = DagOfPhysicalCandidatesWithCosts {
@@ -130,8 +132,8 @@ fn heterogeneous_intervals_price_boundary_rates_and_weighted_lifetimes() {
     )
     .unwrap()
     .unwrap();
-    assert!((result.direct_modeled_cost.unwrap() - 167.5).abs() < 1e-8);
-    assert!((result.model_lower_bound.unwrap() - 167.5).abs() < 1e-8);
+    assert!((result.direct_modeled_cost.unwrap() - 173.5).abs() < 1e-8);
+    assert!((result.model_lower_bound.unwrap() - 173.5).abs() < 1e-8);
 }
 
 // Same-interval readers can share one evaluation only at compatible phases.
