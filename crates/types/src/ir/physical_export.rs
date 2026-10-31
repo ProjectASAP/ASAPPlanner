@@ -512,7 +512,9 @@ impl PhysicalASAPDAG {
     }
 
     /// Each node's operator, by id.
-    fn payloads_by_id(&self) -> HashMap<PhysicalASAPNodeId, &PhysicalASAPOperatorPayload> {
+    pub(crate) fn payloads_by_id(
+        &self,
+    ) -> HashMap<PhysicalASAPNodeId, &PhysicalASAPOperatorPayload> {
         self.nodes
             .iter()
             .map(|node| (node.id, &node.payload))
