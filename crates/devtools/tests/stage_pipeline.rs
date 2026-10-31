@@ -2408,3 +2408,71 @@ fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
     std::fs::remove_file(out).unwrap();
     assert!(document.get("memo").is_none());
 }
+
+/// `stage_pipeline`'s document with Stage 3's new search on
+/// (`ASAP_STAGE3_SEARCH=milp`, #1095 C5), set on the child process only.
+fn document_with_milp_search(args: &[&str]) -> Value {
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let out = std::env::temp_dir().join(format!(
+        "stage_pipeline_{}_milp_{call}.json",
+        std::process::id(),
+    ));
+    let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .env("ASAP_STAGE3_SEARCH", "milp")
+        .args(args)
+        .arg("--out")
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let document = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    std::fs::remove_file(out).unwrap();
+    document
+}
+
+/// #1095 C5: with the new search on, example 1 and the RangeHeavy T5
+/// q0.5 + q0.9 workload select a plan through the real pipeline, solved to
+/// optimality, whose `plan_cost` equals the MILP's objective exactly (the
+/// search errors on a difference and reports `inexact_objective` when the
+/// model encoded a term inexactly) and which passes every query's accuracy
+/// check.
+#[test]
+fn milp_search_objective_equals_plan_cost_on_example1_and_rangeheavy() {
+    let rangeheavy = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/dag-viewer/memo-examples/promql/rangeheavy-t5-q05-q09-1h.json");
+    let runs: [Vec<&str>; 2] = [
+        vec![
+            "--example",
+            "planner-layering-1",
+            "--enforce-accuracy-guarantees",
+        ],
+        vec![
+            "--workload",
+            rangeheavy.to_str().unwrap(),
+            "--deployment-capabilities",
+            r#"{"raw_data_retained": true, "query_time_results_retained": false}"#,
+            "--cost-model",
+            "aws-fargate-us-east-1",
+            "--enforce-accuracy-guarantees",
+        ],
+    ];
+    for args in runs {
+        let document = document_with_milp_search(&args);
+        let selection = &document["stage3_plan_selection"];
+        assert!(selects_a_plan(selection), "{args:?}: {selection}");
+        let report = &selection["search_report"];
+        assert_eq!(report["status"], "optimal", "{args:?}: {report}");
+        assert!(
+            report.get("inexact_objective").is_none(),
+            "{args:?}: {report}"
+        );
+        assert!(report["milp_variables"].as_u64().unwrap() > 0);
+        let queries = document["workload"]["queries"].as_array().unwrap().len();
+        let accepted = selection["accepted_accuracy_per_query"].as_array().unwrap();
+        assert_eq!(accepted.len(), queries);
+        for query in accepted {
+            assert_eq!(query["accepted_regardless_of_guarantee"], false, "{query}");
+        }
+    }
+}
