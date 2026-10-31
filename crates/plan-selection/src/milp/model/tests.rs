@@ -64,7 +64,7 @@ pub(crate) fn through_stages(queries: &[Query<'_>], raw_data_retained: bool) -> 
 /// [`through_stages`] over metric `m` declared non-negative (so relative
 /// errors compose through quotients, and Pass 1 keeps DDSketch).
 pub(crate) fn through_stages_non_negative(queries: &[Query<'_>]) -> Fixture {
-    through_stages_over(queries, true, false, true)
+    through_stages_over(queries, &["m"], true, false, true)
 }
 
 /// [`through_stages`], with rows arriving (100 per second) when
@@ -74,12 +74,14 @@ pub(crate) fn through_stages_with(
     raw_data_retained: bool,
     ingesting: bool,
 ) -> Fixture {
-    through_stages_over(queries, raw_data_retained, ingesting, false)
+    through_stages_over(queries, &["m"], raw_data_retained, ingesting, false)
 }
 
-/// The fixture builder behind [`through_stages`].
+/// The fixture builder behind [`through_stages`], over the metrics
+/// `metrics`, each with 100 series sampled every second.
 fn through_stages_over(
     queries: &[Query<'_>],
+    metrics: &[&str],
     raw_data_retained: bool,
     ingesting: bool,
     values_non_negative: bool,
@@ -115,9 +117,15 @@ fn through_stages_over(
             entry
         })
         .collect();
-    let mut data = DataWorkload::sampled_every(["m".to_string()], DurationMs(1_000));
-    data.sources.get_mut("m").expect("m").series_count = Some(100);
-    data.sources.get_mut("m").expect("m").values_non_negative = values_non_negative;
+    let mut data = DataWorkload::sampled_every(
+        metrics.iter().map(|metric| metric.to_string()),
+        DurationMs(1_000),
+    );
+    for metric in metrics {
+        let source = data.sources.get_mut(*metric).expect("declared");
+        source.series_count = Some(100);
+        source.values_non_negative = values_non_negative;
+    }
     if ingesting {
         data.arrival = asap_types::workload::DataArrival::Ingesting {
             rows_per_second: 100.0,
@@ -176,15 +184,17 @@ pub(crate) fn solve_and_check(
     cost_inputs: &CostInputs,
     restrict: impl FnOnce(&mut SelectionMilp<'_>),
 ) -> Result<Checked, SelectionMilpError> {
-    solve_and_check_by(fixture, cost_inputs, restrict, None)
+    solve_and_check_by(fixture, cost_inputs, restrict, None, true)
 }
 
-/// [`solve_and_check`] with HiGHS's time limit `limit`.
+/// [`solve_and_check`] with HiGHS's time limit `limit`, and the
+/// independent parts solved apart when `split_into_parts`.
 fn solve_and_check_by(
     fixture: &Fixture,
     cost_inputs: &CostInputs,
     restrict: impl FnOnce(&mut SelectionMilp<'_>),
     limit: Option<Duration>,
+    split_into_parts: bool,
 ) -> Result<Checked, SelectionMilpError> {
     let inputs = prepare_milp_inputs(
         &fixture.physical,
@@ -199,6 +209,7 @@ fn solve_and_check_by(
         cost_inputs,
         SelectionMilpOptions {
             enforce_accuracy: true,
+            split_into_parts,
         },
     )?;
     assert!(milp.inexact.is_empty(), "inexact terms: {:?}", milp.inexact);
@@ -642,6 +653,7 @@ fn a_phantom_reader_does_not_satisfy_minimum_query_readers() {
     let inputs = prepare_milp_inputs(&fixture.physical, &fixture.entries, &fixture.data, &costs);
     let options = SelectionMilpOptions {
         enforce_accuracy: true,
+        split_into_parts: true,
     };
     let mut milp = build_selection_milp(
         &fixture.physical,
@@ -775,6 +787,7 @@ fn cost_models_2_and_3_are_unsupported() {
             prepare_milp_inputs(&fixture.physical, &fixture.entries, &fixture.data, &costs);
         let options = SelectionMilpOptions {
             enforce_accuracy: true,
+            split_into_parts: true,
         };
         assert!(matches!(
             build_selection_milp(
@@ -825,6 +838,7 @@ fn accuracy_rows_follow_the_composition_on_a_ratio() {
             &costs,
             SelectionMilpOptions {
                 enforce_accuracy: true,
+                split_into_parts: true,
             },
         )
         .unwrap();
@@ -911,8 +925,14 @@ fn the_warm_start_is_a_feasible_plan_costed_exactly() {
 // time ends with a validated incumbent, reported as the deadline.
 #[test]
 fn a_deadline_yields_the_warm_starts_plan() {
-    let checked =
-        solve_and_check_by(&two_windows(), &cost_inputs(), |_| {}, Some(Duration::ZERO)).unwrap();
+    let checked = solve_and_check_by(
+        &two_windows(),
+        &cost_inputs(),
+        |_| {},
+        Some(Duration::ZERO),
+        true,
+    )
+    .unwrap();
     assert_eq!(checked.solution.status, SelectionMilpStatus::TimeLimit);
     let start = checked
         .solution
@@ -955,4 +975,133 @@ fn a_widened_scan_reading_its_own_memo_group_plans_exactly() {
         let checked = solve_and_check(&fixture, &costs, |_| {}).unwrap();
         assert_eq!(checked.solution.status, SelectionMilpStatus::Optimal);
     }
+}
+
+// #1095 §5 (3a): queries over two metrics share no candidate, run of `I` or
+// source, so the model splits into one part per metric; solving the parts
+// apart gives the plan and cost of one solve of the whole model.
+#[test]
+fn independent_query_sets_solve_apart_to_the_same_plan() {
+    let queries = [
+        query("sum_over_time(m[5m])", 60_000),
+        query("sum_over_time(m[1h])", 60_000),
+        query("sum(n) + max(n)", 30_000),
+    ];
+    let fixture = through_stages_over(&queries, &["m", "n"], true, false, false);
+    let costs = cost_inputs();
+    let inputs = prepare_milp_inputs(&fixture.physical, &fixture.entries, &fixture.data, &costs);
+    let options = SelectionMilpOptions {
+        enforce_accuracy: true,
+        split_into_parts: true,
+    };
+    let milp = build_selection_milp(
+        &fixture.physical,
+        &inputs,
+        &fixture.entries,
+        &costs,
+        options,
+    )
+    .unwrap();
+    let parts = independent_parts(&milp);
+    let queries_per_part: Vec<Vec<usize>> = parts.iter().map(|part| part.queries.clone()).collect();
+    assert_eq!(queries_per_part, vec![vec![0, 1], vec![2]]);
+    let columns: usize = parts.iter().map(|part| part.columns.len()).sum();
+    let rows: usize = parts.iter().map(|part| part.rows.len()).sum();
+    assert_eq!(columns, milp.builder.variables.len());
+    assert_eq!(rows, milp.builder.rows.len());
+
+    let apart = solve_and_check_by(&fixture, &costs, |_| {}, None, true).unwrap();
+    let whole = solve_and_check_by(&fixture, &costs, |_| {}, None, false).unwrap();
+    assert_eq!(apart.solution.parts.len(), 2);
+    assert_eq!(whole.solution.parts.len(), 1);
+    assert_eq!(apart.solution.status, SelectionMilpStatus::Optimal);
+    assert_eq!(whole.solution.status, SelectionMilpStatus::Optimal);
+    let tolerance = 1e-9 * whole.solution.cost_per_second.abs();
+    assert!(
+        (apart.solution.cost_per_second - whole.solution.cost_per_second).abs() <= tolerance,
+        "apart {:e} != whole {:e}",
+        apart.solution.cost_per_second,
+        whole.solution.cost_per_second
+    );
+    assert_eq!(apart.dag.candidate_of_node, whole.dag.candidate_of_node);
+}
+
+thread_local! {
+    /// Set by a test to build the big-M bounds as before #1095 step 1
+    /// ([`super::tests_loose_big_m`]).
+    pub(crate) static LOOSE_BIG_M: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Per row of family `family` in `fixture`'s model (built with the loose
+/// big-M bounds when `loose`), the largest coefficient on an `x` variable.
+fn big_m_per_row(fixture: &Fixture, family: &str, loose: bool) -> Vec<f64> {
+    LOOSE_BIG_M.with(|cell| cell.set(loose));
+    let costs = aws_fargate_cost_inputs();
+    let inputs = prepare_milp_inputs(&fixture.physical, &fixture.entries, &fixture.data, &costs);
+    let milp = build_selection_milp(
+        &fixture.physical,
+        &inputs,
+        &fixture.entries,
+        &costs,
+        SelectionMilpOptions {
+            enforce_accuracy: true,
+            split_into_parts: true,
+        },
+    )
+    .unwrap();
+    LOOSE_BIG_M.with(|cell| cell.set(false));
+    let selected: std::collections::HashSet<Variable> = milp.selected.values().copied().collect();
+    milp.builder
+        .rows
+        .iter()
+        .zip(&milp.builder.row_families)
+        .filter(|(_, &f)| f == family)
+        .map(|(row, _)| {
+            row.expression()
+                .linear_coefficients()
+                .filter(|(variable, _)| selected.contains(variable))
+                .map(|(_, coefficient)| coefficient.abs())
+                .fold(0.0, f64::max)
+        })
+        .collect()
+}
+
+// #1095 step 1: `Ē[m]` in `V ≥ E − Ē (x[m] − z)` is the sum over the
+// context's slots of its costliest run. With a rollup read every 20 s and
+// every 30 s, a shared context has slots with several runs, so the bound is
+// below the old sum over every run; the plan and its cost are unchanged.
+#[test]
+fn a_tighter_context_execution_bound_keeps_the_plan() {
+    let fixture = through_stages(
+        &[
+            query("sum by (job) (sum_over_time(m[10m]))", 20_000),
+            query("sum(sum_over_time(m[10m]))", 30_000),
+        ],
+        true,
+    );
+    let family = "V (context execution at a rate component)";
+    let tight = big_m_per_row(&fixture, family, false);
+    let loose = big_m_per_row(&fixture, family, true);
+    assert_eq!(tight.len(), loose.len());
+    assert!(tight
+        .iter()
+        .zip(&loose)
+        .all(|(t, l)| *t <= l * (1.0 + 1e-12)));
+    assert!(tight.iter().zip(&loose).any(|(t, l)| *t < l * (1.0 - 1e-9)));
+
+    let tightened = solve_and_check(&fixture, &aws_fargate_cost_inputs(), |_| {}).unwrap();
+    LOOSE_BIG_M.with(|cell| cell.set(true));
+    let looser = solve_and_check(&fixture, &aws_fargate_cost_inputs(), |_| {});
+    LOOSE_BIG_M.with(|cell| cell.set(false));
+    let looser = looser.unwrap();
+    assert_eq!(tightened.solution.status, SelectionMilpStatus::Optimal);
+    assert_eq!(looser.solution.status, SelectionMilpStatus::Optimal);
+    let tolerance = 1e-9 * looser.solution.cost_per_second.abs();
+    assert!(
+        (tightened.solution.cost_per_second - looser.solution.cost_per_second).abs() <= tolerance
+    );
+    assert_eq!(
+        tightened.dag.candidate_of_node,
+        looser.dag.candidate_of_node
+    );
 }

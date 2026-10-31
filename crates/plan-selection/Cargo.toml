@@ -25,6 +25,11 @@ highs = "=2.4.0"
 # `reference_pricer`: the whole-workload selector over enumerated plans, for
 # the developer tools' reference pricing (`asap-devtools`).
 reference-pricer = []
+# `lp-diagnosis`: with `ASAP_STAGE3_LP_DIAGNOSIS=<path>`, each selection MILP
+# solve also reports where its LP relaxation loses its bound (measurement
+# only, for the developer tools; a diagnosed run's timings are not
+# comparable with an undiagnosed one's).
+lp-diagnosis = []
 
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
