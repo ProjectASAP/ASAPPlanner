@@ -2,10 +2,12 @@
 //! Each stage removes only what its own knowledge rules out (option C):
 //! Pass 1 what the measure or the deployment cannot compute, Stage 2 what
 //! cannot be implemented, built or kept. Stage 0 fails with an error and
-//! Pass 2 only adds candidates, so neither prunes. Stage 3's rejections
-//! keep their own cause (`RejectionCause` in plan selection).
+//! Pass 2 only adds candidates, so neither prunes. Stage 3 prunes before
+//! its selection MILP (dominated and uncostable candidates); its
+//! rejections of whole plans keep their own cause (`RejectionCause` in plan
+//! selection).
 
-use super::MemoGroupId;
+use super::{MemoGroupId, PhysicalCandidateId};
 
 /// One candidate a stage removed from memo group `group`, and why. `C` is
 /// the stage's candidate type: Pass 1's way to compute a measure
@@ -21,8 +23,8 @@ pub struct PrunedCandidate<C> {
 /// Why a stage removed a candidate. The first seven are Pass 1's: the
 /// candidate cannot compute its measure, the deployment cannot run it, or
 /// no query that reads it can meet its accuracy target with it.
-/// The rest are Stage 2's: the physical candidate cannot be built, used or
-/// kept.
+/// Then Stage 2's: the physical candidate cannot be built, used or
+/// kept. The last two are Stage 3's, before its selection MILP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PruneReason {
     /// Pass 1: the measure requires an exact answer and the summary is
@@ -87,4 +89,12 @@ pub enum PruneReason {
     /// (`MatAtQuery`), which needs at least two reading queries, and fewer
     /// queries can reach it.
     TooFewQueryReaders,
+    /// Stage 3: the candidate it names, in the same memo group with the
+    /// same producers and readers, is at least as good in every respect
+    /// (guarantee, usage, latency, output, held state), so no optimal plan
+    /// needs this one.
+    DominatedBy(PhysicalCandidateId),
+    /// Stage 3: `asap-cost` could not cost it, so the selection MILP leaves
+    /// it out.
+    UsageNotCostable,
 }
