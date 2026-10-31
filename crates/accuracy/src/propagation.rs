@@ -398,7 +398,7 @@ fn selected_group_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
 /// selection states it over a whole result of `G` points as `G·δ`.
 ///
 /// [`AccuracyScope::PerValue`]: asap_types::ir::properties::AccuracyScope::PerValue
-pub(crate) fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
+pub fn composed_guarantee(node: &OperatorNode) -> Option<AccuracyGuarantee> {
     if let Some(guarantee) = selected_group_guarantee(node) {
         return Some(guarantee);
     }

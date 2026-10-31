@@ -86,7 +86,7 @@ pub(crate) fn classic_guarantee(
     relative_error: Option<f64>,
     source: &str,
 ) -> Option<AccuracyGuarantee> {
-    if !(4..=18).contains(&precision) {
+    if !(4..=MAX_PRECISION).contains(&precision) {
         return None;
     }
     let relative_error = classic_relative_error(precision, relative_error);
@@ -123,6 +123,9 @@ pub fn classic_failure_probability(precision: u8, relative_error: f64, max_disti
         .and_then(|model| model.failure_probability(precision))
         .unwrap_or(1.0)
 }
+
+/// The largest precision classic HLL's contract covers.
+pub const MAX_PRECISION: u8 = 18;
 
 const CLASSIC_CONTRACT: &str = "classic_hll_linear_counting_collision_bound_v1";
 
@@ -194,7 +197,7 @@ impl ClassicHllConfidence {
     /// We maximize the collision bound over EVERY integer N in the contract,
     /// not just its upper endpoint (small-cardinality tails matter).
     fn failure_probability(&self, precision: u8) -> Option<f64> {
-        if !(4..=18).contains(&precision) {
+        if !(4..=MAX_PRECISION).contains(&precision) {
             return None;
         }
         let m = f64::from(1u32 << precision);
