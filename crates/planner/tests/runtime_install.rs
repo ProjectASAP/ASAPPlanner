@@ -4,21 +4,27 @@
 //! the compiler checks that no internal is used (CI runs
 //! `cargo check -p asap-planner --tests --locked` on its own for that).
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::time_series;
 use asap_executor::physical_planner::compile;
-use asap_executor::runtime::{Limits, RunContext, Scope};
+use asap_executor::runtime::{Limits, OutputStream, RunContext, Scope};
+use asap_executor::sources::{
+    DataStore, InMemoryDataStore, MaterializedViewRequest, RawDataRequest,
+};
 use asap_executor::values::{Batch, Value};
+use asap_executor::Error as ExecutorError;
 use asap_physical_asap_optimization::test_support::split_shared_by_timing;
 use asap_planner::{
     plan_installable, run_planning, CostInputs, DeploymentCapabilities, FrontendInput,
     InstallablePlan, InstallablePlanError, MaterializedView, MaterializedViewRefresh, OperatorKind,
     OptimizationInput, OptimizationPass, OptimizeError, PhysicalASAPDAG, PlanOutput,
-    PlanSearchSettings, PlanningModels, PlanningWorkload, SelectedPlanReport, SelectionBox,
-    Stage1ToStage3Pass, UserInput,
+    PlanSearchSettings, PlanningModels, PlanningWorkload, RefreshWindow, SelectedPlanReport,
+    SelectionBox, Stage1ToStage3Pass, UserInput,
 };
+use asap_types::ir::operator::Source;
 use asap_types::ir::schema::schema_support::with_promql_series_identity;
 use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::ir::{
@@ -99,6 +105,35 @@ fn remote_write_samples() -> Vec<RawDataSample> {
     samples
 }
 
+thread_local! {
+    /// How many `read_raw_data` calls the runs on this thread made.
+    static RAW_DATA_READS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// A store counting its `read_raw_data` calls in [`RAW_DATA_READS`].
+struct CountingStore(InMemoryDataStore);
+
+impl DataStore for CountingStore {
+    fn read_raw_data(
+        &self,
+        source: &Source,
+        request: &RawDataRequest,
+        context: RunContext,
+    ) -> Result<OutputStream<'_, Batch>, ExecutorError> {
+        RAW_DATA_READS.with(|reads| reads.set(reads.get() + 1));
+        self.0.read_raw_data(source, request, context)
+    }
+
+    fn read_materialized_view(
+        &self,
+        view: &MaterializedView,
+        request: &MaterializedViewRequest,
+        context: RunContext,
+    ) -> Result<OutputStream<'_, Batch>, ExecutorError> {
+        self.0.read_materialized_view(view, request, context)
+    }
+}
+
 /// Compile `ids` of `dag` over the stored states `views` (by node id) and
 /// run them in `scope` over the raw `samples`, as a runtime does with the
 /// executor: each id's output batches.
@@ -129,7 +164,9 @@ fn run(
     for (id, batch) in views {
         store = store.with_materialized_view(id as _, vec![batch]).unwrap();
     }
-    let instance = compiled.instantiate(Arc::new(store)).unwrap();
+    let instance = compiled
+        .instantiate(Arc::new(CountingStore(store)))
+        .unwrap();
     block_on(async {
         // The run's scope (ingestion window or query time) and limits.
         let context = RunContext::new(scope, Limits::default()).unwrap();
@@ -256,6 +293,8 @@ struct DataPlaneRun {
     /// How many materialized views this evaluation refreshed (ingestion or
     /// query runs); the others it read came from the store.
     outputs_built: usize,
+    /// How many `read_raw_data` calls those refreshes made.
+    raw_data_reads_refreshing: usize,
 }
 
 /// One summary state this test stores: its refreshed state, and how long
@@ -313,8 +352,9 @@ fn query_roots(plan: &InstallablePlan) -> Vec<u64> {
 
 /// The data plane at evaluation time `evaluation_ms`: from `plan_json`,
 /// `samples` and the states earlier evaluations left in `store`, refresh each
-/// materialized view the store lacks once, in the plan's order, from its
-/// raw-data windows and the views it reads; answer every query; drop the
+/// materialized view the store lacks once, from its raw-data windows and the
+/// views it reads: the views refreshed at ingestion by refresh group, one
+/// ingestion run per group and span, then the others; answer every query; drop the
 /// states past their retention; and answer the queries again with the
 /// query-time reference.
 fn run_data_plane(
@@ -363,9 +403,9 @@ fn run_data_plane_on(
     let mut inputs = BTreeMap::new();
     // How many materialized views this evaluation refreshes.
     let mut outputs_built = 0;
-    // Each view's state and the time span of its data at this
+    // Each view's state key and the time span of its data at this
     // evaluation, `(start_ms, end_ms]`, by node id.
-    let mut built: BTreeMap<u64, (Batch, (i64, i64))> = BTreeMap::new();
+    let mut planned: BTreeMap<u64, (String, (i64, i64))> = BTreeMap::new();
     for view in &views {
         // The evaluation its windows end at: this one, or for a tumbling
         // at-ingestion view the newest point of its grid at or before it.
@@ -390,31 +430,81 @@ fn run_data_plane_on(
                 view.inputs
                     .materialized_views
                     .iter()
-                    .map(|id| built[&(*id as u64)].1),
+                    .map(|id| planned[&(*id as u64)].1),
             )
             .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
             .expect("a materialized view reads something");
-        let key = state_key(view, built_for_ms);
-        if !store.contains_key(&key) {
-            // The views its refresh reads; its raw data is bound at its `Scan`s.
-            let mut sources = BTreeMap::new();
-            for id in &view.inputs.materialized_views {
-                sources.insert(*id as u64, built[&(*id as u64)].0.clone());
-            }
-            // The run that refreshes it: an ingestion run over its data's span
-            // once its inputs are complete (each window ends at the run's
-            // end), or the query run of this evaluation.
-            let scope = match view.refresh() {
-                MaterializedViewRefresh::AtIngestion => Scope::Ingestion {
-                    window_start_ms: span.0,
-                    window_end_ms: span.1,
-                },
-                MaterializedViewRefresh::OnFirstRead => Scope::Query {
-                    evaluation_time_ms: evaluation_ms,
-                },
+        planned.insert(view.node_id as u64, (state_key(view, built_for_ms), span));
+    }
+    // The runs that refresh the views the store lacks: for each refresh
+    // group, one ingestion run per span its views' data covers, with every
+    // view of the group over that span as a root (a node they share runs
+    // once); then each view refreshed on first read in this evaluation's
+    // query run.
+    let mut refreshes: Vec<(Vec<&MaterializedView>, Scope)> = Vec::new();
+    for group in installed.ingestion_refresh_groups().unwrap() {
+        let mut by_span: BTreeMap<(i64, i64), Vec<&MaterializedView>> = BTreeMap::new();
+        for member in &group.views {
+            let view = views
+                .iter()
+                .find(|view| view.node_id == member.node_id)
+                .unwrap();
+            by_span
+                .entry(planned[&(view.node_id as u64)].1)
+                .or_default()
+                .push(view);
+        }
+        for (span, members) in by_span {
+            let scope = Scope::Ingestion {
+                window_start_ms: span.0,
+                window_end_ms: span.1,
             };
-            // The batches that run produced, in one batch, as the store keeps it.
-            let batches = run(dag, sources, samples, &[view.node_id as u64], scope).remove(0);
+            refreshes.push((members, scope));
+        }
+    }
+    for view in views
+        .iter()
+        .filter(|view| view.refresh() == MaterializedViewRefresh::OnFirstRead)
+    {
+        let scope = Scope::Query {
+            evaluation_time_ms: evaluation_ms,
+        };
+        refreshes.push((vec![view], scope));
+    }
+    let raw_data_reads_before = RAW_DATA_READS.with(Cell::get);
+    for (members, scope) in refreshes {
+        // The views of the run whose state the store lacks, one per state.
+        let mut roots: Vec<&MaterializedView> = Vec::new();
+        for view in members {
+            let key = &planned[&(view.node_id as u64)].0;
+            if !store.contains_key(key)
+                && !roots
+                    .iter()
+                    .any(|root| &planned[&(root.node_id as u64)].0 == key)
+            {
+                roots.push(view);
+            }
+        }
+        if roots.is_empty() {
+            continue;
+        }
+        // The views the run reads that it does not refresh, from the
+        // store; its raw data is bound at its `Scan`s.
+        let mut sources = BTreeMap::new();
+        for id in roots
+            .iter()
+            .flat_map(|view| &view.inputs.materialized_views)
+        {
+            if !roots.iter().any(|root| root.node_id == *id) {
+                let key = &planned[&(*id as u64)].0;
+                sources.insert(*id as u64, store[key].state.clone());
+            }
+        }
+        let root_ids: Vec<u64> = roots.iter().map(|view| view.node_id as u64).collect();
+        // Each root's batches, in one batch per root, as the store keeps it.
+        let outputs = run(dag, sources, samples, &root_ids, scope);
+        for (view, batches) in roots.into_iter().zip(outputs) {
+            let (key, span) = &planned[&(view.node_id as u64)];
             let schema = batches[0].schema().clone();
             let state_rows = batches.iter().flat_map(|b| b.to_rows().to_vec()).collect();
             store.insert(
@@ -427,11 +517,17 @@ fn run_data_plane_on(
             );
             outputs_built += 1;
         }
+    }
+    let raw_data_reads_refreshing = RAW_DATA_READS.with(Cell::get) - raw_data_reads_before;
+    // Each view's state and the span of its data, by node id.
+    let mut built: BTreeMap<u64, (Batch, (i64, i64))> = BTreeMap::new();
+    for view in &views {
+        let (key, span) = &planned[&(view.node_id as u64)];
         // One stored state serves every view with its key, so it is kept
         // for the largest retention any of them requires.
-        let stored = store.get_mut(&key).unwrap();
+        let stored = store.get_mut(key).unwrap();
         stored.retention_ms = stored.retention_ms.max(view.retention_ms());
-        built.insert(view.node_id as u64, (stored.state.clone(), span));
+        built.insert(view.node_id as u64, (stored.state.clone(), *span));
     }
     // The query run reads the views it reaches from the queries' roots
     // without passing another view; those below are read only through the
@@ -493,6 +589,122 @@ fn run_data_plane_on(
         answers_per_query,
         reference_answers_per_query,
         outputs_built,
+        raw_data_reads_refreshing,
+    }
+}
+
+/// The sketch algorithm of the panes view `id` of `plan` builds.
+fn pane_sketch(plan: &InstallablePlan, id: usize) -> SketchAlgorithm {
+    let node = plan.dag.nodes.iter().find(|node| node.id == id).unwrap();
+    match &node.payload {
+        asap_executor::planner::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
+            ASAPOp::SummaryAgg {
+                family: FieldDataType::Sketch(kind, _),
+                ..
+            },
+        ) => *kind.algorithm(),
+        other => panic!("not a sketch pane: {other:?}"),
+    }
+}
+
+/// Issue #1151's example: a p90 at rank error 0.01 over a minute and a p99
+/// at relative error 0.01 over five minutes, both every 10 s, over 1,000
+/// ingesting non-negative `latency_ms` gauges sampled every 10 s, on a
+/// deployment that keeps no raw data: a KLL chain and a DDSketch chain,
+/// both of 10 s panes, kept at ingestion over one `Scan`. Their panes are one refresh group, so each
+/// 10 s window is read from raw data once, in one ingestion run that builds
+/// both panes ending there: 30 reads for the 30 pane windows of the first
+/// evaluation (36 when each pane view had its own run). Each state equals
+/// the one a run of its view alone builds, and both queries answer as the
+/// query-time reference.
+#[tokio::test]
+async fn panes_of_one_refresh_window_read_each_raw_window_once() {
+    let entry = |query: &str, metric: &str| {
+        format!(
+            r#"{{"query": {query:?}, "demand": {{"fixed_interval": 10000}},
+              "requirements": {{"accuracy": {{"accuracy_metric": {metric:?}, "max_error": 0.01,
+                  "failure_probability": 0.01, "accuracy_scope": "whole_result"}}}},
+              "predictability": {{"predictable": {{"known_at": null}}}}}}"#
+        )
+    };
+    let workload: PlanningWorkload = serde_json::from_str(&format!(
+        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{}, {}]}},
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 100.0}}}},
+              "sources": {{"latency_ms": {{"series_count": 1000, "sample_interval": 10000,
+                "metric_type": "gauge", "values_non_negative": true}}}}}}}}"#,
+        entry("quantile_over_time(0.9, latency_ms[1m])", "rank"),
+        entry("quantile_over_time(0.99, latency_ms[5m])", "relative"),
+    ))
+    .unwrap();
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..DeploymentCapabilities::default()
+    };
+    let plan_json = plan_json_for(workload, &capabilities).await;
+    let installed: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
+    installed.check_compiles().unwrap();
+    // One refresh group: the six 10 s KLL panes and the thirty 10 s
+    // DDSketch panes.
+    let groups = installed.ingestion_refresh_groups().unwrap();
+    assert_eq!(groups.len(), 1, "{groups:#?}");
+    assert_eq!(
+        groups[0].refresh_window,
+        Some(RefreshWindow {
+            width_ms: 10_000,
+            phase_ms: 0
+        })
+    );
+    let sketches: Vec<SketchAlgorithm> = groups[0]
+        .views
+        .iter()
+        .map(|view| pane_sketch(&installed, view.node_id))
+        .collect();
+    let count = |algorithm| sketches.iter().filter(|a| **a == algorithm).count();
+    assert_eq!(count(SketchAlgorithm::Kll), 6, "{sketches:?}");
+    assert_eq!(count(SketchAlgorithm::DDSketch), 30, "{sketches:?}");
+
+    let samples = remote_write_samples();
+    let mut store = SummaryStore::new();
+    let evaluated = run_data_plane(&plan_json, &samples, EVALUATION_MS, &mut store);
+    assert_eq!(evaluated.outputs_built, 36);
+    assert_eq!(evaluated.raw_data_reads_refreshing, 30);
+    assert_eq!(
+        evaluated.answers_per_query,
+        evaluated.reference_answers_per_query
+    );
+    assert_eq!(evaluated.answers_per_query[0].len(), 2);
+
+    // Each pane's state equals the one an ingestion run of its view alone
+    // builds.
+    for view in &groups[0].views {
+        let span = view.inputs.raw_data_windows()[0].bounds_ms(EVALUATION_MS);
+        let scope = Scope::Ingestion {
+            window_start_ms: span.0,
+            window_end_ms: span.1,
+        };
+        let alone = run(
+            &installed.dag,
+            BTreeMap::new(),
+            &samples,
+            &[view.node_id as u64],
+            scope,
+        )
+        .remove(0);
+        // `Value` has no equality; its debug form shows each state.
+        let rows = format!(
+            "{:?}",
+            alone
+                .iter()
+                .flat_map(|b| b.to_rows().to_vec())
+                .collect::<Vec<_>>()
+        );
+        let stored = &store[&state_key(view, EVALUATION_MS)].state;
+        assert_eq!(
+            format!("{:?}", stored.to_rows()),
+            rows,
+            "view {}",
+            view.node_id
+        );
     }
 }
 

@@ -288,8 +288,9 @@ window; that requires supported boundary handling or a different candidate.
 ## 3. Materialization → Physical DAG
 
 Operator names in the diagrams of this section and §4 (`NativeKllBuild`,
-`NativeKllMerge`, `NativeP50`, `NativeQuantile`, `KllStateOutput`) are
-illustrative. The executor implements them as `SummaryAgg` (a KLL build),
+`NativeDDSketchBuild`, `NativeKllMerge`, `NativeP50`, `NativeQuantile`,
+`KllStateOutput`) are illustrative. The executor implements them as
+`SummaryAgg` (a KLL or DDSketch build),
 `SummaryMerge` and `SummaryEvaluation` (a quantile readout).
 
 The **Physical Plan Compiler** consumes both computation semantics and maintenance
@@ -448,6 +449,9 @@ impl InstallablePlan {
     /// Every materialized view, in dependency order: its node, refresh mode
     /// (at ingestion, or on first read and kept), coverage, inputs and retention.
     pub fn materialized_views(&self) -> Result<Vec<MaterializedView>, InstallablePlanError>;
+    /// The views refreshed at ingestion, by refresh group (one refresh window
+    /// each), each group after the groups it reads.
+    pub fn ingestion_refresh_groups(&self) -> Result<Vec<IngestionRefreshGroup>, InstallablePlanError>;
     /// Per raw-data `Source` read at query time: how far back raw data must be kept.
     pub fn raw_data_retention(&self) -> Result<Vec<RawDataRetention>, InstallablePlanError>;
 }
@@ -455,9 +459,17 @@ pub struct RawDataRetention {
     pub source: Source,
     pub lookback_ms: Option<u64>,     // None = unbounded
 }
+pub struct IngestionRefreshGroup {
+    pub refresh_window: Option<RefreshWindow>, // None = an unbounded window, a group of its own
+    pub views: Vec<MaterializedView>,          // in dependency order
+}
+pub struct RefreshWindow {
+    pub width_ms: u64,                // width of each window
+    pub phase_ms: u64,                // where each window ends, modulo width_ms
+}
 ```
 
-Both derivations are methods on `PhysicalASAPDAG` in `asap-types`, so a
+These derivations are methods on `PhysicalASAPDAG` in `asap-types`, so a
 runtime needs no dependency on the planner crate.
 
 A **materialized view** is a node whose output is kept across evaluations
@@ -574,21 +586,72 @@ ingestion window, or a query evaluation time `T`.
 - In an ingestion run over `(window_start, window_end]`, each `TimeRange(w)` keeps `(window_end - w, window_end]`. A windowed raw data slot asks for `(window_start, window_end]`, and a materialized view slot for `(window_end - w, window_end]`. A view refreshed at ingestion whose raw windows, or the windows of the views it reads, end at different offsets cannot be built in one run, so installation refuses it.
 - A store never implements PromQL or SQL semantics. The compile check compiles these operators, so a plan whose window the executor cannot run is rejected before it is installed.
 
+### Refresh groups
+
+Two views refreshed at ingestion can be built in one ingestion run, with the
+run's interval equal to each one's window, exactly when they have the same
+**refresh window**: windows of width `W` that end `p` after a multiple of `W`
+(`0 ≤ p < W`), relative to the evaluation time. A view whose `view_window` is
+`(T - o - W, T - o]` has the refresh window `(W, o mod W)`. All panes of a
+pane chain have their newest pane's refresh window. The source, the summary
+family and where the state is kept do not enter. A view with an unbounded
+window is a group of its own.
+
+A **refresh group** is the set of views refreshed at ingestion that have one
+refresh window `(W, p)` (`PhysicalASAPDAG::refresh_window`,
+`ingestion_refresh_groups`). A runtime refreshes a refresh group with one
+ingestion run per window `(e - W, e]`, `e ≡ p (mod W)`:
+
+- The run's roots are the views of the group whose state for the window
+  ending at `e` is not stored yet. Pane `i` of a chain at evaluation `T` is
+  the same state as the newest pane at `T - i·W`, so in steady state the
+  roots are the newest pane of each chain of the group; the older panes are
+  already stored.
+- A view of the group that a root reads is computed in the run, not read
+  from a slot. The views of other groups that the roots read are
+  materialized view slots.
+- The executor runs a node that several roots share once per run, so a `Scan`
+  below several views of the group reads its raw data once per window.
+- Views of different refresh windows are refreshed in different runs. With a
+  10-second and a 60-second pane chain over one `Scan`, the 10-second chain
+  needs five pane ends the 60-second chain does not, so the `Scan` is read
+  once for each chain.
+
+The refresh window is derived from the DAG alone (time ranges, shifts and pane
+widths), like the views and their retention. Sealing, lateness, threading and
+the alignment of the window grid stay the deployment's.
+
+Stage 3's cost assumes this grouping (`asap_cost::execution_demand::computations`):
+a stateless ingestion-time node is charged once per refresh window of the
+views above it, not once per view. A runtime that splits a group (for
+example, because its sources seal at different times) computes the same
+states at a higher cost than priced, the same status pane reuse has. A
+runtime that updates states sample by sample passes each sample once
+whatever the windows, so it runs cheaper than priced.
+
 ### Running example
 
 For the KLL p50/p99 example, with one-minute panes materialized at ingestion
-over `Source::TimeSeries { metric: "latency" }`:
+over `Source::TimeSeries { metric: "latency" }`, plus a p99.9 with relative
+error answered by a DDSketch chain with one-minute panes over the same `Scan`:
 
 ```text
 Install (once):
-    views     = plan.materialized_views()?          // [pane nodes, refresh = at ingestion, retention]
-    refresh   = compile(dag, [], [pane_0])           // Scan → TimeRange(1m) → NativeKllBuild(k=200)
-    query     = compile(dag, views[pane_0..pane_4], [p50, p99])  // 5 materialized view slots → NativeKllMerge → NativeP50, NativeP99
+    views     = plan.materialized_views()?          // [KLL and DDSketch pane nodes, refresh = at ingestion, retention]
+    groups    = plan.ingestion_refresh_groups()?    // [refresh window (1m, 0): ten KLL and DDSketch pane views]
+    refresh   = compile(dag, [], [kll_pane_0, dd_pane_0])  // the newest pane of each chain
+                // Scan → TimeRange(1m) → NativeKllBuild(k=200)
+                //                      → NativeDDSketchBuild(α=0.01)
+    query     = compile(dag, views[kll_pane_0..kll_pane_4], [p50, p99])  // 5 materialized view slots → NativeKllMerge → NativeP50, NativeP99
+    (the p99.9 query DAG reads dd_pane_0..dd_pane_4 the same way)
 
-Each complete pane (12:04, 12:05], in an ingestion run:
+Each complete pane (12:04, 12:05], in one ingestion run whose roots are the
+group's views with no stored state for the pane ending 12:05 (kll_pane_0 and
+dd_pane_0; the older panes were stored by earlier runs):
     refresh.instantiate(store)
-        Scan calls read_raw_data(TimeSeries { latency }, time_range_ms = (12:04, 12:05])
-    store the KllState in the summary store under the view's coverage and interval
+        Scan calls read_raw_data(TimeSeries { latency }, time_range_ms = (12:04, 12:05]) once;
+        both builds read its rows
+    store the KllState and the DDSketchState in the summary store, each under its view's coverage and interval
 
 Query at T = 12:05 over (12:00, 12:05]:
     the installed DAG has the chain expanded: five pane views, pane i under TimeShift(i·1m)
@@ -636,7 +699,7 @@ The complete example makes the ownership boundary explicit:
 | **Physical Plan Compiler** | Lower to native KLL build, merge, and readout operators |
 | **Physical DAG** | Define precompute and query DAGs with typed input/output boundaries |
 | **Deployment interface** | Read the `latency` raw data slot with `read_raw_data`, and each pane's materialized view slot with `read_materialized_view`, from one `DataStore` |
-| **Deployment** | Schedule pane refreshes, store and resolve panes, run queries |
+| **Deployment** | Schedule one ingestion run per refresh group and window, store and resolve panes, run queries |
 
 ```text
 Logical:
@@ -662,7 +725,7 @@ does not introduce additional planning decisions.
 The physical layer does not own raw ingestion, storage formats, or decoding
 persisted bytes into typed state. It compiles computation over input slots:
 windows, summary build, merge (for example KLL merge), sketch estimates and
-exact finalization. The deployment schedules each pane's refresh, stores and
+exact finalization. The deployment schedules each refresh group's runs, stores and
 reads stored state, and serves raw data and views to the slots through its
 `DataStore`. The plan file is the only persisted handoff; a compiled
 physical DAG is derived from it by the executor and is not persisted.
@@ -680,6 +743,7 @@ operator/runtime fixtures:
 | --- | --- |
 | `kll_pane_execution::five_panes_roundtrip_and_shared_merge_runs_once` | One-minute pane refreshes from raw data → five materialized view slots → shared native merge → p50/p99; counts every sample once, checks adjacent aligned windows and instruments one merge start per run |
 | `kll_pane_execution::a_store_keyed_by_definition_and_time_range_answers_the_panes` | A store that finds states only by `(definition_id, time range)` answers the five-pane query: the panes share one definition and request the five ranges that tile the window |
+| `runtime_install::panes_of_one_refresh_window_read_each_raw_window_once` | A KLL chain and a DDSketch chain of 10 s panes over one `Scan` are one refresh group: each pane window is read from raw data once, in one ingestion run that builds both panes; each state equals that of a run of its view alone, and both queries answer as the query-time reference |
 | `kll_pane_execution::panes_reject_parameters_schema_and_missing_binding` | Parameter relabelling, incompatible schemas and missing views fail explicitly |
 | `precompute_candidates::grouped_rate_can_be_materialized_before_or_after_grouped_sum` | Stored Rate state and stored Sum state answer like query time; summing counters before Rate does not |
 | `sql_to_physical::sql_filter_grouped_sum_executes_and_rebinds` | SQL text → candidate search → physical compilation → shared Scan predicates and grouped summary execution; NULL samples are ignored and fresh bindings produce new results |

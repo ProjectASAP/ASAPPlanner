@@ -10,7 +10,8 @@
 //! candidate of that slot, which every reader must then accept (one
 //! candidate per slot per context); a dead end backtracks to the next
 //! candidate. A shareable candidate's context is derived once, when it is
-//! first selected; a candidate of `I` is chosen in `I`.
+//! first selected; a candidate of an `I_r` is chosen in the `I_r` of the
+//! reading context's refresh window.
 //!
 //! **Repairs per query.** If the query's plan depends on more approximate
 //! values than one of them is sized for, on a pair excluded together, or
@@ -19,7 +20,7 @@
 //! planned again by latency alone.
 //!
 //! **Greedy sharing.** A second plan prices what the queries planned
-//! before already selected (a shareable candidate, a candidate of `I`) at
+//! before already selected (a shareable candidate, a candidate of an `I_r`) at
 //! zero, so later queries read it. Both plans, in workload order and
 //! reversed, are costed exactly by the MILP's own rows and objective
 //! ([`Completion`]); the cheapest feasible one is the start.
@@ -368,7 +369,7 @@ impl Estimates {
             .iter()
             .map(|context| match context.kind {
                 ContextKind::Query(query) => query_rate[query],
-                ContextKind::Ingestion => 1.0,
+                ContextKind::Ingestion(_) => 1.0,
                 ContextKind::Shared(m) if context.at_query_time => {
                     let readers = milp.queries_reaching(m);
                     readers
@@ -501,10 +502,12 @@ impl Derivation<'_, '_> {
                         None => return f64::INFINITY,
                     },
                     RunKind::Ingestion => {
-                        let ingestion = milp.ingestion_context();
-                        if !milp.choice[ingestion].contains_key(&candidate) {
+                        let Some(ingestion) = milp
+                            .ingestion_context_read_by(context)
+                            .filter(|&at| milp.choice[at].contains_key(&candidate))
+                        else {
                             return f64::INFINITY;
-                        }
+                        };
                         let chosen = plan.chosen[ingestion].get(&inputs.slot[candidate.0]);
                         (ingestion, chosen == Some(&candidate))
                     }
@@ -651,7 +654,7 @@ impl Derivation<'_, '_> {
                 Ok(())
             }
             RunKind::Ingestion => {
-                let ingestion = milp.ingestion_context();
+                let ingestion = milp.ingestion_context_read_by(context).ok_or(())?;
                 if context == ingestion {
                     return Err(());
                 }
@@ -696,7 +699,10 @@ fn runs_reached(
                     Some(own) => (own, true),
                     None => continue,
                 },
-                RunKind::Ingestion => (milp.ingestion_context(), false),
+                RunKind::Ingestion => match milp.ingestion_context_read_by(context) {
+                    Some(ingestion) => (ingestion, false),
+                    None => continue,
+                },
                 RunKind::PerContext => continue,
             }
         };

@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use super::*;
-use crate::groups::{prepare_milp_inputs, AccuracyWeight};
+use crate::groups::{prepare_milp_inputs, AccuracyWeight, IngestionPipeline};
 use crate::milp::decode::{decode, ChosenCandidates};
 use asap_cost::{node_map, plan_cost, PlanCost, ResourceUnitCost};
 use asap_types::ir::properties::ExecutionTiming;
@@ -567,7 +567,7 @@ fn a_shared_results_not_materialized_input_runs_once() {
 }
 
 // One ingestion scan read by sketches of two configurations (two quantile
-// targets) runs once in `I` and is costed once.
+// targets) runs once in its `I_r` and is costed once.
 #[test]
 fn one_ingestion_scan_shared_by_two_sketch_configurations_is_charged_once() {
     let fixture = through_stages_with(
@@ -614,6 +614,177 @@ fn one_ingestion_scan_shared_by_two_sketch_configurations_is_charged_once() {
         })
         .collect();
     assert_eq!(ingestion_scans.len(), 1, "{:?}", checked.dag);
+}
+
+/// Solves `queries` (ingesting) with two ingestion-time sketch states
+/// selected, every query-time scan forbidden and every ingestion-time state
+/// whose refresh window is not one of `widths_ms` (phase 0) forbidden;
+/// returns the checked solve (objective = `plan_cost`) and its
+/// ingestion-time scan runs, each with the refresh windows of the states
+/// reading it.
+fn ingestion_scans_under_refresh_windows(
+    queries: &[Query<'_>],
+    widths_ms: &[u64],
+) -> (Checked, Vec<BTreeSet<u64>>) {
+    use asap_types::ir::materialized_view::RefreshWindow;
+    let fixture = through_stages_with(queries, true, true);
+    let checked = solve_and_check(&fixture, &cost_inputs(), |milp| {
+        let states = candidates_where(milp, |candidate, _| {
+            candidate.timing == ExecutionTiming::IngestionTime
+                && candidate.materialization != Materialization::NotMaterialized
+        });
+        let window_of = |state: PhysicalCandidateId| {
+            milp.inputs
+                .ingestion_context_of_shareable
+                .get(&state)
+                .map(|&context| milp.inputs.contexts[context].kind)
+        };
+        let (allowed, other): (Vec<_>, Vec<_>) = states.iter().partition(|&&state| {
+            widths_ms.iter().any(|&width_ms| {
+                window_of(state)
+                    == Some(ContextKind::Ingestion(IngestionPipeline::Window(
+                        RefreshWindow {
+                            width_ms,
+                            phase_ms: 0,
+                        },
+                    )))
+            })
+        });
+        forbid(milp, &other);
+        let sketches = candidates_where(milp, |_, node| {
+            matches!(node.asap(), Some(asap_types::ir::ASAPOp::PaneChain { .. }))
+        });
+        let sum: Expression = allowed
+            .iter()
+            .filter(|state| sketches.contains(state))
+            .filter_map(|state| milp.selected.get(state).copied())
+            .map(Expression::from)
+            .sum();
+        milp.builder.row("test", constraint!(sum >= 2.0));
+        let scans = candidates_where(milp, |candidate, node| {
+            candidate.timing == ExecutionTiming::QueryTime && node.operator.kind_name() == "Scan"
+        });
+        forbid(milp, &scans);
+    })
+    .unwrap();
+    // Per ingestion-time scan node of the decoded selection: the pane widths
+    // of the chains above it.
+    let dag = &checked.dag;
+    let nodes = dag.candidate_of_node.len();
+    let mut readers: Vec<Vec<usize>> = vec![Vec::new(); nodes];
+    for edge in &dag.edges {
+        readers[edge.producer.0].push(edge.consumer.0);
+    }
+    let width_above = |scan: usize| {
+        let mut widths = BTreeSet::new();
+        let mut stack = vec![scan];
+        let mut seen = BTreeSet::new();
+        while let Some(node) = stack.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let candidate = dag.candidate_of_node[node];
+            match fixture.physical.physical_node(candidate).asap() {
+                Some(asap_types::ir::ASAPOp::PaneChain { pane_width_ms, .. }) => {
+                    widths.insert(*pane_width_ms);
+                }
+                _ => stack.extend(readers[node].iter().copied()),
+            }
+        }
+        widths
+    };
+    let scans = (0..nodes)
+        .filter(|&node| {
+            let candidate = dag.candidate_of_node[node];
+            fixture.physical.candidates[candidate.0].timing == ExecutionTiming::IngestionTime
+                && fixture
+                    .physical
+                    .physical_node(candidate)
+                    .operator
+                    .kind_name()
+                    == "Scan"
+        })
+        .map(width_above)
+        .collect();
+    (checked, scans)
+}
+
+// Two ingestion-time pane chains of one refresh window (10 s panes) over
+// one source run in one ingestion pipeline: the scan below them runs and
+// is charged once, and the objective equals `plan_cost`.
+#[test]
+fn one_ingestion_scan_under_chains_of_one_refresh_window_is_charged_once() {
+    let (_, scans) = ingestion_scans_under_refresh_windows(
+        &[
+            approximate("quantile_over_time(0.5, m[5m])", 60_000, 0.01),
+            approximate("quantile_over_time(0.9, m[5m])", 60_000, 0.05),
+        ],
+        &[10_000],
+    );
+    assert_eq!(scans, vec![BTreeSet::from([10_000])]);
+}
+
+// Chains of 10 s and 60 s panes over one source run in two ingestion
+// pipelines (#1151): the scan runs and is charged once in each, and the
+// objective equals `plan_cost`, which charges it once per refresh window.
+#[test]
+fn ingestion_scans_under_chains_of_two_refresh_windows_are_charged_twice() {
+    let (_, scans) = ingestion_scans_under_refresh_windows(
+        &[
+            approximate("quantile_over_time(0.5, m[10s])", 10_000, 0.01),
+            approximate("quantile_over_time(0.9, m[5m])", 60_000, 0.05),
+        ],
+        &[10_000, 60_000],
+    );
+    let mut scans = scans;
+    scans.sort();
+    assert_eq!(
+        scans,
+        vec![BTreeSet::from([10_000]), BTreeSet::from([60_000])]
+    );
+}
+
+// Every producer candidate of every input reads one view window on real
+// Stage 2 output (ingesting, and not), so a refresh window computed from
+// first producers is the realized plan's.
+#[test]
+fn producers_of_an_input_read_one_view_window_through_stages() {
+    let fixtures = [
+        through_stages_with(
+            &[
+                approximate("quantile_over_time(0.5, m[10s])", 10_000, 0.01),
+                approximate("quantile_over_time(0.9, m[5m])", 60_000, 0.05),
+            ],
+            true,
+            true,
+        ),
+        through_stages_with(
+            &[
+                query("sum by (job) (rate(m[1m]))", 30_000),
+                query("sum(increase(m[5m] offset 1m))", 60_000),
+                approximate(
+                    "quantile_over_time(0.5, m[5m]) / quantile_over_time(0.9, m[5m])",
+                    60_000,
+                    0.05,
+                ),
+            ],
+            true,
+            true,
+        ),
+        through_stages(
+            &[
+                query("avg_over_time(m[5m])", 60_000),
+                query("max_over_time(m[1m])", 60_000),
+            ],
+            true,
+        ),
+    ];
+    for fixture in &fixtures {
+        assert_eq!(
+            crate::groups::producer_window_disagreements_of_all(&fixture.physical),
+            Vec::new()
+        );
+    }
 }
 
 // A stateless subtree read by two state nodes of one query evaluation
@@ -977,7 +1148,7 @@ fn a_widened_scan_reading_its_own_memo_group_plans_exactly() {
     }
 }
 
-// #1095 §5 (3a): queries over two metrics share no candidate, run of `I` or
+// #1095 §5 (3a): queries over two metrics share no candidate, run of an `I_r` or
 // source, so the model splits into one part per metric; solving the parts
 // apart gives the plan and cost of one solve of the whole model.
 #[test]

@@ -79,7 +79,8 @@ pub struct ResourceUsage {
     pub average_memory_bytes: f64,
     /// The most memory live at once, assuming every evaluation overlaps:
     /// in-memory kept state plus each computation's working memory, once
-    /// per consumer that recomputes it.
+    /// per consumer that recomputes it, with the `MatAtIngestion` consumers
+    /// of one refresh window counted once.
     pub peak_memory_bytes: u64,
     /// Bytes kept on disk: state materialized on `Medium::Disk`, plus the
     /// raw data query-time scans read (the longest window of each source).
@@ -372,8 +373,9 @@ pub struct NodeCost {
     /// ([`MeasuredOperationCosts::ns_per_evaluation`]) is counted on the
     /// node the query reads first.
     pub cpu_core_seconds_per_second: f64,
-    /// The number of consumers it is computed for (1 when materialized,
-    /// [`execution_demand::computations`]).
+    /// The number of consumers it is computed for, with the
+    /// `MatAtIngestion` consumers of one refresh window counted once (1
+    /// when materialized, [`execution_demand::computations`]).
     pub multiplier: u64,
     /// How it was measured, e.g. "scan 1000 samples; x 1.0000/s; keeps
     /// ... bytes": one computation's work, the times it is computed per
