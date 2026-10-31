@@ -345,7 +345,11 @@ pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consu
 /// (operator or scalar root), at its own rate, or a materialized node, at
 /// that node's rate; a walk stops at the first materialized node it meets,
 /// and a node read several times within one consumer's walk counts once for
-/// it. Its `multiplier` is that number of consumers.
+/// it. The `MatAtIngestion` consumers of one refresh window
+/// ([`PhysicalASAPDAG::refresh_window`]) are refreshed in one ingestion run,
+/// which computes the node once for all of them: they count as one
+/// consumer (a consumer with an unbounded window counts alone). Its
+/// `multiplier` is that number of consumers.
 pub fn computations(
     dag: &PhysicalASAPDAG,
     recurrence: &[QueryRecurrence],
@@ -410,10 +414,26 @@ pub fn computations(
             )?,
         });
     }
+    // The refresh window of each node refreshed at ingestion.
+    let refresh_windows = dag.refresh_windows(
+        materialized
+            .iter()
+            .filter(|(_, m)| matches!(m, Materialization::MatAtIngestion(_)))
+            .map(|(&id, _)| id),
+    );
     let mut count: HashMap<_, (u64, f64)> = HashMap::new();
     for (id, of_node) in consumers(dag) {
         let entry = count.entry(id).or_default();
+        // The refresh windows whose ingestion run already computes the node.
+        let mut runs = HashSet::new();
         for consumer in of_node {
+            if let Consumer::Materialized(node) = consumer {
+                if let Some(Some(window)) = refresh_windows.get(&node) {
+                    if !runs.insert(*window) {
+                        continue;
+                    }
+                }
+            }
             entry.0 += 1;
             entry.1 += match consumer {
                 Consumer::Query(query) => query_rates[query],
