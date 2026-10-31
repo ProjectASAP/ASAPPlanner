@@ -510,21 +510,21 @@ pub(crate) fn prepare_milp_inputs(
     let models = SelectionModels {
         accuracy: &asap_accuracy::BuiltinAccuracyModel,
         evidence: &asap_accuracy::NoAccuracyEvidence,
-        plan_selection: cost_inputs,
+        cost_inputs,
     };
     prepare_milp_inputs_with(physical, entries, data, &models)
 }
 
 /// [`MilpInputs`] for `physical`'s candidates, its accuracy positions
 /// checked with `models` (the deployment's accuracy model and evidence) and
-/// its usage costed with `models.plan_selection`.
+/// its usage costed with `models.cost_inputs`.
 pub(crate) fn prepare_milp_inputs_with(
     physical: &PhysicalASAPMemoCandidates,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: &SelectionModels<'_>,
 ) -> MilpInputs {
-    let cost_inputs = models.plan_selection;
+    let cost_inputs = models.cost_inputs;
     let links = &CandidateLinks::new(physical);
     let class_count = physical.candidates.len();
     let all_alive = vec![true; class_count];
