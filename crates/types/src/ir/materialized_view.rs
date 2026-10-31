@@ -252,7 +252,7 @@ pub enum MaterializedViewRefresh {
 /// `phase_ms` (`< width_ms`) after a multiple of `width_ms`, relative to the
 /// evaluation time. Views refreshed at ingestion with one refresh window
 /// are refreshed together, in one ingestion run per window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RefreshWindow {
     /// Width of each window.
     pub width_ms: u64,
