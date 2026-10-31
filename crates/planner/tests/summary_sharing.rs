@@ -106,9 +106,7 @@ fn composed_summary_candidates(
     let workload = promql_workload(queries);
     let roots = lower_promql_query_workload(&workload).expect("lowers");
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-            &roots.into_iter().enumerate().collect::<Vec<_>>(),
-        ),
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let mut assignments = vec![vec![0; inventory.targets.len()]];
@@ -170,9 +168,7 @@ fn shared_kll_candidate(workload: &PlanningWorkload) -> asap_types::physical::Ph
     use asap_types::physical::Materialization;
     let roots = lower_promql_query_workload(workload).unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-            &roots.into_iter().enumerate().collect::<Vec<_>>(),
-        ),
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let mut choices = vec![0; inventory.targets.len()];

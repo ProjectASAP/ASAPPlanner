@@ -78,10 +78,9 @@ fn planned(workload: &PlanningWorkload, series_identity: bool) -> Planned {
             .into_iter()
             .collect()
     };
-    let indexed: Vec<_> = roots.iter().cloned().enumerate().collect();
-    let initial = DagOfLogicalMemoGroups::from_roots(&indexed);
+    let initial = DagOfLogicalMemoGroups::from_roots(&roots);
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&indexed),
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     Planned {

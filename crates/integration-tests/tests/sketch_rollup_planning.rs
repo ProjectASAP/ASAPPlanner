@@ -64,13 +64,13 @@ fn data() -> DataWorkload {
 }
 
 /// The SQL `queries` lowered at `accuracy`.
-async fn sql_roots(queries: &[&str], accuracy: &AccuracyTarget) -> Vec<(usize, QueryRoot)> {
+async fn sql_roots(queries: &[&str], accuracy: &AccuracyTarget) -> Vec<QueryRoot> {
     let mut roots = Vec::new();
-    for (i, query) in queries.iter().enumerate() {
+    for query in queries {
         let root = lower_sql(query, &catalog(), accuracy.clone())
             .await
             .unwrap();
-        roots.push((i, QueryRoot::Operator(root)));
+        roots.push(QueryRoot::Operator(root));
     }
     roots
 }
@@ -149,18 +149,14 @@ fn promql_quantile_by_job_rolls_up_from_by_host_job() {
     let accuracy = AccuracyTarget::max_error(0.01)
         .failure_probability(0.001)
         .accuracy_metric(AccuracyMetric::Rank);
-    let roots: Vec<(usize, QueryRoot)> = [
+    let roots: Vec<QueryRoot> = [
         "quantile by (host, job) (0.5, data)",
         "quantile by (job) (0.5, data)",
     ]
     .iter()
-    .enumerate()
-    .map(|(i, query)| {
+    .map(|query| {
         let root = lower_promql(query, accuracy.clone()).unwrap();
-        (
-            i,
-            QueryRoot::Operator(promql_rows::with_series_identity(&root).unwrap()),
-        )
+        QueryRoot::Operator(promql_rows::with_series_identity(&root).unwrap())
     })
     .collect();
     let data: DataWorkload = serde_json::from_value(serde_json::json!({

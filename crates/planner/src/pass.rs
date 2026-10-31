@@ -32,7 +32,7 @@ use asap_accuracy::{
 };
 use asap_cost::CostInputs;
 use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
-use asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidateError;
+use asap_logical_asap_optimization::pass1::PerComputationCandidateError;
 use asap_plan_selection::{AccuracyCheckInputs, Selection};
 use asap_types::ir::physical_export::PhysicalASAPNodeId;
 

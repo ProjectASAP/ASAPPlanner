@@ -75,9 +75,7 @@ fn assert_removes_exactly(
         compose_logical_candidate, generate_per_computation_candidates,
     };
     let local = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-            &roots.into_iter().enumerate().collect::<Vec<_>>(),
-        ),
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let enumerate_local = |inventory: &asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidates| {
@@ -143,9 +141,7 @@ fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
     let workload = pattern_b_with_p50();
     let original = lower_promql(&workload);
     let local = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-            &original.iter().cloned().enumerate().collect::<Vec<_>>(),
-        ),
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&original),
     )
     .unwrap();
     let choices = local

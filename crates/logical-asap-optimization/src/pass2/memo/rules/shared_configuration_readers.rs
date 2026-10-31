@@ -533,15 +533,11 @@ mod tests {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let roots: Vec<_> = [0.95, 0.99]
             .into_iter()
-            .enumerate()
-            .map(|(query, quantile)| {
-                (
-                    query,
-                    QueryRoot::Operator(lower_promql(
-                        &format!("quantile_over_time({quantile}, latency[5m])"),
-                        target.clone(),
-                    )),
-                )
+            .map(|quantile| {
+                QueryRoot::Operator(lower_promql(
+                    &format!("quantile_over_time({quantile}, latency[5m])"),
+                    target.clone(),
+                ))
             })
             .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
@@ -624,13 +620,10 @@ mod tests {
     #[test]
     fn a_rewrite_to_a_shared_size_carries_its_parts() {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
-        let roots = vec![(
-            0,
-            QueryRoot::Operator(lower_promql(
-                "quantile_over_time(0.5, latency[5m]) / quantile_over_time(0.9, latency[5m])",
-                target.clone(),
-            )),
-        )];
+        let roots = vec![QueryRoot::Operator(lower_promql(
+            "quantile_over_time(0.5, latency[5m]) / quantile_over_time(0.9, latency[5m])",
+            target.clone(),
+        ))];
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = generate_per_computation_candidates(
             &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),

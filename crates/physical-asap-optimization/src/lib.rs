@@ -1483,7 +1483,7 @@ mod tests {
             AccuracyTarget::max_error(0.01).failure_probability(0.001),
         );
         let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&
-            [(0, QueryRoot::Operator(root))],
+            [QueryRoot::Operator(root)],
         ))
         .unwrap();
         // A summary (the last candidate) for every target.
@@ -1528,7 +1528,7 @@ mod tests {
                 .accuracy_metric(asap_types::ir::properties::AccuracyMetric::Rank),
         );
         let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&
-            [(0, QueryRoot::Operator(root))],
+            [QueryRoot::Operator(root)],
         ))
         .unwrap();
         let choice: Vec<_> = inventory

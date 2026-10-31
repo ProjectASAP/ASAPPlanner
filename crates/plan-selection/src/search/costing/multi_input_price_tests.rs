@@ -160,10 +160,9 @@ fn two_sketch_binary_prices_match_evaluator_after_budget_sizing() {
         .accuracy_scope(AccuracyScope::PerValue);
     let original = lower_promql(query, planned);
     let generated = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            0,
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(original.clone()),
-        )]),
+        ]),
     )
     .unwrap();
     let choices: Vec<_> = generated

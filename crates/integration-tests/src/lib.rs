@@ -238,10 +238,9 @@ pub mod planning {
             compose_logical_candidate, generate_per_computation_candidates,
         };
         let local = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-                0,
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
                 QueryRoot::Operator(root),
-            )]),
+            ]),
         )
         .unwrap();
         let mut choices = std::collections::BTreeSet::from([vec![0; local.targets.len()]]);
@@ -277,10 +276,9 @@ pub mod planning {
             HowToComputeAggregateMeasure,
         };
         let local = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-                0,
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
                 QueryRoot::Operator(root),
-            )]),
+            ]),
         )
         .unwrap();
         let choices = local.targets.iter().map(|target| target.ways_to_compute.iter()
@@ -345,7 +343,7 @@ pub mod planning {
     /// on the seed grids (no query pruning). Rule tests read a group's
     /// candidates by `OriginOfCandidateForMemoGroup`.
     pub fn expanded_memo(
-        roots: Vec<(usize, QueryRoot)>,
+        roots: Vec<QueryRoot>,
         entries: &[asap_types::workload::QueryWorkloadEntry],
     ) -> asap_types::stages::MemoCandidates {
         use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;

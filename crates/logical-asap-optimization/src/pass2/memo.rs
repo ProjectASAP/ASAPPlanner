@@ -7,7 +7,7 @@
 pub mod candidates;
 /// The candidate DAGs a memo stands for: choices and their composition.
 pub mod enumeration;
-mod groups;
+pub(crate) mod groups;
 pub(crate) use groups::NodeToStructuralIdCache;
 pub(crate) mod rules;
 /// Shared finite state configuration enumeration.
@@ -47,12 +47,14 @@ pub struct DagOfLogicalMemoGroups {
 }
 
 impl DagOfLogicalMemoGroups {
-    pub fn from_roots<Id>(roots: &[(Id, QueryRoot)]) -> Self {
+    /// Stage 0: the memo groups of the workload's query roots, query `i`
+    /// being `roots[i]`.
+    pub fn from_roots(roots: &[QueryRoot]) -> Self {
         let (groups, group_of) = hash_consed(roots);
         let group = |node: &Rc<OperatorNode>| group_of[&Rc::as_ptr(node)];
         let query_roots = roots
             .iter()
-            .map(|(_, root)| match root {
+            .map(|root| match root {
                 QueryRoot::Operator(node) => QueryRoot::Operator(group(node)),
                 QueryRoot::Scalar(expr) => {
                     QueryRoot::Scalar(expr.map_operator_refs(&mut |node| group(node)))
@@ -93,11 +95,11 @@ type GroupOf = HashMap<*const OperatorNode, MemoGroupId>;
 /// The groups of `roots`, children before parents, and each original node's
 /// group. A scalar query reaches the groups of the operator nodes its
 /// expression reads.
-fn hash_consed<Id>(roots: &[(Id, QueryRoot)]) -> (Vec<MemoGroup>, GroupOf) {
+fn hash_consed(roots: &[QueryRoot]) -> (Vec<MemoGroup>, GroupOf) {
     let originals: Vec<(usize, Rc<OperatorNode>)> = roots
         .iter()
         .enumerate()
-        .flat_map(|(query, (_, root))| {
+        .flat_map(|(query, root)| {
             operator_roots(root)
                 .into_iter()
                 .map(move |node| (query, node))
@@ -215,10 +217,10 @@ mod tests {
     #[test]
     fn repeated_results_share_groups_but_quantile_levels_do_not() {
         let roots = vec![
-            (0, query("sum by (job) (m)")),
-            (1, query("sum by (job) (m)")),
-            (2, query("quantile_over_time(0.95, m[5m])")),
-            (3, query("quantile_over_time(0.99, m[5m])")),
+            query("sum by (job) (m)"),
+            query("sum by (job) (m)"),
+            query("quantile_over_time(0.95, m[5m])"),
+            query("quantile_over_time(0.99, m[5m])"),
         ];
         let memo = DagOfLogicalMemoGroups::from_roots(&roots);
         let root_group = |q: usize| *memo.query_roots[q].as_operator().unwrap();
@@ -242,13 +244,10 @@ mod tests {
     /// two equal sub-expressions are one group read twice.
     #[test]
     fn equal_keyless_deterministic_results_share_one_group() {
-        let roots = vec![(
-            0,
-            QueryRoot::Operator(lower_promql(
+        let roots = vec![QueryRoot::Operator(lower_promql(
                 "avg by (job) (quantile_over_time(0.5, data[5m]) / quantile_over_time(0.5, data[5m]) + quantile_over_time(0.9, data[5m]))",
                 AccuracyTarget::max_error(0.01).failure_probability(0.001),
-            )),
-        )];
+            ))];
         let memo = DagOfLogicalMemoGroups::from_roots(&roots);
         let division = memo
             .groups
@@ -272,12 +271,9 @@ mod tests {
             unreachable!()
         };
         let roots = vec![
-            (10, QueryRoot::Scalar(ScalarExpr::literal_f64(1.0))),
-            (
-                20,
-                QueryRoot::Scalar(ScalarExpr::PromqlScalarFromVector(node.clone())),
-            ),
-            (30, QueryRoot::Operator(node.clone())),
+            QueryRoot::Scalar(ScalarExpr::literal_f64(1.0)),
+            QueryRoot::Scalar(ScalarExpr::PromqlScalarFromVector(node.clone())),
+            QueryRoot::Operator(node.clone()),
         ];
         let memo = DagOfLogicalMemoGroups::from_roots(&roots);
         let id = memo.group_for_node(&node).unwrap();

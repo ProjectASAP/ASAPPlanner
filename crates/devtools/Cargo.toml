@@ -35,6 +35,8 @@ tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
 asap-physical-asap-optimization = { path = "../physical-asap-optimization", features = ["test-support"] }
+# Pass 1's target list (`per_computation_candidates`) for the tests.
+asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
 
 
 [[test]]

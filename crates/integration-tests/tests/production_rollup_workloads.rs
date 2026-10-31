@@ -66,7 +66,7 @@ fn data() -> DataWorkload {
 }
 
 fn production(
-    roots: Vec<(usize, QueryRoot)>,
+    roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
 ) -> PlanningRun {
@@ -75,7 +75,7 @@ fn production(
         settings.resource_speed,
     ));
     run_planning(
-        roots.into_iter().map(|(_, root)| root).collect(),
+        roots,
         entries,
         data,
         PlanningModels::builtin().with_plan_selection(&settings),
@@ -147,14 +147,11 @@ fn check(
 
 async fn sql(queries: &[String], accuracy: AccuracyTarget) -> PlanningRun {
     let mut roots = Vec::new();
-    for (id, query) in queries.iter().enumerate() {
-        roots.push((
-            id,
-            QueryRoot::Operator(
-                lower_sql(query, &catalog(), accuracy.clone())
-                    .await
-                    .unwrap(),
-            ),
+    for query in queries {
+        roots.push(QueryRoot::Operator(
+            lower_sql(query, &catalog(), accuracy.clone())
+                .await
+                .unwrap(),
         ));
     }
     production(
@@ -196,13 +193,9 @@ fn production_promql_compares_rollup_with_exact() {
         "quantile by (job) (0.5, data)",
     ]
     .iter()
-    .enumerate()
-    .map(|(id, query)| {
+    .map(|query| {
         let root = lower_promql(query, accuracy.clone()).unwrap();
-        (
-            id,
-            QueryRoot::Operator(promql_rows::with_series_identity(&root).unwrap()),
-        )
+        QueryRoot::Operator(promql_rows::with_series_identity(&root).unwrap())
     })
     .collect();
     let data: DataWorkload = serde_json::from_value(serde_json::json!({"arrival":{"ingesting":{"rows_per_second":666.67}},"sources":{"data":{"series_count":10000,"metric_type":"gauge","sample_interval":15000,"rows_held":10000}}})).unwrap();
@@ -220,7 +213,7 @@ fn production_promql_compares_rollup_with_exact() {
 
 // Price the same workload with independently built, unmaterialized KLL states.
 fn independent_kll_cost(
-    roots: Vec<(usize, QueryRoot)>,
+    roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
 ) -> f64 {
@@ -287,13 +280,9 @@ fn production_binary_queries_use_joint_prices_with_mixed_schedules() {
     let queries = ["m + n", "m + m", "m or n", "m * n", "m - n"];
     let roots = queries
         .iter()
-        .enumerate()
-        .map(|(id, query)| {
+        .map(|query| {
             let root = lower_promql(query, accuracy.clone()).unwrap();
-            (
-                id,
-                QueryRoot::Operator(promql_rows::with_series_identity(&root).unwrap()),
-            )
+            QueryRoot::Operator(promql_rows::with_series_identity(&root).unwrap())
         })
         .collect();
     let mut entries: Vec<_> = [59_000, 61_000, 67_000, 71_000, 73_000]

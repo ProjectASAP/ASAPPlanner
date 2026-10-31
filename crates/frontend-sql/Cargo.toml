@@ -36,7 +36,8 @@ test-support = []
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
 asap-frontend-sql = { path = ".", features = ["test-support"] }
-asap-logical-asap-optimization = { path = "../logical-asap-optimization" }
+# Pass 1's target list (`per_computation_candidates`) for the tests.
+asap-logical-asap-optimization = { path = "../logical-asap-optimization", features = ["test-support"] }
 # The planning stages through the facade (a dev-dependency cycle, for
 # integration tests only).
 asap-planner = { path = "../planner" }

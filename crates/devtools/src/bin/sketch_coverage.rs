@@ -3,7 +3,8 @@
 // Lowers every query in every corpus we have (mirrors `variant_coverage`'s
 // corpus list exactly, so the two reports are directly comparable) with an
 // *approximate* `AccuracyTarget`, runs Pass 1 of logical ASAP-aware
-// optimization (`generate_per_computation_candidates`) over each query, and
+// optimization (`generate_per_computation_logical_memo_candidates`, every
+// summary supported, no accuracy pruning) over each query, and
 // reports which summary candidates Pass 1 offers for it, plus the fraction of
 // lowered queries with at least one.
 //
@@ -13,17 +14,19 @@
 // every corpus lowers with. Without an approximate target, Pass 1 offers no
 // summary candidate.
 
+use asap_accuracy::{IgnoreAccuracyGuarantees, NoAccuracyEvidence};
 use asap_devtools::corpora::{
     bgp_catalog, dqc_catalog, netflow_catalog, parse_sample_interval, promql_lines, sql_statements,
 };
 use asap_devtools::{lower_promql_with_sample_interval, SqlCatalog};
 use asap_frontend_sql::lower_sql_dialect;
-use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    generate_per_computation_candidates, HowToComputeAggregateMeasure,
+use asap_logical_asap_optimization::pass1::{
+    generate_per_computation_logical_memo_candidates, HowToComputeAggregateMeasure,
 };
+use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::workload::SqlDialect;
+use asap_types::workload::{DataWorkload, SqlDialect};
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
@@ -45,28 +48,33 @@ fn pct(n: usize, total: usize) -> String {
     }
 }
 
-/// Run Pass 1 over each of one corpus's already-lowered queries and collect
-/// the summary candidates it offers for any of the query's targets.
+/// Run Pass 1 over each of one corpus's already-lowered queries (each
+/// lowered with `accuracy`) and collect the summary candidates it offers
+/// for any of the query's targets.
 fn analyze_corpus(
     name: &'static str,
     roots: Vec<(String, Rc<OperatorNode>)>,
     failed: usize,
+    accuracy: &AccuracyTarget,
 ) -> CorpusCoverage {
     let lowered = roots.len();
     let mut rejected = 0;
     let mut summaries = Vec::new();
     for (id, root) in roots {
-        let Ok(inventory) = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-                id.clone(),
-                QueryRoot::Operator(root),
-            )]),
+        let Ok(pass1) = generate_per_computation_logical_memo_candidates(
+            DagOfLogicalMemoGroups::from_roots(&[QueryRoot::Operator(root)]),
+            std::slice::from_ref(accuracy),
+            &IgnoreAccuracyGuarantees,
+            &NoAccuracyEvidence,
+            &DataWorkload::default(),
+            None,
+            None,
         ) else {
             rejected += 1;
             continue;
         };
-        let offered = inventory
-            .targets
+        let offered = pass1
+            .computation_targets
             .iter()
             .flat_map(|target| &target.ways_to_compute)
             .filter_map(|candidate| match candidate {
@@ -164,7 +172,7 @@ async fn main() {
                 Err(_) => failed += 1,
             }
         }
-        results.push(analyze_corpus(name, roots, failed));
+        results.push(analyze_corpus(name, roots, failed, &accuracy));
     }
 
     // ── SQL corpora ──
@@ -199,7 +207,7 @@ async fn main() {
                 Err(_) => failed += 1,
             }
         }
-        results.push(analyze_corpus(name, roots, failed));
+        results.push(analyze_corpus(name, roots, failed, &accuracy));
     }
 
     for r in &results {

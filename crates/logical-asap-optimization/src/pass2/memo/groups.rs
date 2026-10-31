@@ -514,7 +514,7 @@ mod tests {
     }
 
     fn memo_of(inventory: &PerComputationCandidates) -> MemoCandidates {
-        let roots: Vec<_> = inventory.roots.iter().cloned().enumerate().collect();
+        let roots: Vec<_> = inventory.roots.clone();
         populate_pass1(DagOfLogicalMemoGroups::from_roots(&roots), inventory)
     }
     use crate::pass1::per_computation_candidates::{
@@ -528,23 +528,17 @@ mod tests {
     /// The cross-stage API rejects mismatched root identities without panicking.
     #[test]
     fn population_rejects_an_inventory_from_other_roots() {
-        let roots = vec![(
-            0,
-            QueryRoot::Operator(lower_promql(
-                "quantile_over_time(0.95, m[5m])",
-                AccuracyTarget::max_error(0.01),
-            )),
-        )];
+        let roots = vec![QueryRoot::Operator(lower_promql(
+            "quantile_over_time(0.95, m[5m])",
+            AccuracyTarget::max_error(0.01),
+        ))];
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         // An inventory is tied to its roots by structure: the same query
         // text lowered again is the same DAG, so the other roots must differ.
-        let other_roots = vec![(
-            0,
-            QueryRoot::Operator(lower_promql(
-                "quantile_over_time(0.5, n[1m])",
-                AccuracyTarget::max_error(0.01),
-            )),
-        )];
+        let other_roots = vec![QueryRoot::Operator(lower_promql(
+            "quantile_over_time(0.5, n[1m])",
+            AccuracyTarget::max_error(0.01),
+        ))];
         let inventory = generate_per_computation_candidates(
             &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&other_roots),
         )
@@ -558,13 +552,10 @@ mod tests {
     /// Invalid target and fusion indices fail at the stage boundary, not in composition.
     #[test]
     fn population_checks_target_and_absorption_indices() {
-        let roots = vec![(
-            0,
-            QueryRoot::Operator(lower_promql(
-                "quantile_over_time(0.95, m[5m])",
-                AccuracyTarget::max_error(0.01),
-            )),
-        )];
+        let roots = vec![QueryRoot::Operator(lower_promql(
+            "quantile_over_time(0.95, m[5m])",
+            AccuracyTarget::max_error(0.01),
+        ))];
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = generate_per_computation_candidates(
             &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
@@ -595,13 +586,7 @@ mod tests {
             "quantile_over_time(0.99, m[5m])",
         ]
         .iter()
-        .enumerate()
-        .map(|(query, text)| {
-            (
-                query,
-                QueryRoot::Operator(lower_promql(text, AccuracyTarget::max_error(0.01))),
-            )
-        })
+        .map(|text| QueryRoot::Operator(lower_promql(text, AccuracyTarget::max_error(0.01))))
         .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let original_groups = initial.groups.clone();
@@ -636,7 +621,6 @@ mod tests {
         let roots: Vec<_> = queries
             .iter()
             .map(|q| QueryRoot::Operator(lower_promql(q, target.clone())))
-            .enumerate()
             .collect();
         memo_of(
             &generate_per_computation_candidates(
@@ -799,7 +783,6 @@ mod tests {
         let roots: Vec<_> = queries
             .iter()
             .map(|q| QueryRoot::Operator(lower_promql(q, target.clone())))
-            .enumerate()
             .collect();
         let inventory = generate_per_computation_candidates(
             &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
@@ -1107,9 +1090,7 @@ mod tests {
             for seed in 1..=60u64 {
                 let roots = random_roots(seed, gauges);
                 let inventory = generate_per_computation_candidates(
-                    &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                        &roots.iter().cloned().enumerate().collect::<Vec<_>>(),
-                    ),
+                    &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
                 )
                 .unwrap();
                 if inventory.combinations() > 400 {
@@ -1230,8 +1211,8 @@ mod tests {
         };
         let sum = || AggIntent::Sum { col: Some(1) };
         let roots = vec![
-            (0, QueryRoot::Operator(agg(vec![2], sum(), table()))),
-            (1, QueryRoot::Operator(agg(vec![3], sum(), table()))),
+            QueryRoot::Operator(agg(vec![2], sum(), table())),
+            QueryRoot::Operator(agg(vec![3], sum(), table())),
         ];
         let memo = memo_of(
             &generate_per_computation_candidates(

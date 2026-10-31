@@ -63,10 +63,9 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             .accuracy_scope(AccuracyScope::PerValue);
         let original = lower_promql("quantile_over_time(0.95, latency[5m])", target.clone());
         let generated = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-                0,
+            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
                 QueryRoot::Operator(original.clone()),
-            )]),
+            ]),
         )
         .unwrap();
         let choice = generated.targets[0]

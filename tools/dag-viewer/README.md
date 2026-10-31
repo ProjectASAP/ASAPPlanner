@@ -222,9 +222,6 @@ are ignored, `stage_pipeline`'s default.
   "stage0_query_language_frontends": { "dag": "<flat logical DAG>" },
   "stage1_logical_asap_optimization": {
     "combinations": 9, "capped": false,
-    "pass1_pruned": [{ "target": 0, "query": "Q1",
-                       "pruned": [{ "candidate": "DDSketch", "reason": "UnsupportedByDeployment" }],
-                       "fused_pruned": [] }],
     "pruned_candidates": [{ "group": 3, "candidate": "DDSketch", "reason": "UnsupportedByDeployment" }],
     "candidates": [{ "id": "L1", "display_name": "...", "dag": "<flat logical DAG>" },
                    { "id": "L2", "display_name": "...", "error": "..." }]
@@ -316,10 +313,7 @@ are ignored, `stage_pipeline`'s default.
   the rejections and `rejected_by_cause`. The page lists these candidates
   after `P1`, with the reference pricer's pick marked.
 - `deployment_capabilities` repeats the run's `--deployment-capabilities`
-  inputs with defaults filled in. `pass1_pruned` has, per Pass 1 target with
-  a pruned candidate, the target's index, the query it is listed under, and
-  each pruned candidate of the target (`pruned`) and of its fused
-  computation (`fused_pruned`) with the reason. Each stage's
+  inputs with defaults filled in. Each stage's
   `pruned_candidates` lists what that stage removed, one entry per removed
   candidate with its memo `group` and `reason` (`PruneReason`): Pass 1's
   ways to compute a measure (`candidate`), and Stage 2's physical
@@ -327,7 +321,7 @@ are ignored, `stage_pipeline`'s default.
   nodes), `timing` and `materialization`, with the node's
   `operator` label and whether it is an `implementation_root`. The Memo
   view's group panel lists both for the selected group;
-  `deployment_capabilities` and `pass1_pruned` are not shown.
+  `deployment_capabilities` is not shown.
 - A node's `per_node` entry holds its `operator` (as the measured cost
   table names it), `timing` (`ingestion_time` or `query_time`), its
   predicted CPU in core-seconds per second (`cpu_core_seconds_per_second`),

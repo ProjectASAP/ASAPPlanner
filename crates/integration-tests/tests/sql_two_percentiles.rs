@@ -304,19 +304,16 @@ async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
     let workload = workload(queries);
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let mut roots = Vec::new();
-    for (q, entry) in entries.iter().enumerate() {
-        roots.push((
-            q,
-            QueryRoot::Operator(
-                lower_sql_dialect(
-                    &entry.query.0,
-                    &catalog(),
-                    SqlDialect::DataFusionSQL,
-                    entry.requirements.accuracy.clone(),
-                )
-                .await
-                .unwrap(),
-            ),
+    for entry in &entries {
+        roots.push(QueryRoot::Operator(
+            lower_sql_dialect(
+                &entry.query.0,
+                &catalog(),
+                SqlDialect::DataFusionSQL,
+                entry.requirements.accuracy.clone(),
+            )
+            .await
+            .unwrap(),
         ));
     }
     let local = generate_per_computation_candidates(

@@ -1949,9 +1949,9 @@ fn pass1_pruned_for_no_error_bound(
         },
     )
     .unwrap();
-    run.memo_steps
-        .expect("the memo after Pass 1")
-        .pass1_pruned_candidates
+    run.per_computation_candidates
+        .expect("Pass 1's output")
+        .pruned_candidates
         .iter()
         .filter(|pruned| pruned.reason == PruneReason::NoErrorBoundForQueryTarget)
         .filter_map(|pruned| match &pruned.candidate {

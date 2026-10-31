@@ -238,7 +238,7 @@ pub fn cms_summary(query: &str) -> OperatorNode {
     let root = lower_promql(query, target);
     // Inspect each local computation choice under the built-in deployment.
     let per_computation = generate_per_computation_candidates(
-        &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(0, QueryRoot::Operator(root))]),
+        &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[QueryRoot::Operator(root)]),
     )
     .unwrap()
     .without_unsupported_summaries(None);

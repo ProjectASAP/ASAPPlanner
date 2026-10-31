@@ -1285,10 +1285,7 @@ mod tests {
                     "quantile_over_time(0.95, latency[5m])"
                 };
                 let original = lower_promql(query, target.clone());
-                let generated = generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-                    0,
-                    QueryRoot::Operator(original.clone()),
-                )]))
+                let generated = generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[QueryRoot::Operator(original.clone())]))
                 .unwrap();
                 let choice = generated.targets[0].ways_to_compute.iter().position(|candidate|
                     matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == algorithm)).unwrap();
@@ -1505,10 +1502,7 @@ mod tests {
                         "quantile_over_time(0.95, latency[5m])"
                     };
                     let original = lower_promql(query, target.clone());
-                    let generated = generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-                        0,
-                        QueryRoot::Operator(original.clone()),
-                    )]))
+                    let generated = generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[QueryRoot::Operator(original.clone())]))
                     .unwrap();
                     let choice = generated.targets[0].ways_to_compute.iter().position(|candidate|
                     matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == algorithm)).unwrap();
@@ -1960,9 +1954,7 @@ mod tests {
                         ))
                     })
                     .collect();
-                let generated = generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&
-                    originals.iter().cloned().enumerate().collect::<Vec<_>>(),
-                ))
+                let generated = generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&originals))
                 .unwrap();
                 let choices: Vec<_> = generated.targets.iter().map(|target| target.ways_to_compute.iter().position(|candidate|
                     matches!(candidate,HowToComputeAggregateMeasure::Summary(found) if *found==algorithm)).unwrap()).collect();

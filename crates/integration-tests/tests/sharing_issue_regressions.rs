@@ -120,9 +120,7 @@ fn sql_count_topk_has_a_fused_raw_row_heap() {
         .lower(&workload(886))
         .unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-            &roots.into_iter().enumerate().collect::<Vec<_>>(),
-        ),
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let (index, target) = inventory
@@ -211,7 +209,6 @@ fn exact_rollup_catalog_crosses_identical_per_series_average() {
         .lower(&workload(923))
         .unwrap()
         .into_iter()
-        .enumerate()
         .collect();
     let initial = DagOfLogicalMemoGroups::from_roots(&roots);
     let inventory = generate_per_computation_candidates(
@@ -254,7 +251,6 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
         .lower(&workload(902))
         .unwrap()
         .into_iter()
-        .enumerate()
         .collect();
     let initial = DagOfLogicalMemoGroups::from_roots(&roots);
     let inventory = generate_per_computation_candidates(
@@ -283,10 +279,9 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
     let filter = candidate.root_node.children()[0];
     let grouped = filter.children()[0];
     let inv = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[(
-            0,
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(Rc::clone(grouped)),
-        )]),
+        ]),
     )
     .unwrap();
     let choices: Vec<_> = inv
@@ -428,7 +423,6 @@ fn sql_count_rollup_executes_with_integer_results() {
             .lower(&w)
             .unwrap()
             .into_iter()
-            .enumerate()
             .collect();
         let initial = DagOfLogicalMemoGroups::from_roots(&roots);
         let inventory = generate_per_computation_candidates(
@@ -558,7 +552,6 @@ fn sketch_rollup_crosses_inner_range_function() {
         .lower(&w)
         .unwrap()
         .into_iter()
-        .enumerate()
         .collect();
     let initial = DagOfLogicalMemoGroups::from_roots(&roots);
     let inventory = generate_per_computation_candidates(
@@ -590,9 +583,7 @@ fn sql_grouped_count_sketches_are_not_offered() {
     let w = workload(886);
     let roots = Planner::new(FuzzSettings::default()).lower(&w).unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-            &roots.into_iter().enumerate().collect::<Vec<_>>(),
-        ),
+        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let (index, target) = inventory.targets.iter().enumerate().find(|(_, target)| matches!(inventory.aggregate(target).non_asap(), Some(NonASAPOp::Aggregate { measures, .. }) if matches!(measures.as_slice(), [AggIntent::Count { .. }]))).unwrap();

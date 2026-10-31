@@ -1,26 +1,32 @@
-//! Stage 1, Pass 1's output: the per-computation candidates attached to the
+//! Stage 1, Pass 1's entry and output: the per-computation candidates attached to the
 //! memo groups of the workload's hash-consed DAG
 //! ([`PerComputationLogicalMemoCandidates`]), which Pass 2 extends.
 
 use std::rc::Rc;
 use std::time::Instant;
 
+use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{QueryRoot, SchemaDerivationError};
-use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
+use asap_types::workload::DataWorkload;
 
 use asap_accuracy::sizing::{
     per_input_failure_probability, with_summaries_sized_for_failure_probability,
 };
+use asap_accuracy::{AccuracyEvidenceProvider, AccuracyModel};
 
+use crate::deployment_capabilities::SupportedSummary;
 use crate::pass1::per_computation_candidates::{
-    ComputationTarget, HowToComputeAggregateMeasure, PerComputationCandidates,
+    generate_per_computation_candidates, ComputationTarget, HowToComputeAggregateMeasure,
+    PerComputationCandidateError,
 };
-use crate::pass2::memo::candidates::{try_populate_pass1, CandidatePopulationError};
+use crate::pass2::memo::candidates::CandidatePopulationError;
+use crate::pass2::memo::groups::try_populate_pass1;
 use crate::pass2::memo::{check_generation_deadline, DagOfLogicalMemoGroups};
 use asap_types::stages::{CandidateGenerationTimeout, MemoCandidates, PrunedCandidate};
 
 /// Stage 1, Pass 1's output: the workload's memo groups, each with its
 /// Pass 1 candidates, and the computation targets they were built from.
+/// It is also Pass 2's input.
 #[derive(Debug, Clone)]
 pub struct PerComputationLogicalMemoCandidates {
     /// The groups moved from the [`DagOfLogicalMemoGroups`], its query
@@ -37,7 +43,11 @@ pub struct PerComputationLogicalMemoCandidates {
 /// Why [`generate_per_computation_logical_memo_candidates`] failed.
 #[derive(Debug, thiserror::Error)]
 pub enum PerComputationLogicalMemoCandidatesError {
-    /// The inventory does not belong to the DAG of logical memo groups.
+    /// A query's DAG cannot be planned: it already holds ASAP or physical
+    /// annotations, or a measure's accuracy target is invalid.
+    #[error(transparent)]
+    PerComputation(#[from] PerComputationCandidateError),
+    /// The targets do not belong to the DAG of logical memo groups.
     #[error(transparent)]
     Population(#[from] CandidatePopulationError),
     /// The deadline passed while sizing the candidates.
@@ -49,24 +59,44 @@ pub enum PerComputationLogicalMemoCandidatesError {
     Sizing(#[from] SchemaDerivationError),
 }
 
-/// Pass 1's candidates on the memo groups of `dag_of_logical_memo_groups`:
-/// each group's candidates from `per_computation`, the Pass 1 inventory of
-/// the same roots less what the deployment does not support
-/// ([`try_populate_pass1`]), each with its summaries sized for its readers'
-/// failure probabilities ([`size_for_failure_probability`]): one sized
-/// candidate per accuracy-budget split. `entries[i]` is query `i`'s
-/// workload entry. Stops with
+/// Stage 1, Pass 1: the per-computation candidates on the memo groups of
+/// `dag_of_logical_memo_groups`. It finds one computation target per
+/// measure of each aggregate group with a realization besides exact
+/// execution, drops the summaries the deployment does not support
+/// (`supported_summaries`, the deployment's
+/// `DeploymentCapabilities::supported_summaries`; `None` supports every
+/// one) and, unless `accuracy` or `evidence` may accept an output without
+/// its guarantee, the summaries no query reading them can use (a query
+/// `q`'s target is `accuracy_targets[q]`). It then attaches each group's
+/// candidates, each with its summaries sized for its readers' failure
+/// probabilities ([`size_for_failure_probability`]): one sized candidate
+/// per accuracy-budget split. Every pruned way to compute a measure is in
+/// the output's `pruned_candidates`. Stops with
 /// [`PerComputationLogicalMemoCandidatesError::Timeout`] once `deadline`
-/// passes.
+/// passes while sizing.
 pub fn generate_per_computation_logical_memo_candidates(
     dag_of_logical_memo_groups: DagOfLogicalMemoGroups,
-    per_computation: PerComputationCandidates,
-    entries: &[QueryWorkloadEntry],
+    accuracy_targets: &[AccuracyTarget],
+    accuracy: &dyn AccuracyModel,
+    evidence: &dyn AccuracyEvidenceProvider,
     data: &DataWorkload,
+    supported_summaries: Option<&[SupportedSummary]>,
     deadline: Option<Instant>,
 ) -> Result<PerComputationLogicalMemoCandidates, PerComputationLogicalMemoCandidatesError> {
+    let mut per_computation = generate_per_computation_candidates(&dag_of_logical_memo_groups)?
+        .without_unsupported_summaries(supported_summaries);
+    if !accuracy.may_accept_regardless_of_guarantee() && !evidence.may_provide_evidence() {
+        per_computation =
+            per_computation.without_summaries_no_query_can_use(accuracy_targets, data, accuracy);
+    }
     let mut memo = try_populate_pass1(dag_of_logical_memo_groups, &per_computation)?;
-    size_for_failure_probability(&mut memo, &per_computation.roots, entries, data, deadline)?;
+    size_for_failure_probability(
+        &mut memo,
+        &per_computation.roots,
+        accuracy_targets,
+        data,
+        deadline,
+    )?;
     let pruned_candidates = per_computation
         .pruned_ways_to_compute
         .into_iter()
@@ -98,7 +128,7 @@ pub fn generate_per_computation_logical_memo_candidates(
 fn size_for_failure_probability(
     memo: &mut MemoCandidates,
     roots: &[QueryRoot],
-    entries: &[QueryWorkloadEntry],
+    accuracy_targets: &[AccuracyTarget],
     data: &DataWorkload,
     deadline: Option<Instant>,
 ) -> Result<(), PerComputationLogicalMemoCandidatesError> {
@@ -110,7 +140,7 @@ fn size_for_failure_probability(
                 .iter()
                 .filter_map(|&query| {
                     per_input_failure_probability(
-                        &entries.get(query)?.requirements.accuracy,
+                        accuracy_targets.get(query)?,
                         candidate.accuracy_budget_parts,
                         roots.get(query)?,
                         data,
@@ -137,20 +167,16 @@ fn size_for_failure_probability(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use crate::pass2::memo::shared_configurations::PaneWidthDomain;
-    use crate::pass2::memo::DagOfLogicalMemoGroups;
     use crate::test_support::{
         lower_promql, shared_summary_state_groups, sharing_rules_and_shared_state_groups,
     };
+    use asap_accuracy::{IgnoreAccuracyGuarantees, NoAccuracyEvidence};
     use asap_types::ir::properties::{AccuracyMetric, AccuracyScope, AccuracyTarget};
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm, SketchParams};
     use asap_types::ir::{ASAPOp, OperatorNode};
     use asap_types::stages::CandidateForMemoGroup;
-    use asap_types::workload::{
-        DurationMs, Predictability, QueryRecurrence, QueryRequirements, RepeatedDemand,
-        RepetitionInterval,
-    };
+    use asap_types::workload::DurationMs;
 
     /// Rank error 0.01 at δ = 0.01 over `scope`.
     fn rank_target(scope: AccuracyScope) -> AccuracyTarget {
@@ -171,42 +197,24 @@ mod tests {
 
     /// Pass 1's memo for `queries`, each lowered and entered with its target.
     fn pass1(queries: &[(&str, AccuracyTarget)], data: &DataWorkload) -> MemoCandidates {
-        let roots: Vec<(usize, QueryRoot)> = queries
+        let roots: Vec<QueryRoot> = queries
             .iter()
-            .enumerate()
-            .map(|(id, (query, target))| {
-                (
-                    id,
-                    QueryRoot::Operator(lower_promql(
-                        query,
-                        target.clone().accuracy_scope(AccuracyScope::PerValue),
-                    )),
-                )
+            .map(|(query, target)| {
+                QueryRoot::Operator(lower_promql(
+                    query,
+                    target.clone().accuracy_scope(AccuracyScope::PerValue),
+                ))
             })
             .collect();
-        let entries: Vec<QueryWorkloadEntry> = queries
-            .iter()
-            .map(|(query, target)| QueryWorkloadEntry {
-                query: asap_types::workload::Query((*query).into()),
-                requirements: QueryRequirements {
-                    accuracy: target.clone(),
-                    max_latency_ms: None,
-                },
-                predictability: Predictability::Predictable { known_at: None },
-                recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
-                    RepetitionInterval(60_000),
-                )),
-                range_evaluation: None,
-            })
-            .collect();
+        let targets: Vec<AccuracyTarget> =
+            queries.iter().map(|(_, target)| target.clone()).collect();
         generate_per_computation_logical_memo_candidates(
             DagOfLogicalMemoGroups::from_roots(&roots),
-            generate_per_computation_candidates(
-                &crate::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
-            )
-            .unwrap(),
-            &entries,
+            &targets,
+            &IgnoreAccuracyGuarantees,
+            &NoAccuracyEvidence,
             data,
+            None,
             None,
         )
         .unwrap()

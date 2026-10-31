@@ -39,9 +39,9 @@
 //     each step, is under `memo`). The document shows the logical
 //     candidates of the physical candidates it shows (below), and those among
 //     the first `--max-displayed` that have none, with `combinations` (how
-//     many there are), `capped` (whether some are not shown), `pass1_pruned`
-//     (the candidates Pass 1 pruned per target, with reasons) and
-//     `pruned_candidates` (the same, each on its memo `group`:
+//     many there are), `capped` (whether some are not shown) and
+//     `pruned_candidates` (the ways to compute a measure Pass 1 pruned,
+//     each on its aggregate's memo `group`:
 //     `PerComputationLogicalMemoCandidates::pruned_candidates`, with
 //     `candidate` and `reason`). A candidate that cannot be composed carries
 //     `error` instead of `dag`;
@@ -206,9 +206,8 @@
 // `plan_installable` defaults it), raw data is retained,
 // and no query-time result is kept across evaluations. Pass 1 offers no
 // summary the deployment does not support (exact computations are always
-// supported); Stage 1's `pass1_pruned` lists, per target with any, every
-// candidate Pass 1 pruned and why (e.g. `UnsupportedByDeployment`), its fused
-// computation's under `fused_pruned`. Without raw data retained, Stage 2
+// supported); Stage 1's `pruned_candidates` lists every candidate Pass 1
+// pruned and why (e.g. `UnsupportedByDeployment`). Without raw data retained, Stage 2
 // does not generate a query-time scan of raw data (its `pruned_candidates`
 // lists each with `RawDataNotRetained`), and stored data (at rest or
 // mixed) is refused as a contradiction; with `query_time_results_retained`,
@@ -263,7 +262,7 @@ use asap_cost::{
     ClusterLimits, ClusterObjective, CostInputs, CostModel, MeasuredOperationCosts,
     ResourceUnitCost, ResourceUsage,
 };
-use asap_devtools::candidate_labels::{candidate_labels, computation_label, query_of_each_target};
+use asap_devtools::candidate_labels::{candidate_labels, computation_label};
 use asap_devtools::memo_pricing::{price_choices, SelectedBaseline};
 use asap_devtools::planner_layering_examples::{
     example1, example2, pattern_a, pattern_b, PatternARecurrence, SHARED_ROWS_PER_SECOND,
@@ -274,9 +273,7 @@ use asap_devtools::planning_stages::{
 };
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{counter_function_over_gauge_warnings, promql_metric_names};
-use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-    HowToComputeAggregateMeasure, PerComputationCandidates,
-};
+use asap_logical_asap_optimization::pass1::PerComputationLogicalMemoCandidates;
 use asap_logical_asap_optimization::pass2::memo::enumeration::{
     build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
 };
@@ -293,7 +290,7 @@ use asap_types::ir::properties::{default_metric_for_root, AccuracyMetric, Accura
 use asap_types::ir::QueryRoot;
 use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::stages::{queries_rooted_at, MemoGroupId};
-use asap_types::stages::{MemoCandidates, OriginOfCandidateForMemoGroup, PruneReason};
+use asap_types::stages::{MemoCandidates, OriginOfCandidateForMemoGroup};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
     QueryRecurrence, QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand,
@@ -361,7 +358,6 @@ fn document_of(
             "stage1_logical_asap_optimization": {
                 "combinations": 0,
                 "capped": false,
-                "pass1_pruned": [],
                 "pruned_candidates": [],
                 "candidates": [],
                 "error": format!("Pass 1: {error}"),
@@ -761,9 +757,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let memo = result
         .as_ref()
         .ok()
-        .and_then(|run| run.run.memo_steps.as_ref())
+        .and_then(|run| {
+            let pass1 = &run.run.per_computation_candidates.as_ref()?.memo;
+            Some((run.run.memo_steps.as_ref()?, pass1))
+        })
         .filter(|_| write_memo)
-        .map(|steps| {
+        .map(|(steps, pass1)| {
             let pricing = Pricing {
                 stage0_roots: &roots,
                 entries: &entries,
@@ -775,7 +774,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                     .and_then(|run| run.run.selection.as_ref().ok())
                     .map(SelectedBaseline::of),
             };
-            memo_json(steps, &memo_caps, &pricing)
+            memo_json(steps, pass1, &memo_caps, &pricing)
         });
     let mut document = document_of(described, &roots, &entries, result, max_displayed)?;
     if let Some(memo) = memo {
@@ -1051,8 +1050,7 @@ fn stage_pipeline(
             "combinations": logical.len(),
             "capped": physical.len() < every_physical.len() || candidates.len() < logical.len()
                 || run.reference.as_ref().is_some_and(|reference| reference.capped),
-            "pass1_pruned": pass1_pruned_json(&run.run.per_computation_candidates),
-            "pruned_candidates": pass1_pruned_candidates_json(memo_steps),
+            "pruned_candidates": pass1_pruned_candidates_json(run.run.per_computation_candidates.as_ref()),
             "candidates": candidates,
         },
         "stage2_physical_asap_optimization": {
@@ -1210,48 +1208,14 @@ fn materialized_views_json(
         .collect()
 }
 
-/// The candidates Pass 1 pruned, per target that has any: the target's
-/// index, the query it is listed under, and each pruned candidate of its
-/// own (`pruned`) and of its fused computation (`fused_pruned`) with the
-/// reason, e.g. `UnsupportedByDeployment`.
-fn pass1_pruned_json(inventory: &PerComputationCandidates) -> Vec<Value> {
-    let pruned_json = |pruned: &[(HowToComputeAggregateMeasure, PruneReason)]| -> Vec<Value> {
-        pruned
-            .iter()
-            .map(|(candidate, reason)| {
-                json!({ "candidate": computation_label(candidate), "reason": format!("{reason:?}") })
-            })
-            .collect()
-    };
-    let query_of_target = query_of_each_target(inventory);
-    inventory
-        .targets
-        .iter()
-        .enumerate()
-        .filter_map(|(index, _)| {
-            let pruned = inventory.pruned_of_target(index, false);
-            let fused_pruned = inventory.pruned_of_target(index, true);
-            if pruned.is_empty() && fused_pruned.is_empty() {
-                return None;
-            }
-            Some(json!({
-                "target": index,
-                "query": format!("Q{}", query_of_target[index] + 1),
-                "pruned": pruned_json(&pruned),
-                "fused_pruned": pruned_json(&fused_pruned),
-            }))
-        })
-        .collect()
-}
-
 /// The ways to compute a measure Pass 1 pruned
 /// (`PerComputationLogicalMemoCandidates::pruned_candidates`), in pruning
 /// order: each with its aggregate's memo `group`, the `candidate` and the
-/// `reason` (`PruneReason`, e.g. `UnsupportedByDeployment`). Empty without
-/// memo steps.
-fn pass1_pruned_candidates_json(steps: Option<&MemoSteps>) -> Vec<Value> {
-    steps
-        .map_or(&[][..], |steps| &steps.pass1_pruned_candidates)
+/// `reason` (`PruneReason`, e.g. `UnsupportedByDeployment`). Empty when
+/// Pass 1 failed.
+fn pass1_pruned_candidates_json(pass1: Option<&PerComputationLogicalMemoCandidates>) -> Vec<Value> {
+    pass1
+        .map_or(&[][..], |pass1| &pass1.pruned_candidates)
         .iter()
         .map(|pruned| {
             json!({
@@ -1628,14 +1592,20 @@ struct Pricing<'a> {
 /// plan's choice over the last step's memo, and the candidate DAGs each
 /// step's memo stands for (`memo::enumeration::enumerate`; each listed
 /// choice composed by `memo::enumeration::build_logical_asap_dags_from_chosen_candidates`).
-fn memo_json(steps: &MemoSteps, caps: &MemoCaps, pricing: &Pricing<'_>) -> Value {
+/// `pass1` is the memo after Pass 1.
+fn memo_json(
+    steps: &MemoSteps,
+    pass1: &MemoCandidates,
+    caps: &MemoCaps,
+    pricing: &Pricing<'_>,
+) -> Value {
     let named = [
         (
             "stage0",
             "Stage 0, the frontends' DAG hash-consed",
             &steps.stage0,
         ),
-        ("pass1", "Stage 1, Pass 1", &steps.pass1),
+        ("pass1", "Stage 1, Pass 1", pass1),
         (
             "pass2",
             "Stage 1, Pass 2: local window composition",
