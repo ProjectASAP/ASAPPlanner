@@ -460,6 +460,8 @@ impl PaneCandidate {
 #[derive(Debug)]
 pub struct WindowCompositionPass2Candidate {
     /// The builds built as tumbling panes, in [`pane_candidates`] order.
+    /// Only tests read it.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     pub pane_candidates: Vec<PaneCandidate>,
     /// The chains each shared by several of `pane_candidates`
     /// ([`nested_window_groups`] or [`gcd_window_groups`]); empty when each
@@ -486,7 +488,7 @@ pub struct SharedPaneChain {
 /// The most pane candidates one candidate may have: every non-empty subset
 /// is a Pass 2 candidate, and with shared grids up to three, about three
 /// million at 20.
-pub const MAX_PANE_CANDIDATES: usize = 20;
+pub(crate) const MAX_PANE_CANDIDATES: usize = 20;
 
 /// The pane candidates of the candidate with query roots `roots`, children
 /// first. `evaluation_grid_ms[q]` is the grid query `q`'s evaluations fall
@@ -1089,7 +1091,7 @@ fn in_panes(
 /// panes covering its own window (its newest panes, or its whole chain),
 /// which `pane_width_ms` divides and the new chain covers; every guarantee
 /// is composed again.
-pub fn with_pane_chain(
+pub(crate) fn with_pane_chain(
     roots: &[QueryRoot],
     merge: &Rc<OperatorNode>,
     family: FieldDataType,
@@ -1166,7 +1168,7 @@ pub fn with_pane_chain(
 /// `roots` with the summary build `build` (a `SummaryAgg` of `roots`)
 /// built at family `family` instead (the same algorithm at another size),
 /// its output names kept; every guarantee is composed again.
-pub fn with_resized_build(
+pub(crate) fn with_resized_build(
     roots: &[QueryRoot],
     build: &Rc<OperatorNode>,
     family: FieldDataType,
@@ -1320,14 +1322,14 @@ pub struct RollupPass2Candidate {
 
 /// The most rollup or top-k reuse candidates one candidate may have: every
 /// non-empty subset is a Pass 2 candidate, about a million at 20.
-pub const MAX_REUSE_CANDIDATES: usize = 20;
+pub(crate) const MAX_REUSE_CANDIDATES: usize = 20;
 
 /// The exact accumulator that merges finalized values of `family` across
 /// disjoint groups, by the family-capability table: a family whose states
 /// merge over disjoint (or overlapping) selections into an exact state.
 /// `None` for a family without such a merge: counter states merge only
 /// consecutive windows, and sketch states have no regrouping merge in the IR.
-pub fn rollup_kind(family: &FieldDataType) -> Option<ExactKind> {
+pub(crate) fn rollup_kind(family: &FieldDataType) -> Option<ExactKind> {
     let FieldDataType::ExactAggregate(kind, _) = family else {
         return None;
     };
@@ -1351,6 +1353,7 @@ pub fn rollup_kind(family: &FieldDataType) -> Option<ExactKind> {
 /// the same rows that the candidate finalizes; then each coarse sketch build
 /// read only by estimates, with the finest build of its algorithm over the
 /// same rows whose keys include its own ([`sketch_rollup_candidates`]).
+#[cfg(any(test, feature = "test-support"))]
 pub fn rollup_candidates(roots: &[QueryRoot]) -> Vec<RollupCandidate> {
     rollup_candidates_of(roots, None)
 }
@@ -1359,7 +1362,7 @@ pub fn rollup_candidates(roots: &[QueryRoot]) -> Vec<RollupCandidate> {
 /// [`rollup_candidates`]`(roots)`, the first when several, computed for that
 /// build alone (each coarse build's candidate depends only on `roots`, not
 /// on the other coarse builds).
-pub fn rollup_candidate_for(
+pub(crate) fn rollup_candidate_for(
     roots: &[QueryRoot],
     coarse: *const OperatorNode,
 ) -> Option<RollupCandidate> {
@@ -1372,7 +1375,8 @@ pub fn rollup_candidate_for(
 /// no reader of `coarse` or of any build that could answer it (a reader
 /// reaches what it reads), no such build, and leaves the walk order of the
 /// other nodes as it was, so [`rollup_candidate_for`] is unchanged.
-pub fn may_change_rollup_candidate(coarse: &Rc<OperatorNode>, root: &Rc<OperatorNode>) -> bool {
+#[cfg(test)]
+fn may_change_rollup_candidate(coarse: &Rc<OperatorNode>, root: &Rc<OperatorNode>) -> bool {
     OperatorNode::reachable(root).iter().any(|node| {
         Rc::ptr_eq(node, coarse)
             || finer_keys(coarse, node).is_some()
@@ -1921,7 +1925,7 @@ fn rolled_up(
 /// ([`rollup_candidates`]), in order: each exact accumulator's alone, and
 /// every sketch candidate of one finest build together, since they share
 /// that build's size.
-pub fn rollup_choices(candidates: &[RollupCandidate]) -> Vec<Vec<RollupCandidate>> {
+pub(crate) fn rollup_choices(candidates: &[RollupCandidate]) -> Vec<Vec<RollupCandidate>> {
     let mut choices: Vec<Vec<RollupCandidate>> = Vec::new();
     for candidate in candidates {
         let sketch = is_sketch_build(&candidate.finer);
@@ -2138,7 +2142,7 @@ fn replace_all(
 /// ranking they all read in a reuse candidate: `Limit(k_max)` over `Sort`
 /// of the input, partitioned as they are.
 #[derive(Debug, Clone)]
-pub struct TopKReuseCandidate {
+pub(crate) struct TopKReuseCandidate {
     /// The plain `Aggregate` top-k nodes of one input and partition, in
     /// children-first order; at least two different `k`.
     pub members: Vec<Rc<OperatorNode>>,
@@ -2150,7 +2154,7 @@ pub struct TopKReuseCandidate {
 /// The exact top-k reuse candidates of the candidate with query roots `roots`:
 /// plain (exact) `Aggregate` top-k nodes over an exact input, unfiltered and
 /// grouped by listed keys, grouped by equal input and partition.
-pub fn topk_reuse_candidates(roots: &[QueryRoot]) -> Vec<TopKReuseCandidate> {
+pub(crate) fn topk_reuse_candidates(roots: &[QueryRoot]) -> Vec<TopKReuseCandidate> {
     let mut nodes = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for node in roots.iter().flat_map(root_operators) {

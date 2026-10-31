@@ -2,11 +2,11 @@
 use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
 use asap_integration_tests::planning::{builds_and_rollups, expanded_memo, select_rollup};
 use asap_logical_asap_optimization::{
-    pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
+    test_support::{
+        compose_logical_candidate, generate_per_computation_candidates, rollup_candidates,
+        rollup_pass2_candidates,
     },
-    pass2::asap_aware_cse::{rollup_candidates, rollup_pass2_candidates},
+    HowToComputeAggregateMeasure,
 };
 use asap_planner::PlanningModels;
 use asap_types::{
@@ -54,7 +54,7 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.as_ref().unwrap();
     let generated = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     let mut settings = CostInputs::default();
@@ -80,7 +80,7 @@ fn controlled_distinct_rollup_prices_the_original_workload() {
             .collect();
         let roots: Vec<_> = compose_logical_candidate(&generated, &choices).unwrap();
         // Identical sub-DAGs made one node, as the memo's groups are.
-        let roots: Vec<_> = asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
+        let roots: Vec<_> = asap_logical_asap_optimization::test_support::share_common_sub_dags(
             roots
                 .iter()
                 .enumerate()

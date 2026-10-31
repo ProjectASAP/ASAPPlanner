@@ -13,6 +13,7 @@ use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::{
     explicit_local_candidates, explicit_summary_candidate, selected_dag,
 };
+use asap_physical_asap_optimization::test_support::split_shared_by_timing;
 use asap_types::ir::operator::Source;
 use asap_types::ir::physical_export::{
     compile_physical_asap_dag, PhysicalASAPDAG, PhysicalASAPOperatorPayload,
@@ -20,8 +21,8 @@ use asap_types::ir::physical_export::{
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::{
-    apply_materialization_timings, split_shared_by_timing, ASAPOp, MaterializationAssignment,
-    NodeToTimedNodeCache, NonASAPOp, OperatorNode,
+    apply_materialization_timings, ASAPOp, MaterializationAssignment, NodeToTimedNodeCache,
+    NonASAPOp, OperatorNode,
 };
 use asap_types::physical::{Materialization, Medium};
 

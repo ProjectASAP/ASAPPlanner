@@ -308,10 +308,10 @@ mod tests {
     use crate::search::milp::model::solve_candidate_proposal;
     use crate::SelectionModels;
     use asap_cost::CostInputs;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
+    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
+    use asap_logical_asap_optimization::test_support::try_populate_pass1;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
+    use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
     use asap_types::ir::{properties::AccuracyTarget, QueryRoot};
     use asap_types::workload::{
         DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry,
@@ -334,9 +334,7 @@ mod tests {
         let initial = DagOfLogicalMemoGroups::from_roots(&query_roots);
         let output = *initial.query_roots[0].as_operator().unwrap();
         let generated = generate_per_computation_candidates(
-            &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(
-                &query_roots,
-            ),
+            &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&query_roots),
         )
         .unwrap();
         let memo = try_populate_pass1(initial, &generated).unwrap();

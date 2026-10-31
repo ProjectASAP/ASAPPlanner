@@ -179,7 +179,7 @@ fn exact_family(kind: ExactKind) -> FieldDataType {
 
 /// Unranked candidates of one measure and the candidates pruned for it.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ComputationChoices {
+pub(super) struct ComputationChoices {
     pub candidates: Vec<HowToComputeAggregateMeasure>,
     pub pruned: Vec<(HowToComputeAggregateMeasure, PruneReason)>,
 }
@@ -297,7 +297,7 @@ pub struct FusedComputation {
 
 /// A way to compute a target's measure that Pass 1 pruned, and why.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PrunedWayToCompute {
+pub(crate) struct PrunedWayToCompute {
     /// The target, by index in [`PerComputationCandidates::targets`].
     pub target: usize,
     /// Whether it was a way of the target's fused computation
@@ -359,7 +359,7 @@ pub struct PerComputationCandidates {
     pub targets: Vec<ComputationTarget>,
     /// The ways to compute the targets' measures that Pass 1 pruned, in the
     /// order it pruned them.
-    pub pruned_ways_to_compute: Vec<PrunedWayToCompute>,
+    pub(crate) pruned_ways_to_compute: Vec<PrunedWayToCompute>,
 }
 
 impl PerComputationCandidates {
@@ -367,7 +367,7 @@ impl PerComputationCandidates {
     /// the same roots: the same groups (by structural id, in the same order)
     /// and each query's root over the same groups. Its targets' group ids
     /// then name `dag`'s groups.
-    pub fn walked(&self, dag: &DagOfLogicalMemoGroups) -> bool {
+    pub(crate) fn walked(&self, dag: &DagOfLogicalMemoGroups) -> bool {
         use crate::pass2::memo::NodeToStructuralIdCache;
         let mut structural_ids = NodeToStructuralIdCache::default();
         let group_of: HashMap<*const OperatorNode, MemoGroupId> = self
@@ -751,7 +751,7 @@ fn sources_read(node: &Rc<OperatorNode>) -> Vec<Source> {
 /// ([`values_per_result`]): when it is not bound, a per-value guarantee
 /// that may fail never meets a whole-result failure probability, whatever
 /// the size (sizing splits δ over those values).
-pub fn output_can_meet_target(
+pub(crate) fn output_can_meet_target(
     root: &QueryRoot,
     target: &AccuracyTarget,
     data: &DataWorkload,
@@ -848,7 +848,7 @@ pub enum PerComputationCandidateError {
 /// order, without ranking or empirical assessment. A summary is not a claim that
 /// a deployment meets the measure's accuracy requirement. The one exact option
 /// comes first: the exact accumulator form if the intent has one, else `Exact`.
-pub fn computation_candidates_for_intent(
+pub(super) fn computation_candidates_for_intent(
     intent: &AggIntent,
 ) -> Result<ComputationChoices, PerComputationCandidateError> {
     let states = match intent {
@@ -1553,7 +1553,7 @@ pub fn compose_logical_candidate(
 /// ([`accuracy_budget_parts_per_measure`]). `accuracy_budget_parts` 1 sizes
 /// for the whole budget. The sub-expression memo composes one aggregate
 /// alone this way, once per number of parts its readers may give it.
-pub fn compose_logical_candidate_with_accuracy_budget_parts(
+pub(crate) fn compose_logical_candidate_with_accuracy_budget_parts(
     inventory: &PerComputationCandidates,
     choice: &[usize],
     accuracy_budget_parts: usize,

@@ -696,14 +696,14 @@ mod tests {
     use crate::search::milp::model::{solve_candidate_proposal, ObservedAssignment};
     use crate::{PlanSelector, SelectionModels};
     use asap_cost::CalibrationFit;
-    use asap_logical_asap_optimization::pass1::generate_per_computation_logical_memo_candidates;
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+    use asap_logical_asap_optimization::generate_per_computation_logical_memo_candidates;
+    use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
+    use asap_logical_asap_optimization::test_support::try_populate_pass1;
+    use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
+    use asap_logical_asap_optimization::test_support::{
         pane_candidates, window_composition_pass2_candidates,
     };
-    use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-    use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
-    use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
+    use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
     use asap_physical_asap_optimization::test_support::catalog::materialize_selected_candidates;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::{OperatorNode, QueryRoot};

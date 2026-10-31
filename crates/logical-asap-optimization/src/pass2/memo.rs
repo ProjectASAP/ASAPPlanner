@@ -4,18 +4,18 @@
 //! legality rules; Pass 1 walks its groups.
 
 /// Logical implementation candidates populated after initial identity construction.
-pub mod candidates;
+pub(crate) mod candidates;
 /// The candidate DAGs a memo stands for: choices and their composition.
-pub mod enumeration;
+pub(crate) mod enumeration;
 pub(crate) mod groups;
 pub(crate) use groups::NodeToStructuralIdCache;
 pub(crate) mod rules;
 /// Shared finite state configuration enumeration.
-pub mod shared_configurations;
+pub(crate) mod shared_configurations;
 /// Concrete summary-state groups exposed by sharing rules.
-pub mod state_groups;
+pub(crate) mod state_groups;
 /// Local pane candidates with selected-reader grid configurations.
-pub mod window_candidates;
+pub(crate) mod window_candidates;
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;

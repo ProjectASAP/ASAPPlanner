@@ -363,8 +363,8 @@ fn downstream_prices_follow_the_selected_producer_interface() {
 
 #[test]
 fn producer_worker_buckets_remain_joint_choices_and_match_evaluator() {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates,
+    use asap_logical_asap_optimization::{
+        test_support::{compose_logical_candidate, generate_per_computation_candidates},
         HowToComputeAggregateMeasure,
     };
     use asap_types::ir::schema::SketchAlgorithm;
@@ -411,7 +411,7 @@ fn producer_worker_buckets_remain_joint_choices_and_match_evaluator() {
         .accuracy_scope(AccuracyScope::PerValue);
     let original = lower_promql("quantile_over_time(0.95, latency[5m])", target.clone());
     let generated = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(original.clone()),
         ]),
     )
@@ -427,20 +427,17 @@ fn producer_worker_buckets_remain_joint_choices_and_match_evaluator() {
         })
         .unwrap();
     let roots: Vec<_> = compose_logical_candidate(&generated, &[choice]).unwrap();
-    let pane_rules = asap_logical_asap_optimization::pass2::asap_aware_cse::pane_candidates(
+    let pane_rules =
+        asap_logical_asap_optimization::test_support::pane_candidates(&roots, &[Some(60_000)]);
+    let roots = asap_logical_asap_optimization::test_support::window_composition_pass2_candidates(
         &roots,
-        &[Some(60_000)],
-    );
-    let roots =
-        asap_logical_asap_optimization::pass2::asap_aware_cse::window_composition_pass2_candidates(
-            &roots,
-            &pane_rules,
-        )
-        .unwrap()
-        .pop()
-        .unwrap()
-        .roots
-        .unwrap();
+        &pane_rules,
+    )
+    .unwrap()
+    .pop()
+    .unwrap()
+    .roots
+    .unwrap();
     let data: DataWorkload = serde_json::from_value(serde_json::json!({
         "arrival":{"ingesting":{"rows_per_second":100.0}},
         "sources":{

@@ -22,7 +22,8 @@ pub enum PaneWidthDomain {
     },
 }
 
-pub fn pane_width_domain(
+#[cfg(test)]
+pub(crate) fn pane_width_domain(
     grids: impl IntoIterator<Item = u64>,
     domain: PaneWidthDomain,
 ) -> Vec<u64> {
@@ -157,13 +158,13 @@ impl PaneWidthFrontier {
 }
 
 #[derive(Debug, Clone)]
-pub struct PaneRequirement {
+pub(crate) struct PaneRequirement {
     pub pane_width_ms: u64,
     pub window_ms: u64,
     pub family: FieldDataType,
 }
 #[derive(Debug, Clone, PartialEq)]
-pub struct PaneConfiguration {
+pub(crate) struct PaneConfiguration {
     pub pane_width_ms: u64,
     pub longest_window_ms: u64,
     pub family: FieldDataType,
@@ -182,7 +183,8 @@ impl PaneConfiguration {
 /// Every positive integer-millisecond divisor of a grid, in ascending order.
 /// The time representation fixes the search resolution; no representative-width
 /// sampling or arbitrary candidate cap changes this domain.
-pub fn pane_width_divisors(grid_ms: u64) -> Vec<u64> {
+#[cfg(test)]
+pub(crate) fn pane_width_divisors(grid_ms: u64) -> Vec<u64> {
     pane_width_divisors_before(grid_ms, None)
         .expect("generation without a deadline cannot time out")
 }
@@ -211,11 +213,13 @@ fn pane_width_divisors_before(
 
 /// Complete divisor grids, distinct required horizons, and joined state sizes.
 /// This enumerates configurations of one compatible producer, not workload plans.
-pub fn pane_configurations(readers: &[PaneRequirement]) -> Vec<PaneConfiguration> {
+#[cfg(test)]
+fn pane_configurations(readers: &[PaneRequirement]) -> Vec<PaneConfiguration> {
     pane_configurations_in_domain(readers, PaneWidthDomain::Complete)
 }
 
-pub fn pane_configurations_in_domain(
+#[cfg(test)]
+fn pane_configurations_in_domain(
     readers: &[PaneRequirement],
     domain: PaneWidthDomain,
 ) -> Vec<PaneConfiguration> {
@@ -358,7 +362,7 @@ fn same_size(a: &SketchParams, b: &SketchParams) -> bool {
     a == b && format!("{a:?}") == format!("{b:?}")
 }
 
-pub fn shared_size(a: &FieldDataType, b: &FieldDataType) -> Option<FieldDataType> {
+pub(crate) fn shared_size(a: &FieldDataType, b: &FieldDataType) -> Option<FieldDataType> {
     match (a, b) {
         (FieldDataType::Sketch(a, grouping), FieldDataType::Sketch(b, grouping_b))
             if a.algorithm() == b.algorithm() && grouping == grouping_b =>

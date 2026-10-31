@@ -149,8 +149,8 @@ async fn batch_lowering_recognizes_frequency_l2() {
 /// recognized L2 intent.
 #[tokio::test]
 async fn stage1_offers_exact_and_summary_l2_candidates() {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        generate_per_computation_candidates, HowToComputeAggregateMeasure,
+    use asap_logical_asap_optimization::{
+        test_support::generate_per_computation_candidates, HowToComputeAggregateMeasure,
     };
     use asap_types::ir::QueryRoot;
     let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
@@ -158,7 +158,7 @@ async fn stage1_offers_exact_and_summary_l2_candidates() {
         .await
         .unwrap();
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
             QueryRoot::Operator(root),
         ]),
     )

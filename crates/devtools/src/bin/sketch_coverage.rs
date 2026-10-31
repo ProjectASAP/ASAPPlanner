@@ -20,10 +20,10 @@ use asap_devtools::corpora::{
 };
 use asap_devtools::{lower_promql_with_sample_interval, SqlCatalog};
 use asap_frontend_sql::lower_sql_dialect;
-use asap_logical_asap_optimization::pass1::{
+use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
+use asap_logical_asap_optimization::{
     generate_per_computation_logical_memo_candidates, HowToComputeAggregateMeasure,
 };
-use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::workload::{DataWorkload, SqlDialect};

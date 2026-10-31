@@ -38,13 +38,13 @@ use std::rc::Rc;
 
 use asap_devtools::planning_stages::lower_promql_roots;
 use asap_integration_tests::planning::expanded_memo;
-use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+use asap_logical_asap_optimization::test_support::{
     compose_logical_candidate, generate_per_computation_candidates, PerComputationCandidates,
 };
-use asap_logical_asap_optimization::pass2::memo::enumeration::{
+use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
+use asap_logical_asap_optimization::{
     build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
 };
-use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
 use asap_planner::{run_planning, MemoSteps, PlanSearchSettings, PlanningModels, PlanningRun};
 use asap_types::ir::schema::{FieldDataType, SketchParams};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
@@ -503,6 +503,6 @@ fn choices_whose_candidates_read_each_other_are_left_out() {
             &cyclic,
             &[(group, index), (child, back_index)].into()
         ),
-        Err(asap_logical_asap_optimization::pass2::memo::enumeration::ErrorBuildingLogicalASAPDagsFromChosenCandidates::Cycle { .. })
+        Err(asap_logical_asap_optimization::ErrorBuildingLogicalASAPDagsFromChosenCandidates::Cycle { .. })
     ));
 }

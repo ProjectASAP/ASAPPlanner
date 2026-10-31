@@ -100,6 +100,7 @@
 //! A summary needs no rewrite: `SummaryAgg` → `SummaryEstimate` already is
 //! build → estimate. Every node keeps the guarantee Stage 1 composed for it.
 mod catalog;
+mod split_by_timing;
 mod summary_window;
 
 pub use catalog::{
@@ -116,9 +117,9 @@ use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_id
 use asap_types::ir::properties::{ExecutionDataStateError, ExecutionTiming};
 use asap_types::ir::schema::{ExactKind, FieldDataType};
 use asap_types::ir::{
-    apply_materialization_timings, is_filtered_build, split_shared_by_timing, ASAPOp,
-    MaterializationAssignment, NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode, QueryRoot,
-    ScalarExpr, SchemaDerivationError, SortKey,
+    apply_materialization_timings, is_filtered_build, ASAPOp, MaterializationAssignment,
+    NodeToTimedNodeCache, NonASAPOp, Operator, OperatorNode, QueryRoot, ScalarExpr,
+    SchemaDerivationError, SortKey,
 };
 use asap_types::physical::Materialization;
 use asap_types::physical::Medium;
@@ -126,6 +127,7 @@ use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
+use split_by_timing::split_shared_by_timing;
 use summary_window::{plan_pane_phase, validate_pane_coverage, PaneLayout, WindowEdgeCoverage};
 use thiserror::Error;
 
@@ -1151,6 +1153,7 @@ pub mod test_support {
     use crate::{PhysicalASAPOptimizationError, PhysicalWorkloadPlan};
 
     pub use crate::catalog::test_support as catalog;
+    pub use crate::split_by_timing::split_shared_by_timing;
     pub use crate::summary_window::{
         validate_pane_coverage, PaneCoverageError, PaneLayout, WindowEdgeCoverage,
     };
@@ -1482,10 +1485,13 @@ mod tests {
             "topk by (job) (10, sum_over_time(m[1m]))",
             AccuracyTarget::max_error(0.01).failure_probability(0.001),
         );
-        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&
-            [QueryRoot::Operator(root)],
-        ))
-        .unwrap();
+        let inventory =
+            asap_logical_asap_optimization::test_support::generate_per_computation_candidates(
+                &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+                    QueryRoot::Operator(root),
+                ]),
+            )
+            .unwrap();
         // A summary (the last candidate) for every target.
         let choice: Vec<_> = inventory
             .targets
@@ -1493,7 +1499,7 @@ mod tests {
             .map(|t| t.choice_count() - 1)
             .collect();
         let roots: Vec<_> =
-            asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate(
+            asap_logical_asap_optimization::test_support::compose_logical_candidate(
                 &inventory, &choice,
             )
             .unwrap()
@@ -1527,33 +1533,31 @@ mod tests {
                 .failure_probability(0.001)
                 .accuracy_metric(asap_types::ir::properties::AccuracyMetric::Rank),
         );
-        let inventory = asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&
-            [QueryRoot::Operator(root)],
-        ))
-        .unwrap();
+        let inventory =
+            asap_logical_asap_optimization::test_support::generate_per_computation_candidates(
+                &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+                    QueryRoot::Operator(root),
+                ]),
+            )
+            .unwrap();
         let choice: Vec<_> = inventory
             .targets
             .iter()
             .map(|t| t.choice_count() - 1)
             .collect();
-        asap_logical_asap_optimization::pass1::per_computation_candidates::compose_logical_candidate(
-            &inventory, &choice,
-        )
-        .unwrap()
-        .remove(0)
+        asap_logical_asap_optimization::test_support::compose_logical_candidate(&inventory, &choice)
+            .unwrap()
+            .remove(0)
     }
 
     /// `root` with its summary build in 1-min tumbling panes.
     fn in_panes(root: QueryRoot) -> QueryRoot {
         let roots = [root];
         let rule_candidates =
-            asap_logical_asap_optimization::pass2::asap_aware_cse::pane_candidates(
-                &roots,
-                &[Some(MINUTE)],
-            );
+            asap_logical_asap_optimization::test_support::pane_candidates(&roots, &[Some(MINUTE)]);
         assert_eq!(rule_candidates.len(), 1, "{rule_candidates:?}");
         let mut pass2_candidates =
-            asap_logical_asap_optimization::pass2::asap_aware_cse::window_composition_pass2_candidates(
+            asap_logical_asap_optimization::test_support::window_composition_pass2_candidates(
                 &roots,
                 &rule_candidates,
             )

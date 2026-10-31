@@ -93,7 +93,7 @@ impl DeploymentCapabilities {
 /// family and readout the planner can build) can build `family` and answer
 /// `readout` from it. Pass 1 reads only this field of
 /// [`DeploymentCapabilities`].
-pub fn summary_supported(
+pub(crate) fn summary_supported(
     supported_summaries: Option<&[SupportedSummary]>,
     family: &SketchAlgorithm,
     readout: StatisticKind,

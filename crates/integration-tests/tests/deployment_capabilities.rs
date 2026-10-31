@@ -71,25 +71,27 @@ fn assert_removes_exactly(
     roots: Vec<asap_types::ir::QueryRoot>,
     deployment: &DeploymentCapabilities,
 ) {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
+    use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     let local = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
-    let enumerate_local = |inventory: &asap_logical_asap_optimization::pass1::per_computation_candidates::PerComputationCandidates| {
-        let mut result = Vec::new();
-        for (target, options) in inventory.targets.iter().enumerate() {
-            for choice in 0..options.choice_count() {
-                let mut choices = vec![0; inventory.targets.len()]; choices[target] = choice;
-                if let Ok(roots) = compose_logical_candidate(inventory, &choices) {
-                    result.push(asap_types::ir::flat::flatten(&roots).0);
+    let enumerate_local =
+        |inventory: &asap_logical_asap_optimization::test_support::PerComputationCandidates| {
+            let mut result = Vec::new();
+            for (target, options) in inventory.targets.iter().enumerate() {
+                for choice in 0..options.choice_count() {
+                    let mut choices = vec![0; inventory.targets.len()];
+                    choices[target] = choice;
+                    if let Ok(roots) = compose_logical_candidate(inventory, &choices) {
+                        result.push(asap_types::ir::flat::flatten(&roots).0);
+                    }
                 }
             }
-        }
-        result
-    };
+            result
+        };
     let unrestricted = enumerate_local(&local);
     let restricted = enumerate_local(
         &local.without_unsupported_summaries(deployment.supported_summaries.as_deref()),
@@ -130,18 +132,18 @@ fn pattern_b_with_p50() -> asap_types::workload::PlanningWorkload {
 
 /// One explicitly shared KLL pane chain, passed through normal physical rules.
 fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
-    use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-        compose_logical_candidate, generate_per_computation_candidates,
-        HowToComputeAggregateMeasure,
-    };
-    use asap_logical_asap_optimization::pass2::asap_aware_cse::{
+    use asap_logical_asap_optimization::test_support::{
         pane_candidates, window_composition_pass2_candidates,
+    };
+    use asap_logical_asap_optimization::{
+        test_support::{compose_logical_candidate, generate_per_computation_candidates},
+        HowToComputeAggregateMeasure,
     };
     use asap_types::ir::QueryRoot;
     let workload = pattern_b_with_p50();
     let original = lower_promql(&workload);
     let local = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&original),
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&original),
     )
     .unwrap();
     let choices = local
@@ -161,7 +163,7 @@ fn shared_pane_configurations(deployment: &DeploymentCapabilities) -> Run {
         })
         .collect::<Vec<_>>();
     let composed = compose_logical_candidate(&local, &choices).unwrap();
-    let shared = asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
+    let shared = asap_logical_asap_optimization::test_support::share_common_sub_dags(
         composed
             .into_iter()
             .enumerate()

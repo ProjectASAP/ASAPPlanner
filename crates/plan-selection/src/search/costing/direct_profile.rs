@@ -1238,8 +1238,8 @@ mod tests {
     // direct costs include working memory and agree with the complete evaluator.
     #[test]
     fn fixed_sketch_profiles_match_the_real_evaluator() {
-        use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-            compose_logical_candidate, generate_per_computation_candidates,
+        use asap_logical_asap_optimization::{
+            test_support::{compose_logical_candidate, generate_per_computation_candidates},
             HowToComputeAggregateMeasure,
         };
         use asap_types::ir::schema::SketchAlgorithm;
@@ -1285,7 +1285,11 @@ mod tests {
                     "quantile_over_time(0.95, latency[5m])"
                 };
                 let original = lower_promql(query, target.clone());
-                let generated = generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[QueryRoot::Operator(original.clone())]))
+                let generated = generate_per_computation_candidates(
+                    &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+                        QueryRoot::Operator(original.clone()),
+                    ]),
+                )
                 .unwrap();
                 let choice = generated.targets[0].ways_to_compute.iter().position(|candidate|
                     matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == algorithm)).unwrap();
@@ -1432,8 +1436,8 @@ mod tests {
         mode: Materialization,
         range_evaluation: Option<asap_types::workload::RangeEvaluation>,
     ) {
-        use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-            compose_logical_candidate, generate_per_computation_candidates,
+        use asap_logical_asap_optimization::{
+            test_support::{compose_logical_candidate, generate_per_computation_candidates},
             HowToComputeAggregateMeasure,
         };
         use asap_types::ir::schema::SketchAlgorithm;
@@ -1502,17 +1506,20 @@ mod tests {
                         "quantile_over_time(0.95, latency[5m])"
                     };
                     let original = lower_promql(query, target.clone());
-                    let generated = generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&[QueryRoot::Operator(original.clone())]))
+                    let generated = generate_per_computation_candidates(
+                        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&[
+                            QueryRoot::Operator(original.clone()),
+                        ]),
+                    )
                     .unwrap();
                     let choice = generated.targets[0].ways_to_compute.iter().position(|candidate|
                     matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == algorithm)).unwrap();
                     let roots: Vec<_> = compose_logical_candidate(&generated, &[choice]).unwrap();
-                    let pane_rules =
-                        asap_logical_asap_optimization::pass2::asap_aware_cse::pane_candidates(
-                            &roots,
-                            &[Some(width)],
-                        );
-                    let roots = asap_logical_asap_optimization::pass2::asap_aware_cse::window_composition_pass2_candidates(&roots, &pane_rules).unwrap().pop().unwrap().roots.unwrap();
+                    let pane_rules = asap_logical_asap_optimization::test_support::pane_candidates(
+                        &roots,
+                        &[Some(width)],
+                    );
+                    let roots = asap_logical_asap_optimization::test_support::window_composition_pass2_candidates(&roots, &pane_rules).unwrap().pop().unwrap().roots.unwrap();
                     let data: DataWorkload = serde_json::from_value(serde_json::json!({
                     "arrival":{"ingesting":{"rows_per_second":rows_per_second}},
                     "sources":{"latency":{"series_count":series_count,"rows_held":rows_per_second * 300,"values_non_negative":true,"max_distinct_per_evaluation":1000}}
@@ -1899,8 +1906,8 @@ mod tests {
     // including two equal frequencies whose different phases cannot coalesce.
     #[test]
     fn heterogeneous_shared_sketch_profiles_match_the_real_evaluator() {
-        use asap_logical_asap_optimization::pass1::per_computation_candidates::{
-            compose_logical_candidate, generate_per_computation_candidates,
+        use asap_logical_asap_optimization::{
+            test_support::{compose_logical_candidate, generate_per_computation_candidates},
             HowToComputeAggregateMeasure,
         };
         use asap_types::ir::schema::SketchAlgorithm;
@@ -1953,14 +1960,16 @@ mod tests {
                         ))
                     })
                     .collect();
-                let generated = generate_per_computation_candidates(&asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&originals))
+                let generated = generate_per_computation_candidates(
+                    &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&originals),
+                )
                 .unwrap();
                 let choices: Vec<_> = generated.targets.iter().map(|target| target.ways_to_compute.iter().position(|candidate|
                     matches!(candidate,HowToComputeAggregateMeasure::Summary(found) if *found==algorithm)).unwrap()).collect();
                 let roots: Vec<_> = compose_logical_candidate(&generated, &choices).unwrap();
                 // Identical sub-DAGs made one node, as the memo's groups are.
                 let shared: Vec<_> =
-                    asap_logical_asap_optimization::pass2::cse::share_common_sub_dags(
+                    asap_logical_asap_optimization::test_support::share_common_sub_dags(
                         roots
                             .iter()
                             .enumerate()

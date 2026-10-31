@@ -5,11 +5,11 @@ use asap_cost::CostInputs;
 use asap_devtools::memo_pricing::{price_choices, PricedChoice, SelectedBaseline};
 use asap_devtools::planner_layering_examples::example1;
 use asap_devtools::planning_stages::{lower_promql_roots, run_default_search_over};
-use asap_logical_asap_optimization::deployment_capabilities::DeploymentCapabilities;
-use asap_logical_asap_optimization::pass1::per_computation_candidates::generate_per_computation_candidates;
-use asap_logical_asap_optimization::pass2::memo::candidates::try_populate_pass1;
-use asap_logical_asap_optimization::pass2::memo::enumeration::enumerate;
-use asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups;
+use asap_logical_asap_optimization::enumerate;
+use asap_logical_asap_optimization::test_support::generate_per_computation_candidates;
+use asap_logical_asap_optimization::test_support::try_populate_pass1;
+use asap_logical_asap_optimization::DagOfLogicalMemoGroups;
+use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_planner::PlanningModels;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::QueryRoot;
@@ -80,7 +80,7 @@ fn planned(workload: &PlanningWorkload, series_identity: bool) -> Planned {
     };
     let initial = DagOfLogicalMemoGroups::from_roots(&roots);
     let inventory = generate_per_computation_candidates(
-        &asap_logical_asap_optimization::pass2::memo::DagOfLogicalMemoGroups::from_roots(&roots),
+        &asap_logical_asap_optimization::DagOfLogicalMemoGroups::from_roots(&roots),
     )
     .unwrap();
     Planned {

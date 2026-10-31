@@ -4,11 +4,8 @@
 use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, FuzzWorkload, Planner};
 use asap_executor::values::Value;
 use asap_logical_asap_optimization::{
-    pass1::per_computation_candidates::generate_per_computation_candidates,
-    pass2::memo::{
-        candidates::try_populate_pass1, shared_configurations::PaneWidthDomain,
-        DagOfLogicalMemoGroups,
-    },
+    test_support::{generate_per_computation_candidates, try_populate_pass1},
+    DagOfLogicalMemoGroups, PaneWidthDomain,
 };
 use asap_types::ir::NonASAPOp;
 use asap_types::stages::MemoCandidates;
