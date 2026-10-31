@@ -42,18 +42,20 @@
 //!    reading such an instance: `a[q, i] ≤ Σ own reads + Σ_{i0} t[q, i0, i]`,
 //!    `t ≤ a[q, i0]`, `t ≤ Σ b(i0 reads i)`.
 //! 7. Reader constraints on the nodes of the constrained class.
-//! 8. Latency: `L[q] ≥ eval + Σ d · s[q, k] + Σ_i (d_i · a[q, i] + u[q, i])
-//!    + C[q]`, `u[q, i] ≥ u[i] − ū[i] (1 − a[q, i])`, `C[q] ≥ c_i · a[q, i]`,
-//!    `L[q] ≤ bound(q)`, where `bound(q)` is the smaller of
-//!    `max_latency_ms` and the fixed repeat interval.
+//! 8. Latency: `L[q] ≥ eval + Σ d · s[q, k] + Σ_i (d_i · a[q, i] +
+//!    u[q, i]) + C[q]`, `u[q, i] ≥ u[i] − ū[i] (1 − a[q, i])`, `C[q] ≥ c_i ·
+//!    a[q, i]`, `L[q] ≤ bound(q)`, where `bound(q)` is the smaller of
+//!    `max_latency_ms` and the fixed repeat interval; a binding bound's two
+//!    rows are divided by the bound, so HiGHS's absolute tolerance is
+//!    relative to it.
 //! 9. Accuracy (A1, revised 2026-10-30): `N[q] = Σ a[q, i]` over the
 //!    approximate instances `q` may reach; per value `p` of `parts`, `A[q,
 //!    p] ≥ a[q, i]` for its instances and `N[q] ≤ p + M (1 − A[q, p])`;
 //!    `a[q, i] = 0` for a denominator with `parts < 2` and for an unusable
 //!    position.
 //!
-//! The solve starts from [`super::warm_start`]'s plan, so a deadline ends
-//! with a plan.
+//! The solve starts from [`super::warm_start`]'s plan (with every variable's
+//! value), so a deadline ends with a plan.
 //!
 //! Every cost row is a lower bound that minimization makes tight; every
 //! structural row is exact at integral binaries.
@@ -247,6 +249,9 @@ pub(crate) struct SelectionMilp<'a> {
     pub(crate) terms_in_progress: HashSet<(usize, PhysicalCandidateId)>,
     /// The nodes' terms, cached per `(owner, class)`.
     pub(crate) node_terms_cache: HashMap<(usize, PhysicalCandidateId), Vec<NodeTerm>>,
+    /// Per candidate, whether a reader tells its outputs apart
+    /// ([`cost_terms::outputs_that_matter`]).
+    pub(crate) output_matters: Vec<bool>,
 }
 
 /// Variables and rows of one model.
@@ -266,7 +271,9 @@ pub(crate) struct SelectionMilpSize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SelectionMilpStatus {
     Optimal,
-    /// HiGHS's time limit (the deadline), with an integral incumbent.
+    /// HiGHS's time limit (the deadline), with an integral incumbent; also
+    /// when the warm start used up the time to the deadline and HiGHS only
+    /// read it back.
     TimeLimit,
 }
 
@@ -313,6 +320,12 @@ pub(crate) struct SelectionMilpSolution {
     pub(crate) build_ms: u64,
     /// Building the warm start, HiGHS's first incumbent.
     pub(crate) warm_start_ms: u64,
+    /// The warm start's objective (cost per second without the request
+    /// fees, like `cost_per_second`), when its completion costed it: `None`
+    /// when some query has no plan alone or the completion found the warm
+    /// start infeasible, and HiGHS started without it. `cost_per_second` is
+    /// at most this.
+    pub(crate) warm_start_cost_per_second: Option<f64>,
     pub(crate) solve_ms: u64,
 }
 
@@ -485,6 +498,7 @@ pub(crate) fn build_selection_milp<'a>(
         terms_in_progress: HashSet::new(),
         producer_gives: HashMap::new(),
         node_terms_cache: HashMap::new(),
+        output_matters: cost_terms::outputs_that_matter(inputs),
         instances,
     };
     structural_rows(&mut milp);
@@ -1120,13 +1134,18 @@ fn latency_rows(milp: &mut SelectionMilp<'_>) -> Result<(), SelectionMilpError> 
             most += longest_compaction;
         }
         let latency = milp.builder.continuous("L (latency)", None);
-        milp.builder.row("8 latency", constraint!(latency >= work));
-        let bound = latency_bound_ms(&milp.entries[query]);
+        let bound = latency_bound_ms(&milp.entries[query]).filter(|&bound| bound < most);
+        // A binding bound's rows are divided by it, so HiGHS's absolute
+        // feasibility tolerance is relative to the bound (latencies of
+        // microseconds would otherwise pass a bound by its tolerance).
+        let per_ms = bound.map_or(1.0, |bound| 1.0 / bound.max(1e-9));
+        milp.builder
+            .row("8 latency", constraint!(per_ms * latency >= per_ms * work));
         if let Some(bound) = bound {
-            if bound < most {
-                milp.builder.row("8 latency", constraint!(latency <= bound));
-            }
+            milp.builder
+                .row("8 latency", constraint!(per_ms * latency <= per_ms * bound));
         }
+        let bound = latency_bound_ms(&milp.entries[query]);
         milp.latency.push(latency);
         milp.latency_max_ms
             .push(bound.map_or(most, |bound| bound.min(most)));
@@ -1242,12 +1261,22 @@ pub(crate) fn solve_selection_milp(
     let warm_started = Instant::now();
     // A query with no plan alone may still have one with sharing: then the
     // solve starts without an incumbent, and an infeasible model names it.
-    let (start, no_plan_alone) = match warm_start::warm_start(&milp) {
+    // The warm start's local search takes at most a fifth of the time left.
+    let search_budget = Instant::now()
+        + deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()) / 5)
+            .unwrap_or(WARM_START_MOST_TIME)
+            .min(WARM_START_MOST_TIME);
+    let (start, no_plan_alone) = match warm_start::warm_start(&milp, Some(search_budget)) {
         Ok(start) => (Some(start), None),
         Err(no_plan) => (None, Some(no_plan)),
     };
     let warm_start_ms = warm_started.elapsed().as_millis() as u64;
-    let scale = objective_scale(&milp.objective_terms, start.as_deref());
+    let warm_start_cost_per_second = start.as_ref().and_then(|start| start.cost_per_second);
+    let scale = objective_scale(
+        &milp.objective_terms,
+        start.as_ref().map(|start| start.values.as_slice()),
+    );
     let objective: Expression = milp
         .objective_terms
         .iter()
@@ -1286,25 +1315,34 @@ pub(crate) fn solve_selection_milp(
     // its own malloc arenas) costs gigabytes of address space on a large
     // host and breaks an 8 GB `ulimit -v` (#1036 workload-01 on 56 cores).
     model.set_option("threads", HIGHS_THREADS);
-    // The warm start: its binaries; HiGHS completes the continuous
-    // variables by an LP with the binaries fixed.
+    // The warm start: every variable when the completion costed it, else
+    // its binaries, and HiGHS completes the continuous variables by an LP
+    // with the binaries fixed.
+    let started_with_plan = start.is_some();
     if let Some(start) = start {
         let mut columns = vec![0.0; column_of.len()];
-        for (variable, value) in start {
+        for (variable, value) in start.values {
             columns[column_of[&variable]] = value;
         }
         model
             .try_set_solution(Some(&columns), None, None, None)
             .map_err(|status| SelectionMilpError::Solver(format!("warm start: {status:?}")))?;
     }
+    // With a warm start, a deadline the warm start used up still ends with
+    // it: HiGHS gets a moment to read it back, and the solve reports the
+    // deadline (whatever HiGHS says of that moment).
+    let mut only_read_back = false;
     if let Some(deadline) = deadline {
         let seconds = deadline
             .saturating_duration_since(Instant::now())
             .as_secs_f64();
         if seconds <= 0.0 {
-            return Err(SelectionMilpError::DeadlineReached);
+            if !started_with_plan {
+                return Err(SelectionMilpError::DeadlineReached);
+            }
+            only_read_back = true;
         }
-        model.set_option("time_limit", seconds);
+        model.set_option("time_limit", seconds.max(MOMENT_TO_READ_THE_START_S));
     }
     let started = Instant::now();
     let solved = model
@@ -1313,6 +1351,7 @@ pub(crate) fn solve_selection_milp(
     let solve_ms = started.elapsed().as_millis() as u64;
     use highs::{HighsModelStatus, HighsSolutionStatus};
     let status = match solved.status() {
+        HighsModelStatus::Optimal if only_read_back => SelectionMilpStatus::TimeLimit,
         HighsModelStatus::Optimal => SelectionMilpStatus::Optimal,
         HighsModelStatus::Infeasible | HighsModelStatus::UnboundedOrInfeasible => {
             return Err(no_plan_alone.unwrap_or(SelectionMilpError::Infeasible))
@@ -1413,6 +1452,7 @@ pub(crate) fn solve_selection_milp(
         size,
         build_ms,
         warm_start_ms,
+        warm_start_cost_per_second,
         solve_ms,
     })
 }
@@ -1420,11 +1460,16 @@ pub(crate) fn solve_selection_milp(
 /// HiGHS's threads (its `threads` option).
 const HIGHS_THREADS: i32 = 4;
 
+/// HiGHS's time limit when the warm start used up the time to the deadline.
+const MOMENT_TO_READ_THE_START_S: f64 = 1e-3;
+
+/// The most time the warm start's local search takes.
+const WARM_START_MOST_TIME: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The factor the objective is multiplied by for HiGHS: the warm start's
-/// cost on its binaries becomes about 1,000 (so the costs HiGHS compares
-/// stay well above its absolute tolerances), its largest coefficient at
-/// most 10⁷; without a warm start cost, the largest coefficient becomes
-/// 1,000.
+/// cost becomes about 1,000 (so the costs HiGHS compares stay well above its
+/// absolute tolerances), its largest coefficient at most 10⁷; without a
+/// warm start cost, the largest coefficient becomes 1,000.
 fn objective_scale(terms: &[(Variable, f64)], start: Option<&[(Variable, f64)]>) -> f64 {
     let largest = terms
         .iter()
@@ -1433,16 +1478,10 @@ fn objective_scale(terms: &[(Variable, f64)], start: Option<&[(Variable, f64)]>)
     if !(largest > 0.0 && largest.is_finite()) {
         return 1.0;
     }
-    let started: HashSet<Variable> = start
-        .into_iter()
-        .flatten()
-        .filter(|(_, value)| *value > 0.5)
-        .map(|(variable, _)| *variable)
-        .collect();
+    let started: HashMap<Variable, f64> = start.into_iter().flatten().copied().collect();
     let start_cost: f64 = terms
         .iter()
-        .filter(|(variable, _)| started.contains(variable))
-        .map(|(_, coefficient)| *coefficient)
+        .map(|(variable, coefficient)| coefficient * started.get(variable).copied().unwrap_or(0.0))
         .sum();
     if start_cost > 0.0 && start_cost.is_finite() {
         (1_000.0 / start_cost).min(1e7 / largest)

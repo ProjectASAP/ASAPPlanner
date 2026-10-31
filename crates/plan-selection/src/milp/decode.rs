@@ -236,6 +236,7 @@ mod tests {
             size: SelectionMilpSize::default(),
             build_ms: 0,
             warm_start_ms: 0,
+            warm_start_cost_per_second: None,
             solve_ms: 0,
         };
         let dag = decode(&fixture.physical, &solution);
