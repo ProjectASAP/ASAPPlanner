@@ -356,8 +356,10 @@ fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
                             details.push(format!("{kind}({})", params.join(", ")));
                         }
                     }
-                    // A window's range, and a pane chain's layout.
-                    "range" | "window" | "pane_width_ms" | "pane_count" => {
+                    // A time range's length, e.g. `60s`.
+                    "range" => details.push(duration_text(field)),
+                    // A window, and a pane chain's layout.
+                    "window" | "pane_width_ms" | "pane_count" => {
                         details.push(format!("{key}={field}"))
                     }
                     _ => find_details(field, details, depth + 1),
@@ -370,6 +372,19 @@ fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
             }
         }
         _ => {}
+    }
+}
+
+/// A serialized `Duration` (`{"secs": 60, "nanos": 0}`) as `60s`, or
+/// `1500ms` when it is not whole seconds; any other value as its JSON.
+fn duration_text(value: &Value) -> String {
+    match (
+        value.get("secs").and_then(Value::as_u64),
+        value.get("nanos").and_then(Value::as_u64),
+    ) {
+        (Some(secs), Some(0)) => format!("{secs}s"),
+        (Some(secs), Some(nanos)) => format!("{}ms", secs * 1000 + nanos / 1_000_000),
+        _ => value.to_string(),
     }
 }
 
