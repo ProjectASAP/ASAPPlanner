@@ -153,8 +153,8 @@ fn size_for_failure_probability(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pass2::memo::generate_dag_of_logical_memo_groups;
     use crate::pass2::memo::shared_configurations::TumblingWindowWidthDomain;
+    use crate::stage0::generate_dag_of_logical_memo_groups;
     use crate::test_support::{
         lower_promql, shared_summary_state_groups, sharing_rules_and_shared_state_groups,
     };

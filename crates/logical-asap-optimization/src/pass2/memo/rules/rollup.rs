@@ -335,9 +335,9 @@ pub(crate) fn add_window_rollup_candidates(
 #[cfg(test)]
 mod tests {
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::generate_dag_of_logical_memo_groups;
     use crate::pass2::memo::groups::try_populate_pass1;
     use crate::pass2::memo::shared_configurations::TumblingWindowWidthDomain;
+    use crate::stage0::generate_dag_of_logical_memo_groups;
     use crate::test_support::{lower_promql, sharing_rules_and_shared_state_groups};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::QueryRoot;

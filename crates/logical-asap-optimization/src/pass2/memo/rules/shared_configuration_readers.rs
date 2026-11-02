@@ -530,8 +530,8 @@ fn compatible(left: &StateNeed, right: &StateNeed) -> bool {
 mod tests {
     use super::*;
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
-    use crate::pass2::memo::generate_dag_of_logical_memo_groups;
     use crate::pass2::memo::groups::try_populate_pass1;
+    use crate::stage0::generate_dag_of_logical_memo_groups;
     use crate::test_support::{entry_with, lower_promql};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};

@@ -3,7 +3,7 @@ use crate::pass1::per_computation_candidates::{
     computation_candidates_for_intent, generate_per_computation_candidates,
     PerComputationCandidateError,
 };
-use crate::pass2::memo::generate_dag_of_logical_memo_groups;
+use crate::stage0::generate_dag_of_logical_memo_groups;
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::AccuracyTarget;

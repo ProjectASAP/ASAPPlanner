@@ -4,9 +4,8 @@
 /// Stage 1, Pass 2: ASAP-aware common-subexpression elimination (the
 /// identical-expression rule).
 pub(crate) mod asap_aware_cse;
-pub(crate) mod cse;
 pub(crate) mod finer_aggregate;
 /// Stage 1, Pass 2's entry, producing [`asap_types::stages::LogicalASAPMemoCandidates`].
 pub(crate) mod logical_memo_candidates;
-/// Logical group identity available before Pass 1 candidate generation.
+/// The logical memo: candidates, rules and enumeration over Stage 0's groups.
 pub(crate) mod memo;

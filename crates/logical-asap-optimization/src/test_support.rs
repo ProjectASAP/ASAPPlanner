@@ -15,11 +15,11 @@ pub use crate::pass2::asap_aware_cse::{
     window_composition_pass2_candidates, window_composition_shared_chain_candidates,
     with_union_scan_labels,
 };
-pub use crate::pass2::cse::share_common_sub_dags;
 pub use crate::pass2::memo::groups::try_populate_pass1;
 pub use crate::pass2::memo::window_candidates::{
     add_local_window_composition, add_local_window_composition_in_domain,
 };
+pub use crate::stage0::cse::share_common_sub_dags;
 
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::OperatorNode;
@@ -254,7 +254,7 @@ pub fn cms_summary(query: &str) -> OperatorNode {
     let root = lower_promql(query, target);
     // Inspect each local computation choice under the built-in deployment.
     let per_computation = generate_per_computation_candidates(
-        &crate::pass2::memo::generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(root)]),
+        &crate::stage0::generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(root)]),
     )
     .unwrap()
     .without_unsupported_summaries(None);

@@ -282,7 +282,7 @@ one. It makes no implementation choice, so this section counts it as Stage 0
 (its output); the code runs it as Stage 1 starts, which is why
 [Stage inputs and outputs](#stage-inputs-and-outputs-whole-workload-candidates-and-memo)
 lists `generate_dag_of_logical_memo_groups` with Pass 1. `generate_dag_of_logical_memo_groups` runs
-`share_common_sub_dags` (`crates/logical-asap-optimization/src/pass2/cse.rs`) over the frontends'
+`share_common_sub_dags` (`crates/logical-asap-optimization/src/stage0/cse.rs`) over the frontends'
 roots and numbers the shared nodes as groups. Two structurally equal nodes
 become one group only when sharing them is legal, that is, when every reader
 of the shared node reads the rows it would read alone. Equal nodes are
@@ -529,7 +529,7 @@ candidates is in `crates/plan-selection/src/search/`.
 
 | Step | Entry point | Path |
 |---|---|---|
-| Stage 0 | `generate_dag_of_logical_memo_groups` → `DagOfLogicalMemoGroups`, `MemoGroup`, `MemoGroupId` | `pass2/memo.rs` (the types: `asap_types::stages`); hash-consing is `share_common_sub_dags` in `pass2/cse.rs` |
+| Stage 0 | `generate_dag_of_logical_memo_groups` → `DagOfLogicalMemoGroups`, `MemoGroup`, `MemoGroupId` | `stage0.rs` (the types: `asap_types::stages`); hash-consing is `share_common_sub_dags` in `stage0/cse.rs` |
 | Pass 1 | `generate_per_computation_logical_memo_candidates` → `PerComputationLogicalMemoCandidates` (with `ComputationTarget` and `HowToComputeAggregateMeasure`, in `asap_types::stages`), the one entry: inside it, the computation targets (walking the memo groups), the summaries the deployment does not support and those no query can use pruned, the candidates attached to the groups (`try_populate_pass1`), then the accuracy-scoped sizes | `pass1/logical_memo_candidates.rs`; `pass1/per_computation_candidates.rs`; `pass2/memo/groups.rs` |
 | Memo types | `DagOfLogicalMemoGroups`, `PerComputationLogicalMemoCandidates` (with `ComputationTarget`, `FusedComputation`, `HavingEntry`, `HavingPlacement`, `HowToComputeAggregateMeasure`), `MemoCandidates`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup`, `LogicalASAPMemoCandidates`, `CandidateGenerationTimeout`, `root_groups`, `queries_rooted_at` | `crates/types/src/stages/` (`asap_types::stages`) |
 | Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, one tumbling-window-width round over a `Pass2RoundState` (kept between rounds: the memo after step 1 and before the rules, and the widths already generated). It calls in this order: 1. window composition for the round's new widths (`extend_local_window_composition`); 2–9. the rules in `pass2/memo/rules/`: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; 10. `add_shared_summary_state_groups`, the shared builds | `pass2/logical_memo_candidates.rs` (`LogicalASAPMemoCandidates` itself: `asap_types::stages`); `pass2/memo/window_candidates.rs`, `pass2/memo/rules/`, `pass2/memo/state_groups.rs`, `pass2/memo/shared_configurations.rs` |

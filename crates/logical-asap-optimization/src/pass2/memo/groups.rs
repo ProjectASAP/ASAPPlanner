@@ -2,7 +2,7 @@
 //! group (design steps 1 and 2, Pass 1 part).
 //!
 //! Groups are the workload's logical DAG interned by
-//! [`crate::pass2::cse::share_common_sub_dags`], the identical-expression rule's legality
+//! [`crate::stage0::cse::share_common_sub_dags`], the identical-expression rule's legality
 //! included: structurally equal nodes are one group when sharing them is
 //! legal: an ASAP node, or a non-ASAP node that returns the same rows for
 //! the same input rows (`NonASAPOp::is_shareable_when_equal`).
@@ -464,7 +464,7 @@ impl NodeToStructuralIdCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pass2::memo::generate_dag_of_logical_memo_groups;
+    use crate::stage0::generate_dag_of_logical_memo_groups;
 
     #[test]
     fn structural_keys_preserve_nonfinite_and_signed_zero_literals() {

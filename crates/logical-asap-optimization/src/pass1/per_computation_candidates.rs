@@ -3207,9 +3207,9 @@ mod tests {
         // as a column; a query over aggregated rows is planned over labels.
         let root = asap_types::ir::schema::schema_support::with_promql_series_identity(&root)
             .unwrap_or(root);
-        generate_per_computation_candidates(
-            &crate::pass2::memo::generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(root)]),
-        )
+        generate_per_computation_candidates(&crate::stage0::generate_dag_of_logical_memo_groups(&[
+            QueryRoot::Operator(root),
+        ]))
         .unwrap()
     }
 
@@ -3324,7 +3324,7 @@ mod tests {
             AccuracyTarget::max_error(0.1),
         );
         let inventory = generate_per_computation_candidates(
-            &crate::pass2::memo::generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(root)]),
+            &crate::stage0::generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(root)]),
         )
         .unwrap();
         let topk = topk_target(&inventory);
@@ -4454,9 +4454,9 @@ mod tests {
     /// (closed) rows a grouped top-k gets no whole-expression heap.
     fn inventory_at(query: &str, accuracy: AccuracyTarget) -> PerComputationCandidates {
         let root = crate::test_support::lower_promql(query, accuracy);
-        generate_per_computation_candidates(
-            &crate::pass2::memo::generate_dag_of_logical_memo_groups(&[QueryRoot::Operator(root)]),
-        )
+        generate_per_computation_candidates(&crate::stage0::generate_dag_of_logical_memo_groups(&[
+            QueryRoot::Operator(root),
+        ]))
         .unwrap()
     }
 
@@ -4735,9 +4735,9 @@ mod tests {
             .collect();
         let targets: Vec<AccuracyTarget> =
             queries.iter().map(|(_, target)| target.clone()).collect();
-        generate_per_computation_candidates(
-            &crate::pass2::memo::generate_dag_of_logical_memo_groups(&roots),
-        )
+        generate_per_computation_candidates(&crate::stage0::generate_dag_of_logical_memo_groups(
+            &roots,
+        ))
         .unwrap()
         .without_summaries_no_query_can_use(
             &targets,

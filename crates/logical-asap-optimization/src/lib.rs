@@ -3,7 +3,7 @@
 //! frontends' logical DAGs to the memo of logical candidates
 //! (`asap_types::stages::LogicalASAPMemoCandidates`) that Stage 2 implements.
 //!
-//! Identical-sub-DAG sharing over the logical DAG (Stage 0, the `cse`
+//! Identical-sub-DAG sharing over the logical DAG (Stage 0, the `stage0`
 //! module, behind [`generate_dag_of_logical_memo_groups`]) runs before the
 //! stages; Stage 1 adds the ASAP-aware sharing that is invisible at the
 //! logical level (Pass 2, the `asap_aware_cse` module), e.g.
@@ -32,6 +32,8 @@
 //! crates use, one path each, and `test_support` (feature `test-support`)
 //! re-exports the internals other crates' tests call.
 //!
+//! - `stage0` — Stage 0: hash-consing the workload's logical DAG into memo
+//!   groups (`stage0::cse`), behind [`generate_dag_of_logical_memo_groups`].
 //! - `pass1::per_computation_candidates` — Pass 1: per-computation candidate
 //!   generation and composition, behind
 //!   [`generate_per_computation_logical_memo_candidates`].
@@ -62,6 +64,8 @@
 mod deployment_capabilities;
 mod pass1;
 mod pass2;
+/// Stage 0: the memo groups of the workload's query roots.
+mod stage0;
 /// Test helpers shared by the stage crates' tests, and the Stage 1
 /// internals those tests call (feature `test-support`).
 #[cfg(any(test, feature = "test-support"))]
@@ -76,7 +80,7 @@ pub use deployment_capabilities::{
 };
 // Stage 0: the memo groups of the workload's query roots
 // (`asap_types::stages::DagOfLogicalMemoGroups`).
-pub use pass2::memo::generate_dag_of_logical_memo_groups;
+pub use stage0::generate_dag_of_logical_memo_groups;
 // Pass 1: its entry and its errors. Its output and the types the output
 // holds are in `asap_types::stages`.
 pub use pass1::{
