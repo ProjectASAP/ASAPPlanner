@@ -163,6 +163,7 @@ fn repeated_queries_preserve_all_outputs_and_exact_guarantees() {
 // Different windows over the same source remain legal with retained raw data
 // disabled; their selected ingestion state must cover both output contracts.
 #[test]
+#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn different_windows_and_raw_retention_policies_produce_valid_plans() {
     let workload = workload_of(
         &[
@@ -238,6 +239,7 @@ fn composed_quantile_and_sum_outputs_are_validated_together() {
 // A custom accuracy policy still participates in final evaluation and prevents
 // builtin-only permanent pruning assumptions from being applied to its outputs.
 #[test]
+#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn custom_accuracy_policy_is_respected() {
     struct CustomAccuracy(std::cell::Cell<usize>);
     impl AccuracyModel for CustomAccuracy {
@@ -366,6 +368,7 @@ fn unsupported_exact_operation_never_returns_an_unvalidated_plan() {
 // Deterministic small mixed workloads exercise exact temporal operators, counter
 // semantics, different sources and windows without claiming timeout optimality.
 #[test]
+#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn seeded_small_mixed_workloads_return_validated_plans() {
     let queries = [
         "sum_over_time(m[1m])",

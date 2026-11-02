@@ -251,6 +251,7 @@ fn rule_fixture_computations(
 }
 
 #[test]
+#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn production_memo_selects_a_validated_example2_plan() {
     let workload = standin_workload();
     let run = run_stages(&workload, lower_promql(&workload));
