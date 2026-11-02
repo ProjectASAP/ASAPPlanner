@@ -158,7 +158,7 @@ pub struct PlanningReport {
 #[derive(Debug)]
 pub struct PlanningRun {
     /// Stage 1, Pass 1's output: the memo groups with their per-computation
-    /// candidates, the computation targets and the pruned candidates.
+    /// candidates and the pruned candidates.
     /// `None` when Pass 1 failed or without [`PlanSearchSettings::inspect`].
     pub per_computation_candidates: Option<PerComputationLogicalMemoCandidates>,
     /// The selected round's Pass 2 output (the last round's when none is

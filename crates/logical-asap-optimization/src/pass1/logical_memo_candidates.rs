@@ -94,7 +94,6 @@ pub fn generate_per_computation_logical_memo_candidates(
         .collect();
     Ok(PerComputationLogicalMemoCandidates {
         memo,
-        computation_targets: per_computation.targets,
         pruned_candidates,
     })
 }
