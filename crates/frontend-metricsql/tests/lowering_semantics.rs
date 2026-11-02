@@ -156,8 +156,10 @@ fn vector_negation_lowers_as_in_promql() {
     let query = "-rate(up[5m])";
     let metricsql =
         lower_metricsql_query_workload(&workload(QueryLanguage::MetricsQL, query)).unwrap();
-    let promql =
-        asap_frontend_promql::lower_promql_query_workload(&workload(QueryLanguage::PromQL, query))
-            .unwrap();
+    let promql = asap_frontend_promql::lower_promql_query_workload(
+        &workload(QueryLanguage::PromQL, query),
+        &asap_frontend_promql::HistogramCatalog::default(),
+    )
+    .unwrap();
     assert_eq!(metricsql, promql);
 }
