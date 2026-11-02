@@ -31,7 +31,7 @@
 //!   [`PhysicalASAPDAG::scan_window`] for a plan with that one reader);
 //! - for a pane chain kept beyond one evaluation, the panes it keeps, which
 //!   grow with the range-evaluation span of the queries reaching it
-//!   ([`asap_cost::tumbling_window_retention_ms`], [`asap_cost::retained_panes`]).
+//!   ([`asap_cost::tumbling_window_retention_ms`], [`asap_cost::retained_tumbling_windows`]).
 //!
 //! Every combination of these options is costed (at most
 //! [`MAX_CONTEXTS`]); a combination `asap-cost` cannot cost is skipped
@@ -1331,7 +1331,7 @@ fn retained_pane_options(
         )
     );
     if !kept {
-        return vec![asap_cost::panes_of(node)];
+        return vec![asap_cost::tumbling_windows_of(node)];
     }
     // The chain over the time shifts below it, which set its input offset.
     let mut below = Vec::new();
@@ -1362,7 +1362,7 @@ fn retained_pane_options(
     };
     for range in spans {
         let retention = asap_cost::tumbling_window_retention_ms(&dag, &reach, &[range]);
-        let panes = asap_cost::retained_panes(node, &retention);
+        let panes = asap_cost::retained_tumbling_windows(node, &retention);
         options.push(panes);
     }
     options
@@ -1637,7 +1637,7 @@ fn candidate_data(
                 picked
             };
             let retained_pick = pick(retained.len());
-            let retained_panes = retained[retained_pick];
+            let retained_tumbling_windows = retained[retained_pick];
             let window_pick = pick(windows.len());
             let window = windows[window_pick];
             let mut option_picks: Vec<usize> = producer_options
@@ -1657,7 +1657,7 @@ fn candidate_data(
                     &producers,
                     (1, per_second),
                     window,
-                    retained_panes,
+                    retained_tumbling_windows,
                     ingestion_window_ms,
                     data,
                     cost_inputs,

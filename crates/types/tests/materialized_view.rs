@@ -514,7 +514,7 @@ fn a_node_above_an_unexpanded_chain_has_the_window_of_its_tumbling_windows() {
 /// operator's inputs.
 #[test]
 fn a_view_has_its_refresh_window_on_a_dag_without_edges() {
-    let view = pane(&scan_m(), 15_000);
+    let view = tumbling_window(&scan_m(), 15_000);
     let mut assignment = MaterializationAssignment::default();
     assignment.set(&view, Materialization::MatAtIngestion(Medium::Memory));
     let timed = apply_materialization_timings(&view, &assignment, &mut NodeToTimedNodeCache::new())

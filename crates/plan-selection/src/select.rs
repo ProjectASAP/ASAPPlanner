@@ -27,7 +27,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use asap_cost::{kept_pane_chains, node_map, plan_cost, CostInputs};
+use asap_cost::{kept_tumbling_window_chains, node_map, plan_cost, CostInputs};
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::stages::{
     AssignmentRealizer, DagOfSelectedCandidates, PhysicalASAPMemoCandidates,
@@ -131,7 +131,7 @@ pub(crate) fn select_plan_with_milp(
     let (cost, _) = plan_cost(
         &plan.dag,
         &node_map(&plan.dag),
-        &kept_pane_chains(&plan.dag),
+        &kept_tumbling_window_chains(&plan.dag),
         &recurrence,
         &ranges,
         data,

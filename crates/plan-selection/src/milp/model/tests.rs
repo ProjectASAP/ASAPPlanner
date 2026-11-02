@@ -88,7 +88,7 @@ fn through_stages_over(
 ) -> Fixture {
     use asap_logical_asap_optimization::generate_per_computation_logical_memo_candidates;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
-    use asap_logical_asap_optimization::PaneWidthDomain;
+    use asap_logical_asap_optimization::TumblingWindowWidthDomain;
     use asap_logical_asap_optimization::{generate_logical_asap_memo_candidates, Pass2RoundState};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::workload::{
@@ -146,7 +146,7 @@ fn through_stages_over(
     let logical = generate_logical_asap_memo_candidates(
         &mut round,
         &entries,
-        PaneWidthDomain::Complete,
+        TumblingWindowWidthDomain::Complete,
         None,
     )
     .unwrap();
@@ -250,7 +250,7 @@ fn solve_and_check_by(
     let (plan, _) = plan_cost(
         plan_dag,
         &node_map(plan_dag),
-        &asap_cost::kept_pane_chains(plan_dag),
+        &asap_cost::kept_tumbling_window_chains(plan_dag),
         &recurrence,
         &ranges,
         &fixture.data,

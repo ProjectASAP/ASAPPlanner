@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use super::*;
-use asap_logical_asap_optimization::PaneWidthDomain;
+use asap_logical_asap_optimization::TumblingWindowWidthDomain;
 use asap_types::ir::properties::{AccuracyMetric, BoundExpr, ProbabilityExpr};
 use asap_types::ir::scalar::expr_ir::ScalarValue;
 use asap_types::ir::schema::SketchAlgorithm;
@@ -547,11 +547,14 @@ struct ThroughStages1And2 {
 /// through Stage 1 and Stage 2 as the facade runs them, over the complete pane-width domain, with raw data and
 /// query-time results retained.
 fn through_stages_1_and_2(queries: &[&str]) -> ThroughStages1And2 {
-    through_stages_1_and_2_over(queries, PaneWidthDomain::Complete)
+    through_stages_1_and_2_over(queries, TumblingWindowWidthDomain::Complete)
 }
 
 /// [`through_stages_1_and_2`] over the pane-width domain `domain`.
-fn through_stages_1_and_2_over(queries: &[&str], domain: PaneWidthDomain) -> ThroughStages1And2 {
+fn through_stages_1_and_2_over(
+    queries: &[&str],
+    domain: TumblingWindowWidthDomain,
+) -> ThroughStages1And2 {
     use asap_logical_asap_optimization::test_support::lower_promql;
     let roots: Vec<QueryRoot> = queries
         .iter()
@@ -566,7 +569,10 @@ fn target() -> asap_types::ir::properties::AccuracyTarget {
 }
 
 /// [`through_stages_1_and_2_over`] for query roots `roots`.
-fn through_stages_1_and_2_of(roots: Vec<QueryRoot>, domain: PaneWidthDomain) -> ThroughStages1And2 {
+fn through_stages_1_and_2_of(
+    roots: Vec<QueryRoot>,
+    domain: TumblingWindowWidthDomain,
+) -> ThroughStages1And2 {
     use asap_logical_asap_optimization::generate_per_computation_logical_memo_candidates;
     use asap_logical_asap_optimization::test_support::entry_with;
     use asap_logical_asap_optimization::{generate_logical_asap_memo_candidates, Pass2RoundState};
@@ -783,7 +789,7 @@ fn one_pane_chain_serves_a_ratio_and_its_operands() {
             "quantile_over_time(0.9, m[5m])",
             "quantile_over_time(0.5, m[5m])",
         ],
-        PaneWidthDomain::SeedGrids,
+        TumblingWindowWidthDomain::SeedGrids,
     );
     let inputs = prepare_milp_inputs(
         &stages.physical,
@@ -888,7 +894,7 @@ fn kept_builds_match_fresh_builds(queries: &[&str]) -> MilpInputs {
 
 /// [`kept_builds_match_fresh_builds`] for query roots `roots`.
 fn kept_builds_match_fresh_builds_of(roots: Vec<QueryRoot>) -> MilpInputs {
-    let stages = through_stages_1_and_2_of(roots, PaneWidthDomain::SeedGrids);
+    let stages = through_stages_1_and_2_of(roots, TumblingWindowWidthDomain::SeedGrids);
     let prepare = |fresh: bool| {
         accuracy_positions::FRESH_BUILDS.with(|cell| cell.set(fresh));
         let inputs = prepare_milp_inputs(
