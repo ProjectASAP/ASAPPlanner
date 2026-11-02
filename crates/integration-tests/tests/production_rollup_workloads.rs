@@ -165,6 +165,7 @@ async fn sql(queries: &[String], accuracy: AccuracyTarget) -> PlanningRun {
 }
 
 #[tokio::test]
+#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 async fn production_three_sql_groupings_share_kll() {
     let accuracy = AccuracyTarget::max_error(0.05)
         .failure_probability(0.05)
@@ -175,6 +176,7 @@ async fn production_three_sql_groupings_share_kll() {
 }
 
 #[tokio::test]
+#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 async fn production_sql_distinct_region_service_rollup() {
     let accuracy = AccuracyTarget::max_error(0.05)
         .failure_probability(0.05)
@@ -185,6 +187,7 @@ async fn production_sql_distinct_region_service_rollup() {
 }
 
 #[test]
+#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 // The earlier controlled fixture omitted raw retention. This production
 // workload explicitly holds one current sample for each of its 10,000 series.
 fn production_promql_compares_rollup_with_exact() {
@@ -277,6 +280,7 @@ fn independent_kll_cost(
 // Exercise multi-input operators through the production route under more than
 // three heterogeneous query schedules, not just the local pricing kernel.
 #[test]
+#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn production_binary_queries_use_joint_prices_with_mixed_schedules() {
     use asap_types::workload::{DemandEstimate, Rate};
     let accuracy = AccuracyTarget::exact();

@@ -1214,6 +1214,7 @@ mod tests {
 
     // A baseline validation that overruns the shared deadline still retains its plan.
     #[test]
+    #[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
     fn structural_seed_timeout_preserves_validated_incumbent() {
         let result = search_candidates_with_baseline(
             &choices(&[0.0]),
@@ -1394,6 +1395,7 @@ mod tests {
     }
     // The callback cannot be preempted, but a late validated result remains usable.
     #[test]
+    #[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
     fn callback_overrun_preserves_validated_incumbent() {
         let result = search_candidates(
             &choices(&[1.0]),

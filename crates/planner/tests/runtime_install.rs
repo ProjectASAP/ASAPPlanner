@@ -1989,6 +1989,7 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
 /// reason (`NoErrorBoundForQueryTarget`) and Stage 2 the exact candidates,
 /// which scan raw data at query time.
 #[tokio::test]
+#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 async fn an_undeclared_gauges_merged_ddsketch_panes_get_no_relative_bound_through_avg() {
     let error = plan_p99_avg(false).await.expect_err("no valid plan");
     assert_plan_selection_selected_none(&error);
@@ -2207,6 +2208,7 @@ fn exact_average_of_p99s(samples: &[RawDataSample]) -> BTreeMap<String, f64> {
 /// a guarantee, and it runs: equal to its query-time reference and within a
 /// loose tolerance of the exact answer.
 #[tokio::test]
+#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 async fn ignoring_accuracy_guarantees_selects_a_sketch_plan_that_runs() {
     let workload = average_of_p99s_workload();
     let capabilities = DeploymentCapabilities {

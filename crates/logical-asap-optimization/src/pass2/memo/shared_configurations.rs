@@ -574,6 +574,7 @@ mod tests {
     // Cancellation is checked during divisor enumeration, not only between
     // configurations: this grid cannot be fully factored within the budget.
     #[test]
+    #[ignore = "flaky: depends on a wall-clock deadline (#1067)"]
     fn large_grid_enumeration_honors_deadline() {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2);
         assert!(

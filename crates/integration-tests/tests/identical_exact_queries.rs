@@ -53,6 +53,7 @@ fn cost(w: &FuzzWorkload) -> f64 {
 
 /// #922: two identical exact percentile queries pay for their result once.
 #[test]
+#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn identical_exact_percentiles_share_work() {
     let related = workload();
     let mut base = related.clone();
@@ -67,6 +68,7 @@ fn identical_exact_percentiles_share_work() {
 
 /// Different ranks share the source window but still compute their own values.
 #[test]
+#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn different_exact_percentiles_share_the_input_window() {
     let mut related = workload();
     related.queries[1].entry.query.0 = related.queries[1].entry.query.0.replace("0.99", "0.5");

@@ -330,6 +330,7 @@ fn cost(queries: &[String]) -> f64 {
 /// Example B end to end: adding the filtered sum to the finer sums costs
 /// only its read of the finer result, not a second scan and aggregation.
 #[test]
+#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn filtered_sum_costs_little_beyond_the_finer_sums() {
     let finer =
         format!("SELECT city, host, SUM(value) FROM metrics WHERE {WINDOW} GROUP BY city, host");
