@@ -118,7 +118,7 @@ pub fn materialize_selected_candidates(
         .collect::<Result<Vec<_>, String>>()?;
     let range_evaluations: Vec<_> = entries.iter().map(|entry| entry.range_evaluation).collect();
     let tumbling_window_retention_ms =
-        asap_cost::pane_retention_ms_of_plan(&physical.dag, &range_evaluations);
+        asap_cost::tumbling_window_retention_ms_of_plan(&physical.dag, &range_evaluations);
     Ok(RealizedPlan {
         plan: physical,
         tumbling_window_retention_ms,

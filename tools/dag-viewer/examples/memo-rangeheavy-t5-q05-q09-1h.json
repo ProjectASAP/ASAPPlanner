@@ -4505,7 +4505,7 @@
         "build_ms": 2.4857299999999998,
         "candidates": 28,
         "candidates_by_origin": {
-          "Panes": 16,
+          "TumblingWindows": 16,
           "Pass1": 8,
           "SharedBuild": 4
         },
@@ -4647,7 +4647,7 @@
                 2
               ],
               "operator": "Project",
-              "origin": "Panes",
+              "origin": "TumblingWindows",
               "reads": []
             },
             "group": 2,
@@ -4696,7 +4696,7 @@
                 3
               ],
               "operator": "Project",
-              "origin": "Panes",
+              "origin": "TumblingWindows",
               "reads": []
             },
             "group": 3,

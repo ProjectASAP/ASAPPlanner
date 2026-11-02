@@ -3342,7 +3342,7 @@
         "build_ms": 5.124580999999999,
         "candidates": 31,
         "candidates_by_origin": {
-          "Panes": 12,
+          "TumblingWindows": 12,
           "Pass1": 16,
           "Rollup": 3
         },

@@ -159,7 +159,7 @@ test('a memo-MILP document shows its shared sketch, readers and certified summar
   assert.deepEqual([...chain.readers], ['G3', 'G4']);
   assert.deepEqual([...chain.queries], ['q1', 'q2']);
   assert.match(chain.threshold, /^1 min panes over 1 h · DDSketch · alpha 0.05/);
-  assert.equal(view.groups.find((g) => g.id === 'G3').chosen, 'Panes · Project · at S1');
+  assert.equal(view.groups.find((g) => g.id === 'G3').chosen, 'TumblingWindows · Project · at S1');
 });
 
 test('the validator accepts a document with and without its memo section', () => {
@@ -231,4 +231,16 @@ test('a memo written before the rename upgrades its pane origin', () => {
   const group = { candidate_count_by_origin: { pass1: 1, panes: 2 }, candidates: [{ origin: 'pass1' }, { origin: 'panes' }] };
   assert.deepEqual(call('upgradeTumblingWindowNames', group),
     { candidate_count_by_origin: { pass1: 1, tumbling_windows: 2 }, candidates: [{ origin: 'pass1' }, { origin: 'tumbling_windows' }] });
+});
+
+test('the upgrade keeps key order, never lets an old key overwrite a new one, and renames old MILP report origins', () => {
+  const body = { family: 'f', pane_width_ms: 1, pane_count: 2, child: 0 };
+  call('upgradeTumblingWindowNames', body);
+  assert.deepEqual(Object.keys(body), ['family', 'tumbling_window_width_ms', 'tumbling_window_count', 'child']);
+  const both = { pane_count: 1, tumbling_window_count: 2 };
+  call('upgradeTumblingWindowNames', both);
+  assert.equal(both.tumbling_window_count, 2);
+  const report = { candidates_by_origin: { Pass1: 1, Panes: 3 }, chosen: { origin: 'Panes' } };
+  assert.deepEqual(call('upgradeTumblingWindowNames', report),
+    { candidates_by_origin: { Pass1: 1, TumblingWindows: 3 }, chosen: { origin: 'TumblingWindows' } });
 });

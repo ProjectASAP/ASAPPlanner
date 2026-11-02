@@ -4470,7 +4470,7 @@
         "build_ms": 1.099547,
         "candidates": 17,
         "candidates_by_origin": {
-          "Panes": 3,
+          "TumblingWindows": 3,
           "Pass1": 8,
           "WidenedScans": 6
         },
@@ -4587,7 +4587,7 @@
                 2
               ],
               "operator": "FinalizeExactAccumulator",
-              "origin": "Panes",
+              "origin": "TumblingWindows",
               "reads": []
             },
             "group": 2,
@@ -4761,7 +4761,7 @@
                 6
               ],
               "operator": "FinalizeExactAccumulator",
-              "origin": "Panes",
+              "origin": "TumblingWindows",
               "reads": []
             },
             "group": 6,

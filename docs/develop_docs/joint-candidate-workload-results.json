@@ -93,7 +93,7 @@
             "WidenedScans": 62
           },
           "coupling_sites_by_kind": {
-            "SummaryTumblingWindowChain": 5,
+            "PaneChain": 5,
             "RawHorizon": 2,
             "ScanLabels": 2,
             "SharedBuildSize": 2
@@ -185,7 +185,7 @@
             "WidenedScans": 62
           },
           "coupling_sites_by_kind": {
-            "SummaryTumblingWindowChain": 5,
+            "PaneChain": 5,
             "RawHorizon": 2,
             "ScanLabels": 2,
             "SharedBuildSize": 2
@@ -277,7 +277,7 @@
             "WidenedScans": 62
           },
           "coupling_sites_by_kind": {
-            "SummaryTumblingWindowChain": 5,
+            "PaneChain": 5,
             "RawHorizon": 2,
             "ScanLabels": 2,
             "SharedBuildSize": 2

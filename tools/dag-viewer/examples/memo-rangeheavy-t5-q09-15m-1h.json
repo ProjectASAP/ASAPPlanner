@@ -4699,7 +4699,7 @@
         "build_ms": 3.306959,
         "candidates": 17,
         "candidates_by_origin": {
-          "Panes": 8,
+          "TumblingWindows": 8,
           "Pass1": 9
         },
         "coupling_sites_by_kind": {
@@ -4838,7 +4838,7 @@
                 2
               ],
               "operator": "Project",
-              "origin": "Panes",
+              "origin": "TumblingWindows",
               "reads": []
             },
             "group": 2,
@@ -4912,7 +4912,7 @@
                 4
               ],
               "operator": "Project",
-              "origin": "Panes",
+              "origin": "TumblingWindows",
               "reads": []
             },
             "group": 4,

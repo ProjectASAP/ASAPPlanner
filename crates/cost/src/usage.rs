@@ -1456,7 +1456,7 @@ fn chain_input_offset_ms(
 /// ([`tumbling_window_retention_ms`] over [`query_reach`]), for a plan whose query
 /// `q` has range evaluation `range_evaluations[q]` (none when missing):
 /// what Stage 2's realizer records for a realized plan.
-pub fn pane_retention_ms_of_plan(
+pub fn tumbling_window_retention_ms_of_plan(
     dag: &PhysicalASAPDAG,
     range_evaluations: &[Option<RangeEvaluation>],
 ) -> BTreeMap<PhysicalASAPNodeId, u64> {

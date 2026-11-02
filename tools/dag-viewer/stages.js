@@ -4,9 +4,11 @@
 // app.js draws them; test_viewer.py runs this file headless.
 const STAGE_PIPELINE_FORMAT = 'asap-stage-pipeline/v1';
 
-// Documents written before #1163 name the tumbling-window chain `PaneChain`
-// and its fields `pane_*`; renames them in place to today's names, so the
-// rest of the viewer reads one set of names.
+// Documents written before #1163 name the tumbling-window chain `PaneChain`,
+// its fields `pane_*` and the memo origin `panes` (`Panes` in older MILP
+// search reports); renames them in place to today's names, keeping each
+// object's key order, so the rest of the viewer reads one set of names.
+// Remove once no document the viewer must open predates #1163.
 const TUMBLING_WINDOW_RENAMES = Object.freeze({
   PaneChain: 'SummaryTumblingWindowChain',
   pane_width_ms: 'tumbling_window_width_ms',
@@ -14,31 +16,37 @@ const TUMBLING_WINDOW_RENAMES = Object.freeze({
   newest_panes: 'newest_tumbling_windows',
   pane_retention_ms: 'tumbling_window_retention_ms',
 });
-function upgradeTumblingWindowNames(value) {
+const ORIGIN_RENAMES = Object.freeze({ panes: 'tumbling_windows', Panes: 'TumblingWindows' });
+const has = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+function upgradeTumblingWindowNames(value, parentKey) {
   if (Array.isArray(value)) {
     value.forEach((item, index) => {
       if (item === 'PaneChain') value[index] = TUMBLING_WINDOW_RENAMES.PaneChain;
       else upgradeTumblingWindowNames(item);
     });
-  } else if (value && typeof value === 'object') {
-    for (const key of Object.keys(value)) {
-      let item = value[key];
-      if (item === 'PaneChain') item = TUMBLING_WINDOW_RENAMES.PaneChain;
-      else if (key === 'origin' && item === 'panes') item = 'tumbling_windows';
-      else {
-        // A memo group's candidate counts are keyed by origin.
-        if (key === 'candidate_count_by_origin' && item && Object.prototype.hasOwnProperty.call(item, 'panes')) {
-          item.tumbling_windows = item.panes;
-          delete item.panes;
-        }
-        upgradeTumblingWindowNames(item);
-      }
-      const renamed = Object.prototype.hasOwnProperty.call(TUMBLING_WINDOW_RENAMES, key) ? TUMBLING_WINDOW_RENAMES[key] : key;
-      if (renamed !== key) delete value[key];
-      value[renamed] = item;
-    }
+    return value;
+  }
+  if (!value || typeof value !== 'object') return value;
+  // Origin counts are keyed by origin name.
+  const renames = parentKey === 'candidate_count_by_origin' || parentKey === 'candidates_by_origin'
+    ? ORIGIN_RENAMES : TUMBLING_WINDOW_RENAMES;
+  const entries = Object.entries(value);
+  if (!entries.some(([key]) => has(renames, key) && !has(value, renames[key]))) {
+    for (const [key, item] of entries) value[key] = upgradeItem(key, item);
+    return value;
+  }
+  for (const key of Object.keys(value)) delete value[key];
+  for (const [key, item] of entries) {
+    // An old key never overwrites a new one already present.
+    const renamed = has(renames, key) && !entries.some(([other]) => other === renames[key]) ? renames[key] : key;
+    value[renamed] = upgradeItem(key, item);
   }
   return value;
+}
+function upgradeItem(key, item) {
+  if (item === 'PaneChain') return TUMBLING_WINDOW_RENAMES.PaneChain;
+  if (key === 'origin' && has(ORIGIN_RENAMES, item)) return ORIGIN_RENAMES[item];
+  return upgradeTumblingWindowNames(item, key);
 }
 
 function isStagePipelineDocument(doc) {
