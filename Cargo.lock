@@ -360,6 +360,7 @@ dependencies = [
  "asap-frontend-common",
  "asap-frontend-metricsql",
  "asap-frontend-promql",
+ "asap-logical-asap-optimization",
  "asap-types",
  "metricsql_parser",
  "thiserror 2.0.18",
