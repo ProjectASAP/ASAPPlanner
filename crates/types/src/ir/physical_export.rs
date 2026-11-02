@@ -55,10 +55,10 @@ pub enum GroupingEdgeCompatibility {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WindowEdgeCompatibility {
-    /// Physical lowering must prove equal pane/query phase or install an
+    /// Physical lowering must prove equal tumbling-window and query phases or install an
     /// exact boundary residual. The logical DAG alone cannot make that claim.
     #[serde(rename = "RequiresAlignedPanePhaseOrExactBoundaryResidual")]
-    RequiresAlignedPanePhaseOrExactWindowEdgeResidual,
+    RequiresAlignedTumblingWindowPhaseOrExactWindowEdgeResidual,
     NotApplicable,
 }
 
@@ -294,7 +294,7 @@ impl ScanWindow {
 /// counts for it. `Unbounded` when one of those shifts has an `@` anchor,
 /// or `time_range` is not a `TimeRange`. `payload_of` gives each node's
 /// operator by id; an indexed lookup keeps this O(shifts), so a caller
-/// asking for every `TimeRange` of a pane-expanded DAG stays linear.
+/// asking for every `TimeRange` of a tumbling-window-expanded DAG stays linear.
 pub fn time_range_window<'a>(
     time_range: PhysicalASAPNodeId,
     payload_of: impl Fn(PhysicalASAPNodeId) -> Option<&'a PhysicalASAPOperatorPayload>,
@@ -409,10 +409,10 @@ impl PhysicalASAPDAG {
     /// reaches the `Scan` through `TimeShift`s without an `@` anchor
     /// (offsets summing to `s`) and is
     /// - a `TimeRange(w)`, range or instant: `(T - s - w, T - s]`;
-    /// - a `SummaryTumblingWindowChain` of `n` panes of width `w`: its whole window `(T - s -
-    ///   n·w, T - s]`, or only its newest pane `(T - s - w, T - s]` for a
+    /// - a `SummaryTumblingWindowChain` of `n` tumbling windows of width `w`: its whole window `(T - s -
+    ///   n·w, T - s]`, or only its newest tumbling window `(T - s - w, T - s]` for a
     ///   chain in `kept_chains` (kept across evaluations, so each
-    ///   evaluation builds one pane).
+    ///   evaluation builds one tumbling window).
     ///
     /// `Unbounded` when a root, any other reader, or a shift with an `@`
     /// anchor reads the `Scan` or one of those shifts, or nothing reads it.
@@ -492,8 +492,8 @@ impl PhysicalASAPDAG {
     /// The interval of data the output of `node` summarizes, back from the
     /// evaluation time `T`: the union of the windows
     /// ([`time_range_window`]) of every `TimeRange` below it, and of every
-    /// unexpanded `SummaryTumblingWindowChain` (all its panes). For an expanded pane, its
-    /// pane; for a view built from panes, all of them. `Unbounded` when no
+    /// unexpanded `SummaryTumblingWindowChain` (all its tumbling windows). For an expanded tumbling window, its
+    /// tumbling window; for a view built from tumbling windows, all of them. `Unbounded` when no
     /// `TimeRange` or chain is below it or one of them is unbounded (a whole
     /// SQL table, an `@` anchor). O(nodes + edges).
     #[cfg(any(test, feature = "test-support"))]
@@ -679,7 +679,7 @@ impl PhysicalASAPDAG {
         // the role of each input's position, so a swapped `Left`/`Right`
         // cannot reorder the inputs of a binary operator.
         // Count input occurrences instead of scanning a vector for each edge.
-        // Pane merges can have tens of thousands of distinct inputs; linear
+        // Tumbling-window merges can have tens of thousands of distinct inputs; linear
         // searches made validation quadratic in that fan-in. Multiplicities
         // still matter when the same producer occupies several input slots.
         let mut expected: HashMap<_, HashMap<_, usize>> = self
@@ -923,7 +923,7 @@ pub(crate) fn compile_physical_asap_workload_with_node_ids_before(
                 data_state: producer_state,
                 grouping: grouping_compatibility(&nodes[producer].payload, &flat_node.operator),
                 window: if ingestion_dependency {
-                    WindowEdgeCompatibility::RequiresAlignedPanePhaseOrExactWindowEdgeResidual
+                    WindowEdgeCompatibility::RequiresAlignedTumblingWindowPhaseOrExactWindowEdgeResidual
                 } else {
                     WindowEdgeCompatibility::NotApplicable
                 },

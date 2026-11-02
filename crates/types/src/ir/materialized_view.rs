@@ -47,12 +47,12 @@
 //! own). A runtime refreshes a group with one ingestion run per window
 //! `(e - W, e]`, `e ≡ p (mod W)`. The run's roots are the views of the group
 //! whose state for the window ending at `e` is not stored yet: in steady
-//! state the newest pane of each chain, since older panes are the same
+//! state the newest tumbling window of each chain, since older tumbling windows are the same
 //! states, stored by earlier runs. A view of the group that a root reads is
 //! computed in the run; views of other groups are materialized view slots.
 //! A node several roots share runs once per run, so a `Scan` below a KLL
-//! pane chain and a DDSketch pane chain of equal pane width reads each
-//! pane's raw data once. Stage 3's cost assumes this grouping; a runtime
+//! tumbling-window chain and a DDSketch tumbling-window chain of equal tumbling-window width reads each
+//! tumbling window's raw data once. Stage 3's cost assumes this grouping; a runtime
 //! that splits a group computes the same states at a higher cost than
 //! priced.
 //!
@@ -281,7 +281,7 @@ impl RefreshWindow {
 /// ([`PhysicalASAPDAG::ingestion_refresh_groups`]). A runtime refreshes
 /// them with one ingestion run per window `(e - W, e]`; each run's roots are
 /// the views whose state for the window ending at `e` is not stored yet (in
-/// steady state the newest pane of each chain), and a view of the group a
+/// steady state the newest tumbling window of each chain), and a view of the group a
 /// root reads is computed in the run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IngestionRefreshGroup {
@@ -519,11 +519,11 @@ impl PhysicalASAPDAG {
     }
 
     /// The refresh window of `node` ([`RefreshWindow::of_window`]): for a
-    /// `SummaryTumblingWindowChain` (a DAG with its chains unexpanded), its newest pane's,
-    /// `(pane_width, s mod pane_width)` with `s` the sum of the offsets of
+    /// `SummaryTumblingWindowChain` (a DAG with its chains unexpanded), its newest tumbling window's,
+    /// `(tumbling_window_width, s mod tumbling_window_width)` with `s` the sum of the offsets of
     /// the `TimeShift`s below it; for any other node, that of its window
     /// ([`Self::view_windows`], which counts a chain below it as all its
-    /// panes). A chain and each of its expanded panes have the same one.
+    /// tumbling windows). A chain and each of its expanded tumbling windows have the same one.
     /// `None` when the window is unbounded or empty. O(nodes + edges).
     pub fn refresh_window(&self, node: PhysicalASAPNodeId) -> Option<RefreshWindow> {
         self.refresh_windows([node])[&node]
@@ -565,7 +565,7 @@ impl PhysicalASAPDAG {
             else {
                 continue;
             };
-            // The newest pane ends at the offsets of the shifts below the chain.
+            // The newest tumbling window ends at the offsets of the shifts below the chain.
             let end_offset_ms = offset_below(*child, |id| payloads.get(&id).copied());
             let width_ms = i64::try_from(*tumbling_window_width_ms).unwrap_or(0);
             windows.insert(

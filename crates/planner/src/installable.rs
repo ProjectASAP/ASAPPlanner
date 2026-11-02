@@ -19,9 +19,9 @@
 //! buffers; a SQL table is read as is) and its stored views, and the
 //! DAG's own `TimeRange`s apply each window, an instant selector's lookback
 //! and Prometheus stale markers. How the Planner represents the plan
-//! internally (e.g. a tumbling-pane chain, which the stage export keeps for
+//! internally (e.g. a tumbling-window chain, which the stage export keeps for
 //! costing and display) is not the runtime's concern: the installable DAG
-//! has every chain expanded into the panes the executor runs.
+//! has every chain expanded into the tumbling windows the executor runs.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
@@ -32,7 +32,7 @@ use asap_plan_selection::{SearchReport, Selection};
 use asap_types::ir::materialized_view::{
     IngestionRefreshGroup, InstallableDagError, MaterializedView, RawDataRetention,
 };
-use asap_types::ir::operator::pane_chain::expand_pane_chains_in_workload;
+use asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains_in_workload;
 use asap_types::ir::physical_export::{
     PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError,
     PhysicalASAPNodeId, ReferencePlanError,
@@ -60,7 +60,7 @@ pub struct InstallablePlan {
     /// [`INSTALLABLE_PLAN_WIRE_VERSION`] of the planner that wrote it.
     pub wire_version: u32,
     /// The selected physical ASAP DAG with Stage 3's timings and
-    /// materialization, every pane chain expanded into its panes, each
+    /// materialization, every tumbling-window chain expanded into its tumbling windows, each
     /// materialized view and query-time `Scan` carrying its `retention_ms`;
     /// the executor compiles it as is.
     pub dag: PhysicalASAPDAG,
@@ -115,18 +115,18 @@ pub struct PredictedUsage {
 }
 
 /// One operator node's predicted usage. The node is one of the physical
-/// DAG Stage 3 priced, where a tumbling-pane chain is one node; `dag` has
-/// it expanded into its panes, so `installed_node_ids` says which of
+/// DAG Stage 3 priced, where a tumbling-window chain is one node; `dag` has
+/// it expanded into its tumbling windows, so `installed_node_ids` says which of
 /// `dag`'s nodes run it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PredictedNodeUsage {
     /// Its id in Stage 3's physical DAG of the selected candidate.
     pub stage3_node_id: PhysicalASAPNodeId,
-    /// The ids in `dag` that run it: a tumbling-pane chain's panes, newest
+    /// The ids in `dag` that run it: a tumbling-window chain's tumbling windows, newest
     /// first; for every other node, the one node it is installed as. Empty
     /// for a node `dag` has no copy of: one the expansion rebuilds once per
-    /// pane below a chain (e.g. the chain's input window).
+    /// tumbling window below a chain (e.g. the chain's input window).
     pub installed_node_ids: Vec<PhysicalASAPNodeId>,
     /// Its operator, as the measured cost table names it.
     pub operator: OperatorKind,
@@ -161,9 +161,9 @@ pub enum InstallablePlanError {
     /// cannot run at query time.
     #[error("timing: {0}")]
     Timing(#[from] ExecutionDataStateError),
-    /// Internal bug: a pane chain of the selected plan does not expand.
-    #[error("pane chain expansion: {0}")]
-    PaneChainExpansion(#[from] SchemaDerivationError),
+    /// Internal bug: a tumbling-window chain of the selected plan does not expand.
+    #[error("tumbling-window chain expansion: {0}")]
+    TumblingWindowChainExpansion(#[from] SchemaDerivationError),
     /// Bad input (a plan file): written for another plan-file format; `None`
     /// for a file without `wire_version`, written before version 11.
     #[error("unsupported installable plan wire version {0:?}")]
@@ -188,10 +188,10 @@ pub enum InstallablePlanError {
     /// [`InstallableDagError`]).
     #[error("{0}")]
     Uninstallable(InstallableDagError),
-    /// Internal bug: Stage 3 records a pane retention for node `node_id`
-    /// of the selected plan, which is not one of its pane chains.
-    #[error("pane retention for node {node_id}, which is not a pane chain of the selected plan")]
-    PaneRetentionOfUnknownChain { node_id: PhysicalASAPNodeId },
+    /// Internal bug: Stage 3 records a tumbling-window retention for node `node_id`
+    /// of the selected plan, which is not one of its tumbling-window chains.
+    #[error("tumbling-window retention for node {node_id}, which is not a tumbling-window chain of the selected plan")]
+    TumblingWindowRetentionOfUnknownChain { node_id: PhysicalASAPNodeId },
     /// Unsatisfiable request: the executor cannot refresh materialized view
     /// `node_id` from its inputs (`reason`); for a refresh group, `node_id`
     /// is its first view and `reason` names every view compiled with it.
@@ -262,7 +262,7 @@ pub async fn plan_installable(
 /// The installable plan of `roots`, the selected roots of a workload whose
 /// entries are `entries` (in `QueryWorkload::entries()` order), with
 /// Stage 3's report of its `selection` of them when there is one, and the
-/// pane retention of the selected plan's kept chains
+/// tumbling-window retention of the selected plan's kept chains
 /// (`RealizedPlan::tumbling_window_retention_ms`, by node id in the DAG `roots`
 /// export): what [`plan_installable`] returns after planning. A caller that
 /// runs the planning stages itself (e.g. a developer tool) uses it to see
@@ -283,7 +283,10 @@ pub fn installable_plan_of(
     // Every node keeps the timing Stage 3 gave it.
     let timed =
         apply_materialization_timings_to_roots(roots, &MaterializationAssignment::default())?;
-    let expanded = pane_retention_of_expanded_panes(&timed, tumbling_window_retention_ms)?;
+    let expanded = tumbling_window_retention_of_expanded_tumbling_windows(
+        &timed,
+        tumbling_window_retention_ms,
+    )?;
     let report = selection.map(|selection| report_of(selection, &expanded.installed_node_ids));
     let reader_span_ms_by_node = reader_span_ms_by_node(&expanded.dag, &range_spans_ms);
     let plan = InstallablePlan::of_dag(
@@ -361,10 +364,14 @@ impl InstallablePlan {
     pub(crate) fn of_dag(
         mut dag: PhysicalASAPDAG,
         query_texts: Vec<String>,
-        pane_retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
+        tumbling_window_retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
         reader_span_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
     ) -> Result<Self, InstallablePlanError> {
-        let views = dag.set_retention(pane_retention_ms_by_node, reader_span_ms_by_node, None)?;
+        let views = dag.set_retention(
+            tumbling_window_retention_ms_by_node,
+            reader_span_ms_by_node,
+            None,
+        )?;
         check_queries(&dag, &query_texts)?;
         executor_compiles(&dag, &views)?;
         let plan = InstallablePlan {
@@ -632,7 +639,7 @@ fn executor_refreshes(
 }
 
 /// The installable DAG of the timed selected plan, with each expanded
-/// pane's retention by node id.
+/// tumbling window's retention by node id.
 struct ExpandedWithRetention {
     dag: PhysicalASAPDAG,
     retention_ms_by_node: HashMap<PhysicalASAPNodeId, u64>,
@@ -642,18 +649,18 @@ struct ExpandedWithRetention {
     installed_node_ids: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
 }
 
-/// Expand the pane chains of `timed` and export it; each pane takes the
+/// Expand the tumbling-window chains of `timed` and export it; each tumbling window takes the
 /// retention Stage 2 gives its chain (`RealizedPlan::tumbling_window_retention_ms`, by
 /// node id in the selected candidate's physical DAG, which is `timed`
 /// exported).
-fn pane_retention_of_expanded_panes(
+fn tumbling_window_retention_of_expanded_tumbling_windows(
     timed: &[QueryRoot],
     tumbling_window_retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
 ) -> Result<ExpandedWithRetention, InstallablePlanError> {
     use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
     let selected = compile_physical_asap_workload_with_node_ids(timed)?;
     // Reject unsupported raw-source shapes before expanding possibly thousands
-    // of panes. The complete expanded-plan validation remains authoritative.
+    // of tumbling windows. The complete expanded-plan validation remains authoritative.
     selected.dag.check_raw_data_windows()?;
     let mut retention_by_chain: Vec<(Rc<OperatorNode>, u64)> = Vec::new();
     for (&node_id, &retention_ms) in tumbling_window_retention_ms {
@@ -661,14 +668,14 @@ fn pane_retention_of_expanded_panes(
             .node_ids
             .operator_node(node_id)
             .filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })))
-            .ok_or(InstallablePlanError::PaneRetentionOfUnknownChain { node_id })?;
+            .ok_or(InstallablePlanError::TumblingWindowRetentionOfUnknownChain { node_id })?;
         retention_by_chain.push((Rc::clone(chain), retention_ms));
     }
-    let expansion =
-        expand_pane_chains_in_workload(timed).map_err(InstallablePlanError::PaneChainExpansion)?;
+    let expansion = expand_tumbling_window_chains_in_workload(timed)
+        .map_err(InstallablePlanError::TumblingWindowChainExpansion)?;
     let compiled = compile_physical_asap_workload_with_node_ids(&expansion.roots)?;
-    // Index physical identity once. Looking up every expanded pane through
-    // the identity map's linear search makes this phase quadratic in panes.
+    // Index physical identity once. Looking up every expanded tumbling window through
+    // the identity map's linear search makes this phase quadratic in tumbling windows.
     let mut installed_ids_by_pointer = HashMap::with_capacity(compiled.dag.nodes.len());
     for node in &compiled.dag.nodes {
         if let Some(operator) = compiled.node_ids.operator_node(node.id) {
@@ -685,13 +692,13 @@ fn pane_retention_of_expanded_panes(
         else {
             continue;
         };
-        for pane in &expanded.panes {
-            if let Some(node_id) = installed_id(pane) {
+        for tumbling_window in &expanded.tumbling_windows {
+            if let Some(node_id) = installed_id(tumbling_window) {
                 retention_ms_by_node.insert(node_id, *retention_ms);
             }
         }
     }
-    // A chain runs as its panes; every other node as the node replacing it
+    // A chain runs as its tumbling windows; every other node as the node replacing it
     // (itself when nothing below it changed).
     let mut installed_node_ids = HashMap::new();
     for node in &selected.dag.nodes {
@@ -704,9 +711,9 @@ fn pane_retention_of_expanded_panes(
             .find(|expanded| Rc::ptr_eq(&expanded.chain, input))
         {
             Some(expanded) => {
-                let mut ids = Vec::with_capacity(expanded.panes.len());
-                for pane in &expanded.panes {
-                    if let Some(id) = installed_id(pane) {
+                let mut ids = Vec::with_capacity(expanded.tumbling_windows.len());
+                for tumbling_window in &expanded.tumbling_windows {
+                    if let Some(id) = installed_id(tumbling_window) {
                         ids.push(id);
                     }
                 }
@@ -799,9 +806,9 @@ mod tests {
     }
 
     /// A p99 panel over a 300 s window every second, with no raw data kept:
-    /// one DDSketch per series in each of 300 one-second panes built at
+    /// one DDSketch per series in each of 300 one-second tumbling windows built at
     /// ingestion, about 300 materialized views in a DAG of about 900 nodes.
-    /// Each refresh (here one refresh group of all the panes) is compiled
+    /// Each refresh (here one refresh group of all the tumbling windows) is compiled
     /// over the nodes below its views, and the whole plan's checks run once,
     /// so the nodes handed to the executor grow with the plan, not with the
     /// plan times its views (before, every refresh compiled the whole
@@ -1010,10 +1017,10 @@ mod tests {
             )) => assert_eq!(end_offsets_ms, [0, 60_000]),
             other => panic!("{other:?}"),
         }
-        // A merge stored at ingestion time over two panes stored at
+        // A merge stored at ingestion time over two tumbling windows stored at
         // ingestion time, one a minute older: an ingestion run would read
-        // both panes for the window ending at its end, so it is refused too.
-        let pane = |offset_ms: i64| {
+        // both tumbling windows for the window ending at its end, so it is refused too.
+        let tumbling_window = |offset_ms: i64| {
             OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
                 child: window(offset_ms),
                 family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
@@ -1024,15 +1031,15 @@ mod tests {
             }))
             .unwrap()
         };
-        let panes = [pane(0), pane(60_000)];
+        let tumbling_windows = [tumbling_window(0), tumbling_window(60_000)];
         let merge = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
-            children: panes.to_vec(),
+            children: tumbling_windows.to_vec(),
             newest_tumbling_windows: None,
             group_by: None,
         }))
         .unwrap();
         let mut assignment = MaterializationAssignment::default();
-        for node in panes.iter().chain([&merge]) {
+        for node in tumbling_windows.iter().chain([&merge]) {
             assignment.set(node, Materialization::MatAtIngestion(Medium::Memory));
         }
         let timed =

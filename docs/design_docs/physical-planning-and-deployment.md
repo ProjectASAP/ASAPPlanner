@@ -56,10 +56,10 @@ decided by a `MaterializationAssignment`, as the layer contract below states.
    consumers, and the other states run at query time. The default assignment
    is `NotMaterialized` everywhere; `PlanOutput::physical_asap_dag` applies it
    only to nodes the optimization pass left untimed (a pass's own timing, such
-   as Stage 3's ingestion-time panes, is kept).
+   as Stage 3's ingestion-time tumbling windows, is kept).
 3. **Physical compile** (executor) reads the plan's materialized views: each
    view's refresh is one compiled DAG (the precompute DAG) and the query run
-   another, joined by the views. It does not see raw ingestion, panes,
+   another, joined by the views. It does not see raw ingestion, tumbling windows,
    storage or stored-state readout.
 4. **Backend** executes the compiled DAGs, serving raw data and stored views
    through its `DataStore`. A query-time summary requires the deployment to
@@ -150,13 +150,13 @@ deployment canonicalizes; it does not define a stored-definition format.
 
 Suppose p50 and p99 are requested over the same latency samples in a five-minute window,
 and one Planner candidate uses KLL with `k=200`. Assume query windows align with one-minute
-pane boundaries and that the selected parameters satisfy the required guarantees.
+tumbling-window boundaries and that the selected parameters satisfy the required guarantees.
 Operator names below are illustrative; the example defines the design, not a
 claim that the entire deployment integration is implemented.
 
 The data source identifies where samples come from. Filters, grouping and the
-window determine which samples enter each summary. Here `pane_duration: 1m`
-means each stored pane covers one minute; the query range is five minutes.
+window determine which samples enter each summary. Here `tumbling_window_duration: 1m`
+means each stored tumbling window covers one minute; the query range is five minutes.
 Neither duration specifies how often maintenance runs or how long state is kept.
 
 The example evolves through the architecture as follows:
@@ -181,9 +181,9 @@ KLLMerge
 
 KLLBuild(k=200)
   strategy = continuously maintain
-  window   = 1-minute panes
+  window   = 1-minute tumbling windows
   reuse    = p50 + p99
-  query    = merge panes covering requested aligned 5 minutes
+  query    = merge tumbling windows covering requested aligned 5 minutes
 
           │
           │ Physical Plan Compiler
@@ -191,7 +191,7 @@ KLLBuild(k=200)
 
 3. Physical DAGs
 
-Precompute DAG (the pane view's refresh):
+Precompute DAG (the tumbling window view's refresh):
 RawDataSlot<latency> → TimeRange(1m)
         ↓
 NativeKllBuild(k=200)
@@ -199,7 +199,7 @@ NativeKllBuild(k=200)
 KllStateOutput
 
 Query DAG:
-MaterializedViewSlot<KllState>[5 panes]
+MaterializedViewSlot<KllState>[5 tumbling windows]
         ↓
 NativeKllMerge(k=200)
       ┌─┴────────┐
@@ -215,7 +215,7 @@ NativeKllMerge(k=200)
 Precompute:
 OTLP latency source
         ↓
-run KLL build over each complete 1-minute input pane
+run KLL build over each complete 1-minute input tumbling window
         ↓
 store as latency-kll-1m/<window>
 
@@ -228,7 +228,7 @@ return p50 / p99
 ```
 
 Each stage adds a different class of decision while preserving the preceding
-contracts. Here, continuous maintenance means recurring production of pane state;
+contracts. Here, continuous maintenance means recurring production of tumbling-window state;
 the bounded build DAG does not itself implement an unbounded streaming window.
 
 ## 2. Logical Post-ASAP DAG → Materialization
@@ -266,10 +266,10 @@ strategy:
     continuously maintain
 
 window realization:
-    1-minute panes
+    1-minute tumbling windows
 
 query requirement:
-    combine panes covering the requested aligned 5-minute range
+    combine tumbling windows covering the requested aligned 5-minute range
 
 reuse:
     one merged state serves p50 and p99
@@ -281,8 +281,8 @@ It specifies how the selected logical summary should be maintained,
 but not its concrete operator implementation or storage location.
 
 Physical feasibility may feed back into selection. For example, if the required
-pane-based maintenance cannot be implemented, this materialization cannot be
-selected. One-minute panes alone also cannot cover an arbitrarily phased query
+tumbling-window-based maintenance cannot be implemented, this materialization cannot be
+selected. One-minute tumbling windows alone also cannot cover an arbitrarily phased query
 window; that requires supported boundary handling or a different candidate.
 
 ## 3. Materialization → Physical DAG
@@ -330,17 +330,17 @@ NativeKllBuild(k=200)
 KllStateOutput(k=200)
 ```
 
-This DAG refreshes one one-minute pane of the materialized view. Its raw data
+This DAG refreshes one one-minute tumbling window of the materialized view. Its raw data
 slot reads the samples matching the source, filters and group, and its
-`TimeRange` keeps those within the pane. The deployment supplies the samples
+`TimeRange` keeps those within the tumbling window. The deployment supplies the samples
 through its `DataStore` (§4).
 
 ### Query Physical DAG
 
 ```text
-MaterializedViewSlot<KllState> × 5 (pane i, i = 0..4)(
+MaterializedViewSlot<KllState> × 5 (tumbling window i, i = 0..4)(
     k = 200,
-    read_materialized_view(pane_i, (T - i·1m - 1m, T - i·1m])
+    read_materialized_view(tumbling_window_i, (T - i·1m - 1m, T - i·1m])
 )
         ↓
 NativeKllMerge(k=200)
@@ -410,7 +410,7 @@ the check, whether the view is refreshed at ingestion or on first read, so
 query's evaluation time (`Scope::Query`); it has no value in an ingestion run.
 
 A trailing window is a range `TimeRange(w)` over any `TimeShift`s (a tumbling
-pane adds them, offsets summing to `s`) over a `Scan`. At evaluation time
+tumbling window adds them, offsets summing to `s`) over a `Scan`. At evaluation time
 `T` it keeps the rows whose time lies in `(T - s - w, T - s]`, which is the
 window a PromQL range selector reads and a SQL filter against `now()`. Each
 `TimeShift` passes the rows through. The same operator serves a SQL table and
@@ -490,9 +490,9 @@ the plan, not inside it.
 
 `raw_data_retention()` is the per-source maximum over these scans. Example: for
 `max_over_time(m[5m])` evaluated over the last hour, raw `m` is kept 65
-minutes, because refreshing the pane for the oldest step reads that far back.
-A pane chain kept across evaluations counts as all its panes. Reusing a pane is
-optional for a runtime, and a restart or an older step rebuilds older panes
+minutes, because refreshing the tumbling window for the oldest step reads that far back.
+A tumbling-window chain kept across evaluations counts as all its tumbling windows. Reusing a tumbling window is
+optional for a runtime, and a restart or an older step rebuilds older tumbling windows
 from raw data.
 
 ### Input slots and compilation
@@ -592,8 +592,8 @@ Two views refreshed at ingestion can be built in one ingestion run, with the
 run's interval equal to each one's window, exactly when they have the same
 **refresh window**: windows of width `W` that end `p` after a multiple of `W`
 (`0 ≤ p < W`), relative to the evaluation time. A view whose `view_window` is
-`(T - o - W, T - o]` has the refresh window `(W, o mod W)`. All panes of a
-pane chain have their newest pane's refresh window. The source, the summary
+`(T - o - W, T - o]` has the refresh window `(W, o mod W)`. All tumbling windows of a
+tumbling-window chain have their newest tumbling window's refresh window. The source, the summary
 family and where the state is kept do not enter. A view with an unbounded
 window is a group of its own.
 
@@ -603,9 +603,9 @@ refresh window `(W, p)` (`PhysicalASAPDAG::refresh_window`,
 ingestion run per window `(e - W, e]`, `e ≡ p (mod W)`:
 
 - The run's roots are the views of the group whose state for the window
-  ending at `e` is not stored yet. Pane `i` of a chain at evaluation `T` is
-  the same state as the newest pane at `T - i·W`, so in steady state the
-  roots are the newest pane of each chain of the group; the older panes are
+  ending at `e` is not stored yet. Tumbling window `i` of a chain at evaluation `T` is
+  the same state as the newest tumbling window at `T - i·W`, so in steady state the
+  roots are the newest tumbling window of each chain of the group; the older tumbling windows are
   already stored.
 - A view of the group that a root reads is computed in the run, not read
   from a slot. The views of other groups that the roots read are
@@ -613,11 +613,11 @@ ingestion run per window `(e - W, e]`, `e ≡ p (mod W)`:
 - The executor runs a node that several roots share once per run, so a `Scan`
   below several views of the group reads its raw data once per window.
 - Views of different refresh windows are refreshed in different runs. With a
-  10-second and a 60-second pane chain over one `Scan`, the 10-second chain
-  needs five pane ends the 60-second chain does not, so the `Scan` is read
+  10-second and a 60-second tumbling-window chain over one `Scan`, the 10-second chain
+  needs five tumbling window ends the 60-second chain does not, so the `Scan` is read
   once for each chain.
 
-The refresh window is derived from the DAG alone (time ranges, shifts and pane
+The refresh window is derived from the DAG alone (time ranges, shifts and tumbling window
 widths), like the views and their retention. Sealing, lateness, threading and
 the alignment of the window grid stay the deployment's.
 
@@ -625,41 +625,41 @@ Stage 3's cost assumes this grouping (`asap_cost::execution_demand::computations
 a stateless ingestion-time node is charged once per refresh window of the
 views above it, not once per view. A runtime that splits a group (for
 example, because its sources seal at different times) computes the same
-states at a higher cost than priced, the same status pane reuse has. A
+states at a higher cost than priced, the same status tumbling window reuse has. A
 runtime that updates states sample by sample passes each sample once
 whatever the windows, so it runs cheaper than priced.
 
 ### Running example
 
-For the KLL p50/p99 example, with one-minute panes materialized at ingestion
+For the KLL p50/p99 example, with one-minute tumbling windows materialized at ingestion
 over `Source::TimeSeries { metric: "latency" }`, plus a p99.9 with relative
-error answered by a DDSketch chain with one-minute panes over the same `Scan`:
+error answered by a DDSketch chain with one-minute tumbling windows over the same `Scan`:
 
 ```text
 Install (once):
-    views     = plan.materialized_views()?          // [KLL and DDSketch pane nodes, refresh = at ingestion, retention]
-    groups    = plan.ingestion_refresh_groups()?    // [refresh window (1m, 0): ten KLL and DDSketch pane views]
-    refresh   = compile(dag, [], [kll_pane_0, dd_pane_0])  // the newest pane of each chain
+    views     = plan.materialized_views()?          // [KLL and DDSketch tumbling window nodes, refresh = at ingestion, retention]
+    groups    = plan.ingestion_refresh_groups()?    // [refresh window (1m, 0): ten KLL and DDSketch tumbling window views]
+    refresh   = compile(dag, [], [kll_tumbling_window_0, dd_tumbling_window_0])  // the newest tumbling window of each chain
                 // Scan → TimeRange(1m) → NativeKllBuild(k=200)
                 //                      → NativeDDSketchBuild(α=0.01)
-    query     = compile(dag, views[kll_pane_0..kll_pane_4], [p50, p99])  // 5 materialized view slots → NativeKllMerge → NativeP50, NativeP99
-    (the p99.9 query DAG reads dd_pane_0..dd_pane_4 the same way)
+    query     = compile(dag, views[kll_tumbling_window_0..kll_tumbling_window_4], [p50, p99])  // 5 materialized view slots → NativeKllMerge → NativeP50, NativeP99
+    (the p99.9 query DAG reads dd_tumbling_window_0..dd_tumbling_window_4 the same way)
 
-Each complete pane (12:04, 12:05], in one ingestion run whose roots are the
-group's views with no stored state for the pane ending 12:05 (kll_pane_0 and
-dd_pane_0; the older panes were stored by earlier runs):
+Each complete tumbling window (12:04, 12:05], in one ingestion run whose roots are the
+group's views with no stored state for the tumbling window ending 12:05 (kll_tumbling_window_0 and
+dd_tumbling_window_0; the older tumbling windows were stored by earlier runs):
     refresh.instantiate(store)
         Scan calls read_raw_data(TimeSeries { latency }, time_range_ms = (12:04, 12:05]) once;
         both builds read its rows
     store the KllState and the DDSketchState in the summary store, each under its view's coverage and interval
 
 Query at T = 12:05 over (12:00, 12:05]:
-    the installed DAG has the chain expanded: five pane views, pane i under TimeShift(i·1m)
+    the installed DAG has the chain expanded: five tumbling window views, tumbling window i under TimeShift(i·1m)
     query.instantiate(store)
-        read_materialized_view(pane_0, (12:04, 12:05]) → states of latency-kll-1m, pane ending 12:05
-        read_materialized_view(pane_1, (12:03, 12:04]) → states of latency-kll-1m, pane ending 12:04
+        read_materialized_view(tumbling_window_0, (12:04, 12:05]) → states of latency-kll-1m, tumbling window ending 12:05
+        read_materialized_view(tumbling_window_1, (12:03, 12:04]) → states of latency-kll-1m, tumbling window ending 12:04
         …
-        read_materialized_view(pane_4, (12:00, 12:01]) → states of latency-kll-1m, pane ending 12:01
+        read_materialized_view(tumbling_window_4, (12:00, 12:01]) → states of latency-kll-1m, tumbling window ending 12:01
     NativeKllMerge executes once for both readouts → p50, p99
 ```
 
@@ -694,27 +694,27 @@ The complete example makes the ownership boundary explicit:
 | Stage | KLL example decision |
 | --- | --- |
 | **Logical Post-ASAP DAG** | Use `KLL(k=200)` with shared merge for p50/p99 |
-| **Stage 2 Materialization (#509)** | Maintain 1-minute panes and reuse them for aligned five-minute queries |
-| **Materialization** | Record pane/window/freshness/reuse requirements and each node's execution timing |
+| **Stage 2 Materialization (#509)** | Maintain 1-minute tumbling windows and reuse them for aligned five-minute queries |
+| **Materialization** | Record tumbling-window width, query window, freshness and reuse requirements and each node's execution timing |
 | **Physical Plan Compiler** | Lower to native KLL build, merge, and readout operators |
 | **Physical DAG** | Define precompute and query DAGs with typed input/output boundaries |
-| **Deployment interface** | Read the `latency` raw data slot with `read_raw_data`, and each pane's materialized view slot with `read_materialized_view`, from one `DataStore` |
-| **Deployment** | Schedule one ingestion run per refresh group and window, store and resolve panes, run queries |
+| **Deployment interface** | Read the `latency` raw data slot with `read_raw_data`, and each tumbling window's materialized view slot with `read_materialized_view`, from one `DataStore` |
+| **Deployment** | Schedule one ingestion run per refresh group and window, store and resolve tumbling windows, run queries |
 
 ```text
 Logical:
     "Use KLL for p50/p99."
 
 Materialization:
-    "Maintain reusable 1-minute KLL panes."
+    "Maintain reusable 1-minute KLL tumbling windows."
 
 Physical:
     "Execute NativeKllBuild and
      NativeKllMerge → {p50, p99}."
 
 Deployment:
-    "Read OTLP here, store panes here,
-     and serve these five panes for this aligned query."
+    "Read OTLP here, store tumbling windows here,
+     and serve these five tumbling windows for this aligned query."
 ```
 
 The deployment engine executes the instantiated Physical DAGs through ASAPPlanner's
@@ -730,8 +730,8 @@ reads stored state, and serves raw data and views to the slots through its
 `DataStore`. The plan file is the only persisted handoff; a compiled
 physical DAG is derived from it by the executor and is not persisted.
 
-Each maintained pane contributes its input samples once. A replacement snapshot
-replaces that pane's state; query merging must not count both the old and new
+Each maintained tumbling window contributes its input samples once. A replacement snapshot
+replaces that tumbling window's state; query merging must not count both the old and new
 snapshots as separate inputs.
 
 ## 6. Executable acceptance coverage
@@ -741,14 +741,14 @@ operator/runtime fixtures:
 
 | Test | Contract exercised |
 | --- | --- |
-| `kll_pane_execution::five_panes_roundtrip_and_shared_merge_runs_once` | One-minute pane refreshes from raw data → five materialized view slots → shared native merge → p50/p99; counts every sample once, checks adjacent aligned windows and instruments one merge start per run |
-| `kll_pane_execution::a_store_keyed_by_definition_and_time_range_answers_the_panes` | A store that finds states only by `(definition_id, time range)` answers the five-pane query: the panes share one definition and request the five ranges that tile the window |
-| `runtime_install::panes_of_one_refresh_window_read_each_raw_window_once` | A KLL chain and a DDSketch chain of 10 s panes over one `Scan` are one refresh group: each pane window is read from raw data once, in one ingestion run that builds both panes; each state equals that of a run of its view alone, and both queries answer as the query-time reference |
-| `kll_pane_execution::panes_reject_parameters_schema_and_missing_binding` | Parameter relabelling, incompatible schemas and missing views fail explicitly |
+| `kll_tumbling_window_execution::five_tumbling_windows_roundtrip_and_shared_merge_runs_once` | One-minute tumbling window refreshes from raw data → five materialized view slots → shared native merge → p50/p99; counts every sample once, checks adjacent aligned windows and instruments one merge start per run |
+| `kll_tumbling_window_execution::a_store_keyed_by_definition_and_time_range_answers_the_tumbling_windows` | A store that finds states only by `(definition_id, time range)` answers the five-tumbling-window query: the tumbling windows share one definition and request the five ranges that tile the window |
+| `runtime_install::tumbling_windows_of_one_refresh_window_read_each_raw_window_once` | A KLL chain and a DDSketch chain of 10 s tumbling windows over one `Scan` are one refresh group: each tumbling window window is read from raw data once, in one ingestion run that builds both tumbling windows; each state equals that of a run of its view alone, and both queries answer as the query-time reference |
+| `kll_tumbling_window_execution::tumbling_windows_reject_parameters_schema_and_missing_binding` | Parameter relabelling, incompatible schemas and missing views fail explicitly |
 | `precompute_candidates::grouped_rate_can_be_materialized_before_or_after_grouped_sum` | Stored Rate state and stored Sum state answer like query time; summing counters before Rate does not |
 | `sql_to_physical::sql_filter_grouped_sum_executes_and_rebinds` | SQL text → candidate search → physical compilation → shared Scan predicates and grouped summary execution; NULL samples are ignored and fresh bindings produce new results |
 
-Pane construction, pane timestamp checks, stored identity, revisions, readiness
+Tumbling window construction, tumbling window timestamp checks, stored identity, revisions, readiness
 and complete coverage of required input samples are deployment
 responsibilities. Real storage and HTTP execution belong to
 deployment-repository E2E tests.

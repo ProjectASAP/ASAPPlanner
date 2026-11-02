@@ -487,8 +487,8 @@ fn profile_for_priced(
         }),
         materialized: node.materialization != Materialization::NotMaterialized,
         raw_retention,
-        // A chain maintained at ingestion refreshes its newest pane. The
-        // profile admits no `TimeShift` at ingestion, so that pane ends at
+        // A chain maintained at ingestion refreshes its newest tumbling window. The
+        // profile admits no `TimeShift` at ingestion, so that tumbling window ends at
         // the evaluation time: phase 0.
         refresh_window: match &node.payload {
             asap_types::ir::Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
@@ -1929,23 +1929,23 @@ mod tests {
     }
 
     /// A KLL chain (p90 over a minute) and a DDSketch chain (p99 over five
-    /// minutes) kept at ingestion over one `Scan`, each in panes of its
-    /// query's interval. With equal pane widths, one ingestion run per pane
+    /// minutes) kept at ingestion over one `Scan`, each in tumbling windows of its
+    /// query's interval. With equal tumbling-window widths, one ingestion run per tumbling window
     /// computes the `Scan` for both chains, and the old Stage 3 engine's
     /// modeled cost equals the real evaluator's with the `Scan` computed
     /// once, for one schedule (both every 10 s) and for mixed schedules
-    /// (every 20 s and every 40 s, 20 s panes). With 10 s and 60 s panes the
+    /// (every 20 s and every 40 s, 20 s tumbling windows). With 10 s and 60 s tumbling windows the
     /// chains run apart and both count the `Scan` twice (#1151).
     #[test]
     fn chains_of_one_refresh_window_share_their_scan_in_the_direct_profile() {
-        // ((p90 interval, its pane width), (p99 interval, its pane width), Scan computations)
+        // ((p90 interval, its tumbling-window width), (p99 interval, its tumbling-window width), Scan computations)
         for (kll, dd, scan_computations) in [
             ((10_000, 10_000), (10_000, 10_000), 1),
             ((20_000, 20_000), (40_000, 20_000), 1),
             ((10_000, 10_000), (60_000, 60_000), 2),
         ] {
             let (modeled, evaluated, multiplier) = two_chains_over_one_scan(kll, dd);
-            let case = format!("p90 (every, panes) {kll:?} ms, p99 {dd:?} ms");
+            let case = format!("p90 (every, tumbling windows) {kll:?} ms, p99 {dd:?} ms");
             assert!(
                 (evaluated - modeled).abs() <= 1e-9 * evaluated.max(1e-15),
                 "{case}: direct {modeled}, evaluator {evaluated}"
@@ -1955,20 +1955,20 @@ mod tests {
     }
 
     /// [`chains_of_one_refresh_window_share_their_scan_in_the_direct_profile`]
-    /// with the p90 and the p99 each `(interval in ms, pane width in ms)`:
+    /// with the p90 and the p99 each `(interval in ms, tumbling-window width in ms)`:
     /// the direct profile's modeled cost of the selected plan, the
     /// evaluator's cost of it, and the evaluator's multiplier of the `Scan`.
     fn two_chains_over_one_scan(kll: (u64, u64), dd: (u64, u64)) -> (f64, f64, u64) {
         use asap_logical_asap_optimization::test_support::{
-            compose_logical_candidate, generate_per_computation_candidates, pane_candidates,
-            window_composition_pass2_candidates,
+            compose_logical_candidate, generate_per_computation_candidates,
+            tumbling_window_candidates, window_composition_pass2_candidates,
         };
         use asap_types::ir::schema::SketchAlgorithm;
         use asap_types::stages::HowToComputeAggregateMeasure;
         use std::collections::HashMap;
         use std::rc::Rc;
         /// `node` and every node below it as candidates of `configured`, one
-        /// per node (`seen`, by address), at ingestion below a pane chain.
+        /// per node (`seen`, by address), at ingestion below a tumbling-window chain.
         fn append(
             node: &Rc<OperatorNode>,
             configured: &mut PhysicalCandidatesWithCosts,
@@ -2010,7 +2010,7 @@ mod tests {
         let target = AccuracyTarget::max_error(0.05)
             .failure_probability(0.01)
             .accuracy_scope(AccuracyScope::PerValue);
-        // (query, interval in ms, sketch, pane width in ms)
+        // (query, interval in ms, sketch, tumbling-window width in ms)
         let queries = [
             (
                 "quantile_over_time(0.9, latency[1m])",
@@ -2053,20 +2053,27 @@ mod tests {
             .iter()
             .map(|(_, interval, ..)| Some(*interval))
             .collect();
-        // Each build in its query's pane width.
-        let panes: Vec<_> = pane_candidates(&roots, &grid)
+        // Each build in its query's tumbling-window width.
+        let tumbling_windows: Vec<_> = tumbling_window_candidates(&roots, &grid)
             .into_iter()
-            .filter(|pane| {
-                (pane.window_ms(), pane.tumbling_window_width_ms) == (60_000, kll.1)
-                    || (pane.window_ms(), pane.tumbling_window_width_ms) == (300_000, dd.1)
+            .filter(|tumbling_window| {
+                (
+                    tumbling_window.window_ms(),
+                    tumbling_window.tumbling_window_width_ms,
+                ) == (60_000, kll.1)
+                    || (
+                        tumbling_window.window_ms(),
+                        tumbling_window.tumbling_window_width_ms,
+                    ) == (300_000, dd.1)
             })
             .collect();
-        assert_eq!(panes.len(), 2, "{panes:?}");
-        let roots = window_composition_pass2_candidates(&roots, &panes)
+        assert_eq!(tumbling_windows.len(), 2, "{tumbling_windows:?}");
+        let roots = window_composition_pass2_candidates(&roots, &tumbling_windows)
             .unwrap()
             .into_iter()
             .find(|candidate| {
-                candidate.pane_candidates.len() == 2 && candidate.shared_chains.is_empty()
+                candidate.tumbling_window_candidates.len() == 2
+                    && candidate.shared_chains.is_empty()
             })
             .unwrap()
             .roots

@@ -1,5 +1,5 @@
 //! A DAG's materialized views and their retention
-//! (`asap_types::ir::materialized_view`): two one-minute KLL panes of `m`
+//! (`asap_types::ir::materialized_view`): two one-minute KLL tumbling windows of `m`
 //! kept at ingestion, merged into a view refreshed on first read.
 
 use std::collections::HashMap;
@@ -10,7 +10,7 @@ use asap_types::ir::materialized_view::{
     InstallableDagError, MaterializedViewRefresh, RefreshWindow,
 };
 use asap_types::ir::operator::operator_properties::{Reduction, Source};
-use asap_types::ir::operator::pane_chain::expand_pane_chains_in_workload;
+use asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains_in_workload;
 use asap_types::ir::operator::TimeShift;
 use asap_types::ir::physical_export::{
     compile_physical_asap_dag, compile_physical_asap_workload, PhysicalASAPDAG,
@@ -28,7 +28,7 @@ use asap_types::ir::{
 use asap_types::physical::{Materialization, Medium};
 
 /// A KLL of `m`'s values over `(T - shift - 1 min, T - shift]`.
-fn pane(scan: &Rc<OperatorNode>, shift_ms: i64) -> Rc<OperatorNode> {
+fn tumbling_window(scan: &Rc<OperatorNode>, shift_ms: i64) -> Rc<OperatorNode> {
     let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
         shift: TimeShift {
             offset_ms: shift_ms,
@@ -81,20 +81,23 @@ fn scan_m() -> Rc<OperatorNode> {
     .unwrap()
 }
 
-/// The panes at offsets 0 and 1 min kept at ingestion, their merge kept
+/// The tumbling windows at offsets 0 and 1 min kept at ingestion, their merge kept
 /// across evaluations, exported: `(dag, merge's node id)`.
-fn panes_and_kept_merge() -> (PhysicalASAPDAG, usize) {
+fn tumbling_windows_and_kept_merge() -> (PhysicalASAPDAG, usize) {
     let scan = scan_m();
-    let panes = [pane(&scan, 0), pane(&scan, 60_000)];
+    let tumbling_windows = [tumbling_window(&scan, 0), tumbling_window(&scan, 60_000)];
     let merge = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
-        children: panes.to_vec(),
+        children: tumbling_windows.to_vec(),
         newest_tumbling_windows: None,
         group_by: None,
     }))
     .unwrap();
     let mut assignment = MaterializationAssignment::default();
-    for pane in &panes {
-        assignment.set(pane, Materialization::MatAtIngestion(Medium::Memory));
+    for tumbling_window in &tumbling_windows {
+        assignment.set(
+            tumbling_window,
+            Materialization::MatAtIngestion(Medium::Memory),
+        );
     }
     assignment.set(
         &merge,
@@ -112,7 +115,7 @@ fn panes_and_kept_merge() -> (PhysicalASAPDAG, usize) {
 /// materialized views to list.
 #[test]
 fn a_view_without_retention_is_refused() {
-    let (dag, _) = panes_and_kept_merge();
+    let (dag, _) = tumbling_windows_and_kept_merge();
     assert!(matches!(
         dag.materialized_views(),
         Err(InstallableDagError::ViewWithoutRetention { .. })
@@ -120,34 +123,41 @@ fn a_view_without_retention_is_refused() {
 }
 
 /// The merge, refreshed on first read for each step of a one-hour range,
-/// is kept for its two minutes plus the hour; each pane it reads is kept
+/// is kept for its two minutes plus the hour; each tumbling window it reads is kept
 /// that long too, since the merge may be refreshed for its oldest step.
-/// The panes read `m` at ingestion, so no raw data is kept for queries.
+/// The tumbling windows read `m` at ingestion, so no raw data is kept for queries.
 #[test]
 fn retention_propagates_from_a_view_refreshed_on_first_read_to_its_inputs() {
-    let (mut dag, merge_id) = panes_and_kept_merge();
+    let (mut dag, merge_id) = tumbling_windows_and_kept_merge();
     let spans = HashMap::from([(merge_id, 3_600_000)]);
     dag.set_retention(&HashMap::new(), &spans, None).unwrap();
     let views = dag.materialized_views().unwrap();
-    let (merge, panes) = views.split_last().unwrap();
+    let (merge, tumbling_windows) = views.split_last().unwrap();
     assert_eq!(merge.node_id, merge_id);
     assert_eq!(merge.refresh(), MaterializedViewRefresh::OnFirstRead);
     assert_eq!(merge.retention_ms(), 120_000 + 3_600_000);
-    assert_eq!(panes.len(), 2);
-    for pane in panes {
-        assert_eq!(pane.refresh(), MaterializedViewRefresh::AtIngestion);
-        assert_eq!(pane.retention_ms(), merge.retention_ms());
-        let node = dag.nodes.iter().find(|n| n.id == pane.node_id).unwrap();
-        assert_eq!(node.retention_ms, Some(pane.retention_ms()));
+    assert_eq!(tumbling_windows.len(), 2);
+    for tumbling_window in tumbling_windows {
+        assert_eq!(
+            tumbling_window.refresh(),
+            MaterializedViewRefresh::AtIngestion
+        );
+        assert_eq!(tumbling_window.retention_ms(), merge.retention_ms());
+        let node = dag
+            .nodes
+            .iter()
+            .find(|n| n.id == tumbling_window.node_id)
+            .unwrap();
+        assert_eq!(node.retention_ms, Some(tumbling_window.retention_ms()));
     }
     assert_eq!(dag.raw_data_retention().unwrap(), []);
 }
 
-/// A view kept for less than its data reaches back (the older pane, which
+/// A view kept for less than its data reaches back (the older tumbling window, which
 /// reaches 2 minutes back, kept for 1 minute) is refused.
 #[test]
 fn a_view_kept_shorter_than_its_reach_is_refused() {
-    let (mut dag, _) = panes_and_kept_merge();
+    let (mut dag, _) = tumbling_windows_and_kept_merge();
     let views = dag
         .set_retention(&HashMap::new(), &HashMap::new(), None)
         .unwrap();
@@ -176,7 +186,7 @@ fn a_view_kept_shorter_than_its_reach_is_refused() {
 /// An expired deadline stops the derivation.
 #[test]
 fn the_derivation_stops_at_its_deadline() {
-    let (mut dag, _) = panes_and_kept_merge();
+    let (mut dag, _) = tumbling_windows_and_kept_merge();
     assert_eq!(
         dag.set_retention(
             &HashMap::new(),
@@ -199,7 +209,7 @@ fn quantile_sketch(algorithm: SketchAlgorithm) -> FieldDataType {
     FieldDataType::Sketch(SketchKind::new(algorithm, params), Default::default())
 }
 
-/// `tumbling_window_count` panes of `tumbling_window_width_ms` of `family` per `job` over `input`.
+/// `tumbling_window_count` tumbling windows of `tumbling_window_width_ms` of `family` per `job` over `input`.
 fn chain(
     input: &Rc<OperatorNode>,
     family: FieldDataType,
@@ -220,9 +230,9 @@ fn chain(
 }
 
 /// Three queries over one `Scan` of `m`, each merging a chain kept at
-/// ingestion: a KLL of six 10 s panes, a DDSketch of thirty 10 s panes, and
-/// a KLL of five 60 s panes. The DAG Stage 3 costs (chains unexpanded) and
-/// the installed DAG (chains expanded into panes, retention set).
+/// ingestion: a KLL of six 10 s tumbling windows, a DDSketch of thirty 10 s tumbling windows, and
+/// a KLL of five 60 s tumbling windows. The DAG Stage 3 costs (chains unexpanded) and
+/// the installed DAG (chains expanded into tumbling windows, retention set).
 fn three_chains_over_one_scan() -> (PhysicalASAPDAG, PhysicalASAPDAG) {
     let scan = scan_m();
     let chains = [
@@ -252,7 +262,7 @@ fn three_chains_over_one_scan() -> (PhysicalASAPDAG, PhysicalASAPDAG) {
         .collect();
     let timed = apply_materialization_timings_to_roots(&roots, &assignment).unwrap();
     let unexpanded = compile_physical_asap_workload(&timed).unwrap();
-    let expanded = expand_pane_chains_in_workload(&timed).unwrap();
+    let expanded = expand_tumbling_window_chains_in_workload(&timed).unwrap();
     let mut installed = compile_physical_asap_workload(&expanded.roots).unwrap();
     installed
         .set_retention(&HashMap::new(), &HashMap::new(), None)
@@ -260,8 +270,8 @@ fn three_chains_over_one_scan() -> (PhysicalASAPDAG, PhysicalASAPDAG) {
     (unexpanded, installed)
 }
 
-/// The width and sketch of the panes `node` of `dag` builds.
-fn pane_shape(dag: &PhysicalASAPDAG, node: usize) -> (u64, SketchAlgorithm) {
+/// The width and sketch of the tumbling windows `node` of `dag` builds.
+fn tumbling_window_shape(dag: &PhysicalASAPDAG, node: usize) -> (u64, SketchAlgorithm) {
     let payload = &dag.nodes.iter().find(|n| n.id == node).unwrap().payload;
     let (family, width_ms) = match payload {
         Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
@@ -272,11 +282,11 @@ fn pane_shape(dag: &PhysicalASAPDAG, node: usize) -> (u64, SketchAlgorithm) {
         Operator::ASAP(ASAPOp::SummaryAgg { family, child, .. }) => {
             let range = &dag.nodes.iter().find(|n| n.id == *child).unwrap().payload;
             let Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) = range else {
-                panic!("a pane reads a TimeRange")
+                panic!("a tumbling window reads a TimeRange")
             };
             (family, range.as_millis() as u64)
         }
-        other => panic!("not a pane: {other:?}"),
+        other => panic!("not a tumbling window: {other:?}"),
     };
     let FieldDataType::Sketch(kind, _) = family else {
         panic!("a sketch")
@@ -284,10 +294,10 @@ fn pane_shape(dag: &PhysicalASAPDAG, node: usize) -> (u64, SketchAlgorithm) {
     (width_ms, *kind.algorithm())
 }
 
-/// A chain kept at ingestion has its newest pane's refresh window on the
-/// DAG Stage 3 costs, and each of its expanded panes has the same one.
+/// A chain kept at ingestion has its newest tumbling window's refresh window on the
+/// DAG Stage 3 costs, and each of its expanded tumbling windows has the same one.
 #[test]
-fn a_chain_and_each_of_its_panes_have_one_refresh_window() {
+fn a_chain_and_each_of_its_tumbling_windows_have_one_refresh_window() {
     let (unexpanded, installed) = three_chains_over_one_scan();
     let window_of = |width_ms| RefreshWindow {
         width_ms,
@@ -306,13 +316,13 @@ fn a_chain_and_each_of_its_panes_have_one_refresh_window() {
         .collect();
     assert_eq!(chains.len(), 3);
     for chain in chains {
-        let (width_ms, _) = pane_shape(&unexpanded, chain);
+        let (width_ms, _) = tumbling_window_shape(&unexpanded, chain);
         assert_eq!(unexpanded.refresh_window(chain), Some(window_of(width_ms)));
     }
     let views = installed.materialized_views().unwrap();
     assert_eq!(views.len(), 6 + 30 + 5);
     for view in &views {
-        let (width_ms, _) = pane_shape(&installed, view.node_id);
+        let (width_ms, _) = tumbling_window_shape(&installed, view.node_id);
         assert_eq!(
             installed.refresh_window(view.node_id),
             Some(window_of(width_ms))
@@ -320,10 +330,10 @@ fn a_chain_and_each_of_its_panes_have_one_refresh_window() {
     }
 }
 
-/// The 10 s KLL and 10 s DDSketch panes are one refresh group, the 60 s
-/// KLL panes another; the merges, at query time, are in none.
+/// The 10 s KLL and 10 s DDSketch tumbling windows are one refresh group, the 60 s
+/// KLL tumbling windows another; the merges, at query time, are in none.
 #[test]
-fn panes_of_one_width_form_one_refresh_group() {
+fn tumbling_windows_of_one_width_form_one_refresh_group() {
     let (_, installed) = three_chains_over_one_scan();
     let groups = installed.ingestion_refresh_groups().unwrap();
     let shapes: Vec<_> = groups
@@ -332,7 +342,7 @@ fn panes_of_one_width_form_one_refresh_group() {
             let mut shapes: Vec<_> = group
                 .views
                 .iter()
-                .map(|view| pane_shape(&installed, view.node_id))
+                .map(|view| tumbling_window_shape(&installed, view.node_id))
                 .collect();
             shapes.sort_by_key(|(width_ms, algorithm)| (*width_ms, format!("{algorithm:?}")));
             shapes.dedup();
@@ -365,20 +375,23 @@ fn panes_of_one_width_form_one_refresh_group() {
     assert_eq!(groups[1].views.len(), 5);
 }
 
-/// A pane whose window ends 30 s after a multiple of its 60 s width (a
+/// A tumbling window whose window ends 30 s after a multiple of its 60 s width (a
 /// `TimeShift(90 s)` below its range) is refreshed on another grid than a
-/// pane at no offset: another refresh group.
+/// tumbling window at no offset: another refresh group.
 #[test]
-fn a_shifted_pane_has_its_own_phase() {
+fn a_shifted_tumbling_window_has_its_own_phase() {
     let scan = scan_m();
-    let panes = [pane(&scan, 0), pane(&scan, 90_000)];
+    let tumbling_windows = [tumbling_window(&scan, 0), tumbling_window(&scan, 90_000)];
     let mut assignment = MaterializationAssignment::default();
-    for pane in &panes {
-        assignment.set(pane, Materialization::MatAtIngestion(Medium::Memory));
+    for tumbling_window in &tumbling_windows {
+        assignment.set(
+            tumbling_window,
+            Materialization::MatAtIngestion(Medium::Memory),
+        );
     }
-    let roots: Vec<QueryRoot> = panes
+    let roots: Vec<QueryRoot> = tumbling_windows
         .iter()
-        .map(|pane| QueryRoot::Operator(Rc::clone(pane)))
+        .map(|tumbling_window| QueryRoot::Operator(Rc::clone(tumbling_window)))
         .collect();
     let timed = apply_materialization_timings_to_roots(&roots, &assignment).unwrap();
     let mut dag = compile_physical_asap_workload(&timed).unwrap();
@@ -435,21 +448,21 @@ fn views_of_unbounded_windows_are_groups_of_their_own() {
     }
 }
 
-/// A rollup across jobs of a pane, both kept at ingestion, reads the pane's
-/// window: one refresh group, the pane listed before the rollup that reads
-/// it, so a run whose roots hold both computes the pane in the run.
+/// A rollup across jobs of a tumbling window, both kept at ingestion, reads the tumbling window's
+/// window: one refresh group, the tumbling window listed before the rollup that reads
+/// it, so a run whose roots hold both computes the tumbling window in the run.
 #[test]
 fn a_view_reading_a_view_of_its_group_follows_it() {
     let scan = scan_m();
-    let pane = pane(&scan, 0);
+    let tumbling_window = tumbling_window(&scan, 0);
     let rollup = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
-        children: vec![Rc::clone(&pane)],
+        children: vec![Rc::clone(&tumbling_window)],
         newest_tumbling_windows: None,
         group_by: Some(vec![]),
     }))
     .unwrap();
     let mut assignment = MaterializationAssignment::default();
-    for view in [&pane, &rollup] {
+    for view in [&tumbling_window, &rollup] {
         assignment.set(view, Materialization::MatAtIngestion(Medium::Memory));
     }
     let timed = apply_materialization_timings_to_roots(
@@ -462,11 +475,14 @@ fn a_view_reading_a_view_of_its_group_follows_it() {
         .unwrap();
     let groups = dag.ingestion_refresh_groups().unwrap();
     assert_eq!(groups.len(), 1);
-    let [pane_view, rollup_view] = groups[0].views.as_slice() else {
+    let [tumbling_window_view, rollup_view] = groups[0].views.as_slice() else {
         panic!("{groups:#?}")
     };
     assert_eq!(rollup_view.node_id, dag.roots[0]);
-    assert_eq!(rollup_view.inputs.materialized_views, [pane_view.node_id]);
+    assert_eq!(
+        rollup_view.inputs.materialized_views,
+        [tumbling_window_view.node_id]
+    );
     assert_eq!(
         groups[0].refresh_window,
         Some(RefreshWindow {
@@ -477,10 +493,10 @@ fn a_view_reading_a_view_of_its_group_follows_it() {
 }
 
 /// On the DAG Stage 3 costs (chains unexpanded), a node above a chain has
-/// the window of all the chain's panes: a merge of six 10 s panes, refreshed
+/// the window of all the chain's tumbling windows: a merge of six 10 s tumbling windows, refreshed
 /// at ingestion, has refresh window (60 s, 0).
 #[test]
-fn a_node_above_an_unexpanded_chain_has_the_window_of_its_panes() {
+fn a_node_above_an_unexpanded_chain_has_the_window_of_its_tumbling_windows() {
     let (unexpanded, _) = three_chains_over_one_scan();
     let merge_of_kll_10s = unexpanded.roots[0];
     assert_eq!(
