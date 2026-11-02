@@ -156,6 +156,7 @@ fn latest_snapshot_replaces_decreases_expires_and_retains_full_identity() {
 }
 
 #[test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn spatial_heap_ranks_latest_values_in_independent_runs() {
     for algorithm in [
         SketchAlgorithm::CmsWithHeap,

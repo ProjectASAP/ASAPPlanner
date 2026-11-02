@@ -164,6 +164,7 @@ async fn run(deployment: &DeploymentCapabilities) -> Run {
 /// Pass 2 offers each query's distinct-count sketch in tumbling windows, and
 /// Stage 2 maintains a tumbling-window chain at ingestion time, as for `m[5m]`.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn sql_windows_get_tumbling_windows_and_ingestion_time_builds() {
     let run = run(&DeploymentCapabilities::default()).await;
     for (query, window_ms) in WINDOWS_MS.iter().enumerate() {

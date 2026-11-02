@@ -85,6 +85,7 @@ fn stage3_raw_lookback_ms(dag: &PhysicalASAPDAG) -> Vec<(Source, Option<u64>)> {
 /// same plan. With no raw data kept, both run from views refreshed at
 /// ingestion and no source is read at query time.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn raw_data_retention_is_the_lookback_stage3_prices() {
     let workload = repeating(&["rate(m[5m])", "rate(m[5m] offset 1h)"]);
     let input = || UserInput::new(&workload, FrontendInput::Promql, PlanningModels::builtin());

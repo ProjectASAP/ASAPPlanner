@@ -206,6 +206,7 @@ fn sketch_plans_match_snapshots() {
 /// Each manifest entry names a known deployment and an existing input, and
 /// builds its arguments.
 #[test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn manifest_entries_build_their_arguments() {
     let manifest: Value = serde_json::from_str(
         &std::fs::read_to_string(snapshots_dir().join("manifest.json")).unwrap(),

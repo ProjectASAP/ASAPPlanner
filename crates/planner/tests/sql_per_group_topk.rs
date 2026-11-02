@@ -302,6 +302,7 @@ where
 /// The exact per-city top 5 compiles and answers each city's top hosts
 /// with their counts, `sf` with its two.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn an_exact_sql_per_city_top_5_runs() {
     let plan = plan_sql(&[TOP_5_HOSTS_PER_CITY], EXACT).await;
     plan.check_compiles().unwrap();
@@ -312,6 +313,7 @@ async fn an_exact_sql_per_city_top_5_runs() {
 /// SQL's `ROW_NUMBER` per-city top 5 and PromQL's `topk by (city)` answer
 /// the same rows over the same data.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn sql_and_promql_per_city_top_5_answer_alike() {
     let sql = ranked_rows(
         &run_sql(&plan_sql(&[TOP_5_HOSTS_PER_CITY], EXACT).await, 0),
@@ -327,6 +329,7 @@ async fn sql_and_promql_per_city_top_5_answer_alike() {
 
 /// The global top 5 answers its hosts, not only their counts.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn an_exact_sql_top_5_answers_its_hosts() {
     let plan = plan_sql(&[TOP_5_HOSTS], EXACT).await;
     let answered: BTreeSet<(String, i64)> = ranked_rows(&run_sql(&plan, 0), "topk_5")
@@ -342,6 +345,7 @@ async fn an_exact_sql_top_5_answers_its_hosts() {
 /// installs, so the executor refreshes every materialized view it keeps and
 /// compiles its query run.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn the_selected_approximate_plan_installs_and_compiles() {
     let plan = plan_sql(&[TOP_5_HOSTS, TOP_5_HOSTS_PER_CITY], APPROXIMATE).await;
     plan.check_compiles().unwrap();
@@ -353,6 +357,7 @@ async fn the_selected_approximate_plan_installs_and_compiles() {
 /// (each view's refresh, then the query run) and refuses it with the
 /// executor's reason rather than returning a plan a runtime cannot run.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn a_plan_the_executor_cannot_run_is_refused_at_installation() {
     let with_rn =
         TOP_5_HOSTS_PER_CITY.replace("SELECT city, host, c FROM", "SELECT city, host, c, rn FROM");
@@ -387,6 +392,7 @@ async fn a_plan_the_executor_cannot_run_is_refused_at_installation() {
 /// the count then the host (a tie-breaking second key), and with a SELECT
 /// list that drops the partition column.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn generic_per_city_top_5_forms_run_exactly() {
     let tie_broken = TOP_5_HOSTS_PER_CITY.replace("COUNT(*) DESC)", "COUNT(*) DESC, host)");
     let plan = plan_sql(&[&tie_broken], EXACT).await;

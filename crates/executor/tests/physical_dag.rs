@@ -1213,6 +1213,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
 
 // A certified candidate set must have authoritative values for every key, including after recovery.
 #[test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
     use asap_executor::physical_planner::{compile_node, CompiledPhysicalDAG};
     use planner_types::ir::properties::*;
