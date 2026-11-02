@@ -1,4 +1,4 @@
-//! Expand compatible readers at finite shared sizes and pane horizons before
+//! Expand compatible readers at finite shared sizes and tumbling-window horizons before
 //! interning concrete states. Local candidates remain available.
 use crate::pass2::memo::check_generation_deadline;
 use std::collections::{HashMap, HashSet};
@@ -12,10 +12,10 @@ use asap_types::ir::{ASAPOp, Operator, OperatorNode, QueryRoot};
 use super::shared_producer::{
     add_shared_producer_candidates, spans_groups, Reader, SharedProducer,
 };
-use crate::pass2::asap_aware_cse::{with_pane_chain, with_resized_build};
+use crate::pass2::asap_aware_cse::{with_resized_build, with_tumbling_window_chain};
 use crate::pass2::memo::shared_configurations::{
-    pane_configurations_before, shared_size, state_size_configurations, PaneConfiguration,
-    PaneRequirement, PaneWidthDomain,
+    shared_size, state_size_configurations, tumbling_window_configurations_before,
+    TumblingWindowConfiguration, TumblingWindowRequirement, TumblingWindowWidthDomain,
 };
 use crate::pass2::memo::state_groups::{same_range_input, simple_build, StateGroupExpansionError};
 use asap_types::stages::MemoCandidates;
@@ -69,18 +69,18 @@ struct StateNeed {
     /// The reader candidate's `accuracy_budget_parts`: the shares its build
     /// is sized for.
     accuracy_budget_parts: usize,
-    /// The reader's normalized pane layout, when its set shares panes: equal
+    /// The reader's normalized tumbling-window layout, when its set shares tumbling windows: equal
     /// layouts of one set have one index, so a configuration rewrites them once.
     normalized_layout: Option<usize>,
 }
 
-/// A shared build's need: one pane layout (its index among the set's pane
+/// A shared build's need: one tumbling-window layout (its index among the set's tumbling window
 /// configurations, for request deduplication) or one size, with the shares
 /// of the budget its build is sized for ([`covered_parts`]).
 enum StateCovering {
-    Panes {
+    TumblingWindows {
         configuration_index: usize,
-        configuration: PaneConfiguration,
+        configuration: TumblingWindowConfiguration,
         accuracy_budget_parts: usize,
     },
     Size {
@@ -89,13 +89,13 @@ enum StateCovering {
     },
 }
 
-/// Summary builds of one family over one input at different sizes or pane
+/// Summary builds of one family over one input at different sizes or tumbling window
 /// layouts: each reader is rewritten to a build at each covering size or
 /// layout that serves it, and equal concrete builds become one state group
 /// later ([`super::super::state_groups`]).
 struct SummaryStates {
     deduplicate_requests: bool,
-    domain: PaneWidthDomain,
+    domain: TumblingWindowWidthDomain,
     /// Every candidate's graph signature by group, so no rewrite repeats one.
     known: HashMap<(usize, String), Vec<Rc<OperatorNode>>>,
     rewrite_count: usize,
@@ -105,7 +105,7 @@ struct SummaryStates {
 
 pub(crate) fn add_state_configuration_candidates_in_domain(
     memo: &mut MemoCandidates,
-    domain: PaneWidthDomain,
+    domain: TumblingWindowWidthDomain,
     deadline: Option<Instant>,
 ) -> Result<(), StateGroupExpansionError> {
     expand_configurations(memo, true, domain, deadline).map(|_| ())
@@ -114,7 +114,7 @@ pub(crate) fn add_state_configuration_candidates_in_domain(
 fn expand_configurations(
     memo: &mut MemoCandidates,
     deduplicate_requests: bool,
-    domain: PaneWidthDomain,
+    domain: TumblingWindowWidthDomain,
     deadline: Option<Instant>,
 ) -> Result<usize, StateGroupExpansionError> {
     let mut states = SummaryStates {
@@ -168,7 +168,7 @@ impl SharedProducer for SummaryStates {
                         matches!(node.asap(), Some(ASAPOp::SummaryMerge {children, group_by: None, ..})
                             if children.len() == 1 && Rc::ptr_eq(&children[0], &build))
                     }).collect();
-                    // The existing rewrite changes one plain merge. Other pane uses
+                    // The existing rewrite changes one plain merge. Other tumbling window uses
                     // need their own explicit transformation, not guessed semantics.
                     if merges.len() != 1 {
                         continue;
@@ -221,11 +221,11 @@ impl SharedProducer for SummaryStates {
         set: &[Reader<StateNeed>],
         deadline: Option<Instant>,
     ) -> Result<Vec<StateCovering>, StateGroupExpansionError> {
-        let pane_requirements: Option<Vec<_>> = set
+        let tumbling_window_requirements: Option<Vec<_>> = set
             .iter()
-            .map(|reader| pane_requirement(&reader.need))
+            .map(|reader| tumbling_window_requirement(&reader.need))
             .collect();
-        let Some(requirements) = pane_requirements else {
+        let Some(requirements) = tumbling_window_requirements else {
             let requirements = set
                 .iter()
                 .map(|reader| match &reader.need.family {
@@ -254,11 +254,11 @@ impl SharedProducer for SummaryStates {
                 .collect());
         };
         Ok(
-            pane_configurations_before(&requirements, self.domain, deadline)?
+            tumbling_window_configurations_before(&requirements, self.domain, deadline)?
                 .into_iter()
                 .enumerate()
                 .map(
-                    |(configuration_index, configuration)| StateCovering::Panes {
+                    |(configuration_index, configuration)| StateCovering::TumblingWindows {
                         configuration_index,
                         accuracy_budget_parts: covered_parts(&configuration.family, set),
                         configuration,
@@ -276,9 +276,8 @@ impl SharedProducer for SummaryStates {
     ) -> Result<usize, StateGroupExpansionError> {
         let need = &reader.need;
         let serves = match covering {
-            StateCovering::Panes { configuration, .. } => {
-                configuration.serves(&pane_requirement(need).expect("pane set"))
-            }
+            StateCovering::TumblingWindows { configuration, .. } => configuration
+                .serves(&tumbling_window_requirement(need).expect("tumbling window set")),
             StateCovering::Size { family, .. } => serves_size(family, &need.family),
         };
         if !serves {
@@ -287,7 +286,7 @@ impl SharedProducer for SummaryStates {
         let original = memo.candidates[reader.group][need.candidate].clone();
         let roots = [QueryRoot::Operator(Rc::clone(&original.root_node))];
         let result = match covering {
-            StateCovering::Panes {
+            StateCovering::TumblingWindows {
                 configuration_index,
                 configuration,
                 ..
@@ -305,7 +304,7 @@ impl SharedProducer for SummaryStates {
                     return Ok(0);
                 }
                 self.rewrite_count += 1;
-                with_pane_chain(
+                with_tumbling_window_chain(
                     &roots,
                     need.merge.as_ref().unwrap(),
                     configuration.family.clone(),
@@ -352,7 +351,7 @@ impl SharedProducer for SummaryStates {
         // The rewritten build is sized for the covering's shares, at least
         // the reader's own.
         candidate.accuracy_budget_parts = match covering {
-            StateCovering::Panes {
+            StateCovering::TumblingWindows {
                 accuracy_budget_parts,
                 ..
             }
@@ -366,10 +365,10 @@ impl SharedProducer for SummaryStates {
     }
 }
 
-/// Numbers the normalized pane layouts of `set`'s readers, when it shares
-/// panes: different original layouts can produce the same requested
+/// Numbers the normalized tumbling-window layouts of `set`'s readers, when it shares
+/// tumbling windows: different original layouts can produce the same requested
 /// reader/configuration, so each is normalized once and its rewrite made once,
-/// instead of once for every existing pane width. Numbers continue across
+/// instead of once for every existing tumbling-window width. Numbers continue across
 /// sets (`layouts`), so a configuration index of one set never matches
 /// another's.
 fn assign_normalized_layouts(
@@ -380,7 +379,7 @@ fn assign_normalized_layouts(
 ) -> Result<(), StateGroupExpansionError> {
     let Some(requirements) = set
         .iter()
-        .map(|reader| pane_requirement(&reader.need))
+        .map(|reader| tumbling_window_requirement(&reader.need))
         .collect::<Option<Vec<_>>>()
     else {
         return Ok(());
@@ -395,7 +394,7 @@ fn assign_normalized_layouts(
         let need = &reader.need;
         let original = &memo.candidates[reader.group][need.candidate];
         let roots = [QueryRoot::Operator(Rc::clone(&original.root_node))];
-        let normalized = with_pane_chain(
+        let normalized = with_tumbling_window_chain(
             &roots,
             need.merge.as_ref().unwrap(),
             need.family.clone(),
@@ -431,7 +430,7 @@ fn graph_signature(node: &Rc<OperatorNode>) -> Result<String, StateGroupExpansio
         .map_err(|error| StateGroupExpansionError::StateConfiguration(error.to_string()))
 }
 
-fn pane_requirement(reader: &StateNeed) -> Option<PaneRequirement> {
+fn tumbling_window_requirement(reader: &StateNeed) -> Option<TumblingWindowRequirement> {
     let ASAPOp::SummaryTumblingWindowChain {
         tumbling_window_width_ms,
         tumbling_window_count,
@@ -447,7 +446,7 @@ fn pane_requirement(reader: &StateNeed) -> Option<PaneRequirement> {
     else {
         return None;
     };
-    Some(PaneRequirement {
+    Some(TumblingWindowRequirement {
         tumbling_window_width_ms: *tumbling_window_width_ms,
         window_ms: tumbling_window_width_ms.checked_mul(u64::from(
             newest_tumbling_windows.unwrap_or(*tumbling_window_count),
@@ -538,9 +537,9 @@ mod tests {
     use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval};
 
     // Request deduplication preserves the entire declared finite configuration
-    // set while avoiding repeated rewrites through every initial pane layout.
+    // set while avoiding repeated rewrites through every initial tumbling-window layout.
     #[test]
-    fn equivalent_pane_layouts_expand_each_configuration_once() {
+    fn equivalent_tumbling_window_layouts_expand_each_configuration_once() {
         let target = AccuracyTarget::max_error(0.01).failure_probability(0.001);
         let roots: Vec<_> = [0.95, 0.99]
             .into_iter()
@@ -566,10 +565,15 @@ mod tests {
         crate::pass2::memo::window_candidates::add_local_window_composition(&mut memo, &entries);
         let mut unoptimized = memo.clone();
         let optimized_rewrites =
-            expand_configurations(&mut memo, true, PaneWidthDomain::Complete, None).unwrap();
-        let exhaustive_rewrites =
-            expand_configurations(&mut unoptimized, false, PaneWidthDomain::Complete, None)
+            expand_configurations(&mut memo, true, TumblingWindowWidthDomain::Complete, None)
                 .unwrap();
+        let exhaustive_rewrites = expand_configurations(
+            &mut unoptimized,
+            false,
+            TumblingWindowWidthDomain::Complete,
+            None,
+        )
+        .unwrap();
         assert!(
             optimized_rewrites < exhaustive_rewrites,
             "{optimized_rewrites} versus {exhaustive_rewrites}"
@@ -655,7 +659,7 @@ mod tests {
             "{parts_of_size:?}"
         );
         let before = memo.candidates.iter().map(Vec::len).sum::<usize>();
-        expand_configurations(&mut memo, true, PaneWidthDomain::SeedGrids, None).unwrap();
+        expand_configurations(&mut memo, true, TumblingWindowWidthDomain::SeedGrids, None).unwrap();
         assert!(memo.candidates.iter().map(Vec::len).sum::<usize>() > before);
         for candidate in memo.candidates.iter().flatten() {
             for k in kll_sizes(candidate) {

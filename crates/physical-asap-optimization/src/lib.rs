@@ -34,9 +34,9 @@
 //!   kept across evaluations (#509 Example 4's B3), offered when the
 //!   deployment keeps query-time results (the caller's
 //!   `query_time_results_retained`) for a
-//!   tumbling-pane chain that builds one new pane per evaluation
-//!   (`builds_one_pane_per_evaluation`): each evaluation builds the
-//!   newest pane and reuses the others. Both query-time options are offered
+//!   tumbling-window chain that builds one new tumbling window per evaluation
+//!   (`builds_one_tumbling_window_per_evaluation`): each evaluation builds the
+//!   newest tumbling window and reuses the others. Both query-time options are offered
 //!   when both apply, and Stage 3 prices each.
 //!
 //! A build at ingestion time needs every build below it at ingestion time too
@@ -61,9 +61,9 @@
 //!   as Prometheus assumes (it rejects out-of-order samples). Table (SQL)
 //!   sources and mixed data, whose at-rest part may load in any order, are
 //!   not taken to be ordered;
-//! * it is a tumbling-pane chain whose readers all evaluate on its pane
+//! * it is a tumbling-window chain whose readers all evaluate on its tumbling window
 //!   boundaries, anchored at the epoch (each fixed interval a multiple of the
-//!   pane width, and each known phase on that grid), or a whole-window build whose readers
+//!   tumbling-window width, and each known phase on that grid), or a whole-window build whose readers
 //!   all run at one fixed interval with agreeing declared phases, over a
 //!   window that is not shifted and whose evaluations all end on the grid
 //!   of its width anchored at the epoch (the interval and a declared phase
@@ -81,11 +81,11 @@
 //! [`RangeEvaluation`](asap_types::workload::RangeEvaluation) evaluates at
 //! every `step_ms` from `end − span_ms` forward to each request's end.
 //! Every step reads the
-//! panes of a tumbling-pane chain, so each pane width must divide the step
+//! tumbling windows of a tumbling-window chain, so each tumbling-window width must divide the step
 //! of every range-evaluated reader. Stage 1 offers only such widths
 //! (`QueryWorkloadEntry::evaluation_grid_ms`); a candidate with a chain off
 //! a reader's step grid fails with
-//! [`PhysicalASAPOptimizationError::PaneWidthOffRangeStep`] and the caller
+//! [`PhysicalASAPOptimizationError::TumblingWindowWidthOffRangeStep`] and the caller
 //! prunes it with that reason.
 //!
 //! ## Physical operator implementation
@@ -140,7 +140,10 @@ use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
 };
 use split_by_timing::split_shared_by_timing;
-use summary_window::{plan_pane_phase, validate_pane_coverage, PaneLayout, WindowEdgeCoverage};
+use summary_window::{
+    plan_tumbling_window_phase, validate_tumbling_window_coverage, TumblingWindowLayout,
+    WindowEdgeCoverage,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -153,17 +156,17 @@ pub enum PhysicalASAPOptimizationError {
     Timing(#[from] ExecutionDataStateError),
     #[error("exact top-k has no Sort + Limit implementation: {0}")]
     ExactTopK(String),
-    /// Bad candidate for the workload: a tumbling-pane chain whose pane
+    /// Bad candidate for the workload: a tumbling-window chain whose tumbling window
     /// width does not divide the step of a query that reads it as a range
-    /// request, so some step would end inside a pane and could not read
-    /// the panes. Stage 1 offers only panes on every reader's step grid;
+    /// request, so some step would end inside a tumbling window and could not read
+    /// the tumbling windows. Stage 1 offers only tumbling windows on every reader's step grid;
     /// the candidate is pruned with this reason.
     #[error(
-        "pane width {tumbling_window_width_ms} ms does not divide the {step_ms} ms step of \
+        "tumbling-window width {tumbling_window_width_ms} ms does not divide the {step_ms} ms step of \
          a range evaluation that reads it"
     )]
-    PaneWidthOffRangeStep {
-        /// The chain's pane width.
+    TumblingWindowWidthOffRangeStep {
+        /// The chain's tumbling-window width.
         tumbling_window_width_ms: u64,
         /// The reader's range-evaluation step.
         step_ms: u64,
@@ -192,21 +195,21 @@ pub(crate) enum IngestionPruneReason {
     /// A whole-window build whose evaluations do not all end on the grid of
     /// its window's width anchored at the epoch, where the backend builds
     /// it (e.g. `m[20s]` every 20 s at phase 5 s, every 30 s, or `m[15m]`
-    /// every 5 minutes, which panes serve): the interval or the declared
+    /// every 5 minutes, which tumbling windows serve): the interval or the declared
     /// phase is not a multiple of the window.
     WindowOffEpochGrid,
     /// A whole-window build read by a range evaluation of more than one
     /// step per request: it keeps one window per request, not one per step.
     RangeEvaluatedWholeWindow,
-    /// A tumbling-pane chain read at a known phase off its pane boundaries,
-    /// which are anchored at the epoch (e.g. 20 s panes read at phase 5 s):
-    /// built once each, its panes cannot end at every evaluation.
-    PanesOffPhase,
+    /// A tumbling-window chain read at a known phase off its tumbling-window boundaries,
+    /// which are anchored at the epoch (e.g. 20 s tumbling windows read at phase 5 s):
+    /// built once each, its tumbling windows cannot end at every evaluation.
+    TumblingWindowsOffPhase,
     /// A tumbling-window chain read at a fixed interval that its width does
     /// not divide (e.g. 15 s tumbling windows read every 10 s): built once
     /// each on the grid anchored at the epoch, its tumbling windows cannot
     /// end at every evaluation.
-    PanesOffInterval,
+    TumblingWindowsOffInterval,
     /// Something below it can only run at query time.
     UpstreamAtQueryTime(String),
     /// It is not a summary build (e.g. a shared `Scan`): only a summary's
@@ -221,7 +224,7 @@ pub(crate) enum IngestionPruneReason {
 pub(crate) struct SummaryMaterializationEligibility {
     pub(crate) at_ingestion: Result<(), IngestionPruneReason>,
     pub(crate) may_keep_across_evaluations: bool,
-    /// A pane's selected readers must also meet their range-step grids.
+    /// A tumbling window's selected readers must also meet their range-step grids.
     pub(crate) range_compatibility: Result<(), PhysicalASAPOptimizationError>,
 }
 
@@ -229,11 +232,11 @@ pub(crate) struct SummaryMaterializationEligibility {
 pub(crate) enum SummaryEligibilityError {
     #[error("selected reader {query} has no workload entry")]
     UnknownReader { query: usize },
-    #[error("materialization eligibility requires a summary build or pane chain")]
+    #[error("materialization eligibility requires a summary build or tumbling-window chain")]
     NotSummary,
     #[error("materialization eligibility requires at least one selected reader")]
     NoSelectedReaders,
-    #[error("pane width must be positive")]
+    #[error("tumbling-window width must be positive")]
     ZeroPaneWidth,
 }
 
@@ -301,7 +304,7 @@ fn summary_reader_eligibility(
                     ..
                 }),
                 Some(recurrences),
-            ) => builds_one_pane_per_evaluation(*tumbling_window_width_ms, recurrences),
+            ) => builds_one_tumbling_window_per_evaluation(*tumbling_window_width_ms, recurrences),
             _ => false,
         };
     SummaryMaterializationEligibility {
@@ -323,13 +326,13 @@ fn summary_reader_eligibility(
 /// q2: max_over_time(latency[5m])              every 1m
 /// ```
 ///
-/// If Stage 1 chose KLL panes for q1 and exact max panes for q2, Stage 2
+/// If Stage 1 chose KLL tumbling windows for q1 and exact max tumbling windows for q2, Stage 2
 /// finds two materialization candidates:
 ///
-/// | materialization candidate | readers | options                         |
-/// |---------------------------|---------|---------------------------------|
-/// | Kll ×5 panes (q1)         | q1      | NotMaterialized, MatAtIngestion |
-/// | Max acc ×5 panes (q2)     | q2      | NotMaterialized, MatAtIngestion |
+/// | materialization candidate        | readers | options                         |
+/// |----------------------------------|---------|---------------------------------|
+/// | Kll ×5 tumbling windows (q1)     | q1      | NotMaterialized, MatAtIngestion |
+/// | Max acc ×5 tumbling windows (q2) | q2      | NotMaterialized, MatAtIngestion |
 ///
 /// One read by two or more queries also gets `MatAtQuery` (built once per
 /// evaluation and reused), and so does the highest node of a shared
@@ -349,8 +352,8 @@ pub(crate) struct MaterializationCandidate {
     /// `Ok` when `MatAtIngestion` is an option.
     pub(crate) at_ingestion: Result<(), IngestionPruneReason>,
     /// Whether `MatAtQueryKeptAcrossEvaluations` is an option: the
-    /// deployment keeps query-time results and it is a tumbling-pane chain
-    /// that builds one new pane per evaluation.
+    /// deployment keeps query-time results and it is a tumbling-window chain
+    /// that builds one new tumbling window per evaluation.
     pub(crate) may_keep_across_evaluations: bool,
 }
 
@@ -376,11 +379,11 @@ impl MaterializationCandidate {
     }
 }
 
-/// Whether a tumbling-pane chain of `tumbling_window_width_ms`-wide panes read by
-/// queries repeating as `readers` builds exactly one new pane per
+/// Whether a tumbling-window chain of `tumbling_window_width_ms`-wide tumbling windows read by
+/// queries repeating as `readers` builds exactly one new tumbling window per
 /// evaluation: there is a reader, every reader repeats at a fixed interval
-/// equal to the pane width, and the readers whose evaluation phase is known
-/// share one phase (modulo the interval). Its other panes are the previous
+/// equal to the tumbling-window width, and the readers whose evaluation phase is known
+/// share one phase (modulo the interval). Its other tumbling windows are the previous
 /// evaluations' newest, so a deployment that keeps query-time results
 /// reuses them (#509 Example 4's B3).
 ///
@@ -388,8 +391,8 @@ impl MaterializationCandidate {
 /// phase run at the same instants as each other and as the readers with a
 /// known phase, as plan selection (`asap-plan-selection`) assumes when it counts
 /// one evaluation per interval. Readers at different known phases would
-/// each need their own newest pane, so they do not share one kept chain.
-pub(crate) fn builds_one_pane_per_evaluation<'a>(
+/// each need their own newest tumbling window, so they do not share one kept chain.
+pub(crate) fn builds_one_tumbling_window_per_evaluation<'a>(
     tumbling_window_width_ms: u64,
     readers: impl IntoIterator<Item = &'a QueryRecurrence>,
 ) -> bool {
@@ -441,7 +444,7 @@ pub fn optimize_physical_asap(
     let implemented = map_roots(roots, &mut |node| implement(node, &mut cache))?;
     let mat_candidates =
         materialization_candidates(&implemented, entries, data, query_time_results_retained);
-    check_panes_on_range_steps(&mat_candidates, entries)?;
+    check_tumbling_windows_on_range_steps(&mat_candidates, entries)?;
     materialization_assignments(&mat_candidates)
         .map(|assignment| {
             assigned_candidate(from_logical, &implemented, &mat_candidates, assignment)
@@ -471,7 +474,7 @@ pub fn optimize_physical_asap_assigned(
     let implemented = map_roots(roots, &mut |node| implement(node, &mut cache))?;
     let mat_candidates =
         materialization_candidates(&implemented, entries, data, query_time_results_retained);
-    check_panes_on_range_steps(&mat_candidates, entries)?;
+    check_tumbling_windows_on_range_steps(&mat_candidates, entries)?;
     let mut assignment = Vec::with_capacity(mat_candidates.len());
     for mat_candidate in &mat_candidates {
         match choose(&mat_candidate.readers) {
@@ -517,7 +520,7 @@ pub(crate) fn optimize_physical_asap_chosen(
         .collect();
     let mat_candidates =
         materialization_candidates(&implemented, entries, data, query_time_results_retained);
-    check_panes_on_range_steps(&mat_candidates, entries)?;
+    check_tumbling_windows_on_range_steps(&mat_candidates, entries)?;
     let mut assignment = Vec::with_capacity(mat_candidates.len());
     for mat_candidate in &mat_candidates {
         let logical = logical_of
@@ -610,15 +613,15 @@ fn physical_candidate_count(
     let implemented = map_roots(roots, &mut |node| implement(node, &mut cache))?;
     let mat_candidates =
         materialization_candidates(&implemented, entries, data, query_time_results_retained);
-    check_panes_on_range_steps(&mat_candidates, entries)?;
+    check_tumbling_windows_on_range_steps(&mat_candidates, entries)?;
     Ok(materialization_assignments(&mat_candidates).count())
 }
 
-/// `Err` for the first tumbling-pane chain whose pane width does not
+/// `Err` for the first tumbling-window chain whose tumbling-window width does not
 /// divide the step of a reader's range evaluation
-/// ([`PhysicalASAPOptimizationError::PaneWidthOffRangeStep`]): that step
-/// would end inside a pane.
-fn check_panes_on_range_steps(
+/// ([`PhysicalASAPOptimizationError::TumblingWindowWidthOffRangeStep`]): that step
+/// would end inside a tumbling window.
+fn check_tumbling_windows_on_range_steps(
     mat_candidates: &[MaterializationCandidate],
     entries: &[QueryWorkloadEntry],
 ) -> Result<(), PhysicalASAPOptimizationError> {
@@ -649,10 +652,12 @@ fn check_summary_range_steps(
             continue;
         };
         if range.step_ms % tumbling_window_width_ms.max(&1) != 0 {
-            return Err(PhysicalASAPOptimizationError::PaneWidthOffRangeStep {
-                tumbling_window_width_ms: *tumbling_window_width_ms,
-                step_ms: range.step_ms,
-            });
+            return Err(
+                PhysicalASAPOptimizationError::TumblingWindowWidthOffRangeStep {
+                    tumbling_window_width_ms: *tumbling_window_width_ms,
+                    step_ms: range.step_ms,
+                },
+            );
         }
     }
     Ok(())
@@ -798,7 +803,7 @@ fn ingestion_eligibility(
     if is_filtered_build(node) {
         return Err(Why::Filtered);
     }
-    let (family, chain_pane_width_ms) = match node.asap() {
+    let (family, chain_tumbling_window_width_ms) = match node.asap() {
         Some(ASAPOp::SummaryAgg { family, .. }) => (family, None),
         Some(ASAPOp::SummaryTumblingWindowChain {
             family,
@@ -819,17 +824,17 @@ fn ingestion_eligibility(
             return Err(Why::CounterNeedsTimeOrder);
         }
     }
-    if let Some(tumbling_window_width_ms) = chain_pane_width_ms {
-        // A chain's panes are built once each, on the grid anchored at the
-        // epoch (the plan carries no pane origin): every reader must
+    if let Some(tumbling_window_width_ms) = chain_tumbling_window_width_ms {
+        // A chain's tumbling windows are built once each, on the grid anchored at the
+        // epoch (the plan carries no tumbling-window origin): every reader must
         // evaluate on its boundaries. A reader at a fixed interval needs an
         // interval the width divides, whatever its phase; a reader of known
         // phase also needs that phase on the grid. A reader of unknown phase
         // is taken to run at multiples of its interval (phase 0), as for a
         // whole-window build below.
-        let epoch_panes = PaneLayout {
+        let epoch_tumbling_windows = TumblingWindowLayout {
             tumbling_window_width_ms,
-            pane_origin_ms: Some(0),
+            tumbling_window_origin_ms: Some(0),
         };
         for d in demands.iter().flatten() {
             let QueryRecurrence::Repeated(demand) = &d.recurrence else {
@@ -839,23 +844,23 @@ fn ingestion_eligibility(
                 .fixed_interval_ms()
                 .is_some_and(|interval_ms| !interval_ms.is_multiple_of(tumbling_window_width_ms))
             {
-                return Err(Why::PanesOffInterval);
+                return Err(Why::TumblingWindowsOffInterval);
             }
-            let reader = plan_pane_phase(demand, tumbling_window_width_ms)
-                .map_err(|_| Why::PanesOffPhase)?;
-            let Some(phase_ms) = reader.pane_origin_ms else {
+            let reader = plan_tumbling_window_phase(demand, tumbling_window_width_ms)
+                .map_err(|_| Why::TumblingWindowsOffPhase)?;
+            let Some(phase_ms) = reader.tumbling_window_origin_ms else {
                 if matches!(demand, RepeatedDemand::Scheduled(_)) {
-                    // A schedule whose times are not all on one pane phase.
-                    return Err(Why::PanesOffPhase);
+                    // A schedule whose times are not all on one tumbling-window phase.
+                    return Err(Why::TumblingWindowsOffPhase);
                 }
                 continue;
             };
-            validate_pane_coverage(
-                &epoch_panes,
+            validate_tumbling_window_coverage(
+                &epoch_tumbling_windows,
                 Some(phase_ms),
-                &WindowEdgeCoverage::PaneAligned,
+                &WindowEdgeCoverage::TumblingWindowAligned,
             )
-            .map_err(|_| Why::PanesOffPhase)?;
+            .map_err(|_| Why::TumblingWindowsOffPhase)?;
         }
         return Ok(());
     }
@@ -866,7 +871,7 @@ fn ingestion_eligibility(
         return Err(Why::RangeEvaluatedWholeWindow);
     }
     // A whole-window build: one tumbling window per evaluation, built (like
-    // a chain's panes) on the grid of its width anchored at the epoch, so
+    // a chain's tumbling windows) on the grid of its width anchored at the epoch, so
     // every evaluation must end on that grid. The readers share one fixed
     // interval and their declared phases agree; a reader with no declared
     // phase is taken to evaluate at multiples of its interval (phase 0), as
@@ -1179,7 +1184,7 @@ fn rebuilt(
 
 /// Stage 2 internals that other crates' tests call: building one physical
 /// candidate for a chosen assignment, implementing one candidate's
-/// operators, and the pane-coverage check.
+/// operators, and the tumbling-window-coverage check.
 #[cfg(feature = "test-support")]
 pub mod test_support {
     use std::rc::Rc;
@@ -1192,7 +1197,8 @@ pub mod test_support {
     pub use crate::catalog::test_support as catalog;
     pub use crate::split_by_timing::split_shared_by_timing;
     pub use crate::summary_window::{
-        validate_pane_coverage, PaneCoverageError, PaneLayout, WindowEdgeCoverage,
+        validate_tumbling_window_coverage, TumblingWindowCoverageError, TumblingWindowLayout,
+        WindowEdgeCoverage,
     };
 
     /// See `optimize_physical_asap_chosen` in this crate.
@@ -1587,11 +1593,14 @@ mod tests {
             .remove(0)
     }
 
-    /// `root` with its summary build in 1-min tumbling panes.
-    fn in_panes(root: QueryRoot) -> QueryRoot {
+    /// `root` with its summary build in 1-min tumbling windows.
+    fn in_tumbling_windows(root: QueryRoot) -> QueryRoot {
         let roots = [root];
         let rule_candidates =
-            asap_logical_asap_optimization::test_support::pane_candidates(&roots, &[Some(MINUTE)]);
+            asap_logical_asap_optimization::test_support::tumbling_window_candidates(
+                &roots,
+                &[Some(MINUTE)],
+            );
         assert_eq!(rule_candidates.len(), 1, "{rule_candidates:?}");
         let mut pass2_candidates =
             asap_logical_asap_optimization::test_support::window_composition_pass2_candidates(
@@ -1617,7 +1626,7 @@ mod tests {
     // An unselected unpredictable query must not restrict an ingestion candidate.
     #[test]
     fn selected_reader_eligibility_ignores_optional_unpredictable_consumers() {
-        let root = in_panes(summary_root("quantile_over_time(0.99, m[5m])"));
+        let root = in_tumbling_windows(summary_root("quantile_over_time(0.99, m[5m])"));
         let node = root_operators(&root)
             .into_iter()
             .flat_map(OperatorNode::reachable)
@@ -1680,7 +1689,7 @@ mod tests {
     #[test]
     fn selected_reader_eligibility_checks_phase_and_range_compatibility() {
         use asap_types::workload::RangeEvaluation;
-        let root = in_panes(summary_root("quantile_over_time(0.99, m[5m])"));
+        let root = in_tumbling_windows(summary_root("quantile_over_time(0.99, m[5m])"));
         let node = root_operators(&root)
             .into_iter()
             .flat_map(OperatorNode::reachable)
@@ -1727,7 +1736,7 @@ mod tests {
         assert!(!different_phase.may_keep_across_evaluations);
         assert_eq!(
             different_phase.at_ingestion,
-            Err(IngestionPruneReason::PanesOffPhase)
+            Err(IngestionPruneReason::TumblingWindowsOffPhase)
         );
         let off_grid = summary_materialization_eligibility(
             &node,
@@ -1739,7 +1748,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             off_grid.range_compatibility,
-            Err(PhysicalASAPOptimizationError::PaneWidthOffRangeStep { .. })
+            Err(PhysicalASAPOptimizationError::TumblingWindowWidthOffRangeStep { .. })
         ));
         assert!(matches!(
             summary_materialization_eligibility(
@@ -1786,14 +1795,14 @@ mod tests {
         nodes
     }
 
-    /// #509 Example 4, B1 and B2: a tumbling-pane chain read by a repeating,
+    /// #509 Example 4, B1 and B2: a tumbling-window chain read by a repeating,
     /// predictable query over arriving data is either rebuilt at query time
     /// or maintained at ingestion time. Maintained, the chain and the scan
     /// below it run at ingestion time, and the merge and estimate at query
     /// time.
     #[test]
-    fn a_pane_chain_over_arriving_data_may_be_maintained_at_ingestion_time() {
-        let root = in_panes(summary_root("quantile_over_time(0.99, m[5m])"));
+    fn a_tumbling_window_chain_over_arriving_data_may_be_maintained_at_ingestion_time() {
+        let root = in_tumbling_windows(summary_root("quantile_over_time(0.99, m[5m])"));
         let candidates =
             optimize_physical_asap("L1", &[root], &[every_minute()], &arriving(), false).unwrap();
         assert_eq!(candidates.len(), 2);
@@ -1824,15 +1833,15 @@ mod tests {
         }
     }
 
-    /// A chain of 1-min panes, anchored at the epoch, read by two queries
+    /// A chain of 1-min tumbling windows, anchored at the epoch, read by two queries
     /// every minute is maintained at ingestion time when they evaluate on
-    /// its pane boundaries (phases 0 and 2 min, or one phase unknown), not
-    /// when one is at phase 30 s: each pane is built once, so it would read
-    /// panes 30 s off.
+    /// its tumbling-window boundaries (phases 0 and 2 min, or one phase unknown), not
+    /// when one is at phase 30 s: each tumbling window is built once, so it would read
+    /// tumbling windows 30 s off.
     #[test]
-    fn a_pane_chain_is_maintained_only_on_its_readers_phases() {
+    fn a_tumbling_window_chain_is_maintained_only_on_its_readers_phases() {
         use IngestionPruneReason as Why;
-        let root = in_panes(summary_root("quantile_over_time(0.99, m[5m])"));
+        let root = in_tumbling_windows(summary_root("quantile_over_time(0.99, m[5m])"));
         let at = |phase_ms: u64| QueryWorkloadEntry {
             recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
                 interval: RepetitionInterval(MINUTE as u32),
@@ -1860,10 +1869,13 @@ mod tests {
         };
         assert_eq!(at_ingestion([at(0), at(2 * MINUTE)]), Ok(()));
         assert_eq!(at_ingestion([at(0), every_minute()]), Ok(()));
-        assert_eq!(at_ingestion([at(0), at(30_000)]), Err(Why::PanesOffPhase));
+        assert_eq!(
+            at_ingestion([at(0), at(30_000)]),
+            Err(Why::TumblingWindowsOffPhase)
+        );
         assert_eq!(
             at_ingestion([at(30_000), every_minute()]),
-            Err(Why::PanesOffPhase)
+            Err(Why::TumblingWindowsOffPhase)
         );
     }
 
@@ -1874,7 +1886,7 @@ mod tests {
     #[test]
     fn a_tumbling_window_chain_is_maintained_only_on_its_readers_intervals() {
         use IngestionPruneReason as Why;
-        let root = in_panes(summary_root("quantile_over_time(0.99, m[5m])"));
+        let root = in_tumbling_windows(summary_root("quantile_over_time(0.99, m[5m])"));
         let every = |interval_ms: u64| QueryWorkloadEntry {
             recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(
                 RepetitionInterval(interval_ms as u32),
@@ -1909,11 +1921,11 @@ mod tests {
         assert_eq!(at_ingestion([every_minute(), every(2 * MINUTE)]), Ok(()));
         assert_eq!(
             at_ingestion([every_minute(), every(90_000)]),
-            Err(Why::PanesOffInterval)
+            Err(Why::TumblingWindowsOffInterval)
         );
         assert_eq!(
             at_ingestion([every_minute(), every_at_phase_0(90_000)]),
-            Err(Why::PanesOffInterval)
+            Err(Why::TumblingWindowsOffInterval)
         );
     }
 
@@ -1923,7 +1935,7 @@ mod tests {
     #[test]
     fn ingestion_time_needs_arriving_data_and_repeated_predictable_queries() {
         use IngestionPruneReason as Why;
-        let root = in_panes(summary_root("quantile_over_time(0.99, m[5m])"));
+        let root = in_tumbling_windows(summary_root("quantile_over_time(0.99, m[5m])"));
         let at_rest = DataWorkload {
             arrival: DataArrival::AtRest,
             ..Default::default()
@@ -1960,12 +1972,12 @@ mod tests {
 
     /// A counter state (`rate`, `increase`) needs each series' samples in
     /// time order. Continuously ingesting time-series (PromQL) data is taken
-    /// to arrive in that order, as Prometheus assumes, so its counter panes
+    /// to arrive in that order, as Prometheus assumes, so its counter tumbling windows
     /// may be maintained at ingestion time.
     #[test]
-    fn counter_panes_over_ingesting_promql_data_run_at_ingestion_time() {
+    fn counter_tumbling_windows_over_ingesting_promql_data_run_at_ingestion_time() {
         for query in ["rate(m[5m])", "increase(m[5m])"] {
-            let roots = [in_panes(summary_root(query))];
+            let roots = [in_tumbling_windows(summary_root(query))];
             let mut cache = HashMap::new();
             let implemented = map_roots(&roots, &mut |n| implement(n, &mut cache)).unwrap();
             let mat_candidates =
@@ -1982,9 +1994,9 @@ mod tests {
     /// time order: a counter over a table source, or over mixed data (whose
     /// at-rest part may be loaded in any order), stays at query time.
     #[test]
-    fn counter_panes_over_other_sources_stay_at_query_time() {
+    fn counter_tumbling_windows_over_other_sources_stay_at_query_time() {
         use IngestionPruneReason as Why;
-        let root = in_panes(summary_root("rate(m[5m])"));
+        let root = in_tumbling_windows(summary_root("rate(m[5m])"));
         let QueryRoot::Operator(node) = &root else {
             panic!("{root:?}")
         };
@@ -2186,13 +2198,13 @@ mod tests {
         assert_eq!(at_ingestion(at_minute(0)), Ok(()));
     }
 
-    /// A pane chain whose width does not divide a range-evaluated reader's
+    /// A tumbling-window chain whose width does not divide a range-evaluated reader's
     /// step is not offered: the candidate fails with the widths, and the
-    /// caller prunes it. 1-min panes serve 2-min steps.
+    /// caller prunes it. 1-min tumbling windows serve 2-min steps.
     #[test]
-    fn a_pane_chain_off_the_range_step_grid_is_rejected() {
+    fn a_tumbling_window_chain_off_the_range_step_grid_is_rejected() {
         use asap_types::workload::RangeEvaluation;
-        let root = in_panes(summary_root("quantile_over_time(0.99, m[5m])"));
+        let root = in_tumbling_windows(summary_root("quantile_over_time(0.99, m[5m])"));
         let stepping = |step_ms: u64| QueryWorkloadEntry {
             range_evaluation: Some(RangeEvaluation {
                 step_ms,
@@ -2213,7 +2225,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                PhysicalASAPOptimizationError::PaneWidthOffRangeStep {
+                PhysicalASAPOptimizationError::TumblingWindowWidthOffRangeStep {
                     tumbling_window_width_ms: MINUTE,
                     step_ms: 30_000,
                 }
@@ -2222,7 +2234,7 @@ mod tests {
         );
         assert_eq!(
             error.to_string(),
-            "pane width 60000 ms does not divide the 30000 ms step of a range \
+            "tumbling-window width 60000 ms does not divide the 30000 ms step of a range \
              evaluation that reads it"
         );
         assert!(physical_candidate_count(
@@ -2280,19 +2292,20 @@ mod tests {
         );
     }
 
-    /// Two queries share one scan: one reads it through panes maintained at
+    /// Two queries share one scan: one reads it through tumbling windows maintained at
     /// ingestion time, the other at query time. The scan is split, one copy
     /// per timing; with nothing materialized it stays one node. The shared
     /// scan may also be built once per evaluation (`MatAtQuery`), but not
-    /// under ingestion-time panes, where only one query reads it at query
+    /// under ingestion-time tumbling windows, where only one query reads it at query
     /// time.
     #[test]
     fn a_scan_two_queries_read_at_two_timings_is_split() {
-        let QueryRoot::Operator(panes) = in_panes(summary_root("quantile_over_time(0.99, m[5m])"))
+        let QueryRoot::Operator(tumbling_windows) =
+            in_tumbling_windows(summary_root("quantile_over_time(0.99, m[5m])"))
         else {
             unreachable!()
         };
-        let scan = OperatorNode::reachable(&panes)
+        let scan = OperatorNode::reachable(&tumbling_windows)
             .into_iter()
             .find(|n| matches!(n.non_asap(), Some(NonASAPOp::Scan { .. })))
             .unwrap();
@@ -2309,7 +2322,10 @@ mod tests {
             None,
             ranged,
         );
-        let roots = [QueryRoot::Operator(panes), QueryRoot::Operator(exact)];
+        let roots = [
+            QueryRoot::Operator(tumbling_windows),
+            QueryRoot::Operator(exact),
+        ];
         let candidates = optimize_physical_asap(
             "L1",
             &roots,
@@ -2407,13 +2423,13 @@ mod tests {
         );
     }
 
-    /// Readers share one kept pane chain only when they evaluate at the
+    /// Readers share one kept tumbling-window chain only when they evaluate at the
     /// same instants: two readers every minute at phases 0 and 2 min do,
     /// at phases 0 and 30 s they do not (each would need its own newest
-    /// pane). A reader with no known phase is assumed to run with the
+    /// tumbling window). A reader with no known phase is assumed to run with the
     /// others.
     #[test]
-    fn readers_at_different_phases_do_not_build_one_pane_per_evaluation() {
+    fn readers_at_different_phases_do_not_build_one_tumbling_window_per_evaluation() {
         let at = |phase_ms: u64| {
             QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
                 interval: RepetitionInterval(MINUTE as u32),
@@ -2421,19 +2437,19 @@ mod tests {
             })
         };
         let unknown_phase = every_minute().recurrence;
-        assert!(builds_one_pane_per_evaluation(
+        assert!(builds_one_tumbling_window_per_evaluation(
             MINUTE,
             [&at(0), &at(2 * MINUTE)]
         ));
-        assert!(!builds_one_pane_per_evaluation(
+        assert!(!builds_one_tumbling_window_per_evaluation(
             MINUTE,
             [&at(0), &at(30_000)]
         ));
-        assert!(builds_one_pane_per_evaluation(
+        assert!(builds_one_tumbling_window_per_evaluation(
             MINUTE,
             [&at(30_000), &unknown_phase]
         ));
-        assert!(!builds_one_pane_per_evaluation(
+        assert!(!builds_one_tumbling_window_per_evaluation(
             MINUTE,
             [&at(0), &unknown_phase, &at(30_000)]
         ));

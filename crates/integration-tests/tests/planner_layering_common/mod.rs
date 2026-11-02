@@ -413,13 +413,13 @@ pub fn run_pattern_b_fixture(
 }
 
 /// Three fixed Pattern-B computations used by cost/retention fixtures:
-/// exact, whole-window KLL, and a KLL chain of sixty-second panes.
+/// exact, whole-window KLL, and a KLL chain of sixty-second tumbling windows.
 pub fn pattern_b_computations(workload: &PlanningWorkload) -> Vec<Vec<QueryRoot>> {
     use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_logical_asap_optimization::test_support::{
-        pane_candidates, window_composition_pass2_candidates,
+        tumbling_window_candidates, window_composition_pass2_candidates,
     };
     use asap_types::stages::HowToComputeAggregateMeasure;
     let roots = lower_promql(workload);
@@ -443,13 +443,13 @@ pub fn pattern_b_computations(workload: &PlanningWorkload) -> Vec<Vec<QueryRoot>
         })
         .unwrap();
     let whole: Vec<_> = compose_logical_candidate(&local, &[kll]).unwrap();
-    let panes = pane_candidates(&whole, &[Some(60_000)]);
-    assert_eq!(panes.len(), 1);
-    let chain = window_composition_pass2_candidates(&whole, &panes)
+    let tumbling_windows = tumbling_window_candidates(&whole, &[Some(60_000)]);
+    assert_eq!(tumbling_windows.len(), 1);
+    let chain = window_composition_pass2_candidates(&whole, &tumbling_windows)
         .unwrap()
         .remove(0)
         .roots
-        .expect("sixty-second panes compose");
+        .expect("sixty-second tumbling windows compose");
     vec![roots, whole, chain]
 }
 
@@ -576,7 +576,7 @@ pub fn is_merge(payload: &Payload) -> bool {
     matches!(payload, Operator::ASAP(ASAPOp::SummaryMerge { .. }))
 }
 
-/// The sketch build nodes (`SummaryAgg` or tumbling-pane `SummaryTumblingWindowChain` over a
+/// The sketch build nodes (`SummaryAgg` or tumbling-window `SummaryTumblingWindowChain` over a
 /// sketch family) of `dag`, with their algorithm and parameters.
 pub fn sketch_builds(dag: &impl ExportedDag) -> Vec<(NodeId, SketchAlgorithm, SketchParams)> {
     dag.node_ids()
@@ -907,8 +907,8 @@ pub enum WindowForm {
     ExponentialHistogram { horizon_ms: u64 },
 }
 
-/// The window summary of a build: a `SummaryTumblingWindowChain` keeps back-to-back panes of
-/// its pane width (tumbling); a `SummaryAgg` is rebuilt from its query
+/// The window summary of a build: a `SummaryTumblingWindowChain` keeps back-to-back tumbling windows of
+/// its tumbling-window width (tumbling); a `SummaryAgg` is rebuilt from its query
 /// window. Sliding windows and Exponential Histograms are not planned yet
 /// (#628).
 pub fn window_form(dag: &impl ExportedDag, build: NodeId) -> WindowForm {
@@ -925,8 +925,8 @@ pub fn window_form(dag: &impl ExportedDag, build: NodeId) -> WindowForm {
 
 /// How far back from an evaluation a materialized node's kept output
 /// reaches in event time, derived the way plan selection prices what it
-/// keeps: a pane chain keeps its `N`
-/// panes of width `w`, plus the one being built when maintained at
+/// keeps: a tumbling-window chain keeps its `N`
+/// tumbling windows of width `w`, plus the one being built when maintained at
 /// ingestion time; a whole-window build keeps its window, and the next one
 /// being built at ingestion time; each plus the offset of the time shifts
 /// below it. `None` for any other node.
@@ -954,8 +954,8 @@ pub fn retention_ms(p: &Physical, node: NodeId) -> Option<u64> {
             tumbling_window_count,
             ..
         }) => {
-            let panes = u64::from(*tumbling_window_count) + u64::from(at_ingestion);
-            Some(panes * tumbling_window_width_ms + offset_below(below(node)))
+            let tumbling_windows = u64::from(*tumbling_window_count) + u64::from(at_ingestion);
+            Some(tumbling_windows * tumbling_window_width_ms + offset_below(below(node)))
         }
         Operator::ASAP(ASAPOp::SummaryAgg { .. }) => {
             let child = below(node)?;

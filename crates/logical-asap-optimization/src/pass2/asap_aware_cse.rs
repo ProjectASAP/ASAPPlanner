@@ -3,7 +3,7 @@
 //! `docs/design_docs/proposals/planner-layering.md` (Algorithm 2).
 //!
 //! The memo rules (`pass2::memo::rules`) are built on these helpers: the
-//! window-composition rule for tumbling panes, and two reuse rules (#680),
+//! window-composition rule for tumbling windows, and two reuse rules (#680),
 //! rollup and exact top-k reuse. Identical expressions are shared by memo
 //! group identity, and summary builds of one family at different sizes by
 //! the memo's shared-producer rule (`memo::rules::shared_producer`); both
@@ -16,43 +16,43 @@
 //! # Window-composition rule
 //!
 //! A query repeating every `E` over a window `W` can build its summary as
-//! back-to-back tumbling panes of width `w = gcd(W, E)` (Algorithm 2's
-//! `Tumbling(L)` for one query), merged before each read. A *pane
-//! candidate* ([`pane_candidates`]) is a `SummaryAgg` over a range
+//! back-to-back tumbling windows of width `w = gcd(W, E)` (Algorithm 2's
+//! `Tumbling(L)` for one query), merged before each read. A *tumbling window
+//! candidate* ([`tumbling_window_candidates`]) is a `SummaryAgg` over a range
 //! `TimeRange(W)` whose
 //! family merges in the family-capability table ([`FamilyCapability`]):
 //! exact accumulators included, and also families whose merged readouts
 //! are only approximate (heap top-k), whose readers then carry no
 //! guarantee and are left to plan selection's evidence. A family without a
-//! merge (IRate) has no pane candidate.
+//! merge (IRate) has no tumbling-window candidate.
 //! [`window_composition_pass2_candidates`] returns one Pass 2 candidate per
-//! non-empty subset of the pane candidates: the build of each in the subset
-//! becomes a `SummaryMerge` over one [`ASAPOp::SummaryTumblingWindowChain`] of `W / w` panes,
-//! a compact node whatever the pane count, with the build's family and
+//! non-empty subset of the tumbling-window candidates: the build of each in the subset
+//! becomes a `SummaryMerge` over one [`ASAPOp::SummaryTumblingWindowChain`] of `W / w` tumbling windows,
+//! a compact node whatever the tumbling-window count, with the build's family and
 //! size (a mergeable family's merged state has one build's guarantee), and
 //! every guarantee above is composed again. Nothing is materialized here:
-//! the panes are rebuilt at each evaluation until Stage 2 keeps them.
+//! the tumbling windows are rebuilt at each evaluation until Stage 2 keeps them.
 //!
 //! Nested windows share one chain: when a subset holds builds of one family
 //! (at any size) over the same input below their ranges, read the same way,
-//! with the same output column names, whose panes differ in width or count,
+//! with the same output column names, whose tumbling windows differ in width or count,
 //! the subset also comes as a Pass 2 candidate in which each such group
-//! reads one chain ([`SharedPaneChain`]) over the longest window, sized for
+//! reads one chain ([`SharedTumblingWindowChain`]) over the longest window, sized for
 //! every member ([`size_for_all_readers`]). Two grids are offered: the
-//! finest member's own panes, for the members whose widths it divides
+//! finest member's own tumbling windows, for the members whose widths it divides
 //! ([`nested_window_groups`]), and, when that differs, the gcd of all the
-//! members' widths, even finer than every member's own panes
+//! members' widths, even finer than every member's own tumbling windows
 //! ([`gcd_window_groups`]); Stage 3's pricing weighs the extra states and
-//! merges of finer panes. Queries repeating at different intervals read the
-//! same panes, each at its own cadence. Every window ends at the evaluation
-//! time, so each shorter one is the chain's newest panes: its
+//! merges of finer tumbling windows. Queries repeating at different intervals read the
+//! same tumbling windows, each at its own cadence. Every window ends at the evaluation
+//! time, so each shorter one is the chain's newest tumbling windows: its
 //! `SummaryMerge` merges only those (`newest_tumbling_windows`), and has the guarantee
 //! of one build over its own window. A build grouped by fewer keys also
 //! reads the chain of a finer grouping over a window at least its own
-//! ([`rollup_window_groups`]): it merges its newest panes, then rolls the
+//! ([`rollup_window_groups`]): it merges its newest tumbling windows, then rolls the
 //! groups up into its own, as the rollup rule does. Stage 2 never keeps a
 //! chain read at different intervals across evaluations from query time
-//! (each reader would need one new pane per evaluation). Long-window segments, sliding
+//! (each reader would need one new tumbling window per evaluation). Long-window segments, sliding
 //! windows and Exponential Histograms are not implemented.
 //!
 //! # Rollup rule
@@ -137,7 +137,7 @@ use asap_accuracy::propagation::recompose_guarantees;
 /// `Project` that keeps the columns it read, by name. `None` when every metric's scans already
 /// agree, when two of them give one label different types or one is closed
 /// and the other not, when a node would change arity, or when a consumer
-/// would have to narrow a summary state or a grouped or filtered pane chain
+/// would have to narrow a summary state or a grouped or filtered tumbling-window chain
 /// would read a `Project`.
 pub fn with_union_scan_labels(
     roots: &[QueryRoot],
@@ -224,7 +224,7 @@ pub fn with_union_scan_labels(
                     Err(_) => return Ok(None),
                 }
             }
-            // A grouped or filtered pane chain over a `Project` would hide
+            // A grouped or filtered tumbling-window chain over a `Project` would hide
             // its window from plan selection.
             _ if matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })) => {
                 return Ok(None);
@@ -276,10 +276,10 @@ fn unfiltered_series_scan(node: &OperatorNode) -> Option<(&Source, &Schema)> {
 
 /// Whether `node`, over a child with more labels, keeps them in its own
 /// output: a time range or shift of the rows, and a per-series build or
-/// pane chain without a filter (keyed by the series identity, which
+/// tumbling-window chain without a filter (keyed by the series identity, which
 /// determines every label) with its merges, estimates and finalizations.
 /// The executor reads a per-series build's raw rows from its `TimeRange`
-/// directly, and plan selection reads a pane chain's window from the rows
+/// directly, and plan selection reads a tumbling-window chain's window from the rows
 /// below it, so nothing may sit between them.
 fn passes_labels_on(node: &OperatorNode) -> bool {
     matches!(
@@ -430,78 +430,78 @@ fn sized_for_all(
 }
 
 /// One summary build the window-composition rule can build as tumbling
-/// panes: a `SummaryAgg` over a range `TimeRange(W)` whose family merges
+/// tumbling windows: a `SummaryAgg` over a range `TimeRange(W)` whose family merges
 /// (the family-capability table: exact accumulators included, and families
 /// whose merged readouts are only approximate), read only by queries that
-/// repeat at a fixed interval. Its panes are `tumbling_window_count = W / w` back-to-back
+/// repeat at a fixed interval. Its tumbling windows are `tumbling_window_count = W / w` back-to-back
 /// windows of `w = gcd(W, E)` over the queries' intervals `E` (and, for a
 /// query with a range evaluation, its step), at least two.
 #[derive(Debug, Clone)]
-pub struct PaneCandidate {
-    /// The `SummaryAgg` over `TimeRange(W)` built as panes.
+pub struct TumblingWindowCandidate {
+    /// The `SummaryAgg` over `TimeRange(W)` built as tumbling windows.
     pub build: Rc<OperatorNode>,
-    /// The width `w` of one pane.
+    /// The width `w` of one tumbling window.
     pub tumbling_window_width_ms: u64,
-    /// The number of panes, `W / w`, at least two.
+    /// The number of tumbling windows, `W / w`, at least two.
     pub tumbling_window_count: u32,
 }
 
-impl PaneCandidate {
-    /// The window `W` its panes cover, `tumbling_window_width_ms · tumbling_window_count`.
+impl TumblingWindowCandidate {
+    /// The window `W` its tumbling windows cover, `tumbling_window_width_ms · tumbling_window_count`.
     pub fn window_ms(&self) -> u64 {
         self.tumbling_window_width_ms * u64::from(self.tumbling_window_count)
     }
 }
 
 /// A Pass 2 candidate of the window-composition rule: the candidate's roots
-/// with the build of each of `pane_candidates` built as its tumbling panes,
+/// with the build of each of `tumbling_window_candidates` built as its tumbling windows,
 /// merged before every read, and every guarantee composed again; the error
 /// when that fails, which leaves the other Pass 2 candidates unaffected.
 #[derive(Debug)]
 pub struct WindowCompositionPass2Candidate {
-    /// The builds built as tumbling panes, in [`pane_candidates`] order.
+    /// The builds built as tumbling windows, in [`tumbling_window_candidates`] order.
     /// Only tests read it.
     #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
-    pub pane_candidates: Vec<PaneCandidate>,
-    /// The chains each shared by several of `pane_candidates`
+    pub tumbling_window_candidates: Vec<TumblingWindowCandidate>,
+    /// The chains each shared by several of `tumbling_window_candidates`
     /// ([`nested_window_groups`] or [`gcd_window_groups`]); empty when each
     /// build has its own chain.
-    pub shared_chains: Vec<SharedPaneChain>,
-    /// The candidate's roots with those builds in panes.
+    pub shared_chains: Vec<SharedTumblingWindowChain>,
+    /// The candidate's roots with those builds in tumbling windows.
     pub roots: Result<Vec<QueryRoot>, PerComputationCandidateError>,
 }
 
-/// One pane chain several pane candidates read (window-composition rule):
-/// panes of `tumbling_window_width_ms`, a width that divides every member's own pane
+/// One tumbling-window chain several tumbling-window candidates read (window-composition rule):
+/// tumbling windows of `tumbling_window_width_ms`, a width that divides every member's own tumbling window
 /// width, and `tumbling_window_count` of them, covering the longest member's window.
-/// Each member merges the newest `W / tumbling_window_width_ms` panes of its window `W`.
+/// Each member merges the newest `W / tumbling_window_width_ms` tumbling windows of its window `W`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SharedPaneChain {
-    /// Positions in the Pass 2 candidate's `pane_candidates`, two or more.
+pub struct SharedTumblingWindowChain {
+    /// Positions in the Pass 2 candidate's `tumbling_window_candidates`, two or more.
     pub members: Vec<usize>,
-    /// The width of one pane of the shared chain.
+    /// The width of one tumbling window of the shared chain.
     pub tumbling_window_width_ms: u64,
-    /// The number of panes of the shared chain.
+    /// The number of tumbling windows of the shared chain.
     pub tumbling_window_count: u32,
 }
 
-/// The most pane candidates one candidate may have: every non-empty subset
+/// The most tumbling-window candidates one candidate may have: every non-empty subset
 /// is a Pass 2 candidate, and with shared grids up to three, about three
 /// million at 20.
-pub(crate) const MAX_PANE_CANDIDATES: usize = 20;
+pub(crate) const MAX_TUMBLING_WINDOW_CANDIDATES: usize = 20;
 
-/// The pane candidates of the candidate with query roots `roots`, children
+/// The tumbling-window candidates of the candidate with query roots `roots`, children
 /// first. `evaluation_grid_ms[q]` is the grid query `q`'s evaluations fall
 /// on: how often it repeats, or with a range evaluation the greatest common
 /// divisor of that and its step, and of its phase if declared
 /// (`QueryWorkloadEntry::evaluation_grid_ms`); `None` when it does not
-/// repeat at a fixed interval. Each pane width divides every reader's grid,
-/// so with panes anchored at the epoch every evaluation, every range step
-/// included, ends on a pane boundary.
-pub fn pane_candidates(
+/// repeat at a fixed interval. Each tumbling-window width divides every reader's grid,
+/// so with tumbling windows anchored at the epoch every evaluation, every range step
+/// included, ends on a tumbling-window boundary.
+pub fn tumbling_window_candidates(
     roots: &[QueryRoot],
     evaluation_grid_ms: &[Option<u64>],
-) -> Vec<PaneCandidate> {
+) -> Vec<TumblingWindowCandidate> {
     let mut nodes = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for node in roots.iter().flat_map(root_operators) {
@@ -520,7 +520,7 @@ pub fn pane_candidates(
     nodes
         .into_iter()
         .filter_map(|build| {
-            let window_ms = pane_window_ms(&build)?;
+            let window_ms = splittable_window_ms(&build)?;
             let readers: Vec<usize> = (0..roots.len())
                 .filter(|&q| reach[q].contains(&Rc::as_ptr(&build)))
                 .collect();
@@ -532,7 +532,7 @@ pub fn pane_candidates(
                 );
             }
             let tumbling_window_count = u32::try_from(window_ms / width).ok()?;
-            (!readers.is_empty() && tumbling_window_count >= 1).then_some(PaneCandidate {
+            (!readers.is_empty() && tumbling_window_count >= 1).then_some(TumblingWindowCandidate {
                 build,
                 tumbling_window_width_ms: width,
                 tumbling_window_count,
@@ -545,7 +545,7 @@ pub fn pane_candidates(
 /// family merges, over a range `TimeRange(W)` over an instant vector or a
 /// SQL table's rows, read at the query's time or a fixed offset from it: no `@` anchor on any of
 /// the time shifts stacked below the range.
-fn pane_window_ms(build: &OperatorNode) -> Option<u64> {
+fn splittable_window_ms(build: &OperatorNode) -> Option<u64> {
     let Some(ASAPOp::SummaryAgg { child, family, .. }) = build.asap() else {
         return None;
     };
@@ -578,42 +578,42 @@ fn pane_window_ms(build: &OperatorNode) -> Option<u64> {
 }
 
 /// Every Pass 2 candidate of the window-composition rule for the candidate
-/// with query roots `roots` and pane candidates `candidates`
-/// ([`pane_candidates`]): one per non-empty subset of them, in
+/// with query roots `roots` and tumbling-window candidates `candidates`
+/// ([`tumbling_window_candidates`]): one per non-empty subset of them, in
 /// binary-counter order (the first candidate the lowest bit). Each build in
 /// the subset becomes a `SummaryMerge` over one [`ASAPOp::SummaryTumblingWindowChain`] of
-/// its panes; every other build is untouched. A subset whose builds can
+/// its tumbling windows; every other build is untouched. A subset whose builds can
 /// share chains is followed by one Pass 2 candidate per shared grid, in
 /// which each group reads one shared chain, each member merging its newest
-/// panes: the finest member's panes (`nested_window_groups`), then the
+/// tumbling windows: the finest member's tumbling windows (`nested_window_groups`), then the
 /// gcd of the members' widths when that groups them differently
 /// (`gcd_window_groups`); and by one error candidate per group whose
 /// sizing fails. Each grid groups every build of a subset at once: a
 /// shared gcd grid over only some of the builds that could share it is not
 /// listed. An error only for more than
-/// `MAX_PANE_CANDIDATES` pane candidates; a Pass 2 candidate whose
+/// `MAX_TUMBLING_WINDOW_CANDIDATES` tumbling-window candidates; a Pass 2 candidate whose
 /// composition fails carries its own error.
 pub fn window_composition_pass2_candidates(
     roots: &[QueryRoot],
-    candidates: &[PaneCandidate],
+    candidates: &[TumblingWindowCandidate],
 ) -> Result<Vec<WindowCompositionPass2Candidate>, PerComputationCandidateError> {
-    if candidates.len() > MAX_PANE_CANDIDATES {
+    if candidates.len() > MAX_TUMBLING_WINDOW_CANDIDATES {
         return Err(PerComputationCandidateError::TooManyCandidates {
-            counted: "summary builds that could be built in tumbling panes",
+            counted: "summary builds that could be built in tumbling windows",
             found: candidates.len(),
-            max: MAX_PANE_CANDIDATES,
+            max: MAX_TUMBLING_WINDOW_CANDIDATES,
         });
     }
-    let rollable = rollable_pane_candidates(roots, candidates);
+    let rollable = rollable_tumbling_window_candidates(roots, candidates);
     let mut pass2_candidates = Vec::new();
     for mask in 1u64..(1u64 << candidates.len()) {
-        let chosen: Vec<PaneCandidate> = (0..candidates.len())
+        let chosen: Vec<TumblingWindowCandidate> = (0..candidates.len())
             .filter(|&i| mask >> i & 1 == 1)
             .map(|i| candidates[i].clone())
             .collect();
         pass2_candidates.push(WindowCompositionPass2Candidate {
-            roots: in_panes(roots, &chosen, &[]),
-            pane_candidates: chosen.clone(),
+            roots: in_tumbling_windows(roots, &chosen, &[]),
+            tumbling_window_candidates: chosen.clone(),
             shared_chains: Vec::new(),
         });
         let chosen_rollable: Vec<bool> = (0..candidates.len())
@@ -626,14 +626,14 @@ pub fn window_composition_pass2_candidates(
 }
 
 /// The Pass 2 candidates of [`window_composition_pass2_candidates`] in
-/// which every one of `candidates` is in panes and reads a shared chain:
+/// which every one of `candidates` is in tumbling windows and reads a shared chain:
 /// that function's candidates of the whole set with shared chains, in its
 /// order, without building the other subsets'.
 pub fn window_composition_shared_chain_candidates(
     roots: &[QueryRoot],
-    candidates: &[PaneCandidate],
+    candidates: &[TumblingWindowCandidate],
 ) -> Vec<WindowCompositionPass2Candidate> {
-    let rollable = rollable_pane_candidates(roots, candidates);
+    let rollable = rollable_tumbling_window_candidates(roots, candidates);
     let mut pass2_candidates = Vec::new();
     push_every_shared_chain(roots, candidates, &rollable, &mut pass2_candidates);
     pass2_candidates
@@ -643,17 +643,17 @@ pub fn window_composition_shared_chain_candidates(
 /// rollable or not, `chosen_rollable`) of [`window_composition_pass2_candidates`].
 fn push_every_shared_chain(
     roots: &[QueryRoot],
-    chosen: &[PaneCandidate],
+    chosen: &[TumblingWindowCandidate],
     chosen_rollable: &[bool],
     pass2_candidates: &mut Vec<WindowCompositionPass2Candidate>,
 ) {
-    // Shared chains on the members' own finest panes, then, when it
+    // Shared chains on the members' own finest tumbling windows, then, when it
     // groups them differently, on the gcd of their widths.
-    let on_member_panes = nested_window_groups(chosen);
-    let on_gcd_panes = gcd_window_groups(chosen);
-    push_shared_chains(roots, chosen, &on_member_panes, pass2_candidates);
-    if on_gcd_panes != on_member_panes {
-        push_shared_chains(roots, chosen, &on_gcd_panes, pass2_candidates);
+    let on_member_tumbling_windows = nested_window_groups(chosen);
+    let on_gcd_tumbling_windows = gcd_window_groups(chosen);
+    push_shared_chains(roots, chosen, &on_member_tumbling_windows, pass2_candidates);
+    if on_gcd_tumbling_windows != on_member_tumbling_windows {
+        push_shared_chains(roots, chosen, &on_gcd_tumbling_windows, pass2_candidates);
     }
     // Coarser groupings read a finer grouping's chain, rolled up.
     push_shared_chains(
@@ -669,8 +669,8 @@ fn push_every_shared_chain(
 /// each group whose sizing fails. Nothing when no group has a shared size.
 fn push_shared_chains(
     roots: &[QueryRoot],
-    chosen: &[PaneCandidate],
-    groups: &[SharedPaneChain],
+    chosen: &[TumblingWindowCandidate],
+    groups: &[SharedTumblingWindowChain],
     pass2_candidates: &mut Vec<WindowCompositionPass2Candidate>,
 ) {
     // Each group with a size that serves every member, and that build.
@@ -681,29 +681,29 @@ fn push_shared_chains(
             Ok(None) => {}
             Err(error) => pass2_candidates.push(WindowCompositionPass2Candidate {
                 roots: Err(error),
-                pane_candidates: chosen.to_vec(),
+                tumbling_window_candidates: chosen.to_vec(),
                 shared_chains: vec![group.clone()],
             }),
         }
     }
     if !shared.is_empty() {
         pass2_candidates.push(WindowCompositionPass2Candidate {
-            roots: in_panes(roots, chosen, &shared),
-            pane_candidates: chosen.to_vec(),
+            roots: in_tumbling_windows(roots, chosen, &shared),
+            tumbling_window_candidates: chosen.to_vec(),
             shared_chains: shared.into_iter().map(|(group, _)| group).collect(),
         });
     }
 }
 
-/// The pane candidates (positions in `candidates`) that can read one
-/// shared chain at the gcd of their pane widths, each group with its
+/// The tumbling-window candidates (positions in `candidates`) that can read one
+/// shared chain at the gcd of their tumbling-window widths, each group with its
 /// chain: every build over one input ([`same_build_over_one_input`]) in one
-/// group, whatever its pane width, on panes of the gcd of the members'
-/// widths over the longest window. Finer panes than any member builds mean
+/// group, whatever its tumbling-window width, on tumbling windows of the gcd of the members'
+/// widths over the longest window. Finer tumbling windows than any member builds mean
 /// more states and more merges; Stage 3's pricing decides whether sharing
-/// pays. Groups of members with the same panes and window are left to the
+/// pays. Groups of members with the same tumbling windows and window are left to the
 /// other rules.
-fn gcd_window_groups(candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
+fn gcd_window_groups(candidates: &[TumblingWindowCandidate]) -> Vec<SharedTumblingWindowChain> {
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for (i, candidate) in candidates.iter().enumerate() {
         match groups
@@ -717,13 +717,16 @@ fn gcd_window_groups(candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
     groups
         .into_iter()
         .filter_map(|members| {
-            let panes = |i: usize| {
+            let tumbling_windows = |i: usize| {
                 (
                     candidates[i].tumbling_window_width_ms,
                     candidates[i].tumbling_window_count,
                 )
             };
-            if members.iter().all(|&i| panes(i) == panes(members[0])) {
+            if members
+                .iter()
+                .all(|&i| tumbling_windows(i) == tumbling_windows(members[0]))
+            {
                 return None;
             }
             let tumbling_window_width_ms = members.iter().fold(0, |width, &i| {
@@ -735,7 +738,7 @@ fn gcd_window_groups(candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
             let longest = longest(candidates, &members);
             let tumbling_window_count =
                 u32::try_from(candidates[longest].window_ms() / tumbling_window_width_ms).ok()?;
-            Some(SharedPaneChain {
+            Some(SharedTumblingWindowChain {
                 members,
                 tumbling_window_width_ms,
                 tumbling_window_count,
@@ -744,23 +747,23 @@ fn gcd_window_groups(candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
         .collect()
 }
 
-/// The pane candidates (positions in `candidates`) that can read one
+/// The tumbling-window candidates (positions in `candidates`) that can read one
 /// shared chain, each group with its chain: builds of one family
 /// ([`same_family`], at any size) that read the same input below their
 /// ranges the same way (item and weight, grouping and filter), with the
 /// same output column names (each reader reads the shared chain's columns
 /// by position). Their windows end at the same time, so each is the newest
-/// panes of the longest. The shared panes are the group's finest member's
-/// own panes: a build joins a group only when that width divides its own
-/// pane width (the gcd of the widths, never finer than a chain some member
+/// tumbling windows of the longest. The shared tumbling windows are the group's finest member's
+/// own tumbling windows: a build joins a group only when that width divides its own
+/// tumbling-window width (the gcd of the widths, never finer than a chain some member
 /// builds anyway), and otherwise starts its own group. Members at different
-/// repeat intervals read the same panes, each at its own cadence. One chain
+/// repeat intervals read the same tumbling windows, each at its own cadence. One chain
 /// over the longest window, sized for every reader
 /// ([`size_for_all_readers`]), serves them all. Groups of members with the
-/// same panes and window are left to the other rules.
-fn nested_window_groups(candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
-    // Finest panes first: each build joins the first group over its input
-    // whose (finest) pane width divides its own, so a build whose panes no
+/// same tumbling windows and window are left to the other rules.
+fn nested_window_groups(candidates: &[TumblingWindowCandidate]) -> Vec<SharedTumblingWindowChain> {
+    // Finest tumbling windows first: each build joins the first group over its input
+    // whose (finest) tumbling-window width divides its own, so a build whose tumbling windows no
     // group's divide starts its own group instead of breaking another.
     let mut by_width: Vec<usize> = (0..candidates.len()).collect();
     by_width.sort_by_key(|&i| candidates[i].tumbling_window_width_ms);
@@ -781,13 +784,16 @@ fn nested_window_groups(candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
     let mut shared = groups
         .into_iter()
         .filter_map(|mut members| {
-            let panes = |i: usize| {
+            let tumbling_windows = |i: usize| {
                 (
                     candidates[i].tumbling_window_width_ms,
                     candidates[i].tumbling_window_count,
                 )
             };
-            if members.iter().all(|&i| panes(i) == panes(members[0])) {
+            if members
+                .iter()
+                .all(|&i| tumbling_windows(i) == tumbling_windows(members[0]))
+            {
                 return None;
             }
             let tumbling_window_width_ms = candidates[members[0]].tumbling_window_width_ms;
@@ -795,7 +801,7 @@ fn nested_window_groups(candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
             let tumbling_window_count =
                 u32::try_from(candidates[longest].window_ms() / tumbling_window_width_ms).ok()?;
             members.sort_unstable();
-            Some(SharedPaneChain {
+            Some(SharedTumblingWindowChain {
                 members,
                 tumbling_window_width_ms,
                 tumbling_window_count,
@@ -810,10 +816,13 @@ fn nested_window_groups(candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
 
 /// Whether each of `candidates` may be read rolled up from a finer
 /// grouping's chain: a sketch build over a SQL relation's rows (a PromQL
-/// rollup over newest panes is not offered yet) whose every reader in
+/// rollup over newest tumbling windows is not offered yet) whose every reader in
 /// `roots` is an estimate whose merged readout keeps a guarantee, as for
 /// the rollup rule.
-fn rollable_pane_candidates(roots: &[QueryRoot], candidates: &[PaneCandidate]) -> Vec<bool> {
+fn rollable_tumbling_window_candidates(
+    roots: &[QueryRoot],
+    candidates: &[TumblingWindowCandidate],
+) -> Vec<bool> {
     let mut nodes = Vec::new();
     let mut seen = HashSet::new();
     for node in roots.iter().flat_map(root_operators) {
@@ -843,20 +852,23 @@ fn rollable_pane_candidates(roots: &[QueryRoot], candidates: &[PaneCandidate]) -
         .collect()
 }
 
-/// The pane candidates (positions in `candidates`) that can read one
-/// chain of a finer grouping's panes, each group with its chain: a host,
+/// The tumbling-window candidates (positions in `candidates`) that can read one
+/// chain of a finer grouping's tumbling windows, each group with its chain: a host,
 /// and every candidate whose group keys are the host's or fewer
-/// ([`rolls_up_into`]), whose window is at most the host's and whose pane
-/// width the host's divides. Each member merges the newest panes of its
+/// ([`rolls_up_into`]), whose window is at most the host's and whose tumbling window
+/// width the host's divides. Each member merges the newest tumbling windows of its
 /// window, and a coarser member then rolls the host's groups up into its
 /// own (a regrouping `SummaryMerge`): `p90 per city over 20 minutes` in
-/// 10 s panes serves `p90 over 5 minutes` as the newest 30 panes merged
+/// 10 s tumbling windows serves `p90 over 5 minutes` as the newest 30 tumbling windows merged
 /// across cities. A coarser member is one `rollable[i]` allows
-/// ([`rollable_pane_candidates`]). Hosts are tried by most group keys,
+/// ([`rollable_tumbling_window_candidates`]). Hosts are tried by most group keys,
 /// then longest window, and each candidate joins one group. Only groups
 /// with a coarser member are listed; the others are
 /// [`nested_window_groups`]'s.
-fn rollup_window_groups(candidates: &[PaneCandidate], rollable: &[bool]) -> Vec<SharedPaneChain> {
+fn rollup_window_groups(
+    candidates: &[TumblingWindowCandidate],
+    rollable: &[bool],
+) -> Vec<SharedTumblingWindowChain> {
     let mut hosts: Vec<usize> = (0..candidates.len()).collect();
     hosts.sort_by_key(|&i| {
         (
@@ -892,7 +904,7 @@ fn rollup_window_groups(candidates: &[PaneCandidate], rollable: &[bool]) -> Vec<
         for &i in &members {
             grouped[i] = true;
         }
-        groups.push(SharedPaneChain {
+        groups.push(SharedTumblingWindowChain {
             members,
             tumbling_window_width_ms: candidates[host].tumbling_window_width_ms,
             tumbling_window_count: candidates[host].tumbling_window_count,
@@ -918,7 +930,7 @@ fn group_key_count(build: &OperatorNode) -> usize {
 /// or the same but grouped by fewer of `host`'s keys, of a family whose
 /// states merge across groups ([`FamilyCapability::merges_groups`]), so a
 /// rollup of `host`'s states answers it.
-fn rolls_up_into(member: &PaneCandidate, host: &PaneCandidate) -> bool {
+fn rolls_up_into(member: &TumblingWindowCandidate, host: &TumblingWindowCandidate) -> bool {
     if same_build_over_one_input(member, host) {
         return true;
     }
@@ -957,10 +969,10 @@ fn rolls_up_into(member: &PaneCandidate, host: &PaneCandidate) -> bool {
         && filter == host_filter
 }
 
-/// Whether two pane candidates build one family (at any size) over the
+/// Whether two tumbling-window candidates build one family (at any size) over the
 /// same input below their ranges, read the same way, with the same output
 /// column names.
-fn same_build_over_one_input(a: &PaneCandidate, b: &PaneCandidate) -> bool {
+fn same_build_over_one_input(a: &TumblingWindowCandidate, b: &TumblingWindowCandidate) -> bool {
     let (
         Some(ASAPOp::SummaryAgg {
             child: range,
@@ -1002,7 +1014,7 @@ fn same_build_over_one_input(a: &PaneCandidate, b: &PaneCandidate) -> bool {
 
 /// The member of `group` (positions in `candidates`) with the longest
 /// window.
-fn longest(candidates: &[PaneCandidate], group: &[usize]) -> usize {
+fn longest(candidates: &[TumblingWindowCandidate], group: &[usize]) -> usize {
     *group
         .iter()
         .max_by_key(|&&i| candidates[i].window_ms())
@@ -1013,7 +1025,7 @@ fn longest(candidates: &[PaneCandidate], group: &[usize]) -> usize {
 /// made of: the longest member's, sized for every member
 /// ([`sized_for_all`]); `None` when their sizes have no shared size.
 fn shared_chain_build(
-    candidates: &[PaneCandidate],
+    candidates: &[TumblingWindowCandidate],
     group: &[usize],
 ) -> Result<Option<Rc<OperatorNode>>, PerComputationCandidateError> {
     // Of the longest windows, the finest grouping: a rollup group's host.
@@ -1034,17 +1046,17 @@ fn shared_chain_build(
 }
 
 /// `roots` with the build of each of `candidates` built as its tumbling
-/// panes, and every guarantee composed again. The members of each
-/// [`SharedPaneChain`] (with its [`shared_chain_build`]) read that one
-/// chain: each merges the newest panes covering its own window.
-fn in_panes(
+/// tumbling windows, and every guarantee composed again. The members of each
+/// [`SharedTumblingWindowChain`] (with its [`shared_chain_build`]) read that one
+/// chain: each merges the newest tumbling windows covering its own window.
+fn in_tumbling_windows(
     roots: &[QueryRoot],
-    candidates: &[PaneCandidate],
-    shared_chains: &[(SharedPaneChain, Rc<OperatorNode>)],
+    candidates: &[TumblingWindowCandidate],
+    shared_chains: &[(SharedTumblingWindowChain, Rc<OperatorNode>)],
 ) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
     let mut replaced: HashMap<*const OperatorNode, Rc<OperatorNode>> = HashMap::new();
     for (shared, build) in shared_chains {
-        let chain = pane_chain(&PaneCandidate {
+        let chain = tumbling_window_chain(&TumblingWindowCandidate {
             build: Rc::clone(build),
             tumbling_window_width_ms: shared.tumbling_window_width_ms,
             tumbling_window_count: shared.tumbling_window_count,
@@ -1063,7 +1075,7 @@ fn in_panes(
                 merge
             } else {
                 regrouped(member, &merge).ok_or(PerComputationCandidateError::Unsupported(
-                    "a coarser pane build whose keys the shared chain does not hold",
+                    "a coarser tumbling-window build whose keys the shared chain does not hold",
                 ))?
             };
             replaced.insert(Rc::as_ptr(member), read);
@@ -1075,7 +1087,7 @@ fn in_panes(
         {
             entry.insert(Rc::new(OperatorNode::new(Operator::ASAP(
                 ASAPOp::SummaryMerge {
-                    children: vec![pane_chain(candidate)?],
+                    children: vec![tumbling_window_chain(candidate)?],
                     newest_tumbling_windows: None,
                     group_by: None,
                 },
@@ -1104,13 +1116,13 @@ fn in_panes(
 }
 
 /// `roots` with the `SummaryMerge` `merge` (over one [`ASAPOp::SummaryTumblingWindowChain`]
-/// of `roots`) reading the newest panes of another chain over the same
-/// input: `tumbling_window_count` panes of `tumbling_window_width_ms` of family `family` (a size
+/// of `roots`) reading the newest tumbling windows of another chain over the same
+/// input: `tumbling_window_count` tumbling windows of `tumbling_window_width_ms` of family `family` (a size
 /// that serves every reader of the chain). The merge reads the newest
-/// panes covering its own window (its newest panes, or its whole chain),
+/// tumbling windows covering its own window (its newest tumbling windows, or its whole chain),
 /// which `tumbling_window_width_ms` divides and the new chain covers; every guarantee
 /// is composed again.
-pub(crate) fn with_pane_chain(
+pub(crate) fn with_tumbling_window_chain(
     roots: &[QueryRoot],
     merge: &Rc<OperatorNode>,
     family: FieldDataType,
@@ -1123,7 +1135,7 @@ pub(crate) fn with_pane_chain(
         ..
     }) = merge.asap()
     else {
-        unreachable!("a merge over a pane chain");
+        unreachable!("a merge over a tumbling-window chain");
     };
     let own = &children[0];
     let Some(ASAPOp::SummaryTumblingWindowChain {
@@ -1137,9 +1149,9 @@ pub(crate) fn with_pane_chain(
         ..
     }) = own.asap()
     else {
-        unreachable!("a merge over a pane chain");
+        unreachable!("a merge over a tumbling-window chain");
     };
-    // The merge's window: its newest panes, or the whole chain.
+    // The merge's window: its newest tumbling windows, or the whole chain.
     let window_ms = own_width * u64::from(own_newest.unwrap_or(*own_count));
     let newest = u32::try_from(window_ms / tumbling_window_width_ms)
         .expect("a reader's window is at most the chain's");
@@ -1237,9 +1249,11 @@ pub(crate) fn with_resized_build(
     Ok(recompose_guarantees(&out)?)
 }
 
-/// The [`ASAPOp::SummaryTumblingWindowChain`] of `candidate`'s panes, with the build's
+/// The [`ASAPOp::SummaryTumblingWindowChain`] of `candidate`'s tumbling windows, with the build's
 /// output names.
-fn pane_chain(candidate: &PaneCandidate) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+fn tumbling_window_chain(
+    candidate: &TumblingWindowCandidate,
+) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
     let Some(ASAPOp::SummaryAgg {
         child: range,
         family,
@@ -1249,7 +1263,7 @@ fn pane_chain(candidate: &PaneCandidate) -> Result<Rc<OperatorNode>, PerComputat
         filter,
     }) = candidate.build.asap()
     else {
-        unreachable!("a pane candidate's build is a SummaryAgg");
+        unreachable!("a tumbling-window candidate's build is a SummaryAgg");
     };
     let mut chain = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child: Rc::clone(range.children()[0]),
@@ -2351,10 +2365,10 @@ mod tests {
     }
 
     /// A count over a window, read from a Count-Min built in tumbling
-    /// panes, keeps the guarantee of one build over the window: Pass 1
+    /// tumbling windows, keeps the guarantee of one build over the window: Pass 1
     /// offers Count-Min for counts, and its merged counters add.
     #[test]
-    fn a_count_from_count_min_panes_keeps_its_guarantee() {
+    fn a_count_from_count_min_tumbling_windows_keeps_its_guarantee() {
         use crate::pass1::per_computation_candidates::{
             compose_logical_candidate, generate_per_computation_candidates,
         };
@@ -2383,18 +2397,18 @@ mod tests {
             })
             .collect();
         let roots: Vec<QueryRoot> = compose_logical_candidate(&inventory, &choice).unwrap();
-        let candidates = pane_candidates(&roots, &[Some(60_000)]);
+        let candidates = tumbling_window_candidates(&roots, &[Some(60_000)]);
         let pass2_candidates = window_composition_pass2_candidates(&roots, &candidates).unwrap();
         let [pass2_candidate] = pass2_candidates.as_slice() else {
             panic!("one Pass 2 candidate: {pass2_candidates:?}")
         };
-        let (QueryRoot::Operator(whole), QueryRoot::Operator(paned)) =
+        let (QueryRoot::Operator(whole), QueryRoot::Operator(windowed)) =
             (&roots[0], &pass2_candidate.roots.as_ref().unwrap()[0])
         else {
             panic!("operator roots")
         };
         assert!(whole.guarantee.is_some());
-        assert_eq!(paned.guarantee, whole.guarantee);
+        assert_eq!(windowed.guarantee, whole.guarantee);
     }
 
     /// The composed candidate of `queries` (each at its own ε, δ = 0.01)
@@ -2478,9 +2492,9 @@ mod tests {
             .expect("a constant bound")
     }
 
-    /// The pane candidates of `roots` as (pane width, pane count).
-    fn panes(roots: &[QueryRoot], interval_ms: &[Option<u64>]) -> Vec<(u64, u32)> {
-        pane_candidates(roots, interval_ms)
+    /// The tumbling-window candidates of `roots` as (tumbling-window width, tumbling-window count).
+    fn tumbling_windows(roots: &[QueryRoot], interval_ms: &[Option<u64>]) -> Vec<(u64, u32)> {
+        tumbling_window_candidates(roots, interval_ms)
             .iter()
             .map(|rule_candidate| {
                 (
@@ -2491,42 +2505,42 @@ mod tests {
             .collect()
     }
 
-    /// A 5-min window evaluated every 2 min, 90 s or 1 min is built in panes
-    /// of gcd(window, interval). A once-per-window reader has one pane,
-    /// which can reuse the newest pane of a longer chain.
+    /// A 5-min window evaluated every 2 min, 90 s or 1 min is built in tumbling windows
+    /// of gcd(window, interval). A once-per-window reader has one tumbling window,
+    /// which can reuse the newest tumbling window of a longer chain.
     #[test]
-    fn pane_width_is_the_gcd_of_the_window_and_the_interval() {
+    fn tumbling_window_width_is_the_gcd_of_the_window_and_the_interval() {
         let roots = chose(
             &[("quantile_over_time(0.99, m[5m])", 0.01)],
             SketchAlgorithm::Kll,
         );
-        assert_eq!(panes(&roots, &[Some(120_000)]), [(60_000, 5)]);
-        assert_eq!(panes(&roots, &[Some(90_000)]), [(30_000, 10)]);
-        assert_eq!(panes(&roots, &[Some(60_000)]), [(60_000, 5)]);
-        assert_eq!(panes(&roots, &[Some(300_000)]), [(300_000, 1)]);
-        assert!(panes(&roots, &[None]).is_empty());
+        assert_eq!(tumbling_windows(&roots, &[Some(120_000)]), [(60_000, 5)]);
+        assert_eq!(tumbling_windows(&roots, &[Some(90_000)]), [(30_000, 10)]);
+        assert_eq!(tumbling_windows(&roots, &[Some(60_000)]), [(60_000, 5)]);
+        assert_eq!(tumbling_windows(&roots, &[Some(300_000)]), [(300_000, 1)]);
+        assert!(tumbling_windows(&roots, &[None]).is_empty());
     }
 
-    /// Past their caps, the pane rule and the reuse subsets name how many
+    /// Past their caps, the tumbling-window rule and the reuse subsets name how many
     /// candidates they found.
     #[test]
-    fn too_many_pane_or_reuse_candidates_name_the_count_found() {
+    fn too_many_tumbling_window_or_reuse_candidates_name_the_count_found() {
         let roots = chose(
             &[("quantile_over_time(0.99, m[5m])", 0.01)],
             SketchAlgorithm::Kll,
         );
-        let panes: Vec<_> = pane_candidates(&roots, &[Some(60_000)])
+        let tumbling_windows: Vec<_> = tumbling_window_candidates(&roots, &[Some(60_000)])
             .into_iter()
             .cycle()
-            .take(MAX_PANE_CANDIDATES + 1)
+            .take(MAX_TUMBLING_WINDOW_CANDIDATES + 1)
             .collect();
-        let error = window_composition_pass2_candidates(&roots, &panes).unwrap_err();
+        let error = window_composition_pass2_candidates(&roots, &tumbling_windows).unwrap_err();
         assert_eq!(
             error.to_string(),
             format!(
-                "found {} summary builds that could be built in tumbling panes, more than \
-                 {MAX_PANE_CANDIDATES}",
-                MAX_PANE_CANDIDATES + 1
+                "found {} summary builds that could be built in tumbling windows, more than \
+                 {MAX_TUMBLING_WINDOW_CANDIDATES}",
+                MAX_TUMBLING_WINDOW_CANDIDATES + 1
             )
         );
         let error = subsets(&[0u8; MAX_REUSE_CANDIDATES + 1], "rollup").unwrap_err();
@@ -2539,11 +2553,11 @@ mod tests {
         );
     }
 
-    /// A range read at an `@` anchor has no panes, however many shifts
+    /// A range read at an `@` anchor has no tumbling windows, however many shifts
     /// stack above the anchored one: `m[5m] @ 100` with an extra
     /// `offset 1m` shift between the range and the anchor is still anchored.
     #[test]
-    fn an_anchor_below_stacked_shifts_has_no_panes() {
+    fn an_anchor_below_stacked_shifts_has_no_tumbling_windows() {
         use asap_types::ir::operator::TimeShift;
         let roots = chose(
             &[("quantile_over_time(0.99, m[5m] @ 100)", 0.01)],
@@ -2556,7 +2570,7 @@ mod tests {
             .into_iter()
             .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
             .expect("a build");
-        assert_eq!(pane_window_ms(&build), None, "one anchored shift");
+        assert_eq!(splittable_window_ms(&build), None, "one anchored shift");
         // Put an `offset 1m` shift between the range and its anchored shift.
         let restacked = build
             .with_new_children(|range| {
@@ -2580,13 +2594,17 @@ mod tests {
                 )
             })
             .unwrap();
-        assert_eq!(pane_window_ms(&restacked), None, "anchor below an offset");
+        assert_eq!(
+            splittable_window_ms(&restacked),
+            None,
+            "anchor below an offset"
+        );
     }
 
-    /// Exact accumulators whose states merge get panes; IRate, which reads
+    /// Exact accumulators whose states merge get tumbling windows; IRate, which reads
     /// the last two samples of the window, does not.
     #[test]
-    fn exact_accumulators_that_merge_get_panes() {
+    fn exact_accumulators_that_merge_get_tumbling_windows() {
         use asap_types::stages::HowToComputeAggregateMeasure;
         let accumulator = |c: &HowToComputeAggregateMeasure| {
             matches!(c, HowToComputeAggregateMeasure::ExactAccumulator(_))
@@ -2598,10 +2616,14 @@ mod tests {
             "max_over_time(m[5m])",
         ] {
             let roots = chose_where(&[(query, 0.01)], accumulator);
-            assert_eq!(panes(&roots, &[Some(60_000)]), [(60_000, 5)], "{query}");
+            assert_eq!(
+                tumbling_windows(&roots, &[Some(60_000)]),
+                [(60_000, 5)],
+                "{query}"
+            );
         }
         let roots = chose_where(&[("irate(m[5m])", 0.01)], accumulator);
-        assert!(panes(&roots, &[Some(60_000)]).is_empty());
+        assert!(tumbling_windows(&roots, &[Some(60_000)]).is_empty());
     }
 
     /// The rule's candidate reads a `SummaryMerge` over one `SummaryTumblingWindowChain` of
@@ -2609,24 +2631,27 @@ mod tests {
     /// build's output names, and keeps the whole build's guarantee (a KLL
     /// merges into the state of one build over the union).
     #[test]
-    fn panes_replace_the_build_with_a_merged_chain() {
+    fn tumbling_windows_replace_the_build_with_a_merged_chain() {
         let roots = chose(
             &[("quantile_over_time(0.99, m[5m])", 0.01)],
             SketchAlgorithm::Kll,
         );
-        let rule_candidates = pane_candidates(&roots, &[Some(60_000)]);
+        let rule_candidates = tumbling_window_candidates(&roots, &[Some(60_000)]);
         let pass2_candidates =
             window_composition_pass2_candidates(&roots, &rule_candidates).unwrap();
         let [pass2_candidate] = pass2_candidates.as_slice() else {
             panic!("one Pass 2 candidate: {pass2_candidates:?}")
         };
         assert_eq!(
-            positions(&rule_candidates, &pass2_candidate.pane_candidates, |c| &c
-                .build),
+            positions(
+                &rule_candidates,
+                &pass2_candidate.tumbling_window_candidates,
+                |c| &c.build
+            ),
             [0]
         );
-        let panes = pass2_candidate.roots.as_ref().unwrap();
-        let QueryRoot::Operator(root) = &panes[0] else {
+        let tumbling_windows = pass2_candidate.roots.as_ref().unwrap();
+        let QueryRoot::Operator(root) = &tumbling_windows[0] else {
             panic!("operator root")
         };
         root.validate_structure().unwrap();
@@ -2671,9 +2696,9 @@ mod tests {
 
     /// Two builds that could be split give three candidates: each alone and
     /// both, in binary-counter order. Their windows (5 and 2 min) nest on
-    /// 1-min panes, so both together are also offered as one shared chain.
+    /// 1-min tumbling windows, so both together are also offered as one shared chain.
     #[test]
-    fn every_non_empty_subset_of_the_pane_candidates_is_a_pass2_candidate() {
+    fn every_non_empty_subset_of_the_tumbling_window_candidates_is_a_pass2_candidate() {
         let roots = chose(
             &[
                 ("quantile_over_time(0.99, m[5m])", 0.01),
@@ -2681,7 +2706,7 @@ mod tests {
             ],
             SketchAlgorithm::Kll,
         );
-        let rule_candidates = pane_candidates(&roots, &[Some(60_000), Some(60_000)]);
+        let rule_candidates = tumbling_window_candidates(&roots, &[Some(60_000), Some(60_000)]);
         assert_eq!(rule_candidates.len(), 2);
         let subsets: Vec<_> = window_composition_pass2_candidates(&roots, &rule_candidates)
             .unwrap()
@@ -2689,7 +2714,9 @@ mod tests {
             .map(|v| {
                 assert!(v.roots.is_ok());
                 (
-                    positions(&rule_candidates, &v.pane_candidates, |c| &c.build),
+                    positions(&rule_candidates, &v.tumbling_window_candidates, |c| {
+                        &c.build
+                    }),
                     v.shared_chains.clone(),
                 )
             })
@@ -2702,7 +2729,7 @@ mod tests {
                 (vec![0, 1], vec![]),
                 (
                     vec![0, 1],
-                    vec![SharedPaneChain {
+                    vec![SharedTumblingWindowChain {
                         members: vec![0, 1],
                         tumbling_window_width_ms: 60_000,
                         tumbling_window_count: 5
@@ -2712,7 +2739,7 @@ mod tests {
         );
     }
 
-    /// The pane chains in `roots`, one per distinct node.
+    /// The tumbling-window chains in `roots`, one per distinct node.
     fn chains(roots: &[QueryRoot]) -> Vec<Rc<OperatorNode>> {
         let mut found: Vec<Rc<OperatorNode>> = Vec::new();
         for root in roots {
@@ -2742,13 +2769,13 @@ mod tests {
     }
 
     /// A 1-min and a 5-min KLL quantile over one metric, both every 10 s,
-    /// are 6 and 30 panes of 10 s; the 1-min window is the newest 6 of the
+    /// are 6 and 30 tumbling windows of 10 s; the 1-min window is the newest 6 of the
     /// 5-min one. Besides each query's own chain, the rule offers one chain
-    /// of 30 panes read by both: the 5-min query merges every pane, the
+    /// of 30 tumbling windows read by both: the 5-min query merges every tumbling window, the
     /// 1-min one only the newest 6, and each keeps the guarantee of its own
     /// whole-window build (a KLL merges exactly).
     #[test]
-    fn nested_windows_on_equal_panes_share_one_chain() {
+    fn nested_windows_on_equal_tumbling_windows_share_one_chain() {
         let roots = chose(
             &[
                 ("quantile_over_time(0.5, m[1m])", 0.01),
@@ -2756,9 +2783,9 @@ mod tests {
             ],
             SketchAlgorithm::Kll,
         );
-        let rule_candidates = pane_candidates(&roots, &[Some(10_000), Some(10_000)]);
+        let rule_candidates = tumbling_window_candidates(&roots, &[Some(10_000), Some(10_000)]);
         assert_eq!(
-            panes(&roots, &[Some(10_000), Some(10_000)]),
+            tumbling_windows(&roots, &[Some(10_000), Some(10_000)]),
             [(10_000, 6), (10_000, 30)]
         );
         let pass2_candidates =
@@ -2772,7 +2799,7 @@ mod tests {
         };
         assert_eq!(
             shared.shared_chains,
-            [SharedPaneChain {
+            [SharedTumblingWindowChain {
                 members: vec![0, 1],
                 tumbling_window_width_ms: 10_000,
                 tumbling_window_count: 30
@@ -2801,13 +2828,13 @@ mod tests {
         // The per-query chains stay candidates: two chains, each read in full.
         let separate = pass2_candidates
             .iter()
-            .find(|c| c.pane_candidates.len() == 2 && c.shared_chains.is_empty())
-            .expect("both builds in their own panes");
+            .find(|c| c.tumbling_window_candidates.len() == 2 && c.shared_chains.is_empty())
+            .expect("both builds in their own tumbling windows");
         assert_eq!(chains(separate.roots.as_ref().unwrap()).len(), 2);
     }
 
     /// A 15-min quantile every minute and the same quantile every 5 min
-    /// are 15 × 1-min and 3 × 5-min panes. The rule also offers one chain
+    /// are 15 × 1-min and 3 × 5-min tumbling windows. The rule also offers one chain
     /// at the finer width, 15 × 1 min, that both read in full, each at its
     /// own interval; a 1-hour quantile every 5 min (12 × 5 min) reads the
     /// newest 60 of one 60 × 1-min chain with them.
@@ -2821,8 +2848,11 @@ mod tests {
             SketchAlgorithm::Kll,
         );
         let grids = [Some(60_000), Some(300_000)];
-        assert_eq!(panes(&roots, &grids), [(60_000, 15), (300_000, 3)]);
-        let rule_candidates = pane_candidates(&roots, &grids);
+        assert_eq!(
+            tumbling_windows(&roots, &grids),
+            [(60_000, 15), (300_000, 3)]
+        );
+        let rule_candidates = tumbling_window_candidates(&roots, &grids);
         let pass2_candidates =
             window_composition_pass2_candidates(&roots, &rule_candidates).unwrap();
         let shared = pass2_candidates
@@ -2831,7 +2861,7 @@ mod tests {
             .expect("a shared-chain candidate");
         assert_eq!(
             shared.shared_chains,
-            [SharedPaneChain {
+            [SharedTumblingWindowChain {
                 members: vec![0, 1],
                 tumbling_window_width_ms: 60_000,
                 tumbling_window_count: 15
@@ -2863,7 +2893,7 @@ mod tests {
             ],
             SketchAlgorithm::Kll,
         );
-        let rule_candidates = pane_candidates(&roots, &grids);
+        let rule_candidates = tumbling_window_candidates(&roots, &grids);
         let shared = window_composition_pass2_candidates(&roots, &rule_candidates)
             .unwrap()
             .into_iter()
@@ -2882,10 +2912,10 @@ mod tests {
         ));
     }
 
-    /// A build whose panes the group's finest panes do not divide gets its
+    /// A build whose tumbling windows the group's finest tumbling windows do not divide gets its
     /// own chain without breaking the group: 20-min and 10-min quantiles
-    /// every 2 min (2-min panes) share one chain, and a 15-min quantile
-    /// every 3 min (3-min panes) stays apart.
+    /// every 2 min (2-min tumbling windows) share one chain, and a 15-min quantile
+    /// every 3 min (3-min tumbling windows) stays apart.
     #[test]
     fn a_build_on_an_incompatible_grid_does_not_break_a_shared_chain() {
         let roots = chose(
@@ -2898,18 +2928,18 @@ mod tests {
         );
         let grids = [Some(120_000), Some(120_000), Some(180_000)];
         assert_eq!(
-            panes(&roots, &grids),
+            tumbling_windows(&roots, &grids),
             [(120_000, 10), (120_000, 5), (180_000, 5)]
         );
-        let rule_candidates = pane_candidates(&roots, &grids);
+        let rule_candidates = tumbling_window_candidates(&roots, &grids);
         let shared = window_composition_pass2_candidates(&roots, &rule_candidates)
             .unwrap()
             .into_iter()
-            .find(|c| c.pane_candidates.len() == 3 && !c.shared_chains.is_empty())
-            .expect("a shared chain among all three builds in panes");
+            .find(|c| c.tumbling_window_candidates.len() == 3 && !c.shared_chains.is_empty())
+            .expect("a shared chain among all three builds in tumbling windows");
         assert_eq!(
             shared.shared_chains,
-            [SharedPaneChain {
+            [SharedTumblingWindowChain {
                 members: vec![0, 1],
                 tumbling_window_width_ms: 120_000,
                 tumbling_window_count: 10
@@ -2919,15 +2949,15 @@ mod tests {
     }
 
     /// The shared chains (width, count) of every Pass 2 candidate that
-    /// paned all of `rule_candidates`.
+    /// windowed all of `rule_candidates`.
     fn shared_grids(
         roots: &[QueryRoot],
-        rule_candidates: &[PaneCandidate],
+        rule_candidates: &[TumblingWindowCandidate],
     ) -> Vec<Vec<(u64, u32)>> {
         window_composition_pass2_candidates(roots, rule_candidates)
             .unwrap()
             .into_iter()
-            .filter(|c| c.pane_candidates.len() == rule_candidates.len())
+            .filter(|c| c.tumbling_window_candidates.len() == rule_candidates.len())
             .map(|c| {
                 c.shared_chains
                     .iter()
@@ -2942,7 +2972,7 @@ mod tests {
             .collect()
     }
 
-    /// Panes neither member's divide (3-min and 5-min panes of a 15-min
+    /// Tumbling windows neither member's divide (3-min and 5-min tumbling windows of a 15-min
     /// window) are shared at their gcd, 1 min, as one more candidate beside
     /// the per-query chains; no member's own width serves both.
     #[test]
@@ -2955,20 +2985,23 @@ mod tests {
             SketchAlgorithm::Kll,
         );
         let grids = [Some(180_000), Some(300_000)];
-        assert_eq!(panes(&roots, &grids), [(180_000, 5), (300_000, 3)]);
-        let rule_candidates = pane_candidates(&roots, &grids);
+        assert_eq!(
+            tumbling_windows(&roots, &grids),
+            [(180_000, 5), (300_000, 3)]
+        );
+        let rule_candidates = tumbling_window_candidates(&roots, &grids);
         assert_eq!(
             shared_grids(&roots, &rule_candidates),
             [vec![], vec![(60_000, 15)]]
         );
     }
 
-    /// A 15-min quantile every minute (15 × 1-min panes) and a 6-min one
-    /// every 90 s (4 × 90-s panes): one chain of 30-s panes over 15 min
+    /// A 15-min quantile every minute (15 × 1-min tumbling windows) and a 6-min one
+    /// every 90 s (4 × 90-s tumbling windows): one chain of 30-s tumbling windows over 15 min
     /// serves both, the 6-min query merging the newest 12. It comes beside
     /// the per-query chains, and Stage 3 prices which is cheaper.
     #[test]
-    fn queries_at_60_and_90_seconds_share_one_chain_of_30_second_panes() {
+    fn queries_at_60_and_90_seconds_share_one_chain_of_30_second_tumbling_windows() {
         let roots = chose(
             &[
                 ("quantile_over_time(0.5, m[15m])", 0.01),
@@ -2977,8 +3010,11 @@ mod tests {
             SketchAlgorithm::Kll,
         );
         let grids = [Some(60_000), Some(90_000)];
-        assert_eq!(panes(&roots, &grids), [(60_000, 15), (90_000, 4)]);
-        let rule_candidates = pane_candidates(&roots, &grids);
+        assert_eq!(
+            tumbling_windows(&roots, &grids),
+            [(60_000, 15), (90_000, 4)]
+        );
+        let rule_candidates = tumbling_window_candidates(&roots, &grids);
         assert_eq!(
             shared_grids(&roots, &rule_candidates),
             [vec![], vec![(30_000, 30)]]
@@ -2999,7 +3035,7 @@ mod tests {
 
     /// When the members' finest width divides the others, the gcd is that
     /// width: one shared candidate, not two equal ones. With 1-min, 2-min
-    /// and 3-min panes, the divisible group (1 and 2 min, the 3-min build
+    /// and 3-min tumbling windows, the divisible group (1 and 2 min, the 3-min build
     /// joining at 1 min too) is already the gcd grid.
     #[test]
     fn the_gcd_grid_is_not_listed_twice_when_a_member_width_is_the_gcd() {
@@ -3012,7 +3048,7 @@ mod tests {
             SketchAlgorithm::Kll,
         );
         let grids = [Some(60_000), Some(120_000), Some(180_000)];
-        let rule_candidates = pane_candidates(&roots, &grids);
+        let rule_candidates = tumbling_window_candidates(&roots, &grids);
         assert_eq!(
             shared_grids(&roots, &rule_candidates),
             [vec![], vec![(60_000, 12)]]
@@ -3040,7 +3076,7 @@ mod tests {
         };
         let strict = family(&builds(&roots[0])[0]);
         assert_ne!(strict, family(&builds(&roots[1])[0]));
-        let rule_candidates = pane_candidates(&roots, &[Some(10_000), Some(10_000)]);
+        let rule_candidates = tumbling_window_candidates(&roots, &[Some(10_000), Some(10_000)]);
         let pass2_candidates =
             window_composition_pass2_candidates(&roots, &rule_candidates).unwrap();
         let shared = pass2_candidates
@@ -3236,7 +3272,7 @@ mod tests {
 
     /// The rule reuses only a finer computation the workload already has:
     /// keys that are not a superset, another metric, window or measure, or
-    /// a lone query, give no pane candidate.
+    /// a lone query, give no tumbling-window candidate.
     #[test]
     fn rollup_needs_a_finer_computation_of_the_same_rows() {
         for queries in [

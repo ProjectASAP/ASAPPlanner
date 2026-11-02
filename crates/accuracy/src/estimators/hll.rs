@@ -2,7 +2,7 @@
 //!
 //! This is conditional on independent uniform bucket hashes and an enforced
 //! upper bound on distinct items in the complete evaluation population (including
-//! all merged panes). It is not an RSE-to-normal conversion or an ERP fit.
+//! all merged tumbling windows). It is not an RSE-to-normal conversion or an ERP fit.
 
 use super::*;
 
@@ -106,7 +106,7 @@ pub(crate) fn classic_guarantee(
                 "max_distinct": format!("{MAX_DISTINCT}[{source}]"),
                 "relative_error": relative_error,
                 "hash_assumption": "independent_uniform_buckets",
-                "population_scope": "complete_evaluation_including_merged_panes"}),
+                "population_scope": "complete_evaluation_including_merged_tumbling_windows"}),
             query: "Cardinality".into(),
         }],
     ))
@@ -170,7 +170,7 @@ impl ClassicHllConfidence {
                 params: serde_json::json!({"precision": precision,
                     "max_distinct": self.max_distinct, "relative_error": self.relative_error,
                     "hash_assumption": "independent_uniform_buckets",
-                    "population_scope": "complete_evaluation_including_merged_panes"}),
+                    "population_scope": "complete_evaluation_including_merged_tumbling_windows"}),
                 query: "Cardinality".into(),
             }],
         ))

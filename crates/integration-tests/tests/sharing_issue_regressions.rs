@@ -81,10 +81,10 @@ fn exact_coarse_sum_reuses_fine_sum() {
     );
 }
 
-/// #924: the 1m sum reads the newest pane of the existing 2m chain.
+/// #924: the 1m sum reads the newest tumbling window of the existing 2m chain.
 #[test]
 #[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
-fn nested_exact_sum_reuses_newest_panes() {
+fn nested_exact_sum_reuses_newest_tumbling_windows() {
     let related = workload(924);
     let mut base = related.clone();
     base.queries.truncate(1);
@@ -207,7 +207,7 @@ fn sql_count_topk_has_a_fused_raw_row_heap() {
 fn exact_rollup_catalog_crosses_identical_per_series_average() {
     use asap_logical_asap_optimization::{
         test_support::{generate_per_computation_candidates, try_populate_pass1},
-        PaneWidthDomain,
+        TumblingWindowWidthDomain,
     };
     use asap_types::stages::OriginOfCandidateForMemoGroup;
     let roots: Vec<_> = Planner::new(FuzzSettings::default())
@@ -224,7 +224,7 @@ fn exact_rollup_catalog_crosses_identical_per_series_average() {
     let expanded =
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
             memo,
-            PaneWidthDomain::SeedGrids,
+            TumblingWindowWidthDomain::SeedGrids,
         )
         .unwrap();
     let owner = expanded.query_roots[1].as_operator().unwrap().0 as usize;
@@ -245,7 +245,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
     use asap_executor::values::Value;
     use asap_logical_asap_optimization::{
         test_support::{generate_per_computation_candidates, try_populate_pass1},
-        PaneWidthDomain,
+        TumblingWindowWidthDomain,
     };
     use asap_types::ir::{operator::AggIntent, NonASAPOp};
     use asap_types::stages::OriginOfCandidateForMemoGroup;
@@ -263,7 +263,7 @@ fn filtered_group_preserves_sql_empty_and_null_semantics() {
     let expanded =
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
             memo,
-            PaneWidthDomain::SeedGrids,
+            TumblingWindowWidthDomain::SeedGrids,
         )
         .unwrap();
     let (owner, candidate) = expanded.candidates.iter().enumerate().flat_map(|(owner, candidates)| candidates.iter().map(move |c| (owner,c)))
@@ -403,7 +403,7 @@ fn sql_count_rollup_executes_with_integer_results() {
     use asap_executor::values::Value;
     use asap_logical_asap_optimization::{
         test_support::{generate_per_computation_candidates, try_populate_pass1},
-        PaneWidthDomain,
+        TumblingWindowWidthDomain,
     };
     use asap_types::ir::ASAPOp;
     use asap_types::stages::OriginOfCandidateForMemoGroup;
@@ -430,7 +430,7 @@ fn sql_count_rollup_executes_with_integer_results() {
         let expanded =
             asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
                 memo,
-                PaneWidthDomain::SeedGrids,
+                TumblingWindowWidthDomain::SeedGrids,
             )
             .unwrap();
         let (owner, candidate) = expanded
@@ -533,7 +533,7 @@ fn sql_sum_shares_nested_windows_and_slower_readers() {
 fn sketch_rollup_crosses_inner_range_function() {
     use asap_logical_asap_optimization::{
         test_support::{generate_per_computation_candidates, try_populate_pass1},
-        PaneWidthDomain,
+        TumblingWindowWidthDomain,
     };
     use asap_types::stages::OriginOfCandidateForMemoGroup;
     let mut w = workload(923);
@@ -556,7 +556,7 @@ fn sketch_rollup_crosses_inner_range_function() {
     let expanded =
         asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups(
             memo,
-            PaneWidthDomain::SeedGrids,
+            TumblingWindowWidthDomain::SeedGrids,
         )
         .unwrap();
     let owner = expanded.query_roots[1].as_operator().unwrap().0 as usize;

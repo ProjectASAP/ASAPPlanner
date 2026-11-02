@@ -28,8 +28,8 @@ pub enum Materialization {
     /// queries of the same evaluation and discarded after it.
     MatAtQuery(Medium),
     /// Runs at query time and keeps its output across evaluations: a
-    /// tumbling-pane chain whose readers evaluate together every pane
-    /// width builds its newest pane at each evaluation and keeps the older
+    /// tumbling-window chain whose readers evaluate together every tumbling window
+    /// width builds its newest tumbling window at each evaluation and keeps the older
     /// ones for the next (#509 Example 4's B3). Offered only when the
     /// deployment keeps query-time results.
     MatAtQueryKeptAcrossEvaluations(Medium),

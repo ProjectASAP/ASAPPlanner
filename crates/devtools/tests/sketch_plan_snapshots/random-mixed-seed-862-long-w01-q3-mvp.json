@@ -11402,9 +11402,6 @@
       "stage2_node_id": 1
     }
   ],
-  "tumbling_window_retention_ms": {
-    "1": 300000
-  },
   "proven_optimal": true,
   "queries": [
     "avg by (region) (quantile_over_time(0.95, data[300s]))"
@@ -11440,7 +11437,7 @@
         "1": {
           "cost_per_second": 0.0000190019900264,
           "cpu_core_seconds_per_second": 0.0002,
-          "detail": "build DDSketch in 300 panes of 1000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 16518880000 bytes",
+          "detail": "build DDSketch in 300 tumbling windows of 1000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 16518880000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "price_source": "analytical",
@@ -12359,9 +12356,9 @@
                     "kind": "unknown_or_signed"
                   }
                 },
+                "reduction": "PerEntity",
                 "tumbling_window_count": 300,
-                "tumbling_window_width_ms": 1000,
-                "reduction": "PerEntity"
+                "tumbling_window_width_ms": 1000
               }
             }
           }
@@ -13416,6 +13413,9 @@
       ],
       "scalar_roots": []
     },
-    "display_name": "Q1 Sum acc + DDSketch ×300 panes + Count acc · ingestion time: DDSketch for Q1, 300 × 1s panes"
+    "display_name": "Q1 Sum acc + DDSketch ×300 tumbling windows + Count acc · ingestion time: DDSketch for Q1, 300 × 1s tumbling windows"
+  },
+  "tumbling_window_retention_ms": {
+    "1": 300000
   }
 }

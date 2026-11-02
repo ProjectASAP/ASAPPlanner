@@ -7,7 +7,7 @@ Audience: developers moving computation from ASAPQuery-backend into
 
 Logical selection decides what to compute. A `MaterializationAssignment` sets
 node timing (Stage 2 materialization chooses it per physical candidate). `physical_planner::compile` turns a timed `PhysicalASAPDAG` into physical
-operator DAGs. The backend owns ingestion, panes, storage, stored-state
+operator DAGs. The backend owns ingestion, tumbling windows, storage, stored-state
 evaluation, external exact engines, pricing/selection, and execution scheduling.
 
 A backend lowering is *covered* when `compile` accepts the corresponding
@@ -138,7 +138,7 @@ average switches to an incremental mean once the running sum would overflow.
 The grouped path also serves SQL `SUM`/`AVG` over Float64, which are now
 compensated the same way.
 Stored exact `Sum` now retains a Kahan-Neumaier compensation term through
-updates, pane merges, and persistence. A truly overflowing sum remains infinite; the
+updates, tumbling-window merges, and persistence. A truly overflowing sum remains infinite; the
 checked `avg_over_time` division still rejects that case.
 
 Totals after this change: 20 Supported, 4 Partial, 5 Missing, 2 Backend.

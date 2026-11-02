@@ -125,7 +125,7 @@ mod tests {
     use asap_logical_asap_optimization::test_support::lower_promql;
     use asap_logical_asap_optimization::test_support::sharing_rules_and_shared_state_groups;
     use asap_logical_asap_optimization::test_support::try_populate_pass1;
-    use asap_logical_asap_optimization::PaneWidthDomain;
+    use asap_logical_asap_optimization::TumblingWindowWidthDomain;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::{ASAPOp, NonASAPOp, QueryRoot};
@@ -149,7 +149,8 @@ mod tests {
                 .unwrap();
         let memo = try_populate_pass1(initial, &candidates).unwrap();
         (
-            sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap(),
+            sharing_rules_and_shared_state_groups(memo, TumblingWindowWidthDomain::Complete)
+                .unwrap(),
             output_groups,
         )
     }
@@ -315,11 +316,11 @@ mod tests {
         assert_eq!(physical.roots.len(), 2);
     }
 
-    // Union-label pane sharing survives typed connection selection and real
+    // Union-label tumbling window sharing survives typed connection selection and real
     // Stage 2, while each query receives only its original output columns.
     #[test]
-    fn widened_label_readers_materialize_one_shared_pane_chain() {
-        check_shared_pane_plan(
+    fn widened_label_readers_materialize_one_shared_tumbling_window_chain() {
+        check_shared_tumbling_window_plan(
             [
                 "avg by (job) (quantile_over_time(0.95, latency[5m]))",
                 "avg by (region) (quantile_over_time(0.99, latency[5m]))",
@@ -331,10 +332,10 @@ mod tests {
     }
 
     // Different capacities and windows can share a larger chain while the short
-    // query reads only its newest panes; Stage 2, accuracy and pricing all validate.
+    // query reads only its newest tumbling windows; Stage 2, accuracy and pricing all validate.
     #[test]
-    fn different_capacity_and_horizon_readers_share_one_validated_pane_chain() {
-        check_shared_pane_plan(
+    fn different_capacity_and_horizon_readers_share_one_validated_tumbling_window_chain() {
+        check_shared_tumbling_window_plan(
             [
                 "avg by (job) (quantile_over_time(0.95, latency[5m]))",
                 "avg by (job) (quantile_over_time(0.99, latency[15m]))",
@@ -345,7 +346,7 @@ mod tests {
         );
     }
 
-    fn check_shared_pane_plan(
+    fn check_shared_tumbling_window_plan(
         queries: [&str; 2],
         errors: [f64; 2],
         labels: &[&str],
@@ -391,7 +392,8 @@ mod tests {
         asap_logical_asap_optimization::test_support::add_local_window_composition(
             &mut memo, &entries,
         );
-        let memo = sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap();
+        let memo = sharing_rules_and_shared_state_groups(memo, TumblingWindowWidthDomain::Complete)
+            .unwrap();
         let source = build_candidate_inventory(&memo, &outputs, |_| Ok(0.0)).unwrap();
         let deployment = asap_logical_asap_optimization::DeploymentCapabilities {
             raw_data_retained: false,
@@ -477,7 +479,7 @@ mod tests {
             else {
                 unreachable!("selected chain checked above")
             };
-            // The complete width domain permits different pane counts. Verify
+            // The complete width domain permits different tumbling-window counts. Verify
             // the short reader's coverage, not one traversal-dependent width.
             assert!(physical.plan.dag.nodes.iter().any(|node| matches!(
                 node.payload, asap_types::ir::Operator::ASAP(ASAPOp::SummaryMerge {newest_tumbling_windows: Some(count), ..})
@@ -488,7 +490,7 @@ mod tests {
         assert!(selected.node_of(*chains[0]).is_some());
         // Validate this exact selected shared graph. Bounded search incumbents
         // need not choose it, and synthetic activation prices are never bills.
-        physical.plan.id = "shared-pane-regression".into();
+        physical.plan.id = "shared-tumbling-window-regression".into();
         let mut evaluator = crate::PlanSelector::new(
             &entries,
             &data,
@@ -501,7 +503,7 @@ mod tests {
         evaluator.offer(&physical.plan).unwrap();
         let (selection, physical) = evaluator
             .finish()
-            .expect("shared pane graph must pass accuracy and cost validation");
+            .expect("shared tumbling window graph must pass accuracy and cost validation");
         assert!(selection.costs[&selection.selected]
             .cost_per_second
             .unwrap()
@@ -565,7 +567,7 @@ mod tests {
             .unwrap();
             let memo = sharing_rules_and_shared_state_groups(
                 try_populate_pass1(initial, &generated).unwrap(),
-                PaneWidthDomain::Complete,
+                TumblingWindowWidthDomain::Complete,
             )
             .unwrap();
             let mut inventory = build_candidate_inventory(&memo, &outputs, |node| {
@@ -742,7 +744,8 @@ mod tests {
             fused.accuracy_budget_parts = 2;
             memo.candidates[owner].push(fused);
             let memo =
-                sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap();
+                sharing_rules_and_shared_state_groups(memo, TumblingWindowWidthDomain::Complete)
+                    .unwrap();
             let mut inventory = build_candidate_inventory(&memo, &outputs, |node| {
                 Ok(if matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })) {
                     1000.0

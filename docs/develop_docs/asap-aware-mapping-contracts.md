@@ -81,8 +81,8 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
   options: `NotMaterialized` always; `MatAtIngestion(Memory)` when the build
   is eligible to run as data arrives; `MatAtQuery(Memory)` when two or more
   queries read it (reused within one evaluation);
-  `MatAtQueryKeptAcrossEvaluations(Memory)` for a tumbling-pane chain that
-  builds one new pane per evaluation, when the deployment declares
+  `MatAtQueryKeptAcrossEvaluations(Memory)` for a tumbling-window chain that
+  builds one new tumbling window per evaluation, when the deployment declares
   `query_time_results_retained`.
 - One `PhysicalCandidate` per assignment, the all-`NotMaterialized` one first
   (`P<n>`, then `P<n>-m<k>`). An assignment that puts a build at ingestion
@@ -128,7 +128,7 @@ asap-physical-asap-optimization -p asap-plan-selection -p asap-types
 | --- | --- |
 | What a query means | the frontend (Stage 0) |
 | Which computations exist and how each may be computed | Pass 1 |
-| What is shared, split into panes or reused | Pass 2 |
+| What is shared, split into tumbling windows or reused | Pass 2 |
 | When each build runs and whether it is kept | Stage 2 |
 | Which plan is valid and which is chosen | Stage 3 |
 | What the executor can build, retain and how it is priced | the deployment, through `PlanningModels` (`DeploymentCapabilities`, `CostInputs`, `AccuracyModel`) |

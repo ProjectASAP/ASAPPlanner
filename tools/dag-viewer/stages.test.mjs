@@ -1,4 +1,4 @@
-// Node tests of stages.js (no DOM): pane-chain expansion, the queries that
+// Node tests of stages.js (no DOM): tumbling-window-chain expansion, the queries that
 // reach each node, the highlighted neighborhoods and the grouped materialized
 // outputs, over the committed seed-862 workload example; the elements load
 // into the vendored cytoscape (headless), which refuses duplicate ids and
@@ -36,18 +36,20 @@ test('durations read largest unit first', () => {
   assert.equal(call('durationText', 580000), '9 min 40 s');
   assert.equal(call('durationText', 20000), '20 s');
   assert.equal(call('durationText', 3600000), '1 h');
-  assert.equal(call('paneWindowText', 0, 20000), 't−20 s … t');
-  assert.equal(call('paneWindowText', 2, 20000), 't−1 min … t−40 s');
+  assert.equal(call('tumblingWindowTimeText', 0, 20000), 't−20 s … t');
+  assert.equal(call('tumblingWindowTimeText', 2, 20000), 't−1 min … t−40 s');
 });
 
-test('a collapsed chain is one node; expanded, one build, range and shift per pane', () => {
+test('a collapsed chain is one node; expanded, one build, range and shift per tumbling window', () => {
   const collapsed = call('stageLaneElements', dag, { physical: true, queryIds });
   assert.ok(nodesOf(collapsed).some((e) => e.data.id === `n${chain.id}` && e.data.expandable));
   const expanded = call('stageLaneElements', dag, { physical: true, queryIds, expandedChains: [chain.id] });
-  const panes = nodesOf(expanded).filter((e) => e.data.paneOf === chain.id);
-  assert.equal(panes.filter((e) => e.data.kind === 'pane').length, body.tumbling_window_count);
-  assert.equal(panes.filter((e) => e.data.kind === 'TimeRange').length, body.tumbling_window_count);
-  assert.equal(panes.filter((e) => e.data.kind === 'TimeShift').length, body.tumbling_window_count - 1);
+  const tumblingWindows = nodesOf(expanded).filter((e) => e.data.tumblingWindowOf === chain.id);
+  assert.equal(tumblingWindows.filter((e) => e.data.kind === 'tumblingWindow').length, body.tumbling_window_count);
+  assert.equal(tumblingWindows.filter((e) => e.data.kind === 'TimeRange').length, body.tumbling_window_count);
+  assert.equal(tumblingWindows.filter((e) => e.data.kind === 'TimeShift').length, body.tumbling_window_count - 1);
+  // Each expanded node carries the one class app.js styles with a dashed border.
+  assert.ok(tumblingWindows.every((e) => e.classes.split(' ').includes('tumblingWindow')));
   const ids = new Set(nodesOf(expanded).map((e) => e.data.id));
   for (const edge of edgesOf(expanded)) {
     assert.ok(ids.has(edge.data.source) && ids.has(edge.data.target), edge.data.id);
@@ -62,7 +64,7 @@ test('a collapsed chain is one node; expanded, one build, range and shift per pa
   assert.equal(cy.elements('.dimmed').length, all.length - keep.size);
 });
 
-test('a merge of the newest panes reads only those panes, and says so', () => {
+test('a merge of the newest tumbling windows reads only those tumbling windows, and says so', () => {
   const partial = JSON.parse(JSON.stringify(dag));
   const merge = partial.nodes.find((n) => n.payload.ASAP && n.payload.ASAP.SummaryMerge
     && partial.edges.some((e) => e.consumer === n.id && e.producer === chain.id));
@@ -72,7 +74,7 @@ test('a merge of the newest panes reads only those panes, and says so', () => {
   const into = edgesOf(elements).filter((e) => e.data.target === `n${merge.id}` && e.data.source.startsWith(`n${chain.id}p`));
   assert.equal(into.map((e) => e.data.source).sort().join(), `n${chain.id}p0,n${chain.id}p1`);
   const label = nodesOf(elements).find((e) => e.data.id === `n${merge.id}`).data.label;
-  assert.match(label, /newest 2 panes/);
+  assert.match(label, /newest 2 tumbling windows/);
 });
 
 test('every node lists the queries reaching it; shared nodes say how many', () => {
@@ -97,11 +99,11 @@ test('a query keeps its own nodes and a node its neighborhood', () => {
   assert.ok(!around.has(`n${dag.roots[8]}`));
 });
 
-test('materialized views group by pane chain', () => {
+test('materialized views group by tumbling-window chain', () => {
   const groups = call('materializedViewGroups', doc);
   assert.equal(groups.length, 6);
-  assert.equal(groups.reduce((n, g) => n + g.panes.length, 0), doc.stage3_plan_selection.materialized_views.length);
-  assert.equal(groups[0].panesText, `${body.tumbling_window_count} × 20 s`);
+  assert.equal(groups.reduce((n, g) => n + g.tumblingWindows.length, 0), doc.stage3_plan_selection.materialized_views.length);
+  assert.equal(groups[0].tumblingWindowsText, `${body.tumbling_window_count} × 20 s`);
 });
 
 test('the candidate header shows the selection\'s warnings', () => {
@@ -158,7 +160,7 @@ test('a memo-MILP document shows its shared sketch, readers and certified summar
   const chain = view.sharedUnits.find((u) => u.kind === 'coupling site · SummaryTumblingWindowChain');
   assert.deepEqual([...chain.readers], ['G3', 'G4']);
   assert.deepEqual([...chain.queries], ['q1', 'q2']);
-  assert.match(chain.threshold, /^1 min panes over 1 h · DDSketch · alpha 0.05/);
+  assert.match(chain.threshold, /^1 min tumbling windows over 1 h · DDSketch · alpha 0.05/);
   assert.equal(view.groups.find((g) => g.id === 'G3').chosen, 'TumblingWindows · Project · at S1');
 });
 
@@ -222,7 +224,9 @@ test('a document written before the tumbling-window rename (#1163) upgrades to t
     .replaceAll('"tumbling_window_width_ms"', '"pane_width_ms"')
     .replaceAll('"tumbling_window_count"', '"pane_count"')
     .replaceAll('"newest_tumbling_windows"', '"newest_panes"')
-    .replaceAll('"tumbling_window_retention_ms"', '"pane_retention_ms"'));
+    .replaceAll('"tumbling_window_retention_ms"', '"pane_retention_ms"')
+    .replaceAll('"tumbling_window_width_domain"', '"pane_width_domain"')
+    .replaceAll('"tumbling_window_widths_pending"', '"pane_widths_pending"'));
   assert.ok(JSON.stringify(old).includes('"PaneChain"'));
   assert.deepEqual(call('upgradeTumblingWindowNames', old), doc);
 });

@@ -71,10 +71,10 @@ To run it, see [RUNNING.md](RUNNING.md).
   series, or one shared instance. A standalone scalar query (`time()`,
   `scalar(v)`, `1 + 2`) is a dashed `Scalar` node over the nodes it reads.
   Query roots have a thick border. A node that several queries' roots reach
-  says `shared ×n`. A `SummaryTumblingWindowChain` is one node (`30 panes × 20 s`); clicking
-  it draws its panes, newest first, each a `TimeShift` by its offset (none
-  for the newest), a `TimeRange` of one pane and the pane's build with its
-  window (`window t−40 s … t−20 s`), and clicking a pane folds them back.
+  says `shared ×n`. A `SummaryTumblingWindowChain` is one node (`30 tumbling windows × 20 s`); clicking
+  it draws its tumbling windows, newest first, each a `TimeShift` by its offset (none
+  for the newest), a `TimeRange` of one tumbling window and the tumbling window's build with its
+  window (`window t−40 s … t−20 s`), and clicking a tumbling window folds them back.
   This is display only: the document keeps the chain.
 - **Enumerated DAGs**, between the Stage 0 and Stage 1 lanes, shown only
   when the document has `memo.enumeration`: the complete candidate DAGs the
@@ -104,10 +104,10 @@ To run it, see [RUNNING.md](RUNNING.md).
   the background goes back to the query's highlight.
 - **Materialized views** under the Stage 2 lane: the selected plan's
   materialized views as `plan_installable` gives them, one row per Stage 2 node: its
-  coverage definition, operator and summary parameters, panes (`30 × 20 s`
-  for a pane chain), how it is refreshed, its retention, the Stage 3 cost and the
-  queries that read it. A chain's row lists its installed panes (node id,
-  pane, window, retention) under **installed**. Clicking a row selects its
+  coverage definition, operator and summary parameters, tumbling windows (`30 × 20 s`
+  for a tumbling-window chain), how it is refreshed, its retention, the Stage 3 cost and the
+  queries that read it. A chain's row lists its installed tumbling windows (node id,
+  tumbling window, window, retention) under **installed**. Clicking a row selects its
   node in the Stage 2 lane. Stage 3 predicts no
   per-node state size, so the table has none. The lane's header also shows
   the shown candidate's Stage 3 usage.
@@ -123,11 +123,11 @@ To run it, see [RUNNING.md](RUNNING.md).
   count (`745 candidates (64 listed)` when the document lists only some) and
   the queries it is the root of; its implementation candidates sit inside
   it, bordered by origin (Pass1, SharedBuild, SummaryResult, SummaryInput,
-  Panes, Rollup, TopKReuse, WidenedScans), with a double border and
+  TumblingWindows, Rollup, TopKReuse, WidenedScans), with a double border and
   `✚ new` when the step added them. An edge goes from each candidate to
   each child group it reads (at Stage 0, which has no candidates, from the
   group). Readers sit above what they read. A group listing more than 12
-  candidates is drawn as one node per origin with its count (`360 Panes`);
+  candidates is drawn as one node per origin with its count (`360 TumblingWindows`);
   clicking a count lists them, clicking the group folds them back. On the
   last tab the selected plan's candidates (`selected_choice`) are filled
   green with `✓ selected`, and so are the edges they read along. The header
@@ -262,8 +262,8 @@ are ignored, `stage_pipeline`'s default.
                              "retention_ms": 600000,
                              "stage2_node_id": 1, "installed_position": 0, "installed_count": 30 }]
   },
-  "planning_report": { "pass1_ms": 3.1, "selected_round": 1, "pane_widths_pending": false, "time_limit_ms": 30000,
-                       "rounds": [{ "pane_width_domain": "SeedGrids", "memo_groups": 12, "logical_candidates": 30,
+  "planning_report": { "pass1_ms": 3.1, "selected_round": 1, "tumbling_window_widths_pending": false, "time_limit_ms": 30000,
+                       "rounds": [{ "tumbling_window_width_domain": "SeedGrids", "memo_groups": 12, "logical_candidates": 30,
                                     "operator_nodes": 40, "physical_candidates": 96, "stage2_pruned_candidates": 4,
                                     "pass2_ms": 1.2, "stage2_ms": 3.4, "stage3_ms": 150.0,
                                     "search_report": { "...": "..." }, "error": null }] },
@@ -303,10 +303,10 @@ are ignored, `stage_pipeline`'s default.
   run's cost model (`--cost-model`): null under cost model 3, which has no
   prices; a node's is null under cost models 2 and 3, which price or limit
   the whole plan's peaks.
-- `planning_report` is the facade's: Pass 1's time, then per pane-width
+- `planning_report` is the facade's: Pass 1's time, then per tumbling-window-width
   round its domain, Pass 2's and Stage 2's counts, each stage's time, and
-  Stage 3's search report or error; `selected_round` and whether some pane
-  widths were not searched (`pane_widths_pending`).
+  Stage 3's search report or error; `selected_round` and whether some tumbling window
+  widths were not searched (`tumbling_window_widths_pending`).
 - `reference_pricing` (only with `--exhaustive`) is the reference pricer
   over the enumerated memo choices (`E<n>` logical, `E<n>-<k>` physical),
   with keys named as Stage 3's `Selection` names its fields: per shown
@@ -376,12 +376,12 @@ are ignored, `stage_pipeline`'s default.
   its workload entry's own JSON.
 - `materialized_views` are the selected plan's materialized views from
   `installable_plan_of` (what `plan_installable` returns): the node id in
-  the installable DAG (pane chains expanded into panes), `refresh`
+  the installable DAG (tumbling-window chains expanded into tumbling windows), `refresh`
   (`at_ingestion` or `on_first_read`), `coverage`, `inputs` and
   `retention_ms`. `stage2_node_id` is the node of the selected Stage 2
   candidate it is installed from (null when Stage 3 recorded no cost to map
   it by), `installed_position` its position among that node's installed
-  nodes (a pane chain's panes, newest first) and `installed_count` their
+  nodes (a tumbling-window chain's tumbling windows, newest first) and `installed_count` their
   number. Empty without a selection; `materialized_views_error` says why when
   the plan is not installable.
 - `pruned_candidate_count_by_cause` counts the pruned candidates by cause,
@@ -431,7 +431,7 @@ sections are still shown. If a check fails, it shows the problems instead.
 
 - `index.html`, `app.js`: the page.
 - `stages.js`: document checks, the candidate list, lane elements and node
-  labels, pane-chain expansion, the queries reaching each node and the
+  labels, tumbling-window-chain expansion, the queries reaching each node and the
   highlighted neighborhoods; no DOM. `stages.test.mjs`: its Node tests.
 - `enumeration.js`: the Enumerated DAGs panel and the checks of
   `memo.enumeration`. `enumeration.test.mjs`: its Node tests, over

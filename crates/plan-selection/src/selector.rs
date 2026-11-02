@@ -18,7 +18,9 @@ use crate::report::{
     AcceptedAccuracy, ErrorSelectingPlan, Rejection, RejectionCause, WholePlanSelection,
 };
 use crate::SelectionModels;
-use asap_cost::{kept_pane_chains, node_map, plan_cost, query_reach, tumbling_window_retention_ms};
+use asap_cost::{
+    kept_tumbling_window_chains, node_map, plan_cost, query_reach, tumbling_window_retention_ms,
+};
 
 type Ranking = PlanRanking;
 use asap_types::workload::bounds::with_confirmed_weights;
@@ -157,7 +159,7 @@ impl<'a> PlanSelector<'a> {
             return Ok(CalibrationFit::default());
         }
         let nodes = node_map(&candidate.dag);
-        let kept_chains = kept_pane_chains(&candidate.dag);
+        let kept_chains = kept_tumbling_window_chains(&candidate.dag);
         let (_, fit) = plan_cost(
             &candidate.dag,
             &nodes,
@@ -224,7 +226,7 @@ impl<'a> PlanSelector<'a> {
                 }
             };
         let nodes = node_map(&candidate.dag);
-        let kept_chains = kept_pane_chains(&candidate.dag);
+        let kept_chains = kept_tumbling_window_chains(&candidate.dag);
         let settings = self.models.cost_inputs;
         let (cost, _) = plan_cost(
             &candidate.dag,

@@ -243,7 +243,7 @@ mod tests {
     use asap_logical_asap_optimization::test_support::{
         entry, lower_promql, sharing_rules_and_shared_state_groups,
     };
-    use asap_logical_asap_optimization::PaneWidthDomain;
+    use asap_logical_asap_optimization::TumblingWindowWidthDomain;
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::stages::{
         LogicalASAPMemoCandidates, PhysicalCandidateId, SelectedEdge, SelectedNodeId,
@@ -299,7 +299,8 @@ mod tests {
             .unwrap();
         let memo = try_populate_pass1(initial, &per_computation).unwrap();
         let logical = LogicalASAPMemoCandidates {
-            memo: sharing_rules_and_shared_state_groups(memo, PaneWidthDomain::Complete).unwrap(),
+            memo: sharing_rules_and_shared_state_groups(memo, TumblingWindowWidthDomain::Complete)
+                .unwrap(),
         };
         let entries = vec![entry(QueryRecurrence::Unknown)];
         let data = DataWorkload::default();

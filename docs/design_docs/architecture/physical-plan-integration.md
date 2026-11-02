@@ -264,7 +264,7 @@ configuration records partition keys, ordering keys, and function work per
 row; evidence supplies the actual partition distribution. Ordering CPU and
 memory use the same per-partition calculation as comparison sort, plus window
 function work for each row. This is **not** a streaming tumbling window,
-sliding window, pane layout, or exponential-histogram window framework.
+sliding window, tumbling-window layout, or exponential-histogram window framework.
 
 ### `Limit { limit, offset }`
 
@@ -293,7 +293,7 @@ the selector in `rate(http_requests_total[5m])` lowers to `PromqlRange` with
 `range_millis = 300000`. Evidence carries series count, evaluation-step count,
 value kind, and the maximum samples in one per-series range. CPU visits every
 input sample; local memory is `series × max_window_samples_per_series ×
-sample_width`. This query-time range buffer is not a tumbling, sliding, pane,
+sample_width`. This query-time range buffer is not a tumbling-window, sliding-window
 or exponential-histogram layout for maintaining a summary.
 
 ### `PromqlSubquery { range_millis, resolution_millis }`

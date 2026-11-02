@@ -417,7 +417,7 @@ impl<'a> SqlLowerer<'a> {
         // A trailing window on the table's time column is the query's
         // lookback: a range `TimeRange` over the `Scan`, as PromQL's `m[w]`.
         // Only when no other conjunct reads `now()`: such a condition would
-        // be evaluated per pane and at ingestion time once the window is a
+        // be evaluated per tumbling window and at ingestion time once the window is a
         // `TimeRange`, and would select other rows there.
         let other_reads_now = |window: usize| {
             residual

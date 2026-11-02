@@ -177,7 +177,7 @@ fn example1_document_preserves_workload_and_validates_archived_plans() {
 #[test]
 fn display_cap_is_recorded_and_keeps_the_selection() {
     // Instant quantiles provide several implementations without expanding a
-    // pane-width domain. Exhaustive mode ensures the display cap is exercised.
+    // tumbling-window-width domain. Exhaustive mode ensures the display cap is exercised.
     let document = document_of(&[
         "--promql",
         "quantile(0.5, data)",
@@ -302,7 +302,7 @@ fn example3a_archive_and_viewer_select_consistently() {
 /// selects a plan.
 #[test]
 fn example2_plans_the_sql_workload() {
-    // The default search: its SQL windows get tumbling panes, so an
+    // The default search: its SQL windows get tumbling windows, so an
     // exhaustive run has over 10^4 Stage 2 candidates. The integration test
     // `stage1_logical_asap_optimization_sql_adds_one_univmon_for_all_three`
     // checks the shared UnivMon candidate.
@@ -871,9 +871,9 @@ fn cost_model_flag_chooses_how_candidates_are_compared() {
 /// at AWS Fargate's us-east-1 prices, in US dollars per second: the
 /// whole-window KLL (P2) is still selected, at $2.60278e-8/s (its 2.1
 /// CPU-ms/s at $1.1244e-8 per CPU-ms, and its states held while the query
-/// runs), and the panes
+/// runs), and the tumbling windows
 /// maintained at ingestion time (P3-m1) cost about $6.0238e-6/s, almost all
-/// for their 5.232 GB kept in memory (six panes of 1,000,000 series, each a
+/// for their 5.232 GB kept in memory (six tumbling windows of 1,000,000 series, each a
 /// KLL of 872 bytes: its fixed 744 and an item array grown for its 4
 /// samples). A costlier candidate's reason shows
 /// such small costs in scientific notation.
@@ -898,7 +898,7 @@ fn aws_fargate_preset_prices_example_4_in_dollars() {
 /// without the flag, every summary supported, raw data retained, no
 /// query-time result retained). For Pattern B with KLL only and query-time
 /// results retained: no DDSketch candidate is offered, and Stage 1's
-/// `pruned_candidates` says why; the KLL panes gain B3, built at query time and
+/// `pruned_candidates` says why; the KLL tumbling windows gain B3, built at query time and
 /// kept (`P3-m2`, 436.59 cost/s); the whole-window KLL (`P2`) is still
 /// selected. Without raw data, every query-time scan is invalid and B1
 /// (`P3-m1`) is selected when guarantees are enforced. A deployment with an
@@ -1038,7 +1038,7 @@ fn logical_candidate_labels_name_each_query() {
 /// alone: round 1 proves the selected plan optimal within 1e-5, and the
 /// last round finds nothing below the incumbent. That round's bound (the
 /// incumbent less the solver's pruning tolerance, scaled by the largest
-/// charge, here the query-time top-k panes at about 308 times the
+/// charge, here the query-time top-k tumbling windows at about 308 times the
 /// selected plan) used to replace round 1's, reporting a gap of 3.09e-4.
 #[test]
 fn milp_final_bound_keeps_the_bound_an_earlier_round_proved() {
@@ -1101,7 +1101,7 @@ fn milp_final_bound_keeps_the_bound_an_earlier_round_proved() {
 /// (`max_over_time(m[5m])` every minute over 1M series sampled every
 /// 1.5 s) answered as the last hour at 1-minute steps
 /// (`range_evaluation`) is priced as 61 evaluations per request: the kept
-/// panes (`P2-m2`, 460.04 cost/s) beat rebuilding the window at every step
+/// tumbling windows (`P2-m2`, 460.04 cost/s) beat rebuilding the window at every step
 /// (`P1`, 1,270.52), and the document reports their retention, 1 h + 5 min.
 /// The workload section shows the range. An invalid range is refused.
 #[test]
@@ -1140,16 +1140,16 @@ fn workload_file_with_a_range_evaluation_is_planned() {
     );
     let selection = &document["stage3_plan_selection"];
     let cost = selection["cost"]["cost_per_second"].as_f64().unwrap();
-    // The reference: the window merged from panes kept across evaluations,
+    // The reference: the window merged from tumbling windows kept across evaluations,
     // priced under the same models. Its absolute cost is pinned in
     // integration-tests/tests/range_evaluation.rs.
-    let kept_panes = {
+    let kept_tumbling_windows = {
         use asap_accuracy::propagation::recompose_guarantees;
         use asap_logical_asap_optimization::test_support::{
             compose_logical_candidate, generate_per_computation_candidates,
         };
         use asap_logical_asap_optimization::test_support::{
-            pane_candidates, window_composition_pass2_candidates,
+            tumbling_window_candidates, window_composition_pass2_candidates,
         };
         use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
         use asap_types::ir::ASAPOp;
@@ -1165,8 +1165,8 @@ fn workload_file_with_a_range_evaluation_is_planned() {
         .unwrap();
         let exact: Vec<_> = compose_logical_candidate(&inventory, &[0]).unwrap();
         let grids: Vec<_> = entries.iter().map(|e| e.evaluation_grid_ms()).collect();
-        let panes = pane_candidates(&exact, &grids);
-        let paned = window_composition_pass2_candidates(&exact, &panes)
+        let tumbling_windows = tumbling_window_candidates(&exact, &grids);
+        let windowed = window_composition_pass2_candidates(&exact, &tumbling_windows)
             .unwrap()
             .remove(0)
             .roots
@@ -1176,8 +1176,8 @@ fn workload_file_with_a_range_evaluation_is_planned() {
             ..Default::default()
         };
         let kept = asap_physical_asap_optimization::optimize_physical_asap(
-            "kept-panes",
-            &recompose_guarantees(&paned).unwrap(),
+            "kept-tumbling-windows",
+            &recompose_guarantees(&windowed).unwrap(),
             &entries,
             &data,
             deployment.query_time_results_retained,
@@ -1193,7 +1193,7 @@ fn workload_file_with_a_range_evaluation_is_planned() {
                     == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
             })
         })
-        .expect("a plan keeps its panes across evaluations");
+        .expect("a plan keeps its tumbling windows across evaluations");
         let settings = asap_cost::CostInputs::default();
         let priced = asap_devtools::memo_pricing::reference_select(
             std::slice::from_ref(&kept),
@@ -1207,8 +1207,8 @@ fn workload_file_with_a_range_evaluation_is_planned() {
         priced.costs[&priced.selected].cost_per_second.unwrap()
     };
     assert!(
-        cost <= kept_panes * (1.0 + 1e-9),
-        "selected {SELECTED} costs {cost}, more than the kept panes' {kept_panes}"
+        cost <= kept_tumbling_windows * (1.0 + 1e-9),
+        "selected {SELECTED} costs {cost}, more than the kept tumbling windows' {kept_tumbling_windows}"
     );
     assert!(selection["tumbling_window_retention_ms"]
         .as_object()

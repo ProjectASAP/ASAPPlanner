@@ -217,9 +217,9 @@ pub struct PlanOutput {
     /// How plan selection chose the plan, when the pass selects among priced
     /// candidates.
     pub selection: Option<Selection>,
-    /// For each tumbling-pane chain of the selected plan kept beyond one
+    /// For each tumbling-window chain of the selected plan kept beyond one
     /// evaluation, by node id in its physical DAG, how long its completed
-    /// panes are kept ([`RealizedPlan::tumbling_window_retention_ms`](asap_types::stages::RealizedPlan::tumbling_window_retention_ms));
+    /// tumbling windows are kept ([`RealizedPlan::tumbling_window_retention_ms`](asap_types::stages::RealizedPlan::tumbling_window_retention_ms));
     /// empty for a pass that does not set it.
     pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
 }
@@ -301,7 +301,7 @@ impl PlanOutput {
     /// The workload as one physical ASAP DAG, with shared sub-DAGs exported
     /// once. A node keeps the timing and materialization its pass gave it:
     /// for [`Stage1ToStage3Pass`] that is Stage 3's selected plan as
-    /// selected (e.g. ingestion-time panes), the document a deployment
+    /// selected (e.g. ingestion-time tumbling windows), the document a deployment
     /// runtime executes. Only a node the pass left untimed takes the default
     /// [`MaterializationAssignment`] (not materialized, computed when its
     /// consumer runs). Operator queries become its `roots` and standalone scalar

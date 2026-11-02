@@ -192,7 +192,7 @@ pub struct WholePlanSelection {
     /// For each valid candidate, per query, the accuracy Stage 3 accepted.
     pub accepted: BTreeMap<String, Vec<AcceptedAccuracy>>,
     pub rejected: Vec<Rejection>,
-    /// The selected plan's pane retention, by node id in its physical DAG
+    /// The selected plan's tumbling-window retention, by node id in its physical DAG
     /// ([`RealizedPlan::tumbling_window_retention_ms`](asap_types::stages::RealizedPlan::tumbling_window_retention_ms)).
     pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
     /// The physical candidates checked, valid or not.

@@ -8,7 +8,7 @@
 //!   [`Reduction`], [`Source`], …).
 //! - [`agg_intent`] — the aggregation-intent vocabulary ([`AggIntent`]).
 //! - [`maintained_population`] — maintained populations and their evaluations.
-//! - [`pane_chain`] — what a tumbling-pane chain computes.
+//! - [`tumbling_window_chain`] — what a tumbling-window chain computes.
 //! - [`query`] — a query root: an operator result or a standalone scalar.
 pub mod agg_intent;
 pub mod asap;
@@ -16,8 +16,8 @@ pub mod maintained_population;
 pub mod node;
 pub mod non_asap;
 pub mod operator_properties;
-pub mod pane_chain;
 pub mod query;
+pub mod tumbling_window_chain;
 
 pub use agg_intent::{
     agg_has_exact_per_entity_kernel, default_cardinality, default_quantile, AggIntent, MathFunc,

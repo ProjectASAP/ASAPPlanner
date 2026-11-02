@@ -20,6 +20,6 @@ fn the_compiled_plan_and_its_data_stores_are_send_and_sync() {
     shareable::<InMemoryDataStore>();
     shareable::<Batch>();
     shareable::<StateColumn>();
-    // An open pane's updater moves to the worker that ingests its shard.
+    // An open tumbling window's updater moves to the worker that ingests its shard.
     movable::<StateColumnUpdater>();
 }

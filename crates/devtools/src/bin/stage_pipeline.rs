@@ -73,16 +73,16 @@
 //     `guarantee_check_rejection`, the sketches read and a one-line summary),
 //     `pruned_candidates` and `search_report` (`SearchReport`: `status`,
 //     `cost_lower_bound_per_second`, MILP size and timings); `error` when no
-//     plan was selected. `tumbling_window_retention_ms` maps each pane chain the
+//     plan was selected. `tumbling_window_retention_ms` maps each tumbling-window chain the
 //     selected plan keeps beyond one evaluation (by node id in `P1`) to how
-//     far back the runtime must keep its panes (`RealizedPlan::tumbling_window_retention_ms`).
+//     far back the runtime must keep its tumbling windows (`RealizedPlan::tumbling_window_retention_ms`).
 //     `materialized_views` are the selected plan's materialized views as
 //     `plan_installable`'s plan derives them (`installable_plan_of`, then
 //     `InstallablePlan::materialized_views`: each view's installed node id,
 //     `refresh`, `coverage` with its `definition_id` and `selection`,
 //     `inputs` and `retention_ms`), each with the node of `P1` it is
 //     installed from (`stage2_node_id`), its position among that node's
-//     installed nodes (`installed_position`, a pane chain's panes newest
+//     installed nodes (`installed_position`, a tumbling-window chain's tumbling windows newest
 //     first) and their number (`installed_count`); empty without a
 //     selection, with `materialized_views_error` when the plan is not
 //     installable. `warnings` are one-line warnings about the workload and
@@ -94,7 +94,7 @@
 //     declares no memory capacity (`large_peak_memory_warning`); absent when
 //     there are none;
 //   - planning_report: the facade's `PlanningReport`: Pass 1's time and, per
-//     pane-width round, Pass 2's and Stage 2's counts and each stage's time,
+//     tumbling-window-width round, Pass 2's and Stage 2's counts and each stage's time,
 //     with Stage 3's search report or error;
 //   - reference_pricing (with `--exhaustive`): the reference pricer's
 //     selection among the enumerated plans, named as Stage 3's `Selection`
@@ -115,7 +115,7 @@
 // their parents); `steps`, one per
 // memo step in pipeline order (`stage0`: the frontends' DAG hash-consed,
 // groups without candidates; `pass1`: Pass 1's candidates, with the
-// accuracy-scoped sizes; `pass2`: local window composition's pane
+// accuracy-scoped sizes; `pass2`: local window composition's tumbling window
 // candidates; `concrete_states`: the Pass 2 memo rules (scan labels,
 // summary inputs, top-k reuse, finer aggregates, rollups, summary results,
 // state configurations) and the concrete summary-state groups, the memo the
@@ -214,7 +214,7 @@
 // does not generate a query-time scan of raw data (its `pruned_candidates`
 // lists each with `RawDataNotRetained`), and stored data (at rest or
 // mixed) is refused as a contradiction; with `query_time_results_retained`,
-// a tumbling-pane chain whose readers evaluate together at its pane width is
+// a tumbling-window chain whose readers evaluate together at its tumbling-window width is
 // also offered built at query time and kept across evaluations, beside being
 // shared within one evaluation. The document's top-level
 // `deployment_capabilities` shows the capabilities used, with the
@@ -1173,7 +1173,7 @@ fn round_robin<'a, C: PartialEq>(
 /// plus the node of the selected Stage 2 candidate it is installed from
 /// (`stage2_node_id`, null when Stage 3 recorded no cost to map it by), its
 /// position among that node's installed nodes (`installed_position`: a
-/// pane chain's panes, newest first) and their number (`installed_count`).
+/// tumbling-window chain's tumbling windows, newest first) and their number (`installed_count`).
 fn materialized_views_json(
     roots: &[QueryRoot],
     selection: &Selection,

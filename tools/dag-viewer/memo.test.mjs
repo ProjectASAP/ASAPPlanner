@@ -71,7 +71,7 @@ test('each step says what it added over the previous one', () => {
   assert.deepEqual(pass1.groupsAdded, []);
   const pass2 = call('memoStepDiff', memo, 2);
   // G2 grows from 2 to 20 (18 TumblingWindows and SharedBuild, 11 listed), G3 gains a
-  // rollup, the new pane-chain group G6 has one.
+  // rollup, the new tumbling-window-chain group G6 has one.
   assert.deepEqual(pass2.groupsAdded, [6]);
   assert.equal(pass2.candidatesDelta, 18 + 1 + 1);
   assert.equal(pass2.listedAdded, 11 + 1 + 1);

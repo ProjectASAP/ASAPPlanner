@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 /// Width domain used by the same candidate rules. Seed grids are only a
 /// feasible-plan heuristic; optimality must use the complete domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PaneWidthDomain {
+pub enum TumblingWindowWidthDomain {
     #[default]
     Complete,
     SeedGrids,
@@ -23,17 +23,17 @@ pub enum PaneWidthDomain {
 }
 
 #[cfg(test)]
-pub(crate) fn pane_width_domain(
+pub(crate) fn tumbling_window_width_domain(
     grids: impl IntoIterator<Item = u64>,
-    domain: PaneWidthDomain,
+    domain: TumblingWindowWidthDomain,
 ) -> Vec<u64> {
-    pane_width_domain_before(grids, domain, None)
+    tumbling_window_width_domain_before(grids, domain, None)
         .expect("generation without a deadline cannot time out")
 }
 
-pub(crate) fn pane_width_domain_before(
+pub(crate) fn tumbling_window_width_domain_before(
     grids: impl IntoIterator<Item = u64>,
-    domain: PaneWidthDomain,
+    domain: TumblingWindowWidthDomain,
     deadline: Option<std::time::Instant>,
 ) -> Result<Vec<u64>, asap_types::stages::CandidateGenerationTimeout> {
     super::check_generation_deadline(deadline)?;
@@ -44,10 +44,10 @@ pub(crate) fn pane_width_domain_before(
             widths.insert(width);
         }
     }
-    if domain == PaneWidthDomain::Complete {
+    if domain == TumblingWindowWidthDomain::Complete {
         let mut complete = BTreeSet::new();
         for grid in widths {
-            complete.extend(pane_width_divisors_before(grid, deadline)?);
+            complete.extend(tumbling_window_width_divisors_before(grid, deadline)?);
         }
         return Ok(complete.into_iter().collect());
     }
@@ -68,7 +68,7 @@ pub(crate) fn pane_width_domain_before(
         }
         widths.extend(additional);
     }
-    if let PaneWidthDomain::Expanding { max_parts } = domain {
+    if let TumblingWindowWidthDomain::Expanding { max_parts } = domain {
         // Work is proportional to the requested frontier, not the complete
         // divisor domain. Do not introduce the finest reciprocal width early.
         for grid in grids {
@@ -88,7 +88,7 @@ pub(crate) fn pane_width_domain_before(
 
 /// Integer-domain frontier, independent of expensive candidate graph expansion.
 /// Complete divisor lists are computed once under the caller's deadline.
-pub struct PaneWidthFrontier {
+pub struct TumblingWindowWidthFrontier {
     grids: Vec<u64>,
     complete: Vec<Vec<u64>>,
     previous: Vec<Vec<u64>>,
@@ -96,7 +96,7 @@ pub struct PaneWidthFrontier {
     finished: bool,
 }
 
-impl PaneWidthFrontier {
+impl TumblingWindowWidthFrontier {
     pub fn new(
         grids: impl IntoIterator<Item = u64>,
         deadline: Option<std::time::Instant>,
@@ -109,7 +109,7 @@ impl PaneWidthFrontier {
             .collect();
         let complete = grids
             .iter()
-            .map(|&grid| pane_width_divisors_before(grid, deadline))
+            .map(|&grid| tumbling_window_width_divisors_before(grid, deadline))
             .collect::<Result<Vec<_>, _>>()?;
         let previous = grids.iter().map(|&grid| vec![grid]).collect();
         Ok(Self {
@@ -126,7 +126,8 @@ impl PaneWidthFrontier {
     pub fn next_domain(
         &mut self,
         deadline: Option<std::time::Instant>,
-    ) -> Result<Option<PaneWidthDomain>, asap_types::stages::CandidateGenerationTimeout> {
+    ) -> Result<Option<TumblingWindowWidthDomain>, asap_types::stages::CandidateGenerationTimeout>
+    {
         while !self.finished {
             super::check_generation_deadline(deadline)?;
             let current: Vec<Vec<u64>> = self
@@ -144,11 +145,11 @@ impl PaneWidthFrontier {
             self.max_parts = self.max_parts.saturating_mul(2);
             if current == self.complete {
                 self.finished = true;
-                return Ok(Some(PaneWidthDomain::Complete));
+                return Ok(Some(TumblingWindowWidthDomain::Complete));
             }
             if current != self.previous {
                 self.previous = current;
-                return Ok(Some(PaneWidthDomain::Expanding {
+                return Ok(Some(TumblingWindowWidthDomain::Expanding {
                     max_parts: self.max_parts / 2,
                 }));
             }
@@ -158,19 +159,19 @@ impl PaneWidthFrontier {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PaneRequirement {
+pub(crate) struct TumblingWindowRequirement {
     pub tumbling_window_width_ms: u64,
     pub window_ms: u64,
     pub family: FieldDataType,
 }
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct PaneConfiguration {
+pub(crate) struct TumblingWindowConfiguration {
     pub tumbling_window_width_ms: u64,
     pub longest_window_ms: u64,
     pub family: FieldDataType,
 }
-impl PaneConfiguration {
-    pub fn serves(&self, reader: &PaneRequirement) -> bool {
+impl TumblingWindowConfiguration {
+    pub fn serves(&self, reader: &TumblingWindowRequirement) -> bool {
         self.tumbling_window_width_ms > 0
             && reader
                 .tumbling_window_width_ms
@@ -190,12 +191,12 @@ impl PaneConfiguration {
 /// The time representation fixes the search resolution; no representative-width
 /// sampling or arbitrary candidate cap changes this domain.
 #[cfg(test)]
-pub(crate) fn pane_width_divisors(grid_ms: u64) -> Vec<u64> {
-    pane_width_divisors_before(grid_ms, None)
+pub(crate) fn tumbling_window_width_divisors(grid_ms: u64) -> Vec<u64> {
+    tumbling_window_width_divisors_before(grid_ms, None)
         .expect("generation without a deadline cannot time out")
 }
 
-fn pane_width_divisors_before(
+fn tumbling_window_width_divisors_before(
     grid_ms: u64,
     deadline: Option<std::time::Instant>,
 ) -> Result<Vec<u64>, asap_types::stages::CandidateGenerationTimeout> {
@@ -220,24 +221,26 @@ fn pane_width_divisors_before(
 /// Complete divisor grids, distinct required horizons, and joined state sizes.
 /// This enumerates configurations of one compatible producer, not workload plans.
 #[cfg(test)]
-fn pane_configurations(readers: &[PaneRequirement]) -> Vec<PaneConfiguration> {
-    pane_configurations_in_domain(readers, PaneWidthDomain::Complete)
+fn tumbling_window_configurations(
+    readers: &[TumblingWindowRequirement],
+) -> Vec<TumblingWindowConfiguration> {
+    tumbling_window_configurations_in_domain(readers, TumblingWindowWidthDomain::Complete)
 }
 
 #[cfg(test)]
-fn pane_configurations_in_domain(
-    readers: &[PaneRequirement],
-    domain: PaneWidthDomain,
-) -> Vec<PaneConfiguration> {
-    pane_configurations_before(readers, domain, None)
+fn tumbling_window_configurations_in_domain(
+    readers: &[TumblingWindowRequirement],
+    domain: TumblingWindowWidthDomain,
+) -> Vec<TumblingWindowConfiguration> {
+    tumbling_window_configurations_before(readers, domain, None)
         .expect("generation without a deadline cannot time out")
 }
 
-pub(crate) fn pane_configurations_before(
-    readers: &[PaneRequirement],
-    domain: PaneWidthDomain,
+pub(crate) fn tumbling_window_configurations_before(
+    readers: &[TumblingWindowRequirement],
+    domain: TumblingWindowWidthDomain,
     deadline: Option<std::time::Instant>,
-) -> Result<Vec<PaneConfiguration>, asap_types::stages::CandidateGenerationTimeout> {
+) -> Result<Vec<TumblingWindowConfiguration>, asap_types::stages::CandidateGenerationTimeout> {
     super::check_generation_deadline(deadline)?;
     if readers
         .iter()
@@ -245,7 +248,7 @@ pub(crate) fn pane_configurations_before(
     {
         return Ok(Vec::new());
     }
-    let grids = pane_width_domain_before(
+    let grids = tumbling_window_width_domain_before(
         readers.iter().map(|reader| {
             greatest_common_divisor(reader.tumbling_window_width_ms, reader.window_ms)
         }),
@@ -255,7 +258,7 @@ pub(crate) fn pane_configurations_before(
     let mut configurations = Vec::new();
     for &tumbling_window_width_ms in &grids {
         super::check_generation_deadline(deadline)?;
-        let eligible: Vec<&PaneRequirement> = readers
+        let eligible: Vec<&TumblingWindowRequirement> = readers
             .iter()
             .filter(|r| {
                 r.tumbling_window_width_ms
@@ -289,12 +292,12 @@ pub(crate) fn pane_configurations_before(
             super::check_generation_deadline(deadline)?;
             for family in &sizes {
                 super::check_generation_deadline(deadline)?;
-                let configuration = PaneConfiguration {
+                let configuration = TumblingWindowConfiguration {
                     tumbling_window_width_ms,
                     longest_window_ms,
                     family: family.clone(),
                 };
-                let admitted: Vec<&&PaneRequirement> = eligible
+                let admitted: Vec<&&TumblingWindowRequirement> = eligible
                     .iter()
                     .filter(|r| configuration.serves(r))
                     .collect();
@@ -461,20 +464,20 @@ mod tests {
     // Equal physical capacities still carry distinct recorded error contracts;
     // only the joined contract may serve the stricter probability requirement.
     #[test]
-    fn pane_configuration_keeps_failure_probability_contract() {
-        let weaker = PaneConfiguration {
+    fn tumbling_window_configuration_keeps_failure_probability_contract() {
+        let weaker = TumblingWindowConfiguration {
             tumbling_window_width_ms: 1000,
             longest_window_ms: 5000,
             family: kll(None),
         };
-        let strict = PaneRequirement {
+        let strict = TumblingWindowRequirement {
             tumbling_window_width_ms: 1000,
             window_ms: 5000,
             family: kll(Some(0.001)),
         };
         assert!(!weaker.serves(&strict));
-        let configurations = pane_configurations(&[
-            PaneRequirement {
+        let configurations = tumbling_window_configurations(&[
+            TumblingWindowRequirement {
                 family: kll(None),
                 ..strict.clone()
             },
@@ -492,34 +495,40 @@ mod tests {
     // just the coarsest width or GCDs of the readers' original configurations.
     #[test]
     fn width_frontier_skips_empty_rounds_and_detects_actual_completion() {
-        let mut frontier = PaneWidthFrontier::new([97], None).unwrap();
+        let mut frontier = TumblingWindowWidthFrontier::new([97], None).unwrap();
         assert_eq!(
             frontier.next_domain(None).unwrap(),
-            Some(PaneWidthDomain::Complete)
+            Some(TumblingWindowWidthDomain::Complete)
         );
         assert_eq!(frontier.next_domain(None).unwrap(), None);
-        let mut frontier = PaneWidthFrontier::new([12], None).unwrap();
+        let mut frontier = TumblingWindowWidthFrontier::new([12], None).unwrap();
         assert_eq!(
             frontier.next_domain(None).unwrap(),
-            Some(PaneWidthDomain::Expanding { max_parts: 4 })
+            Some(TumblingWindowWidthDomain::Expanding { max_parts: 4 })
         );
         assert_eq!(
             frontier.next_domain(None).unwrap(),
-            Some(PaneWidthDomain::Expanding { max_parts: 8 })
+            Some(TumblingWindowWidthDomain::Expanding { max_parts: 8 })
         );
         assert_eq!(
             frontier.next_domain(None).unwrap(),
-            Some(PaneWidthDomain::Complete)
+            Some(TumblingWindowWidthDomain::Complete)
         );
-        assert!(PaneWidthFrontier::new([u64::MAX], Some(std::time::Instant::now())).is_err());
+        assert!(
+            TumblingWindowWidthFrontier::new([u64::MAX], Some(std::time::Instant::now())).is_err()
+        );
     }
 
     #[test]
     fn expanding_widths_are_nested_and_eventually_complete() {
         let grids = [60, 90];
-        let mut previous = pane_width_domain(grids, PaneWidthDomain::SeedGrids);
+        let mut previous =
+            tumbling_window_width_domain(grids, TumblingWindowWidthDomain::SeedGrids);
         for max_parts in [2, 4, 8, 16, 32, 64, 128] {
-            let next = pane_width_domain(grids, PaneWidthDomain::Expanding { max_parts });
+            let next = tumbling_window_width_domain(
+                grids,
+                TumblingWindowWidthDomain::Expanding { max_parts },
+            );
             assert!(previous.iter().all(|width| next.contains(width)));
             assert!(next
                 .iter()
@@ -528,17 +537,20 @@ mod tests {
         }
         assert_eq!(
             previous,
-            pane_width_domain(grids, PaneWidthDomain::Complete)
+            tumbling_window_width_domain(grids, TumblingWindowWidthDomain::Complete)
         );
     }
 
     #[test]
-    fn expanding_domain_defers_fine_panes_and_obeys_deadline() {
-        let widths = pane_width_domain([60_000], PaneWidthDomain::Expanding { max_parts: 4 });
+    fn expanding_domain_defers_fine_tumbling_windows_and_obeys_deadline() {
+        let widths = tumbling_window_width_domain(
+            [60_000],
+            TumblingWindowWidthDomain::Expanding { max_parts: 4 },
+        );
         assert_eq!(widths, vec![15_000, 20_000, 30_000, 60_000]);
-        assert!(pane_width_domain_before(
+        assert!(tumbling_window_width_domain_before(
             [u64::MAX],
-            PaneWidthDomain::Expanding {
+            TumblingWindowWidthDomain::Expanding {
                 max_parts: u64::MAX
             },
             Some(std::time::Instant::now()),
@@ -547,13 +559,13 @@ mod tests {
     }
 
     #[test]
-    fn pane_width_domain_contains_every_legal_divisor() {
-        let reader = PaneRequirement {
+    fn tumbling_window_width_domain_contains_every_legal_divisor() {
+        let reader = TumblingWindowRequirement {
             tumbling_window_width_ms: 12,
             window_ms: 60,
             family: kll(None),
         };
-        let widths: BTreeSet<_> = pane_configurations(&[reader])
+        let widths: BTreeSet<_> = tumbling_window_configurations(&[reader])
             .into_iter()
             .map(|configuration| configuration.tumbling_window_width_ms)
             .collect();
@@ -567,7 +579,7 @@ mod tests {
             let expected: Vec<_> = (1..=grid)
                 .filter(|width| grid.is_multiple_of(*width))
                 .collect();
-            assert_eq!(pane_width_divisors(grid), expected);
+            assert_eq!(tumbling_window_width_divisors(grid), expected);
         }
     }
 
@@ -577,16 +589,18 @@ mod tests {
     #[ignore = "flaky: depends on a wall-clock deadline (#1067)"]
     fn large_grid_enumeration_honors_deadline() {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2);
-        assert!(
-            pane_width_domain_before([u64::MAX], PaneWidthDomain::Complete, Some(deadline),)
-                .is_err()
-        );
+        assert!(tumbling_window_width_domain_before(
+            [u64::MAX],
+            TumblingWindowWidthDomain::Complete,
+            Some(deadline),
+        )
+        .is_err());
     }
 
     // Public finite enumeration rejects invalid grids instead of dividing by zero.
     #[test]
-    fn invalid_pane_grid_has_no_configurations() {
-        assert!(pane_configurations(&[PaneRequirement {
+    fn invalid_tumbling_window_grid_has_no_configurations() {
+        assert!(tumbling_window_configurations(&[TumblingWindowRequirement {
             tumbling_window_width_ms: 0,
             window_ms: 5000,
             family: kll(None)

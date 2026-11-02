@@ -2282,9 +2282,6 @@
       "stage2_node_id": 1
     }
   ],
-  "tumbling_window_retention_ms": {
-    "1": 3600000
-  },
   "proven_optimal": true,
   "queries": [
     "quantile_over_time(0.9, data[15m])",
@@ -2331,7 +2328,7 @@
         "1": {
           "cost_per_second": 3.89542189639e-6,
           "cpu_core_seconds_per_second": 0.004,
-          "detail": "build DDSketch in 60 panes of 60000 ms for 10000 groups: 2000000 rows x (1 + depth 1); x 1.0000/s; keeps 3347680000 bytes",
+          "detail": "build DDSketch in 60 tumbling windows of 60000 ms for 10000 groups: 2000000 rows x (1 + depth 1); x 1.0000/s; keeps 3347680000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "price_source": "analytical",
@@ -2979,9 +2976,9 @@
                     "kind": "unknown_or_signed"
                   }
                 },
+                "reduction": "PerEntity",
                 "tumbling_window_count": 60,
-                "tumbling_window_width_ms": 60000,
-                "reduction": "PerEntity"
+                "tumbling_window_width_ms": 60000
               }
             }
           }
@@ -3518,6 +3515,9 @@
       ],
       "scalar_roots": []
     },
-    "display_name": "Q1 DDSketch ×60 panes · Q2 DDSketch ×60 panes · shared DDSketch ×60 panes (Q1, Q2) · shared Scan (Q1, Q2) · ingestion time: DDSketch for Q1, Q2, 60 × 1m panes"
+    "display_name": "Q1 DDSketch ×60 tumbling windows · Q2 DDSketch ×60 tumbling windows · shared DDSketch ×60 tumbling windows (Q1, Q2) · shared Scan (Q1, Q2) · ingestion time: DDSketch for Q1, Q2, 60 × 1m tumbling windows"
+  },
+  "tumbling_window_retention_ms": {
+    "1": 3600000
   }
 }

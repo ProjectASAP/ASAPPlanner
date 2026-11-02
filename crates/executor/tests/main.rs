@@ -23,7 +23,7 @@ mod promql_binary;
 mod promql_values;
 mod raw_scan;
 mod state_column_updater;
-mod stored_pane_memory_limit;
+mod stored_tumbling_window_memory_limit;
 mod summary_projection;
 mod text_extremum_memory;
 mod thread_safety;

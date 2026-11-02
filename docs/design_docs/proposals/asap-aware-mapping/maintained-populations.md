@@ -147,7 +147,7 @@ implemented separately; this design does not treat it as already shipped.
 ## Relation to sketch rules and other optimizations
 
 This rule adds an exact maintained-state alternative. It is distinct from choosing
-a sketch family or merging temporal panes, and can coexist with those alternatives
+a sketch family or merging temporal tumbling windows, and can coexist with those alternatives
 in the same workload. Temporal sketch rules continue to emit
 `SummaryAgg -> SummaryEstimate` DAGs.
 

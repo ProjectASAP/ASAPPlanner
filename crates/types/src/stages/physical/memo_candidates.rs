@@ -78,9 +78,9 @@ pub struct PhysicalCandidate {
     /// query time whose output matches its group's logical node, in a group
     /// some query's root reads.
     pub may_produce_query_output: bool,
-    /// One entry per workload query: whether this pane chain may be kept
+    /// One entry per workload query: whether this tumbling-window chain may be kept
     /// across evaluations when that query is its only reader. Filled only
-    /// for a `MatAtQueryKeptAcrossEvaluations(Memory)` pane chain in a
+    /// for a `MatAtQueryKeptAcrossEvaluations(Memory)` tumbling-window chain in a
     /// deployment that keeps query-time results; empty otherwise.
     pub may_keep_across_evaluations_per_sole_reader_query: Vec<bool>,
 }

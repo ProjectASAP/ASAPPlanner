@@ -51,7 +51,7 @@ fn quantile_sketch(algorithm: SketchAlgorithm) -> FieldDataType {
     FieldDataType::Sketch(SketchKind::new(algorithm, params), Default::default())
 }
 
-/// `tumbling_window_count` panes of `tumbling_window_width_ms` of a quantile sketch of
+/// `tumbling_window_count` tumbling windows of `tumbling_window_width_ms` of a quantile sketch of
 /// `algorithm` per `job` over `input`.
 fn chain(
     input: &Rc<OperatorNode>,
@@ -134,11 +134,11 @@ fn shifted(child: &Rc<OperatorNode>, offset_ms: i64) -> Rc<OperatorNode> {
 
 const AT_INGESTION: Materialization = Materialization::MatAtIngestion(Medium::Memory);
 
-/// A KLL chain and a DDSketch chain of 10 s panes over one `Scan`, both
-/// kept at ingestion, are refreshed in one ingestion run per pane: the
+/// A KLL chain and a DDSketch chain of 10 s tumbling windows over one `Scan`, both
+/// kept at ingestion, are refreshed in one ingestion run per tumbling window: the
 /// `Scan` is computed once per second of arriving data, not twice.
 #[test]
-fn a_scan_under_two_chains_of_one_pane_width_is_computed_once() {
+fn a_scan_under_two_chains_of_one_tumbling_window_width_is_computed_once() {
     let scan = scan();
     let dag = dag_of(
         &[
@@ -150,11 +150,11 @@ fn a_scan_under_two_chains_of_one_pane_width_is_computed_once() {
     assert_eq!(scan_computations(&dag), (1, 1.0));
 }
 
-/// With 10 s and 60 s panes the chains need different runs (the 10 s chain
-/// needs five pane ends the 60 s chain does not): the `Scan` is computed
+/// With 10 s and 60 s tumbling windows the chains need different runs (the 10 s chain
+/// needs five tumbling window ends the 60 s chain does not): the `Scan` is computed
 /// once for each.
 #[test]
-fn a_scan_under_chains_of_two_pane_widths_is_computed_for_each() {
+fn a_scan_under_chains_of_two_tumbling_window_widths_is_computed_for_each() {
     let scan = scan();
     let dag = dag_of(
         &[
@@ -217,7 +217,7 @@ fn a_scan_under_chains_of_10_10_and_60_s_is_computed_for_each_width() {
 }
 
 /// A 10 s chain over the `Scan` and a 10 s chain over the `Scan` shifted by
-/// 5 s end their panes on different grids (phases 0 and 5 s): two runs.
+/// 5 s end their tumbling windows on different grids (phases 0 and 5 s): two runs.
 #[test]
 fn chains_of_one_width_and_two_phases_are_computed_apart() {
     let scan = scan();

@@ -181,7 +181,7 @@ fn rule_fixture_computations(
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_logical_asap_optimization::test_support::{
-        pane_candidates, window_composition_pass2_candidates,
+        tumbling_window_candidates, window_composition_pass2_candidates,
     };
     use asap_types::stages::HowToComputeAggregateMeasure;
     let local = generate_per_computation_candidates(
@@ -235,12 +235,12 @@ fn rule_fixture_computations(
         if distinct_nodes(&shared) < distinct_nodes(&whole) {
             computations.push(shared);
         }
-        let panes = pane_candidates(&whole, &grid);
-        // Isolate one pane configuration at a time; no Cartesian products of
+        let tumbling_windows = tumbling_window_candidates(&whole, &grid);
+        // Isolate one tumbling-window configuration at a time; no Cartesian products of
         // independent window implementations are needed for the error tests.
-        for pane in panes {
+        for tumbling_window in tumbling_windows {
             computations.extend(
-                window_composition_pass2_candidates(&whole, &[pane])
+                window_composition_pass2_candidates(&whole, &[tumbling_window])
                     .unwrap()
                     .into_iter()
                     .map(|candidate| candidate.roots.unwrap()),
@@ -878,7 +878,7 @@ fn stage3_plan_selection_accepts_kmv_for_any_failure_probability_without_a_bound
 }
 
 /// The physical candidates among `ids` that build their sketch as a
-/// tumbling-pane `SummaryTumblingWindowChain`.
+/// tumbling-window `SummaryTumblingWindowChain`.
 fn tumbling<'a>(run: &Run, ids: Vec<&'a str>) -> Vec<&'a str> {
     ids.into_iter()
         .filter(|id| {
@@ -890,15 +890,18 @@ fn tumbling<'a>(run: &Run, ids: Vec<&'a str>) -> Vec<&'a str> {
         .collect()
 }
 
-/// The enlarged precision reaches a sketch carried by a tumbling-pane
+/// The enlarged precision reaches a sketch carried by a tumbling-window
 /// `SummaryTumblingWindowChain` too (#713): Q1's HLL over a bound of 3,000 is valid only at
-/// precision 18, above the 17 sized for ε alone, so a valid tumbling-pane
+/// precision 18, above the 17 sized for ε alone, so a valid tumbling-window
 /// HLL candidate carries precision 18 in its chain.
 #[test]
-fn pass1_sizing_enlarges_tumbling_pane_hll() {
+fn pass1_sizing_enlarges_tumbling_window_hll() {
     let run = pipeline_with_distinct_bound(Some(3_000));
     let hll = tumbling(&run, hll_only_candidates(&run));
-    assert!(!hll.is_empty(), "a tumbling-pane HLL candidate answers Q1");
+    assert!(
+        !hll.is_empty(),
+        "a tumbling-window HLL candidate answers Q1"
+    );
     for id in hll {
         assert!(run.cost(id).is_some(), "{id}: {:?}", run.invalid().get(id));
     }

@@ -12,7 +12,7 @@
 //!
 //! A snapshot holds only the plan, never the search that found it: the
 //! selected plan's DAG (Stage 2 candidate `P1`) and display name, its cost
-//! and accepted accuracy per query, the materialized views, pane retention,
+//! and accepted accuracy per query, the materialized views, tumbling-window retention,
 //! and whether the search proved the plan optimal; for a query that does not
 //! plan, the error. Candidate ids, round and evaluation counters, timings, the
 //! Stage 1 and Stage 2 candidate lists and the memo vary from run to run
@@ -90,7 +90,7 @@ fn stage_pipeline(args: &[String], scratch: &Path) -> Value {
 }
 
 /// Whether the wall-clock budget ended the search: planning (Pass 1 and
-/// every pane-width round) used the whole budget. A round cut short by its
+/// every tumbling-window-width round) used the whole budget. A round cut short by its
 /// own budget is not visible in the report.
 fn hit_time_limit(document: &Value) -> bool {
     let report = &document["planning_report"];
@@ -118,10 +118,10 @@ fn search_status(document: &Value) -> &Value {
 }
 
 /// Whether the plan is proven optimal: its search says so and every legal
-/// pane width was searched.
+/// tumbling-window width was searched.
 fn proven_optimal(document: &Value) -> bool {
     search_status(document) == "optimal"
-        && document["planning_report"]["pane_widths_pending"] != json!(true)
+        && document["planning_report"]["tumbling_window_widths_pending"] != json!(true)
 }
 
 /// `value` with every non-integer number rounded to 12 significant digits.
@@ -420,14 +420,14 @@ fn time_limit_detection() {
     ));
 }
 
-/// An optimal search proves the plan optimal only when no legal pane width
+/// An optimal search proves the plan optimal only when no legal tumbling-window width
 /// was left unsearched.
 #[test]
-fn proven_optimal_needs_every_pane_width() {
+fn proven_optimal_needs_every_tumbling_window_width() {
     let document = |status: &str, pending: bool| {
         json!({
             "stage3_plan_selection": {"search_report": {"status": status}},
-            "planning_report": {"pane_widths_pending": pending},
+            "planning_report": {"tumbling_window_widths_pending": pending},
         })
     };
     assert!(proven_optimal(&document("optimal", false)));

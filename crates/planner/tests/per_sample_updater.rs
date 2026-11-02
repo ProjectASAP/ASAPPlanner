@@ -1,6 +1,6 @@
-//! A runtime that ingests sample by sample refreshes a materialized pane's states
+//! A runtime that ingests sample by sample refreshes a materialized tumbling window's states
 //! with `StateColumnUpdater`, the code the plan's `SummaryAgg` runs on a
-//! batch (issue #762): the same states as the executor's pane build.
+//! batch (issue #762): the same states as the executor's tumbling-window build.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -24,7 +24,7 @@ use time_series::{series_identity, series_labels, time_series_tables, RawDataSam
 const EVALUATION_MS: i64 = 3_600_000;
 
 #[tokio::test]
-async fn per_sample_updates_build_the_materialized_pane_the_plan_refreshes() {
+async fn per_sample_updates_build_the_materialized_tumbling_window_the_plan_refreshes() {
     // What the user writes: the 5-minute rate of a counter, every minute,
     // exactly, over 1,000 series sampled every 15 s.
     let workload: PlanningWorkload = serde_json::from_str(
@@ -37,7 +37,7 @@ async fn per_sample_updates_build_the_materialized_pane_the_plan_refreshes() {
               "sources": {"http_requests_total": {"series_count": 1000, "sample_interval": 15000}}}}"#,
     )
     .unwrap();
-    // No raw data samples retained: the plan stores rate panes built at ingestion.
+    // No raw data samples retained: the plan stores rate tumbling windows built at ingestion.
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
@@ -52,7 +52,7 @@ async fn per_sample_updates_build_the_materialized_pane_the_plan_refreshes() {
     .unwrap()
     .0;
     let dag = &plan.dag;
-    // The newest pane view and its window at this evaluation.
+    // The newest tumbling window view and its window at this evaluation.
     let views = plan.materialized_views().unwrap();
     let output = views
         .iter()
@@ -63,7 +63,7 @@ async fn per_sample_updates_build_the_materialized_pane_the_plan_refreshes() {
         })
         .unwrap();
     let (start_ms, end_ms) = output.inputs.raw_data_windows()[0].bounds_ms(EVALUATION_MS);
-    // Five one-minute panes, the newest (59 min, 60 min].
+    // Five one-minute tumbling windows, the newest (59 min, 60 min].
     assert_eq!(views.len(), 5);
     assert_eq!((start_ms, end_ms), (3_540_000, 3_600_000));
     // The view node's summary family, as the plan declares it: the
@@ -83,7 +83,7 @@ async fn per_sample_updates_build_the_materialized_pane_the_plan_refreshes() {
                 .producer;
         }
     };
-    // What the runtime received in the pane: 3 series, one counter sample
+    // What the runtime received in the tumbling window: 3 series, one counter sample
     // every 15 s, one series with a reset.
     assert_eq!(
         family,
@@ -114,8 +114,8 @@ async fn per_sample_updates_build_the_materialized_pane_the_plan_refreshes() {
         })
         .collect();
 
-    // The executor's pane build: the samples bound at the plan's `Scan`,
-    // its `TimeRange` keeping the pane's window.
+    // The executor's tumbling-window build: the samples bound at the plan's `Scan`,
+    // its `TimeRange` keeping the time range the tumbling window covers.
     let compiled = compile(dag, &[], &[output.node_id as u64]).unwrap();
     let build = compiled
         .instantiate(Arc::new(time_series_tables(dag, &samples)))
@@ -128,7 +128,7 @@ async fn per_sample_updates_build_the_materialized_pane_the_plan_refreshes() {
         Limits::default(),
     )
     .unwrap();
-    let pane = build
+    let tumbling_window = build
         .execute(compiled.roots(), context)
         .unwrap()
         .remove(0)
@@ -137,13 +137,13 @@ async fn per_sample_updates_build_the_materialized_pane_the_plan_refreshes() {
         .unwrap()
         .unwrap();
     // Its states, by series labels.
-    let state_column = pane
+    let state_column = tumbling_window
         .schema()
         .fields
         .iter()
         .position(|field| !field.is_plain())
         .unwrap();
-    let from_dag: BTreeMap<BTreeMap<String, String>, String> = pane
+    let from_dag: BTreeMap<BTreeMap<String, String>, String> = tumbling_window
         .to_rows()
         .iter()
         .map(|row| {
@@ -152,13 +152,13 @@ async fn per_sample_updates_build_the_materialized_pane_the_plan_refreshes() {
             };
             let exact = state.as_any().downcast_ref::<ExactAccumulator>().unwrap();
             (
-                series_labels(pane.schema(), row),
+                series_labels(tumbling_window.schema(), row),
                 serde_json::to_string(exact).unwrap(),
             )
         })
         .collect();
 
-    // The per-sample build: one updater for the pane, a group per series.
+    // The per-sample build: one updater for the tumbling window, a group per series.
     let mut updater = StateColumnUpdater::new(&family).unwrap();
     let mut groups: BTreeMap<BTreeMap<String, String>, u32> = BTreeMap::new();
     for sample in &samples {
@@ -174,7 +174,7 @@ async fn per_sample_updates_build_the_materialized_pane_the_plan_refreshes() {
             .update(group, sample.value, sample.timestamp_ms)
             .unwrap();
     }
-    // Sealed at pane close: one state per group.
+    // Sealed at tumbling window close: one state per group.
     let states = updater.seal();
     let per_sample: BTreeMap<BTreeMap<String, String>, String> = groups
         .into_iter()
@@ -243,12 +243,12 @@ async fn answers(
     results
 }
 
-/// A runtime builds every materialized pane sample by sample, installs each as a
+/// A runtime builds every materialized tumbling window sample by sample, installs each as a
 /// batch with `Batch::try_from_columns` (no DAG run), and answers the query
 /// from them: the same answers as the plan's query-time reference over the
 /// raw data samples.
 #[tokio::test]
-async fn panes_installed_from_per_sample_states_answer_the_query() {
+async fn tumbling_windows_installed_from_per_sample_states_answer_the_query() {
     use asap_executor::arrow::array::{DictionaryArray, TimestampMillisecondArray, UInt32Array};
     use asap_executor::arrow::datatypes::UInt32Type;
     use asap_executor::values::{Batch, BatchColumn};
@@ -265,7 +265,7 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
               "sources": {"http_requests_total": {"series_count": 1000, "sample_interval": 15000}}}}"#,
     )
     .unwrap();
-    // No raw data samples retained: five one-minute rate panes built at ingestion.
+    // No raw data samples retained: five one-minute rate tumbling windows built at ingestion.
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
@@ -302,10 +302,10 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
             })
         })
         .collect();
-    // Every materialized pane, built sample by sample and installed as a batch.
-    let mut panes = BTreeMap::new();
+    // Every materialized tumbling window, built sample by sample and installed as a batch.
+    let mut tumbling_windows = BTreeMap::new();
     for output in &plan.materialized_views().unwrap() {
-        // The pane's window, `(start_ms, end_ms]`, at this evaluation.
+        // The time range the tumbling window covers, `(start_ms, end_ms]`, at this evaluation.
         let (start_ms, end_ms) = output.inputs.raw_data_windows()[0].bounds_ms(EVALUATION_MS);
         // The view node's family and output schema, from the plan.
         let node = dag.nodes.iter().find(|n| n.id == output.node_id).unwrap();
@@ -343,9 +343,9 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
                 .update(group, sample.value, sample.timestamp_ms)
                 .unwrap();
         }
-        // ... sealed at pane close: one rate record per series.
+        // ... sealed at tumbling window close: one rate record per series.
         let states = Arc::new(updater.seal());
-        // The pane's columns, in the view node's schema: the pane end as
+        // The tumbling window's columns, in the view node's schema: the tumbling window end as
         // its time, each series' state, and its identity.
         let schema = Arc::new(node.output_schema.clone());
         let groups = identities.len();
@@ -375,18 +375,19 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
             })
             .collect();
         // Installed without running the DAG.
-        panes.insert(
+        tumbling_windows.insert(
             output.node_id as u64,
             Batch::try_from_columns(schema, columns).unwrap(),
         );
     }
-    assert_eq!(panes.len(), 5);
+    assert_eq!(tumbling_windows.len(), 5);
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
     };
     let roots: Vec<u64> = plan.dag.roots.iter().map(|&r| r as u64).collect();
-    // The query's answers from the installed panes.
-    let from_panes = answers(dag, panes, &samples, &roots, query.clone()).await;
+    // The query's answers from the installed tumbling windows.
+    let from_tumbling_windows =
+        answers(dag, tumbling_windows, &samples, &roots, query.clone()).await;
     // The plan's query-time reference over the raw data samples.
     let reference = query_time_reference(&plan).unwrap();
     let reference_roots: Vec<u64> = reference.dag.roots.iter().map(|&r| r as u64).collect();
@@ -399,6 +400,6 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
     )
     .await;
     // One rate per series, equal to the reference.
-    assert_eq!(from_panes[0].len(), 3);
-    assert_eq!(from_panes, expected);
+    assert_eq!(from_tumbling_windows[0].len(), 3);
+    assert_eq!(from_tumbling_windows, expected);
 }

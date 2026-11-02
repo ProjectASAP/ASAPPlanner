@@ -1,5 +1,5 @@
 //! Costing a physical plan DAG node by node: each node's resource usage
-//! ([`node_usage`]), then the plan's usage, latency, retention, kept pane
+//! ([`node_usage`]), then the plan's usage, latency, retention, kept tumbling window
 //! chains and cost ([`plan_cost`]). Moved from Stage 3 (`asap-plan-selection`,
 //! whose module doc, "Cost model", describes the model), so Stage 3 computes
 //! no cost of its own.
@@ -45,9 +45,9 @@ use asap_types::workload::bounds::{
 /// time ranges keep, times how often it is computed per second
 /// ([`computations`]); an ingestion-time node over one second of arriving
 /// rows. A materialized node's kept state is counted in byte-seconds per
-/// second; a pane chain kept beyond one evaluation keeps the panes its
+/// second; a tumbling-window chain kept beyond one evaluation keeps the tumbling windows its
 /// retention covers ([`tumbling_window_retention_ms`]). `nodes` and `kept_chains` are
-/// `dag`'s ([`node_map`], [`kept_pane_chains`]); `recurrence[q]` and
+/// `dag`'s ([`node_map`], [`kept_tumbling_window_chains`]); `recurrence[q]` and
 /// `range_evaluations[q]` say how often query `q` runs and how many steps
 /// each run evaluates (one when missing).
 #[allow(clippy::too_many_arguments)]
@@ -440,7 +440,7 @@ fn each_node_usage<'a>(
             &views,
             multipliers[&node.id],
             scan_window,
-            retained_panes(node, &retention_ms),
+            retained_tumbling_windows(node, &retention_ms),
             (node.output_state.timing == ExecutionTiming::IngestionTime)
                 .then(|| maintained_window_ms(node.id, nodes, &producers_of))
                 .flatten(),
@@ -545,8 +545,8 @@ pub struct NodeUsage<'a> {
 /// `rate` its `(multiplier, per_second)` ([`computations`]), `scan_window`
 /// the raw rows a query-time scan reads ([`PhysicalASAPDAG::scan_window`];
 /// read only for scans: it reads `width_ms` of rows and keeps them back to
-/// [`ScanWindow::lookback_ms`]), `retained_pane_count` the panes a pane chain keeps
-/// completed (`retained_panes`), and `ingestion_window_ms` the window an
+/// [`ScanWindow::lookback_ms`]), `retained_tumbling_window_count` the tumbling windows a tumbling-window chain keeps
+/// completed (`retained_tumbling_windows`), and `ingestion_window_ms` the window an
 /// ingestion-time node maintains (`maintained_window_ms`).
 #[allow(clippy::too_many_arguments)]
 pub fn node_usage<'a>(
@@ -554,7 +554,7 @@ pub fn node_usage<'a>(
     producers: &[ProducerOutput<'a>],
     rate: (u64, f64),
     scan_window: ScanWindow,
-    retained_pane_count: u64,
+    retained_tumbling_window_count: u64,
     ingestion_window_ms: Option<u64>,
     data: &DataWorkload,
     settings: &'a CostInputs,
@@ -945,19 +945,19 @@ pub fn node_usage<'a>(
             tumbling_window_count,
             ..
         }) => {
-            // Each input row is kept by the one pane its time falls in,
+            // Each input row is kept by the one tumbling window its time falls in,
             // as a time range keeps it (one operation), and updates
-            // that pane.
+            // that tumbling window.
             let group_count = groups(reduction)?;
             let states = group_count
                 .checked_mul(u64::from(*tumbling_window_count))
                 .ok_or(AnalyticalCostError::Overflow)?;
-            // Each pane's state sees its group's rows in one pane: of
+            // Each tumbling window's state sees its group's rows in one tumbling window: of
             // one second's rows at ingestion time, of the rows read at
             // query time (all of them for a chain kept across
-            // evaluations, whose scan Stage 2 bounds to its newest pane,
+            // evaluations, whose scan Stage 2 bounds to its newest tumbling window,
             // the only one it builds).
-            let rows_per_pane = match (ingestion, node.materialization) {
+            let rows_per_tumbling_window = match (ingestion, node.materialization) {
                 (true, _) => u64::try_from(
                     (u128::from(input.rows) * u128::from(*tumbling_window_width_ms))
                         .div_ceil(1_000),
@@ -969,7 +969,7 @@ pub fn node_usage<'a>(
                     .div_ceil(u64::from(*tumbling_window_count).max(1)),
             };
             let input_rows = StateInputRows {
-                rows_per_state: Some(rows_per_pane.div_ceil(group_count.max(1))),
+                rows_per_state: Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
                 non_negative: raw_data_samples_non_negative(),
             };
             let (depth, state_bytes) = summary_shape(family, input_rows);
@@ -988,7 +988,7 @@ pub fn node_usage<'a>(
                     0,
                 )),
                 format!(
-                    "build {} in {tumbling_window_count} panes of {tumbling_window_width_ms} ms for \
+                    "build {} in {tumbling_window_count} tumbling windows of {tumbling_window_width_ms} ms for \
                      {group_count} groups: {} rows x (1 + depth {depth})",
                     family_name(family),
                     input.rows
@@ -1001,20 +1001,20 @@ pub fn node_usage<'a>(
             ..
         }) => {
             // One operation per input state read; one state per group
-            // out, each pane of a chain being a state of its group. A
-            // merge of a chain's newest `n` panes reads `n` per group. A
+            // out, each tumbling window of a chain being a state of its group. A
+            // merge of a chain's newest `n` tumbling windows reads `n` per group. A
             // rollup's groups are those of its keys, at most its input
             // groups.
             let mut group_count = 0;
             for producer in producers {
-                let panes = match producer.payload {
+                let tumbling_windows = match producer.payload {
                     Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
                         tumbling_window_count,
                         ..
                     }) => u64::from(*tumbling_window_count),
                     _ => 1,
                 };
-                group_count = group_count.max(producer.output.rows / panes.max(1));
+                group_count = group_count.max(producer.output.rows / tumbling_windows.max(1));
             }
             let states = merged_states(*newest_tumbling_windows, producers)?;
             if let Some(keys) = group_by {
@@ -1119,7 +1119,7 @@ pub fn node_usage<'a>(
     let mut detail = format!("{detail}; x {per_second:.4}/s");
     // State kept between computations: at ingestion time, the window
     // being built and the completed ones queries read (a chain of N
-    // panes keeps N + 1), every second. At query time the output is
+    // tumbling windows keeps N + 1), every second. At query time the output is
     // reused only within one evaluation, so it is held only while that
     // evaluation runs (counted below, once latencies are known). The
     // state is what the node holds: its output, or the values an exact
@@ -1139,14 +1139,14 @@ pub fn node_usage<'a>(
             }
             (0, Medium::Memory)
         }
-        // A pane chain kept across evaluations holds the panes its
-        // retention covers ([`tumbling_window_retention_ms`]: N, plus one per pane
+        // A tumbling-window chain kept across evaluations holds the tumbling windows its
+        // retention covers ([`tumbling_window_retention_ms`]: N, plus one per tumbling window
         // width of the readers' range-evaluation span), all but the
         // newest between evaluations and all while one runs.
         (Materialization::MatAtQueryKeptAcrossEvaluations(medium), _) => {
-            let panes = panes_of(node);
-            let retained = retained_pane_count;
-            let between = (state / panes)
+            let tumbling_windows = tumbling_windows_of(node);
+            let retained = retained_tumbling_window_count;
+            let between = (state / tumbling_windows)
                 .checked_mul(
                     retained
                         .checked_sub(1)
@@ -1156,9 +1156,9 @@ pub fn node_usage<'a>(
             match medium {
                 Medium::Memory => {
                     average_memory_bytes = between as f64;
-                    peak_memory_bytes = match retained == panes {
+                    peak_memory_bytes = match retained == tumbling_windows {
                         true => state,
-                        false => (state / panes)
+                        false => (state / tumbling_windows)
                             .checked_mul(retained)
                             .ok_or(AnalyticalCostError::Overflow)?,
                     };
@@ -1178,16 +1178,16 @@ pub fn node_usage<'a>(
             }
             (0, medium)
         }
-        // The retained panes and the one being built.
+        // The retained tumbling windows and the one being built.
         (
             Materialization::MatAtIngestion(medium),
             Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
         ) => {
-            let panes = panes_of(node);
+            let tumbling_windows = tumbling_windows_of(node);
             (
-                (state / panes)
+                (state / tumbling_windows)
                     .checked_mul(
-                        retained_pane_count
+                        retained_tumbling_window_count
                             .checked_add(1)
                             .ok_or(AnalyticalCostError::Overflow)?,
                     )
@@ -1201,7 +1201,7 @@ pub fn node_usage<'a>(
         ),
     };
     if node.materialization == Materialization::MatAtIngestion(Medium::Memory) {
-        maintained = Some(state / panes_of(node));
+        maintained = Some(state / tumbling_windows_of(node));
     }
     if kept > 0 {
         match medium {
@@ -1328,7 +1328,7 @@ fn query_latencies(
         |id: PhysicalASAPNodeId| nodes[&id].output_state.timing == ExecutionTiming::IngestionTime;
     let compaction_ms = |state: PhysicalASAPNodeId| {
         let workers = ingest_workers(dag, work_ms, state) as f64;
-        let states = (output[&state].rows / panes_of(nodes[&state])) as f64;
+        let states = (output[&state].rows / tumbling_windows_of(nodes[&state])) as f64;
         let per_merge_ms = merge_ms.get(&state).copied().unwrap_or(formula_merge_ms);
         (workers - 1.0) * states * per_merge_ms
     };
@@ -1381,10 +1381,10 @@ fn ingest_workers(
     (ingest_ms_per_s / 1_000.0).ceil().max(1.0) as u64
 }
 
-/// For each tumbling-pane chain of `dag` kept beyond one evaluation (at
+/// For each tumbling-window chain of `dag` kept beyond one evaluation (at
 /// ingestion time, or at query time across evaluations), how far back
-/// from the newest evaluation its completed panes must be kept, in
-/// milliseconds: how long before the evaluation its newest pane ends (the
+/// from the newest evaluation its completed tumbling windows must be kept, in
+/// milliseconds: how long before the evaluation its newest tumbling window ends (the
 /// offset of its input, `chain_input_offset_ms`), plus its window
 /// `tumbling_window_count · tumbling_window_width_ms`, plus the longest
 /// `span_ms` ([`RangeEvaluation`]) among the queries reaching it,
@@ -1431,7 +1431,7 @@ pub fn tumbling_window_retention_ms(
         .collect()
 }
 
-/// How long before the evaluation a chain's newest pane ends: the offsets
+/// How long before the evaluation a chain's newest tumbling window ends: the offsets
 /// of the `TimeShift`s (without an `@` anchor) directly below the chain,
 /// added up; 0 for a negative total.
 fn chain_input_offset_ms(
@@ -1452,7 +1452,7 @@ fn chain_input_offset_ms(
     u64::try_from(offset_ms).unwrap_or(0)
 }
 
-/// The pane retention of every kept pane chain of `dag`
+/// The tumbling-window retention of every kept tumbling-window chain of `dag`
 /// ([`tumbling_window_retention_ms`] over [`query_reach`]), for a plan whose query
 /// `q` has range evaluation `range_evaluations[q]` (none when missing):
 /// what Stage 2's realizer records for a realized plan.
@@ -1464,8 +1464,8 @@ pub fn tumbling_window_retention_ms_of_plan(
 }
 
 /// The input states a `SummaryMerge` over `producers` reads: every row of
-/// each, or of the one pane chain whose newest `newest_tumbling_windows` it merges,
-/// that many panes' states per group.
+/// each, or of the one tumbling-window chain whose newest `newest_tumbling_windows` it merges,
+/// that many tumbling windows' states per group.
 fn merged_states(
     newest_tumbling_windows: Option<u32>,
     producers: &[ProducerOutput<'_>],
@@ -1487,9 +1487,9 @@ fn merged_states(
     })
 }
 
-/// The panes a chain in `retention_ms` ([`tumbling_window_retention_ms`]) keeps
-/// completed: its retention over its pane width, at least its pane count.
-fn retained_panes(
+/// The tumbling windows a chain in `retention_ms` ([`tumbling_window_retention_ms`]) keeps
+/// completed: its retention over its tumbling-window width, at least its tumbling-window count.
+fn retained_tumbling_windows(
     node: &asap_types::ir::physical_export::PhysicalASAPDAGNode,
     retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
 ) -> u64 {
@@ -1500,13 +1500,13 @@ fn retained_panes(
                 ..
             }),
             Some(&retention),
-        ) => (retention / tumbling_window_width_ms.max(&1)).max(panes_of(node)),
-        _ => panes_of(node),
+        ) => (retention / tumbling_window_width_ms.max(&1)).max(tumbling_windows_of(node)),
+        _ => tumbling_windows_of(node),
     }
 }
 
-/// A node's panes: a pane chain's count, 1 for any other node.
-pub fn panes_of(node: &asap_types::ir::physical_export::PhysicalASAPDAGNode) -> u64 {
+/// A node's tumbling windows: a tumbling-window chain's count, 1 for any other node.
+pub fn tumbling_windows_of(node: &asap_types::ir::physical_export::PhysicalASAPDAGNode) -> u64 {
     match &node.payload {
         Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
             tumbling_window_count,
@@ -1543,8 +1543,8 @@ pub fn query_reach(
         .collect()
 }
 
-/// The window an ingestion-time grouping `node` maintains: a pane chain's
-/// panes, or the time range below it (through filters, projections and
+/// The window an ingestion-time grouping `node` maintains: a tumbling-window chain's
+/// tumbling windows, or the time range below it (through filters, projections and
 /// time shifts). `None` when there is none.
 fn maintained_window_ms(
     node: PhysicalASAPNodeId,
@@ -1594,13 +1594,13 @@ pub fn node_map(dag: &PhysicalASAPDAG) -> NodeMap<'_> {
 pub type NodeMap<'a> =
     HashMap<PhysicalASAPNodeId, &'a asap_types::ir::physical_export::PhysicalASAPDAGNode>;
 
-/// The tumbling-pane chains of `dag` kept across evaluations
+/// The tumbling-window chains of `dag` kept across evaluations
 /// (`MatAtQueryKeptAcrossEvaluations`, which Stage 2 offers only when the
 /// deployment keeps query-time results and every reader builds one new
-/// pane per evaluation). Each evaluation builds the newest pane, and the
+/// tumbling window per evaluation). Each evaluation builds the newest tumbling window, and the
 /// older ones, which complete the readers' look-back, are kept from
 /// earlier evaluations.
-pub fn kept_pane_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASAPNodeId> {
+pub fn kept_tumbling_window_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASAPNodeId> {
     dag.nodes
         .iter()
         .filter(|node| {
@@ -1619,7 +1619,7 @@ pub fn kept_pane_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASAPNodeId> {
 /// The widest window, in milliseconds, read above the scan `scan` at query
 /// time, ignoring readers that read it outside a window and the anchors of
 /// shifts: each range `TimeRange` and `SummaryTumblingWindowChain` (its whole window, or
-/// one pane for a chain in `kept_chains`) reached through time shifts.
+/// one tumbling window for a chain in `kept_chains`) reached through time shifts.
 /// Prices a scan whose [`PhysicalASAPDAG::scan_window`] is unbounded as
 /// Stage 3 did before; #955 decides `@` anchors.
 fn widest_window_read_ms(

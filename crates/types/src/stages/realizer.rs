@@ -33,23 +33,23 @@ impl From<&str> for PhysicalCandidateError {
 }
 
 /// A realized selection (was `SelectedPhysicalCandidate`): the physical
-/// plan Stage 2 built for it, how long each kept pane chain of that plan
-/// keeps its panes, and the operator node each selected node became.
+/// plan Stage 2 built for it, how long each kept tumbling-window chain of that plan
+/// keeps its tumbling windows, and the operator node each selected node became.
 #[derive(Debug, Clone)]
 pub struct RealizedPlan {
     /// The selection rebuilt as one physical plan, one operator node per
     /// selected node, each with its candidate's timing and materialization.
     pub plan: PhysicalWorkloadPlan,
-    /// For each tumbling-pane chain of `plan` kept beyond one evaluation
+    /// For each tumbling-window chain of `plan` kept beyond one evaluation
     /// (maintained at ingestion time, or built at query time and kept
     /// across evaluations), by node id in `plan.dag`: how far back from the
-    /// newest evaluation the runtime must keep its completed panes, in
-    /// milliseconds. It is how far its panes reach back: the offset its
-    /// newest pane ends before the evaluation (`[60m] offset 10m`: 10 min),
+    /// newest evaluation the runtime must keep its completed tumbling windows, in
+    /// milliseconds. It is how far its tumbling windows reach back: the offset its
+    /// newest tumbling window ends before the evaluation (`[60m] offset 10m`: 10 min),
     /// plus the chain's window, plus the longest range-evaluation span of
     /// its readers, so the earliest step of the next request still finds
-    /// its panes; without an offset or range evaluations, just the window.
-    /// Empty when the plan keeps no panes.
+    /// its tumbling windows; without an offset or range evaluations, just the window.
+    /// Empty when the plan keeps no tumbling windows.
     pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
     /// The operator node of `plan` each selected node became, indexed by
     /// [`SelectedNodeId`](super::SelectedNodeId).

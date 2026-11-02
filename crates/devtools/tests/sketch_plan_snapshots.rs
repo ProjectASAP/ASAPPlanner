@@ -2,9 +2,9 @@
 //!
 //! The corpus snapshots are single queries without an accuracy target, so
 //! their plans are exact. These workloads carry accuracy targets and select
-//! sketches (KLL, DDSketch, a CMS heap), share a sketch pane chain between
-//! queries or nested windows, answer a ratio of two quantiles from one pane
-//! chain, and materialize panes, under the MVP deployment (raw data not
+//! sketches (KLL, DDSketch, a CMS heap), share a sketch tumbling-window chain between
+//! queries or nested windows, answer a ratio of two quantiles from one tumbling window
+//! chain, and materialize tumbling windows, under the MVP deployment (raw data not
 //! retained) and raw data retained. A change to sketch kinds, parameters,
 //! sizes, sharing, timing, materialization or cost shows up as a snapshot
 //! diff.
@@ -18,14 +18,14 @@
 //! Regenerate with
 //! `UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored sketch_plans_match_snapshots`.
 //!
-//! The search's seed and pane-width rounds have wall-clock budgets (5 s
+//! The search's seed and tumbling-window-width rounds have wall-clock budgets (5 s
 //! each), so a search that stops at a budget, of time or of evaluations, can
 //! select a different plan on a slower machine. Only a search that proves its
 //! plan optimal is independent of speed, so every workload must end with
-//! status `optimal` and no pane width left unsearched; any other ending
+//! status `optimal` and no tumbling-window width left unsearched; any other ending
 //! fails instead of being recorded. A workload with a
 //! `deadline_reached_reason` in the manifest may instead end with status
-//! `deadline_reached` (no pane width left unsearched); its snapshot records
+//! `deadline_reached` (no tumbling-window width left unsearched); its snapshot records
 //! that status, so the plan, cost and status must still match. Each
 //! kept workload gave the same plan in three runs and on one core.
 //! Workloads whose search stops at a budget (the raw-retained memo examples,
@@ -147,17 +147,17 @@ fn sketch_plans_match_snapshots() {
             continue;
         }
         // A `deadline_reached_reason` accepts a search that ended at its
-        // deadline after every pane width; plan and cost are still compared.
+        // deadline after every tumbling-window width; plan and cost are still compared.
         let deadline_accepted = entry.get("deadline_reached_reason").is_some()
             && search_status(&document) == "deadline_reached"
-            && document["planning_report"]["pane_widths_pending"] != json!(true);
+            && document["planning_report"]["tumbling_window_widths_pending"] != json!(true);
         if !proven_optimal(&document) && !deadline_accepted {
             failures.push(format!(
-                "{id}: the plan is not proven optimal (status {}, pane widths \
+                "{id}: the plan is not proven optimal (status {}, tumbling-window widths \
                  pending {}), so a round's budget may have chosen it; drop the \
                  workload or make it smaller",
                 search_status(&document),
-                document["planning_report"]["pane_widths_pending"]
+                document["planning_report"]["tumbling_window_widths_pending"]
             ));
             continue;
         }

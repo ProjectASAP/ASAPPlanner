@@ -17,7 +17,7 @@ use asap_types::workload::{
 use std::rc::Rc;
 
 #[test]
-fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
+fn shared_tumbling_window_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
     fn append(
         node: Rc<OperatorNode>,
         configured: &mut PhysicalCandidatesWithCosts,
@@ -27,7 +27,8 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
         let ingestion = ingestion
             || (matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
                 && mode == Materialization::MatAtIngestion(Medium::Memory));
-        let pane = matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }));
+        let tumbling_window =
+            matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }));
         let mut inputs = Vec::new();
         node.operator
             .map_children(|child| inputs.push(append(child.clone(), configured, ingestion, mode)));
@@ -39,7 +40,7 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             } else {
                 ExecutionTiming::QueryTime
             },
-            if pane {
+            if tumbling_window {
                 mode
             } else {
                 Materialization::NotMaterialized
@@ -80,8 +81,10 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             })
             .unwrap();
         let roots: Vec<_> = compose_logical_candidate(&generated, &[choice]).unwrap();
-        let rules =
-            asap_logical_asap_optimization::test_support::pane_candidates(&roots, &[Some(10_000)]);
+        let rules = asap_logical_asap_optimization::test_support::tumbling_window_candidates(
+            &roots,
+            &[Some(10_000)],
+        );
         let roots =
             asap_logical_asap_optimization::test_support::window_composition_pass2_candidates(
                 &roots, &rules,

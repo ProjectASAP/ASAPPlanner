@@ -6242,10 +6242,6 @@
       "stage2_node_id": 7
     }
   ],
-  "tumbling_window_retention_ms": {
-    "1": 7200000,
-    "7": 7200000
-  },
   "proven_optimal": false,
   "query": "sum(increase(http_requests_total{job=\"payment-service\",status=~\"5..\"}[1h])) / sum(increase(http_requests_total{job=\"payment-service\"}[1h]))",
   "selected": {
@@ -6276,7 +6272,7 @@
         "1": {
           "cost_per_second": 0.849,
           "cpu_core_seconds_per_second": 2e-6,
-          "detail": "build exact Increase accumulator in 60 panes of 60000 ms for 1000 groups: 1000 rows x (1 + depth 1); x 1.0000/s; keeps 6776000 bytes",
+          "detail": "build exact Increase accumulator in 60 tumbling windows of 60000 ms for 1000 groups: 1000 rows x (1 + depth 1); x 1.0000/s; keeps 6776000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "price_source": "analytical",
@@ -6357,7 +6353,7 @@
         "7": {
           "cost_per_second": 0.849,
           "cpu_core_seconds_per_second": 2e-6,
-          "detail": "build exact Increase accumulator in 60 panes of 60000 ms for 1000 groups: 1000 rows x (1 + depth 1); x 1.0000/s; keeps 6776000 bytes",
+          "detail": "build exact Increase accumulator in 60 tumbling windows of 60000 ms for 1000 groups: 1000 rows x (1 + depth 1); x 1.0000/s; keeps 6776000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "price_source": "analytical",
@@ -7253,9 +7249,9 @@
                     "kind": "unknown_or_signed"
                   }
                 },
+                "reduction": "PerEntity",
                 "tumbling_window_count": 60,
-                "tumbling_window_width_ms": 60000,
-                "reduction": "PerEntity"
+                "tumbling_window_width_ms": 60000
               }
             }
           }
@@ -7739,9 +7735,9 @@
                     "kind": "unknown_or_signed"
                   }
                 },
+                "reduction": "PerEntity",
                 "tumbling_window_count": 60,
-                "tumbling_window_width_ms": 60000,
-                "reduction": "PerEntity"
+                "tumbling_window_width_ms": 60000
               }
             }
           }
@@ -8054,6 +8050,10 @@
       ],
       "scalar_roots": []
     },
-    "display_name": "Q1 Sum acc + Increase acc ×60 panes · ingestion time: Increase acc for Q1, 60 × 1m panes, Increase acc for Q1, 60 × 1m panes"
+    "display_name": "Q1 Sum acc + Increase acc ×60 tumbling windows · ingestion time: Increase acc for Q1, 60 × 1m tumbling windows, Increase acc for Q1, 60 × 1m tumbling windows"
+  },
+  "tumbling_window_retention_ms": {
+    "1": 7200000,
+    "7": 7200000
   }
 }

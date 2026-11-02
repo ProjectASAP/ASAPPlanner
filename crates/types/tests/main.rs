@@ -3,11 +3,11 @@
 //! One file: `cargo test -p asap-types --test types <file>::`.
 
 mod materialized_view;
-mod pane_chain;
 mod physical_export;
 mod planner_vocabulary;
 mod schema_rebuilding;
 mod structure_contract;
 mod summary_coverage;
 mod summary_merge_structure;
+mod tumbling_window_chain;
 mod workload_compatibility;

@@ -1,7 +1,7 @@
-//! Tumbling panes merged by `SummaryMerge` answer the same per-series query
-//! as one build over the whole window (#509 Example 3/4, Pattern B): panes
+//! Tumbling windows merged by `SummaryMerge` answer the same per-series query
+//! as one build over the whole window (#509 Example 3/4, Pattern B): tumbling windows
 //! written by hand, and the planner's window-composition rule's
-//! `SummaryTumblingWindowChain`, expanded into the panes the executor runs.
+//! `SummaryTumblingWindowChain`, expanded into the tumbling windows the executor runs.
 use crate::physical_common;
 
 use std::collections::BTreeMap;
@@ -16,11 +16,11 @@ use asap_executor::values::{Batch, Value};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::{explicit_local_candidates, explicit_summary_candidate};
 use asap_logical_asap_optimization::test_support::{
-    pane_candidates, window_composition_pass2_candidates,
+    tumbling_window_candidates, window_composition_pass2_candidates,
     window_composition_shared_chain_candidates,
 };
 use asap_types::ir::operator::operator_properties::TimeShift;
-use asap_types::ir::operator::pane_chain::expand_pane_chains;
+use asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains;
 use asap_types::ir::physical_export::PhysicalASAPDAG;
 use asap_types::ir::properties::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::Schema;
@@ -32,10 +32,10 @@ use asap_types::physical::{Materialization, Medium};
 use asap_types::test_support::compile_physical_asap_dag_with_node_ids;
 
 const EVALUATION_MS: i64 = 300_000;
-const PANE_MS: i64 = 60_000;
-const PANES: i64 = 5;
+const TUMBLING_WINDOW_WIDTH_MS: i64 = 60_000;
+const TUMBLING_WINDOW_COUNT: i64 = 5;
 
-/// An explicit supported single-build fixture for the pane merge rules.
+/// An explicit supported single-build fixture for the tumbling-window merge rules.
 fn single_build(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let root = lower_promql(query, accuracy.clone()).unwrap();
     let root = promql_rows::with_series_identity(&root).unwrap();
@@ -49,7 +49,7 @@ fn single_build(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
             })
             .expect("an exact accumulator fixture")
     } else {
-        // Pin DDS so the actual positive-sample interpolation and pane merge
+        // Pin DDS so the actual positive-sample interpolation and tumbling-window merge
         // checks do not depend on the optimizer's preferred implementation.
         explicit_summary_candidate(root, asap_types::ir::schema::SketchAlgorithm::DDSketch)
     }
@@ -63,26 +63,26 @@ fn summary_agg(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         .expect("a summary build")
 }
 
-/// Rewrite `root` so its summary is built in tumbling panes: pane `i` is
+/// Rewrite `root` so its summary is built in tumbling windows: tumbling window `i` is
 /// `TimeRange(1m)` over `TimeShift(i·1m)` over the same `Scan`, and a
-/// `SummaryMerge` combines the panes. Returns the root and the panes.
-fn tumbling_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Vec<Rc<OperatorNode>>) {
+/// `SummaryMerge` combines the tumbling windows. Returns the root and the tumbling windows.
+fn tumbling_windows(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Vec<Rc<OperatorNode>>) {
     let agg = summary_agg(root);
     let Some(NonASAPOp::TimeRange { kind, child, .. }) = agg.children()[0].non_asap() else {
         panic!("expected a raw time range under the summary");
     };
-    let panes: Vec<_> = (0..PANES)
+    let tumbling_windows: Vec<_> = (0..TUMBLING_WINDOW_COUNT)
         .map(|i| {
             let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
                 shift: TimeShift {
-                    offset_ms: i * PANE_MS,
+                    offset_ms: i * TUMBLING_WINDOW_WIDTH_MS,
                     at: None,
                 },
                 child: child.clone(),
             }))
             .unwrap();
             let range = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
-                range: std::time::Duration::from_millis(PANE_MS as u64),
+                range: std::time::Duration::from_millis(TUMBLING_WINDOW_WIDTH_MS as u64),
                 kind: *kind,
                 child: shifted,
             }))
@@ -91,23 +91,24 @@ fn tumbling_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Vec<Rc<Operator
         })
         .collect();
     let merged = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
-        children: panes.clone(),
+        children: tumbling_windows.clone(),
         newest_tumbling_windows: None,
         group_by: None,
     }))
     .unwrap();
     let root = replace(root, &agg, &merged);
     root.validate_structure().unwrap();
-    (root, panes)
+    (root, tumbling_windows)
 }
 
-/// `root` with its summary built in tumbling panes by the planner's
+/// `root` with its summary built in tumbling windows by the planner's
 /// window-composition rule, for a query repeating every minute: the
 /// planned root (a `SummaryMerge` over one `SummaryTumblingWindowChain`) and its expansion
-/// into the panes the executor runs.
-fn planned_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
+/// into the tumbling windows the executor runs.
+fn planned_tumbling_windows(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
     let roots = [QueryRoot::Operator(Rc::clone(root))];
-    let rule_candidates = pane_candidates(&roots, &[Some(PANE_MS as u64)]);
+    let rule_candidates =
+        tumbling_window_candidates(&roots, &[Some(TUMBLING_WINDOW_WIDTH_MS as u64)]);
     let [rule_candidate] = rule_candidates.as_slice() else {
         panic!("one build to split: {rule_candidates:?}")
     };
@@ -116,7 +117,7 @@ fn planned_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Rc<OperatorNode>
             rule_candidate.tumbling_window_width_ms,
             rule_candidate.tumbling_window_count
         ),
-        (PANE_MS as u64, 5)
+        (TUMBLING_WINDOW_WIDTH_MS as u64, 5)
     );
     let mut pass2_candidates =
         window_composition_pass2_candidates(&roots, &rule_candidates).unwrap();
@@ -128,9 +129,9 @@ fn planned_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Rc<OperatorNode>
     planned.validate_structure().unwrap();
     assert_eq!(
         planned.guarantee, root.guarantee,
-        "merged panes keep the whole build's guarantee"
+        "merged tumbling windows keep the whole build's guarantee"
     );
-    let expanded = expand_pane_chains(&planned).unwrap();
+    let expanded = expand_tumbling_window_chains(&planned).unwrap();
     expanded.validate_structure().unwrap();
     (planned, expanded)
 }
@@ -155,13 +156,13 @@ fn replace(
 type RawDataSample = (&'static str, i64, f64);
 
 /// Two series, four positive samples per minute in [0, 5m), each
-/// `phase_ms` after its 15-s step (0: on the pane boundaries).
+/// `phase_ms` after its 15-s step (0: on the tumbling-window boundaries).
 fn samples(phase_ms: i64) -> Vec<RawDataSample> {
     let mut rows = vec![];
     for (s, series) in ["a", "b"].into_iter().enumerate() {
-        for minute in 0..PANES {
+        for minute in 0..TUMBLING_WINDOW_COUNT {
             for j in 0..4 {
-                let ts = minute * PANE_MS + j * 15_000 + phase_ms;
+                let ts = minute * TUMBLING_WINDOW_WIDTH_MS + j * 15_000 + phase_ms;
                 rows.push((series, ts, (s * 100) as f64 + (minute * 4 + j + 1) as f64));
             }
         }
@@ -171,7 +172,7 @@ fn samples(phase_ms: i64) -> Vec<RawDataSample> {
 
 struct Exported {
     dag: PhysicalASAPDAG,
-    /// Each `SummaryAgg` node with its pane.
+    /// Each `SummaryAgg` node with its tumbling window.
     builds: Vec<(u64, i64)>,
 }
 
@@ -179,9 +180,9 @@ fn export(root: &Rc<OperatorNode>, assignment: &MaterializationAssignment) -> Ex
     let timed =
         apply_materialization_timings(root, assignment, &mut NodeToTimedNodeCache::new()).unwrap();
     let compiled = compile_physical_asap_dag_with_node_ids(&timed).unwrap();
-    let pane = |node: &OperatorNode| -> i64 {
+    let tumbling_window = |node: &OperatorNode| -> i64 {
         match node.children()[0].non_asap() {
-            Some(NonASAPOp::TimeShift { shift, .. }) => shift.offset_ms / PANE_MS,
+            Some(NonASAPOp::TimeShift { shift, .. }) => shift.offset_ms / TUMBLING_WINDOW_WIDTH_MS,
             _ => 0,
         }
     };
@@ -189,7 +190,7 @@ fn export(root: &Rc<OperatorNode>, assignment: &MaterializationAssignment) -> Ex
     for node in &compiled.dag.nodes {
         let logical = compiled.node_ids.operator_node(node.id).unwrap();
         if let Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) = &logical.operator {
-            builds.push((node.id as u64, pane(child)));
+            builds.push((node.id as u64, tumbling_window(child)));
         }
     }
     Exported {
@@ -252,7 +253,7 @@ fn query_scope() -> Scope {
     }
 }
 
-/// Compile `root` with everything at query time (Pattern B2: panes rebuilt
+/// Compile `root` with everything at query time (Pattern B2: tumbling windows rebuilt
 /// from raw rows at query time).
 fn compile_at_query_time(
     root: &Rc<OperatorNode>,
@@ -268,23 +269,26 @@ fn execute(root: &Rc<OperatorNode>, samples: &[RawDataSample]) -> Vec<Vec<Value>
     run(&plan, raw_store(&exported.dag, samples), query_scope())
 }
 
-/// Build the panes in ingestion runs (stored `MatAtIngestion`, each with its
+/// Build the tumbling windows in ingestion runs (stored `MatAtIngestion`, each with its
 /// own build timestamp), then merge them in the query run (Pattern B1).
 fn execute_retained(
     root: &Rc<OperatorNode>,
-    panes: &[Rc<OperatorNode>],
+    tumbling_windows: &[Rc<OperatorNode>],
     samples: &[RawDataSample],
 ) -> Vec<Vec<Value>> {
     let mut assignment = MaterializationAssignment::default();
-    for pane in panes {
-        assignment.set(pane, Materialization::MatAtIngestion(Medium::Memory));
+    for tumbling_window in tumbling_windows {
+        assignment.set(
+            tumbling_window,
+            Materialization::MatAtIngestion(Medium::Memory),
+        );
     }
     execute_retained_as(root, &assignment, samples)
 }
 
-/// The planner's pane chain maintained at ingestion time, as Stage 2's B1
+/// The planner's tumbling-window chain maintained at ingestion time, as Stage 2's B1
 /// option assigns it (`MatAtIngestion` on the chain), then expanded: each
-/// pane carries the chain's timing and materialization, so the panes are
+/// tumbling window carries the chain's timing and materialization, so the tumbling windows are
 /// built in ingestion runs and merged in the query run.
 fn execute_maintained_chain(
     planned: &Rc<OperatorNode>,
@@ -293,19 +297,19 @@ fn execute_maintained_chain(
     let chain = OperatorNode::reachable(planned)
         .into_iter()
         .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })))
-        .expect("a pane chain");
+        .expect("a tumbling-window chain");
     let mut assignment = MaterializationAssignment::default();
     assignment.set(&chain, Materialization::MatAtIngestion(Medium::Memory));
     let timed =
         apply_materialization_timings(planned, &assignment, &mut NodeToTimedNodeCache::new())
             .unwrap();
-    let expanded = expand_pane_chains(&timed).unwrap();
-    for pane in OperatorNode::reachable(&expanded)
+    let expanded = expand_tumbling_window_chains(&timed).unwrap();
+    for tumbling_window in OperatorNode::reachable(&expanded)
         .iter()
         .filter(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
     {
         assert_eq!(
-            pane.materialization,
+            tumbling_window.materialization,
             Materialization::MatAtIngestion(Medium::Memory)
         );
     }
@@ -320,16 +324,16 @@ fn execute_retained_as(
     let mut exported = export(root, assignment);
     let builds: Vec<u64> = exported.builds.iter().map(|&(build, _)| build).collect();
     let views = views_at(&mut exported.dag, &builds).unwrap();
-    // Each pane's ingestion run refreshes its view from the raw samples.
+    // Each tumbling window's ingestion run refreshes its view from the raw samples.
     let mut store = InMemoryDataStore::default();
-    for &(build, pane) in &exported.builds {
+    for &(build, tumbling_window) in &exported.builds {
         let plan = compile(&exported.dag, &[], &[build]).unwrap();
-        let end = EVALUATION_MS - pane * PANE_MS;
+        let end = EVALUATION_MS - tumbling_window * TUMBLING_WINDOW_WIDTH_MS;
         let rows = run(
             &plan,
             raw_store(&exported.dag, samples),
             Scope::Ingestion {
-                window_start_ms: end - PANE_MS,
+                window_start_ms: end - TUMBLING_WINDOW_WIDTH_MS,
                 window_end_ms: end,
             },
         );
@@ -357,38 +361,42 @@ fn values(rows: &[Vec<Value>]) -> Vec<f64> {
 }
 
 /// Returns the per-series values, which every execution path agrees on.
-fn assert_pane_merge_matches_single_build(
+fn assert_tumbling_window_merge_matches_single_build(
     query: &str,
     accuracy: AccuracyTarget,
     samples: &[RawDataSample],
 ) -> Vec<f64> {
     let single = single_build(query, accuracy);
-    let (panes, pane_builds) = tumbling_panes(&single);
+    let (tumbling_windows, tumbling_window_builds) = tumbling_windows(&single);
     let expected = execute(&single, samples);
     assert_eq!(expected.len(), 2, "{expected:?}");
     assert!(expected.iter().all(|row| has_timestamp(row, EVALUATION_MS)));
     let result = values(&expected);
     let expected = render(&expected);
     assert_eq!(
-        render(&execute(&panes, samples)),
+        render(&execute(&tumbling_windows, samples)),
         expected,
-        "panes rebuilt at query time"
+        "tumbling windows rebuilt at query time"
     );
     assert_eq!(
-        render(&execute_retained(&panes, &pane_builds, samples)),
+        render(&execute_retained(
+            &tumbling_windows,
+            &tumbling_window_builds,
+            samples
+        )),
         expected,
-        "retained panes"
+        "retained tumbling windows"
     );
-    let (planned, expanded) = planned_panes(&single);
+    let (planned, expanded) = planned_tumbling_windows(&single);
     assert_eq!(
         render(&execute(&expanded, samples)),
         expected,
-        "the planner's pane chain, expanded"
+        "the planner's tumbling-window chain, expanded"
     );
     assert_eq!(
         render(&execute_maintained_chain(&planned, samples)),
         expected,
-        "the planner's pane chain, maintained at ingestion time"
+        "the planner's tumbling-window chain, maintained at ingestion time"
     );
     let unexpanded = compile_at_query_time(&planned).err().unwrap_or_default();
     assert!(
@@ -398,11 +406,11 @@ fn assert_pane_merge_matches_single_build(
     result
 }
 
-/// Exact per-series Sum over 5 merged 1-minute panes equals one 5-minute
+/// Exact per-series Sum over 5 merged 1-minute tumbling windows equals one 5-minute
 /// build, timestamped at the evaluation time.
 #[test]
-fn exact_sum_over_tumbling_panes_matches_single_build() {
-    let sums = assert_pane_merge_matches_single_build(
+fn exact_sum_over_tumbling_windows_matches_single_build() {
+    let sums = assert_tumbling_window_merge_matches_single_build(
         "sum_over_time(m[5m])",
         AccuracyTarget::exact(),
         // 1 ms past each step: the window `(0, 5m]` holds all 20 samples.
@@ -411,11 +419,11 @@ fn exact_sum_over_tumbling_panes_matches_single_build() {
     assert_eq!(sums, vec![210., 2210.]);
 }
 
-/// The selected quantile sketch over 5 merged 1-minute panes equals one
+/// The selected quantile sketch over 5 merged 1-minute tumbling windows equals one
 /// 5-minute build, within the target of the exact p99 (20 and 120).
 #[test]
-fn quantile_over_tumbling_panes_matches_single_build() {
-    let p99 = assert_pane_merge_matches_single_build(
+fn quantile_over_tumbling_windows_matches_single_build() {
+    let p99 = assert_tumbling_window_merge_matches_single_build(
         "quantile_over_time(0.99, m[5m])",
         AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative),
         &samples(0),
@@ -431,13 +439,16 @@ fn quantile_over_tumbling_panes_matches_single_build() {
     }
 }
 
-/// Exact counter Rate over 5 merged 1-minute panes equals one 5-minute
+/// Exact counter Rate over 5 merged 1-minute tumbling windows equals one 5-minute
 /// build: the merged increase is divided by the whole 5-minute window, not
-/// by one pane's minute.
+/// by one tumbling window's minute.
 #[test]
-fn exact_rate_over_tumbling_panes_matches_single_build() {
-    let rates =
-        assert_pane_merge_matches_single_build("rate(m[5m])", AccuracyTarget::exact(), &samples(0));
+fn exact_rate_over_tumbling_windows_matches_single_build() {
+    let rates = assert_tumbling_window_merge_matches_single_build(
+        "rate(m[5m])",
+        AccuracyTarget::exact(),
+        &samples(0),
+    );
     assert_eq!(rates.len(), 2);
     // 19 counted over 285 s of samples, extrapolated to the 5-min window.
     for rate in rates {
@@ -445,12 +456,12 @@ fn exact_rate_over_tumbling_panes_matches_single_build() {
     }
 }
 
-/// With samples off the pane boundaries, Increase extrapolates to the
+/// With samples off the tumbling-window boundaries, Increase extrapolates to the
 /// start of the whole 5-minute window, as one build does, not to the start
-/// of the newest pane.
+/// of the newest tumbling window.
 #[test]
-fn exact_increase_off_the_pane_boundaries_matches_single_build() {
-    let increases = assert_pane_merge_matches_single_build(
+fn exact_increase_off_the_tumbling_window_boundaries_matches_single_build() {
+    let increases = assert_tumbling_window_merge_matches_single_build(
         "increase(m[5m])",
         AccuracyTarget::exact(),
         &samples(7_000),
@@ -482,7 +493,7 @@ fn offset_counter_window_ends_at_the_offset() {
         let plain = whole_build_values_at(&format!("{function}(m[5m])"), EVALUATION_MS, &samples);
         let shifted = whole_build_values_at(
             &format!("{function}(m[5m] offset 1m)"),
-            EVALUATION_MS + PANE_MS,
+            EVALUATION_MS + TUMBLING_WINDOW_WIDTH_MS,
             &samples,
         );
         assert_eq!(shifted, plain, "{function}");
@@ -501,32 +512,32 @@ fn anchored_counter_window_ends_at_the_anchor() {
         let at_300 = whole_build_values_at(&format!("{function}(m[5m])"), EVALUATION_MS, &samples);
         let at_240 = whole_build_values_at(
             &format!("{function}(m[5m])"),
-            EVALUATION_MS - PANE_MS,
+            EVALUATION_MS - TUMBLING_WINDOW_WIDTH_MS,
             &samples,
         );
         assert_ne!(at_300, at_240, "{function}: the two windows differ");
         let anchored = whole_build_values_at(
             &format!("{function}(m[5m] @ 300)"),
-            EVALUATION_MS + PANE_MS,
+            EVALUATION_MS + TUMBLING_WINDOW_WIDTH_MS,
             &samples,
         );
         assert_eq!(anchored, at_300, "{function} @ 300");
         let anchored_offset = whole_build_values_at(
             &format!("{function}(m[5m] @ 300 offset 1m)"),
-            EVALUATION_MS + PANE_MS,
+            EVALUATION_MS + TUMBLING_WINDOW_WIDTH_MS,
             &samples,
         );
         assert_eq!(anchored_offset, at_240, "{function} @ 300 offset 1m");
     }
 }
 
-/// Panes whose ranges read the scan through two stacked `TimeShift`s (the
-/// pane's shift over a zero shift) compile and answer as the single build:
+/// Tumbling windows whose ranges read the scan through two stacked `TimeShift`s (the
+/// tumbling window's shift over a zero shift) compile and answer as the single build:
 /// the per-entity build looks through every shift to its raw source.
 #[test]
-fn panes_over_stacked_time_shifts_match_single_build() {
+fn tumbling_windows_over_stacked_time_shifts_match_single_build() {
     let single = single_build("increase(m[5m])", AccuracyTarget::exact());
-    let (panes, _) = tumbling_panes(&single);
+    let (tumbling_windows, _) = tumbling_windows(&single);
     let agg = summary_agg(&single);
     let Some(NonASAPOp::TimeRange { child: scan, .. }) = agg.children()[0].non_asap() else {
         panic!("expected a raw time range under the summary");
@@ -539,17 +550,17 @@ fn panes_over_stacked_time_shifts_match_single_build() {
         child: scan.clone(),
     }))
     .unwrap();
-    let stacked = replace(&panes, scan, &zero_shift);
+    let stacked = replace(&tumbling_windows, scan, &zero_shift);
     let expected = render(&execute(&single, &samples(0)));
     assert_eq!(expected.len(), 2, "{expected:?}");
     assert_eq!(render(&execute(&stacked, &samples(0))), expected);
 }
 
-/// Exact counter Increase over 5 merged 1-minute panes equals one 5-minute
-/// build: the merge joins consecutive panes across their boundaries.
+/// Exact counter Increase over 5 merged 1-minute tumbling windows equals one 5-minute
+/// build: the merge joins consecutive tumbling windows across their boundaries.
 #[test]
-fn exact_increase_over_tumbling_panes_matches_single_build() {
-    let increases = assert_pane_merge_matches_single_build(
+fn exact_increase_over_tumbling_windows_matches_single_build() {
+    let increases = assert_tumbling_window_merge_matches_single_build(
         "increase(m[5m])",
         AccuracyTarget::exact(),
         &samples(0),
@@ -557,18 +568,18 @@ fn exact_increase_over_tumbling_panes_matches_single_build() {
     assert_eq!(increases.len(), 2);
 }
 
-/// A middle pane with no samples, for one series or for every series: the
-/// merge joins the panes on either side of the empty one, and Increase
+/// A middle tumbling window with no samples, for one series or for every series: the
+/// merge joins the tumbling windows on either side of the empty one, and Increase
 /// matches one 5-minute build.
 #[test]
-fn exact_increase_over_an_empty_middle_pane_matches_single_build() {
-    let middle = 2 * PANE_MS..3 * PANE_MS;
+fn exact_increase_over_an_empty_middle_tumbling_window_matches_single_build() {
+    let middle = 2 * TUMBLING_WINDOW_WIDTH_MS..3 * TUMBLING_WINDOW_WIDTH_MS;
     for emptied in [&["a"][..], &["a", "b"]] {
         let gapped: Vec<RawDataSample> = samples(0)
             .into_iter()
             .filter(|(series, ts, _)| !(emptied.contains(series) && middle.contains(ts)))
             .collect();
-        let increases = assert_pane_merge_matches_single_build(
+        let increases = assert_tumbling_window_merge_matches_single_build(
             "increase(m[5m])",
             AccuracyTarget::exact(),
             &gapped,
@@ -577,12 +588,12 @@ fn exact_increase_over_an_empty_middle_pane_matches_single_build() {
     }
 }
 
-/// A counter over `[5m] offset 1m` split into the planner's panes, read
+/// A counter over `[5m] offset 1m` split into the planner's tumbling windows, read
 /// at query time or maintained at ingestion time, matches one build: the
-/// panes' shifts fold the outer offset, and the merged counter window ends
+/// tumbling windows' shifts fold the outer offset, and the merged counter window ends
 /// at the evaluation time minus the offset.
 #[test]
-fn a_counter_over_panes_with_an_outer_offset_matches_single_build() {
+fn a_counter_over_tumbling_windows_with_an_outer_offset_matches_single_build() {
     let samples = samples(7_000);
     for function in ["rate", "increase"] {
         let single = single_build(
@@ -591,40 +602,43 @@ fn a_counter_over_panes_with_an_outer_offset_matches_single_build() {
         );
         let expected = render(&execute(&single, &samples));
         assert_eq!(expected.len(), 2, "{function}: {expected:?}");
-        let (planned, expanded) = planned_panes(&single);
+        let (planned, expanded) = planned_tumbling_windows(&single);
         assert_eq!(
             render(&execute(&expanded, &samples)),
             expected,
-            "{function}: expanded panes"
+            "{function}: expanded tumbling windows"
         );
         assert_eq!(
             render(&execute_maintained_chain(&planned, &samples)),
             expected,
-            "{function}: panes maintained at ingestion time"
+            "{function}: tumbling windows maintained at ingestion time"
         );
     }
 }
 
-/// `root`'s summary built from panes `(shift, width)` merged by one
+/// `root`'s summary built from tumbling windows `(shift, width)` merged by one
 /// `SummaryMerge`, both in minutes, or the IR's refusal of that merge.
-fn panes_at(root: &Rc<OperatorNode>, panes: &[(i64, i64)]) -> Result<Rc<OperatorNode>, String> {
+fn tumbling_windows_at(
+    root: &Rc<OperatorNode>,
+    tumbling_windows: &[(i64, i64)],
+) -> Result<Rc<OperatorNode>, String> {
     let agg = summary_agg(root);
     let Some(NonASAPOp::TimeRange { kind, child, .. }) = agg.children()[0].non_asap() else {
         panic!("expected a raw time range under the summary");
     };
-    let children = panes
+    let children = tumbling_windows
         .iter()
         .map(|&(shift, width)| {
             let shifted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeShift {
                 shift: TimeShift {
-                    offset_ms: shift * PANE_MS,
+                    offset_ms: shift * TUMBLING_WINDOW_WIDTH_MS,
                     at: None,
                 },
                 child: child.clone(),
             }))
             .unwrap();
             let range = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::TimeRange {
-                range: std::time::Duration::from_millis((width * PANE_MS) as u64),
+                range: std::time::Duration::from_millis((width * TUMBLING_WINDOW_WIDTH_MS) as u64),
                 kind: *kind,
                 child: shifted,
             }))
@@ -641,29 +655,29 @@ fn panes_at(root: &Rc<OperatorNode>, panes: &[(i64, i64)]) -> Result<Rc<Operator
     Ok(replace(root, &agg, &merged))
 }
 
-/// Counter panes form one window only back to back: with a gap between
-/// them, compiling the counter evaluation is an error; overlapping panes
+/// Counter tumbling windows form one window only back to back: with a gap between
+/// them, compiling the counter evaluation is an error; overlapping tumbling windows
 /// are already refused by the `SummaryMerge`, whose counter inputs must be
 /// disjoint in time.
 #[test]
-fn counter_panes_with_a_gap_or_an_overlap_are_rejected() {
+fn counter_tumbling_windows_with_a_gap_or_an_overlap_are_rejected() {
     let single = single_build("rate(m[5m])", AccuracyTarget::exact());
-    let gapped = panes_at(&single, &[(0, 1), (2, 1)]).unwrap();
+    let gapped = tumbling_windows_at(&single, &[(0, 1), (2, 1)]).unwrap();
     let error = compile_at_query_time(&gapped).err().unwrap_or_default();
     assert!(error.contains("ambiguous logical windows"), "{error}");
-    let overlap = panes_at(&single, &[(0, 2), (1, 2)])
+    let overlap = tumbling_windows_at(&single, &[(0, 2), (1, 2)])
         .err()
         .unwrap_or_default();
     assert!(overlap.contains("InputsOverlap"), "{overlap}");
 }
 
-/// A 2-min and a 5-min quantile, both every minute, on 1-min panes: the
-/// window-composition rule offers one 5-pane chain both read, the 2-min
-/// query merging only its newest 2 panes. Expanded, rebuilt at query time
+/// A 2-min and a 5-min quantile, both every minute, on 1-min tumbling windows: the
+/// window-composition rule offers one 5-tumbling-window chain both read, the 2-min
+/// query merging only its newest 2 tumbling windows. Expanded, rebuilt at query time
 /// or maintained at ingestion time, each query's answer from the shared
 /// chain equals its answer from its own chain.
 #[test]
-fn newest_panes_of_a_shared_chain_match_a_separate_chain() {
+fn newest_tumbling_windows_of_a_shared_chain_match_a_separate_chain() {
     let accuracy = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
     let roots = [
         QueryRoot::Operator(single_build(
@@ -672,15 +686,17 @@ fn newest_panes_of_a_shared_chain_match_a_separate_chain() {
         )),
         QueryRoot::Operator(single_build("quantile_over_time(0.99, m[5m])", accuracy)),
     ];
-    let grid = Some(PANE_MS as u64);
-    let rule_candidates = pane_candidates(&roots, &[grid, grid]);
+    let grid = Some(TUMBLING_WINDOW_WIDTH_MS as u64);
+    let rule_candidates = tumbling_window_candidates(&roots, &[grid, grid]);
     assert_eq!(rule_candidates.len(), 2, "{rule_candidates:?}");
     let pass2_candidates = window_composition_pass2_candidates(&roots, &rule_candidates).unwrap();
     let both = |shared: bool| -> Vec<Rc<OperatorNode>> {
         pass2_candidates
             .iter()
-            .find(|c| c.pane_candidates.len() == 2 && c.shared_chains.is_empty() != shared)
-            .expect("both builds in panes")
+            .find(|c| {
+                c.tumbling_window_candidates.len() == 2 && c.shared_chains.is_empty() != shared
+            })
+            .expect("both builds in tumbling windows")
             .roots
             .as_ref()
             .unwrap()
@@ -704,10 +720,13 @@ fn newest_panes_of_a_shared_chain_match_a_separate_chain() {
     assert_eq!(newest, Some(Some(2)));
     let data = samples(0);
     for (query, (shared, separate)) in shared.iter().zip(&separate).enumerate() {
-        let expected = execute(&expand_pane_chains(separate).unwrap(), &data);
+        let expected = execute(&expand_tumbling_window_chains(separate).unwrap(), &data);
         assert!(!expected.is_empty());
         assert_eq!(
-            render(&execute(&expand_pane_chains(shared).unwrap(), &data)),
+            render(&execute(
+                &expand_tumbling_window_chains(shared).unwrap(),
+                &data
+            )),
             render(&expected),
             "Q{}: the shared chain rebuilt at query time",
             query + 1
@@ -736,13 +755,13 @@ fn execute_ranges_at_their_windows(
     run(&plan, raw_store(&exported.dag, samples), scope)
 }
 
-/// A 5-min quantile every 30 s (10 × 30-s panes) and a 5-min quantile
-/// every minute (5 × 1-min panes): the rule offers one chain of 30-s
-/// panes both read in full, each at its own interval. Expanded, each
+/// A 5-min quantile every 30 s (10 × 30-s tumbling windows) and a 5-min quantile
+/// every minute (5 × 1-min tumbling windows): the rule offers one chain of 30-s
+/// tumbling windows both read in full, each at its own interval. Expanded, each
 /// query's answer from the shared chain equals one build over its window,
 /// at 5 min, and for the 30-s query also at 4.5 min, off the 1-min grid.
 #[test]
-fn queries_at_different_intervals_read_one_chain_of_the_finer_panes() {
+fn queries_at_different_intervals_read_one_chain_of_the_finer_tumbling_windows() {
     let accuracy = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
     let singles = [
         single_build("quantile_over_time(0.5, m[5m])", accuracy.clone()),
@@ -752,16 +771,19 @@ fn queries_at_different_intervals_read_one_chain_of_the_finer_panes() {
         .iter()
         .map(|root| QueryRoot::Operator(Rc::clone(root)))
         .collect();
-    let rule_candidates = pane_candidates(&roots, &[Some(30_000), Some(PANE_MS as u64)]);
+    let rule_candidates = tumbling_window_candidates(
+        &roots,
+        &[Some(30_000), Some(TUMBLING_WINDOW_WIDTH_MS as u64)],
+    );
     let widths: Vec<u64> = rule_candidates
         .iter()
         .map(|c| c.tumbling_window_width_ms)
         .collect();
-    assert_eq!(widths, [30_000, PANE_MS as u64]);
+    assert_eq!(widths, [30_000, TUMBLING_WINDOW_WIDTH_MS as u64]);
     let shared = window_composition_pass2_candidates(&roots, &rule_candidates)
         .unwrap()
         .into_iter()
-        .find(|c| c.pane_candidates.len() == 2 && !c.shared_chains.is_empty())
+        .find(|c| c.tumbling_window_candidates.len() == 2 && !c.shared_chains.is_empty())
         .expect("one shared chain");
     // The whole set's shared chains, built alone, are the same candidates.
     let alone = window_composition_shared_chain_candidates(&roots, &rule_candidates);
@@ -781,7 +803,7 @@ fn queries_at_different_intervals_read_one_chain_of_the_finer_panes() {
         .unwrap()
         .into_iter()
         .map(|root| match root {
-            QueryRoot::Operator(node) => expand_pane_chains(&node).unwrap(),
+            QueryRoot::Operator(node) => expand_tumbling_window_chains(&node).unwrap(),
             QueryRoot::Scalar(_) => panic!("an operator root"),
         })
         .collect();
@@ -801,13 +823,13 @@ fn queries_at_different_intervals_read_one_chain_of_the_finer_panes() {
     }
 }
 
-/// A 5-min quantile every minute (5 × 1-min panes) and a 3-min one every
-/// 90 s (2 × 90-s panes): neither width divides the other, so the rule
-/// offers one chain at their gcd, 10 × 30-s panes, the 3-min query merging
+/// A 5-min quantile every minute (5 × 1-min tumbling windows) and a 3-min one every
+/// 90 s (2 × 90-s tumbling windows): neither width divides the other, so the rule
+/// offers one chain at their gcd, 10 × 30-s tumbling windows, the 3-min query merging
 /// the newest 6. Expanded, each query's answer from the shared chain equals
 /// one build over its window, at times on each query's own grid.
 #[test]
-fn queries_at_60_and_90_seconds_read_one_chain_of_30_second_panes() {
+fn queries_at_60_and_90_seconds_read_one_chain_of_30_second_tumbling_windows() {
     let accuracy = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
     let singles = [
         single_build("quantile_over_time(0.5, m[5m])", accuracy.clone()),
@@ -817,16 +839,19 @@ fn queries_at_60_and_90_seconds_read_one_chain_of_30_second_panes() {
         .iter()
         .map(|root| QueryRoot::Operator(Rc::clone(root)))
         .collect();
-    let rule_candidates = pane_candidates(&roots, &[Some(PANE_MS as u64), Some(90_000)]);
+    let rule_candidates = tumbling_window_candidates(
+        &roots,
+        &[Some(TUMBLING_WINDOW_WIDTH_MS as u64), Some(90_000)],
+    );
     let widths: Vec<(u64, u32)> = rule_candidates
         .iter()
         .map(|c| (c.tumbling_window_width_ms, c.tumbling_window_count))
         .collect();
-    assert_eq!(widths, [(PANE_MS as u64, 5), (90_000, 2)]);
+    assert_eq!(widths, [(TUMBLING_WINDOW_WIDTH_MS as u64, 5), (90_000, 2)]);
     let shared = window_composition_pass2_candidates(&roots, &rule_candidates)
         .unwrap()
         .into_iter()
-        .find(|c| c.pane_candidates.len() == 2 && !c.shared_chains.is_empty())
+        .find(|c| c.tumbling_window_candidates.len() == 2 && !c.shared_chains.is_empty())
         .expect("one shared chain at the gcd");
     assert_eq!(
         (
@@ -841,7 +866,7 @@ fn queries_at_60_and_90_seconds_read_one_chain_of_30_second_panes() {
         .unwrap()
         .into_iter()
         .map(|root| match root {
-            QueryRoot::Operator(node) => expand_pane_chains(&node).unwrap(),
+            QueryRoot::Operator(node) => expand_tumbling_window_chains(&node).unwrap(),
             QueryRoot::Scalar(_) => panic!("an operator root"),
         })
         .collect();

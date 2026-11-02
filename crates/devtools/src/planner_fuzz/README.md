@@ -91,7 +91,7 @@ For a query `q` of workload `W` and a query `q'` derivable from `q`, the tester
 builds a **witness**. The witness is `W`'s selected logical plan (its Stage 1
 candidate) plus one more root that derives `q'` from `q`'s node in that plan,
 by the operator the relation names. Three witnesses change that plan too: m
-and n lengthen the pane chain `q` reads (so `q` merges its newest panes of
+and n lengthen the tumbling-window chain `q` reads (so `q` merges its newest tumbling windows of
 the longer chain); l's `q'` also reads a sibling query, so `W` is planned
 with the sibling added; and h's second witness is `W ∪ {q'}` planned with
 UnivMon as the only sketch family. Each is a plan for `W ∪ {q'}`. The tester
@@ -133,7 +133,7 @@ Two rules decide whether a check counts:
 | `a-looser-accuracy` | `q` at the next looser target | reading `q`'s node |
 | `b-filter-on-group-key` | grouped `q` plus `label = 'value'` on a group key | `Filter` over `q`'s result |
 | `c-coarser-grouping` | `q` grouped by one key fewer | exact `Aggregate` (sum / max / min) over `q`'s result, or a sketch `SummaryMerge{group_by}` over `q`'s state |
-| `d-nested-shorter-window` | `q` over a shorter window that divides it | `SummaryMerge{newest_tumbling_windows}` over `q`'s pane chain |
+| `d-nested-shorter-window` | `q` over a shorter window that divides it | `SummaryMerge{newest_tumbling_windows}` over `q`'s tumbling-window chain |
 | `e-other-quantile-rank` | `q` at another rank | `q`'s estimate (or exact quantile aggregate) at the other rank, same input |
 | `f-exact-duplicate` | `q` | reading `q`'s node |
 | `g-outer-over-result` | an operator over `q`, by `q`'s outer operator: `topk(3, q)` (sum), `bottomk(3, q)` (count), `max(q)` (max), `quantile(0.5, q)` (avg), `q > 0` (min, quantile) | the operator's lowering grafted onto `q`'s node |
@@ -142,7 +142,7 @@ Two rules decide whether a check counts:
 | `j-smaller-topk` | `q`'s top-k at k = 3 | `q`'s `Limit` / `TopK` at 3 over the same input |
 | `k-union-of-selections` | `q` over `label =~ "v1\|v2"`, with `q`'s `v2` twin added to `W` | `SummaryMerge` of the two states, then `q`'s estimate |
 | `l-binary-over-result` | PromQL: `q{label="v"} / q` on a label `q` does not group by, or `q / q_count` for a `sum_over_time` `q` with no outer operator or `sum` (avg as sum/count) | the division's lowering grafted onto `q`'s node |
-| `m-longer-window` | `q` over the shortest longer window (up to 1 h) that is a multiple of `q`'s; not for `rate` or `increase` | `q`'s pane chain lengthened: every merge of it in `W`'s plan reads its old newest panes, and `q'` merges the whole chain |
+| `m-longer-window` | `q` over the shortest longer window (up to 1 h) that is a multiple of `q`'s; not for `rate` or `increase` | `q`'s tumbling-window chain lengthened: every merge of it in `W`'s plan reads its old newest tumbling windows, and `q'` merges the whole chain |
 | `n-longer-window-rollup` | `q` over a longer window, as in m, grouped by one key fewer | m's derivation, then c's rollup |
 | `o-equivalent-range-function` | `q` with `rate` and `increase` swapped (not under `count`) | `q`'s result times (or divided by) the window in seconds, grafted onto `q`'s node |
 
@@ -200,21 +200,21 @@ status column, "conclusive" means the check either held or was violated.
 | Slice: a filter on a group key over a grouped result or summary (planned) | asap-primitive-schema.md "Other uses of coverage" L846–848, L118 | `b-filter-on-group-key` | VIOLATED (995 of 1,003): #891, #902 (#689 for approximate inputs) |
 | Rollup to a coarser grouping: exact, or sketch `SummaryMerge{group_by}` | planner-layering.md rule table L588; asap-primitive-schema.md §5.6 L670, L754–794, L830–844; joint-planning-search.md L324 | `c-coarser-grouping` | VIOLATED (167 of 389): new drafts (exact rollup; sketch rollup over an inner range function) |
 | Scan widening: scans of one metric with different labels share one scan | planner-layering.md Pass 2 L597–607 | `c-coarser-grouping` (sketch rollup witness) | covered by c; no separate violation |
-| Nested window: a shorter window merges the newest panes of a longer window's chain | planner-layering.md L790–807; asap-primitive-schema.md §5.6 L669 | `d-nested-shorter-window` | VIOLATED (73 of 250): new draft (exact sums); compare #873 (rate/increase) |
+| Nested window: a shorter window merges the newest tumbling windows of a longer window's chain | planner-layering.md L790–807; asap-primitive-schema.md §5.6 L669 | `d-nested-shorter-window` | VIOLATED (73 of 250): new draft (exact sums); compare #873 (rate/increase) |
 | Another quantile rank from the same sketch | planner-layering.md L631–634, L804–817 | `e-other-quantile-rank` | VIOLATED (39 of 465), exact percentiles only: new draft (unshared exact aggregates) |
 | Identical expressions (common-subexpression elimination) | planner-layering.md rule table L583–585, Algorithm 2 L655–658 | `f-exact-duplicate` | VIOLATED (92 of 2,915), exact query-time aggregates: new draft |
 | A query over another query's result (top-k over a shared sum) | joint-planning-search.md L177–187; planner-layering.md L583–585 | `g-outer-over-result` | holds (552 conclusive checks). With the operator following q's (ASAPWorkloads #4, #12, #17, #18): VIOLATED (6 of 49), `topk(3, …)` over an exact instant sum and `… > 0` over an approximate quantile |
 | Summary capability: another statistic the family answers (`FamilyCapability::answers`) | planner-layering.md rule table L586, L611–617, Example 2 L1306–1370 | `h-other-statistic` | KLL and KMV answer one statistic, so h now checks SQL frequency statistics of a high-cardinality column (planner-layering Example 2; ASAPWorkloads #57, #107–#108): holds (5 conclusive checks) |
-| gcd pane grid across repeat intervals | planner-layering.md L791–809 | `i-other-repeat-interval` | VIOLATED (49 of 2,717): new draft; compare #731 |
+| gcd tumbling-window grid across repeat intervals | planner-layering.md L791–809 | `i-other-repeat-interval` | VIOLATED (49 of 2,717): new draft; compare #731 |
 | Exact top-k reuse (smaller k) | planner-layering.md rule table L589; joint-planning-search.md L325 | `j-smaller-topk` | holds (62 conclusive checks) |
 | Merge of disjoint selections | asap-primitive-schema.md §4.2 L194–232, §5.6 Example B L721–752 | `k-union-of-selections` | never conclusive: Stage 1 composes no guarantee for the merged estimate |
-| Panes kept across evaluations when query-time results are retained | planner-layering.md Materialization L889–893 | `results-retained` | holds (1,442 conclusive checks) |
-| Window = interval: the whole window as a one-pane tumbling chain | planner-layering.md Materialization L895–905 | — | not checked: a Stage 2 choice within one query |
-| Rollup over newest panes (windowed rollup) | planner-layering.md L809–823 | — | not checked: a composition of c and d |
+| Tumbling windows kept across evaluations when query-time results are retained | planner-layering.md Materialization L889–893 | `results-retained` | holds (1,442 conclusive checks) |
+| Window = interval: the whole window as a one-tumbling-window chain | planner-layering.md Materialization L895–905 | — | not checked: a Stage 2 choice within one query |
+| Rollup over newest tumbling windows (windowed rollup) | planner-layering.md L809–823 | — | not checked: a composition of c and d |
 | avg as sum/count: shared exact accumulators | planner-layering.md L372–383, L502–503; ASAPWorkloads #8 | `l-binary-over-result` | holds (15 conclusive checks, with the ratio row below); checks that the sum is shared, not one accumulator for both |
 | A ratio with a shared operand: a filtered share of a rate (5xx share), one rate over another | ASAPWorkloads #11, #12, #30, #126 | `l-binary-over-result` | holds (see above) |
-| Longer window over the same panes: one chain serves 5m and 1h windows | planner-layering.md L790–807; ASAPWorkloads #1–#2, #19, #122 | `m-longer-window` | VIOLATED (2 of 7): SQL count and percentile at a longer window build new state |
-| Longer window rolled up to a coarser grouping | ASAPWorkloads #1–#2, #61–#62, #65 | `n-longer-window-rollup` | never conclusive yet: needs a grouped q planned with a pane chain |
+| Longer window over the same tumbling windows: one chain serves 5m and 1h windows | planner-layering.md L790–807; ASAPWorkloads #1–#2, #19, #122 | `m-longer-window` | VIOLATED (2 of 7): SQL count and percentile at a longer window build new state |
+| Longer window rolled up to a coarser grouping | ASAPWorkloads #1–#2, #61–#62, #65 | `n-longer-window-rollup` | never conclusive yet: needs a grouped q planned with a tumbling-window chain |
 | `rate` and `increase` of one counter read one state | ASAPWorkloads #1–#2 | `o-equivalent-range-function` | VIOLATED (6 of 6): the second function builds its own state; compare #873 |
 | Stored-state reuse; sliding windows, exponential histograms, SummarySubtract | asap-primitive-schema.md L849, L851–869; planner-layering.md L618–630, L827 | — | not checked: planned or not implemented |
 

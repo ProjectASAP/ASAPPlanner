@@ -1184,7 +1184,7 @@ impl NonASAPOp {
             }
             TimeShift { child, .. } => {
                 // A relation is a SQL table's rows, shifted under a trailing
-                // window's tumbling pane.
+                // window's tumbling window.
                 if !matches!(
                     child.result_kind,
                     OperatorResultKind::InstantVector

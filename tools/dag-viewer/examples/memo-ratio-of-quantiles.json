@@ -113595,7 +113595,7 @@
         "immediate_candidates": 5166,
         "independent_components": 1,
         "inventory_construction_ms": 442.233775,
-        "inventory_pane_width_domain": "Expanding { max_parts: 64 }",
+        "inventory_tumbling_window_width_domain": "Expanding { max_parts: 64 }",
         "joint_price_solve_calls": 0,
         "local_candidate_generation_ms": 0.317655,
         "logical_candidates": 1738,
@@ -113605,7 +113605,7 @@
         "model_construction_ms": 241.089117,
         "objective": "monetary_cost",
         "output_references": 1,
-        "pane_width_rounds": [
+        "tumbling_window_width_rounds": [
           "SeedGrids",
           "Expanding { max_parts: 4 }",
           "Expanding { max_parts: 8 }",
@@ -113613,7 +113613,7 @@
           "Expanding { max_parts: 32 }",
           "Expanding { max_parts: 64 }"
         ],
-        "pane_widths_pending": true,
+        "tumbling_window_widths_pending": true,
         "peak_milp_constraints": 31547,
         "peak_milp_variables": 21948,
         "physical_configurations": 6175,

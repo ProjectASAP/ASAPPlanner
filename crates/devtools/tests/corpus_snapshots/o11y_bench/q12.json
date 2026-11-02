@@ -1,7 +1,6 @@
 {
   "accuracy_guarantees": "enforced",
   "materialized_views": [],
-  "tumbling_window_retention_ms": {},
   "proven_optimal": true,
   "query": "service_cache_refresh_lag_seconds{job=\"user-service\"}",
   "selected": {
@@ -344,5 +343,6 @@
       "scalar_roots": []
     },
     "display_name": "Q1 exact"
-  }
+  },
+  "tumbling_window_retention_ms": {}
 }

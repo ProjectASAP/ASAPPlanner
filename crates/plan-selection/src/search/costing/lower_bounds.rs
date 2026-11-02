@@ -19,7 +19,7 @@ pub(in crate::search) struct LowerBoundMetrics {
     pub priced_candidates: usize,
     pub rounded_down_candidates: usize,
     pub ingestion_scans: usize,
-    pub ingestion_pane_chains: usize,
+    pub ingestion_tumbling_window_chains: usize,
     pub query_readers: usize,
     pub ingestion_transforms: usize,
 }
@@ -252,7 +252,7 @@ pub(in crate::search) fn apply(
                             }
                             asap_types::ir::Operator::ASAP(
                                 ASAPOp::SummaryTumblingWindowChain { .. },
-                            ) => metrics.ingestion_pane_chains += 1,
+                            ) => metrics.ingestion_tumbling_window_chains += 1,
                             _ => metrics.ingestion_transforms += 1,
                         }
                     }
@@ -260,7 +260,7 @@ pub(in crate::search) fn apply(
             }
         }
     }
-    // The solver's coefficient range is narrower than the full pane domain.
+    // The solver's coefficient range is narrower than the full tumbling-window domain.
     // Zero is still a certified lower bound for omitted tiny local charges;
     // the evaluator continues to charge their complete actual cost.
     metrics.rounded_down_candidates = round_down_small_bounds(&mut costs);
@@ -274,8 +274,8 @@ pub(in crate::search) fn apply(
 
 /// Each candidate's common reader window: the window every candidate that
 /// may read it (through time shifts) reads, as the evaluator's
-/// `windows_read` counts windows (a time range's range, a pane chain's
-/// panes). A query-time scan reads its readers' longest window, or every
+/// `windows_read` counts windows (a time range's range, a tumbling-window chain's
+/// tumbling windows). A query-time scan reads its readers' longest window, or every
 /// row held when no reader has one; both are at least the rows of this
 /// window capped by the rows held. `None` when no reader has a window, or
 /// when readers' windows differ: which window the scan reads then depends on
@@ -311,7 +311,7 @@ fn common_reader_windows(configured: &PhysicalCandidatesWithCosts) -> Vec<Option
                             pending.push(reader);
                             None
                         }
-                        // A chain kept across evaluations reads one pane;
+                        // A chain kept across evaluations reads one tumbling window;
                         // its scans are never certified (retained ancestors).
                         asap_types::ir::Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                             tumbling_window_width_ms,
@@ -588,9 +588,9 @@ fn certified_price<'a>(
                         asap_types::workload::bounds::declared_non_negative(context.data, source)
                     })
                 });
-                // Producer pane counts, family, schema fields, statistics and
+                // Producer tumbling-window counts, family, schema fields, statistics and
                 // provenance must agree; upstream work is charged separately.
-                let panes = match producer.payload {
+                let tumbling_windows = match producer.payload {
                     asap_types::ir::Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                         tumbling_window_count,
                         ..
@@ -606,7 +606,7 @@ fn certified_price<'a>(
                 schema.closed = false;
                 let current = serde_json::to_string(&(
                     raw_nonnegative,
-                    panes,
+                    tumbling_windows,
                     family,
                     schema,
                     priced.output,
@@ -653,7 +653,7 @@ fn certified_price<'a>(
         // One ingestion boundary executes once per accounted second; additional
         // unmaterialized consumers can only add executions. A summary build is
         // priced at its template's size, its final size
-        // ([`template_price_is_a_floor`]). Retention above its own pane count
+        // ([`template_price_is_a_floor`]). Retention above its own tumbling-window count
         // and all whole-plan charges are deliberately omitted.
         Ok(node_usage(
             node,
@@ -686,7 +686,7 @@ fn certified_price<'a>(
 #[cfg(test)]
 mod tests {
     use asap_logical_asap_optimization::generate_dag_of_logical_memo_groups;
-    // Fine panes may widen the bound range; round down only the relaxation,
+    // Fine tumbling windows may widen the bound range; round down only the relaxation,
     // preserving a valid lower bound and the core solver's numeric contract.
     #[test]
     fn tiny_certificates_are_rounded_down_without_inflating_other_costs() {
@@ -710,7 +710,7 @@ mod tests {
     use asap_logical_asap_optimization::test_support::try_populate_pass1;
     use asap_logical_asap_optimization::test_support::{entry_with, lower_promql};
     use asap_logical_asap_optimization::test_support::{
-        pane_candidates, window_composition_pass2_candidates,
+        tumbling_window_candidates, window_composition_pass2_candidates,
     };
     use asap_physical_asap_optimization::test_support::catalog::materialize_selected_candidates;
     use asap_types::ir::properties::AccuracyTarget;
@@ -783,9 +783,9 @@ mod tests {
                 } else { matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }) if matches!(kind.params(), SketchParams::DDSketch { .. })) })
             ).unwrap();
             let input = vec![QueryRoot::Operator(Rc::clone(&candidate.root_node))];
-            let panes = pane_candidates(&input, &[Some(60_000)]);
+            let tumbling_windows = tumbling_window_candidates(&input, &[Some(60_000)]);
             roots.push(
-                window_composition_pass2_candidates(&input, &panes)
+                window_composition_pass2_candidates(&input, &tumbling_windows)
                     .unwrap()
                     .remove(0)
                     .roots
@@ -809,16 +809,17 @@ mod tests {
             });
             let id = configured.nodes_for_tests().len();
             ids.insert(Rc::as_ptr(node), id);
-            let pane = matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }));
+            let tumbling_window =
+                matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }));
             let scan = matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }));
             configured.push_for_tests(
                 Rc::clone(node),
-                if pane || scan {
+                if tumbling_window || scan {
                     ExecutionTiming::IngestionTime
                 } else {
                     ExecutionTiming::QueryTime
                 },
-                if pane {
+                if tumbling_window {
                     Materialization::MatAtIngestion(Medium::Memory)
                 } else {
                     Materialization::NotMaterialized
@@ -1088,7 +1089,7 @@ mod tests {
     // Fixed exact accumulator state is not resized by failure-probability rules;
     // every sharing/independent plan must have positive certified state pricing.
     #[test]
-    fn exact_accumulator_panes_and_finalizers_have_certified_bounds() {
+    fn exact_accumulator_tumbling_windows_and_finalizers_have_certified_bounds() {
         check_tiny_bounds(true, false, false);
     }
 
@@ -1101,10 +1102,10 @@ mod tests {
         check_tiny_bounds(true, true, false);
     }
 
-    // Grouped ingestion state uses its own exact pane horizon, matching the
+    // Grouped ingestion state uses its own exact tumbling-window horizon, matching the
     // complete evaluator's maintained_window_ms rather than an unknown window.
     #[test]
-    fn grouped_exact_panes_use_their_declared_maintenance_horizon() {
+    fn grouped_exact_tumbling_windows_use_their_declared_maintenance_horizon() {
         check_tiny_bounds(true, false, true);
     }
 
@@ -1180,7 +1181,7 @@ mod tests {
                 calibration,
             };
             let metrics = apply(&mut configured, &context).unwrap();
-            assert_eq!(metrics.ingestion_pane_chains, 2);
+            assert_eq!(metrics.ingestion_tumbling_window_chains, 2);
             assert!(metrics.ingestion_scans > 0);
             assert!(metrics.query_readers > 0);
             if exact {
@@ -1276,7 +1277,7 @@ mod tests {
         };
         let metrics = apply(&mut configured, &context).unwrap();
         assert_eq!(metrics.query_readers, 0);
-        assert!(metrics.ingestion_pane_chains > 0);
+        assert!(metrics.ingestion_tumbling_window_chains > 0);
         for (candidate, config) in configured
             .dag
             .candidates
@@ -1290,7 +1291,7 @@ mod tests {
     }
     // Equal row counts do not certify different sources as interchangeable cost inputs.
     #[test]
-    fn differing_producer_metadata_leaves_pane_bounds_zero() {
+    fn differing_producer_metadata_leaves_tumbling_window_bounds_zero() {
         let (mut configured, roots, entries, mut data) = fixture();
         let scans: Vec<_> = configured
             .nodes_for_tests()
@@ -1333,7 +1334,7 @@ mod tests {
             calibration: CalibrationFit::default(),
         };
         let metrics = apply(&mut configured, &context).unwrap();
-        assert_eq!(metrics.ingestion_pane_chains, 0);
+        assert_eq!(metrics.ingestion_tumbling_window_chains, 0);
         assert_eq!(metrics.ingestion_scans, 2);
     }
 

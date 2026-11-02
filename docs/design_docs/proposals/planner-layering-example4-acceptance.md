@@ -49,16 +49,16 @@ every other logical candidate gets its own the same way (not counted).
 time, both kept. Not materializing it is the no-window plan, so it is not a
 separate option.
 
-**Today:** Pass 2 builds tumbling panes (`SummaryTumblingWindowChain`), and physical
+**Today:** Pass 2 builds tumbling windows (`SummaryTumblingWindowChain`), and physical
 ASAP-aware optimization enumerates `NotMaterialized`, `MatAtIngestion` and
 `MatAtQuery` (state reused within one evaluation) for every summary build.
-B1 and B2 exist. B3 (panes built at query time and kept across
+B1 and B2 exist. B3 (tumbling windows built at query time and kept across
 evaluations) is offered when the deployment declares
 `query_time_results_retained` in its `deployment_capabilities`: Stage 2 then
-adds `MatAtQueryKeptAcrossEvaluations` for a tumbling-pane chain that builds
-one new pane per evaluation. Pattern A's shared EH needs window segments shared across
+adds `MatAtQueryKeptAcrossEvaluations` for a tumbling-window chain that builds
+one new tumbling window per evaluation. Pattern A's shared EH needs window segments shared across
 queries (#628, #634), so A1–A3 do not exist yet. B3's
-4 kept panes plus the newest cost 436.59 per second under cost model 1,
+4 kept tumbling windows plus the newest cost 436.59 per second under cost model 1,
 between B2 (3.611) and B1 (654.54).
 
 ## Invariants and tests
@@ -69,7 +69,7 @@ between B2 (3.611) and B1 (654.54).
 medium (`MatAtIngestion`, `MatAtQuery`, `NotMaterialized`), and the kept
 event-time span through `retention_ms(p, node)`. The IR does not record
 retention, so the adapter derives it the way plan selection prices kept
-state: a chain of `N` panes of width `w` keeps `N·w`, plus one pane while
+state: a chain of `N` tumbling windows of width `w` keeps `N·w`, plus one tumbling window while
 maintained at ingestion time; a whole-window build keeps its window, plus
 the next one at ingestion time; each plus the offset of the shifts below
 it.
@@ -78,7 +78,7 @@ it.
 
 | Invariant | Test | Status |
 |---|---|---|
-| Every node upstream of an ingestion-time node also runs at ingestion time (all variants) | `stage2_physical_asap_optimization_ingestion_time_upstream_is_ingestion_time`; the monthly variant in `stage2_physical_asap_optimization_monthly_ingestion_time_upstream_is_ingestion_time` | passes: B1 and the monthly variant's maintained panes; the monthly test is ignored as slow (run in release by hand) |
+| Every node upstream of an ingestion-time node also runs at ingestion time (all variants) | `stage2_physical_asap_optimization_ingestion_time_upstream_is_ingestion_time`; the monthly variant in `stage2_physical_asap_optimization_monthly_ingestion_time_upstream_is_ingestion_time` | passes: B1 and the monthly variant's maintained tumbling windows; the monthly test is ignored as slow (run in release by hand) |
 | With data at rest, no node runs at ingestion time | `stage2_physical_asap_optimization_at_rest_runs_nothing_at_ingestion_time` | passes |
 | A materialized output covers its consumers: retention ≥ max over its readers of `lookback` + offset | `stage2_physical_asap_optimization_materialized_output_covers_its_consumers`; the monthly variant in `stage2_physical_asap_optimization_monthly_materialized_output_covers_its_consumers` | passes: B1 keeps 6 min ≥ 5 min; the monthly test is ignored as slow (run in release by hand) |
 

@@ -4,7 +4,7 @@
 //! compiles, is priced, and answers the exact one as `percentile_cont` does
 //! and the sketched one within the sketch's bound. With Q2, the p90 per
 //! city over the last 20 minutes, Q1 and Q2 share the table scan, and Q2's
-//! per-city pane chain serves Q1 through its newest panes rolled up across
+//! per-city tumbling-window chain serves Q1 through its newest tumbling windows rolled up across
 //! cities.
 
 use crate::physical_common;
@@ -165,7 +165,7 @@ fn within_bound(algorithm: Option<&SketchAlgorithm>, q: f64, answer: f64, values
 }
 
 /// `root`'s answer rows at [`EVALUATION_TIME_MS`] over [`rows`], every node at
-/// query time, each pane chain as its panes.
+/// query time, each tumbling-window chain as its tumbling windows.
 fn answers(root: &Rc<OperatorNode>) -> Vec<Vec<Value>> {
     answers_over(root, rows())
 }
@@ -185,8 +185,9 @@ fn answers_over(
             ]
         })
         .collect();
-    // The executor runs a pane chain as its panes.
-    let root = asap_types::ir::operator::pane_chain::expand_pane_chains(root).unwrap();
+    // The executor runs a tumbling-window chain as its tumbling windows.
+    let root = asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains(root)
+        .unwrap();
     physical_common::execute_raw_rows_at(&root, table, EVALUATION_TIME_MS)
 }
 
@@ -298,7 +299,7 @@ async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_logical_asap_optimization::test_support::{
-        pane_candidates, window_composition_pass2_candidates,
+        tumbling_window_candidates, window_composition_pass2_candidates,
     };
     use asap_types::stages::HowToComputeAggregateMeasure;
     let workload = workload(queries);
@@ -361,13 +362,15 @@ async fn stage1(queries: &[&str]) -> Vec<(String, Vec<QueryRoot>)> {
     for choice in choices {
         let roots = share(compose_logical_candidate(&local, &choice).unwrap());
         candidates.push(roots.clone());
-        let panes = pane_candidates(&roots, &grids);
-        if !panes.is_empty() {
+        let tumbling_windows = tumbling_window_candidates(&roots, &grids);
+        if !tumbling_windows.is_empty() {
             candidates.extend(
-                window_composition_pass2_candidates(&roots, &panes)
+                window_composition_pass2_candidates(&roots, &tumbling_windows)
                     .unwrap()
                     .into_iter()
-                    .filter(|candidate| candidate.pane_candidates.len() == panes.len())
+                    .filter(|candidate| {
+                        candidate.tumbling_window_candidates.len() == tumbling_windows.len()
+                    })
                     .filter_map(|candidate| candidate.roots.ok())
                     .map(share),
             );
@@ -402,11 +405,11 @@ async fn q1_and_q2_share_the_table_scan() {
     );
 }
 
-/// Whether Q2's per-city pane chain (120 panes of 10 s) serves both of
-/// Q1's percentiles in `roots`: Q1 merges each city's newest 30 panes (its
+/// Whether Q2's per-city tumbling-window chain (120 tumbling windows of 10 s) serves both of
+/// Q1's percentiles in `roots`: Q1 merges each city's newest 30 tumbling windows (its
 /// 5 minutes), then rolls the cities up into one state, which both of its
 /// estimates read.
-fn newest_panes_rolled_up(roots: &[QueryRoot]) -> bool {
+fn newest_tumbling_windows_rolled_up(roots: &[QueryRoot]) -> bool {
     let (q1, q2) = (operator(&roots[0]), operator(&roots[1]));
     let q2_chains: Vec<*const OperatorNode> = OperatorNode::reachable(q2)
         .iter()
@@ -469,20 +472,21 @@ fn city_values(city: Option<&str>) -> Vec<f64> {
 }
 
 /// Q2's per-city chain serves both of Q1's percentiles through its newest
-/// 30 panes rolled up across cities. Each query's answers are within the
+/// 30 tumbling windows rolled up across cities. Each query's answers are within the
 /// sketch's bound of the exact `percentile_cont`, and over a window with
 /// no row Q1 still answers one NULL row, as the global SQL aggregate the
 /// rollup stands for.
 #[tokio::test]
-async fn q2_pane_chain_serves_q1_through_newest_panes_and_a_rollup() {
+async fn q2_tumbling_window_chain_serves_q1_through_newest_tumbling_windows_and_a_rollup() {
     let candidates = stage1(&[Q1, Q2]).await;
     for algorithm in [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch] {
         let (id, roots) = candidates
             .iter()
             .find(|(_, roots)| {
-                newest_panes_rolled_up(roots) && sketch_of(operator(&roots[0])) == Some(algorithm)
+                newest_tumbling_windows_rolled_up(roots)
+                    && sketch_of(operator(&roots[0])) == Some(algorithm)
             })
-            .unwrap_or_else(|| panic!("no {algorithm:?} newest-panes rollup candidate"));
+            .unwrap_or_else(|| panic!("no {algorithm:?} newest-tumbling-windows rollup candidate"));
         let q1 = answers(operator(&roots[0]));
         let values = values_in(5 * MINUTE_MS, None);
         assert_eq!(q1.len(), 1, "{id}");

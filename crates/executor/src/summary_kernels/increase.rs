@@ -19,7 +19,7 @@ pub struct IncreaseAccumulator {
 
 impl IncreaseAccumulator {
     /// Merge two counter intervals without a temporary collection. Ties retain
-    /// the left input, matching the stable ordering of multi-pane merges.
+    /// the left input, matching the stable ordering of multi-tumbling-window merges.
     pub(crate) fn merge_pair(left: &Self, right: &Self) -> Self {
         let (first, second) = if left.starting_timestamp <= right.starting_timestamp {
             (left, right)

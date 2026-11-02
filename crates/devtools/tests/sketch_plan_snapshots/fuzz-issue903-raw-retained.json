@@ -1,7 +1,6 @@
 {
   "accuracy_guarantees": "enforced",
   "materialized_views": [],
-  "tumbling_window_retention_ms": {},
   "proven_optimal": true,
   "queries": [
     "quantile_over_time(0.9, data[5m])",
@@ -913,5 +912,6 @@
       "scalar_roots": []
     },
     "display_name": "Q1 exact · Q2 Kll · shared Scan (Q1, Q2) · query time, shared: TimeRange"
-  }
+  },
+  "tumbling_window_retention_ms": {}
 }

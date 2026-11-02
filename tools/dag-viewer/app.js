@@ -33,7 +33,7 @@
       { selector: 'node:selected', style: { 'overlay-color': tok('--accent'), 'overlay-opacity': 0.14, 'overlay-padding': 5 } },
       { selector: 'edge', style: { width: 1.6, 'line-color': tok('--edge'), 'target-arrow-color': tok('--edge'), 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'arrow-scale': 0.9 } },
       { selector: '.dimmed', style: { opacity: 0.15 } },
-      { selector: 'node.pane', style: { 'border-style': 'dashed' } },
+      { selector: 'node.tumblingWindow', style: { 'border-style': 'dashed' } },
       { selector: 'edge:selected', style: { 'line-color': tok('--accent'), 'target-arrow-color': tok('--accent'), width: 2.6 } },
     ];
   }
@@ -43,9 +43,9 @@
     $(`lane${i}-meta`).textContent = text;
   }
 
-  // Per lane: what it draws (to redraw it with a pane chain expanded or
+  // Per lane: what it draws (to redraw it with a tumbling-window chain expanded or
   // collapsed) and its elements; per drawn DAG, the SummaryTumblingWindowChain node ids drawn
-  // as panes, so switching plans and back keeps each plan's expanded chains.
+  // as tumbling windows, so switching plans and back keeps each plan's expanded chains.
   const drawn = [null, null, null];
   const laneElements = [[], [], []];
   const expandedByDag = new WeakMap();
@@ -75,11 +75,11 @@
 
   function redraw(i) { const d = drawn[i]; render(i, d.dag, d.physical, d.costPerNode, d.ids); }
 
-  // A SummaryTumblingWindowChain expands into its panes; a pane collapses its chain; any
+  // A SummaryTumblingWindowChain expands into its tumbling windows; a tumbling window collapses its chain; any
   // other node is shown and its upstream and downstream highlighted.
   function tapNode(d, i) {
     if (d.expandable) { expandedOf(drawn[i].dag).add(d.nodeId); redraw(i); showNode(d, i); return; }
-    if (d.kind === 'pane') { expandedOf(drawn[i].dag).delete(d.paneOf); redraw(i); return; }
+    if (d.kind === 'tumblingWindow') { expandedOf(drawn[i].dag).delete(d.tumblingWindowOf); redraw(i); return; }
     showNode(d, i);
     dim(i, new Set(stageNeighborhoodIds(laneElements[i], d.id)));
   }
@@ -121,8 +121,8 @@
     }
     if (d.rootFor && d.rootFor.length) items.push(['query root of', d.rootFor.join(', ')]);
     if (d.reachedBy) items.push(['queries reaching it', d.reachedBy.join(', ') || 'none']);
-    if (d.paneOf !== undefined) items.push(['pane', `${d.pane + 1} of ${body.tumbling_window_count} of SummaryTumblingWindowChain ${d.paneOf}, window ${paneWindowText(d.pane, body.tumbling_window_width_ms)}`]);
-    if (d.expandable) items.push(['panes', `${body.tumbling_window_count} × ${durationText(body.tumbling_window_width_ms)} (click the chain to show them, a pane to hide them)`]);
+    if (d.tumblingWindowOf !== undefined) items.push(['tumbling window', `${d.tumblingWindowIndex + 1} of ${body.tumbling_window_count} of SummaryTumblingWindowChain ${d.tumblingWindowOf}, window ${tumblingWindowTimeText(d.tumbling_window, body.tumbling_window_width_ms)}`]);
+    if (d.expandable) items.push(['tumbling windows', `${body.tumbling_window_count} × ${durationText(body.tumbling_window_width_ms)} (click the chain to show them, a tumbling window to hide them)`]);
     if (d.timing !== undefined) items.push(['runs at', formatTiming(d.timing)]);
     if (n.materialization) items.push(['materialization', compactWire(n.materialization)]);
     if (n.output_state && n.output_state.primitive) items.push(['output primitive', compactWire(n.output_state.primitive)]);
@@ -331,8 +331,8 @@
       : '<span class="status">No source declared.</span>';
   }
 
-  // The selected plan's materialized views, one row per Stage 2 node (a pane
-  // chain's panes listed inside its row); a row selects its Stage 2 node.
+  // The selected plan's materialized views, one row per Stage 2 node (a tumbling window
+  // chain's tumbling windows listed inside its row); a row selects its Stage 2 node.
   function renderMaterializedViews() {
     const selection = selectionTable(doc);
     if (!selection.selected_candidate) {
@@ -346,19 +346,19 @@
       return;
     }
     const groups = materializedViewGroups(doc);
-    const count = groups.reduce((n, g) => n + g.panes.length, 0);
+    const count = groups.reduce((n, g) => n + g.tumblingWindows.length, 0);
     $('views-meta').innerHTML = selection.materialized_views_error
       ? `<span class="error">no installable plan: ${esc(selection.materialized_views_error)}</span>`
       : `<b>${count}</b> materialized view${count === 1 ? '' : 's'} in <b>${groups.length}</b> group${groups.length === 1 ? '' : 's'} of <b>${esc(selection.selected_candidate)}</b>` +
         (count ? '' : ': nothing is kept across evaluations; every query computes at query time');
-    const panes = (g) => (g.panes.length > 1
-      ? `<details><summary>${esc(g.panes.length)} installed nodes</summary><ul>${g.panes.map((p) => `<li>node ${esc(p.nodeId)} · ${esc(p.pane)} · window ${esc(p.window)} · kept ${esc(p.retention)}</li>`).join('')}</ul></details>`
-      : `node ${esc(g.panes[0].nodeId)} · window ${esc(g.panes[0].window)}`);
+    const tumblingWindowsCell = (g) => (g.tumblingWindows.length > 1
+      ? `<details><summary>${esc(g.tumblingWindows.length)} installed nodes</summary><ul>${g.tumblingWindows.map((p) => `<li>node ${esc(p.nodeId)} · ${esc(p.tumblingWindow)} · window ${esc(p.window)} · kept ${esc(p.retention)}</li>`).join('')}</ul></details>`
+      : `node ${esc(g.tumblingWindows[0].nodeId)} · window ${esc(g.tumblingWindows[0].window)}`);
     $('materializedViews').innerHTML = groups.length ? table(
-      ['Stage 2 node', 'definition', 'kind', 'panes', 'refresh', 'retention', 'installed', 'Stage 3 cost', 'read by'],
+      ['Stage 2 node', 'definition', 'kind', 'tumbling windows', 'refresh', 'retention', 'installed', 'Stage 3 cost', 'read by'],
       groups.map((g) => `<tr class="clickable" tabindex="0" data-node="${g.stage2NodeId === null ? '' : esc(g.stage2NodeId)}"><td>${g.stage2NodeId === null ? '—' : esc(g.stage2NodeId)}</td>` +
-        `<td class="wrap">${esc(g.definition)}</td><td class="wrap">${esc(g.kind)}</td><td>${esc(g.panesText)}</td><td>${esc(g.refresh)}</td>` +
-        `<td>${esc(g.retention)}</td><td class="wrap">${panes(g)}</td><td class="wrap">${esc(g.cost)}</td><td class="wrap">${esc(g.readBy.join(', ') || '—')}</td></tr>`).join('')) : '';
+        `<td class="wrap">${esc(g.definition)}</td><td class="wrap">${esc(g.kind)}</td><td>${esc(g.tumblingWindowsText)}</td><td>${esc(g.refresh)}</td>` +
+        `<td>${esc(g.retention)}</td><td class="wrap">${tumblingWindowsCell(g)}</td><td class="wrap">${esc(g.cost)}</td><td class="wrap">${esc(g.readBy.join(', ') || '—')}</td></tr>`).join('')) : '';
     $('materializedViews').querySelectorAll('tr.clickable').forEach((tr) => {
       const pick = (e) => { if (e && e.target && e.target.closest && e.target.closest('details')) return; if (tr.dataset.node !== '') selectStage2Node(Number(tr.dataset.node)); };
       tr.addEventListener('click', pick);
@@ -388,7 +388,7 @@
     if (current.physical !== selected) selectPhysical(selected);
     const cy = cys[2];
     if (!cy) return;
-    // An expanded pane chain is drawn as its panes: select the newest.
+    // An expanded tumbling-window chain is drawn as its tumbling windows: select the newest.
     let node = cy.getElementById(`n${id}`);
     if (!node || node.length === 0) node = cy.getElementById(`n${id}p0`);
     if (!node || node.length === 0) return;

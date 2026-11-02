@@ -3,9 +3,9 @@
 //! the plan compiles with the table's scans (`check_compiles` sees them),
 //! `now()` is the evaluation time, `COUNT(DISTINCT)` over an `Int64` id
 //! column answers with the type the Planner gives it, from a distinct-count
-//! sketch or exactly. A plan that keeps panes at ingestion time runs as a
-//! runtime runs it: each pane built in an ingestion run over its window from
-//! the table bound at the plan's `Scan`, the queries answered from the panes.
+//! sketch or exactly. A plan that keeps tumbling windows at ingestion time runs as a
+//! runtime runs it: each tumbling window built in an ingestion run over its window from
+//! the table bound at the plan's `Scan`, the queries answered from the tumbling windows.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -366,15 +366,18 @@ async fn an_exact_global_sql_percentile_of_no_row_is_null() {
 }
 
 /// A 5 and a 15 minute distinct count over one table: the plan builds them
-/// in tumbling panes, each pane a `TimeRange` over a shifted table `Scan`,
+/// in tumbling windows, each tumbling window a `TimeRange` over a shifted table `Scan`,
 /// which the executor runs as filters on `ts`. Both answer exactly (the
 /// sketch is exact below its capacity).
 #[tokio::test]
-async fn distinct_counts_over_5_and_15_minute_windows_run_from_panes() {
+async fn distinct_counts_over_5_and_15_minute_windows_run_from_tumbling_windows() {
     let fifteen = DISTINCT_USERS_LAST_5_MINUTES.replace("5 minutes", "15 minutes");
     let plan = plan_all(&[DISTINCT_USERS_LAST_5_MINUTES, &fifteen], APPROXIMATE).await;
     let selected = format!("{:?}", plan.dag.nodes);
-    assert!(selected.contains("TimeShift"), "panes: {selected}");
+    assert!(
+        selected.contains("TimeShift"),
+        "tumbling windows: {selected}"
+    );
     assert_eq!(by_key(run_query(&plan, 0).1), expected_distinct_users());
     // The last 15 minutes (i >= 300): every user `i % 50` of each service
     // (3 and 50 are coprime) and its 7 recent ones.
@@ -385,8 +388,8 @@ async fn distinct_counts_over_5_and_15_minute_windows_run_from_panes() {
 }
 
 /// Exact row counts over 5 and 15 minutes: a count tells a row read twice
-/// or missed at a pane's edge, which a distinct count cannot. Each pane is
-/// `(T - s - w, T - s]`, so the 15-minute panes read every row after
+/// or missed at a tumbling window's edge, which a distinct count cannot. Each tumbling window is
+/// `(T - s - w, T - s]`, so the 15-minute tumbling windows read every row after
 /// `T - 15m` exactly once: 300 per service (the row at `T - 15m` is not
 /// read), and 100 in the last 5 minutes.
 #[tokio::test]
@@ -396,7 +399,10 @@ async fn row_counts_over_5_and_15_minute_windows_read_each_row_once() {
     let fifteen = five.replace("5 minutes", "15 minutes");
     let plan = plan_all(&[five, &fifteen], EXACT).await;
     let selected = format!("{:?}", plan.dag.nodes);
-    assert!(selected.contains("TimeShift"), "panes: {selected}");
+    assert!(
+        selected.contains("TimeShift"),
+        "tumbling windows: {selected}"
+    );
     for (query, rows_per_service) in [(0, 100), (1, 300)] {
         let expected: BTreeMap<String, String> = (0..3)
             .map(|s| (format!("s{s}"), shown(&Value::Int64(rows_per_service))))
@@ -540,12 +546,12 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
         .collect()
 }
 
-/// A 5 and a 15 minute distinct count kept in tumbling panes at ingestion
-/// time (the deployment keeps no raw data): each pane is built in an ingestion run from the table rows of its
-/// window, and both queries answer exactly from the panes (the sketch is
+/// A 5 and a 15 minute distinct count kept in tumbling windows at ingestion
+/// time (the deployment keeps no raw data): each tumbling window is built in an ingestion run from the table rows of its
+/// window, and both queries answer exactly from the tumbling windows (the sketch is
 /// exact below its capacity), as the query-time reference does.
 #[tokio::test]
-async fn ingestion_time_panes_built_from_table_rows_answer_exactly() {
+async fn ingestion_time_tumbling_windows_built_from_table_rows_answer_exactly() {
     let fifteen = DISTINCT_USERS_LAST_5_MINUTES.replace("5 minutes", "15 minutes");
     let plan = plan_without_raw_data(&[DISTINCT_USERS_LAST_5_MINUTES, &fifteen], APPROXIMATE).await;
     let views = plan.materialized_views().unwrap();
@@ -554,10 +560,10 @@ async fn ingestion_time_panes_built_from_table_rows_answer_exactly() {
             .iter()
             .any(|v| v.refresh() == MaterializedViewRefresh::AtIngestion
                 && !v.inputs.raw_data_windows().is_empty()),
-        "panes built at ingestion time from table rows: {:?}",
+        "tumbling windows built at ingestion time from table rows: {:?}",
         views
     );
-    // Older panes read windows that end before the evaluation.
+    // Older tumbling windows read windows that end before the evaluation.
     assert!(views
         .iter()
         .flat_map(|v| v.inputs.raw_data_windows())

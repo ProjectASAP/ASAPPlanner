@@ -151,9 +151,9 @@ pub enum OperatorKind {
     FinalizeExactAccumulator,
     MaintainPopulation,
     EvaluatePopulation,
-    /// Per input state merged (each pane of a chain is a state).
+    /// Per input state merged (each tumbling window of a chain is a state).
     SummaryMerge,
-    /// Per input row placed in its pane and inserted into that pane's state.
+    /// Per input row placed in its tumbling window and inserted into that tumbling window's state.
     // Named `PaneChain` before #1163.
     #[serde(alias = "PaneChain")]
     SummaryTumblingWindowChain,

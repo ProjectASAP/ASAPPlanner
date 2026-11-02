@@ -26,7 +26,7 @@ macro_rules! impl_clone_accumulator_methods {
 
         fn into_accumulator(self: Box<Self>) -> Box<dyn AggregateCore> {
             // Consume the updater and MOVE the accumulator out — no clone.
-            // Avoids a clone when a pane is evicted at window close.
+            // Avoids a clone when a tumbling window is evicted at window close.
             let this = *self;
             Box::new(this.$acc_field)
         }
@@ -130,7 +130,7 @@ pub trait AccumulatorUpdater: Send {
     fn take_accumulator(&mut self) -> Box<dyn AggregateCore>;
 
     /// Non-destructive read of the current accumulator state (clone without reset).
-    /// Used by pane-based sliding windows to read shared panes.
+    /// Used by tumbling-window-based sliding windows to read shared tumbling windows.
     fn snapshot_accumulator(&self) -> Box<dyn AggregateCore>;
 
     /// Consume the updater and return its accumulator by move, avoiding the

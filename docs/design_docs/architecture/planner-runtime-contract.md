@@ -15,7 +15,7 @@ execution remain downstream. The
 |---|---|---|
 | Logical candidate semantics | ASAPPlanner | Query rewrite; summary family and parameters; grouping; accuracy guarantees when established. |
 | Summary materialization and realization selection | ASAPPlanner Stage 2 materialization (#509) | `NotMaterialized`, `MatAtIngestion(medium)` or `MatAtQuery(medium)` per sub-DAG, and how long a stored output is kept; direct build or incremental update; window implementations compared using provider evidence. |
-| Concrete implementation and deployment | ASAPQuery-backend and its workload optimizer | Library and data-structure implementation, exact pane layout, placement, sharding, storage, transmission, materialization IDs, executor configuration, and workload-wide assignment. |
+| Concrete implementation and deployment | ASAPQuery-backend and its workload optimizer | Library and data-structure implementation, exact tumbling-window layout, placement, sharding, storage, transmission, materialization IDs, executor configuration, and workload-wide assignment. |
 
 ASAPCollector and the ASAPQuery data plane execute the compiled downstream
 plans. They validate capabilities and plan identities, maintain or read the
@@ -27,15 +27,15 @@ a different summary, materialization, or realization framework.
 Once Stage 2 materialization (#509) owns summary-maintenance decisions,
 ASAPPlanner may decide that a logical summary should be incrementally
 maintained: new data updates existing summary state. It may also select the
-planner-visible window realization—such as tumbling, sliding/panes, or an
+planner-visible window realization—such as tumbling windows, sliding windows over tumbling windows, or an
 exponential histogram—because those alternatives have different accuracy,
 CPU, memory, and I/O behavior.
 
 ASAPQuery-backend then implements the selected framework. For example, after
 Planner chooses a sliding-window realization, the backend chooses the concrete
-pane representation, runtime operator implementation, placement, sharding,
+tumbling window representation, runtime operator implementation, placement, sharding,
 watermark behavior, and materialization identifiers. ASAPCollector maintains
-the compiled panes and summary state.
+the compiled tumbling windows and summary state.
 
 Thus incremental update describes how state is maintained, while tumbling,
 sliding, and exponential-histogram describe realization algorithms. They are

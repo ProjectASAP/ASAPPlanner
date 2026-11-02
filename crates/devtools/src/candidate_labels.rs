@@ -136,7 +136,7 @@ fn duration_name(ms: u64) -> String {
 }
 
 /// `logical` followed by what the candidate materializes, e.g.
-/// "… · ingestion time: Kll for Q1, 5 × 1m panes · query time, shared:
+/// "… · ingestion time: Kll for Q1, 5 × 1m tumbling windows · query time, shared:
 /// DDSketch";
 /// just `logical` when nothing is.
 pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String {
@@ -155,14 +155,14 @@ pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String
             .find(|n| n.id == *id)
             .expect("an assigned node is in the DAG");
         let label = match &node.payload {
-            // Name the chain: chains of one family and pane count differ by
-            // their readers and pane width.
+            // Name the chain: chains of one family and tumbling-window count differ by
+            // their readers and tumbling-window width.
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 tumbling_window_width_ms,
                 tumbling_window_count,
                 ..
             }) => format!(
-                "{}, {tumbling_window_count} × {} panes",
+                "{}, {tumbling_window_count} × {} tumbling windows",
                 for_queries(
                     state_label(&node.payload),
                     &dag_readers(&candidate.dag, *id)
@@ -186,20 +186,23 @@ pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String
         .join(" · ")
 }
 
-/// A summary build, e.g. "Kll ×5 panes" or "Sum acc".
+/// A summary build, e.g. "Kll ×5 tumbling windows" or "Sum acc".
 fn build_label<C>(payload: &Operator<C>) -> String {
     match payload {
         Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
             tumbling_window_count,
             ..
         }) => {
-            format!("{} ×{tumbling_window_count} panes", state_label(payload))
+            format!(
+                "{} ×{tumbling_window_count} tumbling windows",
+                state_label(payload)
+            )
         }
         _ => state_label(payload),
     }
 }
 
-/// The state a summary build or pane chain keeps, e.g. "Kll" or "Sum acc";
+/// The state a summary build or tumbling-window chain keeps, e.g. "Kll" or "Sum acc";
 /// any other operator's kind.
 fn state_label<C>(payload: &Operator<C>) -> String {
     match payload {
@@ -309,13 +312,13 @@ mod tests {
         assert_eq!(label.matches("shared Sum acc").count(), 1);
     }
 
-    /// Two physical candidates that each maintain a different query's pane
+    /// Two physical candidates that each maintain a different query's tumbling window
     /// chain at ingestion time get different labels, even when both chains
-    /// have the same family and pane count (6 × 10s for Q1, 6 × 30s for Q2).
+    /// have the same family and tumbling-window count (6 × 10s for Q1, 6 × 30s for Q2).
     #[test]
-    fn physical_labels_name_the_pane_chain_maintained_at_ingestion() {
+    fn physical_labels_name_the_tumbling_window_chain_maintained_at_ingestion() {
         use asap_logical_asap_optimization::test_support::{
-            pane_candidates, window_composition_pass2_candidates,
+            tumbling_window_candidates, window_composition_pass2_candidates,
         };
         use asap_physical_asap_optimization::optimize_physical_asap;
         use asap_types::workload::PlanningWorkload;
@@ -354,12 +357,12 @@ mod tests {
         let summary: Vec<_> = compose_logical_candidate(&inventory, &choice).unwrap();
         let entries: Vec<_> = workload.query_workload.entries().collect();
         let grids: Vec<_> = entries.iter().map(|e| e.evaluation_grid_ms()).collect();
-        let panes = pane_candidates(&summary, &grids);
-        let roots = window_composition_pass2_candidates(&summary, &panes)
+        let tumbling_windows = tumbling_window_candidates(&summary, &grids);
+        let roots = window_composition_pass2_candidates(&summary, &tumbling_windows)
             .unwrap()
             .into_iter()
-            .find(|c| c.pane_candidates.len() == 2 && c.shared_chains.is_empty())
-            .expect("each query's DDSketch in its own pane chain")
+            .find(|c| c.tumbling_window_candidates.len() == 2 && c.shared_chains.is_empty())
+            .expect("each query's DDSketch in its own tumbling-window chain")
             .roots
             .unwrap();
         let plans = optimize_physical_asap(
@@ -370,7 +373,7 @@ mod tests {
             false,
         )
         .unwrap();
-        // The plans that maintain exactly one pane chain at ingestion time.
+        // The plans that maintain exactly one tumbling-window chain at ingestion time.
         let one_chain_at_ingestion: Vec<String> = plans
             .iter()
             .filter(|plan| {
@@ -403,14 +406,14 @@ mod tests {
             one_chain_at_ingestion
                 .iter()
                 .any(|l| ingestion(l).as_deref()
-                    == Some("ingestion time: DDSketch for Q1, 6 × 10s panes")),
+                    == Some("ingestion time: DDSketch for Q1, 6 × 10s tumbling windows")),
             "{one_chain_at_ingestion:#?}"
         );
         assert!(
             one_chain_at_ingestion
                 .iter()
                 .any(|l| ingestion(l).as_deref()
-                    == Some("ingestion time: DDSketch for Q2, 6 × 30s panes")),
+                    == Some("ingestion time: DDSketch for Q2, 6 × 30s tumbling windows")),
             "{one_chain_at_ingestion:#?}"
         );
         let mut distinct = one_chain_at_ingestion.clone();

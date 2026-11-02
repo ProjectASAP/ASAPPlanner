@@ -3842,12 +3842,12 @@ mod tests {
         }
     }
 
-    /// A quantile read from merged tumbling panes of a metric's samples is
+    /// A quantile read from merged tumbling windows of a metric's samples is
     /// still one of the samples (or between two), so it carries their sign
     /// as the same quantile over the raw window does; φ outside [0, 1]
     /// still carries none.
     #[test]
-    fn a_quantile_of_merged_panes_shares_its_raw_data_samples_sign() {
+    fn a_quantile_of_merged_tumbling_windows_shares_its_raw_data_samples_sign() {
         let inventory = inventory("quantile_over_time(0.99, m[100s])");
         let estimate = (0..inventory.targets.len())
             .flat_map(|t| composed_with(&inventory, t))

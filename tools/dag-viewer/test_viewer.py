@@ -26,7 +26,7 @@ HERE = Path(__file__).resolve().parent
 EXAMPLE1 = HERE / "examples" / "planner-layering-example1.json"
 # A committed workload example: ASAPQuery's random workload seed 862,
 # workload-01 (nine repeating PromQL queries), planned with the default
-# search as the MVP deployment; its selected plan keeps panes at ingestion.
+# search as the MVP deployment; its selected plan keeps tumbling windows at ingestion.
 SEED862 = HERE / "examples" / "random-mixed-seed-862-workload-01.json"
 # A hand-written priced `memo` section for Example 1: four enumerated
 # Pass 1 DAGs, E2 selected, E3 cheaper than it, E4 invalid.
@@ -489,7 +489,7 @@ class DefaultSearchTests(unittest.TestCase):
         report = self.doc["stage3_plan_selection"]["search_report"]
         self.assertIn(f"search {report['status'].replace('_', ' ')}", text)
         self.assertIn(f"MILP {report['milp_variables']} variables", text)
-        self.assertIn("pane-width round", text)
+        self.assertIn("tumbling-window-width round", text)
         outputs = self.doc["stage3_plan_selection"]["selected_dag"]["node_of_output_reference"]
         self.assertEqual(len(outputs), 2)
         # Archived documents (before Stage 3's `Selection`) still render
@@ -618,10 +618,10 @@ class WorkloadViewTests(unittest.TestCase):
         first = rows[0]
         self.assertEqual(first["definition"], stored[0]["coverage"]["definition_id"])
         self.assertTrue(first["kind"].startswith("SummaryTumblingWindowChain · "), first["kind"])
-        self.assertRegex(first["pane"], r"^pane 1 of \d+ \(newest first\), ")
+        self.assertRegex(first["tumblingWindow"], r"^tumbling window 1 of \d+ \(newest first\), ")
         self.assertEqual(first["refresh"], "at ingestion")
         self.assertTrue(all(r["stage2NodeId"] is not None and r["readBy"] for r in rows))
-        # q1 and q2 share one pane chain of exact sums.
+        # q1 and q2 share one tumbling-window chain of exact sums.
         self.assertEqual(first["readBy"], ["q1", "q2"])
 
     def test_queries_show_recurrence_and_predictability(self):
@@ -644,13 +644,13 @@ class WorkloadViewTests(unittest.TestCase):
         text = self.js.call("searchText", example1())
         self.assertRegex(text, r"pruned: [a-z ]+ ×\d+")
 
-    def test_pane_chain_box_shows_its_panes(self):
+    def test_tumbling_window_chain_box_shows_its_tumbling_windows(self):
         selected = self.doc["stage2_physical_asap_optimization"]["candidates"][0]
         chain = next(n for n in selected["dag"]["nodes"] if "SummaryTumblingWindowChain" in n["payload"].get("ASAP", {}))
         lines = self.js.call("stageNodeLines", chain["payload"], None)
         body = chain["payload"]["ASAP"]["SummaryTumblingWindowChain"]
         self.assertEqual(lines[0], "SummaryTumblingWindowChain")
-        self.assertIn(f"{body['tumbling_window_count']} panes × ", lines[2])
+        self.assertIn(f"{body['tumbling_window_count']} tumbling windows × ", lines[2])
 
     def test_usage_and_deployment_lines(self):
         cost = self.doc["stage3_plan_selection"]["costs"][self.doc["stage3_plan_selection"]["selected"]]
@@ -668,10 +668,10 @@ class WorkloadViewTests(unittest.TestCase):
 
 
 @unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
-class PanesAndPathsTests(unittest.TestCase):
-    """Display only: a pane chain expands into its panes on request, each
+class TumblingWindowsAndPathsTests(unittest.TestCase):
+    """Display only: a tumbling-window chain expands into its tumbling windows on request, each
     node lists the queries whose root reaches it, and the query and node
-    neighborhoods the page highlights. The seed-862 plan keeps six pane
+    neighborhoods the page highlights. The seed-862 plan keeps six tumbling window
     chains; queries q1-q7 read metric "data", q8 and q9 "data_total"."""
 
     def setUp(self):
@@ -689,25 +689,25 @@ class PanesAndPathsTests(unittest.TestCase):
     def node(self, elements, element_id):
         return next(e for e in lane_nodes(elements) if e["data"]["id"] == element_id)
 
-    def test_chains_stay_collapsed_by_default_and_print_their_panes(self):
+    def test_chains_stay_collapsed_by_default_and_print_their_tumbling_windows(self):
         chain = self.node(self.elements(), f"n{self.chain['id']}")
         self.assertEqual(chain["data"]["kind"], "SummaryTumblingWindowChain")
-        self.assertIn(f"{self.body['tumbling_window_count']} panes × 20 s", chain["data"]["label"])
+        self.assertIn(f"{self.body['tumbling_window_count']} tumbling windows × 20 s", chain["data"]["label"])
         self.assertTrue(chain["data"]["expandable"])
 
-    def test_an_expanded_chain_shows_each_pane_with_its_time_range_shift_and_window(self):
+    def test_an_expanded_chain_shows_each_tumbling_window_with_its_time_range_shift_and_window(self):
         count, chain_id = self.body["tumbling_window_count"], self.chain["id"]
         elements = self.elements(expandedChains=[chain_id])
         ids = {e["data"]["id"] for e in lane_nodes(elements)}
         self.assertNotIn(f"n{chain_id}", ids)
-        panes = [e for e in lane_nodes(elements) if e["data"].get("paneOf") == chain_id]
-        kinds = sorted(e["data"]["kind"] for e in panes)
-        # One build, one TimeRange per pane; a TimeShift for every pane but the newest.
-        self.assertEqual(kinds.count("pane"), count)
+        tumbling_windows = [e for e in lane_nodes(elements) if e["data"].get("tumblingWindowOf") == chain_id]
+        kinds = sorted(e["data"]["kind"] for e in tumbling_windows)
+        # One build, one TimeRange per tumbling window; a TimeShift for every tumbling window but the newest.
+        self.assertEqual(kinds.count("tumblingWindow"), count)
         self.assertEqual(kinds.count("TimeRange"), count)
         self.assertEqual(kinds.count("TimeShift"), count - 1)
         newest = self.node(elements, f"n{chain_id}p0")
-        self.assertIn("pane 1 of 30", newest["data"]["label"])
+        self.assertIn("tumbling window 1 of 30", newest["data"]["label"])
         self.assertIn("window t−20 s … t", newest["data"]["label"])
         oldest = self.node(elements, f"n{chain_id}p{count - 1}")
         self.assertIn("window t−10 min … t−9 min 40 s", oldest["data"]["label"])
@@ -715,7 +715,7 @@ class PanesAndPathsTests(unittest.TestCase):
         self.assertIn("shift: 20 s", shift["data"]["label"])
         edges = [(e["data"]["source"], e["data"]["target"]) for e in lane_edges(elements)]
         child = f"n{self.body['child']}"
-        # The chain's input feeds every pane's window; every pane feeds the chain's readers.
+        # The chain's input feeds every tumbling window's TimeRange; every tumbling window feeds the chain's readers.
         self.assertIn((child, f"n{chain_id}p0r"), edges)
         self.assertIn((child, f"n{chain_id}p1s"), edges)
         self.assertIn((f"n{chain_id}p1s", f"n{chain_id}p1r"), edges)
@@ -728,7 +728,7 @@ class PanesAndPathsTests(unittest.TestCase):
     def test_each_node_lists_the_queries_reaching_it_and_shared_nodes_say_so(self):
         elements = self.elements()
         # The quantile queries q3-q5 read the same 100 s window of one
-        # per-series DDSketch pane chain, so they share its scan and merge.
+        # per-series DDSketch tumbling-window chain, so they share its scan and merge.
         scans = [e for e in lane_nodes(elements) if e["data"]["kind"] == "Scan"]
         shared = next(e for e in scans if e["data"]["reachedBy"] == ["q3", "q4", "q5"])
         self.assertIn("shared ×3", shared["data"]["label"])
@@ -762,17 +762,17 @@ class PanesAndPathsTests(unittest.TestCase):
             self.assertIn(f"n{root}", kept)
         self.assertNotIn(f"n{self.dag['roots'][8]}", kept)  # q9 reads another metric
 
-    def test_materialized_views_group_by_pane_chain(self):
+    def test_materialized_views_group_by_tumbling_window_chain(self):
         groups = self.js.call("materializedViewGroups", self.doc)
         self.assertEqual(len(groups), 6)
-        self.assertEqual(sum(len(g["panes"]) for g in groups), len(self.doc["stage3_plan_selection"]["materialized_views"]))
+        self.assertEqual(sum(len(g["tumblingWindows"]) for g in groups), len(self.doc["stage3_plan_selection"]["materialized_views"]))
         first = groups[0]
         self.assertEqual(first["stage2NodeId"], self.chain["id"])
-        self.assertEqual(first["panesText"], "30 × 20 s")
+        self.assertEqual(first["tumblingWindowsText"], "30 × 20 s")
         self.assertEqual((first["refresh"], first["retention"]), ("at ingestion", "10 min"))
         self.assertEqual(first["readBy"], ["q1", "q2"])
-        self.assertEqual(first["panes"][0]["window"], "t−20 s … t")
-        self.assertEqual(first["panes"][1]["window"], "t−40 s … t−20 s")
+        self.assertEqual(first["tumblingWindows"][0]["window"], "t−20 s … t")
+        self.assertEqual(first["tumblingWindows"][1]["window"], "t−40 s … t−20 s")
 
 
 class WorkloadSetTests(unittest.TestCase):
@@ -1043,7 +1043,7 @@ class AppTests(unittest.TestCase):
         self.assertIn("no server", js.eval("__els.setsServer.textContent"))
         self.assertIn("Random mixed · seed-862 (10)", js.eval("__els.setPick.innerHTML"))
 
-    def test_materialized_views_table_has_one_row_per_pane_chain(self):
+    def test_materialized_views_table_has_one_row_per_tumbling_window_chain(self):
         js = self.page("?doc=s.json", {"s.json": SEED862.read_text()})
         self.assertEqual(js.eval("(__els.materializedViews.innerHTML.match(/data-node=/g) || []).length"), 6)
         self.assertIn("300 materialized views in 6 groups", self.text(js, "views-meta"))
@@ -1062,15 +1062,15 @@ class AppTests(unittest.TestCase):
         js.eval("__els.queryPick.__on.change({ target: { value: '' } })")
         self.assertEqual(js.eval("__dimmed.cy2.length"), 0)
 
-    def test_tapping_a_pane_chain_expands_it_and_a_pane_collapses_it(self):
+    def test_tapping_a_tumbling_window_chain_expands_it_and_a_tumbling_window_collapses_it(self):
         js = self.page("?doc=s.json", {"s.json": SEED862.read_text()})
         chain = next(e for e in self.ev(js, "__rendered.cy2") if e["data"].get("kind") == "SummaryTumblingWindowChain")
         js.eval(f"__taps['cy2 node']({{ target: __rendered.cy2.find((e) => e.data.id === {json.dumps(chain['data']['id'])}) && {{ data() {{ return __rendered.cy2.find((e) => e.data.id === {json.dumps(chain['data']['id'])}).data; }}, id() {{ return {json.dumps(chain['data']['id'])}; }} }} }})")
         ids = {e["data"]["id"] for e in self.ev(js, "__rendered.cy2")}
         self.assertNotIn(chain["data"]["id"], ids)
-        pane = chain["data"]["id"] + "p0"
-        self.assertIn(pane, ids)
-        js.eval(f"__taps['cy2 node']({{ target: {{ data() {{ return __rendered.cy2.find((e) => e.data.id === {json.dumps(pane)}).data; }}, id() {{ return {json.dumps(pane)}; }} }} }})")
+        tumbling_window = chain["data"]["id"] + "p0"
+        self.assertIn(tumbling_window, ids)
+        js.eval(f"__taps['cy2 node']({{ target: {{ data() {{ return __rendered.cy2.find((e) => e.data.id === {json.dumps(tumbling_window)}).data; }}, id() {{ return {json.dumps(tumbling_window)}; }} }} }})")
         self.assertIn(chain["data"]["id"], {e["data"]["id"] for e in self.ev(js, "__rendered.cy2")})
 
     def test_an_expanded_chain_stays_expanded_after_switching_plans_and_back(self):

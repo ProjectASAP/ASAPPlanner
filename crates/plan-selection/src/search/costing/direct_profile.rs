@@ -71,9 +71,9 @@ pub(in crate::search) fn extract(
     extract_scan_class(configured, context, false)
 }
 
-/// A second restricted proposal keeps the newest-pane scan class separate from
+/// A second restricted proposal keeps the newest-tumbling-window scan class separate from
 /// ordinary full-window scans. The full candidate graph is never changed.
-pub(in crate::search) fn extract_latest_panes(
+pub(in crate::search) fn extract_latest_tumbling_windows(
     configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
 ) -> Result<Option<DirectProfileExtraction>, DirectProfileError> {
@@ -93,7 +93,7 @@ struct PreparedProfile {
 fn prepare_profile(
     configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
-    prefer_latest_pane: bool,
+    prefer_latest_tumbling_window: bool,
 ) -> Result<Option<PreparedProfile>, DirectProfileError> {
     let settings = context.models.cost_inputs;
     let CostModel::UsageOverTime(_prices) = &settings.cost_model else {
@@ -300,7 +300,7 @@ fn prepare_profile(
         if raw_output {
             lookbacks[id] = None;
         } else {
-            let choices = if prefer_latest_pane && !kept.is_empty() {
+            let choices = if prefer_latest_tumbling_window && !kept.is_empty() {
                 &kept
             } else if !ordinary.is_empty() {
                 &ordinary
@@ -310,7 +310,7 @@ fn prepare_profile(
             if choices.is_empty() {
                 nodes[id] = None;
             } else if choices.contains(&None)
-                && !(prefer_latest_pane && choices.iter().any(Option::is_some))
+                && !(prefer_latest_tumbling_window && choices.iter().any(Option::is_some))
             {
                 lookbacks[id] = None;
             } else {
@@ -332,7 +332,7 @@ fn prepare_profile(
 fn extract_scan_class(
     configured: &PhysicalCandidatesWithCosts,
     context: &CandidatePlanningContext<'_>,
-    prefer_latest_pane: bool,
+    prefer_latest_tumbling_window: bool,
 ) -> Result<Option<DirectProfileExtraction>, DirectProfileError> {
     // The fixed adapter has no selected-reader retention tiers. The joint
     // option extractor carries those decisions instead.
@@ -351,7 +351,8 @@ fn extract_scan_class(
     {
         return Ok(None);
     }
-    let Some(prepared) = prepare_profile(configured, context, prefer_latest_pane)? else {
+    let Some(prepared) = prepare_profile(configured, context, prefer_latest_tumbling_window)?
+    else {
         return Ok(None);
     };
     let PreparedProfile {
@@ -486,8 +487,8 @@ fn profile_for_priced(
         }),
         materialized: node.materialization != Materialization::NotMaterialized,
         raw_retention,
-        // A chain maintained at ingestion refreshes its newest pane. The
-        // profile admits no `TimeShift` at ingestion, so that pane ends at
+        // A chain maintained at ingestion refreshes its newest tumbling window. The
+        // profile admits no `TimeShift` at ingestion, so that tumbling window ends at
         // the evaluation time: phase 0.
         refresh_window: match &node.payload {
             asap_types::ir::Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
@@ -669,7 +670,7 @@ fn price<'a>(
         if sketches > 1 && input_override.is_none() {
             continue;
         }
-        let (retained_panes, ingestion_window) = match &node.payload {
+        let (retained_tumbling_windows, ingestion_window) = match &node.payload {
             asap_types::ir::Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 tumbling_window_count,
                 tumbling_window_width_ms,
@@ -700,7 +701,7 @@ fn price<'a>(
             &views,
             (1, 1.0),
             asap_cost::trailing_window(lookbacks[id]),
-            retained_panes,
+            retained_tumbling_windows,
             ingestion_window,
             context.data,
             context.models.cost_inputs,
@@ -1016,7 +1017,7 @@ fn state_compaction_seconds(
         settings.resource_speed.ms_per_cpu_op * context.calibration.factor(),
         |unit| (unit.ns_per_unit + unit.ns_per_invocation) * 1e-6,
     );
-    let states = priced.output.rows / asap_cost::panes_of(node);
+    let states = priced.output.rows / asap_cost::tumbling_windows_of(node);
     (workers - 1) as f64 * states as f64 * merge_ms / 1000.0
 }
 
@@ -1415,29 +1416,29 @@ mod tests {
     }
 
     #[test]
-    fn ingestion_pane_profiles_match_the_real_evaluator() {
-        check_pane_profile(Materialization::MatAtIngestion(Medium::Memory));
+    fn ingestion_tumbling_window_profiles_match_the_real_evaluator() {
+        check_tumbling_window_profile(Materialization::MatAtIngestion(Medium::Memory));
     }
 
     #[test]
-    fn rebuilt_pane_profiles_match_the_real_evaluator() {
-        check_pane_profile(Materialization::NotMaterialized);
-        check_pane_profile(Materialization::MatAtQuery(Medium::Memory));
+    fn rebuilt_tumbling_window_profiles_match_the_real_evaluator() {
+        check_tumbling_window_profile(Materialization::NotMaterialized);
+        check_tumbling_window_profile(Materialization::MatAtQuery(Medium::Memory));
     }
 
     #[test]
-    fn kept_pane_profiles_and_scan_classes_match_the_real_evaluator() {
-        check_pane_profile(Materialization::MatAtQueryKeptAcrossEvaluations(
+    fn kept_tumbling_window_profiles_and_scan_classes_match_the_real_evaluator() {
+        check_tumbling_window_profile(Materialization::MatAtQueryKeptAcrossEvaluations(
             Medium::Memory,
         ));
     }
 
-    fn check_pane_profile(mode: Materialization) {
-        check_pane_profile_with_range(mode, None);
+    fn check_tumbling_window_profile(mode: Materialization) {
+        check_tumbling_window_profile_with_range(mode, None);
     }
 
     #[test]
-    fn identical_range_pane_profiles_match_the_real_evaluator() {
+    fn identical_range_tumbling_window_profiles_match_the_real_evaluator() {
         let range = Some(asap_types::workload::RangeEvaluation {
             span_ms: 3_600_000,
             step_ms: 60_000,
@@ -1447,11 +1448,11 @@ mod tests {
             Materialization::MatAtQuery(Medium::Memory),
             Materialization::MatAtIngestion(Medium::Memory),
         ] {
-            check_pane_profile_with_range(mode, range);
+            check_tumbling_window_profile_with_range(mode, range);
         }
     }
 
-    fn check_pane_profile_with_range(
+    fn check_tumbling_window_profile_with_range(
         mode: Materialization,
         range_evaluation: Option<asap_types::workload::RangeEvaluation>,
     ) {
@@ -1470,7 +1471,8 @@ mod tests {
             let ingestion = ingestion
                 || (matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
                     && mode == Materialization::MatAtIngestion(Medium::Memory));
-            let pane = matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }));
+            let tumbling_window =
+                matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }));
             let mut inputs = Vec::new();
             node.operator.map_children(|child| {
                 inputs.push(append(child.clone(), configured, ingestion, mode))
@@ -1483,7 +1485,7 @@ mod tests {
                 } else {
                     ExecutionTiming::QueryTime
                 },
-                if pane {
+                if tumbling_window {
                     mode
                 } else {
                     Materialization::NotMaterialized
@@ -1534,11 +1536,12 @@ mod tests {
                     let choice = generated.targets[0].ways_to_compute.iter().position(|candidate|
                     matches!(candidate, HowToComputeAggregateMeasure::Summary(found) if *found == algorithm)).unwrap();
                     let roots: Vec<_> = compose_logical_candidate(&generated, &[choice]).unwrap();
-                    let pane_rules = asap_logical_asap_optimization::test_support::pane_candidates(
-                        &roots,
-                        &[Some(width)],
-                    );
-                    let roots = asap_logical_asap_optimization::test_support::window_composition_pass2_candidates(&roots, &pane_rules).unwrap().pop().unwrap().roots.unwrap();
+                    let tumbling_window_rules =
+                        asap_logical_asap_optimization::test_support::tumbling_window_candidates(
+                            &roots,
+                            &[Some(width)],
+                        );
+                    let roots = asap_logical_asap_optimization::test_support::window_composition_pass2_candidates(&roots, &tumbling_window_rules).unwrap().pop().unwrap().roots.unwrap();
                     let data: DataWorkload = serde_json::from_value(serde_json::json!({
                     "arrival":{"ingesting":{"rows_per_second":rows_per_second}},
                     "sources":{"latency":{"series_count":series_count,"rows_held":rows_per_second * 300,"values_non_negative":true,"max_distinct_per_evaluation":1000}}
@@ -1799,7 +1802,7 @@ mod tests {
                     }
                     if mode == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory) {
                         // The same physical scan may feed either a full-window
-                        // rebuild or a newest-pane refresh. Keep these priced
+                        // rebuild or a newest-tumbling-window refresh. Keep these priced
                         // domains distinct, and validate each selected binding.
                         let normal_chain =
                             PhysicalCandidateId(configured.physical.candidates.len());
@@ -1821,7 +1824,7 @@ mod tests {
                         }
                         configured.sync_physical_for_tests();
                         let normal = extract(&configured, &context).unwrap().unwrap();
-                        let latest = extract_latest_panes(&configured, &context)
+                        let latest = extract_latest_tumbling_windows(&configured, &context)
                             .unwrap()
                             .unwrap();
                         assert!(!normal.supported[chain] && normal.supported[normal_chain.0]);
@@ -1926,23 +1929,23 @@ mod tests {
     }
 
     /// A KLL chain (p90 over a minute) and a DDSketch chain (p99 over five
-    /// minutes) kept at ingestion over one `Scan`, each in panes of its
-    /// query's interval. With equal pane widths, one ingestion run per pane
+    /// minutes) kept at ingestion over one `Scan`, each in tumbling windows of its
+    /// query's interval. With equal tumbling-window widths, one ingestion run per tumbling window
     /// computes the `Scan` for both chains, and the old Stage 3 engine's
     /// modeled cost equals the real evaluator's with the `Scan` computed
     /// once, for one schedule (both every 10 s) and for mixed schedules
-    /// (every 20 s and every 40 s, 20 s panes). With 10 s and 60 s panes the
+    /// (every 20 s and every 40 s, 20 s tumbling windows). With 10 s and 60 s tumbling windows the
     /// chains run apart and both count the `Scan` twice (#1151).
     #[test]
     fn chains_of_one_refresh_window_share_their_scan_in_the_direct_profile() {
-        // ((p90 interval, its pane width), (p99 interval, its pane width), Scan computations)
+        // ((p90 interval, its tumbling-window width), (p99 interval, its tumbling-window width), Scan computations)
         for (kll, dd, scan_computations) in [
             ((10_000, 10_000), (10_000, 10_000), 1),
             ((20_000, 20_000), (40_000, 20_000), 1),
             ((10_000, 10_000), (60_000, 60_000), 2),
         ] {
             let (modeled, evaluated, multiplier) = two_chains_over_one_scan(kll, dd);
-            let case = format!("p90 (every, panes) {kll:?} ms, p99 {dd:?} ms");
+            let case = format!("p90 (every, tumbling windows) {kll:?} ms, p99 {dd:?} ms");
             assert!(
                 (evaluated - modeled).abs() <= 1e-9 * evaluated.max(1e-15),
                 "{case}: direct {modeled}, evaluator {evaluated}"
@@ -1952,20 +1955,20 @@ mod tests {
     }
 
     /// [`chains_of_one_refresh_window_share_their_scan_in_the_direct_profile`]
-    /// with the p90 and the p99 each `(interval in ms, pane width in ms)`:
+    /// with the p90 and the p99 each `(interval in ms, tumbling-window width in ms)`:
     /// the direct profile's modeled cost of the selected plan, the
     /// evaluator's cost of it, and the evaluator's multiplier of the `Scan`.
     fn two_chains_over_one_scan(kll: (u64, u64), dd: (u64, u64)) -> (f64, f64, u64) {
         use asap_logical_asap_optimization::test_support::{
-            compose_logical_candidate, generate_per_computation_candidates, pane_candidates,
-            window_composition_pass2_candidates,
+            compose_logical_candidate, generate_per_computation_candidates,
+            tumbling_window_candidates, window_composition_pass2_candidates,
         };
         use asap_types::ir::schema::SketchAlgorithm;
         use asap_types::stages::HowToComputeAggregateMeasure;
         use std::collections::HashMap;
         use std::rc::Rc;
         /// `node` and every node below it as candidates of `configured`, one
-        /// per node (`seen`, by address), at ingestion below a pane chain.
+        /// per node (`seen`, by address), at ingestion below a tumbling-window chain.
         fn append(
             node: &Rc<OperatorNode>,
             configured: &mut PhysicalCandidatesWithCosts,
@@ -2007,7 +2010,7 @@ mod tests {
         let target = AccuracyTarget::max_error(0.05)
             .failure_probability(0.01)
             .accuracy_scope(AccuracyScope::PerValue);
-        // (query, interval in ms, sketch, pane width in ms)
+        // (query, interval in ms, sketch, tumbling-window width in ms)
         let queries = [
             (
                 "quantile_over_time(0.9, latency[1m])",
@@ -2050,20 +2053,27 @@ mod tests {
             .iter()
             .map(|(_, interval, ..)| Some(*interval))
             .collect();
-        // Each build in its query's pane width.
-        let panes: Vec<_> = pane_candidates(&roots, &grid)
+        // Each build in its query's tumbling-window width.
+        let tumbling_windows: Vec<_> = tumbling_window_candidates(&roots, &grid)
             .into_iter()
-            .filter(|pane| {
-                (pane.window_ms(), pane.tumbling_window_width_ms) == (60_000, kll.1)
-                    || (pane.window_ms(), pane.tumbling_window_width_ms) == (300_000, dd.1)
+            .filter(|tumbling_window| {
+                (
+                    tumbling_window.window_ms(),
+                    tumbling_window.tumbling_window_width_ms,
+                ) == (60_000, kll.1)
+                    || (
+                        tumbling_window.window_ms(),
+                        tumbling_window.tumbling_window_width_ms,
+                    ) == (300_000, dd.1)
             })
             .collect();
-        assert_eq!(panes.len(), 2, "{panes:?}");
-        let roots = window_composition_pass2_candidates(&roots, &panes)
+        assert_eq!(tumbling_windows.len(), 2, "{tumbling_windows:?}");
+        let roots = window_composition_pass2_candidates(&roots, &tumbling_windows)
             .unwrap()
             .into_iter()
             .find(|candidate| {
-                candidate.pane_candidates.len() == 2 && candidate.shared_chains.is_empty()
+                candidate.tumbling_window_candidates.len() == 2
+                    && candidate.shared_chains.is_empty()
             })
             .unwrap()
             .roots

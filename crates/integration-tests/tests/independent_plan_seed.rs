@@ -78,7 +78,7 @@ fn assert_no_costlier_than_separate(queries: &[String]) -> (f64, f64) {
     (together, separate)
 }
 
-/// Two per-city p90 queries: each alone maintains an ingestion-time KLL pane
+/// Two per-city p90 queries: each alone maintains an ingestion-time KLL tumbling window
 /// chain; together the search used to stop at a query-time plan about twice
 /// as costly.
 #[test]

@@ -82,22 +82,22 @@ fn sample(metric: &str, instance: &str, timestamp_ms: i64, value: f64) -> RawDat
 
 /// Raw `latency_ms` samples of series `a` and `b`, one every 10 s from 70
 /// minutes before `EVALUATION_MS` to a minute after it (for a second
-/// evaluation), off the pane boundaries, and one
+/// evaluation), off the tumbling-window boundaries, and one
 /// sample of another metric the plan never reads. A sample's value says
-/// which 10-minute pane before `EVALUATION_MS` it falls in: `1000 × pane +
-/// base + 0..=100`, with base 100 for `a` and 300 for `b` (pane 0 is the
-/// newest), so an answer read from the wrong panes is visibly off.
+/// which 10-minute tumbling window before `EVALUATION_MS` it falls in: `1000 × tumbling_window +
+/// base + 0..=100`, with base 100 for `a` and 300 for `b` (tumbling window 0 is the
+/// newest), so an answer read from the wrong tumbling windows is visibly off.
 fn remote_write_samples() -> Vec<RawDataSample> {
     let mut samples = Vec::new();
     for (instance, base) in [("a", 100.0), ("b", 300.0)] {
         for step in 0..426 {
             let timestamp_ms = EVALUATION_MS - 4_195_000 + step * 10_000;
-            let pane = (EVALUATION_MS - timestamp_ms) / 600_000;
+            let tumbling_window = (EVALUATION_MS - timestamp_ms) / 600_000;
             samples.push(sample(
                 "latency_ms",
                 instance,
                 timestamp_ms,
-                (1000 * pane) as f64 + base + (step * 37 % 101) as f64,
+                (1000 * tumbling_window) as f64 + base + (step * 37 % 101) as f64,
             ));
         }
     }
@@ -206,19 +206,19 @@ fn answers(batches: &[Batch]) -> Vec<Answer> {
     answers
 }
 
-/// Each answer is a p99 read from pane `pane` of its series
-/// ([`remote_write_samples`]): within `1000 × pane + base + 0..=100`.
-fn assert_answers_from_pane(answers: &[Answer], pane: i64) {
+/// Each answer is a p99 read from tumbling window `tumbling_window` of its series
+/// ([`remote_write_samples`]): within `1000 × tumbling_window + base + 0..=100`.
+fn assert_answers_from_tumbling_window(answers: &[Answer], tumbling_window: i64) {
     for (labels, value) in answers {
         let base = if labels["instance"] == "a" {
             100.0
         } else {
             300.0
         };
-        let low = (1000 * pane) as f64 + base;
+        let low = (1000 * tumbling_window) as f64 + base;
         assert!(
             (low..=low + 100.0).contains(value),
-            "{labels:?}: {value} is not from pane {pane}"
+            "{labels:?}: {value} is not from tumbling window {tumbling_window}"
         );
     }
 }
@@ -374,9 +374,9 @@ fn run_data_plane(
 enum IngestionBuilds {
     /// For each evaluation, over windows ending at that evaluation.
     PerEvaluation,
-    /// Tumbling, as a runtime that maintains panes as samples arrive: each
+    /// Tumbling, as a runtime that maintains tumbling windows as samples arrive: each
     /// once, over windows ending on the grid of its window's width anchored
-    /// at the epoch (pane end ≡ 0 mod width, as the backend data plane
+    /// at the epoch (tumbling window end ≡ 0 mod width, as the backend data plane
     /// builds them); an evaluation reads the newest one at or before it.
     Tumbling,
 }
@@ -589,8 +589,8 @@ fn run_data_plane_on(
     }
 }
 
-/// The sketch algorithm of the panes view `id` of `plan` builds.
-fn pane_sketch(plan: &InstallablePlan, id: usize) -> SketchAlgorithm {
+/// The sketch algorithm of the tumbling windows view `id` of `plan` builds.
+fn tumbling_window_sketch(plan: &InstallablePlan, id: usize) -> SketchAlgorithm {
     let node = plan.dag.nodes.iter().find(|node| node.id == id).unwrap();
     match &node.payload {
         asap_executor::planner::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
@@ -599,7 +599,7 @@ fn pane_sketch(plan: &InstallablePlan, id: usize) -> SketchAlgorithm {
                 ..
             },
         ) => *kind.algorithm(),
-        other => panic!("not a sketch pane: {other:?}"),
+        other => panic!("not a sketch tumbling window: {other:?}"),
     }
 }
 
@@ -607,14 +607,14 @@ fn pane_sketch(plan: &InstallablePlan, id: usize) -> SketchAlgorithm {
 /// at relative error 0.01 over five minutes, both every 10 s, over 1,000
 /// ingesting non-negative `latency_ms` gauges sampled every 10 s, on a
 /// deployment that keeps no raw data: a KLL chain and a DDSketch chain,
-/// both of 10 s panes, kept at ingestion over one `Scan`. Their panes are one refresh group, so each
+/// both of 10 s tumbling windows, kept at ingestion over one `Scan`. Their tumbling windows are one refresh group, so each
 /// 10 s window is read from raw data once, in one ingestion run that builds
-/// both panes ending there: 30 reads for the 30 pane windows of the first
-/// evaluation (36 when each pane view had its own run). Each state equals
+/// both tumbling windows ending there: 30 reads for the 30 tumbling window windows of the first
+/// evaluation (36 when each tumbling window view had its own run). Each state equals
 /// the one a run of its view alone builds, and both queries answer as the
 /// query-time reference.
 #[tokio::test]
-async fn panes_of_one_refresh_window_read_each_raw_window_once() {
+async fn tumbling_windows_of_one_refresh_window_read_each_raw_window_once() {
     let entry = |query: &str, metric: &str| {
         format!(
             r#"{{"query": {query:?}, "demand": {{"fixed_interval": 10000}},
@@ -639,8 +639,8 @@ async fn panes_of_one_refresh_window_read_each_raw_window_once() {
     let plan_json = plan_json_for(workload, &capabilities).await;
     let installed: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
     installed.check_compiles().unwrap();
-    // One refresh group: the six 10 s KLL panes and the thirty 10 s
-    // DDSketch panes.
+    // One refresh group: the six 10 s KLL tumbling windows and the thirty 10 s
+    // DDSketch tumbling windows.
     let groups = installed.ingestion_refresh_groups().unwrap();
     assert_eq!(groups.len(), 1, "{groups:#?}");
     assert_eq!(
@@ -653,7 +653,7 @@ async fn panes_of_one_refresh_window_read_each_raw_window_once() {
     let sketches: Vec<SketchAlgorithm> = groups[0]
         .views
         .iter()
-        .map(|view| pane_sketch(&installed, view.node_id))
+        .map(|view| tumbling_window_sketch(&installed, view.node_id))
         .collect();
     let count = |algorithm| sketches.iter().filter(|a| **a == algorithm).count();
     assert_eq!(count(SketchAlgorithm::Kll), 6, "{sketches:?}");
@@ -670,7 +670,7 @@ async fn panes_of_one_refresh_window_read_each_raw_window_once() {
     );
     assert_eq!(evaluated.answers_per_query[0].len(), 2);
 
-    // Each pane's state equals the one an ingestion run of its view alone
+    // Each tumbling window's state equals the one an ingestion run of its view alone
     // builds.
     for view in &groups[0].views {
         let span = view.inputs.raw_data_windows()[0].bounds_ms(EVALUATION_MS);
@@ -705,8 +705,8 @@ async fn panes_of_one_refresh_window_read_each_raw_window_once() {
 }
 
 /// #509 Example 4b, as a runtime runs it: one `plan_installable` call,
-/// `plan.json`, then each pane view refreshed in an ingestion run and merged
-/// in the query run. One p99 per series, read from the hour's oldest pane,
+/// `plan.json`, then each tumbling window view refreshed in an ingestion run and merged
+/// in the query run. One p99 per series, read from the hour's oldest tumbling window,
 /// equal to the query-time reference; the other metric is not read.
 #[tokio::test]
 async fn a_runtime_installs_and_runs_the_plan_from_one_facade_call() {
@@ -721,15 +721,15 @@ async fn a_runtime_installs_and_runs_the_plan_from_one_facade_call() {
     let views = installed.materialized_views().unwrap();
     assert!(!views.is_empty());
     assert_eq!(run.outputs_built, views.len());
-    // The p99 of the hour comes from its oldest pane, pane 5.
-    assert_answers_from_pane(&run.answers_per_query[0], 5);
+    // The p99 of the hour comes from its oldest tumbling window, tumbling window 5.
+    assert_answers_from_tumbling_window(&run.answers_per_query[0], 5);
     assert_eq!(run.answers_per_query[0][0].0["instance"], "a");
     assert_eq!(run.answers_per_query, run.reference_answers_per_query);
 }
 
 /// The plan file carries Stage 3's predicted usage of the selected plan, so
 /// a runtime reports it against what it measures without planning again:
-/// for Example 4b's panes maintained at ingestion time, its nodes' prices
+/// for Example 4b's tumbling windows maintained at ingestion time, its nodes' prices
 /// add up to Stage 3's selection cost and their CPU to the plan's, with
 /// one latency per query, each node naming the installed nodes that run it.
 #[tokio::test]
@@ -737,10 +737,10 @@ async fn the_plan_carries_stage3s_predicted_usage() {
     let (plan, selection) =
         planned_with_report(&["quantile_over_time(0.99, latency_ms[60m])"]).await;
     let views = plan.materialized_views().unwrap();
-    assert!(!views.is_empty(), "a pane-only plan");
+    assert!(!views.is_empty(), "a tumbling-window-only plan");
     assert!(
         plan.raw_data_retention().unwrap().is_empty(),
-        "a pane-only plan"
+        "a tumbling-window-only plan"
     );
     let selection = selection.as_ref().expect("Stage 3's report");
     let usage = &selection.predicted_usage;
@@ -766,8 +766,8 @@ async fn the_plan_carries_stage3s_predicted_usage() {
         && node.timing == asap_planner::ExecutionTiming::IngestionTime));
     assert_eq!(usage.per_query.len(), 1);
     assert!(usage.peak_memory_bytes > 0);
-    // Each prediction names the installed nodes that run it: the pane
-    // chain its selected panes, the query's root its own node.
+    // Each prediction names the installed nodes that run it: the tumbling window
+    // chain its selected tumbling windows, the query's root its own node.
     let installed: BTreeSet<_> = plan.dag.nodes.iter().map(|node| node.id).collect();
     for node in &usage.per_node {
         assert!(
@@ -798,7 +798,7 @@ async fn the_plan_carries_stage3s_predicted_usage() {
 /// The query's label matcher selects series `a` only: the runtime feeds
 /// every sample, and the window's selector applies the plan's `Scan`.
 #[tokio::test]
-async fn label_matchers_select_the_series_a_pane_reads() {
+async fn label_matchers_select_the_series_a_tumbling_window_reads() {
     let plan_json =
         plan_json(&[r#"quantile_over_time(0.99, latency_ms{instance="a"}[60m])"#]).await;
     let run = run_data_plane(
@@ -810,13 +810,13 @@ async fn label_matchers_select_the_series_a_pane_reads() {
     let answered = &run.answers_per_query[0];
     assert_eq!(answered.len(), 1, "{answered:?}");
     assert_eq!(answered[0].0["instance"], "a");
-    assert_answers_from_pane(answered, 5);
+    assert_answers_from_tumbling_window(answered, 5);
     assert_eq!(run.answers_per_query, run.reference_answers_per_query);
 }
 
 /// The p99 over the last hour and over the hour before the last 10
-/// minutes may share selected pane windows. The runtime refreshes each distinct
-/// state key once, independent of the optimizer's pane widths. Both answers
+/// minutes may share selected tumbling windows. The runtime refreshes each distinct
+/// state key once, independent of the optimizer's tumbling-window widths. Both answers
 /// equal the reference.
 #[tokio::test]
 async fn an_hour_and_its_offset_twin_both_equal_the_reference() {
@@ -841,33 +841,33 @@ async fn an_hour_and_its_offset_twin_both_equal_the_reference() {
     );
     assert_eq!(run.outputs_built, distinct_states.len());
     assert_eq!(run.answers_per_query.len(), 2);
-    // The last hour's p99 comes from pane 5, the offset hour's from pane 6.
-    assert_answers_from_pane(&run.answers_per_query[0], 5);
-    assert_answers_from_pane(&run.answers_per_query[1], 6);
+    // The last hour's p99 comes from tumbling window 5, the offset hour's from tumbling window 6.
+    assert_answers_from_tumbling_window(&run.answers_per_query[0], 5);
+    assert_answers_from_tumbling_window(&run.answers_per_query[1], 6);
     assert_eq!(run.answers_per_query, run.reference_answers_per_query);
 }
 
 /// Two copies of `sum by (job) (sum_over_time(m[10m]))`, each every 20 s,
 /// one at phase 0 and one at phase 5 s, over 6 ingesting series of `m`
-/// sampled every second. Panes shared by both must end on both schedules:
-/// 20 s panes end only on the first's, so the second would read
+/// sampled every second. Tumbling windows shared by both must end on both schedules:
+/// 20 s tumbling windows end only on the first's, so the second would read
 /// `(t − 605 s, t − 5 s]` instead of `(t − 600 s, t]`.
 #[tokio::test]
-async fn queries_at_two_phases_read_panes_on_both_schedules() {
+async fn queries_at_two_phases_read_tumbling_windows_on_both_schedules() {
     assert_phased_copies_answer_as_reference(&[0, 5_000]).await;
 }
 
-/// The same two copies, both at phase 5 s. A runtime anchors panes at the
-/// epoch and the plan carries no pane origin, so 20 s panes would end 5 s
-/// before every evaluation: the panes must also end on the phase itself.
+/// The same two copies, both at phase 5 s. A runtime anchors tumbling windows at the
+/// epoch and the plan carries no tumbling-window origin, so 20 s tumbling windows would end 5 s
+/// before every evaluation: the tumbling windows must also end on the phase itself.
 #[tokio::test]
-async fn queries_at_one_nonzero_phase_read_panes_anchored_at_the_epoch() {
+async fn queries_at_one_nonzero_phase_read_tumbling_windows_anchored_at_the_epoch() {
     assert_phased_copies_answer_as_reference(&[5_000, 5_000]).await;
 }
 
 /// Copies of `sum by (job) (sum_over_time(m[10m]))`, each every 20 s, copy
 /// `q` at phase `phases_ms[q]`, over 6 ingesting series of `m` sampled
-/// every second. Run by a runtime that refreshes each ingestion pane once, on
+/// every second. Run by a runtime that refreshes each ingestion tumbling window once, on
 /// the grid of its width anchored at the epoch, each answers as the
 /// query-time reference at its own evaluation.
 async fn assert_phased_copies_answer_as_reference(phases_ms: &[i64]) {
@@ -923,10 +923,10 @@ async fn assert_phased_copies_answer_as_reference(phases_ms: &[i64]) {
             })
         })
         .collect();
-    // The panes stored across every evaluation.
+    // The tumbling windows stored across every evaluation.
     let mut store = SummaryStore::new();
     // Copy `q` evaluates `phases_ms[q]` after `EVALUATION_MS` (on the
-    // 20 s grid); each reads the panes the store holds by then.
+    // 20 s grid); each reads the tumbling windows the store holds by then.
     for (query, phase_ms) in phases_ms.iter().enumerate() {
         let evaluation_ms = EVALUATION_MS + phase_ms;
         let run = run_data_plane_on(
@@ -1221,12 +1221,12 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
 /// evaluations (#509 Example 4's B3), with a dashboard panel
 /// (`max_over_time(latency_ms[5m])` every minute over 1M series sampled
 /// every 1.5 s, answered as the last hour at 1-minute steps): Stage 3
-/// keeps five 1-minute panes refreshed at query time, and keeps raw data
-/// for refreshing the oldest pane at the oldest step (5 min + 1 h). The first
+/// keeps five 1-minute tumbling windows refreshed at query time, and keeps raw data
+/// for refreshing the oldest tumbling window at the oldest step (5 min + 1 h). The first
 /// evaluation, with an empty store, refreshes all five in its query run; the
 /// next, a minute later, reuses the four still in its window and refreshes
 /// only the newest. Each
-/// evaluation's answers (each series' newest-pane maximum) equal the
+/// evaluation's answers (each series' newest-tumbling-window maximum) equal the
 /// reference.
 #[tokio::test]
 async fn query_time_results_kept_across_evaluations_are_built_in_query_runs() {
@@ -1253,15 +1253,15 @@ async fn query_time_results_kept_across_evaluations_are_built_in_query_runs() {
         .iter()
         .all(|v| v.refresh() == MaterializedViewRefresh::OnFirstRead
             && v.inputs.raw_data_windows()[0].width_ms() == 60_000));
-    // Raw data is kept for refreshing the oldest pane at the oldest step:
-    // the five panes' 5 minutes plus the hour of steps, as long as the panes
+    // Raw data is kept for refreshing the oldest tumbling window at the oldest step:
+    // the five tumbling windows' 5 minutes plus the hour of steps, as long as the tumbling windows
     // themselves are kept.
-    let pane_lookback_ms = views
+    let tumbling_window_lookback_ms = views
         .iter()
         .flat_map(|v| v.inputs.raw_data_windows())
         .map(asap_types::test_support::lookback_ms)
         .max();
-    assert_eq!(pane_lookback_ms, Some(300_000));
+    assert_eq!(tumbling_window_lookback_ms, Some(300_000));
     assert!(views.iter().all(|v| v.retention_ms() == 3_900_000));
     let retention = installed.raw_data_retention().unwrap();
     assert_eq!(
@@ -1272,7 +1272,7 @@ async fn query_time_results_kept_across_evaluations_are_built_in_query_runs() {
         vec![Some(3_900_000)],
         "{retention:?}"
     );
-    // The pane cache the data plane keeps across evaluations.
+    // The tumbling window cache the data plane keeps across evaluations.
     let mut store = SummaryStore::new();
     let first = run_data_plane(
         &plan_json,
@@ -1281,7 +1281,7 @@ async fn query_time_results_kept_across_evaluations_are_built_in_query_runs() {
         &mut store,
     );
     assert_eq!(first.outputs_built, 5);
-    assert_answers_from_pane(&first.answers_per_query[0], 0);
+    assert_answers_from_tumbling_window(&first.answers_per_query[0], 0);
     assert_eq!(first.answers_per_query, first.reference_answers_per_query);
     let next = run_data_plane(
         &plan_json,
@@ -1289,7 +1289,10 @@ async fn query_time_results_kept_across_evaluations_are_built_in_query_runs() {
         EVALUATION_MS + 60_000,
         &mut store,
     );
-    assert_eq!(next.outputs_built, 1, "four panes reused from the cache");
+    assert_eq!(
+        next.outputs_built, 1,
+        "four tumbling windows reused from the cache"
+    );
     assert_eq!(next.answers_per_query, next.reference_answers_per_query);
 }
 
@@ -1421,7 +1424,7 @@ fn promql_quantile(q: f64, values: &mut [f64]) -> f64 {
 /// The p90/p50 ratio of an hour (W-RangeHeavy template 8) on a deployment
 /// that keeps no raw data samples: both quantiles come from DDSketches
 /// sized for a share of the target (α = 1 − 1.05^{−1/2} ≈ 0.0241, so
-/// `(a + b)/(1 − b) ≤ 0.05`), maintained in panes; nothing is read from
+/// `(a + b)/(1 − b) ≤ 0.05`), maintained in tumbling windows; nothing is read from
 /// raw data at query time. Run on data, each series' ratio is within 0.05
 /// of the exact ratio of its hour's samples.
 #[tokio::test]
@@ -1816,12 +1819,12 @@ async fn a_summary_across_series_from_per_series_summaries_is_listed_and_built()
 }
 
 /// A dashboard's 5-minute max over the last hour at 1-minute steps (#509
-/// Example 4's B3) keeps five 1-minute panes; with its merge kept too, the
-/// merge is listed after the panes it reads, with their definition and the
+/// Example 4's B3) keeps five 1-minute tumbling windows; with its merge kept too, the
+/// merge is listed after the tumbling windows it reads, with their definition and the
 /// union of their times, refreshed in the query run and kept for its window
-/// plus the hour of steps; its panes are kept at least that long. Built
-/// from the stored panes it answers as the reference, and a minute later
-/// only the newest pane and the new merge are refreshed.
+/// plus the hour of steps; its tumbling windows are kept at least that long. Built
+/// from the stored tumbling windows it answers as the reference, and a minute later
+/// only the newest tumbling window and the new merge are refreshed.
 #[tokio::test]
 async fn a_kept_sliding_window_merge_is_listed_and_built() {
     let capabilities = DeploymentCapabilities {
@@ -1832,7 +1835,7 @@ async fn a_kept_sliding_window_merge_is_listed_and_built() {
         &["max_over_time(m[5m])"],
         r#", "range_evaluation": {"step_ms": 60000, "span_ms": 3600000}"#,
     );
-    // Declared as sampled every second, so that keeping the panes is
+    // Declared as sampled every second, so that keeping the tumbling windows is
     // cheaper than rebuilding the window at every step; the samples the
     // run reads are every 10 s, and exact answers do not depend on it.
     let facts = workload
@@ -1844,27 +1847,30 @@ async fn a_kept_sliding_window_merge_is_listed_and_built() {
     let plan_json = forced_plan_json(&workload, &capabilities, merges_kept).await;
     let plan: InstallablePlan = serde_json::from_str(&plan_json).unwrap();
     let views = plan.materialized_views().unwrap();
-    let (merge, panes) = views.split_last().unwrap();
-    assert_eq!(panes.len(), 5);
+    let (merge, tumbling_windows) = views.split_last().unwrap();
+    assert_eq!(tumbling_windows.len(), 5);
     assert_eq!(
         merge.inputs.materialized_views,
-        panes.iter().map(|pane| pane.node_id).collect::<Vec<_>>()
+        tumbling_windows
+            .iter()
+            .map(|tumbling_window| tumbling_window.node_id)
+            .collect::<Vec<_>>()
     );
     assert!(merge.inputs.raw_data_windows().is_empty());
     assert_eq!(merge.refresh(), MaterializedViewRefresh::OnFirstRead);
     assert_eq!(merge.coverage().selection(), relative_time(-300_000, 0));
     assert_eq!(merge.retention_ms(), 300_000 + 3_600_000);
-    for (i, pane) in panes.iter().enumerate() {
+    for (i, tumbling_window) in tumbling_windows.iter().enumerate() {
         let i = i as i64;
         assert_eq!(
-            pane.coverage().definition_id(),
+            tumbling_window.coverage().definition_id(),
             merge.coverage().definition_id()
         );
         assert_eq!(
-            pane.coverage().selection(),
+            tumbling_window.coverage().selection(),
             relative_time(-(i + 1) * 60_000, -i * 60_000)
         );
-        assert!(pane.retention_ms() >= merge.retention_ms());
+        assert!(tumbling_window.retention_ms() >= merge.retention_ms());
     }
     let mut store = SummaryStore::new();
     let first = run_data_plane(&plan_json, &job_samples(), EVALUATION_MS, &mut store);
@@ -1876,45 +1882,48 @@ async fn a_kept_sliding_window_merge_is_listed_and_built() {
         EVALUATION_MS + 60_000,
         &mut store,
     );
-    assert_eq!(next.outputs_built, 2, "the newest pane and the new merge");
+    assert_eq!(
+        next.outputs_built, 2,
+        "the newest tumbling window and the new merge"
+    );
     assert_eq!(next.answers_per_query, next.reference_answers_per_query);
 }
 
-/// Example 4b's selected panes cover the hour and share one definition id,
-/// each with its own time selection; each reads its pane of
+/// Example 4b's selected tumbling windows cover the hour and share one definition id,
+/// each with its own time selection; each reads its tumbling window of
 /// raw data samples and nothing stored.
 #[tokio::test]
-async fn panes_of_an_hour_share_one_definition_with_distinct_times() {
+async fn tumbling_windows_of_an_hour_share_one_definition_with_distinct_times() {
     let plan: InstallablePlan =
         serde_json::from_str(&plan_json(&["quantile_over_time(0.99, latency_ms[60m])"]).await)
             .unwrap();
     let views = plan.materialized_views().unwrap();
     assert!(!views.is_empty());
-    let mut panes: Vec<&MaterializedView> = views.iter().collect();
-    panes.sort_by_key(|o| o.inputs.raw_data_windows()[0].end_offset_ms());
-    let width_ms = panes[0].inputs.raw_data_windows()[0].width_ms();
+    let mut tumbling_windows: Vec<&MaterializedView> = views.iter().collect();
+    tumbling_windows.sort_by_key(|o| o.inputs.raw_data_windows()[0].end_offset_ms());
+    let width_ms = tumbling_windows[0].inputs.raw_data_windows()[0].width_ms();
     assert!(width_ms > 0);
     assert_eq!(
-        width_ms * panes.len() as i64,
+        width_ms * tumbling_windows.len() as i64,
         3_600_000,
         "complete hour coverage"
     );
-    for (i, pane) in panes.iter().enumerate() {
+    for (i, tumbling_window) in tumbling_windows.iter().enumerate() {
         let i = i as i64;
-        let [window] = pane.inputs.raw_data_windows() else {
-            panic!("{pane:?}");
+        let [window] = tumbling_window.inputs.raw_data_windows() else {
+            panic!("{tumbling_window:?}");
         };
         assert_eq!(
             (window.width_ms(), window.end_offset_ms()),
             (width_ms, i * width_ms)
         );
-        assert!(pane.inputs.materialized_views.is_empty());
+        assert!(tumbling_window.inputs.materialized_views.is_empty());
         assert_eq!(
-            pane.coverage().definition_id(),
-            panes[0].coverage().definition_id()
+            tumbling_window.coverage().definition_id(),
+            tumbling_windows[0].coverage().definition_id()
         );
         assert_eq!(
-            pane.coverage().selection(),
+            tumbling_window.coverage().selection(),
             relative_time(-(i + 1) * width_ms, -i * width_ms)
         );
     }
@@ -2075,19 +2084,20 @@ async fn plan_p99_avg(
 }
 
 /// Without raw data samples, the only valid plan of the p99 query keeps one
-/// DDSketch per series in one-second panes built at ingestion and merges
-/// the window's panes at query time. A quantile
-/// of merged panes is still one of the samples, so a declared non-negative
+/// DDSketch per series in one-second tumbling windows built at ingestion and merges
+/// the window's tumbling windows at query time. A quantile
+/// of merged tumbling windows is still one of the samples, so a declared non-negative
 /// gauge carries the sketch's relative bound through `avg`: that plan is
 /// selected, its answers equal the query-time reference's and are within
 /// 5% of the exact averages.
 #[tokio::test]
-async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_through_avg() {
+async fn a_non_negative_gauges_merged_ddsketch_tumbling_windows_carry_the_relative_bound_through_avg(
+) {
     let (plan, selection) = plan_p99_avg(true).await.expect("a valid plan");
     let selection = selection.as_ref().expect("Stage 3's report");
     let views = plan.materialized_views().unwrap();
     assert!(selection.cost_per_second.is_some());
-    assert!(!views.is_empty(), "panes built at ingestion");
+    assert!(!views.is_empty(), "tumbling windows built at ingestion");
     assert_eq!(
         stored_definitions(&plan, "DDSketch").len(),
         1,
@@ -2202,7 +2212,7 @@ async fn a_non_negative_gauges_merged_ddsketch_panes_carry_the_relative_bound_th
 /// which scan raw data at query time.
 #[tokio::test]
 #[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
-async fn an_undeclared_gauges_merged_ddsketch_panes_get_no_relative_bound_through_avg() {
+async fn an_undeclared_gauges_merged_ddsketch_tumbling_windows_get_no_relative_bound_through_avg() {
     let error = plan_p99_avg(false).await.expect_err("no valid plan");
     assert_plan_selection_selected_none(&error);
     // Pass 1 prunes both quantile sketches for that reason: DDSketch's
@@ -2673,7 +2683,7 @@ fn assert_p99s_within_alpha(
 }
 
 /// A non-negative gauge that reports exactly 0 is still summarized by the
-/// selected DDSketch panes (zero has its own bucket): each series' window
+/// selected DDSketch tumbling windows (zero has its own bucket): each series' window
 /// holds the samples 0, 0, 3 and 5 scaled by the series, and every answer
 /// equals the query-time reference's and is within the relative error 0.05
 /// of the exact average of PromQL's interpolated p99s.
@@ -2681,7 +2691,7 @@ fn assert_p99s_within_alpha(
 async fn a_ddsketch_over_a_gauge_reporting_zero_runs_within_alpha() {
     let (plan, _) = plan_p99("avg", true, false).await;
     let views = plan.materialized_views().unwrap();
-    assert!(!views.is_empty(), "panes built at ingestion");
+    assert!(!views.is_empty(), "tumbling windows built at ingestion");
     let (samples, per_group) = data_samples(8, 4, 20_000, |s, step| {
         (s + 1) as f64 * [0.0, 0.0, 3.0, 5.0][step as usize]
     });
@@ -2696,7 +2706,7 @@ async fn a_ddsketch_over_a_gauge_reporting_zero_runs_within_alpha() {
 }
 
 /// Signed samples (negative, zero and positive) are summarized by the
-/// selected DDSketch panes, through their negative store and zero bucket:
+/// selected DDSketch tumbling windows, through their negative store and zero bucket:
 /// Signed interpolation has no general relative guarantee, so this kernel
 /// fixture explicitly bypasses accuracy admission. Every answer equals the
 /// query-time reference's and is
@@ -2714,7 +2724,7 @@ async fn a_ddsketch_over_signed_samples_runs_within_alpha() {
         report.as_ref().unwrap().queries_accepted_without_guarantee,
         vec![0]
     );
-    assert!(!views.is_empty(), "panes built at ingestion");
+    assert!(!views.is_empty(), "tumbling windows built at ingestion");
     let max = |p99s: &[f64]| p99s.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     // Series 0..4 cross zero; series 4..8 are all negative.
     let (samples, per_group) = data_samples(8, 1_100, 100, |s, step| {
@@ -2777,7 +2787,7 @@ fn counter_raw_data_samples() -> Vec<RawDataSample> {
 }
 
 /// Issue: with guarantees ignored and no raw data samples, the counter top-k
-/// queries selected exact per-series panes followed by a query-time
+/// queries selected exact per-series tumbling windows followed by a query-time
 /// CountSketchWithHeap top-k the executor cannot compile ("invalid keyed
 /// evaluation shape or capacity"). The selected plan must be one the
 /// executor compiles; it runs, equal to its query-time reference and to the

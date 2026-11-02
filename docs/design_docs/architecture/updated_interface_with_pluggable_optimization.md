@@ -91,7 +91,7 @@ pub struct PlanOutput {
     pub scalar_roots: Vec<(usize, ScalarExpr)>,  // standalone scalar entries
     pub scalar_plans: Vec<QueryPlan>,            // the operator sub-DAGs they read
     pub selection: Option<Selection>,            // how plan selection chose, if the pass selects
-    pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>, // kept pane chains' retention
+    pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>, // kept tumbling-window chains' retention
 }
 
 pub struct QueryPlan {
@@ -125,7 +125,7 @@ tracked in #580.
 | Step | Call |
 |---|---|
 | Prepare roots | Entries in `entries()` order, the accuracy target from each entry's `requirements`; PromQL operator roots carry the series identity (`with_promql_series_identity`) where it has a realization |
-| Stage 1: logical ASAP-aware optimization | `generate_per_computation_logical_memo_candidates` (Pass 1, once), then per pane-width round `generate_logical_asap_memo_candidates` (Pass 2) |
+| Stage 1: logical ASAP-aware optimization | `generate_per_computation_logical_memo_candidates` (Pass 1, once), then per tumbling-window-width round `generate_logical_asap_memo_candidates` (Pass 2) |
 | Stage 2: physical ASAP-aware optimization | `generate_physical_asap_memo_candidates` per round |
 | Stage 3: plan selection | `select_plan` per round: check accuracy and latency, price under the cost model, select one plan; the facade keeps the best round's and builds it with Stage 2's `AssignmentRealizer::realize` |
 

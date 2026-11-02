@@ -57,8 +57,8 @@ pub fn documented_patterns() -> Vec<DocumentedPattern> {
             note: "checked through the sketch rollup witness, which reads the finer query's scan and state",
         },
         DocumentedPattern {
-            pattern: "Nested window: a shorter window merges the newest panes of a longer window's chain",
-            doc_reference: "planner-layering.md window composition L790–807; asap-primitive-schema.md §5.6 \"Newest panes\" L669",
+            pattern: "Nested window: a shorter window merges the newest tumbling windows of a longer window's chain",
+            doc_reference: "planner-layering.md window composition L790–807; asap-primitive-schema.md §5.6 \"Newest tumbling windows\" L669",
             relation: Some(Relation::NestedShorterWindow),
             note: "",
         },
@@ -87,7 +87,7 @@ pub fn documented_patterns() -> Vec<DocumentedPattern> {
             note: "UnivMon's count, distinct count, L2 and entropy (ASAPWorkloads #57, #107–#108); the witness reads q's own state, or is W ∪ {q'} planned with UnivMon as the only family",
         },
         DocumentedPattern {
-            pattern: "gcd pane grid across repeat intervals: queries at different intervals read one chain at their own cadence",
+            pattern: "gcd tumbling-window grid across repeat intervals: queries at different intervals read one chain at their own cadence",
             doc_reference: "planner-layering.md L791–809",
             relation: Some(Relation::OtherRepeatInterval),
             note: "",
@@ -105,19 +105,19 @@ pub fn documented_patterns() -> Vec<DocumentedPattern> {
             note: "the merge operator is implemented; the docs name no Pass 2 rule that creates it",
         },
         DocumentedPattern {
-            pattern: "Panes kept across evaluations when the deployment retains query-time results",
+            pattern: "Tumbling windows kept across evaluations when the deployment retains query-time results",
             doc_reference: "planner-layering.md Materialization L889–893",
             relation: Some(Relation::ResultsRetained),
             note: "a capability never raises cost",
         },
         DocumentedPattern {
-            pattern: "Window = interval: the whole window maintained as a one-pane tumbling chain",
+            pattern: "Window = interval: the whole window maintained as a one-tumbling-window chain",
             doc_reference: "planner-layering.md Materialization L895–905",
             relation: None,
             note: "a Stage 2 choice within one query, not a q → q' derivation",
         },
         DocumentedPattern {
-            pattern: "Rollup over newest panes (windowed rollup)",
+            pattern: "Rollup over newest tumbling windows (windowed rollup)",
             doc_reference: "planner-layering.md L809–823",
             relation: None,
             note: "a composition of c and d; not checked as one relation",
@@ -135,7 +135,7 @@ pub fn documented_patterns() -> Vec<DocumentedPattern> {
             note: "",
         },
         DocumentedPattern {
-            pattern: "Longer window over the same panes: one chain serves 5m and 1h windows",
+            pattern: "Longer window over the same tumbling windows: one chain serves 5m and 1h windows",
             doc_reference: "planner-layering.md window composition L790–807; ASAPWorkloads #1–#2, #19, #122",
             relation: Some(Relation::LongerWindow),
             note: "rate and increase excluded, as for d",
@@ -725,8 +725,8 @@ fn derivation_text(witness: &Witness) -> String {
             "a `SummaryMerge` with `group_by` = ({}) over q's summary state, then q's estimate",
             labels.join(", ")
         ),
-        Witness::NewestPanes { window_ms } => format!(
-            "a `SummaryMerge` of the newest panes of q's pane chain covering {window_ms} ms"
+        Witness::NewestTumblingWindows { window_ms } => format!(
+            "a `SummaryMerge` of the newest tumbling windows of q's tumbling-window chain covering {window_ms} ms"
         ),
         Witness::QuantileRank { from, to } => {
             format!("q's quantile estimate at rank {to} instead of {from}, from the same state")
@@ -748,8 +748,8 @@ fn derivation_text(witness: &Witness) -> String {
         }
         Witness::LongerWindow { window_ms, rollup } => {
             let lengthened = format!(
-                "q's pane chain lengthened to cover {window_ms} ms (q merges its old newest \
-                 panes), merged whole"
+                "q's tumbling-window chain lengthened to cover {window_ms} ms (q merges its old newest \
+                 tumbling windows), merged whole"
             );
             match rollup {
                 Some(rollup) => format!("{lengthened}, then {}", derivation_text(rollup)),
@@ -806,7 +806,9 @@ fn write_draft(
             format!("A coarser grouping of `{q}` does not roll up its result or state")
         }
         Relation::NestedShorterWindow => {
-            format!("A shorter window of `{q}` does not merge the newest panes of its chain")
+            format!(
+                "A shorter window of `{q}` does not merge the newest tumbling windows of its chain"
+            )
         }
         Relation::OtherQuantileRank => {
             format!("Another quantile rank of `{q}` does not read the same sketch")
@@ -831,7 +833,7 @@ fn write_draft(
             format!("A ratio with `{q}` as an operand does not read `{q}`'s result")
         }
         Relation::LongerWindow => {
-            format!("A longer window of `{q}` does not extend its pane chain")
+            format!("A longer window of `{q}` does not extend its tumbling-window chain")
         }
         Relation::LongerWindowRollup => format!(
             "A longer window and coarser grouping of `{q}` does not roll up its extended chain"

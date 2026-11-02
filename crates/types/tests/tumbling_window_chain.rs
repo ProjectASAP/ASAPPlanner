@@ -1,19 +1,21 @@
-//! A `SummaryTumblingWindowChain` of tumbling panes stands for its panes: it covers what one
+//! A `SummaryTumblingWindowChain` of tumbling windows stands for its tumbling windows: it covers what one
 //! build over its whole window does, and expands into the `SummaryAgg`
-//! panes the executor runs (#509 Pass 2, window-composition rule).
+//! tumbling windows the executor runs (#509 Pass 2, window-composition rule).
 use std::ops::Bound;
 use std::rc::Rc;
 use std::time::Duration;
 
 use asap_types::ir::operator::operator_properties::{Reduction, Source, TimeShift};
-use asap_types::ir::operator::pane_chain::{expand_pane_chains, merged_chain};
+use asap_types::ir::operator::tumbling_window_chain::{
+    expand_tumbling_window_chains, merged_chain,
+};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::schema::{
     GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryUpdate,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, TimeRangeKind};
-use asap_types::test_support::{pane, whole_window_build};
+use asap_types::test_support::{tumbling_window, whole_window_build};
 
 const MINUTE: u64 = 60_000;
 
@@ -57,7 +59,7 @@ fn kll() -> FieldDataType {
     )
 }
 
-/// Five 1-min KLL panes per series over `input`.
+/// Five 1-min KLL tumbling windows per series over `input`.
 fn chain(input: Rc<OperatorNode>) -> Rc<OperatorNode> {
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child: input,
@@ -92,7 +94,7 @@ fn relative_time(node: &OperatorNode) -> (Bound<i64>, Bound<i64>) {
 /// The merged chain is a state of the build over the whole 5-min window:
 /// the same schema and coverage `(-5m, 0]`, and it validates.
 #[test]
-fn merged_panes_cover_the_whole_window() {
+fn merged_tumbling_windows_cover_the_whole_window() {
     let chain = chain(scan());
     let merged = merge(vec![Rc::clone(&chain)]);
     merged.validate_structure().unwrap();
@@ -113,37 +115,37 @@ fn merged_panes_cover_the_whole_window() {
     );
 }
 
-/// Pane `i` is the build over `(-(i+1)·1m, -i·1m]`, the query's own offset
-/// folded into one shift; the panes are disjoint and tile the window.
+/// Tumbling window `i` is the build over `(-(i+1)·1m, -i·1m]`, the query's own offset
+/// folded into one shift; the tumbling windows are disjoint and tile the window.
 #[test]
-fn each_pane_is_one_shifted_minute() {
+fn each_tumbling_window_is_one_shifted_minute() {
     let offset = 3_600_000;
     let chain = chain(shifted(scan(), offset));
     for i in 0..5 {
-        let pane = pane(&chain, i).unwrap();
+        let tumbling_window = tumbling_window(&chain, i).unwrap();
         let back = offset + i64::from(i) * MINUTE as i64;
         assert_eq!(
-            relative_time(&pane),
+            relative_time(&tumbling_window),
             (
                 Bound::Excluded(-(back + MINUTE as i64)),
                 Bound::Included(-back)
             ),
-            "pane {i}"
+            "tumbling window {i}"
         );
-        let range = pane.children()[0];
+        let range = tumbling_window.children()[0];
         let Some(NonASAPOp::TimeShift { shift, child }) = range.children()[0].non_asap() else {
-            panic!("pane {i} reads a shift")
+            panic!("tumbling window {i} reads a shift")
         };
         assert_eq!(shift.offset_ms, back);
         assert!(matches!(child.non_asap(), Some(NonASAPOp::Scan { .. })));
     }
 }
 
-/// Expansion gives the executor a merge over the five panes, newest first,
+/// Expansion gives the executor a merge over the five tumbling windows, newest first,
 /// which covers what the merged chain does; a chain read without a merge
 /// does not expand.
 #[test]
-fn expansion_merges_the_panes() {
+fn expansion_merges_the_tumbling_windows() {
     let chain = chain(scan());
     let merged = merge(vec![Rc::clone(&chain)]);
     let estimate = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
@@ -151,7 +153,7 @@ fn expansion_merges_the_panes() {
         query: SketchStatistic::Quantile { q: 0.99 },
     }))
     .unwrap();
-    let expanded = expand_pane_chains(&estimate).unwrap();
+    let expanded = expand_tumbling_window_chains(&estimate).unwrap();
     expanded.validate_structure().unwrap();
     assert_eq!(expanded.schema, estimate.schema);
     let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = expanded.asap() else {
@@ -162,19 +164,23 @@ fn expansion_merges_the_panes() {
     };
     assert_eq!(children.len(), 5);
     for (i, child) in children.iter().enumerate() {
-        assert_eq!(**child, pane(&chain, i as u32).unwrap(), "pane {i}");
+        assert_eq!(
+            **child,
+            tumbling_window(&chain, i as u32).unwrap(),
+            "tumbling window {i}"
+        );
     }
     assert_eq!(summary_input.coverage(), merged.coverage());
-    assert!(expand_pane_chains(&chain).is_err());
+    assert!(expand_tumbling_window_chains(&chain).is_err());
 }
 
 /// Expanding a timed chain carries its timing and materialization onto its
-/// panes: a chain materialized at ingestion time expands into panes each
+/// tumbling windows: a chain materialized at ingestion time expands into tumbling windows each
 /// built and stored at ingestion time, over ranges and shifts that run at
 /// ingestion time too, while the merge reading them stays at query time.
-/// An unmaterialized chain expands into query-time panes.
+/// An unmaterialized chain expands into query-time tumbling windows.
 #[test]
-fn expansion_carries_the_chains_timing_onto_its_panes() {
+fn expansion_carries_the_chains_timing_onto_its_tumbling_windows() {
     use asap_types::ir::properties::ExecutionTiming;
     use asap_types::ir::{
         apply_materialization_timings, MaterializationAssignment, NodeToTimedNodeCache,
@@ -196,14 +202,14 @@ fn expansion_carries_the_chains_timing_onto_its_panes() {
         let timed =
             apply_materialization_timings(&estimate, &assignment, &mut NodeToTimedNodeCache::new())
                 .unwrap();
-        let expanded = expand_pane_chains(&timed).unwrap();
+        let expanded = expand_tumbling_window_chains(&timed).unwrap();
         let merged = expanded.children()[0];
         assert_eq!(merged.timing, Some(ExecutionTiming::QueryTime));
         assert_eq!(merged.children().len(), 5);
-        for pane in merged.children() {
-            assert_eq!(pane.timing, Some(timing), "{materialization:?}");
-            assert_eq!(pane.materialization, materialization);
-            for below in OperatorNode::reachable(pane).iter().skip(1) {
+        for tumbling_window in merged.children() {
+            assert_eq!(tumbling_window.timing, Some(timing), "{materialization:?}");
+            assert_eq!(tumbling_window.materialization, materialization);
+            for below in OperatorNode::reachable(tumbling_window).iter().skip(1) {
                 assert_eq!(below.timing, Some(timing), "{}", below.operator.kind_name());
                 assert_eq!(below.materialization, Materialization::NotMaterialized);
             }
@@ -239,26 +245,29 @@ fn a_chain_reads_an_instant_vector() {
     assert!(empty.validate_structure().is_err());
 }
 
-/// Two merges over one chain (two queries reading the same panes) expand
-/// into one set of panes: the same five `SummaryAgg` nodes, not ten.
+/// Two merges over one chain (two queries reading the same tumbling windows) expand
+/// into one set of tumbling windows: the same five `SummaryAgg` nodes, not ten.
 #[test]
-fn merges_over_one_chain_share_its_panes() {
-    use asap_types::ir::operator::pane_chain::expand_pane_chains_in_workload;
+fn merges_over_one_chain_share_its_tumbling_windows() {
+    use asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains_in_workload;
     use asap_types::ir::QueryRoot;
     let shared = chain(scan());
     let roots = [
         QueryRoot::Operator(merge(vec![Rc::clone(&shared)])),
         QueryRoot::Operator(merge(vec![shared])),
     ];
-    let expansion = expand_pane_chains_in_workload(&roots).unwrap();
+    let expansion = expand_tumbling_window_chains_in_workload(&roots).unwrap();
     assert_eq!(expansion.chains.len(), 1);
-    assert_eq!(expansion.chains[0].panes.len(), 5);
+    assert_eq!(expansion.chains[0].tumbling_windows.len(), 5);
     let expanded = expansion.roots;
-    let panes = |root: &QueryRoot| match root {
+    let tumbling_windows = |root: &QueryRoot| match root {
         QueryRoot::Operator(node) => node.children().into_iter().cloned().collect::<Vec<_>>(),
         QueryRoot::Scalar(_) => unreachable!(),
     };
-    let (first, second) = (panes(&expanded[0]), panes(&expanded[1]));
+    let (first, second) = (
+        tumbling_windows(&expanded[0]),
+        tumbling_windows(&expanded[1]),
+    );
     assert_eq!(first.len(), 5);
     assert!(first.iter().zip(&second).all(|(a, b)| Rc::ptr_eq(a, b)));
 }
@@ -272,12 +281,12 @@ fn newest(chain: Rc<OperatorNode>, newest_tumbling_windows: u32) -> Rc<OperatorN
     .unwrap()
 }
 
-/// A merge of the newest 2 of 5 panes is a state of one build over the
+/// A merge of the newest 2 of 5 tumbling windows is a state of one build over the
 /// newest 2 minutes: coverage `(-2m, 0]`, the window build's schema, and
 /// a valid structure.
 #[test]
-fn a_merge_of_the_newest_panes_covers_their_window() {
-    use asap_types::ir::operator::pane_chain::merged_window_build;
+fn a_merge_of_the_newest_tumbling_windows_covers_their_window() {
+    use asap_types::ir::operator::tumbling_window_chain::merged_window_build;
     let partial = newest(chain(scan()), 2);
     partial.validate_structure().unwrap();
     let build = merged_window_build(&partial).unwrap();
@@ -293,10 +302,10 @@ fn a_merge_of_the_newest_panes_covers_their_window() {
     );
 }
 
-/// `newest_tumbling_windows` must name between 1 and fewer than all panes of the one
+/// `newest_tumbling_windows` must name between 1 and fewer than all tumbling windows of the one
 /// chain the merge reads; anything else is rejected.
 #[test]
-fn a_merge_of_the_newest_panes_reads_one_chain_and_fewer_than_all_panes() {
+fn a_merge_of_the_newest_tumbling_windows_reads_one_chain_and_fewer_than_all_tumbling_windows() {
     let chain = chain(scan());
     let build = whole_window_build(&chain).unwrap();
     for (children, newest_tumbling_windows) in [
@@ -315,26 +324,29 @@ fn a_merge_of_the_newest_panes_reads_one_chain_and_fewer_than_all_panes() {
     }
 }
 
-/// A merge of the newest 2 panes and a merge of all 5 over one chain
-/// expand into one set of panes: the partial merge reads the first 2 of
+/// A merge of the newest 2 tumbling windows and a merge of all 5 over one chain
+/// expand into one set of tumbling windows: the partial merge reads the first 2 of
 /// the full merge's 5 nodes, newest first, and the chain lists all 5.
 #[test]
-fn a_merge_of_the_newest_panes_reads_the_first_panes_of_the_chain() {
-    use asap_types::ir::operator::pane_chain::expand_pane_chains_in_workload;
+fn a_merge_of_the_newest_tumbling_windows_reads_the_first_tumbling_windows_of_the_chain() {
+    use asap_types::ir::operator::tumbling_window_chain::expand_tumbling_window_chains_in_workload;
     use asap_types::ir::QueryRoot;
     let shared = chain(scan());
     let roots = [
         QueryRoot::Operator(newest(Rc::clone(&shared), 2)),
         QueryRoot::Operator(merge(vec![shared])),
     ];
-    let expansion = expand_pane_chains_in_workload(&roots).unwrap();
+    let expansion = expand_tumbling_window_chains_in_workload(&roots).unwrap();
     assert_eq!(expansion.chains.len(), 1);
-    assert_eq!(expansion.chains[0].panes.len(), 5);
-    let panes = |root: &QueryRoot| match root {
+    assert_eq!(expansion.chains[0].tumbling_windows.len(), 5);
+    let tumbling_windows = |root: &QueryRoot| match root {
         QueryRoot::Operator(node) => node.children().into_iter().cloned().collect::<Vec<_>>(),
         QueryRoot::Scalar(_) => unreachable!(),
     };
-    let (partial, full) = (panes(&expansion.roots[0]), panes(&expansion.roots[1]));
+    let (partial, full) = (
+        tumbling_windows(&expansion.roots[0]),
+        tumbling_windows(&expansion.roots[1]),
+    );
     assert_eq!((partial.len(), full.len()), (2, 5));
     assert!(partial.iter().zip(&full).all(|(a, b)| Rc::ptr_eq(a, b)));
     for (root, window) in expansion.roots.iter().zip([2, 5]) {
@@ -351,7 +363,7 @@ fn a_merge_of_the_newest_panes_reads_the_first_panes_of_the_chain() {
 /// `newest_tumbling_windows` is left out of the JSON when `None`, and JSON without it
 /// reads as `None`; `Some(n)` round-trips.
 #[test]
-fn newest_panes_serializes_only_when_set() {
+fn newest_tumbling_windows_serializes_only_when_set() {
     let full: ASAPOp<()> = ASAPOp::SummaryMerge {
         children: vec![()],
         newest_tumbling_windows: None,
@@ -370,12 +382,12 @@ fn newest_panes_serializes_only_when_set() {
     assert_eq!(serde_json::from_str::<ASAPOp<()>>(&json).unwrap(), partial);
 }
 
-/// A rollup of a chain's panes to no keys (every series' panes into one
-/// state) is no pane merge, and expansion keeps its keys: the expanded
+/// A rollup of a chain's tumbling windows to no keys (every series' tumbling windows into one
+/// state) is no tumbling-window merge, and expansion keeps its keys: the expanded
 /// rollup covers what the planned one does, one build over the whole
 /// window and every series.
 #[test]
-fn expansion_keeps_a_rollup_of_the_panes() {
+fn expansion_keeps_a_rollup_of_the_tumbling_windows() {
     let chain = chain(scan());
     let rollup = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children: vec![Rc::clone(&chain)],
@@ -384,7 +396,7 @@ fn expansion_keeps_a_rollup_of_the_panes() {
     }))
     .unwrap();
     assert!(merged_chain(&rollup).is_none());
-    let expanded = expand_pane_chains(&rollup).unwrap();
+    let expanded = expand_tumbling_window_chains(&rollup).unwrap();
     let Some(ASAPOp::SummaryMerge {
         children, group_by, ..
     }) = expanded.asap()
@@ -399,7 +411,7 @@ fn expansion_keeps_a_rollup_of_the_panes() {
     };
     assert_eq!(*reduction, Reduction::by(vec![]));
     // A rollup merges every input state: it reads a merge of the newest
-    // panes, it is not one.
+    // tumbling windows, it is not one.
     assert!(OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
         children: vec![chain],
         newest_tumbling_windows: Some(2),
@@ -408,11 +420,11 @@ fn expansion_keeps_a_rollup_of_the_panes() {
     .is_err());
 }
 
-/// A rollup reads a merge of the newest panes: every series' newest 2 of 5
-/// panes into one state covers one build by no keys over the newest 2
+/// A rollup reads a merge of the newest tumbling windows: every series' newest 2 of 5
+/// tumbling windows into one state covers one build by no keys over the newest 2
 /// minutes.
 #[test]
-fn a_rollup_of_the_newest_panes_covers_their_window() {
+fn a_rollup_of_the_newest_tumbling_windows_covers_their_window() {
     let rollup = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children: vec![newest(chain(scan()), 2)],
         newest_tumbling_windows: None,
@@ -435,10 +447,10 @@ fn a_rollup_of_the_newest_panes_covers_their_window() {
 /// typed budget stop, never a malformed chain or a partially successful plan.
 #[test]
 #[ignore = "flaky: depends on a wall-clock deadline (#1067)"]
-fn fine_pane_expansion_stops_at_the_planning_deadline() {
-    use asap_types::ir::operator::pane_chain::PaneChainExpansionError;
+fn fine_tumbling_window_expansion_stops_at_the_planning_deadline() {
+    use asap_types::ir::operator::tumbling_window_chain::TumblingWindowChainExpansionError;
     use asap_types::ir::QueryRoot;
-    use asap_types::test_support::expand_pane_chains_in_workload_before;
+    use asap_types::test_support::expand_tumbling_window_chains_in_workload_before;
     use std::time::Instant;
     let mut op = chain(scan()).operator.clone();
     let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
@@ -457,30 +469,30 @@ fn fine_pane_expansion_stops_at_the_planning_deadline() {
     .unwrap()]))];
     let deadline = Instant::now() + Duration::from_millis(1);
     assert!(matches!(
-        expand_pane_chains_in_workload_before(&roots, Some(deadline)),
-        Err(PaneChainExpansionError::DeadlineExceeded)
+        expand_tumbling_window_chains_in_workload_before(&roots, Some(deadline)),
+        Err(TumblingWindowChainExpansionError::DeadlineExceeded)
     ));
 }
 
-/// Supplying ample budget preserves complete expansion and shared pane identity.
+/// Supplying ample budget preserves complete expansion and shared tumbling window identity.
 #[test]
 #[ignore = "flaky: depends on a wall-clock deadline (#1067)"]
-fn budgeted_expansion_preserves_every_pane_and_shared_reader() {
+fn budgeted_expansion_preserves_every_tumbling_window_and_shared_reader() {
     use asap_types::ir::QueryRoot;
-    use asap_types::test_support::expand_pane_chains_in_workload_before;
+    use asap_types::test_support::expand_tumbling_window_chains_in_workload_before;
     use std::time::Instant;
     let shared = chain(scan());
     let roots = [
         QueryRoot::Operator(merge(vec![shared.clone()])),
         QueryRoot::Operator(merge(vec![shared])),
     ];
-    let result = expand_pane_chains_in_workload_before(
+    let result = expand_tumbling_window_chains_in_workload_before(
         &roots,
         Some(Instant::now() + Duration::from_secs(10)),
     )
     .unwrap();
     assert_eq!(result.chains.len(), 1);
-    assert_eq!(result.chains[0].panes.len(), 5);
+    assert_eq!(result.chains[0].tumbling_windows.len(), 5);
     let QueryRoot::Operator(first) = &result.roots[0] else {
         unreachable!()
     };
@@ -495,7 +507,7 @@ fn budgeted_expansion_preserves_every_pane_and_shared_reader() {
 }
 
 /// JSON written before #1163 names the chain `PaneChain`, its fields
-/// `pane_width_ms` and `pane_count`, and a merge's `newest_panes`; it reads
+/// `tumbling_window_width_ms` and `tumbling_window_count`, and a merge's `newest_tumbling_windows`; it reads
 /// as today's operators.
 #[test]
 fn names_before_the_tumbling_window_rename_still_read() {

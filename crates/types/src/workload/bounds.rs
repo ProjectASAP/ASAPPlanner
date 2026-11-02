@@ -364,7 +364,7 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
             group_by: Some(keys),
             ..
         }) => keys.is_empty(),
-        // A merge gives one state per group, whatever the panes it merges.
+        // A merge gives one state per group, whatever the tumbling windows it merges.
         Operator::ASAP(ASAPOp::SummaryMerge { .. }) => matches!(
             node.summary_build(),
             Some(

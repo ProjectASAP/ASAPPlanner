@@ -55,11 +55,11 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         evaluation: PopulationStatistic,
     },
     /// Merge compatible partial states of one family: every input state of
-    /// a group, including each pane of a [`SummaryTumblingWindowChain`](ASAPOp::SummaryTumblingWindowChain),
+    /// a group, including each tumbling window of a [`SummaryTumblingWindowChain`](ASAPOp::SummaryTumblingWindowChain),
     /// into one state per group.
     SummaryMerge {
         children: Vec<C>,
-        /// Merge only the newest `n` panes of the one `SummaryTumblingWindowChain` this
+        /// Merge only the newest `n` tumbling windows of the one `SummaryTumblingWindowChain` this
         /// merge reads, `1 ≤ n <` its `tumbling_window_count`: the state of one build
         /// over the newest `n · tumbling_window_width_ms` of the chain's window, so a
         /// query over a shorter window reads a chain kept for a longer one.
@@ -78,19 +78,19 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         group_by: Option<Vec<ColumnId>>,
     },
-    /// A tumbling-pane window summary (#509 Pass 2, window-composition
+    /// A tumbling-window summary (#509 Pass 2, window-composition
     /// rule): the `SummaryAgg` with these `family`, `input`, `reduction`,
     /// `grouping` and `filter`, built over each of `tumbling_window_count` back-to-back
     /// range windows of `tumbling_window_width_ms` that end at `child`'s evaluation
     /// time, newest first. `child` is the input a range selector would
-    /// read, so pane `i` covers `(-(i+1)·w, -i·w]` relative to it. Output:
-    /// the `SummaryAgg` schema, one state per group and pane; a
+    /// read, so tumbling window `i` covers `(-(i+1)·w, -i·w]` relative to it. Output:
+    /// the `SummaryAgg` schema, one state per group and tumbling window; a
     /// `SummaryMerge` over the chain gives the state of one build over the
     /// whole `tumbling_window_count · tumbling_window_width_ms` window
     /// (`whole_window_build`).
-    /// One compact node whatever the pane count: costs and guarantees come
-    /// from formulas, and the executor expands the panes
-    /// (`expand_pane_chains`).
+    /// One compact node whatever the tumbling-window count: costs and guarantees come
+    /// from formulas, and the executor expands the tumbling windows
+    /// (`expand_tumbling_window_chains`).
     // Written as `PaneChain` before #1163; the aliases read those documents.
     #[serde(alias = "PaneChain")]
     SummaryTumblingWindowChain {
@@ -370,10 +370,10 @@ impl ASAPOp {
                 if let Some(build) = rolled_up_build(child) {
                     return FinalizeExactAccumulator { child: build }.output_schema();
                 }
-                // Merged panes finalize as one build over their window.
-                if super::pane_chain::merged_chain(child).is_some() {
+                // Merged tumbling windows finalize as one build over their window.
+                if super::tumbling_window_chain::merged_chain(child).is_some() {
                     return FinalizeExactAccumulator {
-                        child: Rc::new(super::pane_chain::merged_window_build(child)?),
+                        child: Rc::new(super::tumbling_window_chain::merged_window_build(child)?),
                     }
                     .output_schema();
                 }
@@ -576,7 +576,7 @@ impl ASAPOp {
             } => {
                 if newest_tumbling_windows.is_some() && group_by.is_some() {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
-                        "a rollup merges every input state, not the newest panes".into(),
+                        "a rollup merges every input state, not the newest tumbling windows".into(),
                     ));
                 }
                 if let Some(n) = newest_tumbling_windows {
@@ -592,8 +592,8 @@ impl ASAPOp {
                     };
                     if !tumbling_window_count.is_some_and(|count| (1..count).contains(n)) {
                         return Err(SchemaDerivationError::InvalidScalarSignature(
-                            "a merge of the newest panes reads one pane chain, and fewer \
-                             panes than it has"
+                            "a merge of the newest tumbling windows reads one tumbling-window chain, and fewer \
+                             tumbling windows than it has"
                                 .into(),
                         ));
                     }
@@ -692,7 +692,7 @@ impl ASAPOp {
             } => {
                 if *tumbling_window_width_ms == 0 || *tumbling_window_count == 0 {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
-                        "a pane chain needs a positive pane width and pane count".into(),
+                        "a tumbling-window chain needs a positive tumbling-window width and tumbling-window count".into(),
                     ));
                 }
                 // The chain is the range selector: it reads the series the
@@ -702,7 +702,7 @@ impl ASAPOp {
                     OperatorResultKind::InstantVector | OperatorResultKind::Relation
                 ) {
                     return Err(SchemaDerivationError::InvalidScalarSignature(format!(
-                        "a pane chain reads an instant vector or a relation, got {:?}",
+                        "a tumbling-window chain reads an instant vector or a relation, got {:?}",
                         child.result_kind
                     )));
                 }
@@ -799,8 +799,8 @@ fn rolled_up_build(state: &OperatorNode) -> Option<Rc<OperatorNode>> {
     let input = selected_from(input).unwrap_or(input);
     let build = match input.asap()? {
         ASAPOp::SummaryAgg { .. } => (**input).clone(),
-        _ if super::pane_chain::merged_chain(input).is_some() => {
-            super::pane_chain::merged_window_build(input).ok()?
+        _ if super::tumbling_window_chain::merged_chain(input).is_some() => {
+            super::tumbling_window_chain::merged_window_build(input).ok()?
         }
         _ => return None,
     };

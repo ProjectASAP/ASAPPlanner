@@ -1,8 +1,8 @@
 //! #757: a query answered as a range request (`RangeEvaluation`), e.g. a
 //! dashboard panel that evaluates the last hour at 1-minute steps on every
-//! refresh. Stage 1 and Stage 2 keep pane widths on the step grid, and
+//! refresh. Stage 1 and Stage 2 keep tumbling-window widths on the step grid, and
 //! Stage 3 prices `span_ms / step_ms + 1` evaluations per request, credits
-//! the panes kept across steps and requests, and retains kept panes for
+//! the tumbling windows kept across steps and requests, and retains kept tumbling windows for
 //! the span plus the window.
 
 use crate::planner_layering_common;
@@ -27,14 +27,14 @@ const LAST_HOUR_BY_MINUTE: RangeEvaluation = RangeEvaluation {
 };
 
 /// Price explicitly named computations under the same models as production.
-/// This fixture controls its pane width; a timed MILP archive is not a catalog
+/// This fixture controls its tumbling-window width; a timed MILP archive is not a catalog
 /// of every legal materialization or a stable source of P1/P2 identifiers.
 fn run_explicit_for(workload: &PlanningWorkload, deployment: &DeploymentCapabilities) -> Run {
     use asap_logical_asap_optimization::test_support::{
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_logical_asap_optimization::test_support::{
-        pane_candidates, window_composition_pass2_candidates,
+        tumbling_window_candidates, window_composition_pass2_candidates,
     };
     use asap_types::ir::schema::SketchAlgorithm;
     use asap_types::stages::HowToComputeAggregateMeasure;
@@ -64,10 +64,14 @@ fn run_explicit_for(workload: &PlanningWorkload, deployment: &DeploymentCapabili
         .entries()
         .map(|entry| entry.evaluation_grid_ms())
         .collect::<Vec<_>>();
-    let panes = pane_candidates(build, &grids);
-    assert_eq!(panes.len(), 1, "one explicit pane computation");
+    let tumbling_windows = tumbling_window_candidates(build, &grids);
+    assert_eq!(
+        tumbling_windows.len(),
+        1,
+        "one explicit tumbling window computation"
+    );
     candidates.push(
-        window_composition_pass2_candidates(build, &panes)
+        window_composition_pass2_candidates(build, &tumbling_windows)
             .unwrap()
             .remove(0)
             .roots
@@ -151,8 +155,8 @@ fn close(actual: f64, expected: f64) -> bool {
     (actual - expected).abs() <= 1e-6 * expected.abs().max(1.0)
 }
 
-/// Each physical candidate's pane chains: (pane width, materialization).
-fn pane_chains(run: &Run) -> Vec<(String, u64, Materialization)> {
+/// Each physical candidate's tumbling-window chains: (tumbling-window width, materialization).
+fn tumbling_window_chains(run: &Run) -> Vec<(String, u64, Materialization)> {
     run.physical
         .iter()
         .flat_map(|p| {
@@ -167,9 +171,9 @@ fn pane_chains(run: &Run) -> Vec<(String, u64, Materialization)> {
         .collect()
 }
 
-/// The candidate whose single pane chain is materialized as `wanted`.
+/// The candidate whose single tumbling-window chain is materialized as `wanted`.
 fn with_chain(run: &Run, wanted: Materialization) -> String {
-    pane_chains(run)
+    tumbling_window_chains(run)
         .into_iter()
         .find(|(_, _, m)| *m == wanted)
         .unwrap_or_else(|| panic!("no candidate with a {wanted:?} chain"))
@@ -179,11 +183,11 @@ fn with_chain(run: &Run, wanted: Materialization) -> String {
 /// (a) The issue's acceptance example: Pattern B as a dashboard over the
 /// last hour at 1-minute steps prices 61 evaluations per request. Every
 /// query-time computation runs at every step, so the whole-window KLL
-/// (2.3625 → 144.1125 cost/s), the panes rebuilt per step (3.6112 →
+/// (2.3625 → 144.1125 cost/s), the tumbling windows rebuilt per step (3.6112 →
 /// 220.2852) and the exact plan (2.4576 → 149.9136) cost 61 times as much,
-/// the memory each step holds while it runs included. The kept panes (B3)
-/// are built once per request (one new 1-min pane) but merged at every
-/// step, and keep 64 older panes instead of 4 (1 h + 5 min of panes):
+/// the memory each step holds while it runs included. The kept tumbling windows (B3)
+/// are built once per request (one new 1-min tumbling window) but merged at every
+/// step, and keep 64 older tumbling windows instead of 4 (1 h + 5 min of tumbling windows):
 /// 436.59 → 6,987.05. B1 keeps 66 instead of 6: 654.54 → 7,202.31. The
 /// whole-window KLL is still selected.
 #[test]
@@ -206,7 +210,7 @@ fn stage3_plan_selection_prices_61_evaluations_per_dashboard_request() {
     for id in ["P1", "P2", "P3"] {
         assert!(close(cost(&range, id), 61.0 * cost(&none, id)), "{id}");
     }
-    // B3: 4 → 64 panes kept between requests; B1: 6 → 66 panes kept.
+    // B3: 4 → 64 tumbling windows kept between requests; B1: 6 → 66 tumbling windows kept.
     let keeps = |run: &Run, id: &str, bytes: &str| {
         assert!(
             run.selection.costs[id]
@@ -224,36 +228,42 @@ fn stage3_plan_selection_prices_61_evaluations_per_dashboard_request() {
 }
 
 /// (b) For this explicit fixture, refreshing every minute at 30-second steps
-/// supplies panes of
+/// supplies tumbling windows of
 /// `gcd(5 min, 1 min, 30 s) = 30 s`, on the step grid, and Stage 2 keeps
-/// them; without the range, the fixture uses 1 min panes. Both configurations
+/// them; without the range, the fixture uses 1 min tumbling windows. Both configurations
 /// must divide the evaluation step; production also offers finer legal widths.
 #[test]
-fn explicit_pane_candidates_follow_the_evaluation_step_grid() {
+fn explicit_tumbling_window_candidates_follow_the_evaluation_step_grid() {
     let step_30s = RangeEvaluation {
         step_ms: 30_000,
         span_ms: 3_600_000,
     };
     let range = run_explicit(&exact_panel("max_over_time(m[5m])", 60_000, Some(step_30s)));
-    let widths: Vec<u64> = pane_chains(&range).into_iter().map(|(_, w, _)| w).collect();
-    assert!(!widths.is_empty(), "panes are offered");
+    let widths: Vec<u64> = tumbling_window_chains(&range)
+        .into_iter()
+        .map(|(_, w, _)| w)
+        .collect();
+    assert!(!widths.is_empty(), "tumbling windows are offered");
     assert!(widths.iter().all(|&w| w == 30_000), "{widths:?}");
     assert!(range.pruned.is_empty(), "{:?}", range.pruned);
 
     let none = run_explicit(&exact_panel("max_over_time(m[5m])", 60_000, None));
-    let widths: Vec<u64> = pane_chains(&none).into_iter().map(|(_, w, _)| w).collect();
+    let widths: Vec<u64> = tumbling_window_chains(&none)
+        .into_iter()
+        .map(|(_, w, _)| w)
+        .collect();
     assert!(
         !widths.is_empty() && widths.iter().all(|&w| w == 60_000),
         "{widths:?}"
     );
 }
 
-/// (c) A plan that keeps panes reports how long the runtime must keep
+/// (c) A plan that keeps tumbling windows reports how long the runtime must keep
 /// them: the window plus the range-evaluation span, 5 min + 1 h =
-/// 3,900,000 ms, so the next refresh's earliest step finds its panes.
+/// 3,900,000 ms, so the next refresh's earliest step finds its tumbling windows.
 /// Without the range it is the window, 300,000 ms.
 #[test]
-fn stage3_plan_selection_reports_the_retention_of_kept_panes() {
+fn stage3_plan_selection_reports_the_retention_of_kept_tumbling_windows() {
     let deployment = keeping_query_time_results();
     let query = "max_over_time(m[5m])";
     let range = run_explicit_for(
@@ -294,7 +304,7 @@ fn stage3_plan_selection_reports_the_retention_of_kept_panes() {
 }
 
 /// (d) Without a range evaluation nothing changes: Pattern B's pinned
-/// costs (#509 Example 3 and 4: whole-window KLL 2.3625, panes 3.6112, B3
+/// costs (#509 Example 3 and 4: whole-window KLL 2.3625, tumbling windows 3.6112, B3
 /// 436.59, B1 5.232 GB kept) are as before, and a range of one step per
 /// request (`span_ms: 0`) prices exactly as no range.
 #[test]
@@ -322,14 +332,14 @@ fn no_range_evaluation_leaves_every_price_unchanged() {
 /// The example where declaring the range makes Stage 3 prefer sharing:
 /// `max_over_time(m[5m])` every minute over 1M series. As one evaluation
 /// per minute, rebuilding the window (P1, 20.8281 cost/s) beats the kept
-/// panes (P2-m2, 32.2630: 224 MB of 56-byte per-series maxima kept) and the
-/// panes maintained at ingestion (P2-m1, 46.2340). As a dashboard over the
+/// tumbling windows (P2-m2, 32.2630: 224 MB of 56-byte per-series maxima kept) and the
+/// tumbling windows maintained at ingestion (P2-m1, 46.2340). As a dashboard over the
 /// last hour at 1-minute steps, rebuilding costs 61 times as much
-/// (1,270.5151), while the kept panes add only the per-step merges and 1 h
-/// of panes (460.0410), and B1 472.2760: the kept panes are selected, and without
-/// query-time retention, the ingestion-time panes.
+/// (1,270.5151), while the kept tumbling windows add only the per-step merges and 1 h
+/// of tumbling windows (460.0410), and B1 472.2760: the kept tumbling windows are selected, and without
+/// query-time retention, the ingestion-time tumbling windows.
 #[test]
-fn stage3_plan_selection_prefers_kept_panes_once_the_range_is_declared() {
+fn stage3_plan_selection_prefers_kept_tumbling_windows_once_the_range_is_declared() {
     let query = "max_over_time(m[5m])";
     let deployment = keeping_query_time_results();
     let none = run_explicit_for(&exact_panel(query, 60_000, None), &deployment);
@@ -372,9 +382,9 @@ fn stage3_plan_selection_prefers_kept_panes_once_the_range_is_declared() {
 
 /// (e) A chain over an offset input reaches back its offset further: with
 /// no raw data kept, `max_over_time(m[60m] offset 10m)` every 10 minutes
-/// keeps six 10-minute panes ending 10 minutes before each evaluation, so
-/// its panes must be kept for 10 min + 60 min = 4,200,000 ms, and the kept
-/// memory Stage 3 prices covers that seventh pane; without the offset the
+/// keeps six 10-minute tumbling windows ending 10 minutes before each evaluation, so
+/// its tumbling windows must be kept for 10 min + 60 min = 4,200,000 ms, and the kept
+/// memory Stage 3 prices covers that seventh tumbling window; without the offset the
 /// retention is the window, 3,600,000 ms.
 #[test]
 fn an_offset_chain_is_retained_and_priced_for_its_offset() {

@@ -35,7 +35,7 @@ fn input() -> SchemaRef {
 }
 
 /// Samples of 3 series in `(start, start + 1000]`, counters with a reset.
-fn pane_input(start: i64) -> Batch {
+fn tumbling_window_input(start: i64) -> Batch {
     let rows = (1..=40)
         .map(|i| {
             let series = i % 3;
@@ -81,8 +81,8 @@ fn run(operator: Operator, inputs: Vec<Batch>) -> Vec<Batch> {
     })
 }
 
-// For each exact family: two panes built as numeric records, merged and
-// evaluated, equal the same panes read back as kernel objects (all objects,
+// For each exact family: two tumbling windows built as numeric records, merged and
+// evaluated, equal the same tumbling windows read back as kernel objects (all objects,
 // or one of each), row for row.
 #[test]
 fn exact_records_merge_and_evaluate_as_kernel_objects_do() {
@@ -98,10 +98,16 @@ fn exact_records_merge_and_evaluate_as_kernel_objects_do() {
         let build = || {
             Operator::per_group_summary_build(input(), family.clone(), 2, Some(1), vec![0]).unwrap()
         };
-        let panes = [0, 1_000].map(|start| run(build(), vec![pane_input(start)]).remove(0));
-        let as_objects =
-            |pane: &Batch| Batch::try_new(pane.schema().clone(), pane.to_rows().to_vec()).unwrap();
-        let state_schema = panes[0].schema().clone();
+        let tumbling_windows =
+            [0, 1_000].map(|start| run(build(), vec![tumbling_window_input(start)]).remove(0));
+        let as_objects = |tumbling_window: &Batch| {
+            Batch::try_new(
+                tumbling_window.schema().clone(),
+                tumbling_window.to_rows().to_vec(),
+            )
+            .unwrap()
+        };
+        let state_schema = tumbling_windows[0].schema().clone();
         let answer = |inputs: Vec<Batch>| {
             let merged = run(
                 Operator::summary_merge(state_schema.clone(), 1, vec![0]).unwrap(),
@@ -121,10 +127,19 @@ fn exact_records_merge_and_evaluate_as_kernel_objects_do() {
             assert_eq!(rows.len(), 3, "{kind:?}: one row per series");
             format!("{rows:?}")
         };
-        // Newest pane first: counters must merge in time order regardless.
-        let records = answer(vec![panes[1].clone(), panes[0].clone()]);
-        let objects = answer(vec![as_objects(&panes[1]), as_objects(&panes[0])]);
-        let mixed = answer(vec![panes[1].clone(), as_objects(&panes[0])]);
+        // Newest tumbling window first: counters must merge in time order regardless.
+        let records = answer(vec![
+            tumbling_windows[1].clone(),
+            tumbling_windows[0].clone(),
+        ]);
+        let objects = answer(vec![
+            as_objects(&tumbling_windows[1]),
+            as_objects(&tumbling_windows[0]),
+        ]);
+        let mixed = answer(vec![
+            tumbling_windows[1].clone(),
+            as_objects(&tumbling_windows[0]),
+        ]);
         assert_eq!(records, objects, "{kind:?}");
         assert_eq!(records, mixed, "{kind:?}");
     }

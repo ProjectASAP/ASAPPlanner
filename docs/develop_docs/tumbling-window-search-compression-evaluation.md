@@ -1,15 +1,15 @@
-# Pane-search compression evaluation
+# Tumbling-window-search compression evaluation
 
-This report is for planner developers. It separates three changes: storing repeated producer lists once, factoring equivalent candidate connections, and spending a bounded search budget across progressively larger pane-width domains. Storage compression alone does not reduce the number of MILP variables. Searching fewer widths before a timeout does not prove equivalence to the complete domain.
+This report is for planner developers. It separates three changes: storing repeated producer lists once, factoring equivalent candidate connections, and spending a bounded search budget across progressively larger tumbling-window-width domains. Storage compression alone does not reduce the number of MILP variables. Searching fewer widths before a timeout does not prove equivalence to the complete domain.
 
 ## Reproduction
 
 Use frozen `stage_pipeline` executables; record their SHA-256 hashes. Do not run the four-case comparison concurrently with another benchmark. Both sides use the same input files, AWS pricing, deployment capabilities, enforced accuracy, a 30-second cooperative planning budget, and a 90-second external process timeout. Each case runs sequentially. Whole-process wall time and peak RSS include plan export and validation, so wall time may exceed the cooperative planning budget.
 
 ```bash
-python3 tools/benchmark_pane_search.py summarize BEFORE_BINARY BEFORE_DIR
-python3 tools/benchmark_pane_search.py run AFTER_BINARY AFTER_DIR
-python3 tools/benchmark_pane_search.py compare BEFORE_DIR AFTER_DIR COMPARISON.md
+python3 tools/benchmark_tumbling_window_search.py summarize BEFORE_BINARY BEFORE_DIR
+python3 tools/benchmark_tumbling_window_search.py run AFTER_BINARY AFTER_DIR
+python3 tools/benchmark_tumbling_window_search.py compare BEFORE_DIR AFTER_DIR COMPARISON.md
 ```
 
 `summarize` imports existing plan, timing, and `summary.json` artifacts without executing the planner again. Each directory receives `results.json`, with the binary hash, input fingerprints, full search reports, selected cost/usage, and acceptance checks. Comparison rejects mismatched inputs, budgets, or concurrency. Missing old metrics remain **unreported**, rather than zero.
@@ -17,20 +17,20 @@ python3 tools/benchmark_pane_search.py compare BEFORE_DIR AFTER_DIR COMPARISON.m
 Broader acceptance uses the same runner:
 
 ```bash
-python3 tools/benchmark_pane_search.py run AFTER_BINARY VIEWER_DIR --suite viewer --jobs 2
-python3 tools/benchmark_pane_search.py run AFTER_BINARY ASAP_DIR --suite asap --jobs 2
+python3 tools/benchmark_tumbling_window_search.py run AFTER_BINARY VIEWER_DIR --suite viewer --jobs 2
+python3 tools/benchmark_tumbling_window_search.py run AFTER_BINARY ASAP_DIR --suite asap --jobs 2
 ```
 
 For an archived 30-workload baseline without input fingerprints, compare only cost and acceptance after checking its original pricing configuration:
 
 ```bash
-python3 tools/benchmark_pane_search.py compare OLD_ASAP_DIR ASAP_DIR QUALITY.md --quality-only
+python3 tools/benchmark_tumbling_window_search.py compare OLD_ASAP_DIR ASAP_DIR QUALITY.md --quality-only
 ```
 
 This mode checks serialized workloads, deployment capabilities, accuracy modes, Stage 0 DAGs, and objective/calibration settings. It deliberately excludes planning-time and memory comparisons; the old runner must confirm the pricing profile because historical documents do not serialize it.
 
 
-These suites contain the nine viewer workload examples and 30 mixed ASAPQuery workloads, respectively. They check query coverage, enforced accuracy, finite cost, valid cost bounds, no stored-output errors, and no global bound, gap, optimum, or exhaustion claim while pane widths remain pending. Existing Rust/JavaScript tests remain responsible for DAG structure and installation invariants.
+These suites contain the nine viewer workload examples and 30 mixed ASAPQuery workloads, respectively. They check query coverage, enforced accuracy, finite cost, valid cost bounds, no stored-output errors, and no global bound, gap, optimum, or exhaustion claim while tumbling-window widths remain pending. Existing Rust/JavaScript tests remain responsible for DAG structure and installation invariants.
 
 ## Baseline
 
@@ -54,7 +54,7 @@ Independent correctness checks should cover:
 - Producer-list sharing preserves membership, order, and duplicate input positions. Mutating one shared list must not mutate another list. Cached compatibility includes every semantic/configuration field used by the uncached check.
 - Tiny complete-domain problems retain the same feasible assignments and minimum evaluated cost before and after factoring. Include multiple readers, different materializations, duplicate input positions, optional dependencies, and shared upstream producers. Reconstruction must restore every factored operation and preserve costs, accuracy, and query coverage.
 - Terminal unary factoring must not absorb a node with additional consumers, observable materialization/state, unsupported error propagation, or different execution demand. Shared producer work remains charged once; reader-specific work remains per use.
-- Progressive pane-width domains are nested; each round adds `Panes` candidates to the candidate memo only for newly admitted pane widths. Each round rebuilds its physical inventory and MILP, so previously considered assignments may be revisited. The domains eventually include the complete legal finite domain when the budget permits. A restricted-domain optimum never becomes a global certificate; timeout preserves the best validated incumbent.
+- Progressive tumbling-window-width domains are nested; each round adds `TumblingWindows` candidates to the candidate memo only for newly admitted tumbling-window widths. Each round rebuilds its physical inventory and MILP, so previously considered assignments may be revisited. The domains eventually include the complete legal finite domain when the budget permits. A restricted-domain optimum never becomes a global certificate; timeout preserves the best validated incumbent.
 - The four-case benchmark must show measurable changes on the dense rangeheavy cases. Report cost regressions or incomplete-domain effects explicitly. Full 30-workload and nine-viewer acceptance must pass without relaxing accuracy or latency requirements.
 
 ## After-change results
@@ -108,9 +108,9 @@ The nine viewer workloads also passed **9/9**, with **40/40** query requirements
 
 ### Final regression follow-up
 
-The regression suite found a genuine optimization regression outside window planning. Two identical SQL percentiles over an at-rest table were sent through progressive pane rounds solely because they repeat every ten minutes. No computation had a pane-eligible window, so the rounds rebuilt the same 40-configuration, 150-connection model and restarted refinement. The 128-evaluation budget expired with two identical unmaterialized KLL builds, costing 0.007678692288679677 per second instead of the baseline's one shared query-materialized build at 0.006000017830006526 (+27.98%). The original pointer-sharing assertion failed both in the suite and in isolation; it was retained unchanged.
+The regression suite found a genuine optimization regression outside window planning. Two identical SQL percentiles over an at-rest table were sent through progressive tumbling window rounds solely because they repeat every ten minutes. No computation had a tumbling-window-eligible window, so the rounds rebuilt the same 40-configuration, 150-connection model and restarted refinement. The 128-evaluation budget expired with two identical unmaterialized KLL builds, costing 0.007678692288679677 per second instead of the baseline's one shared query-materialized build at 0.006000017830006526 (+27.98%). The original pointer-sharing assertion failed both in the suite and in isolation; it was retained unchanged.
 
-Revision `fe171f64` bypasses pane-domain expansion when the initial computations contain neither a positive range window nor an existing pane chain. It searches the complete candidate domain directly; at-rest status alone does not disable pane planning. The same SQL fixture now passes the original sharing test and selects one shared KLL with exactly the baseline cost. Its report records 58 evaluations, `optimal`, one `Complete` round, and no pending widths. This fix avoids repeated identical-domain searches rather than increasing the budget or relaxing correctness checks.
+Revision `fe171f64` bypasses tumbling-window-domain expansion when the initial computations contain neither a positive range window nor an existing tumbling-window chain. It searches the complete candidate domain directly; at-rest status alone does not disable tumbling window planning. The same SQL fixture now passes the original sharing test and selects one shared KLL with exactly the baseline cost. Its report records 58 evaluations, `optimal`, one `Complete` round, and no pending widths. This fix avoids repeated identical-domain searches rather than increasing the budget or relaxing correctness checks.
 
 The final frozen executable is `/mydata/pane-compression-validation/stage-pipeline-after-gate-final`, SHA-256 `a3234d62d2a6717e3772aba240959f6a224a4e1e031fe9cba27854079f8622f2`, built from `fe171f64`. SQL before/after artifacts are `/tmp/identical-sql-{before,after,gate-fixed}.json`; the unchanged integration test log is `/tmp/sql-sharing-pane-gate-after.log`.
 

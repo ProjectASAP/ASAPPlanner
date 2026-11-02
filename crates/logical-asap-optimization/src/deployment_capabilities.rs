@@ -8,7 +8,7 @@
 //!   its state, and a readout of it when the executor can answer that
 //!   statistic ([`StatisticKind`]) from the state. Stage 1 (Pass 1) offers
 //!   no summary candidate whose family or readout is unsupported, so no
-//!   Pass 2 candidate has one either (Pass 2 rules share, split into panes
+//!   Pass 2 candidate has one either (Pass 2 rules share, split into tumbling windows
 //!   or reuse existing builds; none adds a family or a readout). Exact
 //!   accumulators and plain exact execution are always supported;
 //! * whether raw data samples are retained. If they are, Stage 3 counts them on
@@ -19,9 +19,9 @@
 //!   rows. Stored data (at rest or mixed) with no raw data retained is a
 //!   contradiction, refused as bad input ([`DeploymentCapabilities::validate`]);
 //! * whether query-time results are retained across evaluations. If they
-//!   are, Stage 2 also offers a tumbling-pane chain whose readers evaluate
-//!   together at its pane width as `MatAtQueryKeptAcrossEvaluations`: each
-//!   evaluation builds one new pane and keeps the others for the next ones,
+//!   are, Stage 2 also offers a tumbling-window chain whose readers evaluate
+//!   together at its tumbling-window width as `MatAtQueryKeptAcrossEvaluations`: each
+//!   evaluation builds one new tumbling window and keeps the others for the next ones,
 //!   covering the readers' longest look-back. A chain two or more queries
 //!   read keeps its `MatAtQuery` option too (shared within one evaluation),
 //!   and Stage 3 picks the cheaper. If they are not, a query-time result is

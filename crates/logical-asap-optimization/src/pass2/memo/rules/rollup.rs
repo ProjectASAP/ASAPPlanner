@@ -223,7 +223,7 @@ pub(crate) fn add_rollup_candidates(
     Ok(added)
 }
 
-/// Existing pane rollup rules applied to producer pairs on already generated
+/// Existing tumbling window rollup rules applied to producer pairs on already generated
 /// legal local grids. No whole-workload choice combinations are constructed.
 pub(crate) fn add_window_rollup_candidates(
     memo: &mut MemoCandidates,
@@ -231,7 +231,7 @@ pub(crate) fn add_window_rollup_candidates(
 ) -> Result<usize, StateGroupExpansionError> {
     check_generation_deadline(deadline)?;
     use crate::pass2::asap_aware_cse::{
-        pane_candidates, window_composition_shared_chain_candidates,
+        tumbling_window_candidates, window_composition_shared_chain_candidates,
     };
     let mut grids = vec![std::collections::BTreeSet::new(); memo.groups.len()];
     for (group, candidates) in memo.candidates.iter().enumerate() {
@@ -278,11 +278,14 @@ pub(crate) fn add_window_rollup_candidates(
                     QueryRoot::Operator(Rc::clone(&coarse.root_node)),
                     QueryRoot::Operator(Rc::clone(&fine.root_node)),
                 ];
-                let panes = pane_candidates(&roots, &[Some(*grid), Some(*grid)]);
-                if panes.len() != 2 {
+                let tumbling_windows =
+                    tumbling_window_candidates(&roots, &[Some(*grid), Some(*grid)]);
+                if tumbling_windows.len() != 2 {
                     continue;
                 }
-                for rewritten in window_composition_shared_chain_candidates(&roots, &panes) {
+                for rewritten in
+                    window_composition_shared_chain_candidates(&roots, &tumbling_windows)
+                {
                     check_generation_deadline(deadline)?;
                     if rewritten.shared_chains.is_empty() {
                         continue;
@@ -334,7 +337,7 @@ mod tests {
     use crate::pass1::per_computation_candidates::generate_per_computation_candidates;
     use crate::pass2::memo::generate_dag_of_logical_memo_groups;
     use crate::pass2::memo::groups::try_populate_pass1;
-    use crate::pass2::memo::shared_configurations::PaneWidthDomain;
+    use crate::pass2::memo::shared_configurations::TumblingWindowWidthDomain;
     use crate::test_support::{lower_promql, sharing_rules_and_shared_state_groups};
     use asap_types::ir::properties::AccuracyTarget;
     use asap_types::ir::QueryRoot;
@@ -356,7 +359,7 @@ mod tests {
                 .unwrap();
         let memo = sharing_rules_and_shared_state_groups(
             try_populate_pass1(initial, &inventory).unwrap(),
-            PaneWidthDomain::Complete,
+            TumblingWindowWidthDomain::Complete,
         )
         .unwrap();
         let root_of = |query: usize| memo.query_roots[query].as_operator().unwrap().0 as usize;
