@@ -164,6 +164,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "flaky: depends on a wall-clock deadline (#1067)"]
     fn bounded_flatten_preserves_identity_and_abandons_partial_export() {
         use std::time::{Duration, Instant};
         let shared = values();

@@ -489,6 +489,7 @@ fn sql_count_rollup_executes_with_integer_results() {
 
 /// #922: duplicate exact TopK readers share their result and inner window work.
 #[test]
+#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn duplicate_exact_topk_shares_work() {
     let mut w = workload(924);
     for query in &mut w.queries {

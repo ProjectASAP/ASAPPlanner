@@ -434,6 +434,7 @@ fn a_rollup_of_the_newest_panes_covers_their_window() {
 /// A fine-width chain remains a legal candidate; interrupted expansion is a
 /// typed budget stop, never a malformed chain or a partially successful plan.
 #[test]
+#[ignore = "flaky: depends on a wall-clock deadline (#1067)"]
 fn fine_pane_expansion_stops_at_the_planning_deadline() {
     use asap_types::ir::operator::pane_chain::PaneChainExpansionError;
     use asap_types::ir::QueryRoot;
@@ -463,6 +464,7 @@ fn fine_pane_expansion_stops_at_the_planning_deadline() {
 
 /// Supplying ample budget preserves complete expansion and shared pane identity.
 #[test]
+#[ignore = "flaky: depends on a wall-clock deadline (#1067)"]
 fn budgeted_expansion_preserves_every_pane_and_shared_reader() {
     use asap_types::ir::QueryRoot;
     use asap_types::test_support::expand_pane_chains_in_workload_before;

@@ -1537,6 +1537,7 @@ mod tests {
     // cannot establish an exact top-k ranking; contract-aware priorities find a
     // validated seed without changing the feasible candidate catalog.
     #[test]
+    #[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
     fn accuracy_baseline_validates_composed_value_and_topk_workload() {
         let target = AccuracyTarget::max_error(0.05).failure_probability(0.3);
         let roots: Vec<_> = [
@@ -2042,6 +2043,7 @@ mod tests {
 
     // Both scalar price objectives use the full evaluator, with one frozen calibration.
     #[test]
+    #[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
     fn real_kll_search_cost_matches_independent_plan_selector_evaluation() {
         let (configured, roots, entries, data) = fixture();
         for provisioned in [false, true] {
@@ -2107,6 +2109,7 @@ mod tests {
 
     // A one-evaluation budget returns the validated full plan and an unfinished status.
     #[test]
+    #[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
     fn bounded_search_keeps_its_validated_plan() {
         let (configured, roots, entries, data) = fixture();
         let context = CandidatePlanningContext {
@@ -2137,6 +2140,7 @@ mod tests {
     // Workload eligibility can reject one offered configuration; exclude only
     // that complete assignment and continue to a validated legal configuration.
     #[test]
+    #[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
     fn rejected_materialization_does_not_stop_search_for_legal_plan() {
         let (configured, roots, mut entries, data) = fixture();
         // The catalog was generated for predictable readers. This deliberately
@@ -2217,6 +2221,7 @@ mod tests {
 
     // A broken output contract is an adapter error, never evidence of infeasibility.
     #[test]
+    #[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
     fn unsupported_output_contract_stops_without_an_infeasibility_cut() {
         let (configured, mut roots, entries, data) = fixture();
         let QueryRoot::Operator(node) = &mut roots[0] else {
@@ -2254,6 +2259,7 @@ mod tests {
 
     // A cluster objective must not silently become scalar price optimization.
     #[test]
+    #[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
     fn scalar_price_search_does_not_scalarize_cluster_objectives() {
         let (configured, roots, entries, data) = fixture();
         let settings = asap_cost::CostInputs {

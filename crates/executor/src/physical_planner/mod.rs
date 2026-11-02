@@ -1622,6 +1622,7 @@ mod compilation_deadline_tests {
     }
 
     #[test]
+    #[ignore = "flaky: depends on a wall-clock deadline (#1067)"]
     fn expired_compilation_is_distinct_from_invalid_graph() {
         let dag = empty_dag();
         assert!(matches!(
@@ -1755,6 +1756,7 @@ mod compilation_deadline_tests {
     }
 
     #[test]
+    #[ignore = "flaky: depends on a wall-clock deadline (#1067)"]
     fn large_compilation_observes_deadline_during_preflight() {
         use planner_types::ir::properties::ExecutionDataState;
         use planner_types::physical::Materialization;

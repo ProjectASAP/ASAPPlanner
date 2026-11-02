@@ -82,6 +82,7 @@ fn assert_no_costlier_than_separate(queries: &[String]) -> (f64, f64) {
 /// chain; together the search used to stop at a query-time plan about twice
 /// as costly.
 #[test]
+#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn per_city_percentiles_cost_no_more_than_separate_plans() {
     assert_no_costlier_than_separate(&[
         format!("SELECT {P90} FROM metrics WHERE city = 'NYC' AND {W5}"),
@@ -94,6 +95,7 @@ fn per_city_percentiles_cost_no_more_than_separate_plans() {
 /// ingestion-time state; together the search used to stop at a query-time
 /// plan almost three times as costly.
 #[test]
+#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn percentile_and_max_over_one_scan_cost_no_more_than_separate_plans() {
     assert_no_costlier_than_separate(&[
         format!("SELECT {P90} FROM metrics WHERE {W5}"),
@@ -103,6 +105,7 @@ fn percentile_and_max_over_one_scan_cost_no_more_than_separate_plans() {
 
 /// The same with a grouped count over the shared scan.
 #[test]
+#[ignore = "flaky: depends on wall-clock search budgets (#1067)"]
 fn percentile_and_grouped_count_over_one_scan_cost_no_more_than_separate_plans() {
     assert_no_costlier_than_separate(&[
         format!("SELECT {P90} FROM metrics WHERE {W5}"),

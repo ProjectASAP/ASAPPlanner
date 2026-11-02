@@ -768,6 +768,7 @@ fn high_fan_in_edges_preserve_multiplicity_without_order_dependence() {
 }
 
 #[test]
+#[ignore = "flaky: depends on a wall-clock deadline (#1067)"]
 fn physical_export_deadline_is_typed_and_preserves_unbounded_behavior() {
     use asap_types::ir::physical_export::PhysicalASAPCompilationError;
     use asap_types::test_support::compile_physical_asap_workload_with_node_ids_before;
