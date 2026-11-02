@@ -97,7 +97,6 @@ fn validated_dag(value: &Value, queries: usize) {
 /// Stage 2 candidate once and costs exactly the valid ones; the committed
 /// fixture's workload is current.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn example1_document_preserves_workload_and_validates_archived_plans() {
     // Example 1's story is about which plans miss their accuracy target;
     // archive enough evaluated plans to check the cross-stage linkage.
@@ -176,10 +175,9 @@ fn example1_document_preserves_workload_and_validates_archived_plans() {
 /// `--max-displayed` cuts only what the document shows, says so, and keeps
 /// the selection made over all candidates.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn display_cap_is_recorded_and_keeps_the_selection() {
     // Instant quantiles provide several implementations without expanding a
-    // tumbling-window-width domain. Exhaustive mode ensures the display cap is exercised.
+    // pane-width domain. Exhaustive mode ensures the display cap is exercised.
     let document = document_of(&[
         "--promql",
         "quantile(0.5, data)",
@@ -248,7 +246,6 @@ fn pass1_pruned(document: &serde_json::Value) -> Vec<(String, String)> {
 /// is pruned in Pass 1 (`TopKHeapOverOneRowPerItem`), listed under
 /// `pruned_candidates`, and every candidate left composes.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn a_topk_heap_over_one_row_per_item_is_pruned_with_its_reason() {
     let document = document_of(&[
         "--promql",
@@ -280,7 +277,6 @@ fn a_topk_heap_over_one_row_per_item_is_pruned_with_its_reason() {
 /// display cap does not change the selection, and the selected plan is
 /// displayed with its cost.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn example3a_archive_and_viewer_select_consistently() {
     // Candidate IDs are local to one time-bounded search. Validate the viewer
     // references within its own archive instead of comparing independent runs.
@@ -305,9 +301,8 @@ fn example3a_archive_and_viewer_select_consistently() {
 /// Example 2 plans its three SQL queries with the default search and
 /// selects a plan.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn example2_plans_the_sql_workload() {
-    // The default search: its SQL windows get tumbling windows, so an
+    // The default search: its SQL windows get tumbling panes, so an
     // exhaustive run has over 10^4 Stage 2 candidates. The integration test
     // `stage1_logical_asap_optimization_sql_adds_one_univmon_for_all_three`
     // checks the shared UnivMon candidate.
@@ -322,7 +317,6 @@ fn example2_plans_the_sql_workload() {
 /// SQL queries over tables declared with `--table` are planned through the
 /// same stages, and the document records each query's language.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn sql_queries_over_declared_tables_are_planned() {
     let out = std::env::temp_dir().join(format!("stage_pipeline_{}_sql.json", std::process::id()));
     let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
@@ -357,7 +351,6 @@ fn sql_queries_over_declared_tables_are_planned() {
 /// One run mixes SQL (over declared tables) and PromQL queries, in the
 /// order given, each named with `--name`.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn mixed_sql_and_promql_queries_are_planned_with_their_names() {
     let out =
         std::env::temp_dir().join(format!("stage_pipeline_{}_mixed.json", std::process::id()));
@@ -419,7 +412,6 @@ fn failure(args: &[&str]) -> (Option<i32>, String) {
 
 /// Exhaustive mode bounds evaluated assignments and archives the examined prefix.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn workload_above_the_candidate_limit_reports_partial_search() {
     let document = generate(&["--max-combinations", "3", "--max-displayed", "100"]);
     // The memo has more than three choices: the reference enumeration
@@ -457,7 +449,6 @@ fn nine_quantile_queries() -> Vec<String> {
 /// enumerating the combinations. The document holds the selected plan and
 /// the search's report.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn default_search_plans_nine_queries_without_cartesian_enumeration() {
     let args = nine_quantile_queries();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -475,7 +466,6 @@ fn default_search_plans_nine_queries_without_cartesian_enumeration() {
 
 /// `--max-combinations` limits only the exhaustive search.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn max_combinations_needs_exhaustive() {
     let (status, stderr) = failure(&["--promql", "sum(m)", "--max-combinations", "10"]);
     assert_eq!(status, Some(2));
@@ -488,7 +478,6 @@ fn max_combinations_needs_exhaustive() {
 /// enforced. Timed searches may choose different incumbents and archive IDs;
 /// the API contract is output coverage, accuracy, and executable installation.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn default_search_and_installation_validate_the_nine_query_workload() {
     const WORKLOAD: &str =
         "../../tools/dag-viewer/workloads/random-mixed-seed-862/workload-01.json";
@@ -541,7 +530,11 @@ fn default_search_and_installation_validate_the_nine_query_workload() {
         .build()
         .unwrap()
         .block_on(asap_planner::plan_installable(
-            asap_planner::UserInput::new(&workload, asap_planner::FrontendInput::Promql, models),
+            asap_planner::UserInput::new(
+                &workload,
+                asap_planner::FrontendInput::Promql { histograms: None },
+                models,
+            ),
         ))
         .unwrap();
     plan.validate().unwrap();
@@ -565,7 +558,6 @@ fn default_search_and_installation_validate_the_nine_query_workload() {
 /// queries read, as in the other lowering tools: `sum(up)`'s bare selector
 /// looks back 30 s. The former `--interval-ms` is unknown.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn sample_interval_ms_sets_the_instant_selector_lookback() {
     let document = document_of(&["--promql", "sum(up)", "--sample-interval-ms", "30000"]);
     let ranges: Vec<&Value> = document["stage0_query_language_frontends"]["dag"]["nodes"]
@@ -585,7 +577,6 @@ fn sample_interval_ms_sets_the_instant_selector_lookback() {
 }
 
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn table_declared_twice_is_rejected() {
     let table =
         r#"{"name": "metrics", "columns": [{"name": "ts", "type": "timestamp"}], "time_index": 0}"#;
@@ -606,7 +597,6 @@ fn table_declared_twice_is_rejected() {
 
 /// A defaulted name that collides says it is the default.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn duplicate_default_name_says_it_is_the_default() {
     let (_, stderr) = failure(&["--promql", "sum(a)", "--name", "q2", "--promql", "sum(b)"]);
     assert!(
@@ -652,7 +642,6 @@ fn document_of(args: &[&str]) -> Value {
 /// CLI planning includes local candidate generation in the same budget/report
 /// as the production planner, rather than bypassing the timer via from_pass1.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn cli_accounts_for_pass1_generation_in_the_planning_budget() {
     let document = document_of(&["--promql", "sum(data)"]);
     let selection = &document["stage3_plan_selection"];
@@ -666,7 +655,6 @@ fn cli_accounts_for_pass1_generation_in_the_planning_budget() {
 /// When Pass 1 fails, the document still carries the Stage 0 DAG, with the
 /// error under Stage 1 and no selection, so the viewer can show both.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn pass1_failure_still_writes_stage0_and_the_error() {
     let document = document_of(&[
         "--promql",
@@ -711,7 +699,6 @@ const SCALAR_QUERIES_ARGS: &[&str] = &[
 ];
 
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn scalar_queries_keep_their_positions_in_scalar_roots() {
     let document = document_of(SCALAR_QUERIES_ARGS);
     assert!(selects_a_plan(&document["stage3_plan_selection"]));
@@ -733,7 +720,6 @@ fn scalar_queries_keep_their_positions_in_scalar_roots() {
 /// `time_index` must be a column index; anything else is an error rather
 /// than a table without a time column.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn table_time_index_must_be_a_column_index() {
     for index in [r#""0""#, "-1", "1.5", "3"] {
         let table = format!(
@@ -754,7 +740,6 @@ fn table_time_index_must_be_a_column_index() {
 /// naturally stated in (the default-metric table, display only): a top-k's
 /// is the L1-scaled absolute error; an exact query shows none.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn a_target_without_a_metric_shows_the_query_default() {
     let document = generate(&[]);
     let queries = &document["workload"]["queries"];
@@ -773,7 +758,6 @@ fn a_target_without_a_metric_shows_the_query_default() {
 /// accuracy is the target's own JSON form. Guarantees are enforced, since
 /// the test is about which guarantees meet the target.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
     let query = |metric: Option<&str>| {
         let mut accuracy = serde_json::json!({"max_error": 0.01});
@@ -861,7 +845,6 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
 /// usage. Cost model 3 is run with guarantees enforced: ignoring them, a
 /// candidate without a guarantee fits the cluster better.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn cost_model_flag_chooses_how_candidates_are_compared() {
     let selected = |extra: &[&str]| {
         let document = generate_example("planner-layering-3b", extra);
@@ -892,14 +875,13 @@ fn cost_model_flag_chooses_how_candidates_are_compared() {
 /// at AWS Fargate's us-east-1 prices, in US dollars per second: the
 /// whole-window KLL (P2) is still selected, at $2.60278e-8/s (its 2.1
 /// CPU-ms/s at $1.1244e-8 per CPU-ms, and its states held while the query
-/// runs), and the tumbling windows
+/// runs), and the panes
 /// maintained at ingestion time (P3-m1) cost about $6.0238e-6/s, almost all
-/// for their 5.232 GB kept in memory (six tumbling windows of 1,000,000 series, each a
+/// for their 5.232 GB kept in memory (six panes of 1,000,000 series, each a
 /// KLL of 872 bytes: its fixed 744 and an item array grown for its 4
 /// samples). A costlier candidate's reason shows
 /// such small costs in scientific notation.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn aws_fargate_preset_prices_example_4_in_dollars() {
     // Pricing acceptance exercises the production bounded planner; exhaustive
     // archive traversal is tested separately on small catalogs.
@@ -920,13 +902,12 @@ fn aws_fargate_preset_prices_example_4_in_dollars() {
 /// without the flag, every summary supported, raw data retained, no
 /// query-time result retained). For Pattern B with KLL only and query-time
 /// results retained: no DDSketch candidate is offered, and Stage 1's
-/// `pruned_candidates` says why; the KLL tumbling windows gain B3, built at query time and
+/// `pruned_candidates` says why; the KLL panes gain B3, built at query time and
 /// kept (`P3-m2`, 436.59 cost/s); the whole-window KLL (`P2`) is still
 /// selected. Without raw data, every query-time scan is invalid and B1
 /// (`P3-m1`) is selected when guarantees are enforced. A deployment with an
 /// unknown field is refused.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
     let default = generate_example("planner-layering-3b", &[]);
     assert_eq!(
@@ -1004,7 +985,6 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
 
 /// Cluster limits need cost model 3, and cost model 3 needs them.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn cluster_flags_and_cost_model_3_go_together() {
     let (code, stderr) = failure(&[
         "--exhaustive",
@@ -1033,7 +1013,6 @@ fn cluster_flags_and_cost_model_3_go_together() {
 /// range between its own pair of queries: every logical candidate's label
 /// names which queries share each node, so no two labels are the same.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn logical_candidate_labels_name_each_query() {
     let document = document_of(&[
         "--exhaustive",
@@ -1063,10 +1042,9 @@ fn logical_candidate_labels_name_each_query() {
 /// alone: round 1 proves the selected plan optimal within 1e-5, and the
 /// last round finds nothing below the incumbent. That round's bound (the
 /// incumbent less the solver's pruning tolerance, scaled by the largest
-/// charge, here the query-time top-k tumbling windows at about 308 times the
+/// charge, here the query-time top-k panes at about 308 times the
 /// selected plan) used to replace round 1's, reporting a gap of 3.09e-4.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn milp_final_bound_keeps_the_bound_an_earlier_round_proved() {
     let workload = serde_json::json!({
         "query_workload": {
@@ -1127,11 +1105,10 @@ fn milp_final_bound_keeps_the_bound_an_earlier_round_proved() {
 /// (`max_over_time(m[5m])` every minute over 1M series sampled every
 /// 1.5 s) answered as the last hour at 1-minute steps
 /// (`range_evaluation`) is priced as 61 evaluations per request: the kept
-/// tumbling windows (`P2-m2`, 460.04 cost/s) beat rebuilding the window at every step
+/// panes (`P2-m2`, 460.04 cost/s) beat rebuilding the window at every step
 /// (`P1`, 1,270.52), and the document reports their retention, 1 h + 5 min.
 /// The workload section shows the range. An invalid range is refused.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn workload_file_with_a_range_evaluation_is_planned() {
     let workload = serde_json::json!({
         "query_workload": {
@@ -1167,16 +1144,16 @@ fn workload_file_with_a_range_evaluation_is_planned() {
     );
     let selection = &document["stage3_plan_selection"];
     let cost = selection["cost"]["cost_per_second"].as_f64().unwrap();
-    // The reference: the window merged from tumbling windows kept across evaluations,
+    // The reference: the window merged from panes kept across evaluations,
     // priced under the same models. Its absolute cost is pinned in
     // integration-tests/tests/range_evaluation.rs.
-    let kept_tumbling_windows = {
+    let kept_panes = {
         use asap_accuracy::propagation::recompose_guarantees;
         use asap_logical_asap_optimization::test_support::{
             compose_logical_candidate, generate_per_computation_candidates,
         };
         use asap_logical_asap_optimization::test_support::{
-            tumbling_window_candidates, window_composition_pass2_candidates,
+            pane_candidates, window_composition_pass2_candidates,
         };
         use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
         use asap_types::ir::ASAPOp;
@@ -1192,8 +1169,8 @@ fn workload_file_with_a_range_evaluation_is_planned() {
         .unwrap();
         let exact: Vec<_> = compose_logical_candidate(&inventory, &[0]).unwrap();
         let grids: Vec<_> = entries.iter().map(|e| e.evaluation_grid_ms()).collect();
-        let tumbling_windows = tumbling_window_candidates(&exact, &grids);
-        let windowed = window_composition_pass2_candidates(&exact, &tumbling_windows)
+        let panes = pane_candidates(&exact, &grids);
+        let paned = window_composition_pass2_candidates(&exact, &panes)
             .unwrap()
             .remove(0)
             .roots
@@ -1203,8 +1180,8 @@ fn workload_file_with_a_range_evaluation_is_planned() {
             ..Default::default()
         };
         let kept = asap_physical_asap_optimization::optimize_physical_asap(
-            "kept-tumbling-windows",
-            &recompose_guarantees(&windowed).unwrap(),
+            "kept-panes",
+            &recompose_guarantees(&paned).unwrap(),
             &entries,
             &data,
             deployment.query_time_results_retained,
@@ -1215,12 +1192,12 @@ fn workload_file_with_a_range_evaluation_is_planned() {
             plan.dag.nodes.iter().any(|n| {
                 matches!(
                     n.payload,
-                    PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+                    PhysicalASAPOperatorPayload::ASAP(ASAPOp::PaneChain { .. })
                 ) && n.materialization
                     == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
             })
         })
-        .expect("a plan keeps its tumbling windows across evaluations");
+        .expect("a plan keeps its panes across evaluations");
         let settings = asap_cost::CostInputs::default();
         let priced = asap_devtools::memo_pricing::reference_select(
             std::slice::from_ref(&kept),
@@ -1234,10 +1211,10 @@ fn workload_file_with_a_range_evaluation_is_planned() {
         priced.costs[&priced.selected].cost_per_second.unwrap()
     };
     assert!(
-        cost <= kept_tumbling_windows * (1.0 + 1e-9),
-        "selected {SELECTED} costs {cost}, more than the kept tumbling windows' {kept_tumbling_windows}"
+        cost <= kept_panes * (1.0 + 1e-9),
+        "selected {SELECTED} costs {cost}, more than the kept panes' {kept_panes}"
     );
-    assert!(selection["tumbling_window_retention_ms"]
+    assert!(selection["pane_retention_ms"]
         .as_object()
         .unwrap()
         .values()
@@ -1261,7 +1238,6 @@ fn workload_file_with_a_range_evaluation_is_planned() {
 /// `--cost-model provisioned-capacity` selects for Example 4 (P1). The file
 /// replaces the cost-model flags, so combining them is refused.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn plan_selection_settings_flag_loads_the_settings_from_json() {
     let path = std::env::temp_dir().join(format!(
         "stage_pipeline_{}_plan_selection_settings.json",
@@ -1302,7 +1278,6 @@ fn plan_selection_settings_flag_loads_the_settings_from_json() {
 /// have rejected it. The document says which mode it
 /// planned under; there is no `--ignore-accuracy-guarantees`.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn accuracy_guarantees_are_ignored_by_default_and_enforced_on_request() {
     let args = [
         "--exhaustive",
@@ -1431,7 +1406,6 @@ fn workload_set_index_and_files_validate() {
 /// materialized views as `plan_installable`'s plan derives them, each mapped
 /// to a node of the selected Stage 2 candidate.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn workload_examples_preserve_data_and_valid_materialized_views() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/dag-viewer");
     let examples: Value =
@@ -1568,7 +1542,6 @@ fn check_candidate_example(document: Value, _committed: Value, example: &Value) 
 /// The `--promql` path's data workload is what it plans with: every metric
 /// the queries read, sampled every `--sample-interval-ms`.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn promql_queries_carry_their_sampled_data_workload() {
     // `document_of` declares 1,000 series and 60,000 rows held per source.
     let document = document_of(&[
@@ -1596,7 +1569,6 @@ fn promql_queries_carry_their_sampled_data_workload() {
 /// rejected ones, each cause in turn; `pruned_candidate_count_by_cause` counts every
 /// rejection.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn display_cap_shows_the_selected_then_valid_cheapest_then_each_cause() {
     let document = generate_example("planner-layering-3a", &["--max-displayed", "6"]);
     let selection = &document["reference_pricing"];
@@ -1624,7 +1596,6 @@ fn display_cap_shows_the_selected_then_valid_cheapest_then_each_cause() {
 /// families, as `plan_installable` does. CountSketch cannot answer a total, so
 /// it is neither generated for count nor reported as deployment-pruned.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn undeclared_supported_summaries_default_to_the_executors_families() {
     let document = document_of(&[
         "--exhaustive",
@@ -1680,7 +1651,6 @@ const QUANTILE_BY_WORKLOAD: &str = r#"{"query_workload": {"language": "promql", 
 /// the workload does not declare), for its accuracy; none fails to
 /// execute. Accepted plans answer Q3 and Q4 exactly.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn exact_grouped_quantile_plans_compile_and_are_compared() {
     let path = std::env::temp_dir().join(format!(
         "stage_pipeline_{}_quantile_by_workload.json",
@@ -1736,7 +1706,6 @@ fn exact_grouped_quantile_plans_compile_and_are_compared() {
 /// once (≈0.1364/s) instead of once per reader (0.2203/s), and beats the
 /// separate scans (0.1530/s).
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn a_scan_two_queries_share_is_offered_built_once_per_evaluation() {
     let query = |q: &str| {
         serde_json::json!({
@@ -1887,7 +1856,6 @@ fn widened_scans_keep_memo_groups_and_stage2_candidates_acyclic() {
 }
 
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn scans_projecting_different_labels_are_shared() {
     let query = |q: &str| {
         serde_json::json!({
@@ -1986,7 +1954,7 @@ fn scans_projecting_different_labels_are_shared() {
     let (installed, _) = asap_planner::installable_plan_of(
         &physical.roots,
         None,
-        &offered.tumbling_window_retention_ms,
+        &offered.pane_retention_ms,
         &entries,
     )
     .unwrap();
@@ -2042,7 +2010,6 @@ fn scans_projecting_different_labels_are_shared() {
 /// The default search is the candidate-connection search; its report has
 /// no legacy route.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn default_search_reports_candidate_connections() {
     let document = document_of(&["--promql", "sum(m)"]);
     assert_eq!(document["search"], "candidate-connections");
@@ -2055,7 +2022,6 @@ fn default_search_reports_candidate_connections() {
 /// There is one search: `--search` is not an option, so no engine name,
 /// current or retired, is accepted.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn search_flag_is_rejected() {
     for engine in ["candidate-connections", "legacy", "memo-milp"] {
         let (status, stderr) = failure(&["--promql", "sum(m)", "--search", engine]);
@@ -2066,7 +2032,6 @@ fn search_flag_is_rejected() {
 
 /// A zero planning budget is accepted for the default engine; it must not claim optimality.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn milp_time_limit_is_reported() {
     let document = document_of(&["--promql", "sum(m)", "--milp-time-limit-s", "0"]);
     let selection = &document["stage3_plan_selection"];
@@ -2093,7 +2058,6 @@ fn milp_time_limit_is_reported() {
 /// viewer's validator requires: the brute force numbers its logical plans,
 /// so the selected one need not be the first.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn the_memo_search_document_names_the_selected_logical_candidate() {
     let document = document_of(&[
         "--promql",
@@ -2128,7 +2092,6 @@ fn the_memo_search_document_names_the_selected_logical_candidate() {
 /// enough to compare a plan's predicted CPU with a runtime's measurement
 /// without `plan_installable`. Report-only: prices are unchanged.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn per_node_costs_show_operator_timing_and_predicted_cpu() {
     // The selected plan supplies the serialization evidence; exhaustive
     // candidate coverage is tested separately by the archive tests.
@@ -2170,7 +2133,6 @@ fn per_node_costs_show_operator_timing_and_predicted_cpu() {
 /// (which the viewer shows) naming the query, the function and the metric.
 /// A counter gets none.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn a_counter_function_over_a_declared_gauge_plans_with_a_warning() {
     let workload = |metric_type: &str| {
         serde_json::json!({
@@ -2281,7 +2243,6 @@ const FLOWS_TABLE: &str = r#"{"name": "flows", "columns": [{"name": "ts", "type"
 /// file, q2 from the SQL file) and its data workload is the union of the
 /// files' sources, with their arrival rates added (1000 + 500 rows/s).
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn several_workload_files_in_different_languages_are_planned_together() {
     let (promql, sql) = mixed_language_workload_files(
         serde_json::json!({"ingesting": {"rows_per_second": 500.0}}),
@@ -2331,7 +2292,6 @@ fn several_workload_files_in_different_languages_are_planned_together() {
 /// sources, so `flows` (10 groups, no sample interval) would be priced at
 /// 1500 × 10 / 15010 ≈ 1 row/s instead of its file's 500.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn workload_files_that_disagree_on_the_data_are_refused() {
     let (promql, sql) = mixed_language_workload_files(
         serde_json::json!({"ingesting": {"rows_per_second": 500.0}}),
@@ -2410,7 +2370,6 @@ fn workload_files_that_disagree_on_the_data_are_refused() {
 /// enforced gets a selected plan the executor compiles, as its bucket rates
 /// alone (the control) already did.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn a_classic_histogram_quantile_gets_a_selected_plan() {
     let buckets = r#"sum by (le) (rate(http_request_duration_seconds_bucket{service="customer-orders-service"}[5m]))"#;
     for query in [
@@ -2437,7 +2396,6 @@ const MEMO_RATIO_OF_QUANTILES: &str =
 /// The `memo` section: the memo after each step, the selected choice and
 /// the enumeration, on the issue's example.
 #[test]
-#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
     let out = std::env::temp_dir().join(format!(
         "stage_pipeline_{}_memo_ratio.json",
@@ -2454,7 +2412,7 @@ fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
     let memo = &document["memo"];
     let steps = memo["steps"].as_array().unwrap();
     let names: Vec<_> = steps.iter().map(|s| s["step"].as_str().unwrap()).collect();
-    assert_eq!(names, ["stage0", "pass1", "pass2"]);
+    assert_eq!(names, ["stage0", "pass1", "pass2", "concrete_states"]);
     let candidates = |step: &Value| -> u64 {
         step["groups"]
             .as_array()
@@ -2484,14 +2442,14 @@ fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
     );
     // The listed step is the last one enumerated completely within 200
     // choices (Stage 0 has no candidates to choose), else the last step.
-    let listed = ["pass1", "pass2"]
+    let listed = ["pass1", "pass2", "concrete_states"]
         .into_iter()
         .rfind(|step| {
             per_step[step]["complete"] == true && per_step[step]["count"].as_u64().unwrap() <= 200
         })
-        .unwrap_or("pass2");
+        .unwrap_or("concrete_states");
     assert_eq!(memo["enumeration"]["step"], listed);
-    if listed != "pass2" {
+    if listed != "concrete_states" {
         assert_eq!(
             memo["enumeration"]["choices"].as_array().unwrap().len() as u64,
             per_step[listed]["count"].as_u64().unwrap()
@@ -2553,169 +2511,52 @@ fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
     assert!(document.get("memo").is_none());
 }
 
-/// `stage_pipeline`'s document for `args`, run with Stage 3's group
-/// selection MILP (#1095).
-fn document_with_milp_search(args: &[&str]) -> Value {
-    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let out = std::env::temp_dir().join(format!(
-        "stage_pipeline_{}_milp_{call}.json",
-        std::process::id(),
-    ));
-    let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
-        .args(args)
-        .arg("--out")
-        .arg(&out)
-        .status()
-        .unwrap();
-    assert!(status.success());
-    let document = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
-    std::fs::remove_file(out).unwrap();
-    document
-}
-
-/// #1095 C5: with the group selection MILP, example 1 and the RangeHeavy T5
-/// q0.5 + q0.9 workload select a plan through the real pipeline, solved to
-/// optimality or stopped at the deadline, whose `plan_cost` equals the MILP's objective exactly (the
-/// search errors on a difference and reports `inexact_objective` when the
-/// model encoded a term inexactly) and which passes every query's accuracy
-/// check.
+/// `--text --out -` prints the same planning run as text on standard
+/// output: every stage boundary, Stage 2's physical candidates, the selected
+/// plan's cost per node, and with `--enumerated` the memo choices.
 #[test]
-fn milp_search_objective_equals_plan_cost_on_example1_and_rangeheavy() {
-    let rangeheavy = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tools/dag-viewer/memo-examples/promql/rangeheavy-t5-q05-q09-1h.json");
-    let runs: [Vec<&str>; 2] = [
-        vec![
+fn text_output_prints_every_stage_to_standard_output() {
+    let output = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args([
             "--example",
             "planner-layering-1",
-            "--enforce-accuracy-guarantees",
-        ],
-        vec![
-            "--workload",
-            rangeheavy.to_str().unwrap(),
-            "--deployment-capabilities",
-            r#"{"raw_data_retained": true, "query_time_results_retained": false}"#,
-            "--cost-model",
-            "aws-fargate-us-east-1",
-            "--enforce-accuracy-guarantees",
-        ],
-    ];
-    for args in runs {
-        let document = document_with_milp_search(&args);
-        let selection = &document["stage3_plan_selection"];
-        assert!(selects_a_plan(selection), "{args:?}: {selection}");
-        let report = &selection["search_report"];
-        // Optimal or not by the deadline, the selected plan's `plan_cost`
-        // equals the MILP's objective: the search errors on a difference,
-        // and no term is encoded inexactly here.
-        assert!(
-            report["status"] == "optimal" || report["status"] == "deadline_reached",
-            "{args:?}: {report}"
-        );
-        assert!(
-            report.get("inexact_objective").is_none(),
-            "{args:?}: {report}"
-        );
-        assert!(report["milp_variables"].as_u64().unwrap() > 0);
-        let queries = document["workload"]["queries"].as_array().unwrap().len();
-        let accepted = selection["accepted_accuracy_per_query"].as_array().unwrap();
-        assert_eq!(accepted.len(), queries);
-        for query in accepted {
-            assert_eq!(query["accepted_regardless_of_guarantee"], false, "{query}");
-        }
-    }
-}
-
-/// #1127 regressions: with the group selection MILP and guarantees enforced, the
-/// memo examples on which the A1 rows admitted a plan that `satisfies`
-/// rejects now select a plan that passes every query's accuracy check:
-/// ratio-of-quantiles (KLL rank errors compose no guarantee through the
-/// quotient, so no query can use KLL) and rollupheavy-t11 (HLL's
-/// failure probability is 1 over the declared 10^6 distinct users, above
-/// its contract's 2^17, so Pass 1 prunes it for both queries).
-#[test]
-fn milp_search_selects_checked_plans_on_ratio_and_rollupheavy() {
-    let root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/dag-viewer/memo-examples");
-    let tables: Vec<String> = serde_json::from_str::<Vec<Value>>(
-        &std::fs::read_to_string(root.join("sql/tables.json")).unwrap(),
-    )
-    .unwrap()
-    .iter()
-    .map(Value::to_string)
-    .collect();
-    for (workload, pruned_family) in [
-        ("promql/ratio-of-quantiles-5m.json", "Kll"),
-        ("sql/rollupheavy-t11-service-endpoint-5m.json", "Hll"),
+            "--text",
+            "--enumerated",
+            "--max-enumerated",
+            "1",
+            "--out",
+            "-",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    for heading in [
+        "Stage 0 output",
+        "Stage 1 Pass 1 output: PerComputationLogicalMemoCandidates",
+        "Stage 1 Pass 2 output = Stage 2 input: LogicalASAPMemoCandidates",
+        "Stage 2 output = Stage 3 input: PhysicalASAPMemoCandidates",
+        "Stage 3 output: Selection",
+        "Memo choices over Stage 2's input: 1 listed",
     ] {
-        let path = root.join(workload);
-        let mut args = vec![
-            "--workload",
-            path.to_str().unwrap(),
-            "--deployment-capabilities",
-            r#"{"raw_data_retained": true, "query_time_results_retained": false}"#,
-            "--cost-model",
-            "aws-fargate-us-east-1",
-            "--enforce-accuracy-guarantees",
-        ];
-        if workload.starts_with("sql/") {
-            for table in &tables {
-                args.extend(["--table", table.as_str()]);
-            }
-        }
-        let document = document_with_milp_search(&args);
-        let selection = &document["stage3_plan_selection"];
-        assert!(selects_a_plan(selection), "{workload}: {selection}");
-        let queries = document["workload"]["queries"].as_array().unwrap().len();
-        let accepted = selection["accepted_accuracy_per_query"].as_array().unwrap();
-        assert_eq!(accepted.len(), queries);
-        for query in accepted {
-            assert_eq!(query["accepted_regardless_of_guarantee"], false, "{query}");
-            assert!(
-                !query["sketches"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|sketch| sketch == pruned_family),
-                "{workload}: {query}"
-            );
-        }
-        let pruned = pass1_pruned(&document);
-        assert!(
-            pruned.iter().any(|(family, reason)| family == pruned_family
-                && reason == "NoErrorBoundForQueryTarget"),
-            "{workload}: {pruned:?}"
-        );
+        assert!(text.contains(heading), "missing {heading}:\n{text}");
     }
+    assert!(text.contains("\ncost_per_second: "), "{text}");
 }
 
-/// #1095 C5: on RangeHeavy T8+T5 (`q0.9 / q0.5` with both operands also
-/// queried alone), the group selection MILP selects a DDSketch plan that passes every
-/// query's accuracy check (the A1 rows admitted KLL there, which the check
-/// rejects). Which chains it shares depends on the deadline; the weights
-/// that let one chain serve all three queries are checked in
-/// `groups::tests::one_pane_chain_serves_a_ratio_and_its_operands`.
+/// `--enumerated` only adds to the `--text` output.
 #[test]
-fn milp_search_selects_a_checked_ddsketch_plan_for_a_ratio_and_its_operands() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tools/dag-viewer/memo-examples/promql/rangeheavy-t8-t5-1h.json");
-    let document = document_with_milp_search(&[
-        "--workload",
-        path.to_str().unwrap(),
-        "--deployment-capabilities",
-        r#"{"raw_data_retained": true, "query_time_results_retained": false}"#,
-        "--cost-model",
-        "aws-fargate-us-east-1",
-        "--enforce-accuracy-guarantees",
-    ]);
-    let selection = &document["stage3_plan_selection"];
-    assert!(selects_a_plan(selection), "{selection}");
-    for query in selection["accepted_accuracy_per_query"].as_array().unwrap() {
-        assert_eq!(query["accepted_regardless_of_guarantee"], false, "{query}");
-        assert_eq!(
-            query["sketches"],
-            serde_json::json!(["DDSketch"]),
-            "{query}"
-        );
-    }
+fn enumerated_needs_text() {
+    let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args([
+            "--example",
+            "planner-layering-1",
+            "--enumerated",
+            "--out",
+            "-",
+        ])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(2));
 }
