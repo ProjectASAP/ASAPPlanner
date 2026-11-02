@@ -37,12 +37,6 @@ impl Pass2RoundState {
             previous_domain: None,
         }
     }
-
-    /// The memo after the last round's local window composition, before
-    /// the other Pass 2 rules (Pass 1's memo before the first round).
-    pub fn unexpanded_memo(&self) -> &Memo {
-        &self.unexpanded_memo
-    }
 }
 
 /// Why [`generate_logical_asap_memo_candidates`] failed.

@@ -254,7 +254,7 @@ pub struct EnumeratedChoice {
 }
 
 /// `stage_pipeline --exhaustive`: the first `max_choices` choices of the
-/// selected round's memo (`run.memo_steps.concrete_states`), each composed,
+/// selected round's Pass 2 memo (`run.logical_asap_candidates`), each composed,
 /// implemented by Stage 2 with every materialization assignment, and all
 /// their physical plans priced together by the reference pricer.
 #[derive(Debug)]
@@ -279,7 +279,7 @@ pub fn reference_enumeration(
     max_choices: usize,
 ) -> Option<ReferenceEnumeration> {
     use asap_logical_asap_optimization::enumerate;
-    let memo = &run.memo_steps.as_ref()?.concrete_states;
+    let memo = &run.logical_asap_candidates.as_ref()?.memo;
     let enumeration = enumerate(memo, max_choices.saturating_add(1));
     let capped = !enumeration.complete || enumeration.all_chosen_candidates.len() > max_choices;
     let root_groups = root_groups_of_queries(memo, stage0_roots);

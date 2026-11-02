@@ -79,7 +79,7 @@ To run it, see [RUNNING.md](RUNNING.md).
 - **Enumerated DAGs**, between the Stage 0 and Stage 1 lanes, shown only
   when the document has `memo.enumeration`: the complete candidate DAGs the
   memo stands for. The header counts them after each memo step (`Stage 0: 1 ·
-  Pass 1: 49 · Pass 2: ≥ 1000 · concrete states: ≥ 1000`; `≥` and the limit when counting stopped), says how
+  Pass 1: 49 · Pass 2: ≥ 1000`; `≥` and the limit when counting stopped), says how
   many of the enumerated step's DAGs the document lists, and, when they were
   priced, how many are cheaper than the selected plan. Each row names the
   groups whose candidate differs from the selected plan's choice
@@ -117,8 +117,8 @@ To run it, see [RUNNING.md](RUNNING.md).
   view of shared units. Rendering that archived format does not enable a second
   planner implementation; new documents use the candidate-connection report.
 - **Memo**, when the document has a `memo` section: the memo after each
-  step, one tab per step (`Stage 0`, `Stage 1, Pass 1`, `Stage 1, Pass 2`,
-  concrete states; a step production did not run is not there), opening on
+  step, one tab per step (`Stage 0`, `Stage 1, Pass 1`, `Stage 1, Pass 2`;
+  a step production did not run is not there), opening on
   the last. Each memo group is a box `G<id> · <label>` with its candidate
   count (`745 candidates (64 listed)` when the document lists only some) and
   the queries it is the root of; its implementation candidates sit inside
@@ -400,8 +400,8 @@ are ignored, `stage_pipeline`'s default.
   DAG: children are indices into the table and come before their parents;
   `memoNodeDag` in `stages.js` rebuilds the flat DAG below any of them);
   `steps`, one per memo step
-  (`stage0`, `pass1`, `pass2`: local window composition, `concrete_states`:
-  the Pass 2 memo rules and the concrete summary-state groups), each with
+  (`stage0`: the frontends' DAG hash-consed; `pass1`: Pass 1's output;
+  `pass2`: Pass 2's output, the memo Stage 2 implements), each with
   its groups (`id`, `label`, `children`, `parents`, `queries`, `roots_of`,
   `node`, the group's node in `nodes`) and their candidates (`candidate_count`,
   `candidate_count_by_origin`, `candidates_capped`, and the first

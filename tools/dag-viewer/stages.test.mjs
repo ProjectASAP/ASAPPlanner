@@ -147,7 +147,7 @@ test('the search header says why the search ran as one and which queries were in
 
 // The memo-MILP examples: the MILP summary, the memo groups with their
 // chosen candidates and the shared units with readers and threshold.
-const memoDoc = (id) => JSON.parse(readFileSync(new URL(`examples/memo-${id}.json`, here), 'utf8'));
+const memoDoc = (id) => call('upgradeMemoSteps', JSON.parse(readFileSync(new URL(`examples/memo-${id}.json`, here), 'utf8')));
 
 test('a memo-MILP document shows its shared sketch, readers and certified summary', () => {
   const doc = memoDoc('rangeheavy-t5-q05-q09-1h');
@@ -166,7 +166,7 @@ test('a memo-MILP document shows its shared sketch, readers and certified summar
 
 test('the validator accepts a document with and without its memo section', () => {
   const doc = memoDoc('ratio-of-quantiles');
-  assert.deepEqual(doc.memo.steps.map((s) => s.step), ['stage0', 'pass1', 'pass2', 'concrete_states']);
+  assert.deepEqual(doc.memo.steps.map((s) => s.step), ['stage0', 'pass1', 'pass2']);
   assert.deepEqual([...call('validateStagePipeline', doc)], []);
   delete doc.memo;
   assert.deepEqual([...call('validateStagePipeline', doc)], []);
@@ -229,6 +229,49 @@ test('a document written before the tumbling-window rename (#1163) upgrades to t
     .replaceAll('"tumbling_window_widths_pending"', '"pane_widths_pending"'));
   assert.ok(JSON.stringify(old).includes('"PaneChain"'));
   assert.deepEqual(call('upgradeTumblingWindowNames', old), doc);
+});
+
+// A document written before `MemoSteps` was dropped opens with today's
+// steps: the window-composition step is gone and Pass 2's output is `pass2`.
+test('a memo written with the window-composition step upgrades to stage0, pass1, pass2', () => {
+  const old = {
+    stage1_logical_asap_optimization: { pass1_pruned: [{ group: 1 }] },
+    memo: {
+      steps: [{ step: 'stage0', title: 'S0' }, { step: 'pass1', title: 'P1' }, { step: 'pass2', title: 'windows' }, { step: 'concrete_states', title: 'rules' }],
+      enumeration: { step: 'concrete_states', per_step: { stage0: 1, pass1: 2, pass2: 3, concrete_states: 4 }, choices: [] },
+    },
+  };
+  const doc = JSON.parse(JSON.stringify(call('upgradeMemoSteps', old)));
+  assert.deepEqual(doc.memo.steps.map((s) => [s.step, s.title]), [['stage0', 'S0'], ['pass1', 'P1'], ['pass2', 'Stage 1, Pass 2']]);
+  assert.deepEqual(doc.memo.enumeration.per_step, { stage0: 1, pass1: 2, pass2: 4 });
+  assert.equal(doc.memo.enumeration.step, 'pass2');
+  assert.deepEqual(doc.stage1_logical_asap_optimization, { pruned_candidates: [{ group: 1 }] });
+  // A candidate the dropped step added stays marked new in `pass2`.
+  const marked = JSON.parse(JSON.stringify(call('upgradeMemoSteps', {
+    memo: {
+      steps: [
+        { step: 'stage0', groups: [] },
+        { step: 'pass2', groups: [{ id: 2, candidates: [{ node: 5, children: [1], added: true }] }] },
+        { step: 'concrete_states', groups: [{ id: 2, candidates: [{ node: 5, children: [1], added: false }, { node: 6, children: [], added: false }] }] },
+      ],
+    },
+  })));
+  assert.deepEqual(marked.memo.steps[1].groups[0].candidates.map((c) => c.added), [true, false]);
+  // An old listing of the dropped step lists nothing; the document stays valid.
+  const listedDropped = {
+    memo: {
+      steps: [{ step: 'stage0' }, { step: 'pass1' }, { step: 'pass2' }, { step: 'concrete_states' }],
+      enumeration: { step: 'pass2', limit: 10, per_step: { stage0: { count: 1, complete: true }, pass2: { count: 2, complete: true }, concrete_states: { count: 9, complete: false } }, choices: [{ id: 'E1' }], priced: { count: 1 } },
+    },
+  };
+  const enumeration = JSON.parse(JSON.stringify(call('upgradeMemoSteps', listedDropped))).memo.enumeration;
+  assert.equal(enumeration.step, 'pass2');
+  assert.deepEqual(enumeration.choices, []);
+  assert.equal(enumeration.priced, null);
+  assert.deepEqual(enumeration.per_step, { stage0: { count: 1, complete: true }, pass2: { count: 9, complete: false } });
+  // A current document is left as it is.
+  const current = { memo: { steps: [{ step: 'stage0' }, { step: 'pass1' }, { step: 'pass2' }] } };
+  assert.deepEqual(JSON.parse(JSON.stringify(call('upgradeMemoSteps', JSON.parse(JSON.stringify(current))))), current);
 });
 
 test('a memo written before the rename upgrades its pane origin', () => {

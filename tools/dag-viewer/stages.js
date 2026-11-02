@@ -46,6 +46,55 @@ function upgradeTumblingWindowNames(value, parentKey) {
   }
   return value;
 }
+// Documents written before the planner dropped `MemoSteps` have a memo step
+// `pass2` (local window composition only) followed by `concrete_states`
+// (Pass 2's output); older ones also name Stage 1's pruned candidates
+// `pass1_pruned` (read by the memo group panel).
+// Renames them in place to today's steps, where `pass2` is Pass 2's output:
+// the window-composition step is dropped (its candidates are in Pass 2's
+// output, marked by their origin), `concrete_states` becomes `pass2`.
+// Remove once no document the viewer must open predates the change.
+function upgradeMemoSteps(doc) {
+  const stage1 = doc && doc.stage1_logical_asap_optimization;
+  if (stage1 && has(stage1, 'pass1_pruned') && !has(stage1, 'pruned_candidates')) {
+    stage1.pruned_candidates = stage1.pass1_pruned;
+    delete stage1.pass1_pruned;
+  }
+  const memo = doc && doc.memo;
+  if (!memo || !Array.isArray(memo.steps) || !memo.steps.some((step) => step && step.step === 'concrete_states')) return doc;
+  // `added` was relative to the dropped step: a candidate that step added
+  // (same group, node and children) is also new since Pass 1.
+  const dropped = memo.steps.find((step) => step && step.step === 'pass2');
+  const addedByDropped = new Set();
+  for (const group of (dropped && dropped.groups) || []) {
+    for (const candidate of group.candidates || []) {
+      if (candidate.added) addedByDropped.add(JSON.stringify([group.id, candidate.node, candidate.children]));
+    }
+  }
+  memo.steps = memo.steps.filter((step) => !step || step.step !== 'pass2');
+  for (const step of memo.steps) {
+    if (!step || step.step !== 'concrete_states') continue;
+    Object.assign(step, { step: 'pass2', title: 'Stage 1, Pass 2' });
+    for (const group of step.groups || []) {
+      for (const candidate of group.candidates || []) {
+        if (addedByDropped.has(JSON.stringify([group.id, candidate.node, candidate.children]))) candidate.added = true;
+      }
+    }
+  }
+  const enumeration = memo.enumeration;
+  if (enumeration && enumeration.per_step) {
+    const perStep = {};
+    for (const [step, count] of Object.entries(enumeration.per_step)) {
+      if (step === 'pass2') continue;
+      perStep[step === 'concrete_states' ? 'pass2' : step] = count;
+    }
+    enumeration.per_step = perStep;
+    // A listing of the dropped step is a listing of no step left.
+    if (enumeration.step === 'pass2') Object.assign(enumeration, { step: 'pass2', choices: [], priced: null });
+    else if (enumeration.step === 'concrete_states') enumeration.step = 'pass2';
+  }
+  return doc;
+}
 function upgradeItem(key, item) {
   if (item === 'PaneChain') return TUMBLING_WINDOW_RENAMES.PaneChain;
   if (key === 'origin' && has(ORIGIN_RENAMES, item)) return ORIGIN_RENAMES[item];

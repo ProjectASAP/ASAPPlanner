@@ -7,7 +7,7 @@
 //! Lowering is production's: the PromQL frontend, then each root with the
 //! series-identity column, as `Stage1ToStage3Pass` does. The memo is read from
 //! the production run's `PlanningRun::per_computation_candidates` (after
-//! Pass 1) and `PlanningRun::memo_steps` (the other steps).
+//! Pass 1) and `PlanningRun::logical_asap_candidates` (after Pass 2).
 //!
 //! **Which round's memo.** The default search plans in rounds of growing
 //! tumbling-window-width domains and records the memo of the round whose plan it
@@ -45,7 +45,7 @@ use asap_logical_asap_optimization::test_support::{
 use asap_logical_asap_optimization::{
     build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
 };
-use asap_planner::{run_planning, MemoSteps, PlanSearchSettings, PlanningModels, PlanningRun};
+use asap_planner::{run_planning, PlanSearchSettings, PlanningModels, PlanningRun};
 use asap_types::ir::schema::{FieldDataType, SketchParams};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use asap_types::stages::{queries_rooted_at, MemoGroupId};
@@ -138,10 +138,12 @@ fn complete_domain_round() -> PlanSearchSettings {
     }
 }
 
-fn memo_steps(run: &PlanningRun) -> &MemoSteps {
-    run.memo_steps
+/// The memo after Pass 2: the selected (or last) round's.
+fn pass2_memo(run: &PlanningRun) -> &Memo {
+    &run.logical_asap_candidates
         .as_ref()
         .expect("a planning round recorded its memo within the time budget")
+        .memo
 }
 
 /// The memo after Pass 1.
@@ -349,7 +351,6 @@ fn ratio_of_quantiles_production_memo() {
     assert_eq!(candidate_count(pass1_memo(&enforced)), 7);
     let models = PlanningModels::builtin().with_accuracy(&AcceptsNoOutput);
     let run = production_run_with(&ratio_of_quantiles(), complete_domain_round(), models);
-    let steps = memo_steps(&run);
     // Stage 0 (Pass 1's groups): series identity makes the two
     // `quantile 0.5` one group.
     // Pass 1: the two quantile groups have 5 candidates each, 3 for the
@@ -369,7 +370,7 @@ fn ratio_of_quantiles_production_memo() {
         (25, 9, 9, 4)
     );
     // The last step, over the complete tumbling-window-width domain.
-    let last = &steps.concrete_states;
+    let last = pass2_memo(&run);
     assert_eq!(last.groups.len(), 255);
     assert_eq!(candidate_count(last), 1243);
     let enumeration = enumerate(last, 2_000);

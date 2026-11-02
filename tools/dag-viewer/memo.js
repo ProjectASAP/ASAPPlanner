@@ -24,7 +24,7 @@
 // group's entries of both.
 
 // Memo steps in pipeline order; a step production does not run is omitted.
-const MEMO_STEPS = ['stage0', 'pass1', 'pass2', 'concrete_states'];
+const MEMO_STEPS = ['stage0', 'pass1', 'pass2'];
 
 // `OriginOfCandidateForMemoGroup` (snake_case in the document), its Rust name, and the
 // border color of its candidates (mid tones, readable in both themes).
