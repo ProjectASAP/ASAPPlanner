@@ -14,7 +14,7 @@ asap-frontend-common = { path = "../frontend-common" }
 # Shared ProjectASAP parser contract. Keep this immutable revision aligned
 # with backend parsing and treat newly parsed functions as unsupported until
 # the frontend lowerer gives them an explicit semantic mapping.
-promql-parser = { git = "https://github.com/ProjectASAP/promql-parser", rev = "9fede7eecca923c9882fe256484d00d37f8706cb" }
+promql-parser = { git = "https://github.com/ProjectASAP/promql-parser", rev = "1d1562e91bbfd59eaceade219a9b98ebb07abdfe" }
 
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
