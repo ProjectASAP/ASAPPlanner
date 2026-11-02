@@ -504,9 +504,12 @@ pub struct DataWorkload {
     pub arrival: DataArrival,
     /// Facts per source, keyed by PromQL metric name or SQL table name
     /// (default: none). A declared histogram or summary is keyed by its
-    /// family name and holds the facts of every series of the family
-    /// ([`Self::series_facts`]). A source without an entry has no known
-    /// facts.
+    /// family name; its `metric_type`, `values_non_negative` and
+    /// `sample_interval` apply to every series of the family
+    /// ([`Self::series_facts`]). Counts, norms and bounds (`series_count`,
+    /// `stream_norms`, …) differ per series name (a `foo_bucket` has one
+    /// series per `le`), so they are read from the series' own entry. A
+    /// source without an entry has no known facts.
     #[serde(default)]
     pub sources: BTreeMap<String, SourceFacts>,
 }
