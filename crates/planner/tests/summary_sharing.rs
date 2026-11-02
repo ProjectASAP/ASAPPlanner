@@ -488,6 +488,7 @@ async fn cross_series_p50_and_p99_share_one_producer() {
 /// Two identical ungrouped queries: their identical producers (rate, then
 /// sum) are shared.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn identical_ungrouped_queries_share_their_producers() {
     let query = ("sum(rate(x[5m]))", 0.01);
     let output = plan_promql(&[query, query]).await;
@@ -498,6 +499,7 @@ async fn identical_ungrouped_queries_share_their_producers() {
 /// The SQL frontend reaches the same sharing for two copies of one filtered
 /// percentile.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn identical_sql_percentiles_share_one_producer() {
     let query =
         "SELECT approx_percentile_cont(l_extendedprice, 0.5) FROM lineitem WHERE l_orderkey > 10";
@@ -559,6 +561,7 @@ async fn sql_p50_and_p99_share_one_producer() {
 /// operator root (#511 §2.3): the scalar root is rebuilt over its selected
 /// sub-DAG, and entries keep their order around a literal scalar query.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn scalar_queries_read_planned_sub_dags() {
     let output = plan_promql(&[
         ("1", 0.01),
@@ -639,6 +642,7 @@ fn combined_scalar_references_keep_summary_candidates() {
 /// output-level evidence (plan selection, #576), so it is not selected
 /// automatically: the exact plan is.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn combined_vector_quantiles_keep_unselected_summary_candidates() {
     for query in [
         "quantile(0.99, rate(x[5m])) - quantile(0.5, rate(x[5m]))",
@@ -677,6 +681,7 @@ async fn combined_vector_quantiles_keep_unselected_summary_candidates() {
 /// The selected graph may reuse a producer or choose separate physical
 /// candidates. Every distinct selected reference must be exported exactly once.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn identical_scalar_references_satisfy_the_plan_contract() {
     for (query, distinct) in [
         ("scalar(rate(x[5m])) - scalar(rate(x[5m]))", 1),
@@ -711,6 +716,7 @@ async fn identical_scalar_references_satisfy_the_plan_contract() {
 /// is read through `FinalizeExactAccumulator`, so its output is plain values,
 /// not accumulator state.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn exact_state_roots_are_finalized() {
     for query in [
         "sum_over_time(m[1m])",

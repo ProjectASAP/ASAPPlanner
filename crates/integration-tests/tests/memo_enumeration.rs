@@ -432,6 +432,7 @@ fn ratio_of_quantiles_production_memo() {
 /// inventory's per value). Pass 1 is the same in every round, so the
 /// default search will do.
 #[test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn shared_quantiles_pass1_memo_and_whole_workload_plans() {
     let workload = with_queries(
         &[

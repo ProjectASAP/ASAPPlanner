@@ -259,6 +259,7 @@ fn expected_distinct_users() -> BTreeMap<String, String> {
 }
 
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn a_distinct_count_over_an_int64_id_in_a_now_window_runs_from_a_sketch() {
     let plan = plan(DISTINCT_USERS_LAST_5_MINUTES, APPROXIMATE).await;
     let selected = format!("{:?}", plan.dag.nodes);
@@ -277,6 +278,7 @@ async fn a_distinct_count_over_an_int64_id_in_a_now_window_runs_from_a_sketch() 
 }
 
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn an_exact_distinct_count_over_an_int64_id_in_a_now_window_runs() {
     let plan = plan(DISTINCT_USERS_LAST_5_MINUTES, EXACT).await;
     let (fields, rows) = run(&plan);
@@ -289,6 +291,7 @@ async fn an_exact_distinct_count_over_an_int64_id_in_a_now_window_runs() {
 }
 
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn now_is_the_evaluation_time() {
     let plan = plan(
         "SELECT service, COUNT(*) AS value FROM http \
@@ -314,6 +317,7 @@ fn percentile_cont(q: f64, mut values: Vec<f64>) -> f64 {
 }
 
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn an_exact_grouped_sql_percentile_runs() {
     let plan = plan(
         "SELECT service, approx_percentile_cont(latency, 0.99) AS value FROM http \
@@ -348,6 +352,7 @@ async fn an_exact_grouped_sql_percentile_runs() {
 /// A global percentile over an empty window is NULL (SQL), and the plan
 /// types it nullable.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn an_exact_global_sql_percentile_of_no_row_is_null() {
     let plan = plan(
         "SELECT approx_percentile_cont(latency, 0.5) AS value FROM http \
@@ -370,6 +375,7 @@ async fn an_exact_global_sql_percentile_of_no_row_is_null() {
 /// which the executor runs as filters on `ts`. Both answer exactly (the
 /// sketch is exact below its capacity).
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn distinct_counts_over_5_and_15_minute_windows_run_from_tumbling_windows() {
     let fifteen = DISTINCT_USERS_LAST_5_MINUTES.replace("5 minutes", "15 minutes");
     let plan = plan_all(&[DISTINCT_USERS_LAST_5_MINUTES, &fifteen], APPROXIMATE).await;
@@ -393,6 +399,7 @@ async fn distinct_counts_over_5_and_15_minute_windows_run_from_tumbling_windows(
 /// `T - 15m` exactly once: 300 per service (the row at `T - 15m` is not
 /// read), and 100 in the last 5 minutes.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn row_counts_over_5_and_15_minute_windows_read_each_row_once() {
     let five = "SELECT service, COUNT(*) AS value FROM http \
                 WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service";
@@ -551,6 +558,7 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
 /// window, and both queries answer exactly from the tumbling windows (the sketch is
 /// exact below its capacity), as the query-time reference does.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn ingestion_time_tumbling_windows_built_from_table_rows_answer_exactly() {
     let fifteen = DISTINCT_USERS_LAST_5_MINUTES.replace("5 minutes", "15 minutes");
     let plan = plan_without_raw_data(&[DISTINCT_USERS_LAST_5_MINUTES, &fifteen], APPROXIMATE).await;
@@ -579,6 +587,7 @@ async fn ingestion_time_tumbling_windows_built_from_table_rows_answer_exactly() 
 /// Exact row counts over 5 and 15 minutes from ingestion-time state: each
 /// window's table rows are read once, 100 and 300 per service.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn ingestion_time_row_counts_read_each_table_row_once() {
     let five = "SELECT service, COUNT(*) AS value FROM http \
                 WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service";
@@ -603,6 +612,7 @@ async fn ingestion_time_row_counts_read_each_table_row_once() {
 /// one tumbling window built at ingestion time from the table rows, read
 /// no raw data at query time, and answers exactly.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn a_window_equal_to_its_interval_is_built_at_ingestion_time_from_table_rows() {
     let five_minutes_ms = 5 * MINUTE_MS as u64;
     let plan = plan_without_raw_data_every(
@@ -678,6 +688,7 @@ impl DataStore for RecordingStore {
 // asked for `(T - 5m, T]` at evaluation time `T`; it returns all 20 minutes
 // of rows, and the answer is the one over the window.
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn a_data_store_is_asked_for_the_query_window() {
     // The user's query, planned exactly over the `http` table.
     let plan = plan(

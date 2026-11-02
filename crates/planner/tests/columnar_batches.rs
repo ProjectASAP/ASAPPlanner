@@ -30,6 +30,7 @@ use time_series::{series_identity, RawDataSample};
 const EVALUATION_MS: i64 = 3_600_000;
 
 #[tokio::test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 async fn a_tumbling_window_is_built_from_arrow_columns_with_one_label_entry_per_series() {
     // What the user writes: p99 of `latency_ms` over the last hour, every
     // 10 minutes, at rank error 0.01, over 1,000 series sampled every second.

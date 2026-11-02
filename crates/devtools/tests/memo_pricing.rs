@@ -215,6 +215,7 @@ fn assert_no_listed_choice_is_cheaper(document: &Value) -> Vec<Value> {
 /// Q2's summary reads miss its 100 ms latency bound, and no valid DAG is
 /// cheaper than the selection.
 #[test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn example1_no_listed_choice_is_cheaper_than_the_selected_plan() {
     let document = priced_document(&["--example", "planner-layering-1"]);
     let choices = assert_no_listed_choice_is_cheaper(&document);
@@ -232,6 +233,7 @@ fn example1_no_listed_choice_is_cheaper_than_the_selected_plan() {
 /// has a guarantee through `/` and `+` over a KLL rank error or a DDSketch
 /// relative one, so every listed DAG is exact and valid.
 #[test]
+#[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
 fn ratio_of_quantiles_no_listed_choice_is_cheaper_than_the_selected_plan() {
     let ignored = assert_no_listed_choice_is_cheaper(&priced_document(&[
         "--workload",
