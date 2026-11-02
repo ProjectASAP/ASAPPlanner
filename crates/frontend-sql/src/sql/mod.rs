@@ -1706,7 +1706,7 @@ fn measure_filter(expr: &Expr, input: &DFSchema) -> Result<Option<Expr>, Lowerin
             }
         }
     }
-    Ok(conjuncts.into_iter().reduce(Expr::and))
+    Ok(conjunction(conjuncts))
 }
 
 /// `CASE WHEN p THEN x END` (searched, one arm, no `ELSE` or `ELSE NULL`)
