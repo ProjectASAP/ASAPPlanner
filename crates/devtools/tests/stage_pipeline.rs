@@ -2553,8 +2553,8 @@ fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
     assert!(document.get("memo").is_none());
 }
 
-/// `stage_pipeline`'s document with Stage 3's new search forced on
-/// (`ASAP_STAGE3_SEARCH=milp`, #1095), set on the child process only.
+/// `stage_pipeline`'s document for `args`, run with Stage 3's group
+/// selection MILP (#1095).
 fn document_with_milp_search(args: &[&str]) -> Value {
     static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2563,7 +2563,6 @@ fn document_with_milp_search(args: &[&str]) -> Value {
         std::process::id(),
     ));
     let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
-        .env("ASAP_STAGE3_SEARCH", "milp")
         .args(args)
         .arg("--out")
         .arg(&out)

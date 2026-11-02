@@ -18,7 +18,7 @@ fn select(
     accuracy: &dyn AccuracyModel,
     realizer: &dyn AssignmentRealizer,
 ) -> Result<Selection, ErrorSelectingPlan> {
-    select_plan_with_milp(
+    select_plan(
         &fixture.physical,
         &fixture.entries,
         &fixture.data,
@@ -156,7 +156,7 @@ fn cost_model_2_is_unsupported() {
         ),
         ..cost_inputs()
     };
-    let result = select_plan_with_milp(
+    let result = select_plan(
         &fixture.physical,
         &fixture.entries,
         &fixture.data,

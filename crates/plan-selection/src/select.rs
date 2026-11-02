@@ -1,8 +1,7 @@
-//! #1095 Steps 3–6: the group selection MILP behind [`select_plan`](crate::select_plan),
-//! Stage 3's default search (#1095 C6). Inputs it does not price yet (cost
-//! models 2 and 3) are an `UnsupportedCostModel` error; `ASAP_STAGE3_SEARCH=old`
-//! runs the old engine instead ([`milp_search_enabled`]). There is no
-//! fallback between the two engines.
+//! Stage 3, plan selection: [`select_plan`] runs the group selection MILP
+//! (#1095). Inputs it does not price yet (cost models 2 and 3, or a measured
+//! operation cost table without a frozen calibration factor) are an
+//! `UnsupportedCostModel` error (#888).
 //!
 //! One MILP solve and one realization, no loop:
 //! 1. the MILP's inputs (candidate dominance, execution contexts, accuracy
@@ -50,26 +49,22 @@ use crate::report::{
     Selection,
 };
 
-/// The environment variable that switches Stage 3 back to the old engine:
-/// `ASAP_STAGE3_SEARCH=old`. Unset, or any other value, runs the group MILP
-/// (#1095 C6), which returns `UnsupportedCostModel` for inputs it does not
-/// price yet (cost models 2 and 3, or a measured operation cost table
-/// without a frozen calibration factor).
-pub(crate) const STAGE3_SEARCH_ENV: &str = "ASAP_STAGE3_SEARCH";
-
-/// Whether Stage 3 runs the group MILP: always, unless
-/// [`STAGE3_SEARCH_ENV`] is `old`.
-pub(crate) fn milp_search_enabled() -> bool {
-    std::env::var(STAGE3_SEARCH_ENV).as_deref() != Ok("old")
-}
-
 /// The largest relative difference between the objective and `plan_cost`
 /// that counts as equal.
 const COST_EQUALITY_TOLERANCE: f64 = 1e-6;
 
-/// [`select_plan`](crate::select_plan) with the new search (module
-/// documentation). `cost_inputs` is already validated.
-pub(crate) fn select_plan_with_milp(
+/// Stage 3, plan selection: select one plan among `physical`'s candidates
+/// with the group selection MILP (module documentation). The selection is
+/// realized through `realizer`, checked against every query's accuracy
+/// target (`accuracy_checks`) and latency bound, and priced under
+/// `cost_inputs`. `entries[q]` is query `q`'s workload entry (accuracy
+/// target, latency bound, recurrence); `data` the data workload with its
+/// bounds. `deadline` is the only budget.
+///
+/// Err: invalid or unsupported cost inputs, an infeasible catalog, no plan
+/// by the deadline, or the realizer rejected the selected plan
+/// ([`ErrorSelectingPlan::RealizerRejected`]: a Stage 2 catalog bug).
+pub fn select_plan(
     physical: &PhysicalASAPMemoCandidates,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
@@ -78,6 +73,9 @@ pub(crate) fn select_plan_with_milp(
     realizer: &dyn AssignmentRealizer,
     deadline: Option<Instant>,
 ) -> Result<Selection, ErrorSelectingPlan> {
+    cost_inputs
+        .validate()
+        .map_err(ErrorSelectingPlan::InvalidSettings)?;
     // The MILP's coefficients and `plan_cost` must use one calibration: a
     // measured cost table needs a frozen factor.
     if cost_inputs.frozen_calibration_factor.is_none()
@@ -278,7 +276,7 @@ fn pruned_before_the_milp(
 
 /// `selected` realized through `realizer`; a rejection is a Stage 2
 /// catalog bug.
-pub(crate) fn realize(
+fn realize(
     physical: &PhysicalASAPMemoCandidates,
     selected: &DagOfSelectedCandidates,
     realizer: &dyn AssignmentRealizer,
@@ -296,7 +294,7 @@ pub(crate) fn realize(
 /// The selected nodes whose summary (`SummaryAgg` or `SummaryTumblingWindowChain`) reads
 /// update weights `data` proves non-negative although the candidate leaves
 /// the requirement open.
-pub(crate) fn proven_non_negative_weights(
+fn proven_non_negative_weights(
     realized: &RealizedPlan,
     data: &DataWorkload,
 ) -> Vec<SelectedNodeId> {

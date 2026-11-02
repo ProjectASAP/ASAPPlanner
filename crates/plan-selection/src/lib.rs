@@ -25,9 +25,9 @@
 //! physical DAG ([`ResourceUsage`](asap_cost::ResourceUsage)), and the deployment's [`CostModel`](asap_cost::CostModel)
 //! chooses among them ("Cost models" below). The rest are reported valid
 //! but costlier (or slower, or larger).
-//! Candidate-connection MILP search selects and validates workload DAGs
-//! without constructing the Cartesian product of local candidates.
-//! Dynamic-programming compression is outside the current implementation.
+//! The group selection MILP ([`select_plan`], #1095) selects one candidate
+//! per memo group and execution context without constructing the Cartesian
+//! product of local candidates; it prices cost model 1 only (#888).
 //!
 //! ## Cost model: cost per second of wall time
 //!
@@ -241,9 +241,6 @@
 #[cfg(test)]
 use asap_types::workload::RepeatedDemand;
 
-use asap_cost::analytical::AnalyticalCostError;
-use asap_cost::state_bytes::{sketch_shape, summary_shape, StateInputRows};
-
 mod accuracy_binding;
 mod checks;
 mod models;
@@ -253,23 +250,20 @@ mod groups;
 // #1095 §2.0: the group selection MILP and the decode of its solution.
 mod milp;
 mod report;
-mod search;
-// #1095 C5: the new search behind `select_plan`'s internal switch.
+// Stage 3's entry, `select_plan`, over the group selection MILP (#1095).
 mod select;
+// The whole-plan selector behind `reference_pricer` and the tests.
+#[cfg(any(test, feature = "reference-pricer"))]
 mod selector;
-pub(crate) use accuracy_binding::bound_root_guarantee;
-pub(crate) use checks::{accuracy_targets, guarantee_check};
 pub use models::AccuracyCheckInputs;
 pub(crate) use models::SelectionModels;
 pub use report::{
     large_peak_memory_warning, AcceptedAccuracy, ErrorSelectingPlan, InexactObjective,
     RejectionCause, SearchReport, SearchStatus, Selection,
 };
-pub(crate) use report::{Rejection, WholePlanSelection};
-pub use search::select::select_plan;
+pub use select::select_plan;
 #[cfg(test)]
 pub(crate) use selector::select_among_plans;
-pub(crate) use selector::PlanSelector;
 
 /// The whole-workload reference pricer (feature `reference-pricer`): the
 /// selector Stage 3 used before the memo search, over whole physical plans
@@ -318,18 +312,23 @@ pub(crate) fn sized_as_pass1(
         .expect("sized summaries rebuild")
 }
 
-use asap_cost::{lookup, StateFamily};
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accuracy_binding::bound_root_guarantee;
     use crate::accuracy_binding::{bind_statistics, root_operators, workload_statistic};
+    use crate::checks::guarantee_check;
     use crate::checks::{accuracy_check, CheckFailure};
+    use crate::report::WholePlanSelection;
+    use crate::selector::PlanSelector;
     use asap_accuracy::composition::INPUT_ROW_COUNT;
     use asap_accuracy::estimators::hll;
     use asap_accuracy::propagation::root_guarantee;
+    use asap_cost::analytical::AnalyticalCostError;
     use asap_cost::execution_demand::evaluation_rate;
+    use asap_cost::state_bytes::{sketch_shape, summary_shape, StateInputRows};
     use asap_cost::{kept_tumbling_window_chains, node_map, plan_cost, NodeMap};
+    use asap_cost::{lookup, StateFamily};
     use asap_cost::{
         CalibrationFit, ClusterLimits, ClusterObjective, CostInputs, CostModel, NodePriceSource,
         OperatorKind, PlanCost, ResourceUsage, COST_SOURCE, MEASURED_COST_SOURCE,

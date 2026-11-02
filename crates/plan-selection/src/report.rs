@@ -7,6 +7,7 @@ use asap_cost::analytical::AnalyticalCostError;
 use asap_cost::{CostModel, PlanCost};
 use asap_types::ir::physical_export::PhysicalASAPNodeId;
 use asap_types::ir::properties::AccuracyMetric;
+#[cfg(any(test, feature = "reference-pricer"))]
 use asap_types::ir::QueryRoot;
 use asap_types::stages::{
     DagOfSelectedCandidates, PhysicalCandidateId, PrunedCandidate, SelectedNodeId,
@@ -180,12 +181,12 @@ impl std::fmt::Display for AcceptedAccuracy {
 
 /// The whole-plan selector's result (`PlanSelector`):
 /// the selected candidate among whole physical plans and the plan to run,
-/// with what it kept of the other candidates. Today's engine evaluates each
-/// proposed plan with it, and the reference pricer (feature
+/// with what it kept of the other candidates. The reference pricer (feature
 /// `reference-pricer`) selects among enumerated plans with it. Keeping
 /// every candidate, `costs` and `accepted` list every valid candidate and
 /// `rejected` every other one; otherwise only the selected candidate is
 /// kept, and `rejected` holds the first rejection of each cause.
+#[cfg(any(test, feature = "reference-pricer"))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct WholePlanSelection {
     pub selected: String,
@@ -220,8 +221,8 @@ pub struct Selection {
     pub cost: PlanCost,
     /// Per query, the accuracy Stage 3 accepted for the selected plan.
     pub accepted_accuracy_per_query: Vec<AcceptedAccuracy>,
-    /// The candidates Stage 3 ruled out before or during the search (none
-    /// recorded by today's engine; #1095 fills it).
+    /// The candidates Stage 3 ruled out before the search: dominated ones and
+    /// those whose usage could not be costed.
     pub pruned_candidates: Vec<PrunedCandidate<PhysicalCandidateId>>,
     pub search_report: SearchReport,
 }
@@ -280,11 +281,8 @@ impl SearchReport {
 pub enum SearchStatus {
     /// The search proved the plan optimal over the catalog it was given.
     Optimal,
-    /// The search stopped at the deadline (or at its internal limits) with
-    /// a validated plan; the gap to the lower bound may be above zero.
-    /// Until #1095 replaces today's engine, this also covers the engine's
-    /// stop at its internal limit of 128 evaluations, and any other
-    /// non-optimal stop that still validated a plan.
+    /// The search stopped at the deadline with a validated plan; the gap to
+    /// the lower bound may be above zero.
     DeadlineReached,
 }
 

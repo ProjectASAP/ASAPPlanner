@@ -76,8 +76,7 @@
 //     `inexact_objective` when the new search's objective and `plan_cost`
 //     differ over terms the MILP encodes inexactly). Stage 3 runs #1095's
 //     selection MILP, which supports cost model 1 only (cost models 2 and 3
-//     are an `UnsupportedCostModel` error); `ASAP_STAGE3_SEARCH=old` runs the
-//     old engine instead; `error` when no
+//     are an `UnsupportedCostModel` error, #888); `error` when no
 //     plan was selected. `tumbling_window_retention_ms` maps each pane chain the
 //     selected plan keeps beyond one evaluation (by node id in `P1`) to how
 //     far back the runtime must keep its tumbling windows (`RealizedPlan::tumbling_window_retention_ms`).
