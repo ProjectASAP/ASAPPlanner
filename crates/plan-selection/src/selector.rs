@@ -18,7 +18,7 @@ use crate::report::{
     AcceptedAccuracy, ErrorSelectingPlan, Rejection, RejectionCause, WholePlanSelection,
 };
 use crate::SelectionModels;
-use asap_cost::{kept_pane_chains, node_map, pane_retention_ms, plan_cost, query_reach};
+use asap_cost::{kept_pane_chains, node_map, plan_cost, query_reach, tumbling_window_retention_ms};
 
 type Ranking = PlanRanking;
 use asap_types::workload::bounds::with_confirmed_weights;
@@ -301,7 +301,7 @@ impl<'a> PlanSelector<'a> {
         }
         let built = self.kept.swap_remove(best);
         let plan = with_confirmed_weights(&built.roots, self.data);
-        let pane_retention_ms = pane_retention_ms(
+        let tumbling_window_retention_ms = tumbling_window_retention_ms(
             &built.dag,
             &query_reach(&built.dag, &node_map(&built.dag)),
             &self.range_evaluations,
@@ -312,7 +312,7 @@ impl<'a> PlanSelector<'a> {
             costs: self.costs,
             accepted: self.accepted,
             rejected: self.rejected,
-            pane_retention_ms,
+            tumbling_window_retention_ms,
             candidates_checked: self.candidates_checked,
         };
         Ok((selection, built))

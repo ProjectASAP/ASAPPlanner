@@ -44,7 +44,7 @@ pub(crate) fn add_scan_label_candidates(
                         reduction: Reduction::PerEntity,
                         filter: None,
                         ..
-                    } | ASAPOp::PaneChain {
+                    } | ASAPOp::SummaryTumblingWindowChain {
                         reduction: Reduction::PerEntity,
                         filter: None,
                         ..

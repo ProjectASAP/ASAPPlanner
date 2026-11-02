@@ -120,7 +120,12 @@ async fn installable(workload: &PlanningWorkload) -> InstallablePlan {
 fn pane_chain_count(dag: &PhysicalASAPDAG) -> usize {
     dag.nodes
         .iter()
-        .filter(|n| matches!(n.payload, Operator::ASAP(ASAPOp::PaneChain { .. })))
+        .filter(|n| {
+            matches!(
+                n.payload,
+                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+            )
+        })
         .count()
 }
 
@@ -172,7 +177,7 @@ async fn plan_for_stages(workload: &PlanningWorkload) -> PhysicalASAPDAG {
         .unwrap()
 }
 
-/// Each summary build of `dag` (`SummaryAgg` or `PaneChain`) as its JSON
+/// Each summary build of `dag` (`SummaryAgg` or `SummaryTumblingWindowChain`) as its JSON
 /// payload, sorted: which families with which parameters it builds.
 fn summary_builds(dag: &PhysicalASAPDAG) -> Vec<String> {
     let mut builds: Vec<String> = dag
@@ -181,7 +186,9 @@ fn summary_builds(dag: &PhysicalASAPDAG) -> Vec<String> {
         .filter(|n| {
             matches!(
                 n.payload,
-                Operator::ASAP(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+                Operator::ASAP(
+                    ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }
+                )
             )
         })
         .map(|n| serde_json::to_string(&n.payload).unwrap())
@@ -327,7 +334,7 @@ async fn raw_data_windows_of_unsupported_shapes_are_refused() {
 /// Example 4b answered as the last hour at 10-minute steps (a range
 /// evaluation): each selected pane view is kept for the hour its window reads
 /// plus the hour the range spans, 7,200,000 ms, as Stage 3 records for the
-/// chain (`Selection::pane_retention_ms`); without the range, for the hour.
+/// chain (`Selection::tumbling_window_retention_ms`); without the range, for the hour.
 #[tokio::test]
 async fn stored_panes_carry_stage3_pane_retention() {
     let mut workload = example4b();
@@ -351,7 +358,7 @@ async fn stored_panes_carry_stage3_pane_retention() {
     let output = plan(&workload, &without_raw_data()).await;
     assert_eq!(
         output
-            .pane_retention_ms
+            .tumbling_window_retention_ms
             .values()
             .copied()
             .collect::<Vec<_>>(),

@@ -444,7 +444,7 @@ pub mod planning {
             node.asap(),
             Some(
                 asap_types::ir::ASAPOp::SummaryAgg { .. }
-                    | asap_types::ir::ASAPOp::PaneChain { .. }
+                    | asap_types::ir::ASAPOp::SummaryTumblingWindowChain { .. }
             )
         )
     }

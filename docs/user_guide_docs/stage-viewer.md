@@ -67,7 +67,7 @@ In the lanes:
   summary operators;
 - a thick border marks a query's result, and `shared ×n` marks a node that n
   queries read;
-- click a `PaneChain` node to unfold its panes, and click again to fold them.
+- click a `SummaryTumblingWindowChain` node to unfold its panes, and click again to fold them.
 
 To follow one query, pick it in **highlight query**: everything it does not
 reach dims, in the lanes and in the Memo. Click a node to see its details;

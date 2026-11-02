@@ -131,7 +131,9 @@ fn check(
                 continue;
             }
             match node.asap() {
-                Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. }) => builds += 1,
+                Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }) => {
+                    builds += 1
+                }
                 Some(ASAPOp::SummaryMerge {
                     group_by: Some(_), ..
                 }) => rollups += 1,

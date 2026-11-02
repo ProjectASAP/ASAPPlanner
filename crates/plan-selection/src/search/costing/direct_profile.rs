@@ -52,7 +52,7 @@ fn supported_node(node: &asap_types::ir::OperatorNode) -> bool {
         node.asap(),
         Some(
             ASAPOp::SummaryAgg { .. }
-                | ASAPOp::PaneChain { .. }
+                | ASAPOp::SummaryTumblingWindowChain { .. }
                 | ASAPOp::SummaryEstimate { .. }
                 | ASAPOp::FinalizeExactAccumulator { .. }
                 | ASAPOp::SummaryMerge { .. }
@@ -195,14 +195,17 @@ fn prepare_profile(
                                     | Materialization::MatAtQuery(Medium::Memory)
                             ) || (configuration.materialization
                                 == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
-                                && matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+                                && matches!(
+                                    node.asap(),
+                                    Some(ASAPOp::SummaryTumblingWindowChain { .. })
+                                )
                                 && configuration
                                     .may_keep_across_evaluations_per_sole_reader_query
                                     .iter()
                                     .any(|&may_keep| may_keep))
                         }
                         ExecutionTiming::IngestionTime => match node.asap() {
-                            Some(ASAPOp::PaneChain { .. }) => {
+                            Some(ASAPOp::SummaryTumblingWindowChain { .. }) => {
                                 configuration.materialization
                                     == Materialization::MatAtIngestion(Medium::Memory)
                             }
@@ -592,7 +595,7 @@ fn price<'a>(
                 family: FieldDataType::Sketch(kind, _),
                 ..
             }
-            | ASAPOp::PaneChain {
+            | ASAPOp::SummaryTumblingWindowChain {
                 family: FieldDataType::Sketch(kind, _),
                 ..
             },
@@ -641,7 +644,7 @@ fn price<'a>(
                 ASAPOp::SummaryAgg {
                     family: FieldDataType::Sketch(..),
                     ..
-                } | ASAPOp::PaneChain {
+                } | ASAPOp::SummaryTumblingWindowChain {
                     family: FieldDataType::Sketch(..),
                     ..
                 }
@@ -653,12 +656,13 @@ fn price<'a>(
             continue;
         }
         let (retained_panes, ingestion_window) = match &node.payload {
-            asap_types::ir::Operator::ASAP(ASAPOp::PaneChain {
-                pane_count,
-                pane_width_ms,
+            asap_types::ir::Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_count,
+                tumbling_window_width_ms,
                 ..
             }) => {
-                let window = pane_width_ms.checked_mul(u64::from(*pane_count));
+                let window =
+                    tumbling_window_width_ms.checked_mul(u64::from(*tumbling_window_count));
                 let span = input_override
                     .and_then(|inputs| inputs.range_span_ms)
                     .unwrap_or_else(|| {
@@ -671,7 +675,8 @@ fn price<'a>(
                 let Some(retention) = window.and_then(|window| window.checked_add(span)) else {
                     continue;
                 };
-                let retained = (retention / (*pane_width_ms).max(1)).max(u64::from(*pane_count));
+                let retained = (retention / (*tumbling_window_width_ms).max(1))
+                    .max(u64::from(*tumbling_window_count));
                 (retained, window)
             }
             _ => (1, None),
@@ -885,7 +890,7 @@ fn failure_budget(
 }
 
 fn requires_source_sizing(node: &asap_types::ir::OperatorNode) -> bool {
-    matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. } | ASAPOp::PaneChain { family: FieldDataType::Sketch(kind, _), .. })
+    matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. } | ASAPOp::SummaryTumblingWindowChain { family: FieldDataType::Sketch(kind, _), .. })
         if matches!(kind.params(), SketchParams::Hll { .. }))
 }
 
@@ -909,7 +914,7 @@ fn stable_size(node: &asap_types::ir::OperatorNode, delta: Option<f64>) -> bool 
             family: FieldDataType::Sketch(kind, _),
             ..
         }
-        | ASAPOp::PaneChain {
+        | ASAPOp::SummaryTumblingWindowChain {
             family: FieldDataType::Sketch(kind, _),
             ..
         },
@@ -942,17 +947,17 @@ fn scan_consumer_lookback(node: &PhysicalASAPDAGNode) -> Option<u64> {
         asap_types::ir::Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
             Some(range.as_millis() as u64)
         }
-        asap_types::ir::Operator::ASAP(ASAPOp::PaneChain {
-            pane_width_ms,
-            pane_count,
+        asap_types::ir::Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            tumbling_window_width_ms,
+            tumbling_window_count,
             ..
         }) => Some(
             if node.materialization
                 == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
             {
-                *pane_width_ms
+                *tumbling_window_width_ms
             } else {
-                pane_width_ms.saturating_mul(u64::from(*pane_count))
+                tumbling_window_width_ms.saturating_mul(u64::from(*tumbling_window_count))
             },
         ),
         _ => None,
@@ -1449,9 +1454,9 @@ mod tests {
             mode: Materialization,
         ) -> PhysicalCandidateId {
             let ingestion = ingestion
-                || (matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+                || (matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
                     && mode == Materialization::MatAtIngestion(Medium::Memory));
-            let pane = matches!(node.asap(), Some(ASAPOp::PaneChain { .. }));
+            let pane = matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }));
             let mut inputs = Vec::new();
             node.operator.map_children(|child| {
                 inputs.push(append(child.clone(), configured, ingestion, mode))
@@ -1636,10 +1641,14 @@ mod tests {
                     let chain = configured
                         .nodes_for_tests()
                         .iter()
-                        .position(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
+                        .position(|node| {
+                            matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
+                        })
                         .unwrap();
-                    let Some(ASAPOp::PaneChain {
-                        family, pane_count, ..
+                    let Some(ASAPOp::SummaryTumblingWindowChain {
+                        family,
+                        tumbling_window_count,
+                        ..
                     }) = configured.node(chain).asap()
                     else {
                         unreachable!()
@@ -1661,12 +1670,12 @@ mod tests {
                     };
                     let expected_residency = match mode {
                         Materialization::MatAtIngestion(_) => {
-                            u64::from(*pane_count)
+                            u64::from(*tumbling_window_count)
                                 + range_evaluation.map_or(0, |range| range.span_ms / width)
                                 + 1
                         }
                         Materialization::MatAtQueryKeptAcrossEvaluations(_) => {
-                            u64::from(*pane_count) - 1
+                            u64::from(*tumbling_window_count) - 1
                         }
                         _ => 0,
                     } * series_count
@@ -1891,7 +1900,7 @@ mod tests {
                     if let Some(delta) = too_small_delta {
                         assert!(configured.nodes_for_tests().iter().any(|node| matches!(
                             node.asap(),
-                            Some(ASAPOp::PaneChain { .. })
+                            Some(ASAPOp::SummaryTumblingWindowChain { .. })
                         ) && !stable_size(
                             node,
                             Some(delta)

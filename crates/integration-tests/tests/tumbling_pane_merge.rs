@@ -1,7 +1,7 @@
 //! Tumbling panes merged by `SummaryMerge` answer the same per-series query
 //! as one build over the whole window (#509 Example 3/4, Pattern B): panes
 //! written by hand, and the planner's window-composition rule's
-//! `PaneChain`, expanded into the panes the executor runs.
+//! `SummaryTumblingWindowChain`, expanded into the panes the executor runs.
 use crate::physical_common;
 
 use std::collections::BTreeMap;
@@ -92,7 +92,7 @@ fn tumbling_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Vec<Rc<Operator
         .collect();
     let merged = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children: panes.clone(),
-        newest_panes: None,
+        newest_tumbling_windows: None,
         group_by: None,
     }))
     .unwrap();
@@ -103,7 +103,7 @@ fn tumbling_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Vec<Rc<Operator
 
 /// `root` with its summary built in tumbling panes by the planner's
 /// window-composition rule, for a query repeating every minute: the
-/// planned root (a `SummaryMerge` over one `PaneChain`) and its expansion
+/// planned root (a `SummaryMerge` over one `SummaryTumblingWindowChain`) and its expansion
 /// into the panes the executor runs.
 fn planned_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
     let roots = [QueryRoot::Operator(Rc::clone(root))];
@@ -112,7 +112,10 @@ fn planned_panes(root: &Rc<OperatorNode>) -> (Rc<OperatorNode>, Rc<OperatorNode>
         panic!("one build to split: {rule_candidates:?}")
     };
     assert_eq!(
-        (rule_candidate.pane_width_ms, rule_candidate.pane_count),
+        (
+            rule_candidate.tumbling_window_width_ms,
+            rule_candidate.tumbling_window_count
+        ),
         (PANE_MS as u64, 5)
     );
     let mut pass2_candidates =
@@ -289,7 +292,7 @@ fn execute_maintained_chain(
 ) -> Vec<Vec<Value>> {
     let chain = OperatorNode::reachable(planned)
         .into_iter()
-        .find(|n| matches!(n.asap(), Some(ASAPOp::PaneChain { .. })))
+        .find(|n| matches!(n.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })))
         .expect("a pane chain");
     let mut assignment = MaterializationAssignment::default();
     assignment.set(&chain, Materialization::MatAtIngestion(Medium::Memory));
@@ -388,7 +391,10 @@ fn assert_pane_merge_matches_single_build(
         "the planner's pane chain, maintained at ingestion time"
     );
     let unexpanded = compile_at_query_time(&planned).err().unwrap_or_default();
-    assert!(unexpanded.contains("PaneChain"), "{unexpanded}");
+    assert!(
+        unexpanded.contains("SummaryTumblingWindowChain"),
+        "{unexpanded}"
+    );
     result
 }
 
@@ -628,7 +634,7 @@ fn panes_at(root: &Rc<OperatorNode>, panes: &[(i64, i64)]) -> Result<Rc<Operator
         .collect();
     let merged = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children,
-        newest_panes: None,
+        newest_tumbling_windows: None,
         group_by: None,
     }))
     .map_err(|error| format!("{error:?}"))?;
@@ -689,7 +695,10 @@ fn newest_panes_of_a_shared_chain_match_a_separate_chain() {
     let newest = OperatorNode::reachable(&shared[0])
         .into_iter()
         .find_map(|n| match n.asap() {
-            Some(ASAPOp::SummaryMerge { newest_panes, .. }) => Some(*newest_panes),
+            Some(ASAPOp::SummaryMerge {
+                newest_tumbling_windows,
+                ..
+            }) => Some(*newest_tumbling_windows),
             _ => None,
         });
     assert_eq!(newest, Some(Some(2)));
@@ -744,7 +753,10 @@ fn queries_at_different_intervals_read_one_chain_of_the_finer_panes() {
         .map(|root| QueryRoot::Operator(Rc::clone(root)))
         .collect();
     let rule_candidates = pane_candidates(&roots, &[Some(30_000), Some(PANE_MS as u64)]);
-    let widths: Vec<u64> = rule_candidates.iter().map(|c| c.pane_width_ms).collect();
+    let widths: Vec<u64> = rule_candidates
+        .iter()
+        .map(|c| c.tumbling_window_width_ms)
+        .collect();
     assert_eq!(widths, [30_000, PANE_MS as u64]);
     let shared = window_composition_pass2_candidates(&roots, &rule_candidates)
         .unwrap()
@@ -758,8 +770,8 @@ fn queries_at_different_intervals_read_one_chain_of_the_finer_panes() {
     assert_eq!(first.roots.as_ref().ok(), shared.roots.as_ref().ok());
     assert_eq!(
         (
-            shared.shared_chains[0].pane_width_ms,
-            shared.shared_chains[0].pane_count
+            shared.shared_chains[0].tumbling_window_width_ms,
+            shared.shared_chains[0].tumbling_window_count
         ),
         (30_000, 10)
     );
@@ -808,7 +820,7 @@ fn queries_at_60_and_90_seconds_read_one_chain_of_30_second_panes() {
     let rule_candidates = pane_candidates(&roots, &[Some(PANE_MS as u64), Some(90_000)]);
     let widths: Vec<(u64, u32)> = rule_candidates
         .iter()
-        .map(|c| (c.pane_width_ms, c.pane_count))
+        .map(|c| (c.tumbling_window_width_ms, c.tumbling_window_count))
         .collect();
     assert_eq!(widths, [(PANE_MS as u64, 5), (90_000, 2)]);
     let shared = window_composition_pass2_candidates(&roots, &rule_candidates)
@@ -818,8 +830,8 @@ fn queries_at_60_and_90_seconds_read_one_chain_of_30_second_panes() {
         .expect("one shared chain at the gcd");
     assert_eq!(
         (
-            shared.shared_chains[0].pane_width_ms,
-            shared.shared_chains[0].pane_count
+            shared.shared_chains[0].tumbling_window_width_ms,
+            shared.shared_chains[0].tumbling_window_count
         ),
         (30_000, 10)
     );

@@ -3330,7 +3330,7 @@
     },
     "front": [],
     "materialized_views": [],
-    "pane_retention_ms": {},
+    "tumbling_window_retention_ms": {},
     "rejected": [],
     "rejected_by_cause": {},
     "search": {
@@ -3347,7 +3347,7 @@
           "Rollup": 3
         },
         "coupling_sites_by_kind": {
-          "PaneChain": 3,
+          "SummaryTumblingWindowChain": 3,
           "RawHorizon": 1,
           "SharedBuildSize": 3
         },

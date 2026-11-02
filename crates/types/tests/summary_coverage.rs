@@ -175,7 +175,7 @@ fn pane_rows(shift_ms: i64, predicates: Vec<Predicate>) -> Rc<OperatorNode> {
 fn merge(children: Vec<Rc<OperatorNode>>) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children,
-        newest_panes: None,
+        newest_tumbling_windows: None,
         group_by: None,
     }))
 }
@@ -576,7 +576,7 @@ fn forged_merges_fail_validation() {
     let forged = Rc::new(OperatorNode::with_schema(
         Operator::ASAP(ASAPOp::SummaryMerge {
             children: vec![us.clone(), us],
-            newest_panes: None,
+            newest_tumbling_windows: None,
             group_by: None,
         }),
         schema,
@@ -912,7 +912,7 @@ fn rollup(state: Rc<OperatorNode>, keys: Vec<usize>) -> Result<Rc<OperatorNode>,
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children: vec![state],
         group_by: Some(keys),
-        newest_panes: None,
+        newest_tumbling_windows: None,
     }))
     .map_err(|error| error.to_string())
 }
@@ -1019,7 +1019,7 @@ fn group_by_is_serialized_only_for_a_rollup() {
     let merge = ASAPOp::SummaryMerge {
         children: vec![0u32],
         group_by: None,
-        newest_panes: None,
+        newest_tumbling_windows: None,
     };
     assert_eq!(
         serde_json::to_value(&merge).unwrap(),
@@ -1028,7 +1028,7 @@ fn group_by_is_serialized_only_for_a_rollup() {
     let rollup_op: ASAPOp<u32> = ASAPOp::SummaryMerge {
         children: vec![0],
         group_by: Some(vec![1]),
-        newest_panes: None,
+        newest_tumbling_windows: None,
     };
     let json = serde_json::to_string(&rollup_op).unwrap();
     assert_eq!(

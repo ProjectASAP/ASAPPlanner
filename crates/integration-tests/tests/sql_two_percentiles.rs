@@ -207,7 +207,7 @@ fn sketch_of(root: &Rc<OperatorNode>) -> Option<SketchAlgorithm> {
                     family: FieldDataType::Sketch(kind, _),
                     ..
                 }
-                | ASAPOp::PaneChain {
+                | ASAPOp::SummaryTumblingWindowChain {
                     family: FieldDataType::Sketch(kind, _),
                     ..
                 },
@@ -413,8 +413,8 @@ fn newest_panes_rolled_up(roots: &[QueryRoot]) -> bool {
         .filter(|n| {
             matches!(
                 n.asap(),
-                Some(ASAPOp::PaneChain {
-                    pane_count: 120,
+                Some(ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_count: 120,
                     ..
                 })
             )
@@ -427,14 +427,14 @@ fn newest_panes_rolled_up(roots: &[QueryRoot]) -> bool {
             Some(ASAPOp::SummaryMerge {
                 children,
                 group_by: Some(keys),
-                newest_panes: None,
+                newest_tumbling_windows: None,
             }) => {
                 keys.is_empty()
                     && matches!(
                         children[0].asap(),
                         Some(ASAPOp::SummaryMerge {
                             children: chain,
-                            newest_panes: Some(30),
+                            newest_tumbling_windows: Some(30),
                             group_by: None,
                         }) if q2_chains.contains(&Rc::as_ptr(&chain[0]))
                     )

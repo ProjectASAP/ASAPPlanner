@@ -49,7 +49,7 @@ const OPERATOR_VARIANTS: &[&str] = &[
     "MaintainPopulation",
     "EvaluatePopulation",
     "SummaryMerge",
-    "PaneChain",
+    "SummaryTumblingWindowChain",
     "SummarySubtract",
     "SummaryDelete",
     "SummaryJoin",

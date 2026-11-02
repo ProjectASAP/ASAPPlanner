@@ -77,7 +77,7 @@ fn panes_and_kept_merge() -> (PhysicalASAPDAG, usize) {
     let panes = [pane(&scan, 0), pane(&scan, 60_000)];
     let merge = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children: panes.to_vec(),
-        newest_panes: None,
+        newest_tumbling_windows: None,
         group_by: None,
     }))
     .unwrap();

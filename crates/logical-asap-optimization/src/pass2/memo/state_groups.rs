@@ -53,7 +53,7 @@ pub(crate) fn check_unexpanded_memo(memo: &MemoCandidates) -> Result<(), StateGr
     if memo.groups.iter().any(|group| {
         matches!(
             group.logical_node.asap(),
-            Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+            Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
         )
     }) {
         return Err(StateGroupExpansionError::AlreadyExpanded);
@@ -290,7 +290,7 @@ pub(super) fn direct_input_builds(
     if !matches!(
         candidate.origin,
         OriginOfCandidateForMemoGroup::Pass1
-            | OriginOfCandidateForMemoGroup::Panes
+            | OriginOfCandidateForMemoGroup::TumblingWindows
             | OriginOfCandidateForMemoGroup::WidenedScans
             | OriginOfCandidateForMemoGroup::Rollup
             | OriginOfCandidateForMemoGroup::SummaryResult
@@ -318,7 +318,7 @@ pub(super) fn direct_input_builds(
         if !Rc::ptr_eq(&node, &candidate.root_node)
             && matches!(
                 node.asap(),
-                Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+                Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
             )
         {
             let children: Option<Vec<_>> = node
@@ -715,13 +715,15 @@ mod tests {
                 let input = panes[0].build.children()[0].children()[0].clone();
                 let chain = OperatorNode::reachable(node)
                     .into_iter()
-                    .find(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
+                    .find(|node| {
+                        matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
+                    })
                     .unwrap();
                 let node = replace_node(node, chain.children()[0], &input);
                 let mut pane = candidate;
                 pane.root_node = Rc::clone(&node);
                 pane.input_groups = boundary_groups(&node, &boundaries);
-                pane.origin = OriginOfCandidateForMemoGroup::Panes;
+                pane.origin = OriginOfCandidateForMemoGroup::TumblingWindows;
                 memo.candidates[group].push(pane);
             }
         }
@@ -773,8 +775,10 @@ mod tests {
             .iter()
             .find(|id| {
                 let group = &expanded.memo.groups[id.0 as usize];
-                matches!(group.logical_node.asap(), Some(ASAPOp::PaneChain { .. }))
-                    && group.queries == vec![0, 1]
+                matches!(
+                    group.logical_node.asap(),
+                    Some(ASAPOp::SummaryTumblingWindowChain { .. })
+                ) && group.queries == vec![0, 1]
                     && ["job", "region"].iter().all(|name| {
                         group
                             .logical_node
@@ -840,8 +844,10 @@ mod tests {
             .iter()
             .map(|id| &expanded.memo.groups[id.0 as usize])
             .find(|group| {
-                matches!(group.logical_node.asap(), Some(ASAPOp::PaneChain { .. }))
-                    && group.queries == vec![0, 1]
+                matches!(
+                    group.logical_node.asap(),
+                    Some(ASAPOp::SummaryTumblingWindowChain { .. })
+                ) && group.queries == vec![0, 1]
                     && ["job", "region"].iter().all(|name| {
                         group
                             .logical_node
@@ -1001,7 +1007,7 @@ mod tests {
             .candidates
             .iter()
             .flatten()
-            .filter(|candidate| candidate.origin == OriginOfCandidateForMemoGroup::Panes)
+            .filter(|candidate| candidate.origin == OriginOfCandidateForMemoGroup::TumblingWindows)
             .count();
         assert!(local_panes >= 2);
         let expanded = expand(original.clone()).unwrap();
@@ -1011,7 +1017,7 @@ mod tests {
             .filter(|id| {
                 matches!(
                     expanded.memo.groups[id.0 as usize].logical_node.asap(),
-                    Some(ASAPOp::PaneChain { .. })
+                    Some(ASAPOp::SummaryTumblingWindowChain { .. })
                 )
             })
             .collect();
@@ -1042,7 +1048,7 @@ mod tests {
         ));
     }
 
-    // A finer grid and longer horizon serves a shorter reader through newest_panes.
+    // A finer grid and longer horizon serves a shorter reader through newest_tumbling_windows.
     #[test]
     fn different_pane_grids_and_horizons_gain_explicit_newest_pane_readers() {
         let original = with_local_panes(
@@ -1059,9 +1065,9 @@ mod tests {
             .find(|id| {
                 matches!(
                     expanded.memo.groups[id.0 as usize].logical_node.asap(),
-                    Some(ASAPOp::PaneChain {
-                        pane_width_ms: 30_000,
-                        pane_count: 30,
+                    Some(ASAPOp::SummaryTumblingWindowChain {
+                        tumbling_window_width_ms: 30_000,
+                        tumbling_window_count: 30,
                         ..
                     })
                 )
@@ -1076,7 +1082,7 @@ mod tests {
                         matches!(
                             node.asap(),
                             Some(ASAPOp::SummaryMerge {
-                                newest_panes: Some(10),
+                                newest_tumbling_windows: Some(10),
                                 ..
                             })
                         )
@@ -1340,8 +1346,8 @@ mod tests {
                         ))
                     && candidate.input_groups.iter().any(|group| matches!(
                         expanded.memo.groups[group.0 as usize].logical_node.asap(),
-                        Some(ASAPOp::PaneChain {
-                            pane_count: 120,
+                        Some(ASAPOp::SummaryTumblingWindowChain {
+                            tumbling_window_count: 120,
                             ..
                         })
                     ))

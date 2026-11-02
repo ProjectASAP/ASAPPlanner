@@ -46,7 +46,7 @@ use asap_types::workload::bounds::{
 /// ([`computations`]); an ingestion-time node over one second of arriving
 /// rows. A materialized node's kept state is counted in byte-seconds per
 /// second; a pane chain kept beyond one evaluation keeps the panes its
-/// retention covers ([`pane_retention_ms`]). `nodes` and `kept_chains` are
+/// retention covers ([`tumbling_window_retention_ms`]). `nodes` and `kept_chains` are
 /// `dag`'s ([`node_map`], [`kept_pane_chains`]); `recurrence[q]` and
 /// `range_evaluations[q]` say how often query `q` runs and how many steps
 /// each run evaluates (one when missing).
@@ -398,7 +398,7 @@ fn each_node_usage<'a>(
     )
     .map_err(|error| (first, error))?;
     let reach = query_reach(dag, nodes);
-    let retention_ms = pane_retention_ms(dag, &reach, range_evaluations);
+    let retention_ms = tumbling_window_retention_ms(dag, &reach, range_evaluations);
     let mut producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
     for e in &dag.edges {
         producers_of.entry(e.consumer).or_default().push(e.producer);
@@ -471,7 +471,7 @@ fn state_family<'a>(
             ASAPOp::SummaryAgg {
                 family, grouping, ..
             }
-            | ASAPOp::PaneChain {
+            | ASAPOp::SummaryTumblingWindowChain {
                 family, grouping, ..
             },
         ) => match family {
@@ -938,11 +938,11 @@ pub fn node_usage<'a>(
                 ),
             )
         }
-        Payload::ASAP(ASAPOp::PaneChain {
+        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
             family,
             reduction,
-            pane_width_ms,
-            pane_count,
+            tumbling_window_width_ms,
+            tumbling_window_count,
             ..
         }) => {
             // Each input row is kept by the one pane its time falls in,
@@ -950,7 +950,7 @@ pub fn node_usage<'a>(
             // that pane.
             let group_count = groups(reduction)?;
             let states = group_count
-                .checked_mul(u64::from(*pane_count))
+                .checked_mul(u64::from(*tumbling_window_count))
                 .ok_or(AnalyticalCostError::Overflow)?;
             // Each pane's state sees its group's rows in one pane: of
             // one second's rows at ingestion time, of the rows read at
@@ -959,11 +959,14 @@ pub fn node_usage<'a>(
             // the only one it builds).
             let rows_per_pane = match (ingestion, node.materialization) {
                 (true, _) => u64::try_from(
-                    (u128::from(input.rows) * u128::from(*pane_width_ms)).div_ceil(1_000),
+                    (u128::from(input.rows) * u128::from(*tumbling_window_width_ms))
+                        .div_ceil(1_000),
                 )
                 .map_err(|_| AnalyticalCostError::Overflow)?,
                 (false, Materialization::MatAtQueryKeptAcrossEvaluations(_)) => input.rows,
-                (false, _) => input.rows.div_ceil(u64::from(*pane_count).max(1)),
+                (false, _) => input
+                    .rows
+                    .div_ceil(u64::from(*tumbling_window_count).max(1)),
             };
             let input_rows = StateInputRows {
                 rows_per_state: Some(rows_per_pane.div_ceil(group_count.max(1))),
@@ -985,7 +988,7 @@ pub fn node_usage<'a>(
                     0,
                 )),
                 format!(
-                    "build {} in {pane_count} panes of {pane_width_ms} ms for \
+                    "build {} in {tumbling_window_count} panes of {tumbling_window_width_ms} ms for \
                      {group_count} groups: {} rows x (1 + depth {depth})",
                     family_name(family),
                     input.rows
@@ -993,7 +996,7 @@ pub fn node_usage<'a>(
             )
         }
         Payload::ASAP(ASAPOp::SummaryMerge {
-            newest_panes,
+            newest_tumbling_windows,
             group_by,
             ..
         }) => {
@@ -1005,12 +1008,15 @@ pub fn node_usage<'a>(
             let mut group_count = 0;
             for producer in producers {
                 let panes = match producer.payload {
-                    Payload::ASAP(ASAPOp::PaneChain { pane_count, .. }) => u64::from(*pane_count),
+                    Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                        tumbling_window_count,
+                        ..
+                    }) => u64::from(*tumbling_window_count),
                     _ => 1,
                 };
                 group_count = group_count.max(producer.output.rows / panes.max(1));
             }
-            let states = merged_states(*newest_panes, producers)?;
+            let states = merged_states(*newest_tumbling_windows, producers)?;
             if let Some(keys) = group_by {
                 group_count = group_count.min(groups(&Reduction::by(keys.clone()))?);
             }
@@ -1065,9 +1071,10 @@ pub fn node_usage<'a>(
     // reads, otherwise the rows of its (first) input.
     let units = match &node.payload {
         Payload::NonASAP(NonASAPOp::Scan { .. }) => out.rows,
-        Payload::ASAP(ASAPOp::SummaryMerge { newest_panes, .. }) => {
-            merged_states(*newest_panes, producers)?
-        }
+        Payload::ASAP(ASAPOp::SummaryMerge {
+            newest_tumbling_windows,
+            ..
+        }) => merged_states(*newest_tumbling_windows, producers)?,
         _ => input.rows,
     };
     let mut detail = detail;
@@ -1133,7 +1140,7 @@ pub fn node_usage<'a>(
             (0, Medium::Memory)
         }
         // A pane chain kept across evaluations holds the panes its
-        // retention covers ([`pane_retention_ms`]: N, plus one per pane
+        // retention covers ([`tumbling_window_retention_ms`]: N, plus one per pane
         // width of the readers' range-evaluation span), all but the
         // newest between evaluations and all while one runs.
         (Materialization::MatAtQueryKeptAcrossEvaluations(medium), _) => {
@@ -1172,7 +1179,10 @@ pub fn node_usage<'a>(
             (0, medium)
         }
         // The retained panes and the one being built.
-        (Materialization::MatAtIngestion(medium), Payload::ASAP(ASAPOp::PaneChain { .. })) => {
+        (
+            Materialization::MatAtIngestion(medium),
+            Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
+        ) => {
             let panes = panes_of(node);
             (
                 (state / panes)
@@ -1376,12 +1386,12 @@ fn ingest_workers(
 /// from the newest evaluation its completed panes must be kept, in
 /// milliseconds: how long before the evaluation its newest pane ends (the
 /// offset of its input, `chain_input_offset_ms`), plus its window
-/// `pane_count · pane_width_ms`, plus the longest
+/// `tumbling_window_count · tumbling_window_width_ms`, plus the longest
 /// `span_ms` ([`RangeEvaluation`]) among the queries reaching it,
 /// whose earliest step reads that much further back. `reach` is
 /// [`query_reach`] of `dag`; `range_evaluations[q]` is query `q`'s (none
 /// when missing). Without range evaluations, each chain's window.
-pub fn pane_retention_ms(
+pub fn tumbling_window_retention_ms(
     dag: &PhysicalASAPDAG,
     reach: &[HashSet<PhysicalASAPNodeId>],
     range_evaluations: &[Option<RangeEvaluation>],
@@ -1391,10 +1401,10 @@ pub fn pane_retention_ms(
         .iter()
         .filter_map(|node| match (&node.payload, node.materialization) {
             (
-                Payload::ASAP(ASAPOp::PaneChain {
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
                     child,
-                    pane_width_ms,
-                    pane_count,
+                    tumbling_window_width_ms,
+                    tumbling_window_count,
                     ..
                 }),
                 Materialization::MatAtIngestion(_)
@@ -1411,7 +1421,9 @@ pub fn pane_retention_ms(
                 let end_offset_ms = chain_input_offset_ms(*child, &nodes);
                 Some((
                     node.id,
-                    end_offset_ms + pane_width_ms * u64::from(*pane_count) + span_ms,
+                    end_offset_ms
+                        + tumbling_window_width_ms * u64::from(*tumbling_window_count)
+                        + span_ms,
                 ))
             }
             _ => None,
@@ -1441,46 +1453,54 @@ fn chain_input_offset_ms(
 }
 
 /// The pane retention of every kept pane chain of `dag`
-/// ([`pane_retention_ms`] over [`query_reach`]), for a plan whose query
+/// ([`tumbling_window_retention_ms`] over [`query_reach`]), for a plan whose query
 /// `q` has range evaluation `range_evaluations[q]` (none when missing):
 /// what Stage 2's realizer records for a realized plan.
 pub fn pane_retention_ms_of_plan(
     dag: &PhysicalASAPDAG,
     range_evaluations: &[Option<RangeEvaluation>],
 ) -> BTreeMap<PhysicalASAPNodeId, u64> {
-    pane_retention_ms(dag, &query_reach(dag, &node_map(dag)), range_evaluations)
+    tumbling_window_retention_ms(dag, &query_reach(dag, &node_map(dag)), range_evaluations)
 }
 
 /// The input states a `SummaryMerge` over `producers` reads: every row of
-/// each, or of the one pane chain whose newest `newest_panes` it merges,
+/// each, or of the one pane chain whose newest `newest_tumbling_windows` it merges,
 /// that many panes' states per group.
 fn merged_states(
-    newest_panes: Option<u32>,
+    newest_tumbling_windows: Option<u32>,
     producers: &[ProducerOutput<'_>],
 ) -> Result<u64, AnalyticalCostError> {
     producers.iter().try_fold(0_u64, |total, producer| {
-        let rows = match (newest_panes, producer.payload) {
-            (Some(count), Payload::ASAP(ASAPOp::PaneChain { pane_count, .. })) => {
-                (producer.output.rows / u64::from(*pane_count).max(1))
-                    .checked_mul(u64::from(count))
-                    .ok_or(AnalyticalCostError::Overflow)?
-            }
+        let rows = match (newest_tumbling_windows, producer.payload) {
+            (
+                Some(count),
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_count,
+                    ..
+                }),
+            ) => (producer.output.rows / u64::from(*tumbling_window_count).max(1))
+                .checked_mul(u64::from(count))
+                .ok_or(AnalyticalCostError::Overflow)?,
             _ => producer.output.rows,
         };
         total.checked_add(rows).ok_or(AnalyticalCostError::Overflow)
     })
 }
 
-/// The panes a chain in `retention_ms` ([`pane_retention_ms`]) keeps
+/// The panes a chain in `retention_ms` ([`tumbling_window_retention_ms`]) keeps
 /// completed: its retention over its pane width, at least its pane count.
 fn retained_panes(
     node: &asap_types::ir::physical_export::PhysicalASAPDAGNode,
     retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
 ) -> u64 {
     match (&node.payload, retention_ms.get(&node.id)) {
-        (Payload::ASAP(ASAPOp::PaneChain { pane_width_ms, .. }), Some(&retention)) => {
-            (retention / pane_width_ms.max(&1)).max(panes_of(node))
-        }
+        (
+            Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                ..
+            }),
+            Some(&retention),
+        ) => (retention / tumbling_window_width_ms.max(&1)).max(panes_of(node)),
         _ => panes_of(node),
     }
 }
@@ -1488,7 +1508,10 @@ fn retained_panes(
 /// A node's panes: a pane chain's count, 1 for any other node.
 pub fn panes_of(node: &asap_types::ir::physical_export::PhysicalASAPDAGNode) -> u64 {
     match &node.payload {
-        Payload::ASAP(ASAPOp::PaneChain { pane_count, .. }) => u64::from(*pane_count).max(1),
+        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            tumbling_window_count,
+            ..
+        }) => u64::from(*tumbling_window_count).max(1),
         _ => 1,
     }
 }
@@ -1529,11 +1552,13 @@ fn maintained_window_ms(
     producers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
 ) -> Option<u64> {
     match &nodes[&node].payload {
-        Payload::ASAP(ASAPOp::PaneChain {
-            pane_width_ms,
-            pane_count,
+        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            tumbling_window_width_ms,
+            tumbling_window_count,
             ..
-        }) => return Some(pane_width_ms.saturating_mul(u64::from(*pane_count))),
+        }) => {
+            return Some(tumbling_window_width_ms.saturating_mul(u64::from(*tumbling_window_count)))
+        }
         Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
             return Some(range.as_millis() as u64)
         }
@@ -1582,7 +1607,7 @@ pub fn kept_pane_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASAPNodeId> {
             matches!(
                 (&node.payload, node.materialization),
                 (
-                    Payload::ASAP(ASAPOp::PaneChain { .. }),
+                    Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
                     Materialization::MatAtQueryKeptAcrossEvaluations(_),
                 )
             )
@@ -1593,7 +1618,7 @@ pub fn kept_pane_chains(dag: &PhysicalASAPDAG) -> HashSet<PhysicalASAPNodeId> {
 
 /// The widest window, in milliseconds, read above the scan `scan` at query
 /// time, ignoring readers that read it outside a window and the anchors of
-/// shifts: each range `TimeRange` and `PaneChain` (its whole window, or
+/// shifts: each range `TimeRange` and `SummaryTumblingWindowChain` (its whole window, or
 /// one pane for a chain in `kept_chains`) reached through time shifts.
 /// Prices a scan whose [`PhysicalASAPDAG::scan_window`] is unbounded as
 /// Stage 3 did before; #955 decides `@` anchors.
@@ -1613,16 +1638,15 @@ fn widest_window_read_ms(
         for edge in dag.edges.iter().filter(|e| e.producer == id) {
             let width_ms = match &nodes[&edge.consumer].payload {
                 Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) => range.as_millis() as u64,
-                Payload::ASAP(ASAPOp::PaneChain { pane_width_ms, .. })
-                    if kept_chains.contains(&edge.consumer) =>
-                {
-                    *pane_width_ms
-                }
-                Payload::ASAP(ASAPOp::PaneChain {
-                    pane_width_ms,
-                    pane_count,
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_width_ms,
                     ..
-                }) => pane_width_ms.saturating_mul(u64::from(*pane_count)),
+                }) if kept_chains.contains(&edge.consumer) => *tumbling_window_width_ms,
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_width_ms,
+                    tumbling_window_count,
+                    ..
+                }) => tumbling_window_width_ms.saturating_mul(u64::from(*tumbling_window_count)),
                 Payload::NonASAP(NonASAPOp::TimeShift { .. }) => {
                     stack.push(edge.consumer);
                     continue;

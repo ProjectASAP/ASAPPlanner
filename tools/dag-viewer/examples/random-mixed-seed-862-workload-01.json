@@ -3347,7 +3347,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -3366,8 +3366,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 30,
-                    "pane_width_ms": 20000,
+                    "tumbling_window_count": 30,
+                    "tumbling_window_width_ms": 20000,
                     "reduction": {
                       "Reduce": [
                         2,
@@ -3870,7 +3870,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -3897,8 +3897,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 100,
-                    "pane_width_ms": 1000,
+                    "tumbling_window_count": 100,
+                    "tumbling_window_width_ms": 1000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -7347,7 +7347,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 37,
                     "family": {
                       "ExactAggregate": [
@@ -7366,8 +7366,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 60,
-                    "pane_width_ms": 1000,
+                    "tumbling_window_count": 60,
+                    "tumbling_window_width_ms": 1000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -7812,7 +7812,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 42,
                     "family": {
                       "ExactAggregate": [
@@ -7831,8 +7831,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 40,
-                    "pane_width_ms": 30000,
+                    "tumbling_window_count": 40,
+                    "tumbling_window_width_ms": 30000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -8277,7 +8277,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 47,
                     "family": {
                       "ExactAggregate": [
@@ -8296,8 +8296,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 30,
-                    "pane_width_ms": 20000,
+                    "tumbling_window_count": 30,
+                    "tumbling_window_width_ms": 20000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -8726,7 +8726,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 52,
                     "family": {
                       "ExactAggregate": [
@@ -8745,8 +8745,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 40,
-                    "pane_width_ms": 30000,
+                    "tumbling_window_count": 40,
+                    "tumbling_window_width_ms": 30000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -9044,7 +9044,7 @@
             }
           ]
         },
-        "display_name": "Q1 exact (nested Sum acc) · Q2 exact (nested Sum acc) · Q3 DDSketch (Sum/Count acc) · Q4 DDSketch (Sum/Count acc) · Q5 DDSketch (Sum/Count acc) · Q6 exact (Sum acc) · Q7 exact (Sum acc) · Q8 exact (Increase acc) · Q9 exact (Rate acc) · one DDSketch · Sum acc for Q1, Q2 in 30 × 20s panes, DDSketch for Q3, Q4, Q5 in 100 × 1s panes, Sum acc for Q6 in 60 × 1s panes, Sum acc for Q7 in 40 × 30s panes, Increase acc for Q8 in 30 × 20s panes, Rate acc for Q9 in 40 × 30s panes · Sum acc rolled up · shared PaneChain (Q3, Q4, Q5), SummaryMerge (Q3, Q4, Q5)",
+        "display_name": "Q1 exact (nested Sum acc) · Q2 exact (nested Sum acc) · Q3 DDSketch (Sum/Count acc) · Q4 DDSketch (Sum/Count acc) · Q5 DDSketch (Sum/Count acc) · Q6 exact (Sum acc) · Q7 exact (Sum acc) · Q8 exact (Increase acc) · Q9 exact (Rate acc) · one DDSketch · Sum acc for Q1, Q2 in 30 × 20s panes, DDSketch for Q3, Q4, Q5 in 100 × 1s panes, Sum acc for Q6 in 60 × 1s panes, Sum acc for Q7 in 40 × 30s panes, Increase acc for Q8 in 30 × 20s panes, Rate acc for Q9 in 40 × 30s panes · Sum acc rolled up · shared SummaryTumblingWindowChain (Q3, Q4, Q5), SummaryMerge (Q3, Q4, Q5)",
         "id": "L315"
       }
     ],
@@ -13070,7 +13070,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -13089,8 +13089,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 30,
-                    "pane_width_ms": 20000,
+                    "tumbling_window_count": 30,
+                    "tumbling_window_width_ms": 20000,
                     "reduction": {
                       "Reduce": [
                         2,
@@ -13638,7 +13638,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -13665,8 +13665,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 100,
-                    "pane_width_ms": 1000,
+                    "tumbling_window_count": 100,
+                    "tumbling_window_width_ms": 1000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -17196,7 +17196,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 37,
                     "family": {
                       "ExactAggregate": [
@@ -17215,8 +17215,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 60,
-                    "pane_width_ms": 1000,
+                    "tumbling_window_count": 60,
+                    "tumbling_window_width_ms": 1000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -17877,7 +17877,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 44,
                     "family": {
                       "ExactAggregate": [
@@ -17896,8 +17896,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 40,
-                    "pane_width_ms": 30000,
+                    "tumbling_window_count": 40,
+                    "tumbling_window_width_ms": 30000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -18558,7 +18558,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 51,
                     "family": {
                       "ExactAggregate": [
@@ -18577,8 +18577,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 30,
-                    "pane_width_ms": 20000,
+                    "tumbling_window_count": 30,
+                    "tumbling_window_width_ms": 20000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -19215,7 +19215,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 58,
                     "family": {
                       "ExactAggregate": [
@@ -19234,8 +19234,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 40,
-                    "pane_width_ms": 30000,
+                    "tumbling_window_count": 40,
+                    "tumbling_window_width_ms": 30000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -19653,7 +19653,7 @@
           ],
           "scalar_roots": []
         },
-        "display_name": "Q1 exact (nested Sum acc) · Q2 exact (nested Sum acc) · Q3 DDSketch (Sum/Count acc) · Q4 DDSketch (Sum/Count acc) · Q5 DDSketch (Sum/Count acc) · Q6 exact (Sum acc) · Q7 exact (Sum acc) · Q8 exact (Increase acc) · Q9 exact (Rate acc) · one DDSketch · Sum acc for Q1, Q2 in 30 × 20s panes, DDSketch for Q3, Q4, Q5 in 100 × 1s panes, Sum acc for Q6 in 60 × 1s panes, Sum acc for Q7 in 40 × 30s panes, Increase acc for Q8 in 30 × 20s panes, Rate acc for Q9 in 40 × 30s panes · Sum acc rolled up · shared PaneChain (Q3, Q4, Q5), SummaryMerge (Q3, Q4, Q5) · ingestion time: Sum acc ×30 panes, DDSketch ×100 panes, Sum acc ×60 panes, Sum acc ×40 panes, Increase acc ×30 panes, Rate acc ×40 panes · query time, shared: FinalizeExactAccumulator, SummaryMerge",
+        "display_name": "Q1 exact (nested Sum acc) · Q2 exact (nested Sum acc) · Q3 DDSketch (Sum/Count acc) · Q4 DDSketch (Sum/Count acc) · Q5 DDSketch (Sum/Count acc) · Q6 exact (Sum acc) · Q7 exact (Sum acc) · Q8 exact (Increase acc) · Q9 exact (Rate acc) · one DDSketch · Sum acc for Q1, Q2 in 30 × 20s panes, DDSketch for Q3, Q4, Q5 in 100 × 1s panes, Sum acc for Q6 in 60 × 1s panes, Sum acc for Q7 in 40 × 30s panes, Increase acc for Q8 in 30 × 20s panes, Rate acc for Q9 in 40 × 30s panes · Sum acc rolled up · shared SummaryTumblingWindowChain (Q3, Q4, Q5), SummaryMerge (Q3, Q4, Q5) · ingestion time: Sum acc ×30 panes, DDSketch ×100 panes, Sum acc ×60 panes, Sum acc ×40 panes, Increase acc ×30 panes, Rate acc ×40 panes · query time, shared: FinalizeExactAccumulator, SummaryMerge",
         "from_logical": "L315",
         "id": "P315-m319"
       }
@@ -19763,7 +19763,7 @@
             "cpu_core_seconds_per_second": 0.00019999999999999998,
             "detail": "build exact Sum accumulator in 30 panes of 20000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 17360000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -20042,7 +20042,7 @@
             "cpu_core_seconds_per_second": 0.00019999999999999998,
             "detail": "build exact Sum accumulator in 60 panes of 1000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 34160000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -20114,7 +20114,7 @@
             "cpu_core_seconds_per_second": 0.00019999999999999998,
             "detail": "build exact Sum accumulator in 40 panes of 30000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 22960000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -20186,7 +20186,7 @@
             "cpu_core_seconds_per_second": 0.00019999999999999998,
             "detail": "build exact Increase accumulator in 30 panes of 20000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 17360000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -20249,7 +20249,7 @@
             "cpu_core_seconds_per_second": 0.00019999999999999998,
             "detail": "build exact Rate accumulator in 40 panes of 30000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 22960000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -20312,7 +20312,7 @@
             "cpu_core_seconds_per_second": 0.00019999999999999998,
             "detail": "build DDSketch in 100 panes of 1000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 1179680000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -31787,7 +31787,7 @@
         "stage2_node_id": 59
       }
     ],
-    "pane_retention_ms": {
+    "tumbling_window_retention_ms": {
       "1": 600000,
       "38": 60000,
       "45": 1200000,

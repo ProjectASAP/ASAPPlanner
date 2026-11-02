@@ -343,7 +343,7 @@ fn merge_over_a_stored_pane(
             1,
             Payload::ASAP(ASAPOp::SummaryMerge {
                 children: vec![0],
-                newest_panes: None,
+                newest_tumbling_windows: None,
                 group_by: None,
             }),
             schema,

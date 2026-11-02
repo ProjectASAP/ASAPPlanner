@@ -237,11 +237,16 @@ pub(crate) fn add_window_rollup_candidates(
     for (group, candidates) in memo.candidates.iter().enumerate() {
         check_generation_deadline(deadline)?;
         for candidate in candidates.iter().filter(|candidate| {
-            candidate.origin == OriginOfCandidateForMemoGroup::Panes && eligible(candidate)
+            candidate.origin == OriginOfCandidateForMemoGroup::TumblingWindows
+                && eligible(candidate)
         }) {
             if let Some((build, _)) = simple_build(memo, candidate) {
-                if let Some(ASAPOp::PaneChain { pane_width_ms, .. }) = build.asap() {
-                    grids[group].insert(*pane_width_ms);
+                if let Some(ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_width_ms,
+                    ..
+                }) = build.asap()
+                {
+                    grids[group].insert(*tumbling_window_width_ms);
                 }
             }
         }

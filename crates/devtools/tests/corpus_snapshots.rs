@@ -178,7 +178,7 @@ fn plan_snapshot(document: &Value) -> Map<String, Value> {
         for key in [
             "materialized_views",
             "materialized_views_error",
-            "pane_retention_ms",
+            "tumbling_window_retention_ms",
             "warnings",
         ] {
             if let Some(value) = stage3.get(key) {
@@ -359,7 +359,7 @@ fn snapshot_keeps_only_the_plan() {
             "cost": {"cost_per_second": 0.1 + 0.2},
             "accepted_accuracy_per_query": [],
             "materialized_views": [],
-            "pane_retention_ms": {"1": 60000},
+            "tumbling_window_retention_ms": {"1": 60000},
             "search_report": {"status": "deadline_reached", "solver_ms": 1},
         },
     });
@@ -376,7 +376,7 @@ fn snapshot_keeps_only_the_plan() {
             },
             "proven_optimal": false,
             "materialized_views": [],
-            "pane_retention_ms": {"1": 60000},
+            "tumbling_window_retention_ms": {"1": 60000},
         })
     );
 }

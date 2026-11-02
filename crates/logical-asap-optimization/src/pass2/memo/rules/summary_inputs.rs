@@ -43,7 +43,7 @@ pub(crate) fn factor_summary_inputs(
             }
             if matches!(
                 node.asap(),
-                Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+                Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
             ) {
                 for child in node.children() {
                     check_generation_deadline(deadline)?;

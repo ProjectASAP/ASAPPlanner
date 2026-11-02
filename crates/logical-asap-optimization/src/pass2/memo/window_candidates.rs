@@ -214,7 +214,7 @@ fn local_pane_candidates_delta(
                             GroupId(g as u32),
                             candidate,
                             node,
-                            OriginOfCandidateForMemoGroup::Panes,
+                            OriginOfCandidateForMemoGroup::TumblingWindows,
                         ),
                     ));
                 }
@@ -437,9 +437,9 @@ mod tests {
         let (memo, entries) = fixture(&[repeated(60_000), QueryRecurrence::Unknown]);
         let candidates = local_pane_candidates(&memo, &entries);
         assert!(!candidates.is_empty());
-        assert!(candidates
-            .iter()
-            .all(|(_, candidate)| candidate.origin == OriginOfCandidateForMemoGroup::Panes));
+        assert!(candidates.iter().all(
+            |(_, candidate)| candidate.origin == OriginOfCandidateForMemoGroup::TumblingWindows
+        ));
     }
 
     // Individual grids and subset GCDs allow separate or shared physical choices.

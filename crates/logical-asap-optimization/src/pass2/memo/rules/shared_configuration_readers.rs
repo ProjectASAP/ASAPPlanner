@@ -154,12 +154,16 @@ impl SharedProducer for SummaryStates {
                     continue;
                 }
                 let family = match build.asap() {
-                    Some(ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. }) => {
-                        family.clone()
-                    }
+                    Some(
+                        ASAPOp::SummaryAgg { family, .. }
+                        | ASAPOp::SummaryTumblingWindowChain { family, .. },
+                    ) => family.clone(),
                     _ => unreachable!(),
                 };
-                let merge = if matches!(build.asap(), Some(ASAPOp::PaneChain { .. })) {
+                let merge = if matches!(
+                    build.asap(),
+                    Some(ASAPOp::SummaryTumblingWindowChain { .. })
+                ) {
                     let merges: Vec<_> = OperatorNode::reachable(&entry.root_node).into_iter().filter(|node| {
                         matches!(node.asap(), Some(ASAPOp::SummaryMerge {children, group_by: None, ..})
                             if children.len() == 1 && Rc::ptr_eq(&children[0], &build))
@@ -288,9 +292,9 @@ impl SharedProducer for SummaryStates {
                 configuration,
                 ..
             } => {
-                let Ok(count) =
-                    u32::try_from(configuration.longest_window_ms / configuration.pane_width_ms)
-                else {
+                let Ok(count) = u32::try_from(
+                    configuration.longest_window_ms / configuration.tumbling_window_width_ms,
+                ) else {
                     return Ok(0);
                 };
                 if self.deduplicate_requests
@@ -305,7 +309,7 @@ impl SharedProducer for SummaryStates {
                     &roots,
                     need.merge.as_ref().unwrap(),
                     configuration.family.clone(),
-                    configuration.pane_width_ms,
+                    configuration.tumbling_window_width_ms,
                     count,
                 )
             }
@@ -428,20 +432,26 @@ fn graph_signature(node: &Rc<OperatorNode>) -> Result<String, StateGroupExpansio
 }
 
 fn pane_requirement(reader: &StateNeed) -> Option<PaneRequirement> {
-    let ASAPOp::PaneChain {
-        pane_width_ms,
-        pane_count,
+    let ASAPOp::SummaryTumblingWindowChain {
+        tumbling_window_width_ms,
+        tumbling_window_count,
         ..
     } = reader.build.asap()?
     else {
         return None;
     };
-    let ASAPOp::SummaryMerge { newest_panes, .. } = reader.merge.as_ref()?.asap()? else {
+    let ASAPOp::SummaryMerge {
+        newest_tumbling_windows,
+        ..
+    } = reader.merge.as_ref()?.asap()?
+    else {
         return None;
     };
     Some(PaneRequirement {
-        pane_width_ms: *pane_width_ms,
-        window_ms: pane_width_ms.checked_mul(u64::from(newest_panes.unwrap_or(*pane_count)))?,
+        tumbling_window_width_ms: *tumbling_window_width_ms,
+        window_ms: tumbling_window_width_ms.checked_mul(u64::from(
+            newest_tumbling_windows.unwrap_or(*tumbling_window_count),
+        ))?,
         family: reader.family.clone(),
     })
 }
@@ -487,15 +497,15 @@ fn compatible(left: &StateNeed, right: &StateNeed) -> bool {
         let mut operator = reader.build.operator.map_children(|_| ());
         match &mut operator {
             Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) => *family = left.family.clone(),
-            Operator::ASAP(ASAPOp::PaneChain {
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 family,
-                pane_width_ms,
-                pane_count,
+                tumbling_window_width_ms,
+                tumbling_window_count,
                 ..
             }) => {
                 *family = left.family.clone();
-                *pane_width_ms = 1;
-                *pane_count = 1;
+                *tumbling_window_width_ms = 1;
+                *tumbling_window_count = 1;
             }
             _ => unreachable!(),
         }
@@ -582,7 +592,10 @@ mod tests {
             .flatten()
             .flat_map(|candidate| OperatorNode::reachable(&candidate.root_node))
             .filter_map(|node| match node.asap() {
-                Some(ASAPOp::PaneChain { pane_width_ms, .. }) => Some(*pane_width_ms),
+                Some(ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_width_ms,
+                    ..
+                }) => Some(*tumbling_window_width_ms),
                 _ => None,
             })
             .collect();
@@ -599,7 +612,7 @@ mod tests {
                         family: FieldDataType::Sketch(kind, _),
                         ..
                     }
-                    | ASAPOp::PaneChain {
+                    | ASAPOp::SummaryTumblingWindowChain {
                         family: FieldDataType::Sketch(kind, _),
                         ..
                     },

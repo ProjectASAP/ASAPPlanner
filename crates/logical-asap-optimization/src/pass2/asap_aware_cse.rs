@@ -27,7 +27,7 @@
 //! merge (IRate) has no pane candidate.
 //! [`window_composition_pass2_candidates`] returns one Pass 2 candidate per
 //! non-empty subset of the pane candidates: the build of each in the subset
-//! becomes a `SummaryMerge` over one [`ASAPOp::PaneChain`] of `W / w` panes,
+//! becomes a `SummaryMerge` over one [`ASAPOp::SummaryTumblingWindowChain`] of `W / w` panes,
 //! a compact node whatever the pane count, with the build's family and
 //! size (a mergeable family's merged state has one build's guarantee), and
 //! every guarantee above is composed again. Nothing is materialized here:
@@ -46,7 +46,7 @@
 //! merges of finer panes. Queries repeating at different intervals read the
 //! same panes, each at its own cadence. Every window ends at the evaluation
 //! time, so each shorter one is the chain's newest panes: its
-//! `SummaryMerge` merges only those (`newest_panes`), and has the guarantee
+//! `SummaryMerge` merges only those (`newest_tumbling_windows`), and has the guarantee
 //! of one build over its own window. A build grouped by fewer keys also
 //! reads the chain of a finer grouping over a window at least its own
 //! ([`rollup_window_groups`]): it merges its newest panes, then rolls the
@@ -226,7 +226,7 @@ pub fn with_union_scan_labels(
             }
             // A grouped or filtered pane chain over a `Project` would hide
             // its window from plan selection.
-            _ if matches!(node.asap(), Some(ASAPOp::PaneChain { .. })) => {
+            _ if matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })) => {
                 return Ok(None);
             }
             _ => {
@@ -292,7 +292,7 @@ fn passes_labels_on(node: &OperatorNode) -> bool {
                 reduction: Reduction::PerEntity,
                 filter: None,
                 ..
-            } | ASAPOp::PaneChain {
+            } | ASAPOp::SummaryTumblingWindowChain {
                 reduction: Reduction::PerEntity,
                 filter: None,
                 ..
@@ -433,7 +433,7 @@ fn sized_for_all(
 /// panes: a `SummaryAgg` over a range `TimeRange(W)` whose family merges
 /// (the family-capability table: exact accumulators included, and families
 /// whose merged readouts are only approximate), read only by queries that
-/// repeat at a fixed interval. Its panes are `pane_count = W / w` back-to-back
+/// repeat at a fixed interval. Its panes are `tumbling_window_count = W / w` back-to-back
 /// windows of `w = gcd(W, E)` over the queries' intervals `E` (and, for a
 /// query with a range evaluation, its step), at least two.
 #[derive(Debug, Clone)]
@@ -441,15 +441,15 @@ pub struct PaneCandidate {
     /// The `SummaryAgg` over `TimeRange(W)` built as panes.
     pub build: Rc<OperatorNode>,
     /// The width `w` of one pane.
-    pub pane_width_ms: u64,
+    pub tumbling_window_width_ms: u64,
     /// The number of panes, `W / w`, at least two.
-    pub pane_count: u32,
+    pub tumbling_window_count: u32,
 }
 
 impl PaneCandidate {
-    /// The window `W` its panes cover, `pane_width_ms · pane_count`.
+    /// The window `W` its panes cover, `tumbling_window_width_ms · tumbling_window_count`.
     pub fn window_ms(&self) -> u64 {
-        self.pane_width_ms * u64::from(self.pane_count)
+        self.tumbling_window_width_ms * u64::from(self.tumbling_window_count)
     }
 }
 
@@ -472,17 +472,17 @@ pub struct WindowCompositionPass2Candidate {
 }
 
 /// One pane chain several pane candidates read (window-composition rule):
-/// panes of `pane_width_ms`, a width that divides every member's own pane
-/// width, and `pane_count` of them, covering the longest member's window.
-/// Each member merges the newest `W / pane_width_ms` panes of its window `W`.
+/// panes of `tumbling_window_width_ms`, a width that divides every member's own pane
+/// width, and `tumbling_window_count` of them, covering the longest member's window.
+/// Each member merges the newest `W / tumbling_window_width_ms` panes of its window `W`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedPaneChain {
     /// Positions in the Pass 2 candidate's `pane_candidates`, two or more.
     pub members: Vec<usize>,
     /// The width of one pane of the shared chain.
-    pub pane_width_ms: u64,
+    pub tumbling_window_width_ms: u64,
     /// The number of panes of the shared chain.
-    pub pane_count: u32,
+    pub tumbling_window_count: u32,
 }
 
 /// The most pane candidates one candidate may have: every non-empty subset
@@ -531,11 +531,11 @@ pub fn pane_candidates(
                     evaluation_grid_ms.get(q).copied().flatten()?,
                 );
             }
-            let pane_count = u32::try_from(window_ms / width).ok()?;
-            (!readers.is_empty() && pane_count >= 1).then_some(PaneCandidate {
+            let tumbling_window_count = u32::try_from(window_ms / width).ok()?;
+            (!readers.is_empty() && tumbling_window_count >= 1).then_some(PaneCandidate {
                 build,
-                pane_width_ms: width,
-                pane_count,
+                tumbling_window_width_ms: width,
+                tumbling_window_count,
             })
         })
         .collect()
@@ -581,7 +581,7 @@ fn pane_window_ms(build: &OperatorNode) -> Option<u64> {
 /// with query roots `roots` and pane candidates `candidates`
 /// ([`pane_candidates`]): one per non-empty subset of them, in
 /// binary-counter order (the first candidate the lowest bit). Each build in
-/// the subset becomes a `SummaryMerge` over one [`ASAPOp::PaneChain`] of
+/// the subset becomes a `SummaryMerge` over one [`ASAPOp::SummaryTumblingWindowChain`] of
 /// its panes; every other build is untouched. A subset whose builds can
 /// share chains is followed by one Pass 2 candidate per shared grid, in
 /// which each group reads one shared chain, each member merging its newest
@@ -717,19 +717,28 @@ fn gcd_window_groups(candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
     groups
         .into_iter()
         .filter_map(|members| {
-            let panes = |i: usize| (candidates[i].pane_width_ms, candidates[i].pane_count);
+            let panes = |i: usize| {
+                (
+                    candidates[i].tumbling_window_width_ms,
+                    candidates[i].tumbling_window_count,
+                )
+            };
             if members.iter().all(|&i| panes(i) == panes(members[0])) {
                 return None;
             }
-            let pane_width_ms = members.iter().fold(0, |width, &i| {
-                asap_types::workload::greatest_common_divisor(width, candidates[i].pane_width_ms)
+            let tumbling_window_width_ms = members.iter().fold(0, |width, &i| {
+                asap_types::workload::greatest_common_divisor(
+                    width,
+                    candidates[i].tumbling_window_width_ms,
+                )
             });
             let longest = longest(candidates, &members);
-            let pane_count = u32::try_from(candidates[longest].window_ms() / pane_width_ms).ok()?;
+            let tumbling_window_count =
+                u32::try_from(candidates[longest].window_ms() / tumbling_window_width_ms).ok()?;
             Some(SharedPaneChain {
                 members,
-                pane_width_ms,
-                pane_count,
+                tumbling_window_width_ms,
+                tumbling_window_count,
             })
         })
         .collect()
@@ -754,13 +763,15 @@ fn nested_window_groups(candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
     // whose (finest) pane width divides its own, so a build whose panes no
     // group's divide starts its own group instead of breaking another.
     let mut by_width: Vec<usize> = (0..candidates.len()).collect();
-    by_width.sort_by_key(|&i| candidates[i].pane_width_ms);
+    by_width.sort_by_key(|&i| candidates[i].tumbling_window_width_ms);
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for i in by_width {
         let candidate = &candidates[i];
         match groups.iter_mut().find(|group| {
             let finest = &candidates[group[0]];
-            candidate.pane_width_ms.is_multiple_of(finest.pane_width_ms)
+            candidate
+                .tumbling_window_width_ms
+                .is_multiple_of(finest.tumbling_window_width_ms)
                 && same_build_over_one_input(finest, candidate)
         }) {
             Some(group) => group.push(i),
@@ -770,18 +781,24 @@ fn nested_window_groups(candidates: &[PaneCandidate]) -> Vec<SharedPaneChain> {
     let mut shared = groups
         .into_iter()
         .filter_map(|mut members| {
-            let panes = |i: usize| (candidates[i].pane_width_ms, candidates[i].pane_count);
+            let panes = |i: usize| {
+                (
+                    candidates[i].tumbling_window_width_ms,
+                    candidates[i].tumbling_window_count,
+                )
+            };
             if members.iter().all(|&i| panes(i) == panes(members[0])) {
                 return None;
             }
-            let pane_width_ms = candidates[members[0]].pane_width_ms;
+            let tumbling_window_width_ms = candidates[members[0]].tumbling_window_width_ms;
             let longest = longest(candidates, &members);
-            let pane_count = u32::try_from(candidates[longest].window_ms() / pane_width_ms).ok()?;
+            let tumbling_window_count =
+                u32::try_from(candidates[longest].window_ms() / tumbling_window_width_ms).ok()?;
             members.sort_unstable();
             Some(SharedPaneChain {
                 members,
-                pane_width_ms,
-                pane_count,
+                tumbling_window_width_ms,
+                tumbling_window_count,
             })
         })
         .collect::<Vec<_>>();
@@ -862,7 +879,9 @@ fn rollup_window_groups(candidates: &[PaneCandidate], rollable: &[bool]) -> Vec<
             i == host
                 || (!grouped[i]
                     && member.window_ms() <= chain.window_ms()
-                    && member.pane_width_ms.is_multiple_of(chain.pane_width_ms)
+                    && member
+                        .tumbling_window_width_ms
+                        .is_multiple_of(chain.tumbling_window_width_ms)
                     && rolls_up_into(member, chain)
                     && (!coarser(i) || rollable[i]))
         };
@@ -875,8 +894,8 @@ fn rollup_window_groups(candidates: &[PaneCandidate], rollable: &[bool]) -> Vec<
         }
         groups.push(SharedPaneChain {
             members,
-            pane_width_ms: candidates[host].pane_width_ms,
-            pane_count: candidates[host].pane_count,
+            tumbling_window_width_ms: candidates[host].tumbling_window_width_ms,
+            tumbling_window_count: candidates[host].tumbling_window_count,
         });
     }
     groups.sort_by_key(|group| group.members[0]);
@@ -1027,15 +1046,15 @@ fn in_panes(
     for (shared, build) in shared_chains {
         let chain = pane_chain(&PaneCandidate {
             build: Rc::clone(build),
-            pane_width_ms: shared.pane_width_ms,
-            pane_count: shared.pane_count,
+            tumbling_window_width_ms: shared.tumbling_window_width_ms,
+            tumbling_window_count: shared.tumbling_window_count,
         })?;
         for &i in &shared.members {
-            let newest = u32::try_from(candidates[i].window_ms() / shared.pane_width_ms)
+            let newest = u32::try_from(candidates[i].window_ms() / shared.tumbling_window_width_ms)
                 .expect("a member's window is at most the chain's");
             let merge = Rc::new(OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
                 children: vec![Rc::clone(&chain)],
-                newest_panes: (newest < shared.pane_count).then_some(newest),
+                newest_tumbling_windows: (newest < shared.tumbling_window_count).then_some(newest),
                 group_by: None,
             }))?);
             // A coarser member rolls the chain's groups up into its own.
@@ -1057,7 +1076,7 @@ fn in_panes(
             entry.insert(Rc::new(OperatorNode::new(Operator::ASAP(
                 ASAPOp::SummaryMerge {
                     children: vec![pane_chain(candidate)?],
-                    newest_panes: None,
+                    newest_tumbling_windows: None,
                     group_by: None,
                 },
             ))?));
@@ -1084,37 +1103,37 @@ fn in_panes(
     Ok(recompose_guarantees(&out)?)
 }
 
-/// `roots` with the `SummaryMerge` `merge` (over one [`ASAPOp::PaneChain`]
+/// `roots` with the `SummaryMerge` `merge` (over one [`ASAPOp::SummaryTumblingWindowChain`]
 /// of `roots`) reading the newest panes of another chain over the same
-/// input: `pane_count` panes of `pane_width_ms` of family `family` (a size
+/// input: `tumbling_window_count` panes of `tumbling_window_width_ms` of family `family` (a size
 /// that serves every reader of the chain). The merge reads the newest
 /// panes covering its own window (its newest panes, or its whole chain),
-/// which `pane_width_ms` divides and the new chain covers; every guarantee
+/// which `tumbling_window_width_ms` divides and the new chain covers; every guarantee
 /// is composed again.
 pub(crate) fn with_pane_chain(
     roots: &[QueryRoot],
     merge: &Rc<OperatorNode>,
     family: FieldDataType,
-    pane_width_ms: u64,
-    pane_count: u32,
+    tumbling_window_width_ms: u64,
+    tumbling_window_count: u32,
 ) -> Result<Vec<QueryRoot>, PerComputationCandidateError> {
     let Some(ASAPOp::SummaryMerge {
         children,
-        newest_panes: own_newest,
+        newest_tumbling_windows: own_newest,
         ..
     }) = merge.asap()
     else {
         unreachable!("a merge over a pane chain");
     };
     let own = &children[0];
-    let Some(ASAPOp::PaneChain {
+    let Some(ASAPOp::SummaryTumblingWindowChain {
         child,
         input,
         reduction,
         grouping,
         filter,
-        pane_width_ms: own_width,
-        pane_count: own_count,
+        tumbling_window_width_ms: own_width,
+        tumbling_window_count: own_count,
         ..
     }) = own.asap()
     else {
@@ -1122,17 +1141,17 @@ pub(crate) fn with_pane_chain(
     };
     // The merge's window: its newest panes, or the whole chain.
     let window_ms = own_width * u64::from(own_newest.unwrap_or(*own_count));
-    let newest =
-        u32::try_from(window_ms / pane_width_ms).expect("a reader's window is at most the chain's");
-    let mut chain = OperatorNode::new(Operator::ASAP(ASAPOp::PaneChain {
+    let newest = u32::try_from(window_ms / tumbling_window_width_ms)
+        .expect("a reader's window is at most the chain's");
+    let mut chain = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child: Rc::clone(child),
         family,
         input: input.clone(),
         reduction: reduction.clone(),
         grouping: grouping.clone(),
         filter: filter.clone(),
-        pane_width_ms,
-        pane_count,
+        tumbling_window_width_ms,
+        tumbling_window_count,
     }))?;
     for (field, kept) in chain.schema.fields.iter_mut().zip(&own.schema.fields) {
         field.name = kept.name.clone();
@@ -1140,7 +1159,7 @@ pub(crate) fn with_pane_chain(
     }
     let read = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
         children: vec![Rc::new(chain)],
-        newest_panes: (newest < pane_count).then_some(newest),
+        newest_tumbling_windows: (newest < tumbling_window_count).then_some(newest),
         group_by: None,
     }))?;
     let replaced = HashMap::from([(Rc::as_ptr(merge), Rc::new(read))]);
@@ -1218,7 +1237,7 @@ pub(crate) fn with_resized_build(
     Ok(recompose_guarantees(&out)?)
 }
 
-/// The [`ASAPOp::PaneChain`] of `candidate`'s panes, with the build's
+/// The [`ASAPOp::SummaryTumblingWindowChain`] of `candidate`'s panes, with the build's
 /// output names.
 fn pane_chain(candidate: &PaneCandidate) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
     let Some(ASAPOp::SummaryAgg {
@@ -1232,15 +1251,15 @@ fn pane_chain(candidate: &PaneCandidate) -> Result<Rc<OperatorNode>, PerComputat
     else {
         unreachable!("a pane candidate's build is a SummaryAgg");
     };
-    let mut chain = OperatorNode::new(Operator::ASAP(ASAPOp::PaneChain {
+    let mut chain = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child: Rc::clone(range.children()[0]),
         family: family.clone(),
         input: input.clone(),
         reduction: reduction.clone(),
         grouping: grouping.clone(),
         filter: filter.clone(),
-        pane_width_ms: candidate.pane_width_ms,
-        pane_count: candidate.pane_count,
+        tumbling_window_width_ms: candidate.tumbling_window_width_ms,
+        tumbling_window_count: candidate.tumbling_window_count,
     }))?;
     for (field, kept) in chain
         .schema
@@ -1600,7 +1619,7 @@ fn regroup_merge(
     let merge = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
         children: vec![Rc::clone(state)],
         group_by: Some(keys),
-        newest_panes: None,
+        newest_tumbling_windows: None,
     }))?;
     let mut schema = merge.schema.clone();
     for (field, coarse) in schema.fields.iter_mut().zip(&named.schema.fields) {
@@ -2463,7 +2482,12 @@ mod tests {
     fn panes(roots: &[QueryRoot], interval_ms: &[Option<u64>]) -> Vec<(u64, u32)> {
         pane_candidates(roots, interval_ms)
             .iter()
-            .map(|rule_candidate| (rule_candidate.pane_width_ms, rule_candidate.pane_count))
+            .map(|rule_candidate| {
+                (
+                    rule_candidate.tumbling_window_width_ms,
+                    rule_candidate.tumbling_window_count,
+                )
+            })
             .collect()
     }
 
@@ -2580,7 +2604,7 @@ mod tests {
         assert!(panes(&roots, &[Some(60_000)]).is_empty());
     }
 
-    /// The rule's candidate reads a `SummaryMerge` over one `PaneChain` of
+    /// The rule's candidate reads a `SummaryMerge` over one `SummaryTumblingWindowChain` of
     /// the build's family and size over the range's input, keeps the
     /// build's output names, and keeps the whole build's guarantee (a KLL
     /// merges into the state of one build over the union).
@@ -2621,11 +2645,11 @@ mod tests {
         let [chain] = children.as_slice() else {
             panic!("one chain")
         };
-        let Some(ASAPOp::PaneChain {
+        let Some(ASAPOp::SummaryTumblingWindowChain {
             child,
             family,
-            pane_width_ms: 60_000,
-            pane_count: 5,
+            tumbling_window_width_ms: 60_000,
+            tumbling_window_count: 5,
             ..
         }) = chain.asap()
         else {
@@ -2680,8 +2704,8 @@ mod tests {
                     vec![0, 1],
                     vec![SharedPaneChain {
                         members: vec![0, 1],
-                        pane_width_ms: 60_000,
-                        pane_count: 5
+                        tumbling_window_width_ms: 60_000,
+                        tumbling_window_count: 5
                     }]
                 )
             ]
@@ -2693,7 +2717,7 @@ mod tests {
         let mut found: Vec<Rc<OperatorNode>> = Vec::new();
         for root in roots {
             for node in OperatorNode::reachable(operator(root)) {
-                if matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+                if matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
                     && !found.iter().any(|c| Rc::ptr_eq(c, &node))
                 {
                     found.push(node);
@@ -2703,12 +2727,15 @@ mod tests {
         found
     }
 
-    /// The `newest_panes` of the one merge `root` reads.
-    fn newest_panes(root: &QueryRoot) -> Option<u32> {
+    /// The `newest_tumbling_windows` of the one merge `root` reads.
+    fn newest_tumbling_windows(root: &QueryRoot) -> Option<u32> {
         OperatorNode::reachable(operator(root))
             .into_iter()
             .find_map(|n| match n.asap() {
-                Some(ASAPOp::SummaryMerge { newest_panes, .. }) => Some(*newest_panes),
+                Some(ASAPOp::SummaryMerge {
+                    newest_tumbling_windows,
+                    ..
+                }) => Some(*newest_tumbling_windows),
                 _ => None,
             })
             .expect("a merge")
@@ -2747,8 +2774,8 @@ mod tests {
             shared.shared_chains,
             [SharedPaneChain {
                 members: vec![0, 1],
-                pane_width_ms: 10_000,
-                pane_count: 30
+                tumbling_window_width_ms: 10_000,
+                tumbling_window_count: 30
             }]
         );
         let shared_roots = shared.roots.as_ref().unwrap();
@@ -2757,14 +2784,14 @@ mod tests {
             .unwrap_or_else(|c: Vec<_>| panic!("one chain, found {}", c.len()));
         assert!(matches!(
             chain.asap(),
-            Some(ASAPOp::PaneChain {
-                pane_width_ms: 10_000,
-                pane_count: 30,
+            Some(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms: 10_000,
+                tumbling_window_count: 30,
                 ..
             })
         ));
-        assert_eq!(newest_panes(&shared_roots[0]), Some(6));
-        assert_eq!(newest_panes(&shared_roots[1]), None);
+        assert_eq!(newest_tumbling_windows(&shared_roots[0]), Some(6));
+        assert_eq!(newest_tumbling_windows(&shared_roots[1]), None);
         for (root, whole) in shared_roots.iter().zip(&roots) {
             let root = operator(root);
             root.validate_structure().unwrap();
@@ -2806,8 +2833,8 @@ mod tests {
             shared.shared_chains,
             [SharedPaneChain {
                 members: vec![0, 1],
-                pane_width_ms: 60_000,
-                pane_count: 15
+                tumbling_window_width_ms: 60_000,
+                tumbling_window_count: 15
             }]
         );
         let shared_roots = shared.roots.as_ref().unwrap();
@@ -2816,14 +2843,14 @@ mod tests {
             .unwrap_or_else(|c: Vec<_>| panic!("one chain, found {}", c.len()));
         assert!(matches!(
             chain.asap(),
-            Some(ASAPOp::PaneChain {
-                pane_width_ms: 60_000,
-                pane_count: 15,
+            Some(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms: 60_000,
+                tumbling_window_count: 15,
                 ..
             })
         ));
-        assert_eq!(newest_panes(&shared_roots[0]), None);
-        assert_eq!(newest_panes(&shared_roots[1]), None);
+        assert_eq!(newest_tumbling_windows(&shared_roots[0]), None);
+        assert_eq!(newest_tumbling_windows(&shared_roots[1]), None);
         for (root, whole) in shared_roots.iter().zip(&roots) {
             operator(root).validate_structure().unwrap();
             assert_eq!(operator(root).guarantee, operator(whole).guarantee);
@@ -2843,13 +2870,13 @@ mod tests {
             .find(|c| !c.shared_chains.is_empty())
             .expect("a shared-chain candidate");
         let shared_roots = shared.roots.unwrap();
-        assert_eq!(newest_panes(&shared_roots[0]), Some(15));
-        assert_eq!(newest_panes(&shared_roots[1]), None);
+        assert_eq!(newest_tumbling_windows(&shared_roots[0]), Some(15));
+        assert_eq!(newest_tumbling_windows(&shared_roots[1]), None);
         assert!(matches!(
             chains(&shared_roots)[0].asap(),
-            Some(ASAPOp::PaneChain {
-                pane_width_ms: 60_000,
-                pane_count: 60,
+            Some(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms: 60_000,
+                tumbling_window_count: 60,
                 ..
             })
         ));
@@ -2884,8 +2911,8 @@ mod tests {
             shared.shared_chains,
             [SharedPaneChain {
                 members: vec![0, 1],
-                pane_width_ms: 120_000,
-                pane_count: 10
+                tumbling_window_width_ms: 120_000,
+                tumbling_window_count: 10
             }]
         );
         assert_eq!(chains(shared.roots.as_ref().unwrap()).len(), 2);
@@ -2904,7 +2931,12 @@ mod tests {
             .map(|c| {
                 c.shared_chains
                     .iter()
-                    .map(|shared| (shared.pane_width_ms, shared.pane_count))
+                    .map(|shared| {
+                        (
+                            shared.tumbling_window_width_ms,
+                            shared.tumbling_window_count,
+                        )
+                    })
                     .collect()
             })
             .collect()
@@ -2957,8 +2989,8 @@ mod tests {
             .find(|c| !c.shared_chains.is_empty())
             .unwrap();
         let shared_roots = shared.roots.unwrap();
-        assert_eq!(newest_panes(&shared_roots[0]), None);
-        assert_eq!(newest_panes(&shared_roots[1]), Some(12));
+        assert_eq!(newest_tumbling_windows(&shared_roots[0]), None);
+        assert_eq!(newest_tumbling_windows(&shared_roots[1]), Some(12));
         for (root, whole) in shared_roots.iter().zip(&roots) {
             operator(root).validate_structure().unwrap();
             assert_eq!(operator(root).guarantee, operator(whole).guarantee);
@@ -3000,9 +3032,10 @@ mod tests {
             SketchAlgorithm::Kll,
         );
         let family = |node: &OperatorNode| match node.asap() {
-            Some(ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. }) => {
-                family.clone()
-            }
+            Some(
+                ASAPOp::SummaryAgg { family, .. }
+                | ASAPOp::SummaryTumblingWindowChain { family, .. },
+            ) => family.clone(),
             _ => unreachable!(),
         };
         let strict = family(&builds(&roots[0])[0]);

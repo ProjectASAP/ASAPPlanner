@@ -553,11 +553,9 @@ async fn the_plan_carries_stage3s_predicted_usage() {
         .sum();
     assert_eq!(node_cpu, usage.cpu_core_seconds_per_second);
     assert!(usage.cpu_core_seconds_per_second > 0.0);
-    assert!(usage
-        .per_node
-        .iter()
-        .any(|node| node.operator == OperatorKind::PaneChain
-            && node.timing == asap_planner::ExecutionTiming::IngestionTime));
+    assert!(usage.per_node.iter().any(|node| node.operator
+        == OperatorKind::SummaryTumblingWindowChain
+        && node.timing == asap_planner::ExecutionTiming::IngestionTime));
     assert_eq!(usage.per_query.len(), 1);
     assert!(usage.peak_memory_bytes > 0);
     // Each prediction names the installed nodes that run it: the pane
@@ -574,7 +572,7 @@ async fn the_plan_carries_stage3s_predicted_usage() {
     let chain = usage
         .per_node
         .iter()
-        .find(|node| node.operator == OperatorKind::PaneChain)
+        .find(|node| node.operator == OperatorKind::SummaryTumblingWindowChain)
         .unwrap();
     assert_eq!(chain.installed_node_ids.len(), views.len(), "{chain:?}");
     let view_ids: BTreeSet<_> = views.iter().map(|v| v.node_id).collect();
@@ -1095,7 +1093,7 @@ fn ddsketch_alphas(plan: &InstallablePlan) -> Vec<f64> {
                     family: FieldDataType::Sketch(kind, _),
                     ..
                 }
-                | ASAPOp::PaneChain {
+                | ASAPOp::SummaryTumblingWindowChain {
                     family: FieldDataType::Sketch(kind, _),
                     ..
                 },
@@ -1268,7 +1266,9 @@ fn untime(
     // query-time result.
     let own = match node.asap() {
         Some(
-            ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. } | ASAPOp::SummaryMerge { .. },
+            ASAPOp::SummaryAgg { .. }
+            | ASAPOp::SummaryTumblingWindowChain { .. }
+            | ASAPOp::SummaryMerge { .. },
         ) => node.materialization,
         _ => Materialization::NotMaterialized,
     };
@@ -2164,7 +2164,8 @@ async fn ignoring_accuracy_guarantees_selects_a_sketch_plan_that_runs() {
         .iter()
         .filter_map(|node| match &node.payload {
             asap_executor::planner::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
-                ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. },
+                ASAPOp::SummaryAgg { family, .. }
+                | ASAPOp::SummaryTumblingWindowChain { family, .. },
             ) => Some(format!("{family:?}")),
             _ => None,
         })
@@ -2767,7 +2768,7 @@ impl asap_accuracy::AccuracyModel for HeapPlansOnly {
         };
         OperatorNode::reachable(root).iter().any(|node| {
             matches!(node.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
-                | ASAPOp::PaneChain { family: FieldDataType::Sketch(kind, _), .. })
+                | ASAPOp::SummaryTumblingWindowChain { family: FieldDataType::Sketch(kind, _), .. })
                 if *kind.algorithm() == self.0)
         })
     }
@@ -2811,7 +2812,7 @@ async fn plan_ignoring_guarantees(
 fn heap_of(plan: &InstallablePlan) -> Option<(SketchAlgorithm, u32)> {
     plan.dag.nodes.iter().find_map(|node| match &node.payload {
         asap_executor::planner::ir::physical_export::PhysicalASAPOperatorPayload::ASAP(
-            ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. },
+            ASAPOp::SummaryAgg { family, .. } | ASAPOp::SummaryTumblingWindowChain { family, .. },
         ) => match family {
             FieldDataType::Sketch(kind, _) => match kind.params() {
                 SketchParams::CmsWithHeap { width, .. }

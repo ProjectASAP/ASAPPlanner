@@ -219,9 +219,9 @@ pub struct PlanOutput {
     pub selection: Option<Selection>,
     /// For each tumbling-pane chain of the selected plan kept beyond one
     /// evaluation, by node id in its physical DAG, how long its completed
-    /// panes are kept ([`RealizedPlan::pane_retention_ms`](asap_types::stages::RealizedPlan::pane_retention_ms));
+    /// panes are kept ([`RealizedPlan::tumbling_window_retention_ms`](asap_types::stages::RealizedPlan::tumbling_window_retention_ms));
     /// empty for a pass that does not set it.
-    pub pane_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
+    pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
 }
 
 impl PlanOutput {
@@ -231,7 +231,7 @@ impl PlanOutput {
             scalar_roots: Vec::new(),
             scalar_plans: Vec::new(),
             selection: None,
-            pane_retention_ms: BTreeMap::new(),
+            tumbling_window_retention_ms: BTreeMap::new(),
         }
     }
 

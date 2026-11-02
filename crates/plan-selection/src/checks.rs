@@ -117,7 +117,8 @@ pub(crate) fn accuracy_check(
             .flat_map(|node| OperatorNode::reachable(node))
         {
             let Operator::ASAP(
-                ASAPOp::SummaryAgg { family, input, .. } | ASAPOp::PaneChain { family, input, .. },
+                ASAPOp::SummaryAgg { family, input, .. }
+                | ASAPOp::SummaryTumblingWindowChain { family, input, .. },
             ) = &node.operator
             else {
                 continue;

@@ -250,7 +250,7 @@ pub async fn plan_installable(
     installable_plan_of(
         &output.roots(),
         output.selection.as_ref(),
-        &output.pane_retention_ms,
+        &output.tumbling_window_retention_ms,
         &entries,
     )
     .map_err(PlanError::Installable)
@@ -260,14 +260,14 @@ pub async fn plan_installable(
 /// entries are `entries` (in `QueryWorkload::entries()` order), with
 /// Stage 3's report of its `selection` of them when there is one, and the
 /// pane retention of the selected plan's kept chains
-/// (`RealizedPlan::pane_retention_ms`, by node id in the DAG `roots`
+/// (`RealizedPlan::tumbling_window_retention_ms`, by node id in the DAG `roots`
 /// export): what [`plan_installable`] returns after planning. A caller that
 /// runs the planning stages itself (e.g. a developer tool) uses it to see
 /// what a runtime would install.
 pub fn installable_plan_of(
     roots: &[QueryRoot],
     selection: Option<&Selection>,
-    pane_retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
+    tumbling_window_retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
     entries: &[QueryWorkloadEntry],
 ) -> Result<(InstallablePlan, Option<SelectedPlanReport>), InstallablePlanError> {
     // Each query's longest range-evaluation span, which the views it
@@ -280,7 +280,7 @@ pub fn installable_plan_of(
     // Every node keeps the timing Stage 3 gave it.
     let timed =
         apply_materialization_timings_to_roots(roots, &MaterializationAssignment::default())?;
-    let expanded = pane_retention_of_expanded_panes(&timed, pane_retention_ms)?;
+    let expanded = pane_retention_of_expanded_panes(&timed, tumbling_window_retention_ms)?;
     let report = selection.map(|selection| report_of(selection, &expanded.installed_node_ids));
     let reader_span_ms_by_node = reader_span_ms_by_node(&expanded.dag, &range_spans_ms);
     let plan = InstallablePlan::of_dag(
@@ -601,12 +601,12 @@ struct ExpandedWithRetention {
 }
 
 /// Expand the pane chains of `timed` and export it; each pane takes the
-/// retention Stage 2 gives its chain (`RealizedPlan::pane_retention_ms`, by
+/// retention Stage 2 gives its chain (`RealizedPlan::tumbling_window_retention_ms`, by
 /// node id in the selected candidate's physical DAG, which is `timed`
 /// exported).
 fn pane_retention_of_expanded_panes(
     timed: &[QueryRoot],
-    pane_retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
+    tumbling_window_retention_ms: &BTreeMap<PhysicalASAPNodeId, u64>,
 ) -> Result<ExpandedWithRetention, InstallablePlanError> {
     use asap_types::ir::physical_export::compile_physical_asap_workload_with_node_ids;
     let selected = compile_physical_asap_workload_with_node_ids(timed)?;
@@ -614,11 +614,11 @@ fn pane_retention_of_expanded_panes(
     // of panes. The complete expanded-plan validation remains authoritative.
     selected.dag.check_raw_data_windows()?;
     let mut retention_by_chain: Vec<(Rc<OperatorNode>, u64)> = Vec::new();
-    for (&node_id, &retention_ms) in pane_retention_ms {
+    for (&node_id, &retention_ms) in tumbling_window_retention_ms {
         let chain = selected
             .node_ids
             .operator_node(node_id)
-            .filter(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
+            .filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })))
             .ok_or(InstallablePlanError::PaneRetentionOfUnknownChain { node_id })?;
         retention_by_chain.push((Rc::clone(chain), retention_ms));
     }
@@ -984,7 +984,7 @@ mod tests {
         let panes = [pane(0), pane(60_000)];
         let merge = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
             children: panes.to_vec(),
-            newest_panes: None,
+            newest_tumbling_windows: None,
             group_by: None,
         }))
         .unwrap();

@@ -230,7 +230,7 @@ fn exact_input_group(
             if boundaries.contains(&Rc::as_ptr(&node)) || !seen.insert(Rc::as_ptr(&node)) {
                 continue;
             }
-            if matches!(node.asap(), Some(ASAPOp::SummaryAgg {family, ..} | ASAPOp::PaneChain {family, ..}) if !matches!(family, FieldDataType::ExactAggregate(..)))
+            if matches!(node.asap(), Some(ASAPOp::SummaryAgg {family, ..} | ASAPOp::SummaryTumblingWindowChain {family, ..}) if !matches!(family, FieldDataType::ExactAggregate(..)))
             {
                 exact = false;
                 break;

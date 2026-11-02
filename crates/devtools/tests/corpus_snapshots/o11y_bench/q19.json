@@ -6242,7 +6242,7 @@
       "stage2_node_id": 7
     }
   ],
-  "pane_retention_ms": {
+  "tumbling_window_retention_ms": {
     "1": 7200000,
     "7": 7200000
   },
@@ -6278,7 +6278,7 @@
           "cpu_core_seconds_per_second": 2e-6,
           "detail": "build exact Increase accumulator in 60 panes of 60000 ms for 1000 groups: 1000 rows x (1 + depth 1); x 1.0000/s; keeps 6776000 bytes",
           "multiplier": 1,
-          "operator": "PaneChain",
+          "operator": "SummaryTumblingWindowChain",
           "price_source": "analytical",
           "timing": "ingestion_time"
         },
@@ -6359,7 +6359,7 @@
           "cpu_core_seconds_per_second": 2e-6,
           "detail": "build exact Increase accumulator in 60 panes of 60000 ms for 1000 groups: 1000 rows x (1 + depth 1); x 1.0000/s; keeps 6776000 bytes",
           "multiplier": 1,
-          "operator": "PaneChain",
+          "operator": "SummaryTumblingWindowChain",
           "price_source": "analytical",
           "timing": "ingestion_time"
         },
@@ -7234,7 +7234,7 @@
           },
           "payload": {
             "ASAP": {
-              "PaneChain": {
+              "SummaryTumblingWindowChain": {
                 "child": 0,
                 "family": {
                   "ExactAggregate": [
@@ -7253,8 +7253,8 @@
                     "kind": "unknown_or_signed"
                   }
                 },
-                "pane_count": 60,
-                "pane_width_ms": 60000,
+                "tumbling_window_count": 60,
+                "tumbling_window_width_ms": 60000,
                 "reduction": "PerEntity"
               }
             }
@@ -7720,7 +7720,7 @@
           },
           "payload": {
             "ASAP": {
-              "PaneChain": {
+              "SummaryTumblingWindowChain": {
                 "child": 6,
                 "family": {
                   "ExactAggregate": [
@@ -7739,8 +7739,8 @@
                     "kind": "unknown_or_signed"
                   }
                 },
-                "pane_count": 60,
-                "pane_width_ms": 60000,
+                "tumbling_window_count": 60,
+                "tumbling_window_width_ms": 60000,
                 "reduction": "PerEntity"
               }
             }

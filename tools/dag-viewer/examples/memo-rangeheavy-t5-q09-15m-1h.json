@@ -615,7 +615,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "Sketch": [
@@ -642,8 +642,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 60,
-                    "pane_width_ms": 60000,
+                    "tumbling_window_count": 60,
+                    "tumbling_window_width_ms": 60000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -707,7 +707,7 @@
                     "children": [
                       1
                     ],
-                    "newest_panes": 15
+                    "newest_tumbling_windows": 15
                   }
                 }
               },
@@ -1738,7 +1738,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "Sketch": [
@@ -1765,8 +1765,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 60,
-                    "pane_width_ms": 60000,
+                    "tumbling_window_count": 60,
+                    "tumbling_window_width_ms": 60000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -1833,7 +1833,7 @@
                     "children": [
                       1
                     ],
-                    "newest_panes": 15
+                    "newest_tumbling_windows": 15
                   }
                 }
               }
@@ -2322,7 +2322,7 @@
             "cpu_core_seconds_per_second": 0.004,
             "detail": "build DDSketch in 60 panes of 60000 ms for 10000 groups: 2000000 rows x (1 + depth 1); x 1.0000/s; keeps 1961760000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -4685,7 +4685,7 @@
         "stage2_node_id": 1
       }
     ],
-    "pane_retention_ms": {
+    "tumbling_window_retention_ms": {
       "1": 3600000
     },
     "rejected": [],
@@ -4703,7 +4703,7 @@
           "Pass1": 9
         },
         "coupling_sites_by_kind": {
-          "PaneChain": 2,
+          "SummaryTumblingWindowChain": 2,
           "RawHorizon": 1
         },
         "groups": 5,
@@ -4712,7 +4712,7 @@
       "memo_plan": {
         "coupling_sites": [
           {
-            "kind": "PaneChain",
+            "kind": "SummaryTumblingWindowChain",
             "readers": [
               2,
               4
@@ -4733,7 +4733,7 @@
                 ]
               },
               "longest_window_ms": 3600000,
-              "pane_width_ms": 60000
+              "tumbling_window_width_ms": 60000
             },
             "thresholds": 2
           }

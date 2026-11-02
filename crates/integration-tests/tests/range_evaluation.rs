@@ -157,9 +157,10 @@ fn pane_chains(run: &Run) -> Vec<(String, u64, Materialization)> {
         .iter()
         .flat_map(|p| {
             p.dag().nodes.iter().filter_map(|n| match &n.payload {
-                PhysicalASAPOperatorPayload::ASAP(ASAPOp::PaneChain { pane_width_ms, .. }) => {
-                    Some((p.id.clone(), *pane_width_ms, n.materialization))
-                }
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_width_ms,
+                    ..
+                }) => Some((p.id.clone(), *tumbling_window_width_ms, n.materialization)),
                 _ => None,
             })
         })
@@ -266,7 +267,7 @@ fn stage3_plan_selection_reports_the_retention_of_kept_panes() {
     assert_eq!(range.selection.selected, kept);
     let retention: Vec<u64> = range
         .selection
-        .pane_retention_ms
+        .tumbling_window_retention_ms
         .values()
         .copied()
         .collect();
@@ -275,7 +276,7 @@ fn stage3_plan_selection_reports_the_retention_of_kept_panes() {
     // Pattern B without a range selects the whole-window KLL, which keeps
     // nothing; B1 reports its window when it is the plan (no raw data).
     let none = run_explicit(&pattern_b_with(None));
-    assert!(none.selection.pane_retention_ms.is_empty());
+    assert!(none.selection.tumbling_window_retention_ms.is_empty());
     let b1 = run_explicit_for(
         &pattern_b_with(None),
         &DeploymentCapabilities {
@@ -283,7 +284,12 @@ fn stage3_plan_selection_reports_the_retention_of_kept_panes() {
             ..DeploymentCapabilities::default()
         },
     );
-    let retention: Vec<u64> = b1.selection.pane_retention_ms.values().copied().collect();
+    let retention: Vec<u64> = b1
+        .selection
+        .tumbling_window_retention_ms
+        .values()
+        .copied()
+        .collect();
     assert_eq!(retention, [PATTERN_B_WINDOW_MS]);
 }
 
@@ -384,8 +390,13 @@ fn an_offset_chain_is_retained_and_priced_for_its_offset() {
         &exact_panel("max_over_time(m[60m] offset 10m)", 600_000, None),
         &no_raw_data,
     );
-    let retention =
-        |run: &Run| -> Vec<u64> { run.selection.pane_retention_ms.values().copied().collect() };
+    let retention = |run: &Run| -> Vec<u64> {
+        run.selection
+            .tumbling_window_retention_ms
+            .values()
+            .copied()
+            .collect()
+    };
     assert_eq!(retention(&plain), [3_600_000]);
     assert_eq!(retention(&offset), [4_200_000]);
     let memory = |run: &Run| {

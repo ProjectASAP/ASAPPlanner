@@ -45,7 +45,7 @@
 //!
 //! | Consumer | Accepts from an input |
 //! |---|---|
-//! | `SummaryAgg.child`, `PaneChain.child` | Rows, or exact-accumulator state, never a query-time value when the state is maintained; a query-time build reads an ingestion-time input (rows or exact-accumulator state) only as a `MatAtIngestion` input's stored output |
+//! | `SummaryAgg.child`, `SummaryTumblingWindowChain.child` | Rows, or exact-accumulator state, never a query-time value when the state is maintained; a query-time build reads an ingestion-time input (rows or exact-accumulator state) only as a `MatAtIngestion` input's stored output |
 //! | `SummaryEstimate.summary_input` | Summary state at either timing |
 //! | `SummaryMerge.children` | Summary state at either timing; at ingestion time only for a merge at ingestion time |
 //! | `FinalizeExactAccumulator.child` | Exact-accumulator state |
@@ -160,19 +160,19 @@ impl MaterializationAssignment {
 }
 
 /// Whether `operator`'s output is a sub-DAG output that materialization may
-/// store: a `SummaryAgg`, a `PaneChain` or a `MaintainPopulation`.
+/// store: a `SummaryAgg`, a `SummaryTumblingWindowChain` or a `MaintainPopulation`.
 pub(crate) fn is_materialization_point<C>(operator: &Operator<C>) -> bool {
     matches!(
         operator,
         Operator::ASAP(
             ASAPOp::SummaryAgg { .. }
-                | ASAPOp::PaneChain { .. }
+                | ASAPOp::SummaryTumblingWindowChain { .. }
                 | ASAPOp::MaintainPopulation { .. }
         )
     )
 }
 
-/// Whether `node` is a summary build (`SummaryAgg` or `PaneChain`) with a
+/// Whether `node` is a summary build (`SummaryAgg` or `SummaryTumblingWindowChain`) with a
 /// filter, which never runs at ingestion time
 /// ([`ExecutionDataStateError::FilteredSummaryAtIngestion`]).
 pub fn is_filtered_build(node: &OperatorNode) -> bool {
@@ -182,7 +182,7 @@ pub fn is_filtered_build(node: &OperatorNode) -> bool {
             ASAPOp::SummaryAgg {
                 filter: Some(_),
                 ..
-            } | ASAPOp::PaneChain {
+            } | ASAPOp::SummaryTumblingWindowChain {
                 filter: Some(_),
                 ..
             }
@@ -558,9 +558,9 @@ fn validate_asap(
     timing: ExecutionTiming,
 ) -> Result<(), ExecutionDataStateError> {
     match op {
-        ASAPOp::SummaryAgg { child, .. } | ASAPOp::PaneChain { child, .. } => {
+        ASAPOp::SummaryAgg { child, .. } | ASAPOp::SummaryTumblingWindowChain { child, .. } => {
             let edge = match op {
-                ASAPOp::PaneChain { .. } => "PaneChain.child",
+                ASAPOp::SummaryTumblingWindowChain { .. } => "SummaryTumblingWindowChain.child",
                 _ => "SummaryAgg.child",
             };
             let avail = state_of(child);

@@ -563,7 +563,7 @@ pub fn is_summary(payload: &Payload) -> bool {
             ASAPOp::SummaryAgg {
                 family: FieldDataType::Sketch(..),
                 ..
-            } | ASAPOp::PaneChain {
+            } | ASAPOp::SummaryTumblingWindowChain {
                 family: FieldDataType::Sketch(..),
                 ..
             } | ASAPOp::SummaryEstimate { .. }
@@ -576,7 +576,7 @@ pub fn is_merge(payload: &Payload) -> bool {
     matches!(payload, Operator::ASAP(ASAPOp::SummaryMerge { .. }))
 }
 
-/// The sketch build nodes (`SummaryAgg` or tumbling-pane `PaneChain` over a
+/// The sketch build nodes (`SummaryAgg` or tumbling-pane `SummaryTumblingWindowChain` over a
 /// sketch family) of `dag`, with their algorithm and parameters.
 pub fn sketch_builds(dag: &impl ExportedDag) -> Vec<(NodeId, SketchAlgorithm, SketchParams)> {
     dag.node_ids()
@@ -587,7 +587,7 @@ pub fn sketch_builds(dag: &impl ExportedDag) -> Vec<(NodeId, SketchAlgorithm, Sk
                     family: FieldDataType::Sketch(kind, _),
                     ..
                 }
-                | ASAPOp::PaneChain {
+                | ASAPOp::SummaryTumblingWindowChain {
                     family: FieldDataType::Sketch(kind, _),
                     ..
                 },
@@ -889,14 +889,17 @@ pub enum WindowForm {
     ExponentialHistogram { horizon_ms: u64 },
 }
 
-/// The window summary of a build: a `PaneChain` keeps back-to-back panes of
+/// The window summary of a build: a `SummaryTumblingWindowChain` keeps back-to-back panes of
 /// its pane width (tumbling); a `SummaryAgg` is rebuilt from its query
 /// window. Sliding windows and Exponential Histograms are not planned yet
 /// (#628).
 pub fn window_form(dag: &impl ExportedDag, build: NodeId) -> WindowForm {
     match dag.payload(build) {
-        Operator::ASAP(ASAPOp::PaneChain { pane_width_ms, .. }) => WindowForm::Tumbling {
-            length_ms: *pane_width_ms,
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            tumbling_window_width_ms,
+            ..
+        }) => WindowForm::Tumbling {
+            length_ms: *tumbling_window_width_ms,
         },
         _ => WindowForm::None,
     }
@@ -928,13 +931,13 @@ pub fn retention_ms(p: &Physical, node: NodeId) -> Option<u64> {
         offset
     };
     match dag.payload(node) {
-        Operator::ASAP(ASAPOp::PaneChain {
-            pane_width_ms,
-            pane_count,
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            tumbling_window_width_ms,
+            tumbling_window_count,
             ..
         }) => {
-            let panes = u64::from(*pane_count) + u64::from(at_ingestion);
-            Some(panes * pane_width_ms + offset_below(below(node)))
+            let panes = u64::from(*tumbling_window_count) + u64::from(at_ingestion);
+            Some(panes * tumbling_window_width_ms + offset_below(below(node)))
         }
         Operator::ASAP(ASAPOp::SummaryAgg { .. }) => {
             let child = below(node)?;

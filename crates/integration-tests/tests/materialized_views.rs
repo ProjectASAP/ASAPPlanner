@@ -56,7 +56,7 @@ fn stage3_raw_lookback_ms(dag: &PhysicalASAPDAG) -> Vec<(Source, Option<u64>)> {
             matches!(
                 (&node.payload, node.materialization),
                 (
-                    Operator::ASAP(ASAPOp::PaneChain { .. }),
+                    Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
                     Materialization::MatAtQueryKeptAcrossEvaluations(_)
                 )
             )

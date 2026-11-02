@@ -27,8 +27,8 @@ const cytoscape = (elements) => {
 const doc = JSON.parse(readFileSync(new URL('examples/random-mixed-seed-862-workload-01.json', here), 'utf8'));
 const dag = doc.stage2_physical_asap_optimization.candidates[0].dag;
 const queryIds = doc.workload.queries.map((q) => q.id);
-const chain = dag.nodes.find((n) => n.payload.ASAP && n.payload.ASAP.PaneChain);
-const body = chain.payload.ASAP.PaneChain;
+const chain = dag.nodes.find((n) => n.payload.ASAP && n.payload.ASAP.SummaryTumblingWindowChain);
+const body = chain.payload.ASAP.SummaryTumblingWindowChain;
 const nodesOf = (elements) => elements.filter((e) => !('source' in e.data));
 const edgesOf = (elements) => elements.filter((e) => 'source' in e.data);
 
@@ -45,15 +45,15 @@ test('a collapsed chain is one node; expanded, one build, range and shift per pa
   assert.ok(nodesOf(collapsed).some((e) => e.data.id === `n${chain.id}` && e.data.expandable));
   const expanded = call('stageLaneElements', dag, { physical: true, queryIds, expandedChains: [chain.id] });
   const panes = nodesOf(expanded).filter((e) => e.data.paneOf === chain.id);
-  assert.equal(panes.filter((e) => e.data.kind === 'pane').length, body.pane_count);
-  assert.equal(panes.filter((e) => e.data.kind === 'TimeRange').length, body.pane_count);
-  assert.equal(panes.filter((e) => e.data.kind === 'TimeShift').length, body.pane_count - 1);
+  assert.equal(panes.filter((e) => e.data.kind === 'pane').length, body.tumbling_window_count);
+  assert.equal(panes.filter((e) => e.data.kind === 'TimeRange').length, body.tumbling_window_count);
+  assert.equal(panes.filter((e) => e.data.kind === 'TimeShift').length, body.tumbling_window_count - 1);
   const ids = new Set(nodesOf(expanded).map((e) => e.data.id));
   for (const edge of edgesOf(expanded)) {
     assert.ok(ids.has(edge.data.source) && ids.has(edge.data.target), edge.data.id);
   }
   // Cytoscape accepts every chain expanded at once, and dims by element id.
-  const every = dag.nodes.filter((n) => n.payload.ASAP && n.payload.ASAP.PaneChain).map((n) => n.id);
+  const every = dag.nodes.filter((n) => n.payload.ASAP && n.payload.ASAP.SummaryTumblingWindowChain).map((n) => n.id);
   const all = call('stageLaneElements', dag, { physical: true, queryIds, expandedChains: every });
   const cy = cytoscape(all);
   assert.equal(cy.nodes().length, nodesOf(all).length);
@@ -67,7 +67,7 @@ test('a merge of the newest panes reads only those panes, and says so', () => {
   const merge = partial.nodes.find((n) => n.payload.ASAP && n.payload.ASAP.SummaryMerge
     && partial.edges.some((e) => e.consumer === n.id && e.producer === chain.id));
   assert.ok(merge, 'a merge reads the chain');
-  merge.payload.ASAP.SummaryMerge.newest_panes = 2;
+  merge.payload.ASAP.SummaryMerge.newest_tumbling_windows = 2;
   const elements = call('stageLaneElements', partial, { physical: true, queryIds, expandedChains: [chain.id] });
   const into = edgesOf(elements).filter((e) => e.data.target === `n${merge.id}` && e.data.source.startsWith(`n${chain.id}p`));
   assert.equal(into.map((e) => e.data.source).sort().join(), `n${chain.id}p0,n${chain.id}p1`);
@@ -101,7 +101,7 @@ test('materialized views group by pane chain', () => {
   const groups = call('materializedViewGroups', doc);
   assert.equal(groups.length, 6);
   assert.equal(groups.reduce((n, g) => n + g.panes.length, 0), doc.stage3_plan_selection.materialized_views.length);
-  assert.equal(groups[0].panesText, `${body.pane_count} × 20 s`);
+  assert.equal(groups[0].panesText, `${body.tumbling_window_count} × 20 s`);
 });
 
 test('the candidate header shows the selection\'s warnings', () => {
@@ -155,7 +155,7 @@ test('a memo-MILP document shows its shared sketch, readers and certified summar
   assert.equal(view.summary.certified, true);
   assert.ok(view.summary.saving > 0.4);
   assert.match(call('memoSummaryText', view.summary), /certified \(gap ≤ 1e-4\).*queries planned alone .* \(sharing saves 50%\)/);
-  const chain = view.sharedUnits.find((u) => u.kind === 'coupling site · PaneChain');
+  const chain = view.sharedUnits.find((u) => u.kind === 'coupling site · SummaryTumblingWindowChain');
   assert.deepEqual([...chain.readers], ['G3', 'G4']);
   assert.deepEqual([...chain.queries], ['q1', 'q2']);
   assert.match(chain.threshold, /^1 min panes over 1 h · DDSketch · alpha 0.05/);
@@ -213,4 +213,22 @@ test('candidate search report exposes objective and partial status', () => {
   assert.equal(view.summary.lowerBound, null);
   assert.equal(view.summary.objective, 'cluster_capacity');
   assert.match(call('searchText', document), /candidate-connection search/);
+});
+
+test('a document written before the tumbling-window rename (#1163) upgrades to today\'s names', () => {
+  // Today's document, written back with the old names.
+  const old = JSON.parse(JSON.stringify(doc)
+    .replaceAll('"SummaryTumblingWindowChain"', '"PaneChain"')
+    .replaceAll('"tumbling_window_width_ms"', '"pane_width_ms"')
+    .replaceAll('"tumbling_window_count"', '"pane_count"')
+    .replaceAll('"newest_tumbling_windows"', '"newest_panes"')
+    .replaceAll('"tumbling_window_retention_ms"', '"pane_retention_ms"'));
+  assert.ok(JSON.stringify(old).includes('"PaneChain"'));
+  assert.deepEqual(call('upgradeTumblingWindowNames', old), doc);
+});
+
+test('a memo written before the rename upgrades its pane origin', () => {
+  const group = { candidate_count_by_origin: { pass1: 1, panes: 2 }, candidates: [{ origin: 'pass1' }, { origin: 'panes' }] };
+  assert.deepEqual(call('upgradeTumblingWindowNames', group),
+    { candidate_count_by_origin: { pass1: 1, tumbling_windows: 2 }, candidates: [{ origin: 'pass1' }, { origin: 'tumbling_windows' }] });
 });

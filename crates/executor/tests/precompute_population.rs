@@ -133,7 +133,7 @@ fn try_state_dag(
             id: 1,
             payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryMerge {
                 children: vec![0],
-                newest_panes: None,
+                newest_tumbling_windows: None,
                 group_by: None,
             }),
             output_state: ExecutionDataState::INGESTION_SUMMARY,

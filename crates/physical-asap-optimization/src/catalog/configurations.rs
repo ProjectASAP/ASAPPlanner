@@ -38,7 +38,7 @@ pub fn may_keep_across_evaluations_per_sole_reader_query(
     query_time_results_retained: bool,
 ) -> Vec<bool> {
     if materialization != Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
-        || !matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+        || !matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
         || !query_time_results_retained
     {
         return Vec::new();
@@ -136,7 +136,7 @@ pub fn enumerate_candidate_configurations_before(
         }
         let summary = matches!(
             node.asap(),
-            Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+            Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
         );
         let forced_query = matches!(
             node.asap(),
@@ -172,7 +172,7 @@ pub fn enumerate_candidate_configurations_before(
                     ExecutionTiming::IngestionTime,
                 ));
             }
-            if matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+            if matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
                 && queries.iter().any(|&query| {
                     summary_mode_allowed(
                         node,

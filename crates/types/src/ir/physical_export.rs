@@ -390,7 +390,7 @@ impl PhysicalASAPDAG {
     /// reaches the `Scan` through `TimeShift`s without an `@` anchor
     /// (offsets summing to `s`) and is
     /// - a `TimeRange(w)`, range or instant: `(T - s - w, T - s]`;
-    /// - a `PaneChain` of `n` panes of width `w`: its whole window `(T - s -
+    /// - a `SummaryTumblingWindowChain` of `n` panes of width `w`: its whole window `(T - s -
     ///   n·w, T - s]`, or only its newest pane `(T - s - w, T - s]` for a
     ///   chain in `kept_chains` (kept across evaluations, so each
     ///   evaluation builds one pane).
@@ -439,16 +439,20 @@ impl PhysicalASAPDAG {
                         Some(Operator::NonASAP(NonASAPOp::TimeRange { range, .. })) => {
                             range.as_millis()
                         }
-                        Some(Operator::ASAP(ASAPOp::PaneChain { pane_width_ms, .. }))
-                            if kept_chains.contains(&consumer) =>
-                        {
-                            u128::from(*pane_width_ms)
-                        }
-                        Some(Operator::ASAP(ASAPOp::PaneChain {
-                            pane_width_ms,
-                            pane_count,
+                        Some(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                            tumbling_window_width_ms,
                             ..
-                        })) => u128::from(*pane_width_ms) * u128::from(*pane_count),
+                        })) if kept_chains.contains(&consumer) => {
+                            u128::from(*tumbling_window_width_ms)
+                        }
+                        Some(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                            tumbling_window_width_ms,
+                            tumbling_window_count,
+                            ..
+                        })) => {
+                            u128::from(*tumbling_window_width_ms)
+                                * u128::from(*tumbling_window_count)
+                        }
                         _ => return ScanWindow::Unbounded,
                     };
                     let read = ScanWindow::Within {

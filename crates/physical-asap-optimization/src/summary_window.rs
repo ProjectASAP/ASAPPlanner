@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 /// Milliseconds are canonical throughout the shared contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneLayout {
-    pub pane_width_ms: u64,
+    // Named `pane_width_ms` before #1163.
+    #[serde(alias = "pane_width_ms")]
+    pub tumbling_window_width_ms: u64,
     /// Unix timestamp of a pane edge. `None` means the runtime has not
     /// established an origin and therefore cannot claim full coverage.
     pub pane_origin_ms: Option<i64>,
@@ -49,7 +51,7 @@ pub fn validate_pane_coverage(
     evaluation_time_ms: Option<i64>,
     edge_coverage: &WindowEdgeCoverage,
 ) -> Result<(), PaneCoverageError> {
-    if layout.pane_width_ms == 0 {
+    if layout.tumbling_window_width_ms == 0 {
         return Err(PaneCoverageError::ZeroPaneWidth);
     }
     if matches!(
@@ -62,7 +64,7 @@ pub fn validate_pane_coverage(
         .pane_origin_ms
         .ok_or(PaneCoverageError::UnknownPaneOrigin)?;
     let evaluation = evaluation_time_ms.ok_or(PaneCoverageError::UnknownEvaluationPhase)?;
-    let width = layout.pane_width_ms as i64;
+    let width = layout.tumbling_window_width_ms as i64;
     let pane_phase_ms = origin.rem_euclid(width) as u64;
     let query_phase_ms = evaluation.rem_euclid(width) as u64;
     if pane_phase_ms == query_phase_ms {
@@ -81,9 +83,9 @@ pub fn validate_pane_coverage(
 /// serve all occurrences.
 pub(crate) fn plan_pane_phase(
     demand: &RepeatedDemand,
-    pane_width_ms: u64,
+    tumbling_window_width_ms: u64,
 ) -> Result<PaneLayout, PaneCoverageError> {
-    if pane_width_ms == 0 {
+    if tumbling_window_width_ms == 0 {
         return Err(PaneCoverageError::ZeroPaneWidth);
     }
     let phase = match demand {
@@ -91,13 +93,17 @@ pub(crate) fn plan_pane_phase(
             evaluation_phase, ..
         } => Some(evaluation_phase.0),
         RepeatedDemand::Scheduled(times) => {
-            let first = times.first().map(|t| t.0 % pane_width_ms);
-            first.filter(|phase| times.iter().all(|t| t.0 % pane_width_ms == *phase))
+            let first = times.first().map(|t| t.0 % tumbling_window_width_ms);
+            first.filter(|phase| {
+                times
+                    .iter()
+                    .all(|t| t.0 % tumbling_window_width_ms == *phase)
+            })
         }
         RepeatedDemand::FixedInterval(_) | RepeatedDemand::EstimatedRate(_) => None,
     };
     Ok(PaneLayout {
-        pane_width_ms,
+        tumbling_window_width_ms,
         pane_origin_ms: phase.and_then(|value| i64::try_from(value).ok()),
     })
 }
@@ -109,7 +115,7 @@ mod tests {
     #[test]
     fn pane_only_evaluation_rejects_source_and_query_phase_mismatch() {
         let layout = PaneLayout {
-            pane_width_ms: 60_000,
+            tumbling_window_width_ms: 60_000,
             pane_origin_ms: Some(26_000),
         };
         assert_eq!(
@@ -139,7 +145,7 @@ mod tests {
         assert_eq!(
             plan_pane_phase(&demand, 60_000).unwrap(),
             PaneLayout {
-                pane_width_ms: 60_000,
+                tumbling_window_width_ms: 60_000,
                 pane_origin_ms: Some(56_000),
             }
         );
@@ -158,7 +164,7 @@ mod tests {
     #[test]
     fn window_edge_names_preserve_wire_values() {
         let layout: PaneLayout = serde_json::from_value(serde_json::json!({
-            "pane_width_ms": 1000, "pane_origin_ms": 0
+            "tumbling_window_width_ms": 1000, "pane_origin_ms": 0
         }))
         .unwrap();
         let json = serde_json::json!({

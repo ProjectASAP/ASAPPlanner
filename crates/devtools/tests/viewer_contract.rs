@@ -203,18 +203,18 @@ fn asap_samples() -> Vec<ASAPOp<()>> {
         },
         ASAPOp::SummaryMerge {
             children: vec![],
-            newest_panes: None,
+            newest_tumbling_windows: None,
             group_by: None,
         },
-        ASAPOp::PaneChain {
+        ASAPOp::SummaryTumblingWindowChain {
             child: (),
             family: family.clone(),
             input: SummaryUpdate::column(ColumnRef::SampleValue),
             reduction: Reduction::by(vec![]),
             grouping: GroupingStrategy::default(),
             filter: None,
-            pane_width_ms: 60_000,
-            pane_count: 5,
+            tumbling_window_width_ms: 60_000,
+            tumbling_window_count: 5,
         },
         ASAPOp::SummarySubtract {
             left: (),
@@ -243,7 +243,7 @@ fn asap_samples() -> Vec<ASAPOp<()>> {
             | ASAPOp::MaintainPopulation { .. }
             | ASAPOp::EvaluatePopulation { .. }
             | ASAPOp::SummaryMerge { .. }
-            | ASAPOp::PaneChain { .. }
+            | ASAPOp::SummaryTumblingWindowChain { .. }
             | ASAPOp::SummarySubtract { .. }
             | ASAPOp::SummaryDelete { .. }
             | ASAPOp::SummaryJoin { .. }

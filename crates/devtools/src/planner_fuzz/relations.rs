@@ -986,9 +986,9 @@ fn with_root_estimate(
 /// The family of the build whose state `state` carries.
 fn state_family(state: &OperatorNode) -> Result<FieldDataType, String> {
     match state.summary_build() {
-        Some(ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. }) => {
-            Ok(family.clone())
-        }
+        Some(
+            ASAPOp::SummaryAgg { family, .. } | ASAPOp::SummaryTumblingWindowChain { family, .. },
+        ) => Ok(family.clone()),
         _ => Err("q's estimate reads no single summary build".into()),
     }
 }
@@ -1139,7 +1139,7 @@ pub fn witness_root(
                 .collect();
             let merge = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
                 children: vec![state],
-                newest_panes: None,
+                newest_tumbling_windows: None,
                 group_by: Some(group_by),
             }))
             .map_err(|e| format!("rollup merge: {e}"))?;
@@ -1154,7 +1154,7 @@ pub fn witness_root(
             rewrite_root(q_root, "summary merge over a pane chain", |node| {
                 let Some(ASAPOp::SummaryMerge {
                     children,
-                    newest_panes: None,
+                    newest_tumbling_windows: None,
                     group_by,
                 }) = node.asap()
                 else {
@@ -1163,27 +1163,28 @@ pub fn witness_root(
                 let [chain] = children.as_slice() else {
                     return None;
                 };
-                let Some(ASAPOp::PaneChain {
-                    pane_width_ms,
-                    pane_count,
+                let Some(ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_width_ms,
+                    tumbling_window_count,
                     ..
                 }) = chain.asap()
                 else {
                     return None;
                 };
-                let panes = window_ms / pane_width_ms;
-                (window_ms % pane_width_ms == 0 && panes >= 1 && (panes as u32) < *pane_count).then(
-                    || {
+                let panes = window_ms / tumbling_window_width_ms;
+                (window_ms % tumbling_window_width_ms == 0
+                    && panes >= 1
+                    && (panes as u32) < *tumbling_window_count)
+                    .then(|| {
                         with_operator(
                             node,
                             Operator::ASAP(ASAPOp::SummaryMerge {
                                 children: children.clone(),
-                                newest_panes: Some(panes as u32),
+                                newest_tumbling_windows: Some(panes as u32),
                                 group_by: group_by.clone(),
                             }),
                         )
-                    },
-                )
+                    })
             })
         }
         Witness::QuantileRank { from, to } => {
@@ -1280,7 +1281,7 @@ pub fn witness_root(
             // selections.
             let merge = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
                 children: vec![state, other_state],
-                newest_panes: None,
+                newest_tumbling_windows: None,
                 group_by: None,
             }))
             .map_err(|e| format!("union merge: {e}"))?;
@@ -1461,8 +1462,8 @@ fn longer_chain_roots(
     let whole_chain_merge = |node: &OperatorNode| {
         matches!(
             node.asap(),
-            Some(ASAPOp::SummaryMerge { children, newest_panes: None, .. })
-                if matches!(children.as_slice(), [chain] if matches!(chain.asap(), Some(ASAPOp::PaneChain { .. })))
+            Some(ASAPOp::SummaryMerge { children, newest_tumbling_windows: None, .. })
+                if matches!(children.as_slice(), [chain] if matches!(chain.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })))
         )
     };
     let merge = find_first(q_root, &whole_chain_merge)
@@ -1482,26 +1483,28 @@ fn longer_chain_roots(
     };
     let chain = children[0].clone();
     let mut operator = chain.operator.clone();
-    let Operator::ASAP(ASAPOp::PaneChain {
-        pane_width_ms,
-        pane_count,
+    let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+        tumbling_window_width_ms,
+        tumbling_window_count,
         ..
     }) = &mut operator
     else {
         unreachable!("found a pane chain");
     };
-    let old_count = *pane_count;
-    if !window_ms.is_multiple_of(*pane_width_ms) || window_ms / *pane_width_ms <= old_count as u64 {
+    let old_count = *tumbling_window_count;
+    if !window_ms.is_multiple_of(*tumbling_window_width_ms)
+        || window_ms / *tumbling_window_width_ms <= old_count as u64
+    {
         return Err(format!(
-            "q's chain of {old_count} panes of {pane_width_ms} ms does not extend to {window_ms} ms"
+            "q's chain of {old_count} panes of {tumbling_window_width_ms} ms does not extend to {window_ms} ms"
         ));
     }
-    *pane_count = (window_ms / *pane_width_ms) as u32;
+    *tumbling_window_count = (window_ms / *tumbling_window_width_ms) as u32;
     let long_chain = with_operator(&chain, operator);
     let reread = |node: &Rc<OperatorNode>, whole: bool| {
         let Some(ASAPOp::SummaryMerge {
             children,
-            newest_panes,
+            newest_tumbling_windows,
             group_by,
         }) = node.asap()
         else {
@@ -1515,10 +1518,10 @@ fn longer_chain_roots(
                 node,
                 Operator::ASAP(ASAPOp::SummaryMerge {
                     children: vec![long_chain.clone()],
-                    newest_panes: if whole {
+                    newest_tumbling_windows: if whole {
                         None
                     } else {
-                        Some(newest_panes.unwrap_or(old_count))
+                        Some(newest_tumbling_windows.unwrap_or(old_count))
                     },
                     group_by: group_by.clone(),
                 }),

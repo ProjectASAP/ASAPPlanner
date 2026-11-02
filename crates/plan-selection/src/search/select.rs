@@ -199,7 +199,7 @@ struct Outcome {
     lower_bound: Option<f64>,
 }
 
-/// The selected nodes whose summary (`SummaryAgg` or `PaneChain`) reads
+/// The selected nodes whose summary (`SummaryAgg` or `SummaryTumblingWindowChain`) reads
 /// update weights `data` proves non-negative although the candidate leaves
 /// the requirement open: the selected plan realized once more, each node
 /// checked.
@@ -222,9 +222,9 @@ fn proven_non_negative_weights(
         .iter()
         .enumerate()
         .filter(|(_, node)| match &node.operator {
-            Operator::ASAP(ASAPOp::SummaryAgg { input, .. } | ASAPOp::PaneChain { input, .. }) => {
-                confirmed_weights(&input.weight_domain, data) != input.weight_domain
-            }
+            Operator::ASAP(
+                ASAPOp::SummaryAgg { input, .. } | ASAPOp::SummaryTumblingWindowChain { input, .. },
+            ) => confirmed_weights(&input.weight_domain, data) != input.weight_domain,
             _ => false,
         })
         .map(|(node, _)| SelectedNodeId(node))

@@ -877,7 +877,7 @@ fn stage3_plan_selection_accepts_kmv_for_any_failure_probability_without_a_bound
 }
 
 /// The physical candidates among `ids` that build their sketch as a
-/// tumbling-pane `PaneChain`.
+/// tumbling-pane `SummaryTumblingWindowChain`.
 fn tumbling<'a>(run: &Run, ids: Vec<&'a str>) -> Vec<&'a str> {
     ids.into_iter()
         .filter(|id| {
@@ -890,7 +890,7 @@ fn tumbling<'a>(run: &Run, ids: Vec<&'a str>) -> Vec<&'a str> {
 }
 
 /// The enlarged precision reaches a sketch carried by a tumbling-pane
-/// `PaneChain` too (#713): Q1's HLL over a bound of 3,000 is valid only at
+/// `SummaryTumblingWindowChain` too (#713): Q1's HLL over a bound of 3,000 is valid only at
 /// precision 18, above the 17 sized for ε alone, so a valid tumbling-pane
 /// HLL candidate carries precision 18 in its chain.
 #[test]

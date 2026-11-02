@@ -25,9 +25,9 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
         mode: Materialization,
     ) -> PhysicalCandidateId {
         let ingestion = ingestion
-            || (matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+            || (matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
                 && mode == Materialization::MatAtIngestion(Medium::Memory));
-        let pane = matches!(node.asap(), Some(ASAPOp::PaneChain { .. }));
+        let pane = matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }));
         let mut inputs = Vec::new();
         node.operator
             .map_children(|child| inputs.push(append(child.clone(), configured, ingestion, mode)));
@@ -169,7 +169,12 @@ fn shared_pane_range_tiers_match_evaluator_for_ingestion_and_kept_refresh() {
             .unwrap()
             .unwrap();
         let chain = (0..configured.physical.candidates.len())
-            .position(|id| matches!(configured.node(id).asap(), Some(ASAPOp::PaneChain { .. })))
+            .position(|id| {
+                matches!(
+                    configured.node(id).asap(),
+                    Some(ASAPOp::SummaryTumblingWindowChain { .. })
+                )
+            })
             .unwrap();
         let tiers: Vec<_> = profile.candidates[chain]
             .iter()

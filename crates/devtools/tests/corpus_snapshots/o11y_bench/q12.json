@@ -1,7 +1,7 @@
 {
   "accuracy_guarantees": "enforced",
   "materialized_views": [],
-  "pane_retention_ms": {},
+  "tumbling_window_retention_ms": {},
   "proven_optimal": true,
   "query": "service_cache_refresh_lag_seconds{job=\"user-service\"}",
   "selected": {
