@@ -528,7 +528,8 @@ impl PhysicalASAPDAG {
                         tumbling_window_count,
                         ..
                     })) => {
-                        let width_ms = tumbling_window_width_ms.checked_mul(u64::from(*tumbling_window_count));
+                        let width_ms =
+                            tumbling_window_width_ms.checked_mul(u64::from(*tumbling_window_count));
                         match (
                             offset_below(*child, |id| payloads.get(&id).copied()),
                             width_ms,

@@ -306,7 +306,12 @@ fn a_chain_and_each_of_its_tumbling_windows_have_one_refresh_window() {
     let chains: Vec<usize> = unexpanded
         .nodes
         .iter()
-        .filter(|node| matches!(node.payload, Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })))
+        .filter(|node| {
+            matches!(
+                node.payload,
+                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+            )
+        })
         .map(|node| node.id)
         .collect();
     assert_eq!(chains.len(), 3);

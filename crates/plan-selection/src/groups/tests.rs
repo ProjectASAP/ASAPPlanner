@@ -273,9 +273,9 @@ fn dominance_needs_every_condition() {
         (
             "operator kind",
             DominanceKey {
-                operator_kind: OperatorKindForReaders::PaneChain {
-                    pane_width_ms: 60_000,
-                    pane_count: 5,
+                operator_kind: OperatorKindForReaders::SummaryTumblingWindowChain {
+                    tumbling_window_width_ms: 60_000,
+                    tumbling_window_count: 5,
                 },
                 ..key.clone()
             },
@@ -646,7 +646,7 @@ fn two_queries_share_a_pane_chain_through_the_real_pipeline() {
         .filter(|candidate| {
             matches!(
                 physical.physical_node(*candidate).asap(),
-                Some(ASAPOp::PaneChain { .. })
+                Some(ASAPOp::SummaryTumblingWindowChain { .. })
             ) && links.is_shareable(*candidate)
                 && inputs.contexts[0].options.contains(candidate)
                 && inputs.contexts[1].options.contains(candidate)
@@ -701,7 +701,7 @@ fn sketch_weights(
                         family: FieldDataType::Sketch(kind, _),
                         ..
                     }
-                    | ASAPOp::PaneChain {
+                    | ASAPOp::SummaryTumblingWindowChain {
                         family: FieldDataType::Sketch(kind, _),
                         ..
                     },
@@ -796,7 +796,7 @@ fn one_pane_chain_serves_a_ratio_and_its_operands() {
         .physical_node(PhysicalCandidateId(class))
         .asap()
     {
-        Some(ASAPOp::PaneChain {
+        Some(ASAPOp::SummaryTumblingWindowChain {
             family: FieldDataType::Sketch(kind, _),
             ..
         }) => match kind.params() {

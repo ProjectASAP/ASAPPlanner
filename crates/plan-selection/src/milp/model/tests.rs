@@ -344,7 +344,10 @@ fn forbid(milp: &mut SelectionMilp<'_>, candidates: &[PhysicalCandidateId]) {
 fn pane_chains_and_ingestion(milp: &SelectionMilp<'_>) -> Vec<PhysicalCandidateId> {
     candidates_where(milp, |candidate, node| {
         candidate.timing == ExecutionTiming::IngestionTime
-            || matches!(node.asap(), Some(asap_types::ir::ASAPOp::PaneChain { .. }))
+            || matches!(
+                node.asap(),
+                Some(asap_types::ir::ASAPOp::SummaryTumblingWindowChain { .. })
+            )
     })
 }
 
@@ -491,11 +494,13 @@ fn a_kept_pane_chain_keeps_the_longest_readers_span() {
     );
     let checked = solve_and_check(&fixture, &cost_inputs(), |milp| {
         let chains = candidates_where(milp, |candidate, node| {
-            matches!(node.asap(), Some(asap_types::ir::ASAPOp::PaneChain { .. }))
-                && matches!(
-                    candidate.materialization,
-                    Materialization::MatAtIngestion(_)
-                )
+            matches!(
+                node.asap(),
+                Some(asap_types::ir::ASAPOp::SummaryTumblingWindowChain { .. })
+            ) && matches!(
+                candidate.materialization,
+                Materialization::MatAtIngestion(_)
+            )
         });
         require_one_of(milp, &chains);
     })
@@ -585,7 +590,7 @@ fn one_ingestion_scan_shared_by_two_sketch_configurations_is_charged_once() {
                 && matches!(
                     node.asap(),
                     Some(asap_types::ir::ASAPOp::SummaryAgg { .. })
-                        | Some(asap_types::ir::ASAPOp::PaneChain { .. })
+                        | Some(asap_types::ir::ASAPOp::SummaryTumblingWindowChain { .. })
                 )
         });
         let sum: Expression = sketches
@@ -652,7 +657,10 @@ fn ingestion_scans_under_refresh_windows(
         });
         forbid(milp, &other);
         let sketches = candidates_where(milp, |_, node| {
-            matches!(node.asap(), Some(asap_types::ir::ASAPOp::PaneChain { .. }))
+            matches!(
+                node.asap(),
+                Some(asap_types::ir::ASAPOp::SummaryTumblingWindowChain { .. })
+            )
         });
         let sum: Expression = allowed
             .iter()
@@ -685,8 +693,11 @@ fn ingestion_scans_under_refresh_windows(
             }
             let candidate = dag.candidate_of_node[node];
             match fixture.physical.physical_node(candidate).asap() {
-                Some(asap_types::ir::ASAPOp::PaneChain { pane_width_ms, .. }) => {
-                    widths.insert(*pane_width_ms);
+                Some(asap_types::ir::ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_width_ms,
+                    ..
+                }) => {
+                    widths.insert(*tumbling_window_width_ms);
                 }
                 _ => stack.extend(readers[node].iter().copied()),
             }

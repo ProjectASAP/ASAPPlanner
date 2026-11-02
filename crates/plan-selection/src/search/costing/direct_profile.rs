@@ -491,9 +491,10 @@ fn profile_for_priced(
         // profile admits no `TimeShift` at ingestion, so that tumbling window ends at
         // the evaluation time: phase 0.
         refresh_window: match &node.payload {
-            asap_types::ir::Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { tumbling_window_width_ms, .. })
-                if node.materialization == Materialization::MatAtIngestion(Medium::Memory) =>
-            {
+            asap_types::ir::Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                ..
+            }) if node.materialization == Materialization::MatAtIngestion(Medium::Memory) => {
                 RefreshWindow::of_window(0, i64::try_from(*tumbling_window_width_ms).unwrap_or(0))
             }
             _ => None,

@@ -31,7 +31,7 @@
 //!   [`PhysicalASAPDAG::scan_window`] for a plan with that one reader);
 //! - for a pane chain kept beyond one evaluation, the panes it keeps, which
 //!   grow with the range-evaluation span of the queries reaching it
-//!   ([`asap_cost::pane_retention_ms`], [`asap_cost::retained_panes`]).
+//!   ([`asap_cost::tumbling_window_retention_ms`], [`asap_cost::retained_panes`]).
 //!
 //! Every combination of these options is costed (at most
 //! [`MAX_CONTEXTS`]); a combination `asap-cost` cannot cost is skipped
@@ -75,7 +75,7 @@
 //! ## Accuracy weights
 //!
 //! `w(q, k)` says whether query `q` may read approximate candidate `k` (a
-//! sketch [`ASAPOp::SummaryAgg`] or [`ASAPOp::PaneChain`], what
+//! sketch [`ASAPOp::SummaryAgg`] or [`ASAPOp::SummaryTumblingWindowChain`], what
 //! [`asap_accuracy::propagation::approximate_inputs`] counts), and pairs of
 //! approximate candidates `q` may not read together. Both come from the
 //! composition itself, never from an operator table
@@ -169,7 +169,7 @@ pub(crate) struct MilpInputs {
 #[derive(Debug, Clone)]
 pub(crate) struct CandidateData {
     /// Whether it outputs approximate values: a sketch `SummaryAgg` or
-    /// `PaneChain`, each an approximate input of the queries reading it.
+    /// `SummaryTumblingWindowChain`, each an approximate input of the queries reading it.
     pub(crate) approximate: bool,
     /// `parts(k)`: its operator node's `accuracy_budget_parts` (Stage 2's
     /// `OperatorNodeOfCandidateForMemoGroup`: for a factored node, the
@@ -1030,7 +1030,7 @@ fn outputs_approximate_values(node: &OperatorNode) -> bool {
             ASAPOp::SummaryAgg {
                 family: FieldDataType::Sketch(..),
                 ..
-            } | ASAPOp::PaneChain {
+            } | ASAPOp::SummaryTumblingWindowChain {
                 family: FieldDataType::Sketch(..),
                 ..
             }
@@ -1076,7 +1076,7 @@ fn catalog_node(
 }
 
 /// A DAG of `nodes` alone, without edges: what
-/// [`asap_cost::pane_retention_ms`] reads (payload children and nodes).
+/// [`asap_cost::tumbling_window_retention_ms`] reads (payload children and nodes).
 fn nodes_dag(nodes: &[&PhysicalASAPDAGNode]) -> PhysicalASAPDAG {
     PhysicalASAPDAG {
         nodes: nodes.iter().map(|&node| node.clone()).collect(),
@@ -1100,19 +1100,21 @@ fn window_read_through(path: &[&PhysicalASAPDAGNode]) -> ScanWindow {
                 continue;
             }
             Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => range.as_millis(),
-            Operator::ASAP(ASAPOp::PaneChain { pane_width_ms, .. })
-                if matches!(
-                    node.materialization,
-                    Materialization::MatAtQueryKeptAcrossEvaluations(_)
-                ) =>
-            {
-                u128::from(*pane_width_ms)
-            }
-            Operator::ASAP(ASAPOp::PaneChain {
-                pane_width_ms,
-                pane_count,
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
                 ..
-            }) => u128::from(*pane_width_ms) * u128::from(*pane_count),
+            }) if matches!(
+                node.materialization,
+                Materialization::MatAtQueryKeptAcrossEvaluations(_)
+            ) =>
+            {
+                u128::from(*tumbling_window_width_ms)
+            }
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                tumbling_window_count,
+                ..
+            }) => u128::from(*tumbling_window_width_ms) * u128::from(*tumbling_window_count),
             _ => return ScanWindow::Unbounded,
         };
         return ScanWindow::Within {
@@ -1323,7 +1325,7 @@ fn retained_pane_options(
     let kept = matches!(
         (&node.payload, node.materialization),
         (
-            Operator::ASAP(ASAPOp::PaneChain { .. }),
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
             Materialization::MatAtIngestion(_)
                 | Materialization::MatAtQueryKeptAcrossEvaluations(_)
         )
@@ -1359,7 +1361,7 @@ fn retained_pane_options(
             .collect(),
     };
     for range in spans {
-        let retention = asap_cost::pane_retention_ms(&dag, &reach, &[range]);
+        let retention = asap_cost::tumbling_window_retention_ms(&dag, &reach, &[range]);
         let panes = asap_cost::retained_panes(node, &retention);
         options.push(panes);
     }
@@ -1974,7 +1976,10 @@ pub(crate) struct DominanceKey<'a> {
 /// pane chain's panes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OperatorKindForReaders {
-    PaneChain { pane_width_ms: u64, pane_count: u32 },
+    SummaryTumblingWindowChain {
+        tumbling_window_width_ms: u64,
+        tumbling_window_count: u32,
+    },
     Other(std::mem::Discriminant<Operator>, &'static str),
 }
 
@@ -2018,13 +2023,13 @@ fn dominance_profiles<'a>(
                         .may_keep_across_evaluations_per_sole_reader_query,
                     output_schema: &node.schema,
                     operator_kind: match &node.operator {
-                        Operator::ASAP(ASAPOp::PaneChain {
-                            pane_width_ms,
-                            pane_count,
+                        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                            tumbling_window_width_ms,
+                            tumbling_window_count,
                             ..
-                        }) => OperatorKindForReaders::PaneChain {
-                            pane_width_ms: *pane_width_ms,
-                            pane_count: *pane_count,
+                        }) => OperatorKindForReaders::SummaryTumblingWindowChain {
+                            tumbling_window_width_ms: *tumbling_window_width_ms,
+                            tumbling_window_count: *tumbling_window_count,
                         },
                         operator => OperatorKindForReaders::Other(
                             std::mem::discriminant(operator),
