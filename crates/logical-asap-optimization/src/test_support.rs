@@ -95,15 +95,12 @@ pub fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
             DurationMs(1_000),
         )),
     };
-    asap_frontend_promql::lower_promql_query_workload(
-        &workload,
-        &asap_frontend_promql::HistogramCatalog::default(),
-    )
-    .unwrap()
-    .remove(0)
-    .as_operator()
-    .cloned()
-    .expect("operator root")
+    asap_frontend_promql::lower_promql_query_workload(&workload)
+        .unwrap()
+        .remove(0)
+        .as_operator()
+        .cloned()
+        .expect("operator root")
 }
 
 // ── Shared pre-ASAP fixture builders ─────────────────────────────────────

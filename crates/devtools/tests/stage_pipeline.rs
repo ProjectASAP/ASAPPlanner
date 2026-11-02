@@ -530,11 +530,7 @@ fn default_search_and_installation_validate_the_nine_query_workload() {
         .build()
         .unwrap()
         .block_on(asap_planner::plan_installable(
-            asap_planner::UserInput::new(
-                &workload,
-                asap_planner::FrontendInput::Promql { histograms: None },
-                models,
-            ),
+            asap_planner::UserInput::new(&workload, asap_planner::FrontendInput::Promql, models),
         ))
         .unwrap();
     plan.validate().unwrap();

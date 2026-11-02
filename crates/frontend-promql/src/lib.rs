@@ -9,16 +9,16 @@
 //! parser only — never on the SQL / DataFusion stack.
 
 mod error;
-mod histogram;
 mod promql;
 
 use std::collections::BTreeSet;
 
 use asap_types::ir::QueryRoot;
-use asap_types::workload::{DataWorkload, DurationMs, MetricType, PlanningWorkload, QueryLanguage};
+use asap_types::workload::{
+    DataWorkload, DurationMs, PlanningWorkload, PrometheusMetricType, QueryLanguage,
+};
 
 pub use error::PromqlError;
-pub use histogram::{HistogramCatalog, HistogramKind};
 
 /// The metrics `query`'s selectors read, by name: the sources whose facts
 /// (such as `sample_interval`) its lowering looks up. Selectors that
@@ -27,37 +27,54 @@ pub fn promql_metric_names(query: &str) -> Result<BTreeSet<String>, PromqlError>
     promql::metric_names(query)
 }
 
-/// One warning per `rate`, `increase` or `irate` call in `query` (one per
-/// function and metric) whose argument reads a metric `data` declares a
-/// gauge ([`MetricType::Gauge`]): those functions assume a counter, so a
-/// gauge's drop reads as a reset. The query still plans as written; a
-/// counter or a metric of undeclared type gets none.
-pub fn counter_function_over_gauge_warnings(
-    query: &str,
-    data: &DataWorkload,
-) -> Result<Vec<String>, PromqlError> {
-    let declared_gauge = |metric: &str| {
-        data.sources
-            .get(metric)
-            .is_some_and(|facts| facts.metric_type == Some(MetricType::Gauge))
+/// Warnings for a query that plans as written but whose metrics' declared
+/// types ([`DataWorkload::series_facts`]) say it likely does not mean what
+/// it computes:
+///
+/// - one per `rate`, `increase` or `irate` call (one per function and
+///   metric) whose argument reads a metric declared a gauge
+///   ([`PrometheusMetricType::Gauge`]): those functions assume a counter, so
+///   a gauge's drop reads as a reset;
+/// - one per `sum`, `avg`, `quantile`, `stddev` or `stdvar` aggregation (one
+///   per aggregation and metric) whose argument reads a Prometheus summary's
+///   quantile series ([`PrometheusMetricType::Summary`]): each series holds a
+///   quantile its client computed, and combining quantiles across series does
+///   not give a quantile of the combined data.
+///
+/// A metric of another or undeclared type gets none.
+pub fn metric_type_warnings(query: &str, data: &DataWorkload) -> Result<Vec<String>, PromqlError> {
+    let declared = |metric: &str, metric_type| {
+        data.series_facts(metric)
+            .is_some_and(|(_, series_type)| series_type == Some(metric_type))
     };
-    Ok(promql::counter_function_metrics(query)?
+    let over_gauge = promql::counter_function_metrics(query)?
         .into_iter()
-        .filter(|(_, metric)| declared_gauge(metric))
+        .filter(|(_, metric)| declared(metric, PrometheusMetricType::Gauge))
         .map(|(function, metric)| {
             format!(
                 "{function} over {metric}, which the data workload declares a gauge: \
                  {function} assumes a counter (a drop is a reset); planned as written"
             )
-        })
-        .collect())
+        });
+    let over_summary_quantiles = promql::value_aggregation_metrics(query)?
+        .into_iter()
+        .filter(|(_, metric)| declared(metric, PrometheusMetricType::Summary))
+        .map(|(aggregation, metric)| {
+            format!(
+                "{aggregation} over {metric}, which the data workload declares a summary: \
+                 its series hold per-series quantiles, and {aggregation} across them is not \
+                 a quantile of the combined data; planned as written"
+            )
+        });
+    Ok(over_gauge.chain(over_summary_quantiles).collect())
 }
 
 /// Lower every normalized PromQL workload entry to its query root: an
 /// operator DAG, or a scalar root that introduces no constant operator.
 ///
-/// `histograms` distinguishes classic bucket interpolation from generic
-/// sketchable quantiles; an empty catalog falls back to query structure.
+/// `histogram_quantile` reads its input as classic buckets unless the data
+/// workload declares a metric it reads a native histogram or a Prometheus
+/// summary, which is rejected.
 ///
 /// A bare instant selector reads the latest sample within its metric's
 /// `sample_interval`, declared in the data workload's
@@ -67,9 +84,7 @@ pub fn counter_function_over_gauge_warnings(
 /// query-specified range and need no interval.
 pub fn lower_promql_query_workload(
     workload: &PlanningWorkload,
-    histograms: &HistogramCatalog,
 ) -> Result<Vec<QueryRoot>, PromqlError> {
-    let _guard = histogram::CatalogGuard::install(histograms.clone());
     if !matches!(workload.query_workload.language, QueryLanguage::PromQL) {
         return Err(PromqlError::WrongLanguage(format!(
             "{:?}",
@@ -82,14 +97,16 @@ pub fn lower_promql_query_workload(
             .sample_interval_of(metric)
             .map(|DurationMs(ms)| std::time::Duration::from_millis(ms))
     };
+    let metric_type_of = |metric: &str| workload.data_workload.as_ref()?.series_facts(metric)?.1;
     workload
         .query_workload
         .entries()
         .map(|entry| {
-            let root = promql::PromqlLowerer::lower_query_with_sample_intervals(
+            let root = promql::PromqlLowerer::lower_query(
                 &entry.query.0,
                 &entry.requirements.accuracy.clone(),
                 &sample_interval_of,
+                &metric_type_of,
             )?;
             Ok(root)
         })
@@ -166,15 +183,12 @@ mod tests {
     // declared sample interval: an `Instant` lookback of that length.
     #[test]
     fn instant_selector_uses_declared_sample_interval() {
-        let query = lower_promql_query_workload(
-            &workload("sum by (job) (data)"),
-            &HistogramCatalog::default(),
-        )
-        .unwrap()
-        .remove(0)
-        .as_operator()
-        .cloned()
-        .expect("operator root");
+        let query = lower_promql_query_workload(&workload("sum by (job) (data)"))
+            .unwrap()
+            .remove(0)
+            .as_operator()
+            .cloned()
+            .expect("operator root");
         let NonASAPOp::Aggregate { child, .. } = query.expect_non_asap() else {
             panic!("expected aggregate")
         };
@@ -190,15 +204,12 @@ mod tests {
     // its own metric's interval.
     #[test]
     fn each_instant_selector_uses_its_own_metrics_sample_interval() {
-        let query = lower_promql_query_workload(
-            &workload("sum(data) + sum(other)"),
-            &HistogramCatalog::default(),
-        )
-        .unwrap()
-        .remove(0)
-        .as_operator()
-        .cloned()
-        .expect("operator root");
+        let query = lower_promql_query_workload(&workload("sum(data) + sum(other)"))
+            .unwrap()
+            .remove(0)
+            .as_operator()
+            .cloned()
+            .expect("operator root");
         let mut lookbacks = instant_lookbacks(&query);
         lookbacks.sort();
         assert_eq!(
@@ -213,15 +224,12 @@ mod tests {
     // An explicit `m[5m]` keeps its own window as a `Range` selection.
     #[test]
     fn explicit_range_selector_keeps_its_query_range() {
-        let query = lower_promql_query_workload(
-            &workload("sum_over_time(data[5m])"),
-            &HistogramCatalog::default(),
-        )
-        .unwrap()
-        .remove(0)
-        .as_operator()
-        .cloned()
-        .expect("operator root");
+        let query = lower_promql_query_workload(&workload("sum_over_time(data[5m])"))
+            .unwrap()
+            .remove(0)
+            .as_operator()
+            .cloned()
+            .expect("operator root");
         let NonASAPOp::Aggregate { child, .. } = query.expect_non_asap() else {
             panic!("expected aggregate")
         };
@@ -247,9 +255,7 @@ mod tests {
             }),
             None,
         ];
-        let lower = |input: &PlanningWorkload| {
-            lower_promql_query_workload(input, &HistogramCatalog::default())
-        };
+        let lower = |input: &PlanningWorkload| lower_promql_query_workload(input);
         for arrival in arrivals {
             let with = |query: &str| {
                 let mut input = workload(query);
@@ -288,7 +294,7 @@ mod tests {
     // function and the metric; a counter or an undeclared type does not.
     #[test]
     fn counter_functions_over_a_declared_gauge_warn() {
-        use asap_types::workload::MetricType;
+        use asap_types::workload::PrometheusMetricType;
         let typed = |metric_type| SourceFacts {
             metric_type,
             ..SourceFacts::default()
@@ -296,13 +302,13 @@ mod tests {
         let data = DataWorkload {
             arrival: DataArrival::Unknown,
             sources: [
-                ("g".to_string(), typed(Some(MetricType::Gauge))),
-                ("c".to_string(), typed(Some(MetricType::Counter))),
+                ("g".to_string(), typed(Some(PrometheusMetricType::Gauge))),
+                ("c".to_string(), typed(Some(PrometheusMetricType::Counter))),
                 ("u".to_string(), typed(None)),
             ]
             .into(),
         };
-        let warnings = |query: &str| counter_function_over_gauge_warnings(query, &data).unwrap();
+        let warnings = |query: &str| metric_type_warnings(query, &data).unwrap();
         assert_eq!(
             warnings("sum by (job) (rate(g[5m])) / sum(irate(g[1m])) + increase(c[5m])"),
             [
@@ -319,6 +325,45 @@ mod tests {
         );
         assert!(warnings("increase(c[5m]) + rate(u[5m]) + delta(g[5m]) + g").is_empty());
         assert!(warnings("rate(max_over_time(g[1m])[5m:1m])").len() == 1);
-        assert!(counter_function_over_gauge_warnings("rate(", &data).is_err());
+        assert!(metric_type_warnings("rate(", &data).is_err());
+    }
+
+    // Combining a declared summary's quantile series across series (`avg`,
+    // `sum`, `quantile`, `stddev`, `stdvar`) warns once per aggregation and
+    // metric; selecting one (`max`), reading it alone, and aggregating its
+    // `_sum`/`_count` counters or a gauge do not; a `rate` of `_sum` reads a
+    // counter, so it does not warn either.
+    #[test]
+    fn aggregating_a_summarys_quantile_series_warns() {
+        use asap_types::workload::PrometheusMetricType;
+        let typed = |metric_type| SourceFacts {
+            metric_type: Some(metric_type),
+            ..SourceFacts::default()
+        };
+        let data = DataWorkload {
+            arrival: DataArrival::Unknown,
+            sources: [
+                ("s".to_string(), typed(PrometheusMetricType::Summary)),
+                ("g".to_string(), typed(PrometheusMetricType::Gauge)),
+            ]
+            .into(),
+        };
+        let warnings = |query: &str| metric_type_warnings(query, &data).unwrap();
+        assert_eq!(
+            warnings(r#"avg(s{quantile="0.99"})"#),
+            [
+                "avg over s, which the data workload declares a summary: its series hold \
+              per-series quantiles, and avg across them is not a quantile of the combined \
+              data; planned as written"
+            ]
+        );
+        assert_eq!(
+            warnings(r#"sum by (job) (s) + quantile(0.5, s) + stddev(s) + stdvar(s)"#).len(),
+            4
+        );
+        assert!(warnings(
+            r#"max(s{quantile="0.99"}) + s{quantile="0.5"} + avg(g) + sum(s_count) + rate(s_sum[5m])"#
+        )
+        .is_empty());
     }
 }

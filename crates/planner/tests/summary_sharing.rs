@@ -82,11 +82,7 @@ fn promql_workload(queries: &[(&str, f64)]) -> PlanningWorkload {
 
 async fn plan_promql(queries: &[(&str, f64)]) -> PlanOutput {
     let workload = promql_workload(queries);
-    let input = UserInput::new(
-        &workload,
-        FrontendInput::Promql { histograms: None },
-        PlanningModels::builtin(),
-    );
+    let input = UserInput::new(&workload, FrontendInput::Promql, PlanningModels::builtin());
     e2e_plan(input).await.expect("workload plans")
 }
 
@@ -104,11 +100,7 @@ fn composed_summary_candidates(
     };
     use asap_types::stages::HowToComputeAggregateMeasure;
     let workload = promql_workload(queries);
-    let roots = lower_promql_query_workload(
-        &workload,
-        &asap_frontend_promql::HistogramCatalog::default(),
-    )
-    .expect("lowers");
+    let roots = lower_promql_query_workload(&workload).expect("lowers");
     let inventory = generate_per_computation_candidates(
         &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )
@@ -170,9 +162,7 @@ fn shared_kll_candidate(workload: &PlanningWorkload) -> asap_types::physical::Ph
         compose_logical_candidate, generate_per_computation_candidates,
     };
     use asap_types::physical::Materialization;
-    let roots =
-        lower_promql_query_workload(workload, &asap_frontend_promql::HistogramCatalog::default())
-            .unwrap();
+    let roots = lower_promql_query_workload(workload).unwrap();
     let inventory = generate_per_computation_candidates(
         &asap_logical_asap_optimization::generate_dag_of_logical_memo_groups(&roots),
     )

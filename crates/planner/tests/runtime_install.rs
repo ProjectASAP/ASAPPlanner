@@ -238,13 +238,9 @@ async fn plan_with_report_for(
         .with_deployment_capabilities(capabilities)
         .with_cost_inputs(&settings);
     // The one Planner call: the selected plan, ready to install.
-    plan_installable(UserInput::new(
-        &workload,
-        FrontendInput::Promql { histograms: None },
-        models,
-    ))
-    .await
-    .unwrap()
+    plan_installable(UserInput::new(&workload, FrontendInput::Promql, models))
+        .await
+        .unwrap()
 }
 
 /// What one data-plane evaluation of a plan file returned.
@@ -886,7 +882,7 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
     let workload = workload(&["sum(latency_ms)"]);
     let plan = plan_installable(UserInput::new(
         &workload,
-        FrontendInput::Promql { histograms: None },
+        FrontendInput::Promql,
         PlanningModels::builtin(),
     ))
     .await
@@ -1326,7 +1322,7 @@ async fn forced_plan_json(
     let pass = StoredAsForced { store };
     let mut input = UserInput::new(
         workload,
-        FrontendInput::Promql { histograms: None },
+        FrontendInput::Promql,
         PlanningModels::builtin().with_deployment_capabilities(capabilities),
     );
     input.pass = Some(&pass);
@@ -1764,7 +1760,7 @@ async fn plan_p99_avg(
     };
     plan_installable(UserInput::new(
         &p99_avg_workload(values_non_negative),
-        FrontendInput::Promql { histograms: None },
+        FrontendInput::Promql,
         PlanningModels::builtin().with_deployment_capabilities(&capabilities),
     ))
     .await
@@ -1928,19 +1924,16 @@ fn pass1_pruned_for_no_error_bound(
     workload: &PlanningWorkload,
     models: PlanningModels<'_>,
 ) -> Vec<String> {
-    let roots = asap_frontend_promql::lower_promql_query_workload(
-        workload,
-        &asap_frontend_promql::HistogramCatalog::default(),
-    )
-    .unwrap()
-    .into_iter()
-    .map(|root| match root {
-        QueryRoot::Operator(node) => {
-            QueryRoot::Operator(with_promql_series_identity(&node).unwrap_or(node))
-        }
-        scalar => scalar,
-    })
-    .collect();
+    let roots = asap_frontend_promql::lower_promql_query_workload(workload)
+        .unwrap()
+        .into_iter()
+        .map(|root| match root {
+            QueryRoot::Operator(node) => {
+                QueryRoot::Operator(with_promql_series_identity(&node).unwrap_or(node))
+            }
+            scalar => scalar,
+        })
+        .collect();
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
     let run = run_planning(
@@ -2131,7 +2124,7 @@ async fn ignoring_accuracy_guarantees_selects_a_sketch_plan_that_runs() {
         async move {
             plan_installable(UserInput::new(
                 &workload,
-                FrontendInput::Promql { histograms: None },
+                FrontendInput::Promql,
                 PlanningModels::builtin()
                     .with_deployment_capabilities(&capabilities)
                     .with_ignore_accuracy_guarantees(ignore),
@@ -2232,7 +2225,7 @@ async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
     let settings = CostInputs::default();
     let (plan, report) = plan_installable(UserInput::new(
         &p99_avg_workload(false),
-        FrontendInput::Promql { histograms: None },
+        FrontendInput::Promql,
         PlanningModels::builtin()
             .with_deployment_capabilities(&capabilities)
             .with_cost_inputs(&settings)
@@ -2271,13 +2264,9 @@ async fn plan_p99(
         .with_deployment_capabilities(&capabilities)
         .with_cost_inputs(&settings)
         .with_ignore_accuracy_guarantees(ignore_accuracy);
-    plan_installable(UserInput::new(
-        &workload,
-        FrontendInput::Promql { histograms: None },
-        models,
-    ))
-    .await
-    .expect("a valid plan")
+    plan_installable(UserInput::new(&workload, FrontendInput::Promql, models))
+        .await
+        .expect("a valid plan")
 }
 
 /// `data` samples of series `0..series`, `value(series, step)` every
@@ -2494,7 +2483,7 @@ async fn ignoring_guarantees_counter_topk_plans_compile_and_answer_exactly() {
     for (function, seconds) in [("increase", 300.0), ("rate", 1.0)] {
         let plan = plan_installable(UserInput::new(
             &counter_topk_workload(function),
-            FrontendInput::Promql { histograms: None },
+            FrontendInput::Promql,
             PlanningModels::builtin()
                 .with_deployment_capabilities(&capabilities)
                 .with_cost_inputs(&settings)
@@ -2565,7 +2554,7 @@ async fn check_compiles_reports_the_executors_error() {
     };
     let (mut plan, _) = plan_installable(UserInput::new(
         &counter_topk_workload("rate"),
-        FrontendInput::Promql { histograms: None },
+        FrontendInput::Promql,
         PlanningModels::builtin().with_deployment_capabilities(&capabilities),
     ))
     .await
@@ -2801,14 +2790,10 @@ async fn plan_ignoring_guarantees(
         Some(model) => models.with_accuracy(model),
         None => models,
     };
-    plan_installable(UserInput::new(
-        workload,
-        FrontendInput::Promql { histograms: None },
-        models,
-    ))
-    .await
-    .map(|(plan, _)| plan)
-    .map_err(|e| e.to_string())
+    plan_installable(UserInput::new(workload, FrontendInput::Promql, models))
+        .await
+        .map(|(plan, _)| plan)
+        .map_err(|e| e.to_string())
 }
 
 /// The heap sketch `plan` builds: its algorithm and width.

@@ -87,13 +87,7 @@ fn stage3_raw_lookback_ms(dag: &PhysicalASAPDAG) -> Vec<(Source, Option<u64>)> {
 #[tokio::test(flavor = "multi_thread")]
 async fn raw_data_retention_is_the_lookback_stage3_prices() {
     let workload = repeating(&["rate(m[5m])", "rate(m[5m] offset 1h)"]);
-    let input = || {
-        UserInput::new(
-            &workload,
-            FrontendInput::Promql { histograms: None },
-            PlanningModels::builtin(),
-        )
-    };
+    let input = || UserInput::new(&workload, FrontendInput::Promql, PlanningModels::builtin());
     let (plan, _) = plan_installable(input()).await.unwrap();
     let m = Source::TimeSeries { metric: "m".into() };
     assert_eq!(
@@ -110,7 +104,7 @@ async fn raw_data_retention_is_the_lookback_stage3_prices() {
     };
     let (plan, _) = plan_installable(UserInput::new(
         &workload,
-        FrontendInput::Promql { histograms: None },
+        FrontendInput::Promql,
         PlanningModels::builtin().with_deployment_capabilities(&capabilities),
     ))
     .await

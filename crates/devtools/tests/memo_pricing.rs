@@ -73,13 +73,10 @@ fn planned(workload: &PlanningWorkload, series_identity: bool) -> Planned {
     let roots = if series_identity {
         lower_promql_roots(workload).unwrap()
     } else {
-        asap_frontend_promql::lower_promql_query_workload(
-            workload,
-            &asap_frontend_promql::HistogramCatalog::default(),
-        )
-        .unwrap()
-        .into_iter()
-        .collect()
+        asap_frontend_promql::lower_promql_query_workload(workload)
+            .unwrap()
+            .into_iter()
+            .collect()
     };
     let initial = generate_dag_of_logical_memo_groups(&roots);
     let inventory = generate_per_computation_candidates(

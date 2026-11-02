@@ -51,7 +51,7 @@ tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 
 | Public function | Required input | Output |
 | --- | --- | --- |
-| `asap_frontend_promql::lower_promql_query_workload` | PromQL `PlanningWorkload` and a `HistogramCatalog`; a bare instant selector needs its metric's nonzero `sample_interval` in `DataWorkload.sources` | All-or-nothing `Result<Vec<QueryRoot>, PromqlError>` for normalized batch and repeating entries |
+| `asap_frontend_promql::lower_promql_query_workload` | PromQL `PlanningWorkload`; a bare instant selector needs its metric's nonzero `sample_interval` in `DataWorkload.sources` | All-or-nothing `Result<Vec<QueryRoot>, PromqlError>` for normalized batch and repeating entries |
 | `asap_frontend_metricsql::lower_metricsql` | Query string, `AccuracyTarget` | `Result<Rc<OperatorNode>, MetricsqlError>` |
 | `asap_frontend_sql::lower_sql` | Query string, `SqlCatalog`, accuracy | Async `Result<Rc<OperatorNode>, SqlError>`; default SQL dialect is DataFusionSQL |
 | `asap_frontend_sql::lower_sql_dialect` | Same inputs plus `SqlDialect` | Async resolved Pre-ASAP query or error |
@@ -72,8 +72,7 @@ those entries with the single-query frontend.
 PromQL's public signature (types are imported from their respective crates):
 
 ```text
-lower_promql_query_workload(workload: &PlanningWorkload, histograms: &HistogramCatalog)
-    -> Result<Vec<QueryRoot>, PromqlError>
+lower_promql_query_workload(workload: &PlanningWorkload) -> Result<Vec<QueryRoot>, PromqlError>
 ```
 
 A bare instant selector reads the latest sample within the sample interval
@@ -81,8 +80,13 @@ its metric declares (`DataWorkload.sources[metric].sample_interval`,
 nonzero), whatever the arrival. A query with one fails with
 `WorkloadError::MissingSampleInterval` when that metric declares no
 interval. Explicit range selectors retain their query-specified range and
-need no interval. `histograms` declares each histogram metric's sample type
-for the whole workload; pass `HistogramCatalog::default()` when there is none. Each entry carries its
+need no interval. `histogram_quantile` reads its input as classic buckets,
+as the PromQL spec reads float samples, unless a metric it reads is declared
+(`DataWorkload.sources[family].metric_type`) a `native_histogram` or a
+`summary`, which is rejected. A declared `histogram` or `summary` family
+`foo` is keyed by its family name and supplies its series: `foo_bucket`
+(histogram), `foo` (summary), and the counters `foo_sum` and `foo_count`.
+Each entry carries its
 own accuracy requirement, an `AccuracyTarget` with the fields `error` (ε),
 `failure_probability` (δ, optional), `accuracy_metric` (optional) and
 `accuracy_scope` (default the whole result). Build it with:
@@ -104,7 +108,7 @@ candidate's guarantee and its error metric; a target is a requirement, not proof
 that a supported candidate exists.
 
 ```rust
-use asap_frontend_promql::{lower_promql_query_workload, HistogramCatalog};
+use asap_frontend_promql::lower_promql_query_workload;
 use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, Query,
     PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
@@ -133,7 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             DurationMs(1_000),
         )),
     };
-    let pre_asap = lower_promql_query_workload(&workload, &HistogramCatalog::default())?;
+    let pre_asap = lower_promql_query_workload(&workload)?;
     println!("{pre_asap:#?}");
     Ok(())
 }
@@ -169,7 +173,7 @@ and Stage 3 per pane-width round, keeping the best round's plan.
 asap_planner::e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError>   // async
 UserInput::new(workload: &PlanningWorkload, frontend_specific: FrontendInput<'_>,
     models: PlanningModels<'_>) -> UserInput<'_>
-FrontendInput::{Sql { catalog: &SqlCatalog }, Promql { histograms: Option<HistogramCatalog> }, Metricsql}
+FrontendInput::{Sql { catalog: &SqlCatalog }, Promql, Metricsql}
 
 // A caller that already holds lowered roots runs the stages through the facade:
 asap_planner::run_planning(
@@ -219,8 +223,8 @@ dependencies):
 use asap_planner::{e2e_plan, FrontendInput, PlanningModels, UserInput};
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::workload::{
-    BatchEntry, DataArrival, DataWorkload, DurationMs, MetricType, PlanningWorkload, Query,
-    QueryLanguage, QueryRequirements, QueryWorkload, SourceFacts,
+    BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, PrometheusMetricType,
+    Query, QueryLanguage, QueryRequirements, QueryWorkload, SourceFacts,
 };
 
 #[tokio::main]
@@ -247,7 +251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "http_requests_total".to_string(),
                 SourceFacts {
                     series_count: Some(1_000_000),
-                    metric_type: Some(MetricType::Counter),
+                    metric_type: Some(PrometheusMetricType::Counter),
                     sample_interval: Some(DurationMs(15_000)),
                     ..Default::default()
                 },
@@ -257,7 +261,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let input = UserInput::new(
         &workload,
-        FrontendInput::Promql { histograms: None },
+        FrontendInput::Promql,
         PlanningModels::builtin(),
     );
     let output = e2e_plan(input).await?;

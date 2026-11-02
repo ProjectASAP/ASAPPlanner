@@ -55,7 +55,7 @@ async fn a_pane_is_built_from_arrow_columns_with_one_label_entry_per_series() {
     // Pane width is chosen by the optimizer.
     let plan = plan_installable(UserInput::new(
         &workload,
-        FrontendInput::Promql { histograms: None },
+        FrontendInput::Promql,
         PlanningModels::builtin().with_deployment_capabilities(&capabilities),
     ))
     .await

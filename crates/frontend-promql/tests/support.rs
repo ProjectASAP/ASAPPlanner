@@ -1,12 +1,12 @@
 use std::rc::Rc;
 
-use asap_frontend_promql::{lower_promql_query_workload, HistogramCatalog, PromqlError};
+use asap_frontend_promql::{lower_promql_query_workload, PromqlError};
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::ScalarValue;
 use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
 use asap_types::workload::{
-    BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
-    QueryRequirements, QueryWorkload,
+    BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Predictability, PrometheusMetricType,
+    Query, QueryLanguage, QueryRequirements, QueryWorkload,
 };
 
 pub fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
@@ -38,16 +38,25 @@ pub fn lower_promql(
     query: &str,
     accuracy: AccuracyTarget,
 ) -> Result<Rc<OperatorNode>, PromqlError> {
-    lower_promql_with_histograms(query, accuracy, HistogramCatalog::default())
+    lower_promql_with_metric_types(query, accuracy, &[])
 }
 
+/// [`lower_promql`] over data that also declares each of `metric_types`'
+/// sources of its type, sampled every second like the query's metrics.
 #[allow(dead_code)]
-pub fn lower_promql_with_histograms(
+pub fn lower_promql_with_metric_types(
     query: &str,
     accuracy: AccuracyTarget,
-    histograms: HistogramCatalog,
+    metric_types: &[(&str, PrometheusMetricType)],
 ) -> Result<Rc<OperatorNode>, PromqlError> {
-    lower_promql_query_workload(&workload(query, accuracy), &histograms)?
+    let mut workload = workload(query, accuracy);
+    let data = workload.data_workload.as_mut().expect("declared data");
+    for (source, metric_type) in metric_types {
+        let facts = data.sources.entry(source.to_string()).or_default();
+        facts.metric_type = Some(*metric_type);
+        facts.sample_interval = Some(DurationMs(1_000));
+    }
+    lower_promql_query_workload(&workload)?
         .remove(0)
         .as_operator()
         .cloned()
@@ -89,12 +98,9 @@ pub fn physical_asap_dag(
 
 #[allow(dead_code)]
 pub fn scalar_root(query: &str) -> ScalarExpr {
-    match lower_promql_query_workload(
-        &workload(query, AccuracyTarget::exact()),
-        &HistogramCatalog::default(),
-    )
-    .unwrap()
-    .remove(0)
+    match lower_promql_query_workload(&workload(query, AccuracyTarget::exact()))
+        .unwrap()
+        .remove(0)
     {
         asap_types::ir::QueryRoot::Scalar(expr) => expr,
         _ => panic!("expected scalar root: {query}"),

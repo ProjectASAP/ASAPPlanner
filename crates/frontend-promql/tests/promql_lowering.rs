@@ -15,9 +15,7 @@ use asap_types::workload::{
 };
 
 use crate::support;
-use asap_frontend_promql::{
-    lower_promql_query_workload, HistogramCatalog, PromqlError as LoweringError,
-};
+use asap_frontend_promql::{lower_promql_query_workload, PromqlError as LoweringError};
 use support::lower_promql;
 
 fn lower(q: &str) -> Rc<OperatorNode> {
@@ -205,8 +203,8 @@ fn avg_over_time_maps_to_avg_intent() {
 #[test]
 fn histogram_quantile_wraps_inner_in_quantile() {
     // The argument's structure (here `rate`) is preserved *under* the quantile,
-    // not squashed away. The `_bucket` metric + `le` matcher mark the classic
-    // form → `HistogramQuantile` over `Aggregate{Rate}` over Scan.
+    // not squashed away: classic buckets → `HistogramQuantile` over
+    // `Aggregate{Rate}` over Scan.
     let qe = lower(r#"histogram_quantile(0.95, rate(http_duration_seconds_bucket{le="0.5"}[5m]))"#);
     let NonASAPOp::Aggregate {
         measures, child, ..
@@ -1137,8 +1135,7 @@ fn batch_lowers_each_entry_and_reads_per_query_accuracy() {
         // Range selectors only: no sample interval is needed.
         data_workload: None,
     };
-    let results = lower_promql_query_workload(&workload, &HistogramCatalog::default())
-        .expect("valid workload");
+    let results = lower_promql_query_workload(&workload).expect("valid workload");
     assert_eq!(results.len(), 2);
 }
 
@@ -1161,7 +1158,7 @@ fn batch_rejects_non_promql_language() {
         data_workload: None,
     };
     assert!(matches!(
-        lower_promql_query_workload(&workload, &HistogramCatalog::default()),
+        lower_promql_query_workload(&workload),
         Err(LoweringError::WrongLanguage(_))
     ));
 }
@@ -1324,11 +1321,17 @@ fn quantile_branches(q: &OperatorNode) -> Vec<(String, AggIntent)> {
         .collect()
 }
 
+/// `histogram_quantiles` over a metric declared a native histogram is
+/// rejected, as `histogram_quantile` is.
 #[test]
 fn histogram_quantiles_rejects_unrepresented_native_histograms() {
-    assert!(lower_promql(
+    assert!(support::lower_promql_with_metric_types(
         r#"histogram_quantiles(testhistogram3, "q", 0, 0.25, 1)"#,
-        AccuracyTarget::exact()
+        AccuracyTarget::exact(),
+        &[(
+            "testhistogram3",
+            asap_types::workload::PrometheusMetricType::NativeHistogram
+        )],
     )
     .is_err());
 }

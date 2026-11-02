@@ -54,12 +54,12 @@ fn confirmed_as_counter(
     plan: Rc<planner_types::ir::OperatorNode>,
 ) -> Rc<planner_types::ir::OperatorNode> {
     use planner_types::ir::QueryRoot;
-    use planner_types::workload::{MetricType, SourceFacts};
+    use planner_types::workload::{PrometheusMetricType, SourceFacts};
     let data = DataWorkload {
         sources: [(
             "m".to_string(),
             SourceFacts {
-                metric_type: Some(MetricType::Counter),
+                metric_type: Some(PrometheusMetricType::Counter),
                 ..SourceFacts::default()
             },
         )]
@@ -199,7 +199,7 @@ fn assert_weighted_binding(algorithm: SketchAlgorithm) {
     }
 }
 
-use asap_frontend_promql::{lower_promql_query_workload, HistogramCatalog};
+use asap_frontend_promql::lower_promql_query_workload;
 use planner_types::workload::{
     BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
     QueryRequirements, QueryWorkload,
@@ -229,13 +229,11 @@ pub fn lower_promql(
             DurationMs(1_000),
         )),
     };
-    Ok(
-        lower_promql_query_workload(&workload, &HistogramCatalog::default())?
-            .remove(0)
-            .as_operator()
-            .cloned()
-            .expect("operator root"),
-    )
+    Ok(lower_promql_query_workload(&workload)?
+        .remove(0)
+        .as_operator()
+        .cloned()
+        .expect("operator root"))
 }
 
 // The old untyped heap updater must not silently round a Planner rate update.

@@ -45,7 +45,7 @@ async fn per_sample_updates_build_the_materialized_pane_the_plan_refreshes() {
     // The installable plan: the selected DAG and its materialized views.
     let plan = plan_installable(UserInput::new(
         &workload,
-        FrontendInput::Promql { histograms: None },
+        FrontendInput::Promql,
         PlanningModels::builtin().with_deployment_capabilities(&capabilities),
     ))
     .await
@@ -272,7 +272,7 @@ async fn panes_installed_from_per_sample_states_answer_the_query() {
     };
     let plan = plan_installable(UserInput::new(
         &workload,
-        FrontendInput::Promql { histograms: None },
+        FrontendInput::Promql,
         PlanningModels::builtin().with_deployment_capabilities(&capabilities),
     ))
     .await

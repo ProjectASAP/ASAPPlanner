@@ -57,13 +57,9 @@ fn without_raw_data() -> DeploymentCapabilities {
 
 async fn plan(workload: &PlanningWorkload, capabilities: &DeploymentCapabilities) -> PlanOutput {
     let models = PlanningModels::builtin().with_deployment_capabilities(capabilities);
-    e2e_plan(UserInput::new(
-        workload,
-        FrontendInput::Promql { histograms: None },
-        models,
-    ))
-    .await
-    .expect("Example 4b plans")
+    e2e_plan(UserInput::new(workload, FrontendInput::Promql, models))
+        .await
+        .expect("Example 4b plans")
 }
 
 fn materialized_count(dag: &PhysicalASAPDAG) -> usize {
@@ -104,13 +100,9 @@ async fn installable_with_report(
 ) -> (InstallablePlan, Option<SelectedPlanReport>) {
     let capabilities = without_raw_data();
     let models = PlanningModels::builtin().with_deployment_capabilities(&capabilities);
-    plan_installable(UserInput::new(
-        workload,
-        FrontendInput::Promql { histograms: None },
-        models,
-    ))
-    .await
-    .expect("Example 4b plans")
+    plan_installable(UserInput::new(workload, FrontendInput::Promql, models))
+        .await
+        .expect("Example 4b plans")
 }
 
 async fn installable(workload: &PlanningWorkload) -> InstallablePlan {
@@ -276,7 +268,7 @@ async fn installable_at_query_time(query: &str) -> Result<InstallablePlan, PlanE
     let workload = repeating(&[query]);
     plan_installable(UserInput::new(
         &workload,
-        FrontendInput::Promql { histograms: None },
+        FrontendInput::Promql,
         PlanningModels::builtin(),
     ))
     .await

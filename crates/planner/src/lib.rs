@@ -76,7 +76,6 @@ pub use asap_cost::{
     MeasuredOperationCost, MeasuredOperationCosts, NodePriceSource, OperatorCost, OperatorKind,
     ResourceSpeed, ResourceUnitCost, SummaryOperation,
 };
-pub use asap_frontend_promql::{HistogramCatalog, HistogramKind};
 pub use asap_frontend_sql::SqlCatalog;
 pub use asap_logical_asap_optimization::{DeploymentCapabilities, SupportedSummary};
 pub use asap_plan_selection::{
@@ -99,12 +98,8 @@ pub use asap_types::workload::PlanningWorkload;
 /// that they agree.
 #[non_exhaustive]
 pub enum FrontendInput<'a> {
-    Sql {
-        catalog: &'a SqlCatalog,
-    },
-    Promql {
-        histograms: Option<HistogramCatalog>,
-    },
+    Sql { catalog: &'a SqlCatalog },
+    Promql,
     Metricsql,
 }
 
@@ -165,7 +160,7 @@ impl FrontendInput<'_> {
     fn name(&self) -> &'static str {
         match self {
             Self::Sql { .. } => "Sql",
-            Self::Promql { .. } => "Promql",
+            Self::Promql => "Promql",
             Self::Metricsql => "Metricsql",
         }
     }
@@ -272,17 +267,11 @@ async fn lower(input: &UserInput<'_>) -> Result<Vec<asap_types::ir::QueryRoot>, 
             }
             Ok(lowered)
         }
-        FrontendInput::Promql { histograms, .. } => {
-            let no_histograms = HistogramCatalog::default();
-            let histograms = histograms.as_ref().unwrap_or(&no_histograms);
-            let lowered =
-                lower_promql_query_workload(input.workload, histograms).map_err(|source| {
-                    PlanError::Lowering {
-                        entry_index: None,
-                        source: LoweringError::Promql(source),
-                    }
-                })?;
-            Ok(lowered)
+        FrontendInput::Promql => {
+            lower_promql_query_workload(input.workload).map_err(|source| PlanError::Lowering {
+                entry_index: None,
+                source: LoweringError::Promql(source),
+            })
         }
         FrontendInput::Metricsql => {
             lower_metricsql_query_workload(input.workload).map_err(|source| PlanError::Lowering {
