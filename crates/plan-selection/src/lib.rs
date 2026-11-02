@@ -43,7 +43,12 @@
 //!   ([`NodeCost::multiplier`](asap_cost::NodeCost::multiplier)) at the sum of their rates. Its consumers are
 //!   the queries whose sub-DAG reaches it and the materialized nodes above
 //!   it, counted without looking through a materialized node: a node below
-//!   one is computed when that node is. Stage 2 keeps a shared node one
+//!   one is computed when that node is. The `MatAtIngestion` consumers of
+//!   one refresh window (`PhysicalASAPDAG::refresh_window`: for a pane
+//!   chain, its pane width) are refreshed in one ingestion run and count as
+//!   one consumer: a `Scan` under a KLL chain and a DDSketch chain of 10 s
+//!   panes is computed once per second of arriving data, under chains of
+//!   10 s and 60 s panes twice. Stage 2 keeps a shared node one
 //!   node (it copies it only for readers at two timings). A shared
 //!   `NotMaterialized` input costs what reading it separately does (#509
 //!   Example 4) only when every consumer reads the same window: a query-time `Scan` is priced over the longest window

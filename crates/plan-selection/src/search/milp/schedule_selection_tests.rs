@@ -98,6 +98,7 @@ fn heterogeneous_intervals_price_boundary_rates_and_longest_reader_lifetimes() {
                 held_memory_cost_per_second: 4.0,
                 materialized: true,
                 raw_retention: None,
+                refresh_window: None,
             },
             NodeCostProfile {
                 ingestion: false,
@@ -168,6 +169,7 @@ fn aligned_and_offset_phases_use_evaluator_union_policy() {
                 held_memory_cost_per_second: 2.0,
                 materialized: true,
                 raw_retention: None,
+                refresh_window: None,
             }],
         };
         let result = solve_direct_cost_proposal_with_metrics(
@@ -222,6 +224,7 @@ fn heterogeneous_selection_matches_exhaustive_reader_assignments() {
                 held_memory_cost_per_second: 3.0,
                 materialized: true,
                 raw_retention: None,
+                refresh_window: None,
             },
             NodeCostProfile {
                 per_request: false,
@@ -233,6 +236,7 @@ fn heterogeneous_selection_matches_exhaustive_reader_assignments() {
                 held_memory_cost_per_second: 1.0,
                 materialized: true,
                 raw_retention: None,
+                refresh_window: None,
             },
             NodeCostProfile {
                 ingestion: false,
