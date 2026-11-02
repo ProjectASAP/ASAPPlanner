@@ -22,3 +22,4 @@ path = "tests/main.rs"
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
 asap-frontend-metricsql = { path = ".", features = ["test-support"] }
+asap-frontend-promql = { path = "../frontend-promql" }
