@@ -503,7 +503,15 @@ pub struct DataWorkload {
     /// How the data arrives (default: unknown).
     pub arrival: DataArrival,
     /// Facts per source, keyed by PromQL metric name or SQL table name
-    /// (default: none). A source without an entry has no known facts.
+    /// (default: none). A declared histogram or summary is keyed by its
+    /// family name; its `metric_type`, `values_non_negative` and
+    /// `sample_interval` apply to every series of the family
+    /// ([`Self::series_facts`]). Counts, norms and bounds (`series_count`,
+    /// `stream_norms`, …) differ per series name (a `foo_bucket` has one
+    /// series per `le`), so they are read from the series' own entry;
+    /// pricing a source's own arrival rate reads its `series_count` and
+    /// `sample_interval` there together. A source without an entry has no
+    /// known facts.
     #[serde(default)]
     pub sources: BTreeMap<String, SourceFacts>,
 }
@@ -522,10 +530,10 @@ pub struct SourceFacts {
     #[serde(default)]
     pub series_count: Option<u64>,
     /// Declared Prometheus type of the metric (`# TYPE` metadata). The
-    /// planner never infers a type from a name such as `_total`; an
-    /// undeclared metric's samples may take any value.
+    /// planner never infers a type from a name such as `_total` or
+    /// `_bucket`; an undeclared metric's samples may take any value.
     #[serde(default)]
-    pub metric_type: Option<MetricType>,
+    pub metric_type: Option<PrometheusMetricType>,
     /// Whether every sample of the metric is non-negative (default `false`:
     /// unknown). A counter's samples always are; this declares it for a
     /// gauge, such as a latency or a queue length. The deployment must
@@ -691,15 +699,28 @@ pub struct StreamNorms {
     pub l2: Option<f64>,
 }
 
-/// The Prometheus type of a metric's samples.
+/// The Prometheus type of a metric family (`# TYPE` metadata). Not an ASAP
+/// summary: [`Self::Summary`] is the Prometheus summary type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MetricType {
+pub enum PrometheusMetricType {
     /// Starts at zero and only increases, or resets to zero: every sample is
     /// non-negative.
     Counter,
     /// May take any value.
     Gauge,
+    /// A classic histogram family `foo`: cumulative bucket counters
+    /// `foo_bucket{le=…}`, and the counters `foo_sum` and `foo_count`. The
+    /// planner reads `foo_sum` as a counter, so it assumes the family's
+    /// observations are non-negative.
+    Histogram,
+    /// A native histogram: its samples are histograms, which the IR cannot
+    /// represent yet, so a query reading one is rejected.
+    NativeHistogram,
+    /// A Prometheus summary family `foo`: quantiles each client computed per
+    /// series, `foo{quantile="φ"}`, and the counters `foo_sum` and
+    /// `foo_count`.
+    Summary,
 }
 
 // ── Top-level workload ────────────────────────────────────────────────────────
@@ -752,6 +773,40 @@ impl QueryWorkload {
 }
 
 impl DataWorkload {
+    /// The facts of the source a PromQL selector over `series` reads, and
+    /// that series' own type. A declared histogram family `foo` holds the
+    /// series `foo_bucket`, `foo_sum` and `foo_count`; a declared summary
+    /// family `foo` holds `foo`, `foo_sum` and `foo_count`; `_sum` and
+    /// `_count` series are counters. A declared family wins over a series'
+    /// own entry (`foo_sum`'s entry is ignored here when `foo` is a declared
+    /// histogram). Any other name is its own source, looked up as is: a
+    /// suffix never makes a type.
+    pub fn series_facts(
+        &self,
+        series: &str,
+    ) -> Option<(&SourceFacts, Option<PrometheusMetricType>)> {
+        use PrometheusMetricType::{Counter, Histogram, Summary};
+        for (suffix, series_type) in [
+            ("_bucket", None),
+            ("_sum", Some(Counter)),
+            ("_count", Some(Counter)),
+        ] {
+            let Some(family) = series.strip_suffix(suffix) else {
+                continue;
+            };
+            let Some(facts) = self.sources.get(family) else {
+                continue;
+            };
+            match (facts.metric_type, series_type) {
+                (Some(Histogram), None) => return Some((facts, Some(Histogram))),
+                (Some(Histogram | Summary), Some(counter)) => return Some((facts, Some(counter))),
+                _ => {}
+            }
+        }
+        let facts = self.sources.get(series)?;
+        Some((facts, facts.metric_type))
+    }
+
     /// Data of unknown arrival whose `metrics` are each sampled every
     /// `sample_interval`, with no other facts: what PromQL or MetricsQL
     /// queries over them need to lower their bare instant selectors.
@@ -857,12 +912,13 @@ impl PlanningWorkload {
         Ok(())
     }
 
-    /// The sample interval the data workload declares for `metric`, if any.
-    pub fn sample_interval_of(&self, metric: &str) -> Option<DurationMs> {
+    /// The sample interval the data workload declares for the source
+    /// `series` reads ([`DataWorkload::series_facts`]), if any.
+    pub fn sample_interval_of(&self, series: &str) -> Option<DurationMs> {
         self.data_workload
             .as_ref()?
-            .sources
-            .get(metric)?
+            .series_facts(series)?
+            .0
             .sample_interval
     }
 }
@@ -1560,7 +1616,7 @@ mod tests {
                     "requests_total".to_string(),
                     SourceFacts {
                         series_count: Some(10_000),
-                        metric_type: Some(MetricType::Counter),
+                        metric_type: Some(PrometheusMetricType::Counter),
                         values_non_negative: true,
                         sample_interval: Some(DurationMs(15_000)),
                         stream_norms: Some(StreamNorms {
@@ -1656,6 +1712,61 @@ mod tests {
                 "{old}"
             );
         }
+    }
+
+    /// `metric_type` takes each Prometheus type by its snake_case name.
+    #[test]
+    fn prometheus_metric_types_have_snake_case_wire_names() {
+        for (metric_type, name) in [
+            (PrometheusMetricType::Counter, "counter"),
+            (PrometheusMetricType::Gauge, "gauge"),
+            (PrometheusMetricType::Histogram, "histogram"),
+            (PrometheusMetricType::NativeHistogram, "native_histogram"),
+            (PrometheusMetricType::Summary, "summary"),
+        ] {
+            let facts: SourceFacts =
+                serde_json::from_value(serde_json::json!({ "metric_type": name })).unwrap();
+            assert_eq!(facts.metric_type, Some(metric_type));
+        }
+    }
+
+    /// A declared histogram family supplies its `_bucket`, `_sum` and
+    /// `_count` series, a declared summary family its `_sum` and `_count`
+    /// series, with `_sum` and `_count` counters; any other name, including
+    /// a suffixed one whose family is undeclared or a counter, is looked up
+    /// as is.
+    #[test]
+    fn series_facts_resolve_declared_histogram_and_summary_families() {
+        use PrometheusMetricType::{Counter, Gauge, Histogram, Summary};
+        let facts = |metric_type| SourceFacts {
+            metric_type: Some(metric_type),
+            sample_interval: Some(DurationMs(15_000)),
+            ..SourceFacts::default()
+        };
+        let data = DataWorkload {
+            arrival: DataArrival::Unknown,
+            sources: BTreeMap::from([
+                ("h".to_string(), facts(Histogram)),
+                ("s".to_string(), facts(Summary)),
+                ("c".to_string(), facts(Counter)),
+                ("g_sum".to_string(), facts(Gauge)),
+            ]),
+        };
+        let series_type = |series: &str| data.series_facts(series).map(|(_, t)| t);
+        assert_eq!(series_type("h"), Some(Some(Histogram)));
+        assert_eq!(series_type("h_bucket"), Some(Some(Histogram)));
+        assert_eq!(series_type("h_sum"), Some(Some(Counter)));
+        assert_eq!(series_type("h_count"), Some(Some(Counter)));
+        assert_eq!(series_type("s"), Some(Some(Summary)));
+        assert_eq!(series_type("s_sum"), Some(Some(Counter)));
+        assert_eq!(series_type("s_count"), Some(Some(Counter)));
+        assert_eq!(series_type("s_bucket"), None);
+        assert_eq!(series_type("c_sum"), None);
+        assert_eq!(series_type("g_sum"), Some(Some(Gauge)));
+        assert_eq!(
+            data.series_facts("h_sum").unwrap().0.sample_interval,
+            Some(DurationMs(15_000))
+        );
     }
 
     #[test]

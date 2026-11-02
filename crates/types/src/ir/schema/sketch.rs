@@ -640,7 +640,7 @@ pub enum NonNegativeWeightProof {
     /// [`WeightDomain::CounterDerivativeOfMetric`] requirement.
     ResetAwareCounterDerivative,
     /// Raw data samples of a metric declared a counter
-    /// ([`MetricType::Counter`](crate::workload::MetricType::Counter)), or
+    /// ([`PrometheusMetricType::Counter`](crate::workload::PrometheusMetricType::Counter)), or
     /// plain sums of them: a counter sample is never negative. Plan selection
     /// gives it on confirming a
     /// [`WeightDomain::RawDataSamplesOfMetric`] requirement. Serialized as

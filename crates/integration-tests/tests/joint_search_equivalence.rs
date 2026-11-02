@@ -15,8 +15,8 @@ use asap_planner::{run_planning, PlanSearchSettings, PlanningModels, PlanningRun
 use asap_types::ir::properties::{AccuracyGuarantee, AccuracyTarget};
 use asap_types::ir::QueryRoot;
 use asap_types::workload::{
-    DataArrival, DataWorkload, DurationMs, MetricType, PlanningWorkload, Predictability, Query,
-    QueryLanguage, QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand,
+    DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, PrometheusMetricType,
+    Query, QueryLanguage, QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand,
     RepeatingEntry, RepetitionInterval, SourceFacts,
 };
 
@@ -55,9 +55,9 @@ fn workload_of(queries: &[(&str, u32)], accuracy: AccuracyTarget) -> PlanningWor
                             rows_held: Some(80),
                             sample_interval: Some(DurationMs(1000)),
                             metric_type: Some(if metric == "c_total" {
-                                MetricType::Counter
+                                PrometheusMetricType::Counter
                             } else {
-                                MetricType::Gauge
+                                PrometheusMetricType::Gauge
                             }),
                             ..Default::default()
                         },

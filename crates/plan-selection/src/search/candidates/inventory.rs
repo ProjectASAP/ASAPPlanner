@@ -256,7 +256,7 @@ mod tests {
         use asap_physical_asap_optimization::test_support::optimize_physical_asap_chosen;
         use asap_types::physical::Medium;
         use asap_types::workload::{
-            DataArrival, DataWorkload, DurationMs, MetricType, Predictability, Query,
+            DataArrival, DataWorkload, DurationMs, Predictability, PrometheusMetricType, Query,
             QueryRecurrence, QueryRequirements, QueryWorkloadEntry, RepeatedDemand,
             RepetitionInterval, SourceFacts,
         };
@@ -283,7 +283,7 @@ mod tests {
                 "latency".into(),
                 SourceFacts {
                     series_count: Some(1_000),
-                    metric_type: Some(MetricType::Gauge),
+                    metric_type: Some(PrometheusMetricType::Gauge),
                     sample_interval: Some(DurationMs(15_000)),
                     ..SourceFacts::default()
                 },

@@ -947,9 +947,9 @@ mod tests {
     fn random_roots(seed: u64, gauges: &[&str]) -> Vec<QueryRoot> {
         use asap_types::ir::properties::AccuracyMetric;
         use asap_types::workload::{
-            DataArrival, DataWorkload, DurationMs, MetricType, PlanningWorkload, Predictability,
-            Query, QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry,
-            RepetitionInterval, SourceFacts,
+            DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability,
+            PrometheusMetricType, Query, QueryLanguage, QueryRequirements, QueryWorkload,
+            RepeatedDemand, RepeatingEntry, RepetitionInterval, SourceFacts,
         };
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let queries = 2 + rng.below(3);
@@ -992,24 +992,22 @@ mod tests {
                 },
                 sources: gauges
                     .iter()
-                    .map(|g| (g.to_string(), source(MetricType::Gauge)))
-                    .chain([("c_total".to_string(), source(MetricType::Counter))])
+                    .map(|g| (g.to_string(), source(PrometheusMetricType::Gauge)))
+                    .chain([("c_total".to_string(), source(PrometheusMetricType::Counter))])
                     .collect(),
             }),
         };
-        asap_frontend_promql::lower_promql_query_workload(
-            &workload,
-            &asap_frontend_promql::HistogramCatalog::default(),
-        )
-        .unwrap()
-        .into_iter()
-        .map(|root| match root {
-            QueryRoot::Operator(node) => QueryRoot::Operator(
-                asap_types::ir::schema::schema_support::with_promql_series_identity(&node).unwrap(),
-            ),
-            scalar => scalar,
-        })
-        .collect()
+        asap_frontend_promql::lower_promql_query_workload(&workload)
+            .unwrap()
+            .into_iter()
+            .map(|root| match root {
+                QueryRoot::Operator(node) => QueryRoot::Operator(
+                    asap_types::ir::schema::schema_support::with_promql_series_identity(&node)
+                        .unwrap(),
+                ),
+                scalar => scalar,
+            })
+            .collect()
     }
 
     /// Whether a composed sub-DAG is some combination of the memo's

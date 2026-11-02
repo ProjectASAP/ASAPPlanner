@@ -302,11 +302,7 @@ async fn rejects_a_frontend_that_does_not_match_the_workload_language() {
         vec![batch("SELECT COUNT(DISTINCT l_orderkey) FROM lineitem")],
         None,
     );
-    let input = UserInput::new(
-        &workload,
-        FrontendInput::Promql { histograms: None },
-        PlanningModels::builtin(),
-    );
+    let input = UserInput::new(&workload, FrontendInput::Promql, PlanningModels::builtin());
 
     let err = e2e_plan(input).await.unwrap_err();
     assert!(matches!(
@@ -339,11 +335,7 @@ async fn each_plan_carries_its_selected_root() {
             ..Default::default()
         }),
     };
-    let input = UserInput::new(
-        &workload,
-        FrontendInput::Promql { histograms: None },
-        PlanningModels::builtin(),
-    );
+    let input = UserInput::new(&workload, FrontendInput::Promql, PlanningModels::builtin());
 
     let output = e2e_plan(input).await.expect("workload plans");
     assert_eq!(output.plans.len(), 1);
@@ -377,7 +369,7 @@ async fn scalar_roots_survive_planning_in_workload_order() {
         };
         let output = e2e_plan(UserInput::new(
             &workload,
-            FrontendInput::Promql { histograms: None },
+            FrontendInput::Promql,
             PlanningModels::builtin(),
         ))
         .await

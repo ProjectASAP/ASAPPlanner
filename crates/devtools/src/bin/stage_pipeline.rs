@@ -87,8 +87,9 @@
 //     selection, with `materialized_views_error` when the plan is not
 //     installable. `warnings` are one-line warnings about the workload and
 //     the selected plan: a PromQL query applying `rate`, `increase` or
-//     `irate` to a metric the data workload declares a gauge, prefixed with
-//     its id (the query still plans; `counter_function_over_gauge_warnings`),
+//     `irate` to a metric the data workload declares a gauge, or combining
+//     a declared summary's quantile series across series, prefixed with
+//     its id (the query still plans; `metric_type_warnings`),
 //     and the plan's peak memory when over 10^12 bytes and the cost model
 //     declares no memory capacity (`large_peak_memory_warning`); absent when
 //     there are none;
@@ -274,7 +275,7 @@ use asap_devtools::planning_stages::{
     PlanningStagesRun,
 };
 use asap_devtools::SqlCatalog;
-use asap_frontend_promql::{counter_function_over_gauge_warnings, promql_metric_names};
+use asap_frontend_promql::{metric_type_warnings, promql_metric_names};
 use asap_logical_asap_optimization::DeploymentCapabilities;
 use asap_logical_asap_optimization::{
     build_logical_asap_dags_from_chosen_candidates, enumerate, ChosenCandidatePerMemoGroup,
@@ -741,8 +742,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         },
         exhaustive.then_some(max_combinations),
     );
-    // A rate, increase or irate over a declared gauge (the query still plans).
-    let mut warnings = counter_function_over_gauge_warnings_of(&described, &data)?;
+    // A rate, increase or irate over a declared gauge, or an aggregation of
+    // a declared summary's quantiles (the query still plans).
+    let mut warnings = metric_type_warnings_of(&described, &data)?;
     // A selected plan's very large peak memory, when the deployment
     // declares no memory capacity to check it against.
     warnings.extend(
@@ -805,10 +807,10 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     std::fs::write(&out, text).map_err(|e| format!("{out}: {e}").into())
 }
 
-/// One warning per PromQL query of `described` (the document's queries)
-/// that applies `rate`, `increase` or `irate` to a metric `data` declares a
-/// gauge, prefixed with the query's id; the query still plans.
-fn counter_function_over_gauge_warnings_of(
+/// The [`metric_type_warnings`] of each PromQL query of `described` (the
+/// document's queries) over `data`, prefixed with the query's id; the query
+/// still plans.
+fn metric_type_warnings_of(
     described: &[Value],
     data: &DataWorkload,
 ) -> Result<Vec<String>, String> {
@@ -817,7 +819,7 @@ fn counter_function_over_gauge_warnings_of(
         let (id, text) = (&query["id"], query["text"].as_str().unwrap_or_default());
         let id = id.as_str().unwrap_or_default();
         warnings.extend(
-            counter_function_over_gauge_warnings(text, data)
+            metric_type_warnings(text, data)
                 .map_err(|e| format!("{id}: {e}"))?
                 .into_iter()
                 .map(|warning| format!("{id}: {warning}")),

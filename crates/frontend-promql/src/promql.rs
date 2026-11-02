@@ -21,8 +21,7 @@
 //! | PromQL | Canonical shape |
 //! |---|---|
 //! | `quantile_over_time(φ, m{f}[w])` | `Aggregate{[Quantile(φ)], TimeRange{w, Scan{predicates}}}` |
-//! | `histogram_quantile(φ, <classic buckets>)` | `Aggregate{without(le), [HistogramQuantile(φ, le)]}` — cumulative-bucket interpolation (classic form recognised by `by (le)` / a `_bucket` metric / an `le` matcher) |
-//! | `histogram_quantile(φ, <declared RawDataSamples>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered arg (generic, sketch-able with an accuracy target); a declared native histogram, or an undeclared non-bucket argument, is rejected |
+//! | `histogram_quantile(φ, v)` | `Aggregate{without(le), [HistogramQuantile(φ, le)]}` — cumulative-bucket interpolation of float samples, as the PromQL spec reads them; `v` reading a metric declared a native histogram or a Prometheus summary is rejected |
 //! | `histogram_quantiles(v, "l", φ…)` | `Concat{PromqlRelabel{l=φᵢ, <the histogram_quantile(φᵢ, v) branch>}…}` — one branch per φ (issue #109) |
 //! | `histogram_count/sum/avg/stddev/stdvar(v)`, `histogram_fraction(l,u,v)` | **rejected** — native histogram samples have no IR representation, and `histogram_fraction` over classic `_bucket` series is not lowered (issue #43) |
 //! | `OUTER_op(inner_func(m[w]))` (e.g. `sum(rate(m[w]))`) | `Aggregate{[OUTER_op]}` over `Aggregate{[inner_func]}` — two levels |
@@ -82,7 +81,7 @@ use asap_types::ir::{BinaryOperator, ExprSemantics, TimeRangeKind};
 use asap_types::ir::operator::{InfoMatcher, SampleKind};
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
-use asap_types::workload::WorkloadError;
+use asap_types::workload::{PrometheusMetricType, WorkloadError};
 
 /// Every scalar expression this front end builds follows PromQL's numeric rules.
 const PROMQL: ExprSemantics = ExprSemantics::Promql;
@@ -187,10 +186,14 @@ impl PromqlLowerer {
     /// Lower `query`; a bare instant selector over metric `m` reads the
     /// latest sample within `sample_interval_of(m)`, and fails with
     /// [`WorkloadError::MissingSampleInterval`] when it is `None`.
-    pub(crate) fn lower_query_with_sample_intervals(
+    /// `metric_type_of(m)` is `m`'s declared type: a native histogram is
+    /// rejected wherever it is read, and `histogram_quantile` input is
+    /// checked by [`check_histogram_quantile_input`].
+    pub(crate) fn lower_query(
         query: &str,
         accuracy: &AccuracyTarget,
         sample_interval_of: &dyn Fn(&str) -> Option<Duration>,
+        metric_type_of: &dyn Fn(&str) -> Option<PrometheusMetricType>,
     ) -> Result<asap_types::ir::QueryRoot> {
         let _guard = AccuracyGuard::install(accuracy.clone());
         let ast = parser::parse(query).map_err(LoweringError::Parse)?;
@@ -203,13 +206,18 @@ impl PromqlLowerer {
                 .filter_map(|metric| Some((metric.clone(), sample_interval_of(metric)?)))
                 .collect(),
         );
-        if metrics.iter().any(|metric| {
-            crate::histogram::current_kind_of(metric)
-                == Some(crate::histogram::HistogramKind::Native)
-        }) {
+        if metrics
+            .iter()
+            .any(|metric| metric_type_of(metric) == Some(PrometheusMetricType::NativeHistogram))
+        {
             return Err(LoweringError::UnsupportedFeature(
-                "native histogram samples have no IR representation".into(),
+                NATIVE_HISTOGRAM_UNSUPPORTED.into(),
             ));
+        }
+        for (_, metric) in
+            call_argument_metrics(&ast, &["histogram_quantile", "histogram_quantiles"])
+        {
+            check_histogram_quantile_input(metric_type_of(&metric))?;
         }
 
         if ast.value_type() == ValueType::Scalar {
@@ -234,8 +242,19 @@ pub(crate) fn metric_names(query: &str) -> Result<std::collections::BTreeSet<Str
 }
 
 /// Each `rate`, `increase` or `irate` call in `query` with every metric its
-/// argument reads ([`crate::counter_function_over_gauge_warnings`]).
+/// argument reads ([`crate::metric_type_warnings`]).
 pub(crate) fn counter_function_metrics(
+    query: &str,
+) -> Result<std::collections::BTreeSet<(&'static str, String)>> {
+    let ast = parser::parse(query).map_err(LoweringError::Parse)?;
+    check_depth(&ast, MAX_DEPTH)?;
+    Ok(call_argument_metrics(&ast, &["rate", "increase", "irate"]))
+}
+
+/// Each `sum`, `avg`, `quantile`, `stddev` or `stdvar` aggregation in `query`
+/// with every metric its argument reads ([`crate::metric_type_warnings`]):
+/// the aggregations that compute a new value from their inputs' values.
+pub(crate) fn value_aggregation_metrics(
     query: &str,
 ) -> Result<std::collections::BTreeSet<(&'static str, String)>> {
     fn collect(expr: &Expr, out: &mut std::collections::BTreeSet<(&'static str, String)>) {
@@ -243,35 +262,105 @@ pub(crate) fn counter_function_metrics(
             Expr::Paren(p) => collect(&p.expr, out),
             Expr::Unary(u) => collect(&u.expr, out),
             Expr::Subquery(s) => collect(&s.expr, out),
-            Expr::Aggregate(a) => collect(&a.expr, out),
+            Expr::Aggregate(a) => {
+                let op = a.op.id();
+                let aggregation = [
+                    (token::T_SUM, "sum"),
+                    (token::T_AVG, "avg"),
+                    (token::T_QUANTILE, "quantile"),
+                    (token::T_STDDEV, "stddev"),
+                    (token::T_STDVAR, "stdvar"),
+                ]
+                .into_iter()
+                .find_map(|(id, name)| (id == op).then_some(name));
+                if let Some(aggregation) = aggregation {
+                    let mut metrics = Vec::new();
+                    collect_metric_names(&a.expr, &mut metrics);
+                    out.extend(metrics.into_iter().map(|m| (aggregation, m)));
+                }
+                collect(&a.expr, out);
+            }
             Expr::Binary(b) => {
                 collect(&b.lhs, out);
                 collect(&b.rhs, out);
             }
+            Expr::Call(c) => c.args.args.iter().for_each(|a| collect(a, out)),
+            _ => {}
+        }
+    }
+    let ast = parser::parse(query).map_err(LoweringError::Parse)?;
+    check_depth(&ast, MAX_DEPTH)?;
+    let mut aggregations = std::collections::BTreeSet::new();
+    collect(&ast, &mut aggregations);
+    Ok(aggregations)
+}
+
+/// Each call in `expr` to one of `functions`, with every metric its
+/// arguments read.
+fn call_argument_metrics(
+    expr: &Expr,
+    functions: &[&'static str],
+) -> std::collections::BTreeSet<(&'static str, String)> {
+    fn collect(
+        expr: &Expr,
+        functions: &[&'static str],
+        out: &mut std::collections::BTreeSet<(&'static str, String)>,
+    ) {
+        match expr {
+            Expr::Paren(p) => collect(&p.expr, functions, out),
+            Expr::Unary(u) => collect(&u.expr, functions, out),
+            Expr::Subquery(s) => collect(&s.expr, functions, out),
+            Expr::Aggregate(a) => collect(&a.expr, functions, out),
+            Expr::Binary(b) => {
+                collect(&b.lhs, functions, out);
+                collect(&b.rhs, functions, out);
+            }
             Expr::Call(c) => {
-                let function = match c.func.name {
-                    "rate" => Some("rate"),
-                    "increase" => Some("increase"),
-                    "irate" => Some("irate"),
-                    _ => None,
-                };
+                let function = functions.iter().find(|&&f| f == c.func.name).copied();
                 for arg in &c.args.args {
                     if let Some(function) = function {
                         let mut metrics = Vec::new();
                         collect_metric_names(arg, &mut metrics);
                         out.extend(metrics.into_iter().map(|m| (function, m)));
                     }
-                    collect(arg, out);
+                    collect(arg, functions, out);
                 }
             }
             _ => {}
         }
     }
-    let ast = parser::parse(query).map_err(LoweringError::Parse)?;
-    check_depth(&ast, MAX_DEPTH)?;
     let mut calls = std::collections::BTreeSet::new();
-    collect(&ast, &mut calls);
-    Ok(calls)
+    collect(expr, functions, &mut calls);
+    calls
+}
+
+const NATIVE_HISTOGRAM_UNSUPPORTED: &str = "native histogram samples have no IR representation";
+
+/// Whether `histogram_quantile` (or `histogram_quantiles`) may read a metric
+/// of declared type `metric_type`. Float samples, declared a classic
+/// histogram or of any other or no declared type, are classic buckets, as
+/// the PromQL spec reads them: interpolated per series group without `le`,
+/// with series lacking `le` contributing nothing. A native histogram has no
+/// IR type yet, and a Prometheus summary has no buckets. Every declared type
+/// is decided here, so a later type (such as a collector-held ASAP summary)
+/// is one more arm.
+fn check_histogram_quantile_input(metric_type: Option<PrometheusMetricType>) -> Result<()> {
+    match metric_type {
+        None
+        | Some(
+            PrometheusMetricType::Histogram
+            | PrometheusMetricType::Counter
+            | PrometheusMetricType::Gauge,
+        ) => Ok(()),
+        Some(PrometheusMetricType::NativeHistogram) => Err(LoweringError::UnsupportedFeature(
+            NATIVE_HISTOGRAM_UNSUPPORTED.into(),
+        )),
+        Some(PrometheusMetricType::Summary) => Err(LoweringError::UnsupportedFeature(
+            "histogram_quantile over a Prometheus summary, which has no buckets: \
+             read its quantile series instead"
+                .into(),
+        )),
+    }
 }
 
 std::thread_local! {
@@ -282,8 +371,7 @@ std::thread_local! {
 }
 
 /// RAII guard installing `accuracy` as the ambient accuracy target for the
-/// current thread's lowering, restoring the prior value on drop — same shape
-/// as `histogram::CatalogGuard`.
+/// current thread's lowering, restoring the prior value on drop.
 struct AccuracyGuard(AccuracyTarget);
 
 impl AccuracyGuard {
@@ -301,7 +389,7 @@ impl Drop for AccuracyGuard {
 }
 
 /// The ambient accuracy target installed by the current
-/// [`PromqlLowerer::lower_query_with_sample_intervals`] call.
+/// [`PromqlLowerer::lower_query`] call.
 fn current_accuracy() -> AccuracyTarget {
     ACCURACY.with(|a| a.borrow().clone())
 }
@@ -901,9 +989,9 @@ fn ranked_by_value(
 /// The `histogram_*` function family (issues #43, histogram_quantile).
 ///
 /// `histogram_quantile(φ, <expr>)` lowers `<expr>` in full — preserving any
-/// `sum by (le)` / `rate` structure inside it. The classic `le`-bucket form
-/// becomes [`classic_histogram_quantile`]; a native histogram or raw data samples
-/// become a `Quantile` over the whole argument.
+/// `sum by (le)` / `rate` structure inside it — under
+/// [`classic_histogram_quantile`]; its input's declared type was checked
+/// before the walk ([`check_histogram_quantile_input`]).
 /// The native-histogram accessors (`histogram_count`/`sum`/`avg`/`stddev`/
 /// `stdvar`) and `histogram_fraction` (native or classic buckets) are rejected.
 fn walk_histogram(call: &Call) -> Result<Unresolved> {
@@ -912,24 +1000,7 @@ fn walk_histogram(call: &Call) -> Result<Unresolved> {
     }
     if call.func.name == "histogram_quantile" {
         let phi = num_arg(call, 0)?;
-        let arg_expr = arg(call, 1)?;
-        // Two lowerings of `histogram_quantile(φ, …)`:
-        //  - classic `le`-bucket form → `HistogramQuantile`, exact interpolation
-        //    over cumulative buckets (not sketch-able).
-        //  - native-histogram / raw-data-samples form → the generic `Quantile` intent
-        //    (sketch-able).
-        // The true signal is the argument's sample type: a declared
-        // `HistogramKind` (issue #79) drives the choice when available, else we
-        // fall back to the structural `by (le)`/`_bucket` heuristic (issue #43).
-        if !histogram_arg_is_sketchable(arg_expr)? {
-            return Ok(classic_histogram_quantile(phi, "", walk(arg_expr)?));
-        }
-        let func = AggIntent::Quantile {
-            col: None,
-            q: phi,
-            accuracy: current_accuracy(),
-        };
-        return Ok(outer_aggregate(vec![], func, walk(arg_expr)?));
+        return Ok(classic_histogram_quantile(phi, "", walk(arg(call, 1)?)?));
     }
     if call.func.name == "histogram_fraction" {
         return Err(LoweringError::UnsupportedFeature(
@@ -938,7 +1009,7 @@ fn walk_histogram(call: &Call) -> Result<Unresolved> {
         ));
     }
     Err(LoweringError::UnsupportedFeature(
-        "native histogram samples have no IR representation".into(),
+        NATIVE_HISTOGRAM_UNSUPPORTED.into(),
     ))
 }
 
@@ -962,10 +1033,9 @@ fn classic_histogram_quantile(q: f64, output_name: &str, child: Unresolved) -> U
 /// form (issue #109). It is `histogram_quantile(φᵢ, v)` fanned out over the
 /// quantiles, each branch's output series tagged with `label = φᵢ`.
 ///
-/// Lowers to a `Concat` of one `PromqlRelabel`-wrapped quantile branch per φ, reusing
-/// the single-quantile decision — classic `le`-buckets interpolate
-/// (`HistogramQuantile`), native histograms / raw data samples take the sketch-able
-/// `Quantile` (issues #43 / #79) — so the two functions cannot diverge.
+/// Lowers to a `Concat` of one `PromqlRelabel`-wrapped classic-bucket quantile
+/// branch per φ, sharing `histogram_quantile`'s input check
+/// ([`check_histogram_quantile_input`]), so the two functions cannot diverge.
 ///
 /// The vector argument is lowered once per branch, duplicating the sub-DAG —
 /// a future workload-level reuse pass could hoist it back into a single
@@ -985,8 +1055,6 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
             "histogram_quantiles(v, label, φ…) needs at least one quantile".into(),
         ));
     }
-    // The bucket-vs-native choice is a property of the argument, not of φ.
-    let sketchable = histogram_arg_is_sketchable(vec_expr)?;
     let branches = (2..call.args.args.len())
         .map(|i| {
             let phi = num_arg(call, i)?;
@@ -994,27 +1062,10 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
             // Each branch aliases its value column to "value" (not the
             // intent-keyed default) so `Concat` — which derives its schema
             // from the first branch — doesn't silently misdescribe the rest.
-            let quantile = if sketchable {
-                let intent = AggIntent::Quantile {
-                    col: None,
-                    q: phi,
-                    accuracy: current_accuracy(),
-                };
-                Unresolved::Aggregate {
-                    reduction: reduction_for(&[], intent.is_per_series()),
-                    measures: vec![intent],
-                    output_names: vec!["value".into()],
-                    filters: vec![],
-                    having: None,
-                    child: Rc::new(child),
-                }
-            } else {
-                classic_histogram_quantile(phi, "value", child)
-            };
             Ok(Unresolved::PromqlRelabel {
                 dst: label.clone(),
                 value: Scalar::Literal(ScalarValue::Utf8(open_metrics_float(phi))),
-                child: Rc::new(quantile),
+                child: Rc::new(classic_histogram_quantile(phi, "value", child)),
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1414,49 +1465,10 @@ fn clamp_bounds_filter(min: &Scalar, max: &Scalar, child: Unresolved) -> Unresol
     }
 }
 
-/// Whether `histogram_quantile(φ, arg)` lowers to the sketch-able generic
-/// `Quantile` (`true`) or exact classic-bucket interpolation (`false`).
-///
-/// Metadata wins: if any metric referenced in `arg` has a declared
-/// [`HistogramKind`](crate::histogram::HistogramKind), that decides it (issue
-/// #79) — this fixes both the false-positive (a `…_bucket`-named non-histogram
-/// declared `RawDataSamples`) and the false-negative (a suffix-less classic
-/// histogram declared `ClassicBucket`) of the structural heuristic. A declared
-/// `Native` kind, or declared kinds that disagree, is rejected. With no
-/// declaration, an argument [`is_classic_bucket_arg`] recognises is exact
-/// interpolation; any other argument is rejected.
-fn histogram_arg_is_sketchable(arg: &Expr) -> Result<bool> {
-    let mut metrics = Vec::new();
-    collect_metric_names(arg, &mut metrics);
-    let kinds = metrics
-        .iter()
-        .filter_map(|metric| crate::histogram::current_kind_of(metric))
-        .collect::<Vec<_>>();
-    if kinds.contains(&crate::histogram::HistogramKind::Native) {
-        return Err(LoweringError::UnsupportedFeature(
-            "native histogram samples have no IR representation".into(),
-        ));
-    }
-    if let Some(kind) = kinds.first() {
-        if kinds.iter().any(|other| other != kind) {
-            return Err(LoweringError::UnsupportedFeature(
-                "mixed histogram sample contracts".into(),
-            ));
-        }
-        return Ok(kind.is_sketchable());
-    }
-    if is_classic_bucket_arg(arg) {
-        Ok(false)
-    } else {
-        Err(LoweringError::UnsupportedFeature("histogram_quantile requires classic buckets; use quantile for float samples or explicitly declare the RawDataSamples extension".into()))
-    }
-}
-
 /// Collect the metric names of every vector/matrix selector reachable in
-/// `expr`: the metrics whose histogram kind ([`histogram_arg_is_sketchable`])
-/// and sample interval (`lower_query_with_sample_intervals`) lowering looks
-/// up. Skips selectors that lowering rejects, such as `{le="…"}` with no
-/// metric name.
+/// `expr`: the metrics whose declared type and sample interval
+/// ([`PromqlLowerer::lower_query`]) lowering looks up. Skips selectors that
+/// lowering rejects, such as `{le="…"}` with no metric name.
 fn collect_metric_names(expr: &Expr, out: &mut Vec<String>) {
     match expr {
         Expr::VectorSelector(vs) => {
@@ -1484,49 +1496,6 @@ fn collect_metric_names(expr: &Expr, out: &mut Vec<String>) {
             .for_each(|a| collect_metric_names(a, out)),
         _ => {}
     }
-}
-
-/// Whether `expr` is a **classic cumulative-bucket** `histogram_quantile`
-/// argument, recognised structurally by any of:
-///  - a `by (le)` grouping (`sum by (le) (…)`),
-///  - a selector on a classic `_bucket` metric (`http_request_…_bucket`),
-///  - a selector with an `le` label matcher (`{le="…"}`).
-///
-/// This is a heuristic proxy for the real signal — the argument's sample
-/// type — which [`histogram_arg_is_sketchable`] consults first when a
-/// [`HistogramCatalog`](crate::histogram::HistogramCatalog) declares it
-/// (issues #43, #79).
-fn is_classic_bucket_arg(expr: &Expr) -> bool {
-    match expr {
-        Expr::Paren(p) => is_classic_bucket_arg(&p.expr),
-        Expr::Unary(u) => is_classic_bucket_arg(&u.expr),
-        Expr::Subquery(s) => is_classic_bucket_arg(&s.expr),
-        Expr::Aggregate(agg) => {
-            matches!(
-                &agg.modifier,
-                Some(LabelModifier::Include(ls)) if ls.labels.iter().any(|l| l == "le")
-            ) || is_classic_bucket_arg(&agg.expr)
-        }
-        Expr::Binary(b) => is_classic_bucket_arg(&b.lhs) || is_classic_bucket_arg(&b.rhs),
-        Expr::Call(c) => c.args.args.iter().any(|a| is_classic_bucket_arg(a)),
-        Expr::VectorSelector(vs) => selector_is_bucket(vs),
-        Expr::MatrixSelector(ms) => selector_is_bucket(&ms.vs),
-        _ => false,
-    }
-}
-
-/// A classic histogram bucket selector — a `_bucket`-named metric (via bare name
-/// or `__name__` matcher) or an explicit `le` label matcher.
-fn selector_is_bucket(vs: &VectorSelector) -> bool {
-    let name = vs.name.as_deref().or_else(|| {
-        vs.matchers
-            .matchers
-            .iter()
-            .find(|m| m.name == "__name__")
-            .map(|m| m.value.as_str())
-    });
-    name.is_some_and(|n| n.ends_with("_bucket"))
-        || vs.matchers.matchers.iter().any(|m| m.name == "le")
 }
 
 /// A binary op with at least one vector operand (a scalar/scalar op is

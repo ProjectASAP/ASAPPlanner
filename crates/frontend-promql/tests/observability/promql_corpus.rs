@@ -54,10 +54,10 @@ impl Tally {
 fn tally(corpus: &str) -> Tally {
     let mut t = Tally::default();
     for q in queries(corpus) {
-        match asap_frontend_promql::lower_promql_query_workload(
-            &support::workload(q, AccuracyTarget::exact()),
-            &asap_frontend_promql::HistogramCatalog::default(),
-        ) {
+        match asap_frontend_promql::lower_promql_query_workload(&support::workload(
+            q,
+            AccuracyTarget::exact(),
+        )) {
             Ok(_) => t.lowered += 1,
             Err(LoweringError::Parse(_)) => t.unparseable += 1,
             Err(e) if e.to_string().contains(NO_METRIC_NAME) => t.no_metric_name += 1,
@@ -130,12 +130,14 @@ fn lowering_is_total_over_the_entire_corpus() {
         "testdata corpus unexpectedly small: {td:?}"
     );
 
-    // Coverage tripwire after rejecting unrepresented native histogram samples:
-    // docs 48 lowered / 1 rejected; testdata 1097 lowered / 29 without a
-    // metric name / 464 rejected / 233 parser gaps. Earlier coverage counted
-    // native histogram operations incorrectly treated as float quantiles. Keep
-    // the rejection cases in the corpus: accepting them requires a native
-    // histogram sample representation.
+    // Coverage tripwire: docs 48 lowered / 1 rejected; testdata 1190 lowered
+    // / 29 without a metric name / 371 rejected / 233 parser gaps. The corpus
+    // declares no metric types, so `histogram_quantile(s)` over any metric
+    // lowers as classic buckets, as the PromQL spec reads float samples
+    // (issue #1165: 93 testdata queries more than when undeclared input
+    // needed a `_bucket` name, `by (le)` or `le` matcher). Native histogram
+    // accessors (`histogram_count`, ...) stay rejected: accepting them
+    // requires a native histogram sample representation.
     //
     // Expected unsupported: the 29 testdata queries whose selectors name no
     // metric (`sum({idx="0"})`, `absent_over_time({job="grok"}[20m])`,
@@ -149,7 +151,7 @@ fn lowering_is_total_over_the_entire_corpus() {
         "docs lowering coverage regressed: {docs:?}"
     );
     assert!(
-        td.lowered >= 1097,
+        td.lowered >= 1190,
         "testdata lowering coverage regressed: {td:?}"
     );
 }

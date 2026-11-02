@@ -99,7 +99,7 @@ async fn plan_sql(queries: &[&str], accuracy: &str) -> InstallablePlan {
 async fn plan_promql(query: &str) -> InstallablePlan {
     plan_installable(UserInput::new(
         &workload(r#""promql""#, &[query], EXACT),
-        FrontendInput::Promql { histograms: None },
+        FrontendInput::Promql,
         PlanningModels::builtin(),
     ))
     .await

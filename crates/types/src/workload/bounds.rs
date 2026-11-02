@@ -13,7 +13,7 @@ use crate::ir::schema::{Schema, SketchStatistic, WeightDomain};
 use crate::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot, ScalarExpr,
 };
-use crate::workload::{DataWorkload, MetricType};
+use crate::workload::{DataWorkload, PrometheusMetricType};
 
 /// A scan source's name: its PromQL metric or SQL table.
 pub fn source_name(source: &Source) -> &str {
@@ -419,17 +419,17 @@ pub fn confirmed_weights(domain: &WeightDomain, data: &DataWorkload) -> WeightDo
 pub fn declared_non_negative(data: &DataWorkload, metric: &str) -> bool {
     declared_counter(data, metric)
         || data
-            .sources
-            .get(metric)
-            .is_some_and(|facts| facts.values_non_negative)
+            .series_facts(metric)
+            .is_some_and(|(facts, _)| facts.values_non_negative)
 }
 
-/// Whether `data` declares `metric` a counter. A declared type does not
-/// expire, so its evidence is not checked.
+/// Whether `data` declares `metric` a counter, itself or as the `_sum` or
+/// `_count` series of a declared histogram or summary
+/// ([`DataWorkload::series_facts`]). A declared type does not expire, so its
+/// evidence is not checked.
 fn declared_counter(data: &DataWorkload, metric: &str) -> bool {
-    data.sources
-        .get(metric)
-        .is_some_and(|facts| facts.metric_type == Some(MetricType::Counter))
+    data.series_facts(metric)
+        .is_some_and(|(_, series_type)| series_type == Some(PrometheusMetricType::Counter))
 }
 
 /// `roots` with every open [`WeightDomain::RawDataSamplesOfMetric`] requirement

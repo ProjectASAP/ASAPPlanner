@@ -17,7 +17,7 @@ selected.
 |---|---|---:|
 | `PlanningWorkload.query_workload` | Query language and one-time/repeating query workloads | Yes |
 | `PlanningWorkload.data_workload` | How the data arrives, and facts about each source | No implicit default. Set `None` when unavailable; a PromQL query with a bare instant selector needs a nonzero `sample_interval` on the metric it reads. |
-| Frontend-specific dependencies (outside `PlanningWorkload`) | `SqlCatalog` for SQL; when needed, `HistogramCatalog` for PromQL | `SqlCatalog` is required for SQL lowering |
+| Frontend-specific dependencies (outside `PlanningWorkload`) | `SqlCatalog` for SQL | `SqlCatalog` is required for SQL lowering |
 | `PlanningModels` | Accuracy model and evidence, `CostInputs` (cost model 1, 2 or 3, resource speed, measured operation costs), `DeploymentCapabilities` | `PlanningModels::builtin()` uses `BuiltinAccuracyModel`, no evidence, cost model 1 with illustrative unit costs, and a deployment that supports everything |
 
 Frontend lowering (Stage 0) and Stages 1–3 run inside the workflow; they are
@@ -185,7 +185,7 @@ is known about each source.
 ```rust
 struct DataWorkload {
     arrival: DataArrival,
-    sources: BTreeMap<String, SourceFacts>, // key: PromQL metric or SQL table
+    sources: BTreeMap<String, SourceFacts>, // key: PromQL metric (family) or SQL table
 }
 enum DataArrival {
     AtRest,
@@ -195,7 +195,7 @@ enum DataArrival {
 }
 struct SourceFacts {
     series_count: Option<u64>,
-    metric_type: Option<MetricType>,
+    metric_type: Option<PrometheusMetricType>,
     values_non_negative: bool,
     sample_interval: Option<DurationMs>,
     stream_norms: Option<StreamNorms>,
@@ -215,7 +215,7 @@ struct LabelSetDistinctValues {
 | `arrival` | Present; may be `Unknown` | Distinguishes data at rest, ingesting data, and mixed data. Ingestion-time builds are possible only for ingesting or mixed data. |
 | `rows_per_second` | With `Ingesting`/`Mixed` | Rows arriving per second over all sources, used to price scans and continuous maintenance. It must be finite and non-negative. A source with no `series_count` + `sample_interval` of its own is priced at its series share of it when every source declares `series_count`, else at all of it. |
 | `series_count` | Optional | Series in the source. Plan selection bounds a query's number of values `G`, and its input row count, by the series counts of the sources it reads (each branch of an `or` counted); unknown, they stay unbound. |
-| `metric_type` | Optional | Declared Prometheus type; a counter proves samples non-negative. Never inferred from a name. `rate`, `increase` or `irate` over a metric declared a gauge still plans, with a warning from the PromQL frontend (`counter_function_over_gauge_warnings`), which `stage_pipeline` reports. |
+| `metric_type` | Optional | Declared Prometheus type (`PrometheusMetricType`): `counter`, `gauge`, `histogram`, `native_histogram` or `summary`; a counter proves samples non-negative. Never inferred from a name. A `histogram` or `summary` is keyed by its family name `foo` and supplies its series (`DataWorkload::series_facts`): `foo_bucket` (histogram) or `foo` (summary, per-series quantiles read as values), and the counters `foo_sum` and `foo_count`; any other name is looked up as is. The family entry's `metric_type`, `values_non_negative` and `sample_interval` apply to its series; counts, norms and bounds are read per series name. `histogram_quantile` reads float input as classic buckets, declared `histogram` or undeclared, and rejects a `native_histogram` or `summary`; any query reading a `native_histogram` is rejected. `rate`, `increase` or `irate` over a metric declared a gauge, and `sum`, `avg`, `quantile`, `stddev` or `stdvar` across a summary's quantile series, still plan, with a warning from the PromQL frontend (`metric_type_warnings`), which `stage_pipeline` reports. |
 | `values_non_negative` | Optional; default `false` | Declares every sample non-negative, for a gauge as well as a counter. It is the sign a relative-error bound needs to carry through `sum` and `avg` (a per-series DDSketch quantile under `avg by`, say); without it, and for a gauge, that bound is unknown. |
 | `sample_interval` | PromQL and MetricsQL; nonzero | How often each series of the metric is sampled. Bare instant selectors over it use it as their selection horizon; without it, such a query fails to lower. |
 | `stream_norms`, `max_distinct_per_evaluation` | Optional | Bounds that Count-Min/Count Sketch and HLL/UnivMon guarantees are bound with. |
@@ -238,7 +238,7 @@ inside it:
 
 | Frontend | Additional lowering inputs |
 |---|---|
-| PromQL | An optional `HistogramCatalog` when histogram semantics must be resolved |
+| PromQL | None: histogram and summary types are declared in `SourceFacts.metric_type` |
 | SQL | `SqlCatalog`; single-query APIs also receive the accuracy target and optionally an explicit SQL dialect |
 | MetricsQL | No catalog; the single-query API receives the query text and accuracy target directly |
 

@@ -1,137 +1,208 @@
-//! Type-driven `histogram_quantile` discrimination (issue #79).
+//! `histogram_quantile` and Prometheus summaries driven by the data
+//! workload's declared metric types (issues #79, #1165).
 //!
-//! The structural heuristic (`by (le)` / `_bucket` / `le=` matcher) proxies the
-//! argument's sample type. A declared [`HistogramKind`] overrides it, fixing the
-//! heuristic's false-positive and false-negative cases. Undeclared metrics still
-//! fall back to the heuristic.
+//! Float input to `histogram_quantile` is classic buckets, as the PromQL spec
+//! reads it, whether declared a histogram or undeclared; no decision depends
+//! on a `_bucket` name or a `by (le)` grouping. A declared native histogram
+//! or summary is rejected. A declared histogram or summary family `foo` is
+//! keyed by its family name and supplies its `_bucket`, `_sum` and `_count`
+//! series.
 
 use crate::support;
-use asap_frontend_promql::{HistogramCatalog, HistogramKind};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::AccuracyTarget;
 use asap_types::ir::{NonASAPOp, OperatorNode};
-use support::{lower_promql, lower_promql_with_histograms};
+use asap_types::workload::bounds::declared_non_negative;
+use asap_types::workload::{DurationMs, PrometheusMetricType, SourceFacts};
+use support::{lower_promql, lower_promql_with_metric_types};
+
+use PrometheusMetricType::{Histogram, NativeHistogram, Summary};
 
 /// The histogram/quantile intent kind in the lowered DAG: `"HQ"` for the
-/// classic-bucket `HistogramQuantile`, `"Q"` for the sketch-able `Quantile`.
-fn quantile_kind(qe: &OperatorNode) -> &'static str {
-    fn walk(e: &OperatorNode) -> Option<&'static str> {
-        match e.expect_non_asap() {
-            NonASAPOp::Aggregate {
-                measures, child, ..
-            } => measures
-                .iter()
-                .find_map(|i| match i {
-                    AggIntent::HistogramQuantile { .. } => Some("HQ"),
-                    AggIntent::Quantile { .. } => Some("Q"),
-                    _ => None,
-                })
-                .or_else(|| walk(child)),
-            NonASAPOp::TimeRange { child, .. }
-            | NonASAPOp::Filter { child, .. }
-            | NonASAPOp::Sort { child, .. }
-            | NonASAPOp::Limit { child, .. }
-            | NonASAPOp::PromqlSubquery { child, .. }
-            | NonASAPOp::Project { child, .. } => walk(child),
-            _ => None,
-        }
+/// classic-bucket `HistogramQuantile`, `"Q"` for a `Quantile`, `None` for
+/// neither.
+fn quantile_kind(qe: &OperatorNode) -> Option<&'static str> {
+    match qe.expect_non_asap() {
+        NonASAPOp::Aggregate {
+            measures, child, ..
+        } => measures
+            .iter()
+            .find_map(|i| match i {
+                AggIntent::HistogramQuantile { .. } => Some("HQ"),
+                AggIntent::Quantile { .. } => Some("Q"),
+                _ => None,
+            })
+            .or_else(|| quantile_kind(child)),
+        NonASAPOp::TimeRange { child, .. }
+        | NonASAPOp::Filter { child, .. }
+        | NonASAPOp::Sort { child, .. }
+        | NonASAPOp::Limit { child, .. }
+        | NonASAPOp::PromqlSubquery { child, .. }
+        | NonASAPOp::Project { child, .. } => quantile_kind(child),
+        _ => None,
     }
-    walk(qe).expect("a HistogramQuantile or Quantile intent")
 }
 
-fn heuristic(q: &str) -> &'static str {
-    quantile_kind(&lower_promql(q, AccuracyTarget::exact()).unwrap())
+/// `query`'s quantile intent with no declared metric type.
+fn undeclared(query: &str) -> Option<&'static str> {
+    quantile_kind(&lower_promql(query, AccuracyTarget::exact()).unwrap())
 }
 
-fn with_meta(q: &str, catalog: HistogramCatalog) -> &'static str {
-    quantile_kind(&lower_promql_with_histograms(q, AccuracyTarget::exact(), catalog).unwrap())
-}
-
-#[test]
-fn heuristic_baseline_is_unchanged_without_a_catalog() {
-    // Classic buckets are represented; undeclared native samples are rejected.
-    assert_eq!(
-        heuristic(
-            "histogram_quantile(0.9, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))"
-        ),
-        "HQ"
-    );
-    assert!(lower_promql(
-        "histogram_quantile(0.9, native_latency)",
-        AccuracyTarget::exact()
+/// `query`'s quantile intent with `metric` declared of `metric_type`.
+fn declared(query: &str, metric: &str, metric_type: PrometheusMetricType) -> Option<&'static str> {
+    quantile_kind(
+        &lower_promql_with_metric_types(query, AccuracyTarget::exact(), &[(metric, metric_type)])
+            .unwrap(),
     )
-    .is_err());
 }
 
+/// The data workload of `query` declaring only `family`, of `metric_type`
+/// and sampled every second: the query's series resolve to it by name.
+fn over_family(
+    query: &str,
+    family: &str,
+    metric_type: PrometheusMetricType,
+) -> asap_types::workload::PlanningWorkload {
+    let mut workload = support::workload(query, AccuracyTarget::exact());
+    workload.data_workload.as_mut().unwrap().sources = [(
+        family.to_string(),
+        SourceFacts {
+            metric_type: Some(metric_type),
+            sample_interval: Some(DurationMs(1_000)),
+            ..SourceFacts::default()
+        },
+    )]
+    .into();
+    workload
+}
+
+/// Whether `query` lowers over data declaring only `family` of `metric_type`.
+fn lowers_over_family(query: &str, family: &str, metric_type: PrometheusMetricType) -> bool {
+    asap_frontend_promql::lower_promql_query_workload(&over_family(query, family, metric_type))
+        .is_ok()
+}
+
+/// A classic histogram without the `_bucket` suffix is classic buckets,
+/// undeclared (as the PromQL spec reads float samples) or declared a histogram.
 #[test]
-fn declared_classic_bucket_fixes_the_false_negative() {
-    // A classic histogram exposed WITHOUT the `_bucket` suffix and queried with
-    // no `le` grouping/matcher requires an explicit sample-type declaration.
+fn suffixless_float_input_is_classic_buckets() {
     let q = "histogram_quantile(0.9, latency_seconds)";
-    assert!(lower_promql(q, AccuracyTarget::exact()).is_err());
-    assert_eq!(
-        with_meta(
-            q,
-            HistogramCatalog::new().with("latency_seconds", HistogramKind::ClassicBucket)
-        ),
-        "HQ",
-        "metadata routes it to exact bucket interpolation"
-    );
+    assert_eq!(undeclared(q), Some("HQ"));
+    assert_eq!(declared(q, "latency_seconds", Histogram), Some("HQ"));
 }
 
+/// `_bucket` series and `by (le)` arguments stay classic buckets with no
+/// declaration, now without a name check.
 #[test]
-fn declared_raw_extension_and_native_gap_override_the_heuristic() {
-    // A metric merely NAMED `…_bucket` that actually holds raw data samples / a native
-    // histogram: the heuristic wrongly routes it to bucket interpolation.
-    let q = "histogram_quantile(0.9, foo_bucket)";
-    assert_eq!(
-        heuristic(q),
-        "HQ",
-        "heuristic mis-routes on the `_bucket` name"
-    );
-    assert_eq!(
-        with_meta(
-            q,
-            HistogramCatalog::new().with("foo_bucket", HistogramKind::RawDataSamples)
-        ),
-        "Q",
-        "raw samples are sketch-able"
-    );
-    let catalog = HistogramCatalog::new().with("foo_bucket", HistogramKind::Native);
-    assert!(lower_promql_with_histograms(q, AccuracyTarget::exact(), catalog.clone()).is_err());
-    assert!(lower_promql_with_histograms("foo_bucket", AccuracyTarget::exact(), catalog).is_err());
-}
-
-#[test]
-fn undeclared_metric_falls_back_to_the_heuristic() {
-    // A catalog that doesn't mention the queried metric leaves the structural
-    // decision in place.
-    let catalog = HistogramCatalog::new().with("some_other_metric", HistogramKind::RawDataSamples);
-    assert_eq!(
-        with_meta(
-            "histogram_quantile(0.9, sum by (le) (x_bucket))",
-            catalog.clone()
-        ),
-        "HQ"
-    );
-    assert!(lower_promql_with_histograms(
-        "histogram_quantile(0.9, native_thing)",
-        AccuracyTarget::exact(),
-        catalog
-    )
-    .is_err());
-}
-
-#[test]
-fn the_catalog_does_not_leak_across_calls() {
-    // The ambient catalog is scoped to the single `_with_histograms` call; a
-    // subsequent plain `lower_promql` sees no metadata (guards against a
-    // thread-local that isn't cleaned up).
-    let _ = with_meta(
+fn bucket_named_input_is_classic_buckets_without_a_declaration() {
+    for q in [
         "histogram_quantile(0.9, foo_bucket)",
-        HistogramCatalog::new().with("foo_bucket", HistogramKind::RawDataSamples),
+        "histogram_quantile(0.9, sum by (le) (rate(x_bucket[5m])))",
+        "histogram_quantile(0.9, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
+    ] {
+        assert_eq!(undeclared(q), Some("HQ"), "{q}");
+    }
+}
+
+/// A metric declared a native histogram is rejected, under
+/// `histogram_quantile(s)` and as a bare read.
+#[test]
+fn declared_native_histogram_is_rejected() {
+    for q in [
+        "histogram_quantile(0.9, foo_bucket)",
+        r#"histogram_quantiles(foo_bucket, "q", 0.5, 0.9)"#,
+        "foo_bucket",
+    ] {
+        let lowered = lower_promql_with_metric_types(
+            q,
+            AccuracyTarget::exact(),
+            &[("foo_bucket", NativeHistogram)],
+        );
+        assert!(
+            matches!(&lowered, Err(e) if e.to_string().contains("native histogram")),
+            "{q}: {lowered:?}"
+        );
+    }
+}
+
+/// A family `foo` declared a native histogram is rejected under
+/// `histogram_quantile(0.9, foo)`, the form a user writes for one.
+#[test]
+fn declared_native_histogram_family_is_rejected() {
+    let lowered = asap_frontend_promql::lower_promql_query_workload(&over_family(
+        "histogram_quantile(0.9, foo)",
+        "foo",
+        NativeHistogram,
+    ));
+    assert!(
+        matches!(&lowered, Err(e) if e.to_string().contains("native histogram")),
+        "{lowered:?}"
     );
-    // `foo_bucket` would be sketch-able under that catalog, but with none it must
-    // revert to the heuristic (the `_bucket` name → HistogramQuantile).
-    assert_eq!(heuristic("histogram_quantile(0.9, foo_bucket)"), "HQ");
+}
+
+/// A declared summary family `foo`: a quantile series is a plain value read
+/// (no quantile computed), `histogram_quantile(s)` over it is rejected, and
+/// `foo_sum`/`foo_count` read the family's facts as counters.
+#[test]
+fn declared_summary_family() {
+    assert!(lowers_over_family(
+        r#"foo{quantile="0.99"}"#,
+        "foo",
+        Summary
+    ));
+    assert_eq!(
+        quantile_kind(
+            &asap_frontend_promql::lower_promql_query_workload(&over_family(
+                r#"avg(foo{quantile="0.99"})"#,
+                "foo",
+                Summary
+            ))
+            .unwrap()[0]
+                .as_operator()
+                .cloned()
+                .unwrap()
+        ),
+        None,
+        "averaging quantile series computes no quantile"
+    );
+    for q in [
+        "histogram_quantile(0.9, foo)",
+        r#"histogram_quantiles(foo, "q", 0.5, 0.9)"#,
+    ] {
+        let lowered =
+            asap_frontend_promql::lower_promql_query_workload(&over_family(q, "foo", Summary));
+        assert!(
+            matches!(&lowered, Err(e) if e.to_string().contains("summary")),
+            "{q}: {lowered:?}"
+        );
+    }
+    // `foo_sum` takes the family's sample interval and reads as a counter.
+    assert!(lowers_over_family(
+        "rate(foo_sum[5m]) / rate(foo_count[5m]) + foo_sum",
+        "foo",
+        Summary
+    ));
+    let data = over_family("", "foo", Summary).data_workload.unwrap();
+    assert!(declared_non_negative(&data, "foo_sum"));
+    assert!(declared_non_negative(&data, "foo_count"));
+    assert!(!declared_non_negative(&data, "foo"));
+}
+
+/// A declared histogram family `foo`: `foo_sum` and `foo_count` read as
+/// counters, and `histogram_quantile` over `foo_bucket` is classic buckets.
+#[test]
+fn declared_histogram_family() {
+    let q = "histogram_quantile(0.9, sum by (le) (rate(foo_bucket[5m])))";
+    let lowered =
+        asap_frontend_promql::lower_promql_query_workload(&over_family(q, "foo", Histogram))
+            .unwrap();
+    assert_eq!(quantile_kind(lowered[0].as_operator().unwrap()), Some("HQ"));
+    assert!(lowers_over_family(
+        "rate(foo_sum[5m]) / rate(foo_count[5m]) + foo_bucket",
+        "foo",
+        Histogram
+    ));
+    let data = over_family("", "foo", Histogram).data_workload.unwrap();
+    assert!(declared_non_negative(&data, "foo_sum"));
+    assert!(declared_non_negative(&data, "foo_count"));
 }

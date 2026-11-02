@@ -439,7 +439,7 @@ fn over_time_functions_reduce_over_time_range() {
 
 #[test]
 fn histogram_quantile_over_rate() {
-    // φ-quantile from bucket rates. The `_bucket` metric marks the classic
+    // φ-quantile from bucket rates: float input is the classic
     // cumulative-bucket form → `HistogramQuantile` (even without `sum by (le)`).
     let qe = ok("histogram_quantile(0.9, rate(demo_api_request_duration_seconds_bucket[5m]))");
     let NonASAPOp::Aggregate { measures, .. } = qe.expect_non_asap() else {
@@ -1411,16 +1411,16 @@ fn predict_linear_and_double_exp_over_a_subquery_carry_params() {
 // N. Native-histogram accessors            (functions.test; issue #43)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// `histogram_quantile` reads float samples as classic buckets, as the PromQL
+/// spec does, with or without a `_bucket` name, `by (le)` or `le` matcher;
+/// only a metric declared a native histogram is rejected (issue #1165).
 #[test]
 fn histogram_quantile_classic_bucket_vs_native() {
-    // Two lowerings of `histogram_quantile(φ, …)`: the classic cumulative-bucket
-    // form → exact `HistogramQuantile`; native samples require a new type.
-    // The classic form is recognised by
-    // `by (le)`, a `_bucket` metric, or an `le` matcher (issue #43).
     for classic in [
         "histogram_quantile(0.9, sum by (le) (rate(x_bucket[5m])))",
-        "histogram_quantile(0.9, rate(x_bucket[5m]))", // bare _bucket metric
-        r#"histogram_quantile(0.9, rate(x{le="0.5"}[5m]))"#, // le matcher
+        "histogram_quantile(0.9, rate(x_bucket[5m]))",
+        r#"histogram_quantile(0.9, rate(x{le="0.5"}[5m]))"#,
+        "histogram_quantile(0.9, request_duration_seconds)",
     ] {
         let qe = ok(classic);
         assert!(
@@ -1435,12 +1435,15 @@ fn histogram_quantile_classic_bucket_vs_native() {
             "{classic}"
         );
     }
-    for native in [
+    assert!(support::lower_promql_with_metric_types(
         "histogram_quantile(0.9, my_native_histogram)",
-        "histogram_quantile(0.9, request_duration_seconds)", // raw samples (your extension)
-    ] {
-        rejected(native);
-    }
+        AccuracyTarget::exact(),
+        &[(
+            "my_native_histogram",
+            asap_types::workload::PrometheusMetricType::NativeHistogram
+        )],
+    )
+    .is_err());
 }
 
 #[test]

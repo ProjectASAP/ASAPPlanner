@@ -785,7 +785,7 @@ mod tests {
         COMPILED_NODES.with(|count| count.set(0));
         let (plan, _) = plan_installable(crate::UserInput::new(
             &workload,
-            crate::FrontendInput::Promql { histograms: None },
+            crate::FrontendInput::Promql,
             crate::PlanningModels::builtin().with_deployment_capabilities(&capabilities),
         ))
         .await
