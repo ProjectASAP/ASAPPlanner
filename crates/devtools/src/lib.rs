@@ -27,6 +27,7 @@ pub mod memo_pricing;
 pub mod planner_fuzz;
 pub mod planner_layering_examples;
 pub mod planning_stages;
+pub mod planning_stages_text;
 pub mod rqe_atomic_costs;
 
 pub use asap_frontend_promql::{
