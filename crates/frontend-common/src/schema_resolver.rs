@@ -1,13 +1,12 @@
-//! The **SchemaResolver** — name resolution as an explicit pass.
+//! Name resolution as an explicit pass.
 //!
-//! [`SchemaResolver::resolve_schema_with_inherited`] produces the complete, self-contained
+//! [`resolve_schema_with_inherited`] produces the complete, self-contained
 //! [`Schema`] every `ColumnId` in a schemaless leaf's scope indexes into, so
 //! positional resolution in [`resolve`](crate::resolve) is total.
 //!
-//! The default [`UsageDerivedCatalog`] knows nothing — every schema is derived
-//! purely from the query's own usage. That is the honest state for the
-//! observability domain (metric label sets are open-ended). A registry-backed
-//! `SchemaCatalog` is future work; only the catalog impl swaps when it lands.
+//! Every schema is derived purely from the query's own usage. That is the
+//! honest state for the observability domain (metric label sets are
+//! open-ended). A registry-backed source catalog is tracked in #1112.
 
 use asap_types::ir::operator::{AggIntent, GroupKeys, Reduction};
 use asap_types::ir::scalar::ColumnRef;
@@ -15,98 +14,28 @@ use asap_types::ir::schema::{DataType, Field, Schema};
 
 use crate::unresolved::{UnresolvedOp, UnresolvedScalar};
 
-/// The DB / source-schema metadata source — resolves a source (metric /
-/// table) name to its known columns. Distinct from `Scan.schema`, which is
-/// the *resolved* binding schema this feeds. Even a registry-backed PromQL
-/// catalog yields an **open** schema: a metric's labels are per-series and
-/// time-varying, so the registry is a superset hint, not a per-row contract.
-pub(crate) trait SchemaCatalog {
-    /// Columns known for `source`. `None` when unknown — the resolver then
-    /// falls back to a usage-derived column set.
-    fn columns_for(&self, source: &str) -> Option<Vec<Field>>;
-}
-
-/// The default catalog: knows nothing.
-pub(crate) struct UsageDerivedCatalog;
-
-impl SchemaCatalog for UsageDerivedCatalog {
-    fn columns_for(&self, _source: &str) -> Option<Vec<Field>> {
-        None
-    }
-}
-
-/// The explicit name-resolution pass.
-pub(crate) struct SchemaResolver<C: SchemaCatalog = UsageDerivedCatalog> {
-    catalog: C,
-}
-
-impl Default for SchemaResolver<UsageDerivedCatalog> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SchemaResolver<UsageDerivedCatalog> {
-    pub(crate) fn new() -> Self {
-        Self {
-            catalog: UsageDerivedCatalog,
+/// The complete [`Schema`] in scope for a query rooted at `tree`: the time
+/// axis, the synthetic `value` column, and one column per distinct name
+/// referenced anywhere in the tree, plus the `inherited` label names
+/// referenced by an **enclosing** scope rather than by `tree` itself. This is
+/// how an independently-bound `BinaryOp` side still sees an outer aggregate's
+/// group keys — the `__name__` / `job` in `sum by (__name__)(a or b)`, which
+/// appear in neither side's own matchers (issue #52).
+pub(crate) fn resolve_schema_with_inherited(tree: &UnresolvedOp, inherited: &[String]) -> Schema {
+    let mut columns = default_leaf_columns();
+    for name in collect_referenced_columns(tree).iter().chain(inherited) {
+        if !columns.iter().any(|c| c.name == *name) {
+            columns.push(Field::plain(name.clone(), DataType::Utf8, true));
         }
     }
-}
-
-impl<C: SchemaCatalog> SchemaResolver<C> {
-    #[cfg(test)]
-    fn with_catalog(catalog: C) -> Self {
-        Self { catalog }
-    }
-
-    /// The complete [`Schema`] in scope for a query rooted at `tree`: the
-    /// time axis, the synthetic `value` column, and one column per distinct
-    /// name referenced anywhere in the tree.
-    #[cfg(test)]
-    fn resolve_schema(&self, tree: &UnresolvedOp) -> Schema {
-        self.resolve_schema_with_inherited(tree, &[])
-    }
-
-    /// Like `resolve_schema`, but also seeds
-    /// `inherited` label names referenced by an **enclosing** scope rather
-    /// than by `tree` itself. This is how an independently-bound `BinaryOp`
-    /// side still sees an outer aggregate's group keys — the `__name__` /
-    /// `job` in `sum by (__name__)(a or b)`, which appear in neither side's
-    /// own matchers (issue #52).
-    pub(crate) fn resolve_schema_with_inherited(
-        &self,
-        tree: &UnresolvedOp,
-        inherited: &[String],
-    ) -> Schema {
-        let mut columns: Vec<Field> = leftmost_scan_name(tree)
-            .and_then(|name| self.catalog.columns_for(name))
-            .unwrap_or_else(default_leaf_columns);
-
-        // Ensure the (ts, value) floor is present.
-        for floor in default_leaf_columns() {
-            if !columns.iter().any(|c| c.name == floor.name) {
-                columns.push(floor);
-            }
-        }
-
-        // One column per referenced-but-unknown name, plus the inherited ones.
-        let referenced = collect_referenced_columns(tree);
-        for name in referenced.iter().chain(inherited) {
-            if !columns.iter().any(|c| c.name == *name) {
-                columns.push(Field::plain(name.clone(), DataType::Utf8, true));
-            }
-        }
-
-        let time_index = columns.iter().position(|c| c.name == "ts");
-        Schema {
-            fields: columns,
-            time_index,
-            unique_keys: Vec::new(),
-            // Usage-derived (schemaless PromQL): the metric's full label set is
-            // open and runtime-only, so this lists only what the query references.
-            closed: false,
-        }
+    let time_index = columns.iter().position(|c| c.name == "ts");
+    Schema {
+        fields: columns,
+        time_index,
+        unique_keys: Vec::new(),
+        // Usage-derived (schemaless PromQL): the metric's full label set is
+        // open and runtime-only, so this lists only what the query references.
+        closed: false,
     }
 }
 
@@ -125,40 +54,6 @@ fn push_ref_name(c: &ColumnRef, out: &mut Vec<String>) {
         ColumnRef::Named(n) => out.push(n.clone()),
         ColumnRef::Qualified { name, .. } => out.push(name.clone()),
         ColumnRef::SampleValue | ColumnRef::Wildcard => {}
-    }
-}
-
-/// The leftmost `Scan`'s source name, following the relational skeleton only
-/// (never the operators referenced from scalar positions: those are bound in
-/// their own scope).
-fn leftmost_scan_name(tree: &UnresolvedOp) -> Option<&str> {
-    use asap_types::ir::operator::Source;
-    use UnresolvedOp as U;
-    match tree {
-        U::Scan { source, .. } => Some(match source {
-            Source::TimeSeries { metric } => metric.as_str(),
-            Source::Table { table_ref } => table_ref.as_str(),
-        }),
-        U::Values { .. } | U::PromqlVectorFromScalar(_) => None,
-        U::PromqlMap { child, .. }
-        | U::PromqlScalarOp { child, .. }
-        | U::PromqlRelabel { child, .. }
-        | U::PromqlInfoEnrich { child, .. }
-        | U::PromqlSeriesSample { child, .. }
-        | U::Filter { child, .. }
-        | U::Project { child, .. }
-        | U::Aggregate { child, .. }
-        | U::Dedup { child, .. }
-        | U::Sort { child, .. }
-        | U::Limit { child, .. }
-        | U::PromqlSubquery { child, .. }
-        | U::TimeRange { child, .. }
-        | U::TimeShift { child, .. }
-        | U::SQLWindowFunc { child, .. } => leftmost_scan_name(child),
-        U::Concat { children, .. } => children.first().and_then(|c| leftmost_scan_name(c)),
-        U::Join { left, .. } | U::SetOp { left, .. } | U::BinaryOp { lhs: left, .. } => {
-            leftmost_scan_name(left)
-        }
     }
 }
 
@@ -328,6 +223,10 @@ mod tests {
     use super::*;
     use crate::unresolved::UnresolvedSortKey;
 
+    fn resolve_schema(tree: &UnresolvedOp) -> Schema {
+        resolve_schema_with_inherited(tree, &[])
+    }
+
     fn src(name: &str) -> UnresolvedOp {
         UnresolvedOp::Scan {
             source: Source::TimeSeries {
@@ -353,7 +252,7 @@ mod tests {
             child: Rc::new(src("m")),
         };
         assert_eq!(collect_referenced_columns(&tree), vec!["x", "y"]);
-        let schema = SchemaResolver::new().resolve_schema(&tree);
+        let schema = resolve_schema(&tree);
         assert!(schema.column_id("x").is_some());
         assert!(schema.column_id("y").is_some());
     }
@@ -361,7 +260,7 @@ mod tests {
     // A bare source gets exactly the (ts, value) floor.
     #[test]
     fn bare_source_yields_ts_value_floor() {
-        let schema = SchemaResolver::new().resolve_schema(&src("m"));
+        let schema = resolve_schema(&src("m"));
         assert_eq!(schema.fields.len(), 2);
         assert_eq!(schema.fields[0].name, "ts");
         assert_eq!(schema.fields[1].name, "value");
@@ -381,7 +280,7 @@ mod tests {
             partition_by: GroupKeys::by(vec![ColumnRef::Named("host".into())]),
             child: Rc::new(src("hits")),
         };
-        let schema = SchemaResolver::new().resolve_schema(&tree);
+        let schema = resolve_schema(&tree);
         assert!(schema.column_id("host").is_some());
     }
 
@@ -394,7 +293,7 @@ mod tests {
             partition_by: GroupKeys::by(vec![ColumnRef::Named("host".into())]),
             child: Rc::new(src("hits")),
         };
-        let schema = SchemaResolver::new().resolve_schema(&tree);
+        let schema = resolve_schema(&tree);
         assert!(schema.column_id("host").is_some());
     }
 
@@ -407,7 +306,7 @@ mod tests {
             ColumnRef::Named("phi".into()),
             vec![ColumnRef::Named("host".into())],
         );
-        let schema = SchemaResolver::new().resolve_schema(&tree);
+        let schema = resolve_schema(&tree);
         assert!(schema.column_id("phi").is_some(), "discriminator seeded");
         assert!(schema.column_id("host").is_some(), "inner_key seeded");
     }
@@ -416,32 +315,9 @@ mod tests {
     // `resolve_schema` does not conjure them (issue #52).
     #[test]
     fn inherited_names_are_seeded_alongside_referenced() {
-        let schema =
-            SchemaResolver::new().resolve_schema_with_inherited(&src("m"), &["__name__".into()]);
+        let schema = resolve_schema_with_inherited(&src("m"), &["__name__".into()]);
         assert!(schema.column_id("__name__").is_some());
-        let plain = SchemaResolver::new().resolve_schema(&src("m"));
+        let plain = resolve_schema(&src("m"));
         assert!(plain.column_id("__name__").is_none());
-    }
-
-    // A catalog-known source supplies its base columns, typed as the catalog says.
-    #[test]
-    fn custom_catalog_supplies_base_columns() {
-        struct FixedCatalog;
-        impl SchemaCatalog for FixedCatalog {
-            fn columns_for(&self, source: &str) -> Option<Vec<Field>> {
-                (source == "known").then(|| {
-                    vec![
-                        Field::plain("ts", DataType::Timestamp, false),
-                        Field::plain("value", DataType::Float64, false),
-                        Field::plain("datacenter", DataType::Utf8, false),
-                    ]
-                })
-            }
-        }
-        let schema = SchemaResolver::with_catalog(FixedCatalog).resolve_schema(&src("known"));
-        let dc = schema
-            .column_id("datacenter")
-            .and_then(|id| schema.fields.get(id));
-        assert!(matches!(dc, Some(c) if !c.nullable));
     }
 }

@@ -121,7 +121,6 @@ pub struct NativeFunction {
     /// Lowercase function name, as DataFusion's `Expr::AggregateFunction`
     /// reports it (`agg_fn.func.name()`).
     pub name: &'static str,
-    pub arity: Arity,
     pub semantic: AggSemantic,
 }
 
@@ -132,97 +131,78 @@ pub struct NativeFunction {
 pub const NATIVE_FUNCTIONS: &[NativeFunction] = &[
     NativeFunction {
         name: "corr",
-        arity: Arity::Exact(2),
         semantic: AggSemantic::Correlation,
     },
     NativeFunction {
         name: "count",
-        arity: Arity::Range { min: 0, max: 1 },
         semantic: AggSemantic::Count,
     },
     NativeFunction {
         name: "sum",
-        arity: Arity::Exact(1),
         semantic: AggSemantic::Sum,
     },
     NativeFunction {
         name: "min",
-        arity: Arity::Exact(1),
         semantic: AggSemantic::Min,
     },
     NativeFunction {
         name: "max",
-        arity: Arity::Exact(1),
         semantic: AggSemantic::Max,
     },
     NativeFunction {
         name: "avg",
-        arity: Arity::Exact(1),
         semantic: AggSemantic::Avg,
     },
     NativeFunction {
         name: "mean",
-        arity: Arity::Exact(1),
         semantic: AggSemantic::Avg,
     },
     NativeFunction {
         name: "stddev",
-        arity: Arity::Exact(1),
         semantic: AggSemantic::StdDev { population: false },
     },
     NativeFunction {
         name: "stddev_samp",
-        arity: Arity::Exact(1),
         semantic: AggSemantic::StdDev { population: false },
     },
     NativeFunction {
         name: "stddev_pop",
-        arity: Arity::Exact(1),
         semantic: AggSemantic::StdDev { population: true },
     },
     NativeFunction {
         name: "var",
-        arity: Arity::Exact(1),
         semantic: AggSemantic::Variance { population: false },
     },
     NativeFunction {
         name: "variance",
-        arity: Arity::Exact(1),
         semantic: AggSemantic::Variance { population: false },
     },
     NativeFunction {
         name: "var_samp",
-        arity: Arity::Exact(1),
         semantic: AggSemantic::Variance { population: false },
     },
     NativeFunction {
         name: "var_pop",
-        arity: Arity::Exact(1),
         semantic: AggSemantic::Variance { population: true },
     },
     NativeFunction {
         name: "approx_percentile_cont",
-        arity: Arity::Exact(2),
         semantic: AggSemantic::Quantile { fixed_q: None },
     },
     NativeFunction {
         name: "percentile_cont",
-        arity: Arity::Exact(2),
         semantic: AggSemantic::Quantile { fixed_q: None },
     },
     NativeFunction {
         name: "median",
-        arity: Arity::Exact(1),
         semantic: AggSemantic::Quantile { fixed_q: Some(0.5) },
     },
     NativeFunction {
         name: "approx_median",
-        arity: Arity::Exact(1),
         semantic: AggSemantic::Quantile { fixed_q: Some(0.5) },
     },
     NativeFunction {
         name: "approx_distinct",
-        arity: Arity::Exact(1),
         semantic: AggSemantic::Cardinality,
     },
 ];
@@ -487,12 +467,6 @@ pub const CLICKHOUSE_SCALAR_BUILTINS: &[ClickHouseScalarBuiltin] = &[
     },
 ];
 
-/// Look up a ClickHouse-only scalar builtin by name (case-sensitive, see
-/// [`lookup_native`]).
-pub fn lookup_clickhouse_scalar_builtin(name: &str) -> Option<&'static ClickHouseScalarBuiltin> {
-    CLICKHOUSE_SCALAR_BUILTINS.iter().find(|b| b.name == name)
-}
-
 /// One [`CLICKHOUSE_WINDOW_BUILTINS`] entry -- just `{ name, arity }`, no
 /// [`RewriteKind`]: unlike an aggregate call, `lower_window_func_kind`
 /// (`asap-frontend-sql::sql`) already maps each of these names directly to
@@ -533,12 +507,6 @@ pub const CLICKHOUSE_WINDOW_BUILTINS: &[ClickHouseWindowBuiltin] = &[
         arity: Arity::Range { min: 1, max: 3 },
     },
 ];
-
-/// Look up a ClickHouse-only window builtin by name (case-sensitive, see
-/// [`lookup_native`]).
-pub fn lookup_clickhouse_window_builtin(name: &str) -> Option<&'static ClickHouseWindowBuiltin> {
-    CLICKHOUSE_WINDOW_BUILTINS.iter().find(|b| b.name == name)
-}
 
 #[cfg(test)]
 mod tests {
@@ -622,20 +590,6 @@ mod tests {
     }
 
     #[test]
-    fn clickhouse_scalar_builtin_lookup_finds_every_listed_name() {
-        for b in CLICKHOUSE_SCALAR_BUILTINS {
-            let found =
-                lookup_clickhouse_scalar_builtin(b.name).expect("listed name must be found");
-            assert_eq!(found.name, b.name);
-            assert_eq!(found.arity, b.arity);
-        }
-        assert_eq!(
-            lookup_clickhouse_scalar_builtin("not_a_real_function"),
-            None
-        );
-    }
-
-    #[test]
     fn clickhouse_scalar_builtin_names_are_lowercase() {
         for b in CLICKHOUSE_SCALAR_BUILTINS {
             assert_eq!(b.name, b.name.to_lowercase(), "not lowercase: {}", b.name);
@@ -664,20 +618,6 @@ mod tests {
     }
 
     #[test]
-    fn clickhouse_window_builtin_lookup_finds_every_listed_name() {
-        for b in CLICKHOUSE_WINDOW_BUILTINS {
-            let found =
-                lookup_clickhouse_window_builtin(b.name).expect("listed name must be found");
-            assert_eq!(found.name, b.name);
-            assert_eq!(found.arity, b.arity);
-        }
-        assert_eq!(
-            lookup_clickhouse_window_builtin("not_a_real_function"),
-            None
-        );
-    }
-
-    #[test]
     fn clickhouse_window_builtin_names_are_lowercase() {
         for b in CLICKHOUSE_WINDOW_BUILTINS {
             assert_eq!(b.name, b.name.to_lowercase(), "not lowercase: {}", b.name);
@@ -701,7 +641,7 @@ mod tests {
                 b.name
             );
             assert!(
-                lookup_clickhouse_scalar_builtin(b.name).is_none(),
+                !CLICKHOUSE_SCALAR_BUILTINS.iter().any(|s| s.name == b.name),
                 "{} listed as both a ClickHouse scalar and window builtin",
                 b.name
             );
