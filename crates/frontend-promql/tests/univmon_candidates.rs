@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::planner_support::run_stage1_to_stage3;
+use crate::planner_support::run_all_stages;
 use crate::support;
 use asap_accuracy::test_support::{local_guarantee, satisfies};
 use asap_logical_asap_optimization::test_support::share_common_sub_dags;
@@ -132,7 +132,7 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
         ] {
             let root = lower_promql(query, target.clone()).unwrap();
             let generated = logical_candidates(Rc::clone(&root));
-            let run = run_stage1_to_stage3(root, target.clone());
+            let run = run_all_stages(root, target.clone());
             let unknown: Vec<_> = generated
                 .iter()
                 .filter(|node| univmon_estimate(node).is_some() && node.guarantee.is_none())

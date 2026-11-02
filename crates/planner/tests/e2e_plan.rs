@@ -111,7 +111,7 @@ async fn plans_every_query_in_entry_order() {
 /// roots ([`run_planning`]), and reports that selection.
 #[tokio::test]
 #[ignore = "nondeterministic: plans under a wall-clock budget; revisit after Stage 3 design (#1175)"]
-async fn facade_plans_match_run_stage1_to_stage3() {
+async fn facade_plans_match_run_planning() {
     let workload = sql_workload(
         vec![
             batch("SELECT COUNT(DISTINCT l_orderkey) FROM lineitem"),

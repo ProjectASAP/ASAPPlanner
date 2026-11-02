@@ -186,15 +186,15 @@ pub mod planning {
 
     /// Every planning stage's output for the single query `root`, with
     /// the reference enumeration of its memo.
-    pub fn run_stage1_to_stage3(
+    pub fn run_all_stages(
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
     ) -> asap_devtools::planning_stages::PlanningStagesRun {
-        run_stage1_to_stage3_with(root, accuracy, asap_planner::PlanningModels::builtin())
+        run_all_stages_with(root, accuracy, asap_planner::PlanningModels::builtin())
     }
 
-    /// [`run_stage1_to_stage3`] with `models`.
-    fn run_stage1_to_stage3_with(
+    /// [`run_all_stages`] with `models`.
+    fn run_all_stages_with(
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
         models: asap_planner::PlanningModels<'_>,
@@ -222,11 +222,7 @@ pub mod planning {
     /// The logical DAG the planner pipeline selects for the single query
     /// `root` at `accuracy`.
     pub fn selected_dag(root: Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
-        match run_stage1_to_stage3(root, accuracy)
-            .run
-            .selected_plan
-            .as_deref()
-        {
+        match run_all_stages(root, accuracy).run.selected_plan.as_deref() {
             Some([QueryRoot::Operator(node)]) => Rc::clone(node),
             other => panic!("one selected operator root: {other:?}"),
         }
@@ -300,9 +296,7 @@ pub mod planning {
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
     ) -> Vec<Rc<OperatorNode>> {
-        require_composed_operator_candidates(
-            run_stage1_to_stage3(root, accuracy).logical_candidates(),
-        )
+        require_composed_operator_candidates(run_all_stages(root, accuracy).logical_candidates())
     }
 
     /// [`logical_candidates`] with every output accepted whatever its
@@ -318,7 +312,7 @@ pub mod planning {
     ) -> Vec<Rc<OperatorNode>> {
         let models = asap_planner::PlanningModels::builtin().with_ignore_accuracy_guarantees(true);
         require_composed_operator_candidates(
-            run_stage1_to_stage3_with(root, accuracy, models).logical_candidates(),
+            run_all_stages_with(root, accuracy, models).logical_candidates(),
         )
     }
 
