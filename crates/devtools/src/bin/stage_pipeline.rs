@@ -271,7 +271,7 @@ use asap_cost::{
     ClusterLimits, ClusterObjective, CostInputs, CostModel, MeasuredOperationCosts,
     ResourceUnitCost, ResourceUsage,
 };
-use asap_devtools::candidate_labels::{candidate_labels, computation_label};
+use asap_devtools::candidate_labels::{candidate_labels, computation_label, node_label};
 use asap_devtools::memo_pricing::{price_choices, SelectedBaseline};
 use asap_devtools::planner_layering_examples::{
     example1, example2, pattern_a, pattern_b, PatternARecurrence, SHARED_ROWS_PER_SECOND,
@@ -1926,110 +1926,6 @@ fn candidate_node_label(
         pending.extend(nodes[id].operator.children().into_iter().rev().copied());
     }
     labels.join(" ← ")
-}
-
-/// One node's operator kind with its sketch family and parameters, its
-/// summary query and its time range, when it has them: e.g.
-/// `SummaryAgg Kll(k=200)`, `SummaryEstimate Quantile(q=0.5)`.
-fn node_label(node: &asap_types::ir::flat::FlatNode) -> String {
-    let operator = serde_json::to_value(&node.operator).unwrap_or_default();
-    // `{"ASAP": {"SummaryAgg": {...}}}` (or a unit variant's string).
-    let (kind, fields) = match operator.as_object().and_then(|o| o.values().next()) {
-        Some(Value::Object(inner)) => match inner.iter().next() {
-            Some((kind, fields)) => (kind.clone(), fields.clone()),
-            None => (String::new(), Value::Null),
-        },
-        Some(Value::String(kind)) => (kind.clone(), Value::Null),
-        _ => (operator.to_string(), Value::Null),
-    };
-    let mut details = Vec::new();
-    find_details(&fields, &mut details, 0);
-    let mut label = kind;
-    for detail in details {
-        label.push(' ');
-        label.push_str(&detail);
-    }
-    label
-}
-
-/// Sketch algorithms with parameters, summary queries and time ranges found
-/// in an operator's fields (not inside its schemas).
-fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
-    if depth > 6 || details.len() >= 3 {
-        return;
-    }
-    let compact = |value: &Value| -> String {
-        match value {
-            Value::Object(fields) => fields
-                .iter()
-                .map(|(key, value)| match value {
-                    Value::Object(inner) if inner.len() == 1 => {
-                        let (k, v) = inner.iter().next().unwrap();
-                        format!("{key}({k}={v})")
-                    }
-                    Value::Object(inner) => format!(
-                        "{key}({})",
-                        inner
-                            .iter()
-                            .filter(|(_, v)| !v.is_object() && !v.is_array())
-                            .map(|(k, v)| format!("{k}={v}"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                    other => format!("{key}={other}"),
-                })
-                .collect::<Vec<_>>()
-                .join(" "),
-            other => other.to_string(),
-        }
-    };
-    match value {
-        Value::Object(fields) => {
-            if let (Some(Value::String(algorithm)), Some(params)) =
-                (fields.get("algorithm"), fields.get("params"))
-            {
-                let params = params
-                    .as_object()
-                    .and_then(|p| p.values().next())
-                    .map(compact)
-                    .unwrap_or_default();
-                details.push(format!("{algorithm}({params})"));
-                return;
-            }
-            for (key, field) in fields {
-                match key.as_str() {
-                    "schema" | "input_schema" | "output_schema" | "predicates" | "cols" => {}
-                    "query" => details.push(compact(field)),
-                    // An aggregate's measures, e.g. `quantile(q=0.5)`.
-                    "measures" => {
-                        for measure in field.as_array().into_iter().flatten() {
-                            let Some(kind) = measure.get("kind").and_then(Value::as_str) else {
-                                continue;
-                            };
-                            let params: Vec<_> = measure
-                                .as_object()
-                                .into_iter()
-                                .flatten()
-                                .filter(|(key, value)| {
-                                    *key != "kind" && (value.is_number() || value.is_string())
-                                })
-                                .map(|(key, value)| format!("{key}={value}"))
-                                .collect();
-                            details.push(format!("{kind}({})", params.join(", ")));
-                        }
-                    }
-                    "range" | "window" => details.push(format!("{key}={field}")),
-                    _ => find_details(field, details, depth + 1),
-                }
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                find_details(item, details, depth + 1);
-            }
-        }
-        _ => {}
-    }
 }
 
 #[cfg(test)]
