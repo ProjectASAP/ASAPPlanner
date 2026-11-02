@@ -1243,7 +1243,7 @@ class AppTests(unittest.TestCase):
         self.assertIn("7 groups (+1) · 30 candidates (+20)", meta)
         self.assertIn("selected plan's candidates highlighted (7 groups)", meta)
         # G2 is collapsed to its origin counts; the rest list their candidates.
-        self.assertEqual(self.memo_ids(js, "g2"), ["g2opass1", "g2opanes", "g2oshared_build"])
+        self.assertEqual(self.memo_ids(js, "g2"), ["g2opass1", "g2otumbling_windows", "g2oshared_build"])
         js.eval("window.MemoView.selectStep(0)")
         self.assertEqual(len(self.memo_ids(js)), 6)
         self.assertIn("6 groups · 0 candidates", self.text(js, "memoView-meta"))
@@ -1251,7 +1251,7 @@ class AppTests(unittest.TestCase):
 
     def test_tapping_a_count_expands_its_group_and_the_group_collapses_it(self):
         js = self.memo_page()
-        self.tap_memo(js, "g2opanes")
+        self.tap_memo(js, "g2otumbling_windows")
         self.assertEqual(len(self.memo_ids(js, "g2")), 13)
         self.assertIn("Memo group G2", self.text(js, "details"))
         self.assertIn("20 (13 listed): 2 Pass1, 9 TumblingWindows, 9 SharedBuild", self.text(js, "details"))

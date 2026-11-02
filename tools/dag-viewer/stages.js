@@ -27,13 +27,13 @@ function upgradeTumblingWindowNames(value) {
       else if (key === 'origin' && item === 'panes') item = 'tumbling_windows';
       else {
         // A memo group's candidate counts are keyed by origin.
-        if (key === 'candidate_count_by_origin' && item && Object.hasOwn(item, 'panes')) {
+        if (key === 'candidate_count_by_origin' && item && Object.prototype.hasOwnProperty.call(item, 'panes')) {
           item.tumbling_windows = item.panes;
           delete item.panes;
         }
         upgradeTumblingWindowNames(item);
       }
-      const renamed = Object.hasOwn(TUMBLING_WINDOW_RENAMES, key) ? TUMBLING_WINDOW_RENAMES[key] : key;
+      const renamed = Object.prototype.hasOwnProperty.call(TUMBLING_WINDOW_RENAMES, key) ? TUMBLING_WINDOW_RENAMES[key] : key;
       if (renamed !== key) delete value[key];
       value[renamed] = item;
     }
