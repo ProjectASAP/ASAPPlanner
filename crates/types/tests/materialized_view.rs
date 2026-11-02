@@ -199,22 +199,22 @@ fn quantile_sketch(algorithm: SketchAlgorithm) -> FieldDataType {
     FieldDataType::Sketch(SketchKind::new(algorithm, params), Default::default())
 }
 
-/// `pane_count` panes of `pane_width_ms` of `family` per `job` over `input`.
+/// `tumbling_window_count` panes of `tumbling_window_width_ms` of `family` per `job` over `input`.
 fn chain(
     input: &Rc<OperatorNode>,
     family: FieldDataType,
-    pane_width_ms: u64,
-    pane_count: u32,
+    tumbling_window_width_ms: u64,
+    tumbling_window_count: u32,
 ) -> Rc<OperatorNode> {
-    OperatorNode::new_shared(Operator::ASAP(ASAPOp::PaneChain {
+    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child: Rc::clone(input),
         family,
         input: SummaryUpdate::column(ColumnRef::Named("value".into())),
         reduction: Reduction::by(vec![2]),
         grouping: GroupingStrategy::default(),
         filter: None,
-        pane_width_ms,
-        pane_count,
+        tumbling_window_width_ms,
+        tumbling_window_count,
     }))
     .unwrap()
 }
@@ -243,7 +243,7 @@ fn three_chains_over_one_scan() -> (PhysicalASAPDAG, PhysicalASAPDAG) {
             QueryRoot::Operator(
                 OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
                     children: vec![Rc::clone(chain)],
-                    newest_panes: None,
+                    newest_tumbling_windows: None,
                     group_by: None,
                 }))
                 .unwrap(),
@@ -264,11 +264,11 @@ fn three_chains_over_one_scan() -> (PhysicalASAPDAG, PhysicalASAPDAG) {
 fn pane_shape(dag: &PhysicalASAPDAG, node: usize) -> (u64, SketchAlgorithm) {
     let payload = &dag.nodes.iter().find(|n| n.id == node).unwrap().payload;
     let (family, width_ms) = match payload {
-        Operator::ASAP(ASAPOp::PaneChain {
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
             family,
-            pane_width_ms,
+            tumbling_window_width_ms,
             ..
-        }) => (family, *pane_width_ms),
+        }) => (family, *tumbling_window_width_ms),
         Operator::ASAP(ASAPOp::SummaryAgg { family, child, .. }) => {
             let range = &dag.nodes.iter().find(|n| n.id == *child).unwrap().payload;
             let Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) = range else {
@@ -296,7 +296,12 @@ fn a_chain_and_each_of_its_panes_have_one_refresh_window() {
     let chains: Vec<usize> = unexpanded
         .nodes
         .iter()
-        .filter(|node| matches!(node.payload, Operator::ASAP(ASAPOp::PaneChain { .. })))
+        .filter(|node| {
+            matches!(
+                node.payload,
+                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+            )
+        })
         .map(|node| node.id)
         .collect();
     assert_eq!(chains.len(), 3);
@@ -439,7 +444,7 @@ fn a_view_reading_a_view_of_its_group_follows_it() {
     let pane = pane(&scan, 0);
     let rollup = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children: vec![Rc::clone(&pane)],
-        newest_panes: None,
+        newest_tumbling_windows: None,
         group_by: Some(vec![]),
     }))
     .unwrap();

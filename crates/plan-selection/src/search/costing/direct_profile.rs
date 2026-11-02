@@ -490,10 +490,11 @@ fn profile_for_priced(
         // profile admits no `TimeShift` at ingestion, so that pane ends at
         // the evaluation time: phase 0.
         refresh_window: match &node.payload {
-            asap_types::ir::Operator::ASAP(ASAPOp::PaneChain { pane_width_ms, .. })
-                if node.materialization == Materialization::MatAtIngestion(Medium::Memory) =>
-            {
-                RefreshWindow::of_window(0, i64::try_from(*pane_width_ms).unwrap_or(0))
+            asap_types::ir::Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                ..
+            }) if node.materialization == Materialization::MatAtIngestion(Medium::Memory) => {
+                RefreshWindow::of_window(0, i64::try_from(*tumbling_window_width_ms).unwrap_or(0))
             }
             _ => None,
         },
@@ -1974,7 +1975,7 @@ mod tests {
             if let Some(id) = seen.get(&Rc::as_ptr(node)) {
                 return *id;
             }
-            let chain = matches!(node.asap(), Some(ASAPOp::PaneChain { .. }));
+            let chain = matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }));
             let ingestion = ingestion || chain;
             let mut inputs = Vec::new();
             node.operator
@@ -2053,8 +2054,8 @@ mod tests {
         let panes: Vec<_> = pane_candidates(&roots, &grid)
             .into_iter()
             .filter(|pane| {
-                (pane.window_ms(), pane.pane_width_ms) == (60_000, kll.1)
-                    || (pane.window_ms(), pane.pane_width_ms) == (300_000, dd.1)
+                (pane.window_ms(), pane.tumbling_window_width_ms) == (60_000, kll.1)
+                    || (pane.window_ms(), pane.tumbling_window_width_ms) == (300_000, dd.1)
             })
             .collect();
         assert_eq!(panes.len(), 2, "{panes:?}");

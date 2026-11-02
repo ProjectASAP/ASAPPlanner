@@ -519,7 +519,7 @@ impl PhysicalASAPDAG {
     }
 
     /// The refresh window of `node` ([`RefreshWindow::of_window`]): for a
-    /// `PaneChain` (a DAG with its chains unexpanded), its newest pane's,
+    /// `SummaryTumblingWindowChain` (a DAG with its chains unexpanded), its newest pane's,
     /// `(pane_width, s mod pane_width)` with `s` the sum of the offsets of
     /// the `TimeShift`s below it; for any other node, that of its window
     /// ([`Self::view_windows`], which counts a chain below it as all its
@@ -539,7 +539,7 @@ impl PhysicalASAPDAG {
         let (chains, others): (Vec<_>, Vec<_>) = nodes.into_iter().partition(|id| {
             matches!(
                 payloads.get(id),
-                Some(Operator::ASAP(ASAPOp::PaneChain { .. }))
+                Some(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }))
             )
         });
         let mut windows: HashMap<PhysicalASAPNodeId, Option<RefreshWindow>> = self
@@ -557,9 +557,9 @@ impl PhysicalASAPDAG {
             })
             .collect();
         for chain in chains {
-            let Some(Operator::ASAP(ASAPOp::PaneChain {
+            let Some(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 child,
-                pane_width_ms,
+                tumbling_window_width_ms,
                 ..
             })) = payloads.get(&chain)
             else {
@@ -567,7 +567,7 @@ impl PhysicalASAPDAG {
             };
             // The newest pane ends at the offsets of the shifts below the chain.
             let end_offset_ms = offset_below(*child, |id| payloads.get(&id).copied());
-            let width_ms = i64::try_from(*pane_width_ms).unwrap_or(0);
+            let width_ms = i64::try_from(*tumbling_window_width_ms).unwrap_or(0);
             windows.insert(
                 chain,
                 end_offset_ms.and_then(|offset| RefreshWindow::of_window(offset, width_ms)),

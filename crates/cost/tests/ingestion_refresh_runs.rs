@@ -51,23 +51,23 @@ fn quantile_sketch(algorithm: SketchAlgorithm) -> FieldDataType {
     FieldDataType::Sketch(SketchKind::new(algorithm, params), Default::default())
 }
 
-/// `pane_count` panes of `pane_width_ms` of a quantile sketch of
+/// `tumbling_window_count` panes of `tumbling_window_width_ms` of a quantile sketch of
 /// `algorithm` per `job` over `input`.
 fn chain(
     input: &Rc<OperatorNode>,
     algorithm: SketchAlgorithm,
-    pane_width_ms: u64,
-    pane_count: u32,
+    tumbling_window_width_ms: u64,
+    tumbling_window_count: u32,
 ) -> Rc<OperatorNode> {
-    OperatorNode::new_shared(Operator::ASAP(ASAPOp::PaneChain {
+    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child: Rc::clone(input),
         family: quantile_sketch(algorithm),
         input: SummaryUpdate::column(ColumnRef::Named("value".into())),
         reduction: Reduction::by(vec![2]),
         grouping: GroupingStrategy::default(),
         filter: None,
-        pane_width_ms,
-        pane_count,
+        tumbling_window_width_ms,
+        tumbling_window_count,
     }))
     .unwrap()
 }
@@ -86,7 +86,7 @@ fn dag_of(summaries: &[Rc<OperatorNode>], materialization: Materialization) -> P
             QueryRoot::Operator(
                 OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
                     children: vec![Rc::clone(summary)],
-                    newest_panes: None,
+                    newest_tumbling_windows: None,
                     group_by: None,
                 }))
                 .unwrap(),

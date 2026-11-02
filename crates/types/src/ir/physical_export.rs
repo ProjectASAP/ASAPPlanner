@@ -492,7 +492,7 @@ impl PhysicalASAPDAG {
     /// The interval of data the output of `node` summarizes, back from the
     /// evaluation time `T`: the union of the windows
     /// ([`time_range_window`]) of every `TimeRange` below it, and of every
-    /// unexpanded `PaneChain` (all its panes). For an expanded pane, its
+    /// unexpanded `SummaryTumblingWindowChain` (all its panes). For an expanded pane, its
     /// pane; for a view built from panes, all of them. `Unbounded` when no
     /// `TimeRange` or chain is below it or one of them is unbounded (a whole
     /// SQL table, an `@` anchor). O(nodes + edges).
@@ -524,13 +524,14 @@ impl PhysicalASAPDAG {
                     Some(Operator::NonASAP(NonASAPOp::TimeRange { .. })) => {
                         time_range_window(id, |id| payloads.get(&id).copied())
                     }
-                    Some(Operator::ASAP(ASAPOp::PaneChain {
+                    Some(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                         child,
-                        pane_width_ms,
-                        pane_count,
+                        tumbling_window_width_ms,
+                        tumbling_window_count,
                         ..
                     })) => {
-                        let width_ms = pane_width_ms.checked_mul(u64::from(*pane_count));
+                        let width_ms =
+                            tumbling_window_width_ms.checked_mul(u64::from(*tumbling_window_count));
                         match (
                             offset_below(*child, |id| payloads.get(&id).copied()),
                             width_ms,
