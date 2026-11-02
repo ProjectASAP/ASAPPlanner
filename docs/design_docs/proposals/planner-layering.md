@@ -19,6 +19,7 @@ design is extended.
   - [ASAPPlanner System Overview: Planning Stages](#asapplanner-system-overview-planning-stages)
   - [The stages over a memo of sub-expressions](#the-stages-over-a-memo-of-sub-expressions)
     - [Memo components](#memo-components)
+    - [State groups](#state-groups)
     - [Example: one query through the memo](#example-one-query-through-the-memo)
     - [Algorithm: memo to candidate DAGs](#algorithm-memo-to-candidate-dags)
     - [How the search uses the memo](#how-the-search-uses-the-memo)
@@ -275,7 +276,9 @@ lists each stage's input and output types.
 | DAG of logical memo groups | `DagOfLogicalMemoGroups` | Stage 0's groups, before any implementation choice: the workload's logical DAG hash-consed (below). |
 | Memo candidates | `MemoCandidates` | The groups, and the candidates for each memo group (`candidates[group]`). Pass 1 creates it from the DAG of logical memo groups; the Pass 2 rules add candidates and groups. |
 | Candidate for a memo group | `CandidateForMemoGroup` | One way to implement a group over child groups. `fused_groups`: for a fused computation, the groups it absorbs beyond the group whose candidate it is; empty otherwise. `root_node`: its own nodes, down to the nodes of the groups it reads. `input_groups`: the groups it reads, whose implementations are chosen separately. `origin`: the rule that made it (`OriginOfCandidateForMemoGroup`, below). `accuracy_budget_parts`: the number of equal shares of the accuracy budget its summaries are sized for, 1 for the whole budget and `n` when it is one of `n` approximate inputs of a query. |
-| Concrete summary-state group | a `MemoGroup` whose node is a `SummaryAgg` or a `SummaryTumblingWindowChain` | One summary state at one size, or one tumbling-window chain at one layout, that several readers may share. A choice several groups depend on, such as a shared size or a tumbling-window grid, is one concrete group per value, when two or more readers may read that value, and each of them gets a candidate reading that group: of two readers needing a KLL with `k ≥ 345` and `k ≥ 200`, both may read a group `KLL(345)`, and the second may also keep its own private `KLL(200)`. Choosing a value is choosing a group, so the memo has no separate type for such a choice. The other Pass 2 rules add groups too (below). |
+| State group | a `MemoGroup` whose node is one whole-window `SummaryAgg` over its input group | One mergeable state of one measure: an exact accumulator or one summary family, over one input group. Pass 1 creates it; the aggregate's group reads it through one reader candidate (`FinalizeExactAccumulator`, or the summary's `SummaryEstimate`). Its candidates are the ways to build that state: one build over the window, a merge of tumbling windows, a fused build over an earlier input. A summary's size is a property of each candidate, not of the group, and each reader's input states the size it requires. See [State groups](#state-groups). |
+| Required state size | on each input of a candidate that reads a state group | The smallest size the reader accepts for that input, the size Pass 1 chose for the reader's accuracy share. A state-group candidate meets it when each of its size parameters is at least the required one (`k ≥ 345`). Stage 2 lists as producers of the input only the candidates that meet it. |
+| Tumbling-window chain group | a `MemoGroup` whose node is a `SummaryTumblingWindowChain` | One tumbling-window chain at one layout that readers of different windows share: a 1-min and a 5-min reader merge the newest 6 and all 30 of one chain of 10-s tumbling windows. Pass 2's last step adds it. |
 
 **Stage 0: hash-consing.** Hash-consing merges structurally equal nodes into
 one. It makes no implementation choice, so this section counts it as Stage 0
@@ -310,20 +313,21 @@ rule's origin, and gives each reader a candidate that reads that group.
 
 | `OriginOfCandidateForMemoGroup` | Added by | Candidates |
 |---|---|---|
-| `Pass1` | `try_populate_pass1` (`pass2/memo/groups.rs`) | Every Pass 1 choice of the group's measures: exact, exact accumulator, each summary family and size, and fused computations. Each summary choice comes at every `accuracy_budget_parts` from 1 to the most approximate inputs a query reaching the group has. A fused candidate implements the groups it absorbs only when no other reader needs them; otherwise they stay groups of their own. |
-| `TumblingWindows` | Window composition: `add_local_window_composition` and `extend_local_window_composition` (`pass2/memo/window_candidates.rs`) | A window summary computed from tumbling windows, at each tumbling-window width the reader's evaluation grid allows. The tumbling-window chain stays private to the candidate. |
+| `Pass1` | `try_populate_pass1` (`pass2/memo/groups.rs`) | On an aggregate's group: plain exact execution, and one reader per mergeable state (exact accumulator, each summary family) reading that state's group. On a state group: one build over the window, at each size its readers require (each summary choice comes at every `accuracy_budget_parts` from 1 to the most approximate inputs a query reaching the group has), and fused builds. A fused build implements the groups it absorbs only when no other reader needs them; otherwise they stay groups of their own. |
+| `TumblingWindows` | Window composition, order (a): `add_local_window_composition` and `extend_local_window_composition` (`pass2/memo/window_candidates.rs`) | On a state group: the state merged from a tumbling-window chain over the scan's group, `SummaryMerge ← SummaryTumblingWindowChain`, at each tumbling-window width the readers' evaluation grids allow. The reader above is not copied. |
+| `RawDataTumblingWindows` | Window composition, order (b) (planned) | On a window's input group (a `TimeRange`): the window's rows assembled from a chain of raw-data tumbling windows over the scan's group, `RawDataMerge ← RawDataTumblingWindowChain`, at each width the readers' grids allow, when the deployment keeps raw tumbling windows. |
 | `WidenedScans` | Scan widening: `add_scan_label_candidates` (`pass2/memo/rules/scan_labels.rs`) | A reader of a metric's scans widened to a shared label set, read through a `Project`. |
 | `SummaryInput` | `factor_summary_inputs` (`pass2/memo/rules/summary_inputs.rs`) | Canonical value preprocessing feeding a summary build. |
 | `TopKReuse` | Exact top-k reuse: `add_topk_candidates` (`pass2/memo/rules/topk.rs`) | One ranking (`Limit(k_max)` over `Sort`), and each top-k reading its first `k` rows from it. |
 | `Rollup` | Rollup: `add_finer_aggregate_candidates` (`pass2/memo/rules/finer_aggregate.rs`), `add_rollup_candidates` and `add_window_rollup_candidates` (`pass2/memo/rules/rollup.rs`) | A coarse group computed from a finer group's values or states. |
 | `SummaryResult` | `factor_summary_results` (`pass2/memo/rules/summary_results.rs`) | A summary readout factored out of a composite implementation, so that other readers can read it. |
-| `SharedBuild` | Summary capability: `add_shared_summary_state_groups` (`pass2/memo/state_groups.rs`), Pass 2's last step | For each build made two or more times (by different candidates, or twice within one), one concrete summary-state group with one `SharedBuild` candidate; and for each candidate making such builds, one `SharedBuild` copy that reads the groups instead of building its own states. |
+| `SharedBuild` | `add_shared_summary_state_groups` (`pass2/memo/state_groups.rs`), Pass 2's last step | For a tumbling-window chain that readers of different windows can share, one tumbling-window chain group with one `SharedBuild` candidate, and for each state group whose window is the newest part of the chain's, one `SharedBuild` candidate merging the newest tumbling windows of that group. Equal states of one window need no rule: they are one state group. |
 
 The state-configuration rule (`pass2/memo/rules/shared_configuration_readers.rs`) runs just
-before the shared builds are found. It rewrites readers to each shared size
-and to the newest tumbling windows of each tumbling-window chain layout they may read, so that
-equal builds appear, and a rewrite keeps the origin of the candidate it
-rewrites.
+before the shared chains are found. It adds to each state group the candidates at the
+sizes its readers share and over the newest tumbling windows of each chain layout
+they may read, so that equal chains appear; an added candidate keeps the origin of the
+candidate it rewrites.
 
 **Each stage over the memo.** Each stage keeps its decision, on groups
 instead of whole candidates:
@@ -331,10 +335,179 @@ instead of whole candidates:
 | Stage | Over the memo |
 |---|---|
 | 0 | Hash-conses the frontends' roots into groups (`DagOfLogicalMemoGroups`). |
-| 1, Pass 1 | Emits the candidates for each memo group: exact, exact accumulator, each summary family and size, fused computations. |
-| 1, Pass 2 | Each rule adds candidates to groups. Identical expression is group identity (nothing to add). Summary capability: a reader reading a concrete summary-state group shared with other groups, one group per shared size. Window composition: tumbling windows, and the newest tumbling windows of a shared chain, one concrete group per chain layout (grid, longest window, size). Rollup and exact top-k reuse: a candidate that reads another group (a finer grouping, a ranking). Scan widening: a reader of a metric's scans widened to a shared label set. |
-| 2 | Chooses each candidate's materialization, once for a group however many parents read it. A scan read through one window is built once; one read through different windows may also be read per reader. |
+| 1, Pass 1 | Adds one state group per mergeable state and emits the candidates for each memo group: on an aggregate, exact execution and one reader per state; on a state group, its builds at the sizes its readers require, and fused builds. |
+| 1, Pass 2 | Each rule adds candidates to groups. Identical expression is group identity (nothing to add), and so is an equal state read by several aggregates. Window composition: on a state group, its merge from tumbling windows (order (a)); on a window's input group, its rows from raw-data tumbling windows (order (b)); and the newest tumbling windows of a chain shared by readers of different windows, one chain group per layout (grid, longest window, size). Rollup and exact top-k reuse: a candidate that reads another group (a finer grouping, a ranking). Scan widening: a reader of a metric's scans widened to a shared label set. |
+| 2 | Chooses each candidate's materialization, once for a group however many parents read it. A scan read through one window is built once; one read through different windows may also be read per reader. Lists as producers of a reader's input only the state-group candidates that meet the input's required size. |
 | 3 | Chooses one candidate per needed group, and costs each candidate's own nodes, per node, given its readers; plan-level charges are added once per plan. A source's retained raw data is a concrete group `raw window(S, H)`, one per distinct lookback `H` of the source's query-time readers (a window plus any offset); its storage of `H` of raw data is charged once when it is chosen (planned). |
+
+#### State groups
+
+An aggregate whose measure has a mergeable state is computed in two parts: a
+build of the state over the input rows, and a reader that turns the state into
+the measure. The build is where the choices are (one build over the window,
+a merge of tumbling windows, a summary size, a fused build over an earlier
+input); the reader is the same for all of them. So the state is a memo group
+of its own, a **state group**, and the build choices are its candidates. Pass 1
+creates it, so every later rule adds candidates to the state, not copies of
+its reader.
+
+For `sum by (job) (rate(http_requests_total[1m]))`, evaluated every 10 s:
+
+```
+G0:  Scan
+G1:  TimeRange 60s          <- G0
+Gs:  rate state over G1     <- G1, G0
+    [0]   SummaryAgg                                                          inputs=[G1]
+    [1]   SummaryMerge ← SummaryTumblingWindowChain(10000 ms × 6)             inputs=[G0]
+    …     one per tumbling-window width the evaluation grid allows
+G2:  Aggregate rate()       <- G1
+    [0]   FinalizeExactAccumulator                                            inputs=[Gs]
+G3:  Aggregate sum()        <- G2
+    …
+```
+
+Without the state group, each of the 26 ways to build the rate state was its
+own candidate of G2, each with its own copy of `FinalizeExactAccumulator`, and
+the readers above chose among 26 producers. With it, G2 has one candidate, and
+the tumbling-window width is chosen inside `Gs`.
+
+**Identity.** A state group is one state of one measure over one input group:
+an exact accumulator (`ExactAccumulator(kinds)`) or one summary family
+(`Summary(algorithm)`), with the measure's filter and grouping. Its logical
+node is one whole-window `SummaryAgg` over the input group, the build every
+other candidate must equal (a merge of tumbling windows covers what that
+build covers, `whole_window_build`). Plain `Exact` execution has no state,
+so it stays a candidate of the aggregate's own group. Equal states of
+different aggregates are one state group, as equal expressions are one group.
+
+**Size is a candidate property, not part of the group.** A summary is sized
+for each reader's share of its query's accuracy budget, so readers of one state
+may need different sizes: query A reads a quantile at `KLL(k=200)`, and query
+B, whose budget is split between two quantiles, at `KLL(k=345)`. Both read one
+group, `Gs: KLL quantile state over G1`, whose candidates carry their sizes:
+`SummaryAgg(k=200) ← G1`, `SummaryAgg(k=345) ← G1`, and the tumbling-window
+merges at each size. Each reader's input states its **required size**, the
+size Pass 1 chose for it; a candidate meets it when every size parameter is
+at least the required one. Stage 2 lists as producers of A's input both
+sizes' candidates, and of B's input only the `k=345` ones. When A and B both
+take a `k=345` build, it is one physical candidate with two readers, and
+Stage 3 shares it. This is how a memo treats a physical property such as sort
+order: the group is the logical result, each candidate delivers a property,
+and each reader requires one. Stage 3's MILP is unchanged: it has one binary
+and one rank variable per physical candidate and one binary per producer link,
+and sizing by group or by property gives the same builds and about the same
+links.
+
+**Memo choice per (group, required size).** Two readers may need different
+sizes of one state group, so a choice names one candidate per needed
+`(group, required size)` pair, not per group ([Algorithm: memo to candidate
+DAGs](#algorithm-memo-to-candidate-dags)). Readers with the same requirement
+share the choice.
+
+**Fused computations.** A fused computation computes an outer target
+directly from the inner target's input, and the inner target is not computed.
+Its build goes into a state group by one rule:
+
+| Rule | When | Where the fused build goes |
+|---|---|---|
+| 1 | The fused state is the outer target's state | A candidate of the outer target's state group. It reads a different input group, and fusion guarantees the same result. |
+| 2 | The fused state is of a different kind | A state group of its own (one per family, size as a property), read by another reader candidate of the outer target's group. |
+
+Rule 1, a nested sum: for `sum by (job) (sum_over_time(http_requests_total[1m]))`,
+a sum of per-series sums is the per-job sum of the raw rows, so one per-job
+Sum state has three kinds of candidates:
+
+```
+G2:  Aggregate sum()   <- G1     per-series sum over 60 s
+Gs3: per-job Sum state (G3's measure)
+    [0]   SummaryAgg(by job)                                        inputs=[G2]
+    [1]   SummaryAgg(by job)                                        inputs=[G1]  fuses=[G2]
+    [2]   SummaryMerge ← SummaryTumblingWindowChain(by job, …)      inputs=[G0]  fuses=[G2]
+G3:  Aggregate sum()
+    [0]   FinalizeExactAccumulator                                  inputs=[Gs3]
+```
+
+Choosing `Gs3[1]` needs no candidate of G2.
+
+Rule 2, a whole-expression top-k: for
+`topk(10, sum by (job) (sum_over_time(http_requests_total[1m])))` with an
+accuracy target, the fused builds are heap sketches over the raw rows, not
+G3's exact Sum state, so each family is its own state group:
+
+```
+Gcms: CmsWithHeap state by job over the 60 s window
+    [0]   SummaryAgg CmsWithHeap(…)                                 inputs=[G1]  fuses=[G3, G2]
+    [1]   SummaryMerge ← SummaryTumblingWindowChain CmsWithHeap(…)  inputs=[G0]  fuses=[G3, G2]
+Gcs:  CountSketchWithHeap state by job over the 60 s window
+    …     the same shapes
+G4:  Aggregate top_k(k=10)
+    [0]   Aggregate top_k(k=10)                                     inputs=[G3]
+    [1]   Project ← SummaryEstimate TopK(k=10)                      inputs=[Gcms]  fuses=[G3, G2]
+    [2]   Project ← SummaryEstimate TopK(k=10)                      inputs=[Gcs]   fuses=[G3, G2]
+```
+
+**A windowed aggregate over tumbling windows has two orders.** Take
+`rate(http_requests_total[1m])` over six 10-s tumbling windows:
+
+| Order | Plan | Candidate of |
+|---|---|---|
+| (a) aggregate each tumbling window, then merge the states | `SummaryMerge ← SummaryTumblingWindowChain(10000 ms × 6) ← G0` | the state group |
+| (b) merge the tumbling windows' rows, then aggregate | `RawDataMerge(skip 0, 6 tumbling windows) ← RawDataTumblingWindowChain(10000 ms × 6) ← G0`, read by the state group's `SummaryAgg ← G1` | the window's input group, G1 (`TimeRange 60s`) |
+
+Order (b) also applies when the aggregate has no mergeable state (plain
+`Exact`, e.g. an exact quantile), where order (a) cannot, and it lets several
+different aggregates over one window read one set of raw tumbling windows.
+Choosing a tumbling-window grid is then a choice inside G1 (order b) or inside
+the state group (order a), never a copy of the groups above them.
+
+Order (b)'s two operators are the raw-data counterparts of
+`SummaryTumblingWindowChain` and `SummaryMerge`; each name says what it holds,
+summary states or raw data:
+
+- **`RawDataTumblingWindowChain { tumbling_window_width_ms, tumbling_window_count, child }`**
+  keeps the child's rows in `tumbling_window_count` tumbling windows of
+  `tumbling_window_width_ms`, aligned to absolute time. Each evaluation builds
+  the newest tumbling window and keeps the older ones, as
+  `SummaryTumblingWindowChain` keeps states. It is one node however many
+  tumbling windows it holds.
+- **`RawDataMerge { skip_newest_tumbling_windows, tumbling_window_count, child }`**
+  outputs the rows of the tumbling windows it names: it skips the newest
+  `skip_newest_tumbling_windows`, then takes the next `tumbling_window_count`.
+  Naming the range, not only "the newest n", lets readers of one chain read
+  different query windows from it. With one
+  `RawDataTumblingWindowChain(10000 ms × 36)`, `rate(x[1m])` reads
+  `RawDataMerge(skip 0, 6 tumbling windows)`, `rate(x[5m])` reads
+  `RawDataMerge(skip 0, 30 tumbling windows)` and `rate(x[1m] offset 5m)`
+  reads `RawDataMerge(skip 30, 6 tumbling windows)`. The tumbling-window edges
+  follow PromQL's left-open window, `(t − 60 s, t]`.
+
+A `Concat` of shifted `TimeRange` slices would express order (b) without new
+operators, but each slice is relative to the evaluation time: the slice ten
+seconds back holds different rows at the next evaluation, so no slice can be
+kept across evaluations, and it needs one node per slice.
+
+A raw-data chain is not the source's retained raw data (the `raw window(S, H)`
+group Stage 3 charges for a query-time scan): it is part of the plan, built
+at ingestion or at query time and kept by the plan, and readers read its
+tumbling windows, not the source. A deployment capability says whether
+the deployment keeps raw tumbling windows; without it Pass 2 adds no
+order-(b) candidate. Stage 3 prices holding raw rows (66,667 rows/s × 60 s,
+about 4M rows, for the example above) against order (a)'s per-series states
+and the rescans it saves, and picks among them.
+
+**Code interface (planned).**
+
+| Item | Where |
+|---|---|
+| State groups created in Pass 1; the aggregate's candidates read them | `try_populate_pass1` (`pass2/memo/groups.rs`), `pass1/` |
+| A candidate's required size per input, beside `input_groups` | `CandidateForMemoGroup` (`asap_types::stages`) |
+| Stage 2's producer lists filtered by required size | `generate_physical_asap_memo_candidates` (`physical-asap-optimization/src/catalog/`) |
+| Memo choice per (group, required size) | `ChosenCandidatePerMemoGroup`, `enumerate`, `build_logical_asap_dags_from_chosen_candidates` (`pass2/memo/enumeration.rs`) |
+| Order (a) on state groups | `extend_local_window_composition` (`pass2/memo/window_candidates.rs`) |
+| Order (b): operators, origin, deployment capability | `ASAPOp::RawDataTumblingWindowChain`, `ASAPOp::RawDataMerge`; `OriginOfCandidateForMemoGroup::RawDataTumblingWindows`; `DeploymentCapabilities` |
+
+The [example below](#example-one-query-through-the-memo) and its counts are the
+memo before state groups; each implementation step re-measures them.
 
 #### Example: one query through the memo
 
@@ -438,16 +611,20 @@ the same candidate DAGs as the vector of whole-workload candidates the stage
 table describes. `pass2::memo::enumeration` converts a memo after any step into
 that vector.
 
-- **`ChosenCandidatePerMemoGroup`** maps each needed group to one candidate index in
-  `MemoCandidates::candidates[group]`. A group is *needed* when a query's
-  root is in it or a chosen candidate reads it.
+- **`ChosenCandidatePerMemoGroup`** maps each needed `(group, required size)` pair to
+  one candidate index in `MemoCandidates::candidates[group]`; the required size
+  is the one the reading input states (none for a query's root and for a
+  group that is not a state group). A pair is *needed* when a query's root is
+  in the group or a chosen candidate reads the group with that requirement,
+  and only candidates that meet the requirement are offered for it.
 - **`enumerate(memo, limit) -> AllChosenCandidatesPerMemoGroup { all_chosen_candidates, complete }`** lists
   every choice, depth first:
   1. Pending: the root groups (the groups with a query's root).
-  2. Take a pending group. If the choice already names it, skip it: a group
-     several chosen candidates read takes one candidate.
-  3. For each of the group's candidates: set it in the choice, add its
-     `children` to the pending groups, and continue from step 2.
+  2. Take a pending `(group, required size)` pair. If the choice already
+     names it, skip it: readers with one requirement take one candidate.
+  3. For each of the group's candidates that meets the requirement: set it
+     in the choice, add its inputs with their required sizes to the pending
+     pairs, and continue from step 2.
   4. When nothing is pending, the choice is complete: record it. If a
      further choice is found after `limit` are recorded, stop with
      `complete: false`.
@@ -470,7 +647,7 @@ that vector.
 
 | Reason | Effect on the count | In the example |
 |---|---|---|
-| Shared group | A group several chosen candidates read takes one candidate per choice, not one per reader. | G1 is read by G2 and G4 and chosen once. |
+| Shared group | A group several chosen candidates read with one requirement takes one candidate per choice, not one per reader. | G1 is read by G2 and G4 and chosen once. |
 | Group needed only under some choices | A group joins the choice only when a chosen candidate reads it. | A `SummaryTumblingWindowChain` group is needed only when a `SharedBuild` candidate reading it is chosen; a choice of `Pass1` candidates needs none of the 347 added groups. |
 | Fused candidate | The groups a fused candidate implements are computed inside it and never become pending. | None (the example has no fused computation). |
 
@@ -500,9 +677,10 @@ recursion depth is the number of needed groups, and memory holds at most
 #### How the search uses the memo
 
 Hash-cons the workload into groups; generate each group's candidates (Pass 1,
-then the Pass 2 transformations), and expand shared sizes, tumbling-window horizons and
-(planned) raw windows into concrete groups, so that choosing a threshold is
-choosing a group; choose one candidate per needed group; compose the choice
+then the Pass 2 transformations), with each mergeable state a group whose
+candidates carry their sizes, and shared tumbling-window horizons and
+(planned) raw windows as concrete groups; choose one candidate per needed
+group and required size; compose the choice
 into one plan and check and cost it with Stage 2 and Stage 3. The search is a
 candidate-connection search: a MILP (mixed-integer linear program) over the graph of candidates and the
 groups they read proposes a choice from local cost bounds, Stage 2 and
@@ -605,7 +783,7 @@ the memo path's entry points.
 | 0. Frontends | Query text, language → one logical root per query, carrying its accuracy target | Same: a `QueryRoot` per query | `lower_promql_query_workload`, `lower_sql_dialect` (`asap-frontend-*`); `plan_installable` (`asap_planner`) runs the frontends and Stages 1–3 on the user input |
 | 1, Pass 1 | Logical roots; the deployment's supported summaries → the Pass 1 inventory, every computation's candidates (`PerComputationCandidates`, now Pass 1's crate-private working form) | Logical roots → `DagOfLogicalMemoGroups` (hash-consed `MemoGroup`s); with the Pass 1 inventory, less the summaries the deployment does not support and those no query reading them can use → `PerComputationLogicalMemoCandidates`: the `MemoCandidates` (each group's `CandidateForMemoGroup`s, with the accuracy-scoped sizes), the computation targets and the pruned candidates (`PrunedCandidate<HowToComputeAggregateMeasure>`) | `generate_dag_of_logical_memo_groups`, `generate_per_computation_logical_memo_candidates` |
 | 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (no longer in the code) | `MemoCandidates`; the entries' recurrence and range steps → the same memo with each rule's candidates added to the groups they implement | the memo rules (`pass2/memo/rules/`), `pass2::memo::window_candidates` |
-| 1, concrete summary-state groups | (part of Pass 2) | `MemoCandidates` → the memo with concrete summary-state groups: one group per shared size or tumbling-window layout that readers can read | `add_shared_summary_state_groups`, Pass 2's last step; the Pass 2 output is `LogicalASAPMemoCandidates` (`generate_logical_asap_memo_candidates`) |
+| 1, shared tumbling-window chain groups | (part of Pass 2) | `MemoCandidates` → the memo with one tumbling-window chain group per layout that readers of different windows can share (state groups come from Pass 1) | `add_shared_summary_state_groups`, Pass 2's last step; the Pass 2 output is `LogicalASAPMemoCandidates` (`generate_logical_asap_memo_candidates`) |
 | 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per materialization assignment | `LogicalASAPMemoCandidates`; entries, `DataWorkload`, query-time and raw-data retention → `PhysicalASAPMemoCandidates`: every operator node of every candidate with each allowed timing and materialization (one physical candidate each, no copies), the producers of each input, reader constraints (each applied to every selected run of its candidate), and the pruned candidates (`PrunedCandidate<PhysicalCandidateKey>`) | `generate_physical_asap_memo_candidates` (`asap_physical_asap_optimization`) |
 | 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model → one plan | `PhysicalASAPMemoCandidates`; entries, `DataWorkload`, `AccuracyCheckInputs`, `CostInputs`, Stage 2's realizer, a deadline → `Selection`: the selected plan (`selected_dag`, a `DagOfSelectedCandidates`: one node per run of a candidate, so a candidate recomputed by two readers or shared as two instances over different inputs is two nodes, with an edge per input), its cost, the accepted accuracy per query and the search report | `select_plan` (`asap_plan_selection`); the facade (`run_planning`, output `PlanningRun`) runs it per tumbling-window-width round and builds the selected `PhysicalWorkloadPlan` with `AssignmentRealizer::realize`, one plan node per selected node |
 | 4. Execution | The selected `PhysicalASAPDAG` → query results | Same: an `InstallablePlan` (`{dag, query_texts}`) → query results | The deployment runtime installs the `InstallablePlan` |
@@ -622,6 +800,10 @@ What changed with the memo:
 - The concrete summary-state groups are expanded by Stage 3's search today,
   through the Stage 1 functions above. A planned change moves this expansion
   into Stage 1, so that Stage 3 receives a complete memo and only selects.
+- Each mergeable state is a group from Pass 1 on, with its size a property
+  of each candidate and each reader requiring one ([State groups](#state-groups)),
+  so a rule that adds a way to build a state adds one candidate to the state
+  group instead of a copy of every reader above it.
 
 ### 0. Language-specific frontends
 
@@ -847,8 +1029,10 @@ approximate inputs of a query reaching the group, each sized by the accuracy
 model for its share. Pass 2 never resizes a summary for its own readers: a
 tumbling-window chain inherits the size of the build it replaces (a merge of equal-size
 tumbling windows keeps the guarantee when the family's merged error is `Exact` or
-`AsIfBuiltOverUnion`), and a build shared by several readers takes the
-strictest reader's size, one state group per distinct size. The failure
+`AsIfBuiltOverUnion`), and readers of one state group each require the size Pass 1
+chose for them: a reader takes any candidate of the group whose size meets its
+requirement, and readers whose requirements one candidate meets can share it
+([State groups](#state-groups)). The failure
 probability is part of Pass 1's size too
 (`generate_per_computation_logical_memo_candidates`): each approximate input
 of a candidate with `n` budget parts is sized for `δ / (n · V)`, the smallest
@@ -1113,7 +1297,11 @@ flowchart TB
 
 The planner implements a subset of the window-composition rule today:
 `Tumbling(L)` only, as a `SummaryTumblingWindowChain` (one node for all its tumbling windows) read
-through a `SummaryMerge`, with `L = gcd(W_q, E_q)` for each query. Two or
+through a `SummaryMerge`, with `L = gcd(W_q, E_q)` for each query. It is order (a)
+of [State groups](#state-groups): the merge is a candidate of the state group,
+so the reader above it is not copied per width; order (b), the window's rows
+from a `RawDataTumblingWindowChain` read through a `RawDataMerge`, is a
+candidate of the window's input group, at the same widths. Two or
 more queries share one chain when their builds have the same family (at any
 size), the same summary input data and the same output column names, and
 their windows end at the same time. Two shared grids are offered: the
