@@ -2257,7 +2257,7 @@ fn ranking(child: &Rc<OperatorNode>, by: &Reduction, k: usize) -> Option<Rc<Oper
     let Reduction::Reduce(keys) = by else {
         return None;
     };
-    let value = crate::pass1::realization::ranked_column(child).ok()?;
+    let value = asap_types::ir::schema::topk::ranked_column(child).ok()?;
     let sorted = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Sort {
         keys: vec![SortKey {
             expr: ScalarExpr::Column(value),

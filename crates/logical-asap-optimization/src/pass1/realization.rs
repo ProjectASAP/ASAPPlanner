@@ -7,6 +7,7 @@ use asap_types::ir::operator::agg_intent::AggIntent;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::scalar::column_resolution::{resolve_column_ref, ResolveError};
 use asap_types::ir::scalar::expr_ir::ColumnRef;
+use asap_types::ir::schema::topk::ranked_column;
 use asap_types::ir::schema::ColumnId;
 use asap_types::ir::schema::{
     EntityIdentity, FamilyCapability, Field, FieldDataType, NonNegativeWeightProof, Schema,
@@ -79,8 +80,6 @@ pub(crate) fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> Co
         None => ColumnRef::SampleValue,
     }
 }
-
-pub use asap_types::ir::schema::topk::ranked_column;
 
 /// [`ranked_column`] as a reference: the sample value when it is that
 /// column, else the column by name.
