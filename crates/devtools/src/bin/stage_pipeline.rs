@@ -23,6 +23,12 @@
 //
 // Writes an `asap-stage-pipeline/v1` document (tools/dag-viewer) with the
 // four planner stages as the facade runs them (`asap_planner::run_planning`).
+// `--text` writes the same run as text instead, for reading and debugging
+// (`asap_devtools::planning_stages_text`): every stage boundary, including
+// Stage 2's whole `PhysicalASAPMemoCandidates`, the selected plan's cost per
+// node and each query's accepted accuracy; `--text --enumerated` adds the
+// first `--max-enumerated` memo choices with their DAGs. `--out -` writes
+// to standard output.
 // The default document keeps the selected plan; `--exhaustive` adds the
 // reference enumeration: the selected round's memo choices, each implemented
 // by Stage 2 with every materialization assignment, all priced by the
@@ -264,7 +270,7 @@ use asap_cost::{
     ClusterLimits, ClusterObjective, CostInputs, CostModel, MeasuredOperationCosts,
     ResourceUnitCost, ResourceUsage,
 };
-use asap_devtools::candidate_labels::{candidate_labels, computation_label};
+use asap_devtools::candidate_labels::{candidate_labels, computation_label, node_label};
 use asap_devtools::memo_pricing::{price_choices, SelectedBaseline};
 use asap_devtools::planner_layering_examples::{
     example1, example2, pattern_a, pattern_b, PatternARecurrence, SHARED_ROWS_PER_SECOND,
@@ -273,6 +279,7 @@ use asap_devtools::planning_stages::{
     lower_promql_roots, lower_sql_roots, run_search_over, sql_catalog, PlanningStagesError,
     PlanningStagesRun,
 };
+use asap_devtools::planning_stages_text::planning_stages_text;
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{counter_function_over_gauge_warnings, promql_metric_names};
 use asap_logical_asap_optimization::DeploymentCapabilities;
@@ -306,7 +313,8 @@ const USAGE: &str =
 [--cost-model usage-over-time|aws-fargate-us-east-1|provisioned-capacity|cluster-capacity [--cluster-memory-bytes <n> \
 --cluster-disk-bytes <n> [--cluster-cpu-cores <n>] --cluster-objective lowest-latency|least-memory]] \
 [--cost-inputs <file>] [--enforce-accuracy-guarantees] [--deployment-capabilities <json>] [--exhaustive [--max-combinations <n>]] [--milp-time-limit-s <f64>] [--max-displayed <n>] \
-[--no-memo] [--max-memo-candidates <n>] [--memo-enumeration-limit <n>] [--max-enumerated <n>] [--price-enumerated <n>] --out <file>";
+[--no-memo] [--max-memo-candidates <n>] [--memo-enumeration-limit <n>] [--max-enumerated <n>] [--price-enumerated <n>] \
+[--text [--enumerated]] --out <file|->";
 
 /// Default evaluator-assignment budget for an exhaustive archive run.
 const MAX_COMBINATIONS: usize = 10_000;
@@ -398,6 +406,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut milp_time_limit_ms: Option<u64> = None;
     let mut max_combinations_given = false;
     let mut write_memo = true;
+    let mut text = false;
+    let mut text_enumerated = false;
     let mut memo_caps = MemoCaps {
         candidates_per_group: 64,
         enumeration_limit: 1000,
@@ -466,6 +476,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--enforce-accuracy-guarantees" => enforce_accuracy_guarantees = true,
             "--exhaustive" => exhaustive = true,
             "--no-memo" => write_memo = false,
+            "--text" => text = true,
+            "--enumerated" => text_enumerated = true,
             "--max-memo-candidates" => {
                 memo_caps.candidates_per_group = value()?.parse().map_err(|e| format!("{e}"))?
             }
@@ -502,6 +514,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
              queries; a --workload or --example declares its own"
                 .into(),
         );
+    }
+    if text_enumerated && !text {
+        return Err("--enumerated lists memo choices in the --text output: it needs --text".into());
     }
     if max_combinations_given && !exhaustive {
         return Err("--max-combinations limits the exhaustive search: it needs --exhaustive (bounds evaluated assignments)".into());
@@ -757,6 +772,14 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 )
             }),
     );
+    if text {
+        let run = result.map_err(|e| e.to_string())?;
+        let mut text = planning_stages_text(&run, text_enumerated.then_some(memo_caps.enumerated));
+        for warning in &warnings {
+            text.push_str(&format!("warning: {warning}\n"));
+        }
+        return write_output(&out, &text);
+    }
     let memo = result
         .as_ref()
         .ok()
@@ -802,7 +825,16 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     document["deployment_capabilities"] =
         serde_json::to_value(&deployment_capabilities).map_err(|e| e.to_string())?;
     let text = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())? + "\n";
-    std::fs::write(&out, text).map_err(|e| format!("{out}: {e}").into())
+    write_output(&out, &text)
+}
+
+/// Writes `text` to the file `out`, or to standard output when `out` is `-`.
+fn write_output(out: &str, text: &str) -> Result<(), Failure> {
+    if out == "-" {
+        print!("{text}");
+        return Ok(());
+    }
+    std::fs::write(out, text).map_err(|e| format!("{out}: {e}").into())
 }
 
 /// One warning per PromQL query of `described` (the document's queries)
@@ -1894,110 +1926,6 @@ fn candidate_node_label(
         pending.extend(nodes[id].operator.children().into_iter().rev().copied());
     }
     labels.join(" ← ")
-}
-
-/// One node's operator kind with its sketch family and parameters, its
-/// summary query and its time range, when it has them: e.g.
-/// `SummaryAgg Kll(k=200)`, `SummaryEstimate Quantile(q=0.5)`.
-fn node_label(node: &asap_types::ir::flat::FlatNode) -> String {
-    let operator = serde_json::to_value(&node.operator).unwrap_or_default();
-    // `{"ASAP": {"SummaryAgg": {...}}}` (or a unit variant's string).
-    let (kind, fields) = match operator.as_object().and_then(|o| o.values().next()) {
-        Some(Value::Object(inner)) => match inner.iter().next() {
-            Some((kind, fields)) => (kind.clone(), fields.clone()),
-            None => (String::new(), Value::Null),
-        },
-        Some(Value::String(kind)) => (kind.clone(), Value::Null),
-        _ => (operator.to_string(), Value::Null),
-    };
-    let mut details = Vec::new();
-    find_details(&fields, &mut details, 0);
-    let mut label = kind;
-    for detail in details {
-        label.push(' ');
-        label.push_str(&detail);
-    }
-    label
-}
-
-/// Sketch algorithms with parameters, summary queries and time ranges found
-/// in an operator's fields (not inside its schemas).
-fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
-    if depth > 6 || details.len() >= 3 {
-        return;
-    }
-    let compact = |value: &Value| -> String {
-        match value {
-            Value::Object(fields) => fields
-                .iter()
-                .map(|(key, value)| match value {
-                    Value::Object(inner) if inner.len() == 1 => {
-                        let (k, v) = inner.iter().next().unwrap();
-                        format!("{key}({k}={v})")
-                    }
-                    Value::Object(inner) => format!(
-                        "{key}({})",
-                        inner
-                            .iter()
-                            .filter(|(_, v)| !v.is_object() && !v.is_array())
-                            .map(|(k, v)| format!("{k}={v}"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                    other => format!("{key}={other}"),
-                })
-                .collect::<Vec<_>>()
-                .join(" "),
-            other => other.to_string(),
-        }
-    };
-    match value {
-        Value::Object(fields) => {
-            if let (Some(Value::String(algorithm)), Some(params)) =
-                (fields.get("algorithm"), fields.get("params"))
-            {
-                let params = params
-                    .as_object()
-                    .and_then(|p| p.values().next())
-                    .map(compact)
-                    .unwrap_or_default();
-                details.push(format!("{algorithm}({params})"));
-                return;
-            }
-            for (key, field) in fields {
-                match key.as_str() {
-                    "schema" | "input_schema" | "output_schema" | "predicates" | "cols" => {}
-                    "query" => details.push(compact(field)),
-                    // An aggregate's measures, e.g. `quantile(q=0.5)`.
-                    "measures" => {
-                        for measure in field.as_array().into_iter().flatten() {
-                            let Some(kind) = measure.get("kind").and_then(Value::as_str) else {
-                                continue;
-                            };
-                            let params: Vec<_> = measure
-                                .as_object()
-                                .into_iter()
-                                .flatten()
-                                .filter(|(key, value)| {
-                                    *key != "kind" && (value.is_number() || value.is_string())
-                                })
-                                .map(|(key, value)| format!("{key}={value}"))
-                                .collect();
-                            details.push(format!("{kind}({})", params.join(", ")));
-                        }
-                    }
-                    "range" | "window" => details.push(format!("{key}={field}")),
-                    _ => find_details(field, details, depth + 1),
-                }
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                find_details(item, details, depth + 1);
-            }
-        }
-        _ => {}
-    }
 }
 
 #[cfg(test)]

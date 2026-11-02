@@ -2510,3 +2510,53 @@ fn memo_section_lists_each_step_the_selected_choice_and_the_enumeration() {
     std::fs::remove_file(out).unwrap();
     assert!(document.get("memo").is_none());
 }
+
+/// `--text --out -` prints the same planning run as text on standard
+/// output: every stage boundary, Stage 2's physical candidates, the selected
+/// plan's cost per node, and with `--enumerated` the memo choices.
+#[test]
+fn text_output_prints_every_stage_to_standard_output() {
+    let output = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args([
+            "--example",
+            "planner-layering-1",
+            "--text",
+            "--enumerated",
+            "--max-enumerated",
+            "1",
+            "--out",
+            "-",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    for heading in [
+        "Stage 0 output",
+        "Stage 1 Pass 1 output: PerComputationLogicalMemoCandidates",
+        "Stage 1 Pass 2 output = Stage 2 input: LogicalASAPMemoCandidates",
+        "Stage 2 output = Stage 3 input: PhysicalASAPMemoCandidates",
+        "Stage 3 output: Selection",
+        "Memo choices over Stage 2's input: 1 listed",
+    ] {
+        assert!(text.contains(heading), "missing {heading}:\n{text}");
+    }
+    assert!(text.contains("\ncost_per_second: "), "{text}");
+}
+
+/// `--enumerated` only adds to the `--text` output.
+#[test]
+fn enumerated_needs_text() {
+    let status = Command::new(env!("CARGO_BIN_EXE_stage_pipeline"))
+        .args([
+            "--example",
+            "planner-layering-1",
+            "--enumerated",
+            "--out",
+            "-",
+        ])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(2));
+}
