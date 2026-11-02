@@ -18,7 +18,7 @@ use crate::pass2::memo::shared_configurations::{
     TumblingWindowConfiguration, TumblingWindowRequirement, TumblingWindowWidthDomain,
 };
 use crate::pass2::memo::state_groups::{same_range_input, simple_build, Pass2RuleError};
-use asap_types::stages::MemoCandidates;
+use asap_types::stages::Memo;
 
 /// `resized` (a rewrite of `original` with the same shape) with each node
 /// that is a child group's node in `original` put back, and the nodes above
@@ -104,7 +104,7 @@ struct SummaryStates {
 }
 
 pub(crate) fn add_state_configuration_candidates_in_domain(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     domain: TumblingWindowWidthDomain,
     deadline: Option<Instant>,
 ) -> Result<(), Pass2RuleError> {
@@ -112,7 +112,7 @@ pub(crate) fn add_state_configuration_candidates_in_domain(
 }
 
 fn expand_configurations(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     deduplicate_requests: bool,
     domain: TumblingWindowWidthDomain,
     deadline: Option<Instant>,
@@ -134,7 +134,7 @@ impl SharedProducer for SummaryStates {
 
     fn sets(
         &mut self,
-        memo: &MemoCandidates,
+        memo: &Memo,
         deadline: Option<Instant>,
     ) -> Result<Vec<Vec<Reader<StateNeed>>>, Pass2RuleError> {
         let mut sets: Vec<Vec<Reader<StateNeed>>> = Vec::new();
@@ -270,7 +270,7 @@ impl SharedProducer for SummaryStates {
 
     fn derive(
         &mut self,
-        memo: &mut MemoCandidates,
+        memo: &mut Memo,
         reader: &Reader<StateNeed>,
         covering: &StateCovering,
     ) -> Result<usize, Pass2RuleError> {
@@ -372,7 +372,7 @@ impl SharedProducer for SummaryStates {
 /// sets (`layouts`), so a configuration index of one set never matches
 /// another's.
 fn assign_normalized_layouts(
-    memo: &MemoCandidates,
+    memo: &Memo,
     set: &mut [Reader<StateNeed>],
     layouts: &mut Vec<(usize, usize, FlatDag)>,
     deadline: Option<Instant>,
@@ -578,7 +578,7 @@ mod tests {
             optimized_rewrites < exhaustive_rewrites,
             "{optimized_rewrites} versus {exhaustive_rewrites}"
         );
-        let signatures = |memo: &MemoCandidates| -> Vec<HashSet<String>> {
+        let signatures = |memo: &Memo| -> Vec<HashSet<String>> {
             memo.candidates
                 .iter()
                 .map(|candidates| {

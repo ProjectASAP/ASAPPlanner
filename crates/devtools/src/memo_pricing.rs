@@ -21,7 +21,7 @@ use asap_types::ir::physical_export::PhysicalASAPOperatorPayload;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{NonASAPOp, OperatorNode, QueryRoot};
 use asap_types::physical::PhysicalWorkloadPlan;
-use asap_types::stages::MemoCandidates;
+use asap_types::stages::Memo;
 use asap_types::stages::MemoGroupId;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
@@ -80,7 +80,7 @@ const TIE_TOLERANCE: f64 = 1e-9;
 /// is `stage0_roots[i]` with workload entry `entries[i]`; its operator
 /// references are replaced by their root groups' composed DAGs.
 pub fn price_choices(
-    memo: &MemoCandidates,
+    memo: &Memo,
     choices: &[ChosenCandidatePerMemoGroup],
     stage0_roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
@@ -326,7 +326,7 @@ pub fn reference_enumeration(
 /// `query_roots`) reads when its root is one operator, else the group
 /// whose node is the reference.
 fn root_groups_of_queries(
-    memo: &MemoCandidates,
+    memo: &Memo,
     stage0_roots: &[QueryRoot],
 ) -> Result<Vec<Vec<MemoGroupId>>, String> {
     stage0_roots
@@ -362,7 +362,7 @@ fn root_groups_of_queries(
 /// equal one (the memo's group nodes are the frontends' nodes with common
 /// sub-DAGs shared).
 fn group_of(
-    memo: &MemoCandidates,
+    memo: &Memo,
     groups: &[MemoGroupId],
     node: &Rc<OperatorNode>,
     query: usize,

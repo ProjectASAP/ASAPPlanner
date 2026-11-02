@@ -293,7 +293,7 @@ use asap_types::ir::QueryRoot;
 use asap_types::physical::PhysicalWorkloadPlan;
 use asap_types::stages::PerComputationLogicalMemoCandidates;
 use asap_types::stages::{queries_rooted_at, MemoGroupId};
-use asap_types::stages::{MemoCandidates, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
     QueryRecurrence, QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand,
@@ -1610,14 +1610,9 @@ struct Pricing<'a> {
 /// step's memo stands for (`memo::enumeration::enumerate`; each listed
 /// choice composed by `memo::enumeration::build_logical_asap_dags_from_chosen_candidates`).
 /// `pass1` is the memo after Pass 1.
-fn memo_json(
-    steps: &MemoSteps,
-    pass1: &MemoCandidates,
-    caps: &MemoCaps,
-    pricing: &Pricing<'_>,
-) -> Value {
+fn memo_json(steps: &MemoSteps, pass1: &Memo, caps: &MemoCaps, pricing: &Pricing<'_>) -> Value {
     // Stage 0's groups are Pass 1's, without candidates.
-    let stage0 = MemoCandidates {
+    let stage0 = Memo {
         groups: pass1.groups.clone(),
         query_roots: pass1.query_roots.clone(),
         candidates: vec![Vec::new(); pass1.groups.len()],
@@ -1637,7 +1632,7 @@ fn memo_json(
         ),
     ];
     let mut table = MemoNodes::default();
-    let mut previous: Option<&MemoCandidates> = None;
+    let mut previous: Option<&Memo> = None;
     let mut json_steps = Vec::new();
     let mut per_step = serde_json::Map::new();
     // The last step (with candidates) enumerated completely within `enumerated`.
@@ -1792,8 +1787,8 @@ impl MemoNodes {
 /// children.
 fn memo_groups_json(
     table: &mut MemoNodes,
-    memo: &MemoCandidates,
-    previous: Option<&MemoCandidates>,
+    memo: &Memo,
+    previous: Option<&Memo>,
     max_candidates: usize,
 ) -> Vec<Value> {
     let ids = |groups: &[MemoGroupId]| groups.iter().map(|g| g.0).collect::<Vec<_>>();

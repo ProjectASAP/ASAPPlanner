@@ -30,7 +30,7 @@ use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
 use asap_types::stages::DagOfLogicalMemoGroups;
 use asap_types::stages::{
     AssignmentRealizer, CandidateForMemoGroupId, DagOfSelectedCandidates,
-    LogicalASAPMemoCandidates, MemoCandidates, MemoGroupId, OperatorNodeOfCandidateForMemoGroup,
+    LogicalASAPMemoCandidates, Memo, MemoGroupId, OperatorNodeOfCandidateForMemoGroup,
     PhysicalASAPMemoCandidates, PhysicalCandidateError, PhysicalCandidateKey, PrunedCandidate,
     RealizedPlan,
 };
@@ -73,10 +73,10 @@ pub struct PlanSearchSettings {
 #[derive(Debug, Clone)]
 pub struct MemoSteps {
     /// After local window composition (tumbling-window candidates).
-    pub pass2: MemoCandidates,
+    pub pass2: Memo,
     /// After concrete summary-state group expansion: the memo Stage 2
     /// implements.
-    pub concrete_states: MemoCandidates,
+    pub concrete_states: Memo,
     /// Stage 2's operator nodes over `concrete_states`
     /// (`PhysicalASAPMemoCandidates::operator_nodes_of_candidates_for_memo_groups`),
     /// which `stage2_pruned_candidates` index.
@@ -186,7 +186,7 @@ struct Round {
     logical: LogicalASAPMemoCandidates,
     physical: PhysicalASAPMemoCandidates,
     /// The memo after local window composition, only when inspecting.
-    pass2: Option<MemoCandidates>,
+    pass2: Option<Memo>,
     selection: Result<Selection, SelectionError>,
 }
 
@@ -657,7 +657,7 @@ fn has_splittable_window(initial: &DagOfLogicalMemoGroups) -> bool {
 /// memo candidates of a group one root (identical terminal readers of
 /// different inputs); the one reading the selected producers' groups is taken.
 fn selected_chosen_candidates(
-    memo: &MemoCandidates,
+    memo: &Memo,
     physical: &PhysicalASAPMemoCandidates,
     selected: &DagOfSelectedCandidates,
 ) -> Result<ChosenCandidatePerMemoGroup, String> {

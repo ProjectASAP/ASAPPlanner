@@ -10,13 +10,13 @@ use asap_types::ir::properties::AccuracyGuarantee;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot};
 use asap_types::stages::MemoGroupId;
-use asap_types::stages::{MemoCandidates, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 
 pub(crate) fn add_topk_candidates(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     deadline: Option<Instant>,
 ) -> Result<usize, Pass2RuleError> {
     add_shared_producer_candidates(
@@ -52,7 +52,7 @@ impl SharedProducer for TopKRankings {
 
     fn sets(
         &mut self,
-        memo: &MemoCandidates,
+        memo: &Memo,
         deadline: Option<Instant>,
     ) -> Result<Vec<Vec<Reader<Rc<OperatorNode>>>>, Pass2RuleError> {
         let mut owners = HashMap::new();
@@ -107,7 +107,7 @@ impl SharedProducer for TopKRankings {
 
     fn derive(
         &mut self,
-        memo: &mut MemoCandidates,
+        memo: &mut Memo,
         reader: &Reader<Rc<OperatorNode>>,
         covering: &SharedRanking,
     ) -> Result<usize, Pass2RuleError> {
@@ -199,7 +199,7 @@ impl SharedProducer for TopKRankings {
 }
 
 fn exact_input_group(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     group: MemoGroupId,
     known: &mut HashMap<MemoGroupId, Option<MemoGroupId>>,
 ) -> Result<Option<MemoGroupId>, Pass2RuleError> {

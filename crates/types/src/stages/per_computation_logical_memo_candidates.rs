@@ -4,7 +4,7 @@
 
 use std::rc::Rc;
 
-use super::{MemoCandidates, MemoGroupId, PrunedCandidate};
+use super::{Memo, MemoGroupId, PrunedCandidate};
 use crate::ir::schema::{ExactKind, SketchAlgorithm};
 use crate::ir::{OperatorNode, Predicate};
 
@@ -16,7 +16,7 @@ pub struct PerComputationLogicalMemoCandidates {
     /// The groups moved from the [`DagOfLogicalMemoGroups`](super::DagOfLogicalMemoGroups),
     /// its query roots, and every group's candidates (origin
     /// [`Pass1`](super::OriginOfCandidateForMemoGroup::Pass1)).
-    pub memo: MemoCandidates,
+    pub memo: Memo,
     /// One per aggregate measure: what Pass 1 chose among.
     pub computation_targets: Vec<ComputationTarget>,
     /// The ways to compute a target's measure that Pass 1 pruned, each on

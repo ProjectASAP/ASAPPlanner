@@ -49,7 +49,7 @@ use asap_planner::{run_planning, MemoSteps, PlanSearchSettings, PlanningModels, 
 use asap_types::ir::schema::{FieldDataType, SketchParams};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use asap_types::stages::{queries_rooted_at, MemoGroupId};
-use asap_types::stages::{CandidateForMemoGroup, MemoCandidates, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
 use asap_types::workload::{PlanningWorkload, Query, RepeatedDemand, RepetitionInterval};
 
 const RATIO_OF_QUANTILES: &str = concat!(
@@ -145,7 +145,7 @@ fn memo_steps(run: &PlanningRun) -> &MemoSteps {
 }
 
 /// The memo after Pass 1.
-fn pass1_memo(run: &PlanningRun) -> &MemoCandidates {
+fn pass1_memo(run: &PlanningRun) -> &Memo {
     &run.per_computation_candidates
         .as_ref()
         .expect("Pass 1's output")
@@ -183,7 +183,7 @@ fn pass1_inventory(
     inventory.without_summaries_no_query_can_use(&targets, &data, accuracy.model)
 }
 
-fn candidate_count(memo: &MemoCandidates) -> usize {
+fn candidate_count(memo: &Memo) -> usize {
     memo.candidates.iter().map(Vec::len).sum()
 }
 
@@ -219,7 +219,7 @@ fn whole_workload_plans(inventory: &PerComputationCandidates) -> Vec<(Vec<usize>
 }
 
 /// `choice`'s DAG, one root per query.
-fn composed(memo: &MemoCandidates, choice: &ChosenCandidatePerMemoGroup) -> Plan {
+fn composed(memo: &Memo, choice: &ChosenCandidatePerMemoGroup) -> Plan {
     let mut roots = build_logical_asap_dags_from_chosen_candidates(memo, choice)
         .expect("an enumerated choice composes");
     roots.sort_by_key(|(group, _)| {
@@ -231,7 +231,7 @@ fn composed(memo: &MemoCandidates, choice: &ChosenCandidatePerMemoGroup) -> Plan
 }
 
 fn chosen<'a>(
-    memo: &'a MemoCandidates,
+    memo: &'a Memo,
     choice: &'a ChosenCandidatePerMemoGroup,
 ) -> impl Iterator<Item = &'a CandidateForMemoGroup> {
     choice

@@ -10,7 +10,7 @@ use asap_physical_asap_optimization::test_support::catalog::{
 use asap_physical_asap_optimization::CandidateInventoryError;
 use asap_types::ir::OperatorNode;
 use asap_types::physical::Materialization;
-use asap_types::stages::{MemoCandidates, MemoGroupId, PhysicalCandidateId};
+use asap_types::stages::{Memo, MemoGroupId, PhysicalCandidateId};
 
 use crate::search::candidates::dag::{
     DagOfPhysicalCandidatesWithCosts, InputProducerCandidates, PhysicalCandidateWithCost,
@@ -107,7 +107,7 @@ impl std::ops::Deref for InventoryForTests {
 /// Scalar query assembly and Stage 2/accuracy validation remain with the caller.
 #[cfg(test)]
 pub(in crate::search) fn build_candidate_inventory(
-    memo: &MemoCandidates,
+    memo: &Memo,
     output_groups: &[MemoGroupId],
     node_local_cost: impl FnMut(&OperatorNode) -> Result<f64, String>,
 ) -> Result<InventoryForTests, CandidateInventoryError> {
@@ -130,7 +130,7 @@ mod tests {
     use asap_types::ir::schema::{FieldDataType, SketchAlgorithm};
     use asap_types::ir::{ASAPOp, NonASAPOp, QueryRoot};
 
-    fn quantile_memo() -> (MemoCandidates, Vec<MemoGroupId>) {
+    fn quantile_memo() -> (Memo, Vec<MemoGroupId>) {
         let roots = [0.95, 0.99]
             .into_iter()
             .map(|quantile| {
@@ -922,7 +922,7 @@ mod tests {
         );
     }
 
-    fn nested_sum_memo(external_reader: bool) -> (MemoCandidates, Vec<MemoGroupId>) {
+    fn nested_sum_memo(external_reader: bool) -> (Memo, Vec<MemoGroupId>) {
         let mut queries = vec!["sum by (region) (sum by (region, job) (m))"];
         if external_reader {
             queries.push("sum by (region, job) (m)");

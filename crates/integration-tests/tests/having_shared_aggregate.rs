@@ -9,7 +9,7 @@ use asap_logical_asap_optimization::{
     TumblingWindowWidthDomain,
 };
 use asap_types::ir::NonASAPOp;
-use asap_types::stages::MemoCandidates;
+use asap_types::stages::Memo;
 use serde_json::json;
 use std::path::Path;
 
@@ -44,7 +44,7 @@ fn workload(queries: &[String]) -> FuzzWorkload {
 }
 
 /// The Pass 1 memo of `queries` with every Pass 2 sharing rule applied.
-fn expanded(queries: &[String]) -> MemoCandidates {
+fn expanded(queries: &[String]) -> Memo {
     let roots: Vec<_> = Planner::new(FuzzSettings::default())
         .lower(&workload(queries))
         .unwrap()

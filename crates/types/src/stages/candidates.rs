@@ -6,9 +6,10 @@ use std::rc::Rc;
 use super::{MemoGroup, MemoGroupId};
 use crate::ir::{OperatorNode, QueryRoot};
 
-/// The hash-consed workload: its groups, children before parents.
+/// The memo: the memo groups, each query's root over them, and each group's
+/// candidate implementations.
 #[derive(Debug, Clone, Default)]
-pub struct MemoCandidates {
+pub struct Memo {
     pub groups: Vec<MemoGroup>,
     /// Each query's root over groups, by index in the workload (the
     /// initial logical memo's query roots); groups added later are never a
@@ -24,7 +25,7 @@ pub struct MemoCandidates {
 pub struct CandidateForMemoGroup {
     /// The groups a fused computation also implements, beyond the group
     /// whose candidate it is (its owner, implicit from its position in
-    /// [`MemoCandidates::candidates`]); empty otherwise.
+    /// [`Memo::candidates`]); empty otherwise.
     pub fused_groups: Vec<MemoGroupId>,
     /// The implementation's own node(s): its root node, whose descendants
     /// down to [`Self::input_groups`] are its private nodes.
@@ -65,7 +66,7 @@ pub enum OriginOfCandidateForMemoGroup {
     WidenedScans,
 }
 
-impl MemoCandidates {
+impl Memo {
     /// The groups, each after every group it or one of its candidates
     /// reads, the lower index first among those ready: a dependency order for
     /// candidate traversal, whatever order transformations appended

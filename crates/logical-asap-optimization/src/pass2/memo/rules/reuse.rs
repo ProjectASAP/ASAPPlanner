@@ -2,7 +2,7 @@
 //! canonical input identities after guarantee recomposition rebuilds their DAGs.
 use crate::pass2::memo::state_groups::{boundary_groups, Pass2RuleError};
 use asap_types::ir::OperatorNode;
-use asap_types::stages::{CandidateForMemoGroup, MemoCandidates, OriginOfCandidateForMemoGroup};
+use asap_types::stages::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
 use asap_types::stages::{MemoGroup, MemoGroupId};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -13,7 +13,7 @@ pub(in crate::pass2::memo) fn eligible(candidate: &CandidateForMemoGroup) -> boo
 
 pub(in crate::pass2::memo) fn restore_inputs(
     node: &Rc<OperatorNode>,
-    memo: &MemoCandidates,
+    memo: &Memo,
     inputs: &[MemoGroupId],
 ) -> Rc<OperatorNode> {
     // These are the same declared logical input groups, rebound after a rule
@@ -92,7 +92,7 @@ pub(in crate::pass2::memo) fn same_node(
 }
 
 pub(in crate::pass2::memo) fn append_producer(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     node: Rc<OperatorNode>,
     queries: &[usize],
     origin: OriginOfCandidateForMemoGroup,
@@ -137,7 +137,7 @@ pub(in crate::pass2::memo) fn append_producer(
 }
 
 pub(in crate::pass2::memo) fn append_reader(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     owner: usize,
     original: &CandidateForMemoGroup,
     node: Rc<OperatorNode>,

@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use asap_types::ir::OperatorNode;
 use asap_types::physical::Materialization;
-use asap_types::stages::MemoCandidates;
+use asap_types::stages::Memo;
 use asap_types::stages::MemoGroupId;
 
 use super::factoring::{MemoGroupOutputKey, MemoGroupOutputToCompatibleProducersCache};
@@ -89,7 +89,7 @@ pub enum CandidateInventoryError {
 /// The inventory with identical terminal readers factored into one node
 /// (whose `candidates_for_memo_group` lists every candidate it can implement).
 pub fn build_candidate_inventory_before(
-    memo: &MemoCandidates,
+    memo: &Memo,
     output_groups: &[MemoGroupId],
     deadline: Option<std::time::Instant>,
 ) -> Result<CandidateInventory, CandidateInventoryError> {
@@ -104,7 +104,7 @@ pub fn build_candidate_inventory_before(
 }
 
 pub fn build_with_compatible_producers_cache(
-    memo: &MemoCandidates,
+    memo: &Memo,
     output_groups: &[MemoGroupId],
     deadline: Option<std::time::Instant>,
     compatible_producers_cache: &mut MemoGroupOutputToCompatibleProducersCache,

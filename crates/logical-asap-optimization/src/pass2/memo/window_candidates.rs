@@ -11,9 +11,7 @@ use crate::pass2::asap_aware_cse::{
 };
 use asap_types::ir::flat::flatten;
 use asap_types::ir::{OperatorNode, QueryRoot};
-use asap_types::stages::{
-    CandidateForMemoGroup, MemoCandidates as Memo, OriginOfCandidateForMemoGroup,
-};
+use asap_types::stages::{CandidateForMemoGroup, Memo, OriginOfCandidateForMemoGroup};
 use asap_types::stages::{MemoGroup, MemoGroupId as GroupId};
 use asap_types::workload::QueryWorkloadEntry;
 #[cfg(test)]

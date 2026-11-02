@@ -22,8 +22,8 @@ use crate::pass2::memo::candidates::CandidatePopulationError;
 use crate::pass2::memo::check_generation_deadline;
 use crate::pass2::memo::groups::try_populate_pass1;
 use asap_types::stages::{
-    CandidateGenerationTimeout, DagOfLogicalMemoGroups, MemoCandidates,
-    PerComputationLogicalMemoCandidates, PrunedCandidate,
+    CandidateGenerationTimeout, DagOfLogicalMemoGroups, Memo, PerComputationLogicalMemoCandidates,
+    PrunedCandidate,
 };
 
 /// Why [`generate_per_computation_logical_memo_candidates`] failed.
@@ -112,7 +112,7 @@ pub fn generate_per_computation_logical_memo_candidates(
 /// gives a failure probability (exact, per-value with no `δ`, or a
 /// whole-result target over an unbound `G`) keeps its Pass 1 size.
 fn size_for_failure_probability(
-    memo: &mut MemoCandidates,
+    memo: &mut Memo,
     roots: &[QueryRoot],
     accuracy_targets: &[AccuracyTarget],
     data: &DataWorkload,
@@ -183,7 +183,7 @@ mod tests {
     }
 
     /// Pass 1's memo for `queries`, each lowered and entered with its target.
-    fn pass1(queries: &[(&str, AccuracyTarget)], data: &DataWorkload) -> MemoCandidates {
+    fn pass1(queries: &[(&str, AccuracyTarget)], data: &DataWorkload) -> Memo {
         let roots: Vec<QueryRoot> = queries
             .iter()
             .map(|(query, target)| {
@@ -233,7 +233,7 @@ mod tests {
 
     /// The failure probability of every KLL build of `memo`'s candidates
     /// for one accuracy budget part (the whole budget).
-    fn whole_share_kll(memo: &MemoCandidates) -> Vec<Option<f64>> {
+    fn whole_share_kll(memo: &Memo) -> Vec<Option<f64>> {
         kll_failure_probabilities(
             memo.candidates
                 .iter()
