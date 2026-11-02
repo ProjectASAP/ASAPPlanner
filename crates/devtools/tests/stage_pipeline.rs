@@ -1192,7 +1192,7 @@ fn workload_file_with_a_range_evaluation_is_planned() {
             plan.dag.nodes.iter().any(|n| {
                 matches!(
                     n.payload,
-                    PhysicalASAPOperatorPayload::ASAP(ASAPOp::PaneChain { .. })
+                    PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
                 ) && n.materialization
                     == Materialization::MatAtQueryKeptAcrossEvaluations(Medium::Memory)
             })
@@ -1214,7 +1214,7 @@ fn workload_file_with_a_range_evaluation_is_planned() {
         cost <= kept_panes * (1.0 + 1e-9),
         "selected {SELECTED} costs {cost}, more than the kept panes' {kept_panes}"
     );
-    assert!(selection["pane_retention_ms"]
+    assert!(selection["tumbling_window_retention_ms"]
         .as_object()
         .unwrap()
         .values()
@@ -1954,7 +1954,7 @@ fn scans_projecting_different_labels_are_shared() {
     let (installed, _) = asap_planner::installable_plan_of(
         &physical.roots,
         None,
-        &offered.pane_retention_ms,
+        &offered.tumbling_window_retention_ms,
         &entries,
     )
     .unwrap();

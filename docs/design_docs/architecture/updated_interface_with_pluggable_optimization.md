@@ -91,7 +91,7 @@ pub struct PlanOutput {
     pub scalar_roots: Vec<(usize, ScalarExpr)>,  // standalone scalar entries
     pub scalar_plans: Vec<QueryPlan>,            // the operator sub-DAGs they read
     pub selection: Option<Selection>,            // how plan selection chose, if the pass selects
-    pub pane_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>, // kept pane chains' retention
+    pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>, // kept pane chains' retention
 }
 
 pub struct QueryPlan {

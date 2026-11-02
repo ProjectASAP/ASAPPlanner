@@ -2,7 +2,7 @@
   "accuracy_guarantees": "enforced",
   "materialized_views": [],
   "materialized_views_error": "raw-data window of node 1 is unsupported: a subquery or a TimeShift above the range",
-  "pane_retention_ms": {},
+  "tumbling_window_retention_ms": {},
   "proven_optimal": true,
   "query": "max_over_time(sum(process_resident_memory_bytes)[6h:1m])",
   "selected": {

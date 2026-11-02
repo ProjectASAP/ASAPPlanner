@@ -140,7 +140,10 @@ pub(in crate::search) fn apply(
                         },
                         (
                             _,
-                            Some(build @ (ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })),
+                            Some(
+                                build @ (ASAPOp::SummaryAgg { .. }
+                                | ASAPOp::SummaryTumblingWindowChain { .. }),
+                            ),
                         ) if template_price_is_a_floor(build, context) => ExecutionDataState {
                             timing: ExecutionTiming::QueryTime,
                             primitive: DataPrimitive::SummaryState,
@@ -164,7 +167,7 @@ pub(in crate::search) fn apply(
                         ) => ExecutionDataState::INGESTION_ROWS,
                         (
                             _,
-                            Some(ASAPOp::PaneChain {
+                            Some(ASAPOp::SummaryTumblingWindowChain {
                                 family: FieldDataType::ExactAggregate(..),
                                 ..
                             }),
@@ -173,7 +176,7 @@ pub(in crate::search) fn apply(
                         (
                             _,
                             Some(
-                                chain @ ASAPOp::PaneChain {
+                                chain @ ASAPOp::SummaryTumblingWindowChain {
                                     family: FieldDataType::Sketch(..),
                                     ..
                                 },
@@ -247,9 +250,9 @@ pub(in crate::search) fn apply(
                             asap_types::ir::Operator::NonASAP(NonASAPOp::Scan { .. }) => {
                                 metrics.ingestion_scans += 1
                             }
-                            asap_types::ir::Operator::ASAP(ASAPOp::PaneChain { .. }) => {
-                                metrics.ingestion_pane_chains += 1
-                            }
+                            asap_types::ir::Operator::ASAP(
+                                ASAPOp::SummaryTumblingWindowChain { .. },
+                            ) => metrics.ingestion_pane_chains += 1,
                             _ => metrics.ingestion_transforms += 1,
                         }
                     }
@@ -310,11 +313,14 @@ fn common_reader_windows(configured: &PhysicalCandidatesWithCosts) -> Vec<Option
                         }
                         // A chain kept across evaluations reads one pane;
                         // its scans are never certified (retained ancestors).
-                        asap_types::ir::Operator::ASAP(ASAPOp::PaneChain {
-                            pane_width_ms,
-                            pane_count,
+                        asap_types::ir::Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                            tumbling_window_width_ms,
+                            tumbling_window_count,
                             ..
-                        }) => Some(pane_width_ms.saturating_mul(u64::from(*pane_count))),
+                        }) => Some(
+                            tumbling_window_width_ms
+                                .saturating_mul(u64::from(*tumbling_window_count)),
+                        ),
                         _ => None,
                     };
                     windows_ms.extend(window);
@@ -568,7 +574,7 @@ fn certified_price<'a>(
                 let raw_nonnegative = matches!(
                     &node.payload,
                     asap_types::ir::Operator::ASAP(
-                        ASAPOp::PaneChain { family: FieldDataType::Sketch(kind, _), .. }
+                        ASAPOp::SummaryTumblingWindowChain { family: FieldDataType::Sketch(kind, _), .. }
                         | ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
                     ) if matches!(kind.params(), SketchParams::DDSketch { .. })
                 )
@@ -585,9 +591,10 @@ fn certified_price<'a>(
                 // Producer pane counts, family, schema fields, statistics and
                 // provenance must agree; upstream work is charged separately.
                 let panes = match producer.payload {
-                    asap_types::ir::Operator::ASAP(ASAPOp::PaneChain { pane_count, .. }) => {
-                        Some(pane_count)
-                    }
+                    asap_types::ir::Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                        tumbling_window_count,
+                        ..
+                    }) => Some(tumbling_window_count),
                     _ => None,
                 };
                 let family = match priced.family {
@@ -629,17 +636,18 @@ fn certified_price<'a>(
             views.push(view);
         }
         let maintained_window = match &node.payload {
-            asap_types::ir::Operator::ASAP(ASAPOp::PaneChain {
-                pane_width_ms,
-                pane_count,
+            asap_types::ir::Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                tumbling_window_count,
                 ..
-            }) => Some(pane_width_ms.saturating_mul(u64::from(*pane_count))),
+            }) => Some(tumbling_window_width_ms.saturating_mul(u64::from(*tumbling_window_count))),
             _ => None,
         };
         let retained = match &node.payload {
-            asap_types::ir::Operator::ASAP(ASAPOp::PaneChain { pane_count, .. }) => {
-                u64::from(*pane_count).max(1)
-            }
+            asap_types::ir::Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_count,
+                ..
+            }) => u64::from(*tumbling_window_count).max(1),
             _ => 1,
         };
         // One ingestion boundary executes once per accounted second; additional
@@ -801,7 +809,7 @@ mod tests {
             });
             let id = configured.nodes_for_tests().len();
             ids.insert(Rc::as_ptr(node), id);
-            let pane = matches!(node.asap(), Some(ASAPOp::PaneChain { .. }));
+            let pane = matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }));
             let scan = matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }));
             configured.push_for_tests(
                 Rc::clone(node),
@@ -841,7 +849,7 @@ mod tests {
             .iter()
             .enumerate()
             .filter_map(|(id, node)| {
-                matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+                matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
                     .then_some(PhysicalCandidateId(id))
             })
             .collect();
@@ -891,7 +899,7 @@ mod tests {
             .iter()
             .enumerate()
             .filter_map(|(id, node)| {
-                matches!(node.asap(), Some(ASAPOp::PaneChain { .. })).then_some(id)
+                matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })).then_some(id)
             })
             .collect();
         let mut projects = Vec::new();
@@ -999,7 +1007,10 @@ mod tests {
             projects.push(id);
         }
         for (id, template) in configured.nodes_for_tests().iter().enumerate() {
-            if matches!(template.asap(), Some(ASAPOp::PaneChain { .. })) {
+            if matches!(
+                template.asap(),
+                Some(ASAPOp::SummaryTumblingWindowChain { .. })
+            ) {
                 let input = &mut configured.dag.candidates[id].producer_candidates_per_input[0];
                 // Put larger signed-domain Project pricing last to expose the
                 // former arbitrary representative selection.
@@ -1147,11 +1158,11 @@ mod tests {
             }
             let mut settings = asap_cost::CostInputs::default();
             if measured {
-                settings.measured_operation_costs = serde_json::from_value(serde_json::json!({"operators": [{"operator": "PaneChain", "phase": "ingestion_time", "sketch": {"DDSketch": {"alpha": 0.1}}, "ns_per_unit": 300.0, "ns_per_invocation": 200.0, "memory_bytes_per_state": 1000.0}, {"operator": "SummaryMerge", "phase": "query_time", "sketch": {"DDSketch": {"alpha": 0.1}}, "ns_per_unit": 500.0, "ns_per_invocation": 100.0}, {"operator": "SummaryEstimate", "phase": "query_time", "sketch": {"DDSketch": {"alpha": 0.1}}, "ns_per_unit": 900.0, "ns_per_invocation": 400.0}]})).unwrap();
+                settings.measured_operation_costs = serde_json::from_value(serde_json::json!({"operators": [{"operator": "SummaryTumblingWindowChain", "phase": "ingestion_time", "sketch": {"DDSketch": {"alpha": 0.1}}, "ns_per_unit": 300.0, "ns_per_invocation": 200.0, "memory_bytes_per_state": 1000.0}, {"operator": "SummaryMerge", "phase": "query_time", "sketch": {"DDSketch": {"alpha": 0.1}}, "ns_per_unit": 500.0, "ns_per_invocation": 100.0}, {"operator": "SummaryEstimate", "phase": "query_time", "sketch": {"DDSketch": {"alpha": 0.1}}, "ns_per_unit": 900.0, "ns_per_invocation": 400.0}]})).unwrap();
             }
             if exact && measured {
                 settings.measured_operation_costs = serde_json::from_value(serde_json::json!({"operators": [
-                    {"operator": "PaneChain", "phase": "ingestion_time", "exact": "Sum", "ns_per_unit": 300.0, "ns_per_invocation": 200.0, "memory_bytes_per_state": 64.0},
+                    {"operator": "SummaryTumblingWindowChain", "phase": "ingestion_time", "exact": "Sum", "ns_per_unit": 300.0, "ns_per_invocation": 200.0, "memory_bytes_per_state": 64.0},
                     {"operator": "SummaryMerge", "phase": "query_time", "exact": "Sum", "ns_per_unit": 500.0, "ns_per_invocation": 100.0},
                     {"operator": "FinalizeExactAccumulator", "phase": "query_time", "exact": "Sum", "ns_per_unit": 900.0, "ns_per_invocation": 400.0}
                 ]})).unwrap();
@@ -1306,7 +1317,7 @@ mod tests {
             .insert("other".into(), data.sources["latency"].clone());
         let nodes = configured.nodes_for_tests();
         for (candidate, node) in configured.dag.candidates.iter_mut().zip(&nodes) {
-            if matches!(node.asap(), Some(ASAPOp::PaneChain { .. })) {
+            if matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })) {
                 candidate.producer_candidates_per_input[0].candidates = scans.clone().into();
             }
         }

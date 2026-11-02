@@ -41,8 +41,8 @@ pub use measured::{
 pub use operator_statistics::EdgeStatistics;
 pub use ranking::{cheaper, worst_latency_ms, PlanRanking};
 pub use usage::{
-    family_name, kept_pane_chains, node_map, node_usage, pane_retention_ms,
-    pane_retention_ms_of_plan, panes_of, plan_cost, query_reach, trailing_window, NodeMap,
+    family_name, kept_pane_chains, node_map, node_usage, panes_of, plan_cost, query_reach,
+    trailing_window, tumbling_window_retention_ms, tumbling_window_retention_ms_of_plan, NodeMap,
     NodeUsage, ProducerOutput,
 };
 

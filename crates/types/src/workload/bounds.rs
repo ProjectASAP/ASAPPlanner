@@ -202,7 +202,7 @@ fn declared_group_bound(node: &OperatorNode, data: &DataWorkload) -> Option<u64>
             ASAPOp::SummaryAgg {
                 reduction, child, ..
             }
-            | ASAPOp::PaneChain {
+            | ASAPOp::SummaryTumblingWindowChain {
                 reduction, child, ..
             },
         ) => grouped(reduction, child),
@@ -213,7 +213,7 @@ fn declared_group_bound(node: &OperatorNode, data: &DataWorkload) -> Option<u64>
                 ASAPOp::SummaryAgg {
                     reduction, child, ..
                 }
-                | ASAPOp::PaneChain {
+                | ASAPOp::SummaryTumblingWindowChain {
                     reduction, child, ..
                 },
             ) => grouped(reduction, child),
@@ -368,7 +368,7 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
         Operator::ASAP(ASAPOp::SummaryMerge { .. }) => matches!(
             node.summary_build(),
             Some(
-                ASAPOp::SummaryAgg { reduction, .. } | ASAPOp::PaneChain { reduction, .. }
+                ASAPOp::SummaryAgg { reduction, .. } | ASAPOp::SummaryTumblingWindowChain { reduction, .. }
             ) if global(reduction)
         ),
         Operator::ASAP(ASAPOp::SummaryEstimate {
@@ -463,8 +463,9 @@ pub fn with_confirmed_weights_at(
             changed |= !Rc::ptr_eq(&rebuilt, child);
             rebuilt
         });
-        if let Operator::ASAP(ASAPOp::SummaryAgg { input, .. } | ASAPOp::PaneChain { input, .. }) =
-            &mut operator
+        if let Operator::ASAP(
+            ASAPOp::SummaryAgg { input, .. } | ASAPOp::SummaryTumblingWindowChain { input, .. },
+        ) = &mut operator
         {
             let confirmed = confirmed_weights(&input.weight_domain, data);
             if confirmed != input.weight_domain && confirm_at(node) {
@@ -644,7 +645,7 @@ pub fn unchanged_source_columns<'a>(
         },
         Payload::ASAP(
             ASAPOp::SummaryAgg { .. }
-            | ASAPOp::PaneChain { .. }
+            | ASAPOp::SummaryTumblingWindowChain { .. }
             | ASAPOp::SummaryMerge { .. }
             | ASAPOp::SummaryEstimate { .. }
             | ASAPOp::FinalizeExactAccumulator { .. },

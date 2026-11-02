@@ -106,7 +106,7 @@ pub struct OperatorCost {
     /// ingestion time. Default 0.
     #[serde(default)]
     pub ns_per_invocation: f64,
-    /// For a node that keeps summary state (`SummaryAgg`, `PaneChain`):
+    /// For a node that keeps summary state (`SummaryAgg`, `SummaryTumblingWindowChain`):
     /// the bytes one state holds, from the kernel's own `memory_bytes()`
     /// (e.g. KLL after lazy allocation). `None`: the bytes the formulas
     /// derive from the sketch's parameters.
@@ -154,7 +154,9 @@ pub enum OperatorKind {
     /// Per input state merged (each pane of a chain is a state).
     SummaryMerge,
     /// Per input row placed in its pane and inserted into that pane's state.
-    PaneChain,
+    // Named `PaneChain` before #1163.
+    #[serde(alias = "PaneChain")]
+    SummaryTumblingWindowChain,
     SummarySubtract,
     SummaryDelete,
     SummaryJoin,
@@ -194,7 +196,7 @@ impl OperatorKind {
                 ASAPOp::MaintainPopulation { .. } => Self::MaintainPopulation,
                 ASAPOp::EvaluatePopulation { .. } => Self::EvaluatePopulation,
                 ASAPOp::SummaryMerge { .. } => Self::SummaryMerge,
-                ASAPOp::PaneChain { .. } => Self::PaneChain,
+                ASAPOp::SummaryTumblingWindowChain { .. } => Self::SummaryTumblingWindowChain,
                 ASAPOp::SummarySubtract { .. } => Self::SummarySubtract,
                 ASAPOp::SummaryDelete { .. } => Self::SummaryDelete,
                 ASAPOp::SummaryJoin { .. } => Self::SummaryJoin,
@@ -415,7 +417,7 @@ pub(crate) fn validate(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SummaryOperation {
-    /// Insert one input row: a `SummaryAgg` or `PaneChain` entry.
+    /// Insert one input row: a `SummaryAgg` or `SummaryTumblingWindowChain` entry.
     Update,
     /// Merge one input state into another: a `SummaryMerge` entry.
     Merge,
@@ -425,7 +427,7 @@ pub enum SummaryOperation {
 
 /// An entry of the earlier format, still loadable: the measured CPU time of
 /// one operation on one sketch configuration. It becomes the
-/// [`OperatorCost`] of its operator (both `SummaryAgg` and `PaneChain` for
+/// [`OperatorCost`] of its operator (both `SummaryAgg` and `SummaryTumblingWindowChain` for
 /// an update) at both phases.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -444,9 +446,10 @@ impl From<Vec<MeasuredOperationCost>> for MeasuredOperationCosts {
             .into_iter()
             .flat_map(|entry| {
                 let kinds: &[OperatorKind] = match entry.operation {
-                    SummaryOperation::Update => {
-                        &[OperatorKind::SummaryAgg, OperatorKind::PaneChain]
-                    }
+                    SummaryOperation::Update => &[
+                        OperatorKind::SummaryAgg,
+                        OperatorKind::SummaryTumblingWindowChain,
+                    ],
                     SummaryOperation::Merge => &[OperatorKind::SummaryMerge],
                     SummaryOperation::Estimate => &[OperatorKind::SummaryEstimate],
                 };

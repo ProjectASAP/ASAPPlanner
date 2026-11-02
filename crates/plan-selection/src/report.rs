@@ -193,8 +193,8 @@ pub struct WholePlanSelection {
     pub accepted: BTreeMap<String, Vec<AcceptedAccuracy>>,
     pub rejected: Vec<Rejection>,
     /// The selected plan's pane retention, by node id in its physical DAG
-    /// ([`RealizedPlan::pane_retention_ms`](asap_types::stages::RealizedPlan::pane_retention_ms)).
-    pub pane_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
+    /// ([`RealizedPlan::tumbling_window_retention_ms`](asap_types::stages::RealizedPlan::tumbling_window_retention_ms)).
+    pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
     /// The physical candidates checked, valid or not.
     pub candidates_checked: u64,
 }

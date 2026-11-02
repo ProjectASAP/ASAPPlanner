@@ -99,7 +99,7 @@ pub fn approximate_inputs(root: &QueryRoot) -> Vec<Rc<OperatorNode>> {
                     ASAPOp::SummaryAgg {
                         family: FieldDataType::Sketch(..),
                         ..
-                    } | ASAPOp::PaneChain {
+                    } | ASAPOp::SummaryTumblingWindowChain {
                         family: FieldDataType::Sketch(..),
                         ..
                     }
@@ -190,7 +190,7 @@ pub fn with_resized_summaries(
                 family: FieldDataType::Sketch(kind, _),
                 ..
             }
-            | ASAPOp::PaneChain {
+            | ASAPOp::SummaryTumblingWindowChain {
                 family: FieldDataType::Sketch(kind, _),
                 ..
             },
@@ -248,7 +248,8 @@ pub fn with_resized_summaries(
 /// distinct bound gives its failure probability. `None` for a state over
 /// computed rows or several sources.
 pub fn distinct_bound_source(state: &OperatorNode) -> Option<String> {
-    let Some(ASAPOp::SummaryAgg { child, .. } | ASAPOp::PaneChain { child, .. }) = state.asap()
+    let Some(ASAPOp::SummaryAgg { child, .. } | ASAPOp::SummaryTumblingWindowChain { child, .. }) =
+        state.asap()
     else {
         return None;
     };
@@ -648,7 +649,7 @@ fn merged_panes_guarantee(node: &OperatorNode) -> Option<Option<AccuracyGuarante
     };
     // The merged panes' window range over the chain's input carries the
     // guarantee composed over that input.
-    let ASAPOp::PaneChain { child: input, .. } = chain.asap()? else {
+    let ASAPOp::SummaryTumblingWindowChain { child: input, .. } = chain.asap()? else {
         return Some(None);
     };
     if let Operator::ASAP(ASAPOp::SummaryAgg { child: range, .. }) = &mut window_build.operator {
@@ -771,7 +772,7 @@ pub(crate) fn estimates_raw_data_samples_of(node: &OperatorNode) -> Option<Strin
         },
         // Only a φ in [0, 1] picks one of the values; outside it the answer
         // is -Inf or +Inf, whatever their sign. Merged tumbling panes of one
-        // definition ([`merged_chain`]) are read through their `PaneChain`:
+        // definition ([`merged_chain`]) are read through their `SummaryTumblingWindowChain`:
         // a quantile of the merged state is still one of the panes'
         // samples, or between two of them.
         Operator::ASAP(ASAPOp::SummaryEstimate {
@@ -792,7 +793,7 @@ pub(crate) fn estimates_raw_data_samples_of(node: &OperatorNode) -> Option<Strin
                 child,
                 ..
             }
-            | ASAPOp::PaneChain {
+            | ASAPOp::SummaryTumblingWindowChain {
                 input:
                     SummaryUpdate {
                         item: None,

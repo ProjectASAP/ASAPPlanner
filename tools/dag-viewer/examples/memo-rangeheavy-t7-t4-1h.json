@@ -707,7 +707,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -726,8 +726,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 60,
-                    "pane_width_ms": 60000,
+                    "tumbling_window_count": 60,
+                    "tumbling_window_width_ms": 60000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -1659,7 +1659,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -1678,8 +1678,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 60,
-                    "pane_width_ms": 60000,
+                    "tumbling_window_count": 60,
+                    "tumbling_window_width_ms": 60000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -2102,7 +2102,7 @@
             "cpu_core_seconds_per_second": 0.004,
             "detail": "build exact Sum accumulator in 60 panes of 60000 ms for 10000 groups: 2000000 rows x (1 + depth 1); x 1.0000/s; keeps 34160000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -4456,7 +4456,7 @@
         "stage2_node_id": 1
       }
     ],
-    "pane_retention_ms": {
+    "tumbling_window_retention_ms": {
       "1": 3600000
     },
     "rejected": [],
@@ -4470,7 +4470,7 @@
         "build_ms": 1.099547,
         "candidates": 17,
         "candidates_by_origin": {
-          "Panes": 3,
+          "TumblingWindows": 3,
           "Pass1": 8,
           "WidenedScans": 6
         },
@@ -4587,7 +4587,7 @@
                 2
               ],
               "operator": "FinalizeExactAccumulator",
-              "origin": "Panes",
+              "origin": "TumblingWindows",
               "reads": []
             },
             "group": 2,
@@ -4761,7 +4761,7 @@
                 6
               ],
               "operator": "FinalizeExactAccumulator",
-              "origin": "Panes",
+              "origin": "TumblingWindows",
               "reads": []
             },
             "group": 6,

@@ -1,7 +1,7 @@
 {
   "accuracy_guarantees": "enforced",
   "materialized_views": [],
-  "pane_retention_ms": {},
+  "tumbling_window_retention_ms": {},
   "proven_optimal": true,
   "queries": [
     "quantile_over_time(0.9, data[5m])",

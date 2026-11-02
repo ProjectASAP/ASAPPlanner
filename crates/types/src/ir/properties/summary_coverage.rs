@@ -216,12 +216,14 @@ mod value_bound {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CoverageError {
-    /// The node is not a summary state (`SummaryAgg`, `PaneChain` or
+    /// The node is not a summary state (`SummaryAgg`, `SummaryTumblingWindowChain` or
     /// `SummaryMerge`): a caller bug, or bad input when it is a merge's
     /// input.
-    #[error("coverage is derived only for SummaryAgg, PaneChain and SummaryMerge")]
+    #[error(
+        "coverage is derived only for SummaryAgg, SummaryTumblingWindowChain and SummaryMerge"
+    )]
     NotSummary,
-    /// A `PaneChain` that does not expand to one build over its whole
+    /// A `SummaryTumblingWindowChain` that does not expand to one build over its whole
     /// window (its window overflows, or the build does not derive): bad
     /// input.
     #[error("pane chain does not expand to one build over its whole window: {reason}")]
@@ -265,7 +267,7 @@ pub enum CoverageError {
 pub(crate) type NodeToSummaryCoverageCache = HashMap<*const OperatorNode, SummaryCoverage>;
 
 impl SummaryCoverage {
-    /// Coverage of a `SummaryAgg`, `PaneChain` or `SummaryMerge`. A chain
+    /// Coverage of a `SummaryAgg`, `SummaryTumblingWindowChain` or `SummaryMerge`. A chain
     /// covers what one build over its whole window does, and a merge of its
     /// newest panes what one build over their window does. A merge fails unless
     /// every input has the same definition and their selections are
@@ -310,7 +312,7 @@ impl SummaryCoverage {
             Some(ASAPOp::SummaryAgg { .. }) => of_summary_agg(node),
             // Back-to-back panes cover the whole window one build over it
             // would.
-            Some(ASAPOp::PaneChain { .. }) => of_summary_agg(
+            Some(ASAPOp::SummaryTumblingWindowChain { .. }) => of_summary_agg(
                 &crate::ir::operator::pane_chain::whole_window_build(node).map_err(|error| {
                     CoverageError::PaneChainExpansion {
                         reason: error.to_string(),
@@ -320,7 +322,7 @@ impl SummaryCoverage {
             // The newest panes of one chain cover what one build over their
             // window does.
             Some(ASAPOp::SummaryMerge {
-                newest_panes: Some(_),
+                newest_tumbling_windows: Some(_),
                 group_by: None,
                 ..
             }) => of_summary_agg(

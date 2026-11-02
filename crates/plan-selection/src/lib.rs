@@ -103,7 +103,7 @@
 //!   any of its steps reads was built by an earlier request or step;
 //! * a pane chain kept beyond one evaluation (ingestion time or kept
 //!   across evaluations) retains its input's offset plus its window plus
-//!   the longest `span_ms` among its readers (`RealizedPlan::pane_retention_ms`),
+//!   the longest `span_ms` among its readers (`RealizedPlan::tumbling_window_retention_ms`),
 //!   so the earliest step of the next request still finds its panes: that
 //!   many more panes are kept every second.
 //!
@@ -4002,7 +4002,7 @@ mod tests {
             10_000 * 300
         );
         assert_eq!(kept.usage.disk_bytes * 5, rebuilt.usage.disk_bytes);
-        let Payload::ASAP(ASAPOp::PaneChain { family, .. }) =
+        let Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { family, .. }) =
             &b3.nodes.iter().find(|n| n.id == chain).unwrap().payload
         else {
             unreachable!()
@@ -4042,7 +4042,10 @@ mod tests {
     }
 
     fn is_chain(payload: &Payload) -> bool {
-        matches!(payload, Payload::ASAP(ASAPOp::PaneChain { .. }))
+        matches!(
+            payload,
+            Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+        )
     }
 
     /// #509 Example 4, B1: maintained at ingestion time, a chain of N panes
@@ -4054,13 +4057,15 @@ mod tests {
         let candidates = pane_candidates(10_000.0);
         let dag = &candidates[1].dag;
         let chain = node_of(dag, is_chain);
-        let Payload::ASAP(ASAPOp::PaneChain {
-            family, pane_count, ..
+        let Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            family,
+            tumbling_window_count,
+            ..
         }) = &dag.nodes.iter().find(|n| n.id == chain).unwrap().payload
         else {
             unreachable!()
         };
-        assert_eq!(*pane_count, 5);
+        assert_eq!(*tumbling_window_count, 5);
         // Each pane sees its series' 60 samples: one minute of 10 000 rows
         // per second over 10 000 series.
         let samples = StateInputRows {
@@ -4313,7 +4318,7 @@ mod tests {
                         family: FieldDataType::Sketch(kind, _),
                         ..
                     }
-                    | ASAPOp::PaneChain {
+                    | ASAPOp::SummaryTumblingWindowChain {
                         family: FieldDataType::Sketch(kind, _),
                         ..
                     },
@@ -4722,7 +4727,7 @@ mod tests {
         .into_iter()
         .find(|c| {
             c.dag.nodes.iter().all(|n| match n.payload {
-                Payload::ASAP(ASAPOp::PaneChain { .. }) => {
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
                     matches!(n.materialization, Materialization::MatAtIngestion(_))
                 }
                 _ => n.materialization == Materialization::NotMaterialized,
@@ -4755,8 +4760,8 @@ mod tests {
                 .nodes
                 .iter()
                 .find(|n| {
-                    matches!(&n.payload, Payload::ASAP(ASAPOp::SummaryMerge { newest_panes, .. })
-                        if *newest_panes == newest)
+                    matches!(&n.payload, Payload::ASAP(ASAPOp::SummaryMerge { newest_tumbling_windows, .. })
+                        if *newest_tumbling_windows == newest)
                 })
                 .unwrap();
             let detail = &cost.per_node[&merge.id].detail;
@@ -4801,9 +4806,9 @@ mod tests {
         assert_eq!(chains.len(), 1);
         assert!(matches!(
             chains[0].payload,
-            Payload::ASAP(ASAPOp::PaneChain {
-                pane_width_ms: 60_000,
-                pane_count: 10,
+            Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms: 60_000,
+                tumbling_window_count: 10,
                 ..
             })
         ));
@@ -4862,9 +4867,9 @@ mod tests {
         let chain = shared.dag.nodes.iter().find(|n| n.id == chain).unwrap();
         assert!(matches!(
             chain.payload,
-            Payload::ASAP(ASAPOp::PaneChain {
-                pane_width_ms: 15_000,
-                pane_count: 240,
+            Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms: 15_000,
+                tumbling_window_count: 240,
                 ..
             })
         ));
@@ -5177,7 +5182,9 @@ mod tests {
         !candidate.dag.nodes.iter().any(|n| {
             matches!(
                 n.payload,
-                Payload::ASAP(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+                Payload::ASAP(
+                    ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }
+                )
             )
         })
     }
@@ -5198,7 +5205,7 @@ mod tests {
             .nodes
             .iter()
             .find_map(|n| match &n.payload {
-                Payload::ASAP(ASAPOp::PaneChain {
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
                     family: FieldDataType::Sketch(kind, _),
                     ..
                 }) => Some(kind.params().clone()),
@@ -5282,7 +5289,7 @@ mod tests {
         };
         let kll_entries = || {
             vec![
-                sketch_entry(OperatorKind::PaneChain, kll.clone(), 150.0),
+                sketch_entry(OperatorKind::SummaryTumblingWindowChain, kll.clone(), 150.0),
                 sketch_entry(OperatorKind::SummaryMerge, kll.clone(), 2_000.0),
                 sketch_entry(OperatorKind::SummaryEstimate, kll.clone(), 5_000.0),
                 plain_entry(OperatorKind::TimeRange, None, 2.0),
@@ -5314,7 +5321,7 @@ mod tests {
     fn a_partial_table_can_still_mis_rank_plans() {
         let (candidates, kll) = exact_and_kll();
         let partial = vec![
-            sketch_entry(OperatorKind::PaneChain, kll.clone(), 150.0),
+            sketch_entry(OperatorKind::SummaryTumblingWindowChain, kll.clone(), 150.0),
             sketch_entry(OperatorKind::SummaryMerge, kll.clone(), 2_000.0),
             sketch_entry(OperatorKind::SummaryEstimate, kll.clone(), 5_000.0),
             plain_entry(OperatorKind::TimeRange, None, 2.0),
@@ -5360,7 +5367,7 @@ mod tests {
                     measure: Some("quantile".to_string()),
                     ..plain_entry(OperatorKind::Aggregate, None, 10.0)
                 },
-                sketch_entry(OperatorKind::PaneChain, kll.clone(), 30.0),
+                sketch_entry(OperatorKind::SummaryTumblingWindowChain, kll.clone(), 30.0),
                 sketch_entry(OperatorKind::SummaryMerge, kll.clone(), 500.0),
                 sketch_entry(OperatorKind::SummaryEstimate, kll.clone(), 1_000.0),
             ])
@@ -5536,7 +5543,7 @@ mod tests {
             .nodes
             .iter()
             .find_map(|n| match &n.payload {
-                Payload::ASAP(ASAPOp::PaneChain {
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
                     family: FieldDataType::Sketch(kind, _),
                     ..
                 }) => Some(kind.params().clone()),
@@ -5546,7 +5553,7 @@ mod tests {
         let memory = |memory_bytes_per_state| {
             let settings = measured(vec![OperatorCost {
                 memory_bytes_per_state,
-                ..sketch_entry(OperatorKind::PaneChain, kll.clone(), 1.0)
+                ..sketch_entry(OperatorKind::SummaryTumblingWindowChain, kll.clone(), 1.0)
             }]);
             price(
                 &maintained.dag,
@@ -5579,7 +5586,7 @@ mod tests {
                 .nodes
                 .iter()
                 .find_map(|node| match &node.payload {
-                    Payload::ASAP(ASAPOp::PaneChain {
+                    Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
                         family: FieldDataType::Sketch(kind, _),
                         ..
                     }) => Some(kind.params().clone()),
@@ -5588,7 +5595,7 @@ mod tests {
                 .unwrap();
             let settings = measured(vec![OperatorCost {
                 memory_bytes_per_state: Some(u64::MAX as f64),
-                ..sketch_entry(OperatorKind::PaneChain, kll, 1.0)
+                ..sketch_entry(OperatorKind::SummaryTumblingWindowChain, kll, 1.0)
             }]);
             assert!(matches!(
                 price(
@@ -5604,7 +5611,7 @@ mod tests {
 
     /// The table of earlier versions, a JSON array of sketch operations,
     /// still loads: each entry becomes its operator's entry at both phases,
-    /// an update both a `SummaryAgg` and a `PaneChain` entry.
+    /// an update both a `SummaryAgg` and a `SummaryTumblingWindowChain` entry.
     #[test]
     fn the_earlier_table_format_still_loads() {
         let settings: CostInputs = serde_json::from_str(
@@ -5621,7 +5628,7 @@ mod tests {
             settings.measured_operation_costs.operators,
             vec![
                 sketch_entry(OperatorKind::SummaryAgg, kll.clone(), 120.0),
-                sketch_entry(OperatorKind::PaneChain, kll.clone(), 120.0),
+                sketch_entry(OperatorKind::SummaryTumblingWindowChain, kll.clone(), 120.0),
                 sketch_entry(OperatorKind::SummaryMerge, kll, 900.0),
             ]
         );

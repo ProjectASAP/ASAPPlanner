@@ -523,7 +523,7 @@ impl PhysicalASAPDAG {
     }
 
     /// Checks that every raw-data window the DAG reads (each `TimeRange`,
-    /// and each `PaneChain`'s pane, reading a `Scan` without passing another
+    /// and each `SummaryTumblingWindowChain`'s pane, reading a `Scan` without passing another
     /// `TimeRange`) has a supported shape
     /// ([`InstallableDagError::UnsupportedRawDataWindow`]). O(nodes + edges)
     /// plus the depth below each window.
@@ -663,7 +663,7 @@ struct ViewIndex<'a> {
     /// Every node after its inputs, from the DAG's node order.
     children_first: Vec<PhysicalASAPNodeId>,
     /// The nodes whose rows come from raw data: a `Scan` is reachable below
-    /// them without passing a `TimeRange` or `PaneChain`.
+    /// them without passing a `TimeRange` or `SummaryTumblingWindowChain`.
     reading_raw_data: HashSet<PhysicalASAPNodeId>,
     /// The nodes with a `TimeShift`, `TimeRange` or `PromqlSubquery` above
     /// them, which evaluates them at other times than the evaluation time.
@@ -716,7 +716,7 @@ impl<'a> ViewIndex<'a> {
                     Some(Operator::NonASAP(NonASAPOp::Scan { .. })) => true,
                     Some(
                         Operator::NonASAP(NonASAPOp::TimeRange { .. })
-                        | Operator::ASAP(ASAPOp::PaneChain { .. }),
+                        | Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
                     ) => false,
                     _ => reading_raw_data.contains(input),
                 });
@@ -764,8 +764,11 @@ impl<'a> ViewIndex<'a> {
                 Operator::NonASAP(NonASAPOp::TimeRange { .. }) => {
                     self.window_at(node.id)?;
                 }
-                Operator::ASAP(ASAPOp::PaneChain { pane_width_ms, .. }) => {
-                    self.raw_window_below(node.id, u128::from(*pane_width_ms))?;
+                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_width_ms,
+                    ..
+                }) => {
+                    self.raw_window_below(node.id, u128::from(*tumbling_window_width_ms))?;
                 }
                 _ => {}
             }
@@ -789,7 +792,7 @@ impl<'a> ViewIndex<'a> {
     }
 
     /// The window of width `width_ms` that `time_range` (a `TimeRange`, or
-    /// a `PaneChain`'s pane) reads from the `Scan` below it, and that
+    /// a `SummaryTumblingWindowChain`'s pane) reads from the `Scan` below it, and that
     /// `Scan`, or why its shape is unsupported. It does not allocate or
     /// compile every pane in a chain.
     fn raw_window_below(

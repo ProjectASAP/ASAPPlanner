@@ -71,7 +71,7 @@ To run it, see [RUNNING.md](RUNNING.md).
   series, or one shared instance. A standalone scalar query (`time()`,
   `scalar(v)`, `1 + 2`) is a dashed `Scalar` node over the nodes it reads.
   Query roots have a thick border. A node that several queries' roots reach
-  says `shared ×n`. A `PaneChain` is one node (`30 panes × 20 s`); clicking
+  says `shared ×n`. A `SummaryTumblingWindowChain` is one node (`30 panes × 20 s`); clicking
   it draws its panes, newest first, each a `TimeShift` by its offset (none
   for the newest), a `TimeRange` of one pane and the pane's build with its
   window (`window t−40 s … t−20 s`), and clicking a pane folds them back.
@@ -253,7 +253,7 @@ are ignored, `stage_pipeline`'s default.
     "search_report": { "status": "optimal", "cost_lower_bound_per_second": 7.9,
                        "milp_variables": 812, "milp_constraints": 1490,
                        "model_construction_ms": 12, "solver_ms": 40, "validation_ms": 95 },
-    "pane_retention_ms": { "<node id>": 600000 },
+    "tumbling_window_retention_ms": { "<node id>": 600000 },
     "materialized_views": [{ "node_id": 2, "refresh": "at_ingestion",
                              "coverage": { "definition_id": "98f2b35a…", "selection": ["..."] },
                              "inputs": { "raw_data_windows": [{ "source": { "TimeSeries": { "metric": "data" } },
@@ -274,7 +274,7 @@ are ignored, `stage_pipeline`'s default.
     "pruned_candidates": [{ "candidate": "E2-0", "cause": "costlier", "reason": "..." }],
     "pruned_candidates_not_enumerated": [],
     "pruned_candidate_count_by_cause": { "accuracy_target_missed": 533, "costlier": 12 },
-    "pane_retention_ms": {}
+    "tumbling_window_retention_ms": {}
   }
 }
 ```

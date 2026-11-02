@@ -163,14 +163,16 @@ impl OperatorNode {
     }
 
     /// The build whose state this summary-state node carries: a
-    /// `SummaryAgg` or `PaneChain` itself, or the first input's build under
+    /// `SummaryAgg` or `SummaryTumblingWindowChain` itself, or the first input's build under
     /// `SummaryMerge`s (merged inputs have one definition, which
     /// `coverage` checks). `None` under a regrouping
     /// merge, whose states no build in the DAG carries (its coverage's
     /// `definition` is the build it stands for), and for any other node.
     pub fn summary_build(&self) -> Option<&ASAPOp> {
         match self.asap()? {
-            op @ (ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. }) => Some(op),
+            op @ (ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }) => {
+                Some(op)
+            }
             ASAPOp::SummaryMerge {
                 children,
                 group_by: None,

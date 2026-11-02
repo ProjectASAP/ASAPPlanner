@@ -133,7 +133,7 @@ Two rules decide whether a check counts:
 | `a-looser-accuracy` | `q` at the next looser target | reading `q`'s node |
 | `b-filter-on-group-key` | grouped `q` plus `label = 'value'` on a group key | `Filter` over `q`'s result |
 | `c-coarser-grouping` | `q` grouped by one key fewer | exact `Aggregate` (sum / max / min) over `q`'s result, or a sketch `SummaryMerge{group_by}` over `q`'s state |
-| `d-nested-shorter-window` | `q` over a shorter window that divides it | `SummaryMerge{newest_panes}` over `q`'s pane chain |
+| `d-nested-shorter-window` | `q` over a shorter window that divides it | `SummaryMerge{newest_tumbling_windows}` over `q`'s pane chain |
 | `e-other-quantile-rank` | `q` at another rank | `q`'s estimate (or exact quantile aggregate) at the other rank, same input |
 | `f-exact-duplicate` | `q` | reading `q`'s node |
 | `g-outer-over-result` | an operator over `q`, by `q`'s outer operator: `topk(3, q)` (sum), `bottomk(3, q)` (count), `max(q)` (max), `quantile(0.5, q)` (avg), `q > 0` (min, quantile) | the operator's lowering grafted onto `q`'s node |

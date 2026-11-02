@@ -183,7 +183,7 @@ pub(in crate::search) fn extract_price_options(
             let node = nodes[id].as_ref().unwrap();
             let spans: Vec<Option<u64>> = if matches!(
                 node.payload,
-                asap_types::ir::Operator::ASAP(ASAPOp::PaneChain { .. })
+                asap_types::ir::Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
             ) {
                 let mut spans: Vec<_> = context
                     .entries
@@ -242,7 +242,7 @@ pub(in crate::search) fn extract_price_options(
                                 ASAPOp::SummaryAgg {
                                     family: FieldDataType::Sketch(..),
                                     ..
-                                } | ASAPOp::PaneChain {
+                                } | ASAPOp::SummaryTumblingWindowChain {
                                     family: FieldDataType::Sketch(..),
                                     ..
                                 }
@@ -282,7 +282,7 @@ pub(in crate::search) fn extract_price_options(
                                             family: FieldDataType::Sketch(kind, _),
                                             ..
                                         }
-                                        | ASAPOp::PaneChain {
+                                        | ASAPOp::SummaryTumblingWindowChain {
                                             family: FieldDataType::Sketch(kind, _),
                                             ..
                                         },
@@ -368,7 +368,7 @@ pub(in crate::search) fn extract_price_options(
                                 ASAPOp::SummaryAgg {
                                     family: FieldDataType::Sketch(..),
                                     ..
-                                } | ASAPOp::PaneChain {
+                                } | ASAPOp::SummaryTumblingWindowChain {
                                     family: FieldDataType::Sketch(..),
                                     ..
                                 }

@@ -15,7 +15,7 @@
 //!
 //! ## Materialization
 //!
-//! Each summary build (a `SummaryAgg` or a `PaneChain`) is one
+//! Each summary build (a `SummaryAgg` or a `SummaryTumblingWindowChain`) is one
 //! materialization candidate (`MaterializationCandidate`) whose
 //! output materialization may store (#509 §Materialization, Algorithm 3).
 //! So is the highest node of each other sub-DAG that two or more queries
@@ -158,12 +158,12 @@ pub enum PhysicalASAPOptimizationError {
     /// the panes. Stage 1 offers only panes on every reader's step grid;
     /// the candidate is pruned with this reason.
     #[error(
-        "pane width {pane_width_ms} ms does not divide the {step_ms} ms step of \
+        "pane width {tumbling_window_width_ms} ms does not divide the {step_ms} ms step of \
          a range evaluation that reads it"
     )]
     PaneWidthOffRangeStep {
         /// The chain's pane width.
-        pane_width_ms: u64,
+        tumbling_window_width_ms: u64,
         /// The reader's range-evaluation step.
         step_ms: u64,
     },
@@ -251,8 +251,8 @@ pub(crate) fn summary_materialization_eligibility(
     }
     if matches!(
         node.asap(),
-        Some(ASAPOp::PaneChain {
-            pane_width_ms: 0,
+        Some(ASAPOp::SummaryTumblingWindowChain {
+            tumbling_window_width_ms: 0,
             ..
         })
     ) {
@@ -289,9 +289,13 @@ fn summary_reader_eligibility(
         .collect();
     let may_keep_across_evaluations = query_time_results_retained
         && match (node.asap(), recurrences) {
-            (Some(ASAPOp::PaneChain { pane_width_ms, .. }), Some(recurrences)) => {
-                builds_one_pane_per_evaluation(*pane_width_ms, recurrences)
-            }
+            (
+                Some(ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_width_ms,
+                    ..
+                }),
+                Some(recurrences),
+            ) => builds_one_pane_per_evaluation(*tumbling_window_width_ms, recurrences),
             _ => false,
         };
     SummaryMaterializationEligibility {
@@ -366,7 +370,7 @@ impl MaterializationCandidate {
     }
 }
 
-/// Whether a tumbling-pane chain of `pane_width_ms`-wide panes read by
+/// Whether a tumbling-pane chain of `tumbling_window_width_ms`-wide panes read by
 /// queries repeating as `readers` builds exactly one new pane per
 /// evaluation: there is a reader, every reader repeats at a fixed interval
 /// equal to the pane width, and the readers whose evaluation phase is known
@@ -380,24 +384,24 @@ impl MaterializationCandidate {
 /// one evaluation per interval. Readers at different known phases would
 /// each need their own newest pane, so they do not share one kept chain.
 pub(crate) fn builds_one_pane_per_evaluation<'a>(
-    pane_width_ms: u64,
+    tumbling_window_width_ms: u64,
     readers: impl IntoIterator<Item = &'a QueryRecurrence>,
 ) -> bool {
-    if pane_width_ms == 0 {
+    if tumbling_window_width_ms == 0 {
         return false;
     }
     let mut phase_ms = None;
     let mut any_reader = false;
     for recurrence in readers {
         any_reader = true;
-        if recurrence.fixed_interval_ms() != Some(pane_width_ms) {
+        if recurrence.fixed_interval_ms() != Some(tumbling_window_width_ms) {
             return false;
         }
         if let QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
             evaluation_phase, ..
         }) = recurrence
         {
-            let phase = evaluation_phase.0 % pane_width_ms;
+            let phase = evaluation_phase.0 % tumbling_window_width_ms;
             if *phase_ms.get_or_insert(phase) != phase {
                 return false;
             }
@@ -570,7 +574,9 @@ fn assigned_candidate(
         .filter(|n| {
             matches!(
                 n.payload,
-                Operator::ASAP(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+                Operator::ASAP(
+                    ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }
+                )
             ) || n.materialization != Materialization::NotMaterialized
         })
         .map(|n| (n.id, n.materialization))
@@ -621,7 +627,11 @@ fn check_summary_range_steps(
     readers: &[usize],
     entries: &[QueryWorkloadEntry],
 ) -> Result<(), PhysicalASAPOptimizationError> {
-    let Some(ASAPOp::PaneChain { pane_width_ms, .. }) = node.asap() else {
+    let Some(ASAPOp::SummaryTumblingWindowChain {
+        tumbling_window_width_ms,
+        ..
+    }) = node.asap()
+    else {
         return Ok(());
     };
     for &query in readers {
@@ -632,9 +642,9 @@ fn check_summary_range_steps(
         else {
             continue;
         };
-        if range.step_ms % pane_width_ms.max(&1) != 0 {
+        if range.step_ms % tumbling_window_width_ms.max(&1) != 0 {
             return Err(PhysicalASAPOptimizationError::PaneWidthOffRangeStep {
-                pane_width_ms: *pane_width_ms,
+                tumbling_window_width_ms: *tumbling_window_width_ms,
                 step_ms: range.step_ms,
             });
         }
@@ -650,11 +660,11 @@ fn root_operators(root: &QueryRoot) -> Vec<&Rc<OperatorNode>> {
     }
 }
 
-/// Whether `node` is a summary build (`SummaryAgg` or `PaneChain`).
+/// Whether `node` is a summary build (`SummaryAgg` or `SummaryTumblingWindowChain`).
 fn is_summary_build(node: &OperatorNode) -> bool {
     matches!(
         node.asap(),
-        Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+        Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
     )
 }
 
@@ -784,11 +794,11 @@ fn ingestion_eligibility(
     }
     let (family, chain_pane_width_ms) = match node.asap() {
         Some(ASAPOp::SummaryAgg { family, .. }) => (family, None),
-        Some(ASAPOp::PaneChain {
+        Some(ASAPOp::SummaryTumblingWindowChain {
             family,
-            pane_width_ms,
+            tumbling_window_width_ms,
             ..
-        }) => (family, Some(*pane_width_ms)),
+        }) => (family, Some(*tumbling_window_width_ms)),
         _ => unreachable!("a materialization candidate is a summary build"),
     };
     if matches!(
@@ -803,20 +813,21 @@ fn ingestion_eligibility(
             return Err(Why::CounterNeedsTimeOrder);
         }
     }
-    if let Some(pane_width_ms) = chain_pane_width_ms {
+    if let Some(tumbling_window_width_ms) = chain_pane_width_ms {
         // A chain's panes are built once each, on the grid anchored at the
         // epoch (the plan carries no pane origin): every reader of known
         // phase must evaluate on its boundaries. A reader of unknown phase
         // is taken to run on them (`builds_one_pane_per_evaluation`).
         let epoch_panes = PaneLayout {
-            pane_width_ms,
+            tumbling_window_width_ms,
             pane_origin_ms: Some(0),
         };
         for d in demands.iter().flatten() {
             let QueryRecurrence::Repeated(demand) = &d.recurrence else {
                 continue;
             };
-            let reader = plan_pane_phase(demand, pane_width_ms).map_err(|_| Why::PanesOffPhase)?;
+            let reader = plan_pane_phase(demand, tumbling_window_width_ms)
+                .map_err(|_| Why::PanesOffPhase)?;
             let Some(phase_ms) = reader.pane_origin_ms else {
                 if matches!(demand, RepeatedDemand::Scheduled(_)) {
                     // A schedule whose times are not all on one pane phase.
@@ -1595,7 +1606,7 @@ mod tests {
         let node = root_operators(&root)
             .into_iter()
             .flat_map(OperatorNode::reachable)
-            .find(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
+            .find(|node| matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })))
             .unwrap();
         let entries = vec![
             every_minute(),
@@ -1636,7 +1647,12 @@ mod tests {
             materialization_candidates(&[root], &entries, &data, query_time_results_retained);
         let original = candidates
             .iter()
-            .find(|candidate| matches!(candidate.node.asap(), Some(ASAPOp::PaneChain { .. })))
+            .find(|candidate| {
+                matches!(
+                    candidate.node.asap(),
+                    Some(ASAPOp::SummaryTumblingWindowChain { .. })
+                )
+            })
             .unwrap();
         assert_eq!(original.at_ingestion, selected.at_ingestion);
         assert_eq!(
@@ -1653,7 +1669,7 @@ mod tests {
         let node = root_operators(&root)
             .into_iter()
             .flat_map(OperatorNode::reachable)
-            .find(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
+            .find(|node| matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })))
             .unwrap();
         let at = |phase| QueryWorkloadEntry {
             recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
@@ -1776,7 +1792,7 @@ mod tests {
             .iter()
             .all(|n| n.output_state.timing == ExecutionTiming::QueryTime));
         assert_eq!(materialized(b1), [AT_INGESTION]);
-        let [chain] = &node_of(b1, "PaneChain")[..] else {
+        let [chain] = &node_of(b1, "SummaryTumblingWindowChain")[..] else {
             panic!("one chain")
         };
         assert_eq!(
@@ -1818,7 +1834,12 @@ mod tests {
             .unwrap();
             materialization_candidates(&implemented, &demands, &arriving(), false)
                 .into_iter()
-                .find(|c| matches!(c.node.asap(), Some(ASAPOp::PaneChain { .. })))
+                .find(|c| {
+                    matches!(
+                        c.node.asap(),
+                        Some(ASAPOp::SummaryTumblingWindowChain { .. })
+                    )
+                })
                 .expect("the chain is a materialization candidate")
                 .at_ingestion
         };
@@ -2128,7 +2149,7 @@ mod tests {
             matches!(
                 error,
                 PhysicalASAPOptimizationError::PaneWidthOffRangeStep {
-                    pane_width_ms: MINUTE,
+                    tumbling_window_width_ms: MINUTE,
                     step_ms: 30_000,
                 }
             ),

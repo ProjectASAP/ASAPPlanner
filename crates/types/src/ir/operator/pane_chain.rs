@@ -1,4 +1,4 @@
-//! Tumbling-pane window summaries: what an [`ASAPOp::PaneChain`] computes,
+//! Tumbling-pane window summaries: what an [`ASAPOp::SummaryTumblingWindowChain`] computes,
 //! as the plain `SummaryAgg` nodes it stands for.
 //!
 //! A chain of `n` panes of width `w` over `child` is pane `i` (newest first,
@@ -7,7 +7,7 @@
 //! state of one build over `TimeRange(n·w)` (`whole_window_build`) when
 //! the family merges (the family-capability table), and the executor runs
 //! the chain as its panes (`expand_pane_chains`). A merge of only the
-//! newest `m < n` panes (`SummaryMerge::newest_panes`) is the state of one
+//! newest `m < n` panes (`SummaryMerge::newest_tumbling_windows`) is the state of one
 //! build over `TimeRange(m·w)` ([`merged_window_build`]): one chain kept for
 //! the longest window serves every query whose window, on the same panes,
 //! ends at the same time and is shorter.
@@ -27,19 +27,26 @@ fn invalid(message: &str) -> SchemaDerivationError {
     SchemaDerivationError::InvalidScalarSignature(message.into())
 }
 
-/// The `PaneChain` a summary-state node carries merged: the chain itself,
+/// The `SummaryTumblingWindowChain` a summary-state node carries merged: the chain itself,
 /// or the one chain a `SummaryMerge` that keeps its groups reads, in full
 /// or its newest panes (`merged_pane_count`). `None` for any other node,
 /// a rollup (regrouping merge) included.
 pub fn merged_chain(state: &OperatorNode) -> Option<&OperatorNode> {
     match state.asap()? {
-        ASAPOp::PaneChain { .. } => Some(state),
+        ASAPOp::SummaryTumblingWindowChain { .. } => Some(state),
         ASAPOp::SummaryMerge {
             children,
             group_by: None,
             ..
         } => match children.as_slice() {
-            [child] if matches!(child.asap(), Some(ASAPOp::PaneChain { .. })) => Some(child),
+            [child]
+                if matches!(
+                    child.asap(),
+                    Some(ASAPOp::SummaryTumblingWindowChain { .. })
+                ) =>
+            {
+                Some(child)
+            }
             _ => None,
         },
         _ => None,
@@ -47,80 +54,93 @@ pub fn merged_chain(state: &OperatorNode) -> Option<&OperatorNode> {
 }
 
 /// How many of its chain's panes, newest first, a summary-state node with
-/// a [`merged_chain`] merges: the merge's `newest_panes`, otherwise the
-/// chain's `pane_count`. `None` for any other node.
+/// a [`merged_chain`] merges: the merge's `newest_tumbling_windows`, otherwise the
+/// chain's `tumbling_window_count`. `None` for any other node.
 fn merged_pane_count(state: &OperatorNode) -> Option<u32> {
-    let Some(ASAPOp::PaneChain { pane_count, .. }) = merged_chain(state)?.asap() else {
+    let Some(ASAPOp::SummaryTumblingWindowChain {
+        tumbling_window_count,
+        ..
+    }) = merged_chain(state)?.asap()
+    else {
         return None;
     };
     match state.asap()? {
         ASAPOp::SummaryMerge {
-            newest_panes: Some(newest),
+            newest_tumbling_windows: Some(newest),
             ..
         } => Some(*newest),
-        _ => Some(*pane_count),
+        _ => Some(*tumbling_window_count),
     }
 }
 
-/// The `SummaryAgg` over `TimeRange(pane_count · pane_width_ms)` over the
+/// The `SummaryAgg` over `TimeRange(tumbling_window_count · tumbling_window_width_ms)` over the
 /// chain's input whose state the merged panes of `chain` equal.
 pub(crate) fn whole_window_build(
     chain: &OperatorNode,
 ) -> Result<OperatorNode, SchemaDerivationError> {
-    let Some(ASAPOp::PaneChain { pane_count, .. }) = chain.asap() else {
+    let Some(ASAPOp::SummaryTumblingWindowChain {
+        tumbling_window_count,
+        ..
+    }) = chain.asap()
+    else {
         return Err(invalid("expected a pane chain"));
     };
-    newest_panes_build(chain, *pane_count)
+    newest_panes_build(chain, *tumbling_window_count)
 }
 
 /// The `SummaryAgg` whose state a summary-state node with a
 /// [`merged_chain`] carries: one build over the window of the panes it
 /// merges (`merged_pane_count`).
 pub fn merged_window_build(state: &OperatorNode) -> Result<OperatorNode, SchemaDerivationError> {
-    let (Some(chain), Some(pane_count)) = (merged_chain(state), merged_pane_count(state)) else {
+    let (Some(chain), Some(tumbling_window_count)) =
+        (merged_chain(state), merged_pane_count(state))
+    else {
         return Err(invalid("expected merged panes of one pane chain"));
     };
-    newest_panes_build(chain, pane_count)
+    newest_panes_build(chain, tumbling_window_count)
 }
 
-/// The `SummaryAgg` over `TimeRange(pane_count · pane_width_ms)` over the
-/// chain's input: the state of the chain's newest `pane_count` panes.
+/// The `SummaryAgg` over `TimeRange(tumbling_window_count · tumbling_window_width_ms)` over the
+/// chain's input: the state of the chain's newest `tumbling_window_count` panes.
 fn newest_panes_build(
     chain: &OperatorNode,
-    pane_count: u32,
+    tumbling_window_count: u32,
 ) -> Result<OperatorNode, SchemaDerivationError> {
-    let Some(ASAPOp::PaneChain {
+    let Some(ASAPOp::SummaryTumblingWindowChain {
         child,
-        pane_width_ms,
+        tumbling_window_width_ms,
         ..
     }) = chain.asap()
     else {
         return Err(invalid("expected a pane chain"));
     };
-    let window = pane_width_ms
-        .checked_mul(u64::from(pane_count))
+    let window = tumbling_window_width_ms
+        .checked_mul(u64::from(tumbling_window_count))
         .ok_or_else(|| invalid("pane chain window overflows"))?;
     build_over(chain, range(Rc::clone(child), window)?)
 }
 
 /// Pane `index` (0 = newest) of `chain`: its `SummaryAgg` over the range
-/// `TimeRange(pane_width_ms)` ending `index · pane_width_ms` before the
+/// `TimeRange(tumbling_window_width_ms)` ending `index · tumbling_window_width_ms` before the
 /// chain's input.
 pub(crate) fn pane(
     chain: &OperatorNode,
     index: u32,
 ) -> Result<OperatorNode, SchemaDerivationError> {
-    let Some(ASAPOp::PaneChain {
+    let Some(ASAPOp::SummaryTumblingWindowChain {
         child,
-        pane_width_ms,
+        tumbling_window_width_ms,
         ..
     }) = chain.asap()
     else {
         return Err(invalid("expected a pane chain"));
     };
-    let back = i64::try_from(pane_width_ms.saturating_mul(u64::from(index)))
+    let back = i64::try_from(tumbling_window_width_ms.saturating_mul(u64::from(index)))
         .map_err(|_| invalid("pane offset overflows"))?;
-    build_over(chain, range(shifted(child, back)?, *pane_width_ms)?)
+    build_over(
+        chain,
+        range(shifted(child, back)?, *tumbling_window_width_ms)?,
+    )
 }
 
 /// `child` evaluated `back_ms` earlier: one `TimeShift`, folded into a
@@ -176,7 +196,7 @@ fn build_over(
     chain: &OperatorNode,
     input: Rc<OperatorNode>,
 ) -> Result<OperatorNode, SchemaDerivationError> {
-    let Some(ASAPOp::PaneChain {
+    let Some(ASAPOp::SummaryTumblingWindowChain {
         family,
         input: update,
         reduction,
@@ -220,7 +240,7 @@ fn without_deadline(error: PaneChainExpansionError) -> SchemaDerivationError {
     }
 }
 
-/// `root` with every `PaneChain` expanded into its panes: a `SummaryMerge`
+/// `root` with every `SummaryTumblingWindowChain` expanded into its panes: a `SummaryMerge`
 /// reads each pane of each chain it read, newest first, as plain
 /// `SummaryAgg` nodes the executor runs; a merge of the newest `n` panes
 /// reads the first `n`, the same nodes a merge of the whole chain reads. Every other node keeps its
@@ -253,7 +273,7 @@ pub struct PaneChainExpansion {
     pub expanded_nodes: Vec<(Rc<OperatorNode>, Rc<OperatorNode>)>,
 }
 
-/// One expanded chain: the `PaneChain` node of the input workload and the
+/// One expanded chain: the `SummaryTumblingWindowChain` node of the input workload and the
 /// `SummaryAgg` panes that replace it.
 #[derive(Debug, Clone)]
 pub struct ExpandedPaneChain {
@@ -309,11 +329,14 @@ pub(crate) fn expand_pane_chains_in_workload_before(
         .chains
         .into_iter()
         .map(|chain| {
-            let pane_count = match chain.asap() {
-                Some(ASAPOp::PaneChain { pane_count, .. }) => *pane_count,
+            let tumbling_window_count = match chain.asap() {
+                Some(ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_count,
+                    ..
+                }) => *tumbling_window_count,
                 _ => unreachable!("only chains are recorded"),
             };
-            let panes = (0..pane_count)
+            let panes = (0..tumbling_window_count)
                 .map_while(|index| cache.pane_of.get(&(Rc::as_ptr(&chain), index)).cloned())
                 .collect();
             ExpandedPaneChain { chain, panes }
@@ -382,19 +405,22 @@ fn expand(
         return Ok(Rc::clone(done));
     }
     let out = match &node.operator {
-        Operator::ASAP(ASAPOp::PaneChain { .. }) => {
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
             return Err(invalid("a pane chain is read only through a summary merge").into())
         }
         Operator::ASAP(ASAPOp::SummaryMerge {
             children,
-            newest_panes,
+            newest_tumbling_windows,
             group_by,
         }) => {
             let mut inputs = Vec::new();
             for child in children {
                 match child.asap() {
-                    Some(ASAPOp::PaneChain { pane_count, .. }) => {
-                        for index in 0..newest_panes.unwrap_or(*pane_count) {
+                    Some(ASAPOp::SummaryTumblingWindowChain {
+                        tumbling_window_count,
+                        ..
+                    }) => {
+                        for index in 0..newest_tumbling_windows.unwrap_or(*tumbling_window_count) {
                             cache.check_deadline()?;
                             let key = (Rc::as_ptr(child), index);
                             if let Some(done) = cache.pane_of.get(&key) {
@@ -421,7 +447,7 @@ fn expand(
             }
             let merge = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
                 children: inputs,
-                newest_panes: None,
+                newest_tumbling_windows: None,
                 group_by: group_by.clone(),
             }))?;
             Rc::new(

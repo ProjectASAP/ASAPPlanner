@@ -49,7 +49,7 @@ every other logical candidate gets its own the same way (not counted).
 time, both kept. Not materializing it is the no-window plan, so it is not a
 separate option.
 
-**Today:** Pass 2 builds tumbling panes (`PaneChain`), and physical
+**Today:** Pass 2 builds tumbling panes (`SummaryTumblingWindowChain`), and physical
 ASAP-aware optimization enumerates `NotMaterialized`, `MatAtIngestion` and
 `MatAtQuery` (state reused within one evaluation) for every summary build.
 B1 and B2 exist. B3 (panes built at query time and kept across

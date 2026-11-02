@@ -122,7 +122,7 @@ fn sketch_options(dag: &impl ExportedDag, nodes: &HashSet<NodeId>) -> BTreeSet<Q
                     family: FieldDataType::Sketch(kind, grouping),
                     ..
                 }
-                | ASAPOp::PaneChain {
+                | ASAPOp::SummaryTumblingWindowChain {
                     family: FieldDataType::Sketch(kind, grouping),
                     ..
                 },
@@ -153,9 +153,12 @@ fn sketch_options(dag: &impl ExportedDag, nodes: &HashSet<NodeId>) -> BTreeSet<Q
 /// Whether every summary of `dag` is built over its whole window: no
 /// tumbling panes (Pass 2's window-composition rule).
 fn whole_windows(dag: &impl ExportedDag) -> bool {
-    dag.node_ids()
-        .into_iter()
-        .all(|id| !matches!(dag.payload(id), Operator::ASAP(ASAPOp::PaneChain { .. })))
+    dag.node_ids().into_iter().all(|id| {
+        !matches!(
+            dag.payload(id),
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+        )
+    })
 }
 
 fn roots(query_roots: &[NodeId]) -> (NodeId, NodeId) {
@@ -373,10 +376,10 @@ fn stage1_logical_asap_optimization_window_composition_adds_10s_tumbling_panes()
     let mut chains = BTreeSet::new();
     for c in &run.logical {
         for id in c.dag.node_ids() {
-            if let Operator::ASAP(ASAPOp::PaneChain {
+            if let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 family,
-                pane_width_ms,
-                pane_count,
+                tumbling_window_width_ms,
+                tumbling_window_count,
                 ..
             }) = c.dag.payload(id)
             {
@@ -386,7 +389,12 @@ fn stage1_logical_asap_optimization_window_composition_adds_10s_tumbling_panes()
                     other => panic!("{}: {other:?}", c.id),
                 };
                 let query = readers(&c.dag, &c.query_roots, id);
-                chains.insert((state, query, *pane_width_ms, *pane_count));
+                chains.insert((
+                    state,
+                    query,
+                    *tumbling_window_width_ms,
+                    *tumbling_window_count,
+                ));
             }
         }
     }
@@ -569,7 +577,8 @@ fn stage2_physical_asap_optimization_materializes_only_panes_at_ingestion() {
             match materialization(p, n.id) {
                 MaterializationOption::NotMaterialized => {}
                 MaterializationOption::MatAtIngestion => {
-                    let Operator::ASAP(ASAPOp::PaneChain { family, .. }) = p.dag().payload(n.id)
+                    let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { family, .. }) =
+                        p.dag().payload(n.id)
                     else {
                         panic!("{}: {:?} is not a pane chain", p.id, n.id)
                     };
@@ -620,7 +629,12 @@ fn stage2_physical_asap_optimization_materializes_only_panes_at_ingestion() {
                 .dag
                 .node_ids()
                 .into_iter()
-                .filter(|&id| matches!(c.dag.payload(id), Operator::ASAP(ASAPOp::PaneChain { .. })))
+                .filter(|&id| {
+                    matches!(
+                        c.dag.payload(id),
+                        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+                    )
+                })
                 .count();
             (1 << chains) + usize::from(c.shared_input())
         })

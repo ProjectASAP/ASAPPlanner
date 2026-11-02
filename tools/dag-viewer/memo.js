@@ -33,7 +33,7 @@ const MEMO_ORIGINS = {
   shared_build: { name: 'SharedBuild', color: '#2e9e6b' },
   summary_result: { name: 'SummaryResult', color: '#a36ad6' },
   summary_input: { name: 'SummaryInput', color: '#d0842a' },
-  panes: { name: 'Panes', color: '#d4524c' },
+  tumbling_windows: { name: 'TumblingWindows', color: '#d4524c' },
   rollup: { name: 'Rollup', color: '#1d9fb0' },
   top_k_reuse: { name: 'TopKReuse', color: '#b8931c' },
   widened_scans: { name: 'WidenedScans', color: '#848b98' },

@@ -376,9 +376,9 @@ fn producer_worker_buckets_remain_joint_choices_and_match_evaluator() {
         mode: Materialization,
     ) -> PhysicalCandidateId {
         let ingestion = ingestion
-            || (matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+            || (matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
                 && mode == Materialization::MatAtIngestion(Medium::Memory));
-        let pane = matches!(node.asap(), Some(ASAPOp::PaneChain { .. }));
+        let pane = matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }));
         let mut inputs = Vec::new();
         node.operator
             .map_children(|child| inputs.push(append(child.clone(), configured, ingestion, mode)));
@@ -462,7 +462,7 @@ fn producer_worker_buckets_remain_joint_choices_and_match_evaluator() {
     let chain = configured
         .nodes_for_tests()
         .iter()
-        .position(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
+        .position(|node| matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })))
         .unwrap();
     let raw_producer =
         configured.dag.candidates[chain].producer_candidates_per_input[0].candidates[0];

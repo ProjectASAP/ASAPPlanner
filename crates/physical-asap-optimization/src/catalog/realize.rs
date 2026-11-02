@@ -117,10 +117,11 @@ pub fn materialize_selected_candidates(
         })
         .collect::<Result<Vec<_>, String>>()?;
     let range_evaluations: Vec<_> = entries.iter().map(|entry| entry.range_evaluation).collect();
-    let pane_retention_ms = asap_cost::pane_retention_ms_of_plan(&physical.dag, &range_evaluations);
+    let tumbling_window_retention_ms =
+        asap_cost::tumbling_window_retention_ms_of_plan(&physical.dag, &range_evaluations);
     Ok(RealizedPlan {
         plan: physical,
-        pane_retention_ms,
+        tumbling_window_retention_ms,
         operator_node_of_selected_node,
     })
 }
@@ -353,6 +354,9 @@ mod tests {
             direct.operator_node_of_selected_node,
             through_trait.operator_node_of_selected_node
         );
-        assert_eq!(direct.pane_retention_ms, through_trait.pane_retention_ms);
+        assert_eq!(
+            direct.tumbling_window_retention_ms,
+            through_trait.tumbling_window_retention_ms
+        );
     }
 }

@@ -773,7 +773,10 @@ fn accuracy_baseline(
                     configured.physical.candidates[id].timing
                         == asap_types::ir::properties::ExecutionTiming::QueryTime
                 } else {
-                    matches!(configured.node(id).asap(), Some(ASAPOp::PaneChain { .. }))
+                    matches!(
+                        configured.node(id).asap(),
+                        Some(ASAPOp::SummaryTumblingWindowChain { .. })
+                    )
                 })
             .then_some(cost)
         })
@@ -844,7 +847,7 @@ fn accuracy_baseline(
                         != asap_types::physical::Materialization::NotMaterialized
                     && !matches!(
                         node.asap(),
-                        Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+                        Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
                     );
             let projected_raw_source = raw_source_groups
                 .contains(&configured.physical.memo_group_of(asap_types::stages::PhysicalCandidateId(id)))
@@ -858,7 +861,7 @@ fn accuracy_baseline(
             let unknown_work_priority = if context.models.accuracy.may_accept_regardless_of_guarantee()
                 && configured.physical.candidates[id].timing
                     == asap_types::ir::properties::ExecutionTiming::QueryTime
-                && matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+                && matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
                 && proposal_costs[id] == 0.0
             {
                 preference * preference
@@ -911,10 +914,10 @@ fn retained_pane_priority_cost(
     let Materialization::MatAtIngestion(medium) = configuration.materialization else {
         return 0.0;
     };
-    let Some(ASAPOp::PaneChain {
+    let Some(ASAPOp::SummaryTumblingWindowChain {
         family,
-        pane_width_ms,
-        pane_count,
+        tumbling_window_width_ms,
+        tumbling_window_count,
         reduction,
         child,
         ..
@@ -948,7 +951,7 @@ fn retained_pane_priority_cost(
             .max(1),
     };
     let rows_per_state = asap_types::workload::bounds::source_rows_per_ms(&sources, context.data)
-        .map(|rate| (rate * *pane_width_ms as f64 / groups as f64).ceil() as u64);
+        .map(|rate| (rate * *tumbling_window_width_ms as f64 / groups as f64).ceil() as u64);
     let non_negative = matches!(
         child.non_asap(),
         Some(NonASAPOp::Scan { .. } | NonASAPOp::TimeRange { .. })
@@ -962,7 +965,7 @@ fn retained_pane_priority_cost(
             non_negative,
         },
     );
-    let cost = price * bytes as f64 * groups as f64 * (f64::from(*pane_count) + 1.0);
+    let cost = price * bytes as f64 * groups as f64 * (f64::from(*tumbling_window_count) + 1.0);
     if cost.is_finite() {
         cost
     } else {
@@ -1247,7 +1250,7 @@ mod tests {
                 Materialization::MatAtQuery(_)
             ) && !matches!(
                 configured.node(id).asap(),
-                Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+                Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
             ) {
                 configured.dag.reader_constraints.push(
                     crate::search::candidates::dag::ReaderConstraint::AllowedOutputs {
@@ -1392,9 +1395,9 @@ mod tests {
             .nodes_for_tests()
             .iter()
             .map(|node| {
-                OperatorNode::reachable(node)
-                    .iter()
-                    .any(|node| matches!(node.asap(), Some(ASAPOp::PaneChain { .. })))
+                OperatorNode::reachable(node).iter().any(|node| {
+                    matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
+                })
             })
             .collect();
         configured.dag.query_roots[0]
@@ -1409,7 +1412,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(id, node)| {
-                !matches!(node.asap(), Some(ASAPOp::PaneChain { .. }))
+                !matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. }))
                     || configured.physical.candidates[id].timing == ExecutionTiming::IngestionTime
             })
             .collect();
@@ -1928,21 +1931,22 @@ mod tests {
             Some(NonASAPOp::TimeRange { child, .. }) => child,
             _ => child,
         };
-        for (id, (pane_width_ms, pane_count)) in [(1000, 1200), (1000, 60), (30000, 40)]
-            .into_iter()
-            .enumerate()
+        for (id, (tumbling_window_width_ms, tumbling_window_count)) in
+            [(1000, 1200), (1000, 60), (30000, 40)]
+                .into_iter()
+                .enumerate()
         {
             configured.set_node_for_tests(
                 id,
-                OperatorNode::new_shared(Operator::ASAP(ASAPOp::PaneChain {
+                OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                     child: child.clone(),
                     family: family.clone(),
                     input: input.clone(),
                     reduction: reduction.clone(),
                     grouping: grouping.clone(),
                     filter: filter.clone(),
-                    pane_width_ms,
-                    pane_count,
+                    tumbling_window_width_ms,
+                    tumbling_window_count,
                 }))
                 .unwrap(),
             );
@@ -2155,7 +2159,7 @@ mod tests {
         for (id, configuration) in configured.physical.candidates.iter().enumerate() {
             if matches!(
                 configured.node(id).asap(),
-                Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+                Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
             ) && !matches!(
                 configuration.materialization,
                 Materialization::MatAtIngestion(_)

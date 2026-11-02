@@ -44,11 +44,11 @@ Implemented:
   population, including membership changes.
 - `EvaluatePopulation { child, evaluation }`: read an aggregate or TopK prefix from a
   maintained population.
-- `SummaryMerge { children, newest_panes, group_by }`: merge summary states with identical
+- `SummaryMerge { children, newest_tumbling_windows, group_by }`: merge summary states with identical
   schemas (same family, parameters and grouping) into the state of their
   union; its coverage check rejects inputs whose selections overlap. With
   `group_by` (a rollup) the output is keyed by those input group columns, and
-  each output state merges the input states of its key; `newest_panes`
+  each output state merges the input states of its key; `newest_tumbling_windows`
   merges only the newest panes of one pane chain, never with `group_by`. The timing pass does
   not place it yet (`ExecutionDataStateError::UnimplementedOperator`).
 

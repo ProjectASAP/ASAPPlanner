@@ -55,7 +55,7 @@ pub enum OriginOfCandidateForMemoGroup {
     /// Canonical value preprocessing feeding a summary build.
     SummaryInput,
     /// Tumbling panes, or the newest panes of another group's chain.
-    Panes,
+    TumblingWindows,
     /// A coarse group regrouping a finer group.
     Rollup,
     /// A top-k read from another group's ranking.

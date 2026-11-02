@@ -44,7 +44,7 @@
   }
 
   // Per lane: what it draws (to redraw it with a pane chain expanded or
-  // collapsed) and its elements; per drawn DAG, the PaneChain node ids drawn
+  // collapsed) and its elements; per drawn DAG, the SummaryTumblingWindowChain node ids drawn
   // as panes, so switching plans and back keeps each plan's expanded chains.
   const drawn = [null, null, null];
   const laneElements = [[], [], []];
@@ -75,7 +75,7 @@
 
   function redraw(i) { const d = drawn[i]; render(i, d.dag, d.physical, d.costPerNode, d.ids); }
 
-  // A PaneChain expands into its panes; a pane collapses its chain; any
+  // A SummaryTumblingWindowChain expands into its panes; a pane collapses its chain; any
   // other node is shown and its upstream and downstream highlighted.
   function tapNode(d, i) {
     if (d.expandable) { expandedOf(drawn[i].dag).add(d.nodeId); redraw(i); showNode(d, i); return; }
@@ -121,8 +121,8 @@
     }
     if (d.rootFor && d.rootFor.length) items.push(['query root of', d.rootFor.join(', ')]);
     if (d.reachedBy) items.push(['queries reaching it', d.reachedBy.join(', ') || 'none']);
-    if (d.paneOf !== undefined) items.push(['pane', `${d.pane + 1} of ${body.pane_count} of PaneChain ${d.paneOf}, window ${paneWindowText(d.pane, body.pane_width_ms)}`]);
-    if (d.expandable) items.push(['panes', `${body.pane_count} × ${durationText(body.pane_width_ms)} (click the chain to show them, a pane to hide them)`]);
+    if (d.paneOf !== undefined) items.push(['pane', `${d.pane + 1} of ${body.tumbling_window_count} of SummaryTumblingWindowChain ${d.paneOf}, window ${paneWindowText(d.pane, body.tumbling_window_width_ms)}`]);
+    if (d.expandable) items.push(['panes', `${body.tumbling_window_count} × ${durationText(body.tumbling_window_width_ms)} (click the chain to show them, a pane to hide them)`]);
     if (d.timing !== undefined) items.push(['runs at', formatTiming(d.timing)]);
     if (n.materialization) items.push(['materialization', compactWire(n.materialization)]);
     if (n.output_state && n.output_state.primitive) items.push(['output primitive', compactWire(n.output_state.primitive)]);
@@ -250,6 +250,7 @@
 
   // Show one stage document; `source` names it, `story` explains it.
   function showDocument(data, source, story) {
+    upgradeTumblingWindowNames(data);
     const errors = validateStagePipeline(data).concat(validateMemoEnumeration(data));
     if (!errors.length && typeof validateMemo === 'function') errors.push(...validateMemo(data.memo, data.workload.queries.length));
     if (errors.length) throw new Error(errors.slice(0, 3).join('; '));

@@ -126,12 +126,12 @@ impl TemplateCatalog {
         };
         let lookback = match node.asap() {
             // Query-time construction reads all panes' source rows. Reuse the
-            // compact PaneChain formula in asap_cost::node_usage without expanding panes.
-            Some(ASAPOp::PaneChain {
-                pane_width_ms,
-                pane_count,
+            // compact SummaryTumblingWindowChain formula in asap_cost::node_usage without expanding panes.
+            Some(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                tumbling_window_count,
                 ..
-            }) => Some(pane_width_ms.checked_mul(u64::from(*pane_count))?),
+            }) => Some(tumbling_window_width_ms.checked_mul(u64::from(*tumbling_window_count))?),
             _ => lookback,
         };
         let key = (Rc::as_ptr(node), lookback);
@@ -315,16 +315,18 @@ mod tests {
         let Some(NonASAPOp::TimeRange { child: source, .. }) = child.non_asap() else {
             unreachable!()
         };
-        let pane = OperatorNode::new_shared(asap_types::ir::Operator::ASAP(ASAPOp::PaneChain {
-            child: Rc::clone(source),
-            family: family.clone(),
-            input: input.clone(),
-            reduction: reduction.clone(),
-            grouping: grouping.clone(),
-            filter: filter.clone(),
-            pane_width_ms: 1000,
-            pane_count: 300,
-        }))
+        let pane = OperatorNode::new_shared(asap_types::ir::Operator::ASAP(
+            ASAPOp::SummaryTumblingWindowChain {
+                child: Rc::clone(source),
+                family: family.clone(),
+                input: input.clone(),
+                reduction: reduction.clone(),
+                grouping: grouping.clone(),
+                filter: filter.clone(),
+                tumbling_window_width_ms: 1000,
+                tumbling_window_count: 300,
+            },
+        ))
         .unwrap();
         configured.set_node_for_tests(pane_id, pane);
         let pane_estimates = estimate_costs(&configured, &context);

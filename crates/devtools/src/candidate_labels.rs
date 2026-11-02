@@ -55,7 +55,7 @@ fn connected_candidate_label(roots: &[QueryRoot]) -> String {
                 }
                 if matches!(
                     node.asap(),
-                    Some(ASAPOp::SummaryAgg { .. } | ASAPOp::PaneChain { .. })
+                    Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
                 ) {
                     let name = build_label(&node.operator);
                     if !states.contains(&name) {
@@ -157,17 +157,17 @@ pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String
         let label = match &node.payload {
             // Name the chain: chains of one family and pane count differ by
             // their readers and pane width.
-            Operator::ASAP(ASAPOp::PaneChain {
-                pane_width_ms,
-                pane_count,
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                tumbling_window_count,
                 ..
             }) => format!(
-                "{}, {pane_count} × {} panes",
+                "{}, {tumbling_window_count} × {} panes",
                 for_queries(
                     state_label(&node.payload),
                     &dag_readers(&candidate.dag, *id)
                 ),
-                duration_name(*pane_width_ms)
+                duration_name(*tumbling_window_width_ms)
             ),
             payload => build_label(payload),
         };
@@ -189,8 +189,11 @@ pub fn physical_label(logical: &str, candidate: &PhysicalWorkloadPlan) -> String
 /// A summary build, e.g. "Kll ×5 panes" or "Sum acc".
 fn build_label<C>(payload: &Operator<C>) -> String {
     match payload {
-        Operator::ASAP(ASAPOp::PaneChain { pane_count, .. }) => {
-            format!("{} ×{pane_count} panes", state_label(payload))
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            tumbling_window_count,
+            ..
+        }) => {
+            format!("{} ×{tumbling_window_count} panes", state_label(payload))
         }
         _ => state_label(payload),
     }
@@ -200,13 +203,13 @@ fn build_label<C>(payload: &Operator<C>) -> String {
 /// any other operator's kind.
 fn state_label<C>(payload: &Operator<C>) -> String {
     match payload {
-        Operator::ASAP(ASAPOp::SummaryAgg { family, .. } | ASAPOp::PaneChain { family, .. }) => {
-            match family {
-                FieldDataType::Sketch(kind, _) => sketch_name(kind.algorithm()),
-                FieldDataType::ExactAggregate(kind, _) => format!("{kind:?} acc"),
-                _ => payload.kind_name().to_string(),
-            }
-        }
+        Operator::ASAP(
+            ASAPOp::SummaryAgg { family, .. } | ASAPOp::SummaryTumblingWindowChain { family, .. },
+        ) => match family {
+            FieldDataType::Sketch(kind, _) => sketch_name(kind.algorithm()),
+            FieldDataType::ExactAggregate(kind, _) => format!("{kind:?} acc"),
+            _ => payload.kind_name().to_string(),
+        },
         _ => payload.kind_name().to_string(),
     }
 }
@@ -382,7 +385,7 @@ mod tests {
                                     .find(|n| n.id == **id)
                                     .unwrap()
                                     .payload,
-                                Operator::ASAP(ASAPOp::PaneChain { .. })
+                                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
                             )
                     })
                     .count()

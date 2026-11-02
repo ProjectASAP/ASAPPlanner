@@ -143,8 +143,12 @@ fn price_choice(
     };
     match reference_select(&physical, entries, data, models) {
         Ok(selection) => {
-            match installable_plan_of(&selection.plan, None, &selection.pane_retention_ms, entries)
-            {
+            match installable_plan_of(
+                &selection.plan,
+                None,
+                &selection.tumbling_window_retention_ms,
+                entries,
+            ) {
                 // A standalone scalar query, which a runtime cannot answer yet,
                 // does not depend on the choice.
                 Ok(_) | Err(InstallablePlanError::UnsupportedQueryRoot { .. }) => PricedChoice {

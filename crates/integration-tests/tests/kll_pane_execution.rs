@@ -111,7 +111,7 @@ fn fixture() -> Fixture {
         .collect();
     let merge = new(asap_types::ir::Operator::ASAP(ASAPOp::SummaryMerge {
         children: panes.clone(),
-        newest_panes: None,
+        newest_tumbling_windows: None,
         group_by: None,
     }));
     let estimate = |q| {
@@ -308,7 +308,7 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
     )
     .unwrap();
     let layout = asap_physical_asap_optimization::test_support::PaneLayout {
-        pane_width_ms: 60_000,
+        tumbling_window_width_ms: 60_000,
         pane_origin_ms: Some(0),
     };
     assert!(

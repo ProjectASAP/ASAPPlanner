@@ -472,12 +472,14 @@ fn stage1_logical_asap_optimization_b_window_composition_adds_tumbling_per_merge
                     .any(|p| is_merge(c.dag.payload(p)))
             });
             assert_eq!(merged, form != WindowForm::None, "{}: {form:?}", c.id);
-            if let asap_types::ir::Operator::ASAP(asap_types::ir::ASAPOp::PaneChain {
-                pane_count,
-                ..
-            }) = c.dag.payload(build)
+            if let asap_types::ir::Operator::ASAP(
+                asap_types::ir::ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_count,
+                    ..
+                },
+            ) = c.dag.payload(build)
             {
-                assert_eq!(*pane_count, 5, "{}", c.id);
+                assert_eq!(*tumbling_window_count, 5, "{}", c.id);
             }
             found.insert((format!("{algorithm:?}"), form));
         }

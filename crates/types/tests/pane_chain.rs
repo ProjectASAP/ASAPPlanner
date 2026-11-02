@@ -1,4 +1,4 @@
-//! A `PaneChain` of tumbling panes stands for its panes: it covers what one
+//! A `SummaryTumblingWindowChain` of tumbling panes stands for its panes: it covers what one
 //! build over its whole window does, and expands into the `SummaryAgg`
 //! panes the executor runs (#509 Pass 2, window-composition rule).
 use std::ops::Bound;
@@ -59,15 +59,15 @@ fn kll() -> FieldDataType {
 
 /// Five 1-min KLL panes per series over `input`.
 fn chain(input: Rc<OperatorNode>) -> Rc<OperatorNode> {
-    OperatorNode::new_shared(Operator::ASAP(ASAPOp::PaneChain {
+    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child: input,
         family: kll(),
         input: SummaryUpdate::column(ColumnRef::SampleValue),
         reduction: Reduction::PerEntity,
         grouping: GroupingStrategy::default(),
         filter: None,
-        pane_width_ms: MINUTE,
-        pane_count: 5,
+        tumbling_window_width_ms: MINUTE,
+        tumbling_window_count: 5,
     }))
     .unwrap()
 }
@@ -75,7 +75,7 @@ fn chain(input: Rc<OperatorNode>) -> Rc<OperatorNode> {
 fn merge(children: Vec<Rc<OperatorNode>>) -> Rc<OperatorNode> {
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children,
-        newest_panes: None,
+        newest_tumbling_windows: None,
         group_by: None,
     }))
     .unwrap()
@@ -222,18 +222,18 @@ fn a_chain_reads_an_instant_vector() {
     }))
     .unwrap();
     assert!(chain(ranged).validate_structure().is_err());
-    let Some(ASAPOp::PaneChain { .. }) = chain(scan()).asap() else {
+    let Some(ASAPOp::SummaryTumblingWindowChain { .. }) = chain(scan()).asap() else {
         unreachable!()
     };
-    let empty = OperatorNode::new_shared(Operator::ASAP(ASAPOp::PaneChain {
+    let empty = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child: scan(),
         family: kll(),
         input: SummaryUpdate::column(ColumnRef::SampleValue),
         reduction: Reduction::PerEntity,
         grouping: GroupingStrategy::default(),
         filter: None,
-        pane_width_ms: MINUTE,
-        pane_count: 0,
+        tumbling_window_width_ms: MINUTE,
+        tumbling_window_count: 0,
     }))
     .unwrap();
     assert!(empty.validate_structure().is_err());
@@ -263,10 +263,10 @@ fn merges_over_one_chain_share_its_panes() {
     assert!(first.iter().zip(&second).all(|(a, b)| Rc::ptr_eq(a, b)));
 }
 
-fn newest(chain: Rc<OperatorNode>, newest_panes: u32) -> Rc<OperatorNode> {
+fn newest(chain: Rc<OperatorNode>, newest_tumbling_windows: u32) -> Rc<OperatorNode> {
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children: vec![chain],
-        newest_panes: Some(newest_panes),
+        newest_tumbling_windows: Some(newest_tumbling_windows),
         group_by: None,
     }))
     .unwrap()
@@ -293,13 +293,13 @@ fn a_merge_of_the_newest_panes_covers_their_window() {
     );
 }
 
-/// `newest_panes` must name between 1 and fewer than all panes of the one
+/// `newest_tumbling_windows` must name between 1 and fewer than all panes of the one
 /// chain the merge reads; anything else is rejected.
 #[test]
 fn a_merge_of_the_newest_panes_reads_one_chain_and_fewer_than_all_panes() {
     let chain = chain(scan());
     let build = whole_window_build(&chain).unwrap();
-    for (children, newest_panes) in [
+    for (children, newest_tumbling_windows) in [
         (vec![Rc::clone(&chain)], 0),
         (vec![Rc::clone(&chain)], 5),
         (vec![Rc::clone(&chain)], 6),
@@ -308,10 +308,10 @@ fn a_merge_of_the_newest_panes_reads_one_chain_and_fewer_than_all_panes() {
     ] {
         let merge = OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
             children,
-            newest_panes: Some(newest_panes),
+            newest_tumbling_windows: Some(newest_tumbling_windows),
             group_by: None,
         }));
-        assert!(merge.is_err(), "newest {newest_panes}");
+        assert!(merge.is_err(), "newest {newest_tumbling_windows}");
     }
 }
 
@@ -348,22 +348,22 @@ fn a_merge_of_the_newest_panes_reads_the_first_panes_of_the_chain() {
     }
 }
 
-/// `newest_panes` is left out of the JSON when `None`, and JSON without it
+/// `newest_tumbling_windows` is left out of the JSON when `None`, and JSON without it
 /// reads as `None`; `Some(n)` round-trips.
 #[test]
 fn newest_panes_serializes_only_when_set() {
     let full: ASAPOp<()> = ASAPOp::SummaryMerge {
         children: vec![()],
-        newest_panes: None,
+        newest_tumbling_windows: None,
         group_by: None,
     };
     let json = serde_json::to_string(&full).unwrap();
-    assert!(!json.contains("newest_panes"), "{json}");
+    assert!(!json.contains("newest_tumbling_windows"), "{json}");
     let read: ASAPOp<()> = serde_json::from_str(r#"{"SummaryMerge":{"children":[null]}}"#).unwrap();
     assert_eq!(read, full);
     let partial: ASAPOp<()> = ASAPOp::SummaryMerge {
         children: vec![()],
-        newest_panes: Some(6),
+        newest_tumbling_windows: Some(6),
         group_by: None,
     };
     let json = serde_json::to_string(&partial).unwrap();
@@ -380,7 +380,7 @@ fn expansion_keeps_a_rollup_of_the_panes() {
     let rollup = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children: vec![Rc::clone(&chain)],
         group_by: Some(vec![]),
-        newest_panes: None,
+        newest_tumbling_windows: None,
     }))
     .unwrap();
     assert!(merged_chain(&rollup).is_none());
@@ -402,7 +402,7 @@ fn expansion_keeps_a_rollup_of_the_panes() {
     // panes, it is not one.
     assert!(OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
         children: vec![chain],
-        newest_panes: Some(2),
+        newest_tumbling_windows: Some(2),
         group_by: Some(vec![]),
     }))
     .is_err());
@@ -415,7 +415,7 @@ fn expansion_keeps_a_rollup_of_the_panes() {
 fn a_rollup_of_the_newest_panes_covers_their_window() {
     let rollup = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
         children: vec![newest(chain(scan()), 2)],
-        newest_panes: None,
+        newest_tumbling_windows: None,
         group_by: Some(vec![]),
     }))
     .unwrap();
@@ -440,16 +440,16 @@ fn fine_pane_expansion_stops_at_the_planning_deadline() {
     use asap_types::test_support::expand_pane_chains_in_workload_before;
     use std::time::Instant;
     let mut op = chain(scan()).operator.clone();
-    let Operator::ASAP(ASAPOp::PaneChain {
-        pane_width_ms,
-        pane_count,
+    let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+        tumbling_window_width_ms,
+        tumbling_window_count,
         ..
     }) = &mut op
     else {
         unreachable!()
     };
-    *pane_width_ms = 1;
-    *pane_count = 1_000_000;
+    *tumbling_window_width_ms = 1;
+    *tumbling_window_count = 1_000_000;
     let roots = [QueryRoot::Operator(merge(vec![OperatorNode::new_shared(
         op,
     )
@@ -490,4 +490,30 @@ fn budgeted_expansion_preserves_every_pane_and_shared_reader() {
         .iter()
         .zip(second.children())
         .all(|(a, b)| Rc::ptr_eq(a, b)));
+}
+
+/// JSON written before #1163 names the chain `PaneChain`, its fields
+/// `pane_width_ms` and `pane_count`, and a merge's `newest_panes`; it reads
+/// as today's operators.
+#[test]
+fn names_before_the_tumbling_window_rename_still_read() {
+    let chain = chain(scan()).operator.map_children(|_| ());
+    let merge: Operator<()> = Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![()],
+        newest_tumbling_windows: Some(3),
+        group_by: None,
+    });
+    for operator in [chain, merge] {
+        let old = serde_json::to_string(&operator)
+            .unwrap()
+            .replace("SummaryTumblingWindowChain", "PaneChain")
+            .replace("tumbling_window_width_ms", "pane_width_ms")
+            .replace("tumbling_window_count", "pane_count")
+            .replace("newest_tumbling_windows", "newest_panes");
+        assert!(!old.contains("umbling"), "{old}");
+        assert_eq!(
+            serde_json::from_str::<Operator<()>>(&old).unwrap(),
+            operator
+        );
+    }
 }

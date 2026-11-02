@@ -275,7 +275,7 @@ lists each stage's input and output types.
 | DAG of logical memo groups | `DagOfLogicalMemoGroups` | Stage 0's groups, before any implementation choice: the workload's logical DAG hash-consed (below). |
 | Memo candidates | `MemoCandidates` | The groups, and the candidates for each memo group (`candidates[group]`). Pass 1 creates it from the DAG of logical memo groups; the Pass 2 rules add candidates and groups. |
 | Candidate for a memo group | `CandidateForMemoGroup` | One way to implement a group over child groups. `fused_groups`: for a fused computation, the groups it absorbs beyond the group whose candidate it is; empty otherwise. `root_node`: its own nodes, down to the nodes of the groups it reads. `input_groups`: the groups it reads, whose implementations are chosen separately. `origin`: the rule that made it (`OriginOfCandidateForMemoGroup`, below). `accuracy_budget_parts`: the number of equal shares of the accuracy budget its summaries are sized for, 1 for the whole budget and `n` when it is one of `n` approximate inputs of a query. |
-| Concrete summary-state group | a `MemoGroup` whose node is a `SummaryAgg` or a `PaneChain` | One summary state at one size, or one pane chain at one layout, that several readers may share. A choice several groups depend on, such as a shared size or a pane grid, is one concrete group per value, when two or more readers may read that value, and each of them gets a candidate reading that group: of two readers needing a KLL with `k ≥ 345` and `k ≥ 200`, both may read a group `KLL(345)`, and the second may also keep its own private `KLL(200)`. Choosing a value is choosing a group, so the memo has no separate type for such a choice. The other Pass 2 rules add groups too (below). |
+| Concrete summary-state group | a `MemoGroup` whose node is a `SummaryAgg` or a `SummaryTumblingWindowChain` | One summary state at one size, or one pane chain at one layout, that several readers may share. A choice several groups depend on, such as a shared size or a pane grid, is one concrete group per value, when two or more readers may read that value, and each of them gets a candidate reading that group: of two readers needing a KLL with `k ≥ 345` and `k ≥ 200`, both may read a group `KLL(345)`, and the second may also keep its own private `KLL(200)`. Choosing a value is choosing a group, so the memo has no separate type for such a choice. The other Pass 2 rules add groups too (below). |
 
 **Stage 0: hash-consing.** Hash-consing merges structurally equal nodes into
 one. It makes no implementation choice, so this section counts it as Stage 0
@@ -395,7 +395,7 @@ all; the memo has 259 candidates.
 **Step 4, the other Pass 2 rules and the concrete summary-state groups**
 (rules 2–9 of `generate_logical_asap_memo_candidates`, then
 `add_shared_summary_state_groups`):
-- 354 groups: the 7 above; 336 `PaneChain` groups (7 summary configurations
+- 354 groups: the 7 above; 336 `SummaryTumblingWindowChain` groups (7 summary configurations
   × 48 pane layouts, with pane widths from 20 ms to 60 s); 7 `SummaryAgg`
   state groups (the 6 summaries above and a KLL with `k` 1156,
   `failure_probability` 1e-7); 2 `SummaryAgg` groups for G6's sum and count
@@ -471,7 +471,7 @@ that vector.
 | Reason | Effect on the count | In the example |
 |---|---|---|
 | Shared group | A group several chosen candidates read takes one candidate per choice, not one per reader. | G1 is read by G2 and G4 and chosen once. |
-| Group needed only under some choices | A group joins the choice only when a chosen candidate reads it. | A `PaneChain` group is needed only when a `SharedBuild` candidate reading it is chosen; a choice of `Pass1` candidates needs none of the 347 added groups. |
+| Group needed only under some choices | A group joins the choice only when a chosen candidate reads it. | A `SummaryTumblingWindowChain` group is needed only when a `SharedBuild` candidate reading it is chosen; a choice of `Pass1` candidates needs none of the 347 added groups. |
 | Fused candidate | The groups a fused candidate implements are computed inside it and never become pending. | None (the example has no fused computation). |
 
 In Pass 1 of the example the count happens to be a product, 7 × 7,
@@ -1112,7 +1112,7 @@ flowchart TB
 ```
 
 The planner implements a subset of the window-composition rule today:
-`Tumbling(L)` only, as a `PaneChain` (one node for all its panes) read
+`Tumbling(L)` only, as a `SummaryTumblingWindowChain` (one node for all its panes) read
 through a `SummaryMerge`, with `L = gcd(W_q, E_q)` for each query. Two or
 more queries share one chain when their builds have the same family (at any
 size), the same summary input data and the same output column names, and
@@ -1127,7 +1127,7 @@ any, pays; no pane-count limit is imposed beyond the pane count fitting in
 32 bits. The chain covers the longest window and is sized
 for all of them, each parameter at its largest value among them, as the
 summary-capability rule sizes a shared build. Each query merges only the
-newest panes covering its own window (`SummaryMerge.newest_panes`), since a
+newest panes covering its own window (`SummaryMerge.newest_tumbling_windows`), since a
 shorter window ending at the same time is the newest part of the longest.
 For example, `quantile_over_time(0.5, m[1m])` and
 `quantile_over_time(0.9, m[5m])`, both every 10 s, read one chain of thirty
@@ -1205,7 +1205,7 @@ the `DataWorkload`. Typical outcomes:
 A shared summary is materialized once for all its consumers. See Example 4.
 
 The planner implements a subset of these options today. Stage 2 enumerates
-materialization for summary builds (`SummaryAgg` and `PaneChain`); each
+materialization for summary builds (`SummaryAgg` and `SummaryTumblingWindowChain`); each
 gets `NotMaterialized`, `MatAtIngestion(Memory)` when it is eligible to run
 at ingestion time, and `MatAtQuery(Memory)` when two or more queries read
 it. Of every other sub-DAG that two or more queries read (for example a

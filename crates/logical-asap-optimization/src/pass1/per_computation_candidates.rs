@@ -3872,22 +3872,22 @@ mod tests {
             panic!("{summary_input:?}")
         };
         let chain = Rc::new(
-            OperatorNode::new(Operator::ASAP(ASAPOp::PaneChain {
+            OperatorNode::new(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 child: Rc::clone(range.children()[0]),
                 family: family.clone(),
                 input: input.clone(),
                 reduction: reduction.clone(),
                 grouping: grouping.clone(),
                 filter: filter.clone(),
-                pane_width_ms: 10_000,
-                pane_count: 10,
+                tumbling_window_width_ms: 10_000,
+                tumbling_window_count: 10,
             }))
             .unwrap(),
         );
         let merged = Rc::new(
             OperatorNode::new(Operator::ASAP(ASAPOp::SummaryMerge {
                 children: vec![chain],
-                newest_panes: None,
+                newest_tumbling_windows: None,
                 group_by: None,
             }))
             .unwrap(),

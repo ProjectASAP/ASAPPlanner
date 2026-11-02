@@ -425,7 +425,7 @@ mod tests {
                         == asap_types::ir::properties::AccuracyMetric::Rank
             }) {
                 100_000.0
-            } else if matches!(node.asap(), Some(ASAPOp::PaneChain { .. })) {
+            } else if matches!(node.asap(), Some(ASAPOp::SummaryTumblingWindowChain { .. })) {
                 1000.0
             } else {
                 1.0
@@ -439,7 +439,12 @@ mod tests {
         let chains: Vec<_> = selected
             .selected_candidates
             .iter()
-            .filter(|id| matches!(configured.node(id.0).asap(), Some(ASAPOp::PaneChain { .. })))
+            .filter(|id| {
+                matches!(
+                    configured.node(id.0).asap(),
+                    Some(ASAPOp::SummaryTumblingWindowChain { .. })
+                )
+            })
             .collect();
         assert_eq!(chains.len(), 1);
         let chain = configured.node(chains[0].0);
@@ -464,9 +469,9 @@ mod tests {
         .unwrap();
         physical.plan.dag.validate().unwrap();
         if let Some(window_ms) = newest_window_ms {
-            let Some(ASAPOp::PaneChain {
-                pane_width_ms,
-                pane_count,
+            let Some(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                tumbling_window_count,
                 ..
             }) = chain.asap()
             else {
@@ -475,8 +480,8 @@ mod tests {
             // The complete width domain permits different pane counts. Verify
             // the short reader's coverage, not one traversal-dependent width.
             assert!(physical.plan.dag.nodes.iter().any(|node| matches!(
-                node.payload, asap_types::ir::Operator::ASAP(ASAPOp::SummaryMerge {newest_panes: Some(count), ..})
-                    if u64::from(count) * pane_width_ms == window_ms && count < *pane_count
+                node.payload, asap_types::ir::Operator::ASAP(ASAPOp::SummaryMerge {newest_tumbling_windows: Some(count), ..})
+                    if u64::from(count) * tumbling_window_width_ms == window_ms && count < *tumbling_window_count
             )));
         }
 
@@ -508,7 +513,7 @@ mod tests {
                 .iter()
                 .filter(|node| matches!(
                     node.payload,
-                    asap_types::ir::Operator::ASAP(ASAPOp::PaneChain { .. })
+                    asap_types::ir::Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
                 ))
                 .count(),
             1

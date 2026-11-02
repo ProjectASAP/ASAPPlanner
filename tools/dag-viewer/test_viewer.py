@@ -617,7 +617,7 @@ class WorkloadViewTests(unittest.TestCase):
         self.assertEqual(len(rows), len(stored))
         first = rows[0]
         self.assertEqual(first["definition"], stored[0]["coverage"]["definition_id"])
-        self.assertTrue(first["kind"].startswith("PaneChain · "), first["kind"])
+        self.assertTrue(first["kind"].startswith("SummaryTumblingWindowChain · "), first["kind"])
         self.assertRegex(first["pane"], r"^pane 1 of \d+ \(newest first\), ")
         self.assertEqual(first["refresh"], "at ingestion")
         self.assertTrue(all(r["stage2NodeId"] is not None and r["readBy"] for r in rows))
@@ -646,11 +646,11 @@ class WorkloadViewTests(unittest.TestCase):
 
     def test_pane_chain_box_shows_its_panes(self):
         selected = self.doc["stage2_physical_asap_optimization"]["candidates"][0]
-        chain = next(n for n in selected["dag"]["nodes"] if "PaneChain" in n["payload"].get("ASAP", {}))
+        chain = next(n for n in selected["dag"]["nodes"] if "SummaryTumblingWindowChain" in n["payload"].get("ASAP", {}))
         lines = self.js.call("stageNodeLines", chain["payload"], None)
-        body = chain["payload"]["ASAP"]["PaneChain"]
-        self.assertEqual(lines[0], "PaneChain")
-        self.assertIn(f"{body['pane_count']} panes × ", lines[2])
+        body = chain["payload"]["ASAP"]["SummaryTumblingWindowChain"]
+        self.assertEqual(lines[0], "SummaryTumblingWindowChain")
+        self.assertIn(f"{body['tumbling_window_count']} panes × ", lines[2])
 
     def test_usage_and_deployment_lines(self):
         cost = self.doc["stage3_plan_selection"]["costs"][self.doc["stage3_plan_selection"]["selected"]]
@@ -680,8 +680,8 @@ class PanesAndPathsTests(unittest.TestCase):
         self.selected = self.doc["stage2_physical_asap_optimization"]["candidates"][0]
         self.dag = self.selected["dag"]
         self.query_ids = [q["id"] for q in self.doc["workload"]["queries"]]
-        self.chain = next(n for n in self.dag["nodes"] if "PaneChain" in n["payload"].get("ASAP", {}))
-        self.body = self.chain["payload"]["ASAP"]["PaneChain"]
+        self.chain = next(n for n in self.dag["nodes"] if "SummaryTumblingWindowChain" in n["payload"].get("ASAP", {}))
+        self.body = self.chain["payload"]["ASAP"]["SummaryTumblingWindowChain"]
 
     def elements(self, **options):
         return self.js.call("stageLaneElements", self.dag, dict({"physical": True, "queryIds": self.query_ids}, **options))
@@ -691,12 +691,12 @@ class PanesAndPathsTests(unittest.TestCase):
 
     def test_chains_stay_collapsed_by_default_and_print_their_panes(self):
         chain = self.node(self.elements(), f"n{self.chain['id']}")
-        self.assertEqual(chain["data"]["kind"], "PaneChain")
-        self.assertIn(f"{self.body['pane_count']} panes × 20 s", chain["data"]["label"])
+        self.assertEqual(chain["data"]["kind"], "SummaryTumblingWindowChain")
+        self.assertIn(f"{self.body['tumbling_window_count']} panes × 20 s", chain["data"]["label"])
         self.assertTrue(chain["data"]["expandable"])
 
     def test_an_expanded_chain_shows_each_pane_with_its_time_range_shift_and_window(self):
-        count, chain_id = self.body["pane_count"], self.chain["id"]
+        count, chain_id = self.body["tumbling_window_count"], self.chain["id"]
         elements = self.elements(expandedChains=[chain_id])
         ids = {e["data"]["id"] for e in lane_nodes(elements)}
         self.assertNotIn(f"n{chain_id}", ids)
@@ -1064,7 +1064,7 @@ class AppTests(unittest.TestCase):
 
     def test_tapping_a_pane_chain_expands_it_and_a_pane_collapses_it(self):
         js = self.page("?doc=s.json", {"s.json": SEED862.read_text()})
-        chain = next(e for e in self.ev(js, "__rendered.cy2") if e["data"].get("kind") == "PaneChain")
+        chain = next(e for e in self.ev(js, "__rendered.cy2") if e["data"].get("kind") == "SummaryTumblingWindowChain")
         js.eval(f"__taps['cy2 node']({{ target: __rendered.cy2.find((e) => e.data.id === {json.dumps(chain['data']['id'])}) && {{ data() {{ return __rendered.cy2.find((e) => e.data.id === {json.dumps(chain['data']['id'])}).data; }}, id() {{ return {json.dumps(chain['data']['id'])}; }} }} }})")
         ids = {e["data"]["id"] for e in self.ev(js, "__rendered.cy2")}
         self.assertNotIn(chain["data"]["id"], ids)
@@ -1082,7 +1082,7 @@ class AppTests(unittest.TestCase):
         physical["candidates"].append(copy)
         doc["stage3_plan_selection"]["rejected"].append({"id": "P-copy", "cause": "costlier", "reason": "a copy of the selected plan"})
         js = self.page("?doc=s.json", {"s.json": json.dumps(doc)})
-        chain = next(e for e in self.ev(js, "__rendered.cy2") if e["data"].get("kind") == "PaneChain")["data"]["id"]
+        chain = next(e for e in self.ev(js, "__rendered.cy2") if e["data"].get("kind") == "SummaryTumblingWindowChain")["data"]["id"]
         tap = lambda id_: js.eval(f"__taps['cy2 node']({{ target: {{ data() {{ return __rendered.cy2.find((e) => e.data.id === {json.dumps(id_)}).data; }}, id() {{ return {json.dumps(id_)}; }} }} }})")
         ids = lambda: {e["data"]["id"] for e in self.ev(js, "__rendered.cy2")}
         tap(chain)
@@ -1243,7 +1243,7 @@ class AppTests(unittest.TestCase):
         self.assertIn("7 groups (+1) · 30 candidates (+20)", meta)
         self.assertIn("selected plan's candidates highlighted (7 groups)", meta)
         # G2 is collapsed to its origin counts; the rest list their candidates.
-        self.assertEqual(self.memo_ids(js, "g2"), ["g2opass1", "g2opanes", "g2oshared_build"])
+        self.assertEqual(self.memo_ids(js, "g2"), ["g2opass1", "g2otumbling_windows", "g2oshared_build"])
         js.eval("window.MemoView.selectStep(0)")
         self.assertEqual(len(self.memo_ids(js)), 6)
         self.assertIn("6 groups · 0 candidates", self.text(js, "memoView-meta"))
@@ -1251,11 +1251,11 @@ class AppTests(unittest.TestCase):
 
     def test_tapping_a_count_expands_its_group_and_the_group_collapses_it(self):
         js = self.memo_page()
-        self.tap_memo(js, "g2opanes")
+        self.tap_memo(js, "g2otumbling_windows")
         self.assertEqual(len(self.memo_ids(js, "g2")), 13)
         self.assertIn("Memo group G2", self.text(js, "details"))
-        self.assertIn("20 (13 listed): 2 Pass1, 9 Panes, 9 SharedBuild", self.text(js, "details"))
-        self.assertIn("selected plan#2 rate accumulator over G6's panes, variant 1 (Panes)", self.text(js, "details"))
+        self.assertIn("20 (13 listed): 2 Pass1, 9 TumblingWindows, 9 SharedBuild", self.text(js, "details"))
+        self.assertIn("selected plan#2 rate accumulator over G6's panes, variant 1 (TumblingWindows)", self.text(js, "details"))
         self.tap_memo(js, "g2")
         self.assertEqual(len(self.memo_ids(js, "g2")), 3)
 
@@ -1297,7 +1297,7 @@ class AppTests(unittest.TestCase):
         """#1005's acceptance on its ratio-of-quantiles example as production
         plans it (stage_pipeline shares the two equal quantiles, so 7 groups
         and 19 Pass 1 candidates, not the issue's 8 and 26): the Stage 0 tab,
-        the Pass 1 tab, and G2's Panes and SharedBuild counts on the last tab."""
+        the Pass 1 tab, and G2's TumblingWindows and SharedBuild counts on the last tab."""
         doc = json.loads(MEMO_REAL.read_text())
         js = self.page("?doc=r.json", {"r.json": json.dumps(doc)})
         steps = [s["step"] for s in doc["memo"]["steps"]]
@@ -1308,7 +1308,7 @@ class AppTests(unittest.TestCase):
         self.assertIn("7 groups (+0) · 19 candidates (+19)", self.text(js, "memoView-meta"))
         js.eval(f"window.MemoView.selectStep({len(steps) - 1})")
         labels = sorted(e["data"]["label"].split("\n")[0] for e in self.ev(js, "__rendered.cyMemo") if e["data"].get("parent") == "g2")
-        self.assertEqual(labels, ["10 Pass1", "336 Panes", "345 SharedBuild"])
+        self.assertEqual(labels, ["10 Pass1", "336 TumblingWindows", "345 SharedBuild"])
         self.assertIn("354 groups", self.text(js, "memoView-meta"))
 
 if __name__ == "__main__":

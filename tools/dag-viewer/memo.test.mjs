@@ -46,7 +46,7 @@ test('memo violations are reported', () => {
   assert.match(broken((m) => { m.steps[1].groups[5].candidate_count = 2; }), /candidate_count must count at least/);
   assert.match(broken((m) => { m.steps[2].groups[2].candidates_capped = false; }), /candidates_capped/);
   assert.match(broken((m) => { m.steps[1].groups[2].candidate_count_by_origin = { pass1: 1 }; }), /candidate_count_by_origin/);
-  assert.match(broken((m) => { m.steps[1].groups[2].candidate_count_by_origin = { pass1: 1, panes: 1 }; m.steps[1].groups[2].candidates[1].origin = 'rollup'; }), /origin rollup is not counted/);
+  assert.match(broken((m) => { m.steps[1].groups[2].candidate_count_by_origin = { pass1: 1, tumbling_windows: 1 }; m.steps[1].groups[2].candidates[1].origin = 'rollup'; }), /origin rollup is not counted/);
   assert.match(broken((m) => { m.steps[1].groups[3].candidates[0].group_of_node = { '1.5': 2 }; }), /group_of_node must map/);
   assert.match(broken((m) => { delete m.steps[1].groups[3].candidates[0].label; }), /needs a label/);
   assert.match(broken((m) => { m.steps[1].groups[3].candidates[0].group_of_node = { 0: 4 }; }), /group_of_node must map/);
@@ -70,7 +70,7 @@ test('each step says what it added over the previous one', () => {
   assert.equal(pass1.listedAdded, 10);
   assert.deepEqual(pass1.groupsAdded, []);
   const pass2 = call('memoStepDiff', memo, 2);
-  // G2 grows from 2 to 20 (18 Panes and SharedBuild, 11 listed), G3 gains a
+  // G2 grows from 2 to 20 (18 TumblingWindows and SharedBuild, 11 listed), G3 gains a
   // rollup, the new pane-chain group G6 has one.
   assert.deepEqual(pass2.groupsAdded, [6]);
   assert.equal(pass2.candidatesDelta, 18 + 1 + 1);
@@ -116,12 +116,12 @@ test('a large group collapses to one count per origin and expands on request', (
   const memo = fixture();
   const collapsed = call('memoStepElements', memo, 2, {});
   const inG2 = (elements) => nodesOf(elements).filter((e) => e.data.parent === 'g2');
-  assert.deepEqual(inG2(collapsed).map((e) => e.data.label.split('\n')[0]), ['2 Pass1', '9 Panes', '9 SharedBuild']);
+  assert.deepEqual(inG2(collapsed).map((e) => e.data.label.split('\n')[0]), ['2 Pass1', '9 TumblingWindows', '9 SharedBuild']);
   assert.match(byId(collapsed, 'g2').data.label, /20 candidates \(13 listed\) · click a count to expand/);
-  // The selected candidate (G2 #2, a Panes candidate) marks its count.
-  assert.match(byId(collapsed, 'g2opanes').classes, /chosen/);
-  assert.match(byId(collapsed, 'g2opanes').data.label, /✚ 6 new · ✓ selected/);
-  assert.ok(byId(collapsed, 'g2opanes>g6'));
+  // The selected candidate (G2 #2, a TumblingWindows candidate) marks its count.
+  assert.match(byId(collapsed, 'g2otumbling_windows').classes, /chosen/);
+  assert.match(byId(collapsed, 'g2otumbling_windows').data.label, /✚ 6 new · ✓ selected/);
+  assert.ok(byId(collapsed, 'g2otumbling_windows>g6'));
   assert.ok(byId(collapsed, 'g2opass1>g1'));
   const open = call('memoStepElements', memo, 2, { expanded: [2] });
   assert.equal(inG2(open).length, 13);
@@ -150,13 +150,13 @@ test('the selected choice is highlighted on the last step only', () => {
 
 test('a collapsed count marks only the selected candidate\'s edges', () => {
   const memo = fixture();
-  // Another listed Panes candidate of G2 reads G1 instead of G6.
+  // Another listed TumblingWindows candidate of G2 reads G1 instead of G6.
   const other = memo.steps[2].groups[2].candidates.find((c) => c.index === 3);
   other.children = [1];
   other.group_of_node = { [memo.steps[2].groups.find((g) => g.id === 1).node]: 1 };
   const elements = call('memoStepElements', memo, 2, {});
-  assert.match(byId(elements, 'g2opanes>g6').classes, /chosen/);
-  assert.equal(byId(elements, 'g2opanes>g1').classes, '');
+  assert.match(byId(elements, 'g2otumbling_windows>g6').classes, /chosen/);
+  assert.equal(byId(elements, 'g2otumbling_windows>g1').classes, '');
 });
 
 test('a selected candidate past the listed prefix is named on its group', () => {
@@ -229,7 +229,7 @@ test('a node shared by groups is stored once, and memoNodeDag rebuilds each DAG 
 // group (series identity gives the schema a unique key), so it has 7 groups
 // and 19 Pass 1 candidates where #1005 measured 8 and 26 without it.
 const REAL = new URL('examples/memo-ratio-of-quantiles.json', here);
-test('the real example: 7 groups at Stage 0, 19 candidates after Pass 1, G2 Panes and SharedBuild counts on the last step', { skip: !existsSync(REAL) }, () => {
+test('the real example: 7 groups at Stage 0, 19 candidates after Pass 1, G2 TumblingWindows and SharedBuild counts on the last step', { skip: !existsSync(REAL) }, () => {
   const doc = JSON.parse(readFileSync(REAL, 'utf8'));
   const memo = doc.memo;
   assert.deepEqual(call('validateMemo', memo, doc.workload.queries.length), []);
@@ -240,7 +240,7 @@ test('the real example: 7 groups at Stage 0, 19 candidates after Pass 1, G2 Pane
   const last = memo.steps.length - 1;
   const elements = call('memoStepElements', memo, last, {});
   const g2 = elements.filter((e) => e.data.parent === 'g2').map((e) => e.data.label.split('\n')[0]);
-  assert.deepEqual(g2.sort(), ['10 Pass1', '336 Panes', '345 SharedBuild']);
+  assert.deepEqual(g2.sort(), ['10 Pass1', '336 TumblingWindows', '345 SharedBuild']);
   assert.equal(nodesOf(elements).filter((e) => e.data.kind === 'group').length, 354);
   assert.ok(cytoscape(elements).nodes().length > 354);
   // A candidate's boundary node is its child group's own table node.

@@ -112,13 +112,14 @@ fn compile_internal(
     preflight_depth(dag, deadline)?;
     // A pane chain stands for its panes; the deployment binds each pane's
     // raw input, so it runs only once expanded.
-    if let Some(node) = dag
-        .nodes
-        .iter()
-        .find(|n| matches!(n.payload, Payload::ASAP(ASAPOp::PaneChain { .. })))
-    {
+    if let Some(node) = dag.nodes.iter().find(|n| {
+        matches!(
+            n.payload,
+            Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+        )
+    }) {
         return Err(invalid(format!(
-            "node {}: a PaneChain runs as its panes; expand it with \
+            "node {}: a SummaryTumblingWindowChain runs as its panes; expand it with \
              `asap_types::ir::operator::pane_chain::expand_pane_chains` before compiling",
             node.id
         )));
@@ -691,9 +692,9 @@ fn built_from_relation(state: &OperatorNode) -> bool {
         Some(ASAPOp::SummaryMerge { children, .. }) => {
             children.iter().all(|child| built_from_relation(child))
         }
-        Some(ASAPOp::SummaryAgg { child, .. } | ASAPOp::PaneChain { child, .. }) => {
-            child.result_kind == planner_types::ir::OperatorResultKind::Relation
-        }
+        Some(
+            ASAPOp::SummaryAgg { child, .. } | ASAPOp::SummaryTumblingWindowChain { child, .. },
+        ) => child.result_kind == planner_types::ir::OperatorResultKind::Relation,
         // A filter keeping whole states reads them from their build.
         _ => planner_types::ir::operator::asap::selected_from(state)
             .is_some_and(|states| built_from_relation(states)),

@@ -205,8 +205,10 @@ fn shared_chain_costs(run: &Run) -> (CandidateCosts, CandidateCosts) {
     let (mut within_one, mut kept) = (Vec::new(), Vec::new());
     for p in &run.physical {
         for n in &p.dag().nodes {
-            let shared_chain = matches!(n.payload, Operator::ASAP(ASAPOp::PaneChain { .. }))
-                && readers(p.dag(), &p.query_roots, n.id).len() == 2;
+            let shared_chain = matches!(
+                n.payload,
+                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+            ) && readers(p.dag(), &p.query_roots, n.id).len() == 2;
             let Some(cost) = run.selection.costs.get(&p.id).filter(|_| shared_chain) else {
                 continue;
             };

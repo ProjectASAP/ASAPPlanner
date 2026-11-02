@@ -26,7 +26,7 @@ Only the plan, which must not change between runs:
   `cost` (`cost_per_second`, `usage`, `per_node`) and `accepted` accuracy;
 - `proven_optimal`: whether the search proved the plan optimal (its status is
   `optimal`) rather than stopping at an evaluation budget;
-- `materialized_views`, `pane_retention_ms` and any `warnings`;
+- `materialized_views`, `tumbling_window_retention_ms` and any `warnings`;
 - for a query that does not plan, `selected: null`, the `error` up to its
   embedded search report, and the causes and reasons of the rejections.
 

@@ -73,9 +73,9 @@
 //     `guarantee_check_rejection`, the sketches read and a one-line summary),
 //     `pruned_candidates` and `search_report` (`SearchReport`: `status`,
 //     `cost_lower_bound_per_second`, MILP size and timings); `error` when no
-//     plan was selected. `pane_retention_ms` maps each pane chain the
+//     plan was selected. `tumbling_window_retention_ms` maps each pane chain the
 //     selected plan keeps beyond one evaluation (by node id in `P1`) to how
-//     far back the runtime must keep its panes (`RealizedPlan::pane_retention_ms`).
+//     far back the runtime must keep its panes (`RealizedPlan::tumbling_window_retention_ms`).
 //     `materialized_views` are the selected plan's materialized views as
 //     `plan_installable`'s plan derives them (`installable_plan_of`, then
 //     `InstallablePlan::materialized_views`: each view's installed node id,
@@ -1023,18 +1023,19 @@ fn stage_pipeline(
     let mut stage3 = selection_json(&run.run.selection);
     match (&run.run.selection, &run.run.selected_plan) {
         (Ok(selection), Some(roots)) => {
-            let pane_retention_ms = run
+            let tumbling_window_retention_ms = run
                 .run
                 .selected_physical_plan
                 .as_ref()
-                .map(|realized| realized.pane_retention_ms.clone())
+                .map(|realized| realized.tumbling_window_retention_ms.clone())
                 .unwrap_or_default();
-            stage3["pane_retention_ms"] = pane_retention_ms
+            stage3["tumbling_window_retention_ms"] = tumbling_window_retention_ms
                 .iter()
                 .map(|(node, ms)| (node.to_string(), json!(ms)))
                 .collect::<serde_json::Map<_, _>>()
                 .into();
-            match materialized_views_json(roots, selection, &pane_retention_ms, entries) {
+            match materialized_views_json(roots, selection, &tumbling_window_retention_ms, entries)
+            {
                 Ok(views) => stage3["materialized_views"] = Value::Array(views),
                 Err(error) => {
                     stage3["materialized_views"] = json!([]);
@@ -1174,14 +1175,19 @@ fn round_robin<'a, C: PartialEq>(
 fn materialized_views_json(
     roots: &[QueryRoot],
     selection: &Selection,
-    pane_retention_ms: &std::collections::BTreeMap<
+    tumbling_window_retention_ms: &std::collections::BTreeMap<
         asap_types::ir::physical_export::PhysicalASAPNodeId,
         u64,
     >,
     entries: &[QueryWorkloadEntry],
 ) -> Result<Vec<Value>, String> {
-    let (plan, report) = installable_plan_of(roots, Some(selection), pane_retention_ms, entries)
-        .map_err(|e| e.to_string())?;
+    let (plan, report) = installable_plan_of(
+        roots,
+        Some(selection),
+        tumbling_window_retention_ms,
+        entries,
+    )
+    .map_err(|e| e.to_string())?;
     let views = plan.materialized_views().map_err(|e| e.to_string())?;
     let mut stage2_of = std::collections::HashMap::new();
     for node in report
@@ -1317,8 +1323,8 @@ fn reference_pricing_json(
         "pruned_candidates": pruned_candidates_json(&selection.rejected),
         "pruned_candidates_not_enumerated": not_enumerated(&selection.rejected),
         "pruned_candidate_count_by_cause": count_by_cause(&selection.rejected),
-        "pane_retention_ms": selection
-            .pane_retention_ms
+        "tumbling_window_retention_ms": selection
+            .tumbling_window_retention_ms
             .iter()
             .map(|(node, ms)| (node.to_string(), json!(ms)))
             .collect::<serde_json::Map<_, _>>(),
@@ -1868,7 +1874,7 @@ fn origin_name(origin: &OriginOfCandidateForMemoGroup) -> String {
         OriginOfCandidateForMemoGroup::SharedBuild => "shared_build",
         OriginOfCandidateForMemoGroup::SummaryResult => "summary_result",
         OriginOfCandidateForMemoGroup::SummaryInput => "summary_input",
-        OriginOfCandidateForMemoGroup::Panes => "panes",
+        OriginOfCandidateForMemoGroup::TumblingWindows => "tumbling_windows",
         OriginOfCandidateForMemoGroup::Rollup => "rollup",
         OriginOfCandidateForMemoGroup::TopKReuse => "top_k_reuse",
         OriginOfCandidateForMemoGroup::WidenedScans => "widened_scans",

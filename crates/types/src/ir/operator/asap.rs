@@ -55,17 +55,21 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         evaluation: PopulationStatistic,
     },
     /// Merge compatible partial states of one family: every input state of
-    /// a group, including each pane of a [`PaneChain`](ASAPOp::PaneChain),
+    /// a group, including each pane of a [`SummaryTumblingWindowChain`](ASAPOp::SummaryTumblingWindowChain),
     /// into one state per group.
     SummaryMerge {
         children: Vec<C>,
-        /// Merge only the newest `n` panes of the one `PaneChain` this
-        /// merge reads, `1 ≤ n <` its `pane_count`: the state of one build
-        /// over the newest `n · pane_width_ms` of the chain's window, so a
+        /// Merge only the newest `n` panes of the one `SummaryTumblingWindowChain` this
+        /// merge reads, `1 ≤ n <` its `tumbling_window_count`: the state of one build
+        /// over the newest `n · tumbling_window_width_ms` of the chain's window, so a
         /// query over a shorter window reads a chain kept for a longer one.
         /// `None` merges every input state.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        newest_panes: Option<u32>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            alias = "newest_panes"
+        )]
+        newest_tumbling_windows: Option<u32>,
         /// A rollup (regrouping merge): the input's plain columns the
         /// merged states are keyed by, in output order. Every input state
         /// whose values in these columns match goes into one output state,
@@ -76,18 +80,20 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
     },
     /// A tumbling-pane window summary (#509 Pass 2, window-composition
     /// rule): the `SummaryAgg` with these `family`, `input`, `reduction`,
-    /// `grouping` and `filter`, built over each of `pane_count` back-to-back
-    /// range windows of `pane_width_ms` that end at `child`'s evaluation
+    /// `grouping` and `filter`, built over each of `tumbling_window_count` back-to-back
+    /// range windows of `tumbling_window_width_ms` that end at `child`'s evaluation
     /// time, newest first. `child` is the input a range selector would
     /// read, so pane `i` covers `(-(i+1)·w, -i·w]` relative to it. Output:
     /// the `SummaryAgg` schema, one state per group and pane; a
     /// `SummaryMerge` over the chain gives the state of one build over the
-    /// whole `pane_count · pane_width_ms` window
+    /// whole `tumbling_window_count · tumbling_window_width_ms` window
     /// (`whole_window_build`).
     /// One compact node whatever the pane count: costs and guarantees come
     /// from formulas, and the executor expands the panes
     /// (`expand_pane_chains`).
-    PaneChain {
+    // Written as `PaneChain` before #1163; the aliases read those documents.
+    #[serde(alias = "PaneChain")]
+    SummaryTumblingWindowChain {
         child: C,
         family: FieldDataType,
         input: SummaryUpdate,
@@ -95,8 +101,10 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         grouping: GroupingStrategy,
         #[serde(default)]
         filter: Option<crate::ir::scalar::Predicate<C>>,
-        pane_width_ms: u64,
-        pane_count: u32,
+        #[serde(alias = "pane_width_ms")]
+        tumbling_window_width_ms: u64,
+        #[serde(alias = "pane_count")]
+        tumbling_window_count: u32,
     },
     // ── Reserved: migrated but unimplemented ──
     SummarySubtract {
@@ -123,7 +131,7 @@ impl<C> ASAPOp<C> {
     pub(crate) fn children(&self) -> Vec<&C> {
         use ASAPOp::*;
         match self {
-            SummaryAgg { child, filter, .. } | PaneChain { child, filter, .. } => {
+            SummaryAgg { child, filter, .. } | SummaryTumblingWindowChain { child, filter, .. } => {
                 let mut inputs = vec![child];
                 if let Some(filter) = filter {
                     inputs.extend(filter.0.operator_refs());
@@ -165,16 +173,16 @@ impl<C> ASAPOp<C> {
                     .as_ref()
                     .map(|p| crate::ir::scalar::Predicate(p.0.map_operator_refs(&mut f))),
             },
-            PaneChain {
+            SummaryTumblingWindowChain {
                 child,
                 family,
                 input,
                 reduction,
                 grouping,
                 filter,
-                pane_width_ms,
-                pane_count,
-            } => PaneChain {
+                tumbling_window_width_ms,
+                tumbling_window_count,
+            } => SummaryTumblingWindowChain {
                 child: f(child),
                 family: family.clone(),
                 input: input.clone(),
@@ -183,8 +191,8 @@ impl<C> ASAPOp<C> {
                 filter: filter
                     .as_ref()
                     .map(|p| crate::ir::scalar::Predicate(p.0.map_operator_refs(&mut f))),
-                pane_width_ms: *pane_width_ms,
-                pane_count: *pane_count,
+                tumbling_window_width_ms: *tumbling_window_width_ms,
+                tumbling_window_count: *tumbling_window_count,
             },
             SummaryEstimate {
                 summary_input,
@@ -204,11 +212,11 @@ impl<C> ASAPOp<C> {
             },
             SummaryMerge {
                 children,
-                newest_panes,
+                newest_tumbling_windows,
                 group_by,
             } => SummaryMerge {
                 children: children.iter().map(&mut f).collect(),
-                newest_panes: *newest_panes,
+                newest_tumbling_windows: *newest_tumbling_windows,
                 group_by: group_by.clone(),
             },
             SummarySubtract { left, right } => SummarySubtract {
@@ -246,7 +254,7 @@ impl<C> ASAPOp<C> {
             MaintainPopulation { .. } => "MaintainPopulation",
             EvaluatePopulation { .. } => "EvaluatePopulation",
             SummaryMerge { .. } => "SummaryMerge",
-            PaneChain { .. } => "PaneChain",
+            SummaryTumblingWindowChain { .. } => "SummaryTumblingWindowChain",
             SummarySubtract { .. } => "SummarySubtract",
             SummaryDelete { .. } => "SummaryDelete",
             SummaryJoin { .. } => "SummaryJoin",
@@ -264,7 +272,7 @@ impl ASAPOp {
     pub fn produced_state(&self) -> Option<&FieldDataType> {
         match self {
             ASAPOp::SummaryAgg { family, .. }
-            | ASAPOp::PaneChain { family, .. }
+            | ASAPOp::SummaryTumblingWindowChain { family, .. }
             | ASAPOp::SummaryJoin { family, .. } => Some(family),
             ASAPOp::SummaryMerge { children, .. } => children.first().and_then(|child| {
                 child
@@ -291,7 +299,7 @@ impl ASAPOp {
                 reduction,
                 ..
             }
-            | PaneChain {
+            | SummaryTumblingWindowChain {
                 child,
                 family,
                 reduction,
@@ -333,7 +341,7 @@ impl ASAPOp {
                         SummaryAgg {
                             reduction: Reduction::PerEntity,
                             ..
-                        } | PaneChain {
+                        } | SummaryTumblingWindowChain {
                             reduction: Reduction::PerEntity,
                             ..
                         }
@@ -533,7 +541,7 @@ impl ASAPOp {
         use ASAPOp::*;
         match self {
             SummaryAgg { .. }
-            | PaneChain { .. }
+            | SummaryTumblingWindowChain { .. }
             | MaintainPopulation { .. }
             | SummaryMerge { .. }
             | SummarySubtract { .. }
@@ -563,23 +571,26 @@ impl ASAPOp {
         match self {
             SummaryMerge {
                 children,
-                newest_panes,
+                newest_tumbling_windows,
                 group_by,
             } => {
-                if newest_panes.is_some() && group_by.is_some() {
+                if newest_tumbling_windows.is_some() && group_by.is_some() {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
                         "a rollup merges every input state, not the newest panes".into(),
                     ));
                 }
-                if let Some(n) = newest_panes {
-                    let pane_count = match children.as_slice() {
+                if let Some(n) = newest_tumbling_windows {
+                    let tumbling_window_count = match children.as_slice() {
                         [chain] => match chain.asap() {
-                            Some(PaneChain { pane_count, .. }) => Some(*pane_count),
+                            Some(SummaryTumblingWindowChain {
+                                tumbling_window_count,
+                                ..
+                            }) => Some(*tumbling_window_count),
                             _ => None,
                         },
                         _ => None,
                     };
-                    if !pane_count.is_some_and(|count| (1..count).contains(n)) {
+                    if !tumbling_window_count.is_some_and(|count| (1..count).contains(n)) {
                         return Err(SchemaDerivationError::InvalidScalarSignature(
                             "a merge of the newest panes reads one pane chain, and fewer \
                              panes than it has"
@@ -673,13 +684,13 @@ impl ASAPOp {
                 }
                 Ok(())
             }
-            PaneChain {
+            SummaryTumblingWindowChain {
                 child,
-                pane_width_ms,
-                pane_count,
+                tumbling_window_width_ms,
+                tumbling_window_count,
                 ..
             } => {
-                if *pane_width_ms == 0 || *pane_count == 0 {
+                if *tumbling_window_width_ms == 0 || *tumbling_window_count == 0 {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
                         "a pane chain needs a positive pane width and pane count".into(),
                     ));
@@ -710,7 +721,7 @@ impl ASAPOp {
         }
     }
 
-    /// The input checks of a `SummaryAgg`, which a `PaneChain` shares.
+    /// The input checks of a `SummaryAgg`, which a `SummaryTumblingWindowChain` shares.
     fn summary_agg_inputs(&self) -> Result<(), SchemaDerivationError> {
         let (ASAPOp::SummaryAgg {
             child,
@@ -719,7 +730,7 @@ impl ASAPOp {
             filter,
             ..
         }
-        | ASAPOp::PaneChain {
+        | ASAPOp::SummaryTumblingWindowChain {
             child,
             family,
             input,
@@ -912,7 +923,7 @@ fn topk_estimate_schema(state: &OperatorNode) -> Option<Schema> {
         None => state.summary_build(),
     };
     let (Some(ASAPOp::SummaryAgg { child, input, .. })
-    | Some(ASAPOp::PaneChain { child, input, .. })) = build
+    | Some(ASAPOp::SummaryTumblingWindowChain { child, input, .. })) = build
     else {
         return None;
     };
@@ -1007,7 +1018,7 @@ fn quantile_may_be_empty(state: &OperatorNode) -> bool {
                 filter,
                 ..
             }
-            | ASAPOp::PaneChain {
+            | ASAPOp::SummaryTumblingWindowChain {
                 child,
                 input,
                 reduction,

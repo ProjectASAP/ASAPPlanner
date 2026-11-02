@@ -418,7 +418,7 @@ fn builds_a_sketch(node: &Rc<OperatorNode>) -> bool {
                 ASAPOp::SummaryAgg {
                     family: FieldDataType::Sketch(..),
                     ..
-                } | ASAPOp::PaneChain {
+                } | ASAPOp::SummaryTumblingWindowChain {
                     family: FieldDataType::Sketch(..),
                     ..
                 }

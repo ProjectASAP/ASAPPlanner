@@ -180,7 +180,7 @@ async fn sql_windows_get_tumbling_panes_and_ingestion_time_builds() {
         p.dag().nodes.iter().any(|n| {
             matches!(
                 n.payload,
-                Operator::ASAP(asap_types::ir::ASAPOp::PaneChain { .. })
+                Operator::ASAP(asap_types::ir::ASAPOp::SummaryTumblingWindowChain { .. })
             ) && runs_at_ingestion(p, n.id)
         })
     });

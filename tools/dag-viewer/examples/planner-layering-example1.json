@@ -3238,7 +3238,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -3257,8 +3257,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -4145,7 +4145,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -4164,8 +4164,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -5405,7 +5405,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "ExactAggregate": [
@@ -5424,8 +5424,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -6189,7 +6189,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -6208,8 +6208,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -6620,7 +6620,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -6639,8 +6639,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -7081,7 +7081,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "ExactAggregate": [
@@ -7100,8 +7100,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -7512,7 +7512,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -7531,8 +7531,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -7850,7 +7850,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -7869,8 +7869,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -10650,7 +10650,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -10669,8 +10669,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -11533,7 +11533,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -11552,8 +11552,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -12769,7 +12769,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -12803,8 +12803,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -13522,7 +13522,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "Sketch": [
@@ -13556,8 +13556,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -13922,7 +13922,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -13941,8 +13941,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -14383,7 +14383,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -14417,8 +14417,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -14783,7 +14783,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -14802,8 +14802,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -15121,7 +15121,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "Sketch": [
@@ -15155,8 +15155,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -17890,7 +17890,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -17909,8 +17909,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -18773,7 +18773,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -18792,8 +18792,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -20009,7 +20009,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -20043,8 +20043,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -20762,7 +20762,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "Sketch": [
@@ -20796,8 +20796,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -21162,7 +21162,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -21181,8 +21181,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -21623,7 +21623,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -21657,8 +21657,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -22023,7 +22023,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -22042,8 +22042,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -22361,7 +22361,7 @@
               "materialization": "NotMaterialized",
               "operator": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "Sketch": [
@@ -22395,8 +22395,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -31296,7 +31296,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -31315,8 +31315,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -33015,7 +33015,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -33034,8 +33034,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -34732,7 +34732,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -34751,8 +34751,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -36325,7 +36325,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -36344,8 +36344,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -37918,7 +37918,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -37937,8 +37937,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -40129,7 +40129,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "ExactAggregate": [
@@ -40148,8 +40148,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -41848,7 +41848,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "ExactAggregate": [
@@ -41867,8 +41867,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -43439,7 +43439,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -43458,8 +43458,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -45032,7 +45032,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -45051,8 +45051,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -46751,7 +46751,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "ExactAggregate": [
@@ -46770,8 +46770,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -47977,7 +47977,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -47996,8 +47996,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -48456,7 +48456,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "ExactAggregate": [
@@ -48475,8 +48475,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -49682,7 +49682,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -49701,8 +49701,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -50163,7 +50163,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "ExactAggregate": [
@@ -50182,8 +50182,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -51391,7 +51391,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -51410,8 +51410,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -51870,7 +51870,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "ExactAggregate": [
@@ -51889,8 +51889,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -53098,7 +53098,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -53117,8 +53117,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -53579,7 +53579,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "ExactAggregate": [
@@ -53598,8 +53598,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -54805,7 +54805,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -54824,8 +54824,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -55158,7 +55158,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -55177,8 +55177,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -56386,7 +56386,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -56405,8 +56405,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -56739,7 +56739,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -56758,8 +56758,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -57965,7 +57965,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -57984,8 +57984,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -58446,7 +58446,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "ExactAggregate": [
@@ -58465,8 +58465,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -59674,7 +59674,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -59693,8 +59693,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -60153,7 +60153,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "ExactAggregate": [
@@ -60172,8 +60172,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -61381,7 +61381,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -61400,8 +61400,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -61736,7 +61736,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -61755,8 +61755,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -69045,7 +69045,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -69064,8 +69064,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -70433,7 +70433,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -70452,8 +70452,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -71819,7 +71819,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -71838,8 +71838,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -73081,7 +73081,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -73100,8 +73100,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -74343,7 +74343,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -74362,8 +74362,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -76209,7 +76209,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -76243,8 +76243,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -77583,7 +77583,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -77617,8 +77617,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -78829,7 +78829,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "Sketch": [
@@ -78863,8 +78863,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -80077,7 +80077,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "Sketch": [
@@ -80111,8 +80111,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -81451,7 +81451,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -81485,8 +81485,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -82339,7 +82339,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -82358,8 +82358,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -82811,7 +82811,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -82845,8 +82845,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -83699,7 +83699,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -83718,8 +83718,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -84173,7 +84173,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -84207,8 +84207,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -85063,7 +85063,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -85082,8 +85082,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -85535,7 +85535,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -85569,8 +85569,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -86425,7 +86425,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -86444,8 +86444,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -86899,7 +86899,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -86933,8 +86933,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -87787,7 +87787,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -87806,8 +87806,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -88133,7 +88133,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "Sketch": [
@@ -88167,8 +88167,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -89023,7 +89023,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -89042,8 +89042,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -89369,7 +89369,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "Sketch": [
@@ -89403,8 +89403,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -90257,7 +90257,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -90276,8 +90276,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -90731,7 +90731,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -90765,8 +90765,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -91621,7 +91621,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -91640,8 +91640,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -92093,7 +92093,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -92127,8 +92127,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -92983,7 +92983,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -93002,8 +93002,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -93331,7 +93331,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "Sketch": [
@@ -93365,8 +93365,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -100439,7 +100439,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -100458,8 +100458,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -101827,7 +101827,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -101846,8 +101846,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -103213,7 +103213,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -103232,8 +103232,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -104475,7 +104475,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -104494,8 +104494,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -105737,7 +105737,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -105756,8 +105756,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -107603,7 +107603,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -107637,8 +107637,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -108977,7 +108977,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -109011,8 +109011,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -110223,7 +110223,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "Sketch": [
@@ -110257,8 +110257,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -111471,7 +111471,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "Sketch": [
@@ -111505,8 +111505,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -112845,7 +112845,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -112879,8 +112879,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -113733,7 +113733,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -113752,8 +113752,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -114205,7 +114205,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -114239,8 +114239,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -115093,7 +115093,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -115112,8 +115112,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -115567,7 +115567,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -115601,8 +115601,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -116457,7 +116457,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -116476,8 +116476,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -116929,7 +116929,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -116963,8 +116963,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -117819,7 +117819,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -117838,8 +117838,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -118293,7 +118293,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -118327,8 +118327,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -119181,7 +119181,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -119200,8 +119200,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -119527,7 +119527,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "Sketch": [
@@ -119561,8 +119561,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -120417,7 +120417,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -120436,8 +120436,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -120763,7 +120763,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "Sketch": [
@@ -120797,8 +120797,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -121651,7 +121651,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -121670,8 +121670,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -122125,7 +122125,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -122159,8 +122159,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -123015,7 +123015,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -123034,8 +123034,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -123487,7 +123487,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 6,
                     "family": {
                       "Sketch": [
@@ -123521,8 +123521,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -124377,7 +124377,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "ExactAggregate": [
@@ -124396,8 +124396,8 @@
                         "kind": "unknown_or_signed"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": "PerEntity"
                   }
                 }
@@ -124725,7 +124725,7 @@
               },
               "payload": {
                 "ASAP": {
-                  "PaneChain": {
+                  "SummaryTumblingWindowChain": {
                     "child": 0,
                     "family": {
                       "Sketch": [
@@ -124759,8 +124759,8 @@
                         "metric": "http_requests_total"
                       }
                     },
-                    "pane_count": 6,
-                    "pane_width_ms": 10000,
+                    "tumbling_window_count": 6,
+                    "tumbling_window_width_ms": 10000,
                     "reduction": {
                       "Reduce": [
                         2
@@ -126078,7 +126078,7 @@
             "cpu_core_seconds_per_second": 0.0008,
             "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 4000000 rows x (1 + depth 1); x 0.1000/s; holds 336000000 bytes for 40.2 ms",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "query_time"
           },
@@ -126221,7 +126221,7 @@
             "cpu_core_seconds_per_second": 0.00013333399999999998,
             "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -126364,7 +126364,7 @@
             "cpu_core_seconds_per_second": 0.0008,
             "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 4000000 rows x (1 + depth 1); x 0.1000/s; holds 336000000 bytes for 40.2 ms",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "query_time"
           },
@@ -126498,7 +126498,7 @@
             "cpu_core_seconds_per_second": 0.0008,
             "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 4000000 rows x (1 + depth 1); x 0.1000/s; holds 336000000 bytes for 40.2 ms",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "query_time"
           },
@@ -126632,7 +126632,7 @@
             "cpu_core_seconds_per_second": 0.00013333399999999998,
             "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -126856,7 +126856,7 @@
             "cpu_core_seconds_per_second": 0.0008,
             "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 4000000 rows x (1 + depth 1); x 0.1000/s; holds 336000000 bytes for 41.2 ms",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "query_time"
           },
@@ -126999,7 +126999,7 @@
             "cpu_core_seconds_per_second": 0.00013333399999999998,
             "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -127124,7 +127124,7 @@
             "cpu_core_seconds_per_second": 0.0008,
             "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 4000000 rows x (1 + depth 1); x 0.1000/s; holds 336000000 bytes for 41.2 ms",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "query_time"
           },
@@ -127258,7 +127258,7 @@
             "cpu_core_seconds_per_second": 0.0008,
             "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 4000000 rows x (1 + depth 1); x 0.1000/s; holds 336000000 bytes for 41.2 ms",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "query_time"
           },
@@ -127410,7 +127410,7 @@
             "cpu_core_seconds_per_second": 0.00013333399999999998,
             "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -127472,7 +127472,7 @@
             "cpu_core_seconds_per_second": 0.0008,
             "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 4000000 rows x (1 + depth 1); x 0.1000/s; holds 336000000 bytes for 40.2 ms",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "query_time"
           },
@@ -127553,7 +127553,7 @@
             "cpu_core_seconds_per_second": 0.0008,
             "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 4000000 rows x (1 + depth 1); x 0.1000/s; holds 336000000 bytes for 41.2 ms",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "query_time"
           },
@@ -127615,7 +127615,7 @@
             "cpu_core_seconds_per_second": 0.0008,
             "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 4000000 rows x (1 + depth 1); x 0.1000/s; holds 336000000 bytes for 40.2 ms",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "query_time"
           },
@@ -127696,7 +127696,7 @@
             "cpu_core_seconds_per_second": 0.00013333399999999998,
             "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -127758,7 +127758,7 @@
             "cpu_core_seconds_per_second": 0.00013333399999999998,
             "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -127839,7 +127839,7 @@
             "cpu_core_seconds_per_second": 0.0008,
             "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 4000000 rows x (1 + depth 1); x 0.1000/s; holds 336000000 bytes for 41.2 ms",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "query_time"
           },
@@ -127901,7 +127901,7 @@
             "cpu_core_seconds_per_second": 0.00013333399999999998,
             "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -127982,7 +127982,7 @@
             "cpu_core_seconds_per_second": 0.00013333399999999998,
             "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -128044,7 +128044,7 @@
             "cpu_core_seconds_per_second": 0.0008,
             "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 4000000 rows x (1 + depth 1); x 0.1000/s; holds 336000000 bytes for 40.2 ms",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "query_time"
           },
@@ -128107,7 +128107,7 @@
             "cpu_core_seconds_per_second": 0.0008,
             "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 4000000 rows x (1 + depth 1); x 0.1000/s; holds 336000000 bytes for 41.2 ms",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "query_time"
           },
@@ -128178,7 +128178,7 @@
             "cpu_core_seconds_per_second": 0.0008,
             "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 4000000 rows x (1 + depth 1); x 0.1000/s; holds 336000000 bytes for 40.2 ms",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "query_time"
           },
@@ -128241,7 +128241,7 @@
             "cpu_core_seconds_per_second": 0.0008,
             "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 4000000 rows x (1 + depth 1); x 0.1000/s; holds 336000000 bytes for 41.2 ms",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "query_time"
           },
@@ -128312,7 +128312,7 @@
             "cpu_core_seconds_per_second": 0.0008,
             "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 4000000 rows x (1 + depth 1); x 0.1000/s; holds 336000000 bytes for 40.2 ms",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "query_time"
           },
@@ -128393,7 +128393,7 @@
             "cpu_core_seconds_per_second": 0.00013333399999999998,
             "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -128455,7 +128455,7 @@
             "cpu_core_seconds_per_second": 0.00013333399999999998,
             "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -128536,7 +128536,7 @@
             "cpu_core_seconds_per_second": 0.0008,
             "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 4000000 rows x (1 + depth 1); x 0.1000/s; holds 336000000 bytes for 41.2 ms",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "query_time"
           },
@@ -128598,7 +128598,7 @@
             "cpu_core_seconds_per_second": 0.00013333399999999998,
             "detail": "build exact Rate accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -128661,7 +128661,7 @@
             "cpu_core_seconds_per_second": 0.00013333399999999998,
             "detail": "build exact Sum accumulator in 6 panes of 10000 ms for 1000000 groups: 66667 rows x (1 + depth 1); x 1.0000/s; keeps 392000000 bytes",
             "multiplier": 1,
-            "operator": "PaneChain",
+            "operator": "SummaryTumblingWindowChain",
             "price_source": "analytical",
             "timing": "ingestion_time"
           },
@@ -128716,7 +128716,7 @@
     },
     "front": [],
     "materialized_views": [],
-    "pane_retention_ms": {},
+    "tumbling_window_retention_ms": {},
     "rejected": [
       {
         "cause": "no_accuracy_guarantee",

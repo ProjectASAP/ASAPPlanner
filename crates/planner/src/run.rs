@@ -643,7 +643,10 @@ fn has_pane_window(initial: &DagOfLogicalMemoGroups) -> bool {
             Some(NonASAPOp::TimeRange {
                 kind: TimeRangeKind::Range, range, ..
             }) if !range.is_zero()
-        ) || matches!(group.logical_node.asap(), Some(ASAPOp::PaneChain { .. }))
+        ) || matches!(
+            group.logical_node.asap(),
+            Some(ASAPOp::SummaryTumblingWindowChain { .. })
+        )
     })
 }
 
@@ -793,9 +796,9 @@ impl OptimizationPass for Stage1ToStage3Pass {
                 }
             }
         }
-        output.pane_retention_ms = run
+        output.tumbling_window_retention_ms = run
             .selected_physical_plan
-            .map(|realized| realized.pane_retention_ms)
+            .map(|realized| realized.tumbling_window_retention_ms)
             .unwrap_or_default();
         output.selection = Some(selection);
         Ok(output)

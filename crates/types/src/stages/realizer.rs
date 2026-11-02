@@ -50,7 +50,7 @@ pub struct RealizedPlan {
     /// its readers, so the earliest step of the next request still finds
     /// its panes; without an offset or range evaluations, just the window.
     /// Empty when the plan keeps no panes.
-    pub pane_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
+    pub tumbling_window_retention_ms: BTreeMap<PhysicalASAPNodeId, u64>,
     /// The operator node of `plan` each selected node became, indexed by
     /// [`SelectedNodeId`](super::SelectedNodeId).
     pub operator_node_of_selected_node: Vec<Rc<OperatorNode>>,

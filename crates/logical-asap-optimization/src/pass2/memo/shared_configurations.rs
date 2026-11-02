@@ -159,22 +159,28 @@ impl PaneWidthFrontier {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PaneRequirement {
-    pub pane_width_ms: u64,
+    pub tumbling_window_width_ms: u64,
     pub window_ms: u64,
     pub family: FieldDataType,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PaneConfiguration {
-    pub pane_width_ms: u64,
+    pub tumbling_window_width_ms: u64,
     pub longest_window_ms: u64,
     pub family: FieldDataType,
 }
 impl PaneConfiguration {
     pub fn serves(&self, reader: &PaneRequirement) -> bool {
-        self.pane_width_ms > 0
-            && reader.pane_width_ms.is_multiple_of(self.pane_width_ms)
-            && reader.window_ms.is_multiple_of(self.pane_width_ms)
-            && self.longest_window_ms.is_multiple_of(self.pane_width_ms)
+        self.tumbling_window_width_ms > 0
+            && reader
+                .tumbling_window_width_ms
+                .is_multiple_of(self.tumbling_window_width_ms)
+            && reader
+                .window_ms
+                .is_multiple_of(self.tumbling_window_width_ms)
+            && self
+                .longest_window_ms
+                .is_multiple_of(self.tumbling_window_width_ms)
             && reader.window_ms <= self.longest_window_ms
             && shared_size(&self.family, &reader.family)
                 .is_some_and(|joined| same_family(&joined, &self.family))
@@ -235,25 +241,26 @@ pub(crate) fn pane_configurations_before(
     super::check_generation_deadline(deadline)?;
     if readers
         .iter()
-        .any(|r| r.pane_width_ms == 0 || r.window_ms == 0)
+        .any(|r| r.tumbling_window_width_ms == 0 || r.window_ms == 0)
     {
         return Ok(Vec::new());
     }
     let grids = pane_width_domain_before(
-        readers
-            .iter()
-            .map(|reader| greatest_common_divisor(reader.pane_width_ms, reader.window_ms)),
+        readers.iter().map(|reader| {
+            greatest_common_divisor(reader.tumbling_window_width_ms, reader.window_ms)
+        }),
         domain,
         deadline,
     )?;
     let mut configurations = Vec::new();
-    for &pane_width_ms in &grids {
+    for &tumbling_window_width_ms in &grids {
         super::check_generation_deadline(deadline)?;
         let eligible: Vec<&PaneRequirement> = readers
             .iter()
             .filter(|r| {
-                r.pane_width_ms.is_multiple_of(pane_width_ms)
-                    && r.window_ms.is_multiple_of(pane_width_ms)
+                r.tumbling_window_width_ms
+                    .is_multiple_of(tumbling_window_width_ms)
+                    && r.window_ms.is_multiple_of(tumbling_window_width_ms)
             })
             .collect();
         let windows: BTreeSet<u64> = eligible.iter().map(|r| r.window_ms).collect();
@@ -283,7 +290,7 @@ pub(crate) fn pane_configurations_before(
             for family in &sizes {
                 super::check_generation_deadline(deadline)?;
                 let configuration = PaneConfiguration {
-                    pane_width_ms,
+                    tumbling_window_width_ms,
                     longest_window_ms,
                     family: family.clone(),
                 };
@@ -456,12 +463,12 @@ mod tests {
     #[test]
     fn pane_configuration_keeps_failure_probability_contract() {
         let weaker = PaneConfiguration {
-            pane_width_ms: 1000,
+            tumbling_window_width_ms: 1000,
             longest_window_ms: 5000,
             family: kll(None),
         };
         let strict = PaneRequirement {
-            pane_width_ms: 1000,
+            tumbling_window_width_ms: 1000,
             window_ms: 5000,
             family: kll(Some(0.001)),
         };
@@ -478,7 +485,7 @@ mod tests {
             .any(|configuration| configuration.serves(&strict)));
         assert!(configurations
             .iter()
-            .all(|configuration| 1000_u64.is_multiple_of(configuration.pane_width_ms)));
+            .all(|configuration| 1000_u64.is_multiple_of(configuration.tumbling_window_width_ms)));
     }
 
     // Every integer-millisecond width that divides the grid is offered, not
@@ -542,13 +549,13 @@ mod tests {
     #[test]
     fn pane_width_domain_contains_every_legal_divisor() {
         let reader = PaneRequirement {
-            pane_width_ms: 12,
+            tumbling_window_width_ms: 12,
             window_ms: 60,
             family: kll(None),
         };
         let widths: BTreeSet<_> = pane_configurations(&[reader])
             .into_iter()
-            .map(|configuration| configuration.pane_width_ms)
+            .map(|configuration| configuration.tumbling_window_width_ms)
             .collect();
         assert_eq!(widths, BTreeSet::from([1, 2, 3, 4, 6, 12]));
     }
@@ -579,7 +586,7 @@ mod tests {
     #[test]
     fn invalid_pane_grid_has_no_configurations() {
         assert!(pane_configurations(&[PaneRequirement {
-            pane_width_ms: 0,
+            tumbling_window_width_ms: 0,
             window_ms: 5000,
             family: kll(None)
         }])

@@ -20,7 +20,7 @@ pub struct PhysicalWorkloadPlan {
     pub roots: Vec<QueryRoot>,
     pub dag: PhysicalASAPDAG,
     /// Its materialization assignment: the option chosen for each summary
-    /// build (`SummaryAgg` or `PaneChain`) of `dag`, by node id, including
+    /// build (`SummaryAgg` or `SummaryTumblingWindowChain`) of `dag`, by node id, including
     /// the builds left `NotMaterialized`, and each other node materialized
     /// (a shared node built once per evaluation). A build one query reads
     /// at ingestion time and another at query time appears once per copy.
