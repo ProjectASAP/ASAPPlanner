@@ -19,6 +19,13 @@ shows:
 
 To run it, see [RUNNING.md](RUNNING.md).
 
+For the same document as text, run `python3 tools/dag-viewer/print_stages.py
+run.json`. It prints each stage's DAG and the memo after each step: groups
+with their children, parents and queries, and each group's candidates. Add
+`--enumerated` to print every memo choice as a logical DAG instead
+(`stage_pipeline --max-enumerated N` sets how many choices the document
+lists).
+
 ## The page
 
 - **Examples**: one tab per entry of `examples.json`: #509 Examples 1, 3a
@@ -478,6 +485,8 @@ sections are still shown. If a check fails, it shows the problems instead.
   `ratio-of-quantiles-5m.json` (one ratio of two equal per-series quantiles
   plus a third, every minute, ε = 0.01, δ = 0.001) shows the `memo`
   section: the memo after each step.
+- `print_stages.py`: prints a document as text. `test_print_stages.py`: its
+  tests, over a document planned by the built `stage_pipeline`.
 - `cytoscape.min.js`, `dagre.min.js`, `cytoscape-dagre.js`: vendored, so the
   page works offline.
 
@@ -486,7 +495,7 @@ sections are still shown. If a check fails, it shows the problems instead.
 From `tools/dag-viewer`:
 
 ```bash
-python3 -m unittest test_viewer test_server
+python3 -m unittest test_viewer test_server test_print_stages
 ```
 
 `stages.js` and `memo.js` also have Node tests, which load the elements into the vendored
@@ -498,7 +507,7 @@ node --test tools/dag-viewer/stages.test.mjs tools/dag-viewer/enumeration.test.m
 
 The JavaScript runs in V8 through `py_mini_racer` (`pip install
 py-mini-racer==0.6.0`) against a stub DOM, so no browser is needed; without
-it those tests are skipped. The scalar-query and `/api/plan` tests need a
+it those tests are skipped. The scalar-query, `/api/plan` and `print_stages.py` tests need a
 built `stage_pipeline` (`cargo build -p asap-devtools --bin
 stage_pipeline`). The Rust side:
 

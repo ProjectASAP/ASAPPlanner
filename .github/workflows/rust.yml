@@ -103,7 +103,7 @@ jobs:
       working-directory: tools/dag-viewer
       run: |
         python3 -m pip install py-mini-racer==0.6.0
-        python3 -m unittest -v test_viewer test_server
+        python3 -m unittest -v test_viewer test_server test_print_stages
 
     - name: Run the DAG viewer's Node tests
       run: node --test tools/dag-viewer/stages.test.mjs tools/dag-viewer/enumeration.test.mjs tools/dag-viewer/memo.test.mjs
