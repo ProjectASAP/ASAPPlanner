@@ -508,8 +508,10 @@ pub struct DataWorkload {
     /// `sample_interval` apply to every series of the family
     /// ([`Self::series_facts`]). Counts, norms and bounds (`series_count`,
     /// `stream_norms`, …) differ per series name (a `foo_bucket` has one
-    /// series per `le`), so they are read from the series' own entry. A
-    /// source without an entry has no known facts.
+    /// series per `le`), so they are read from the series' own entry;
+    /// pricing a source's own arrival rate reads its `series_count` and
+    /// `sample_interval` there together. A source without an entry has no
+    /// known facts.
     #[serde(default)]
     pub sources: BTreeMap<String, SourceFacts>,
 }
@@ -708,7 +710,9 @@ pub enum PrometheusMetricType {
     /// May take any value.
     Gauge,
     /// A classic histogram family `foo`: cumulative bucket counters
-    /// `foo_bucket{le=…}`, and the counters `foo_sum` and `foo_count`.
+    /// `foo_bucket{le=…}`, and the counters `foo_sum` and `foo_count`. The
+    /// planner reads `foo_sum` as a counter, so it assumes the family's
+    /// observations are non-negative.
     Histogram,
     /// A native histogram: its samples are histograms, which the IR cannot
     /// represent yet, so a query reading one is rejected.
@@ -773,8 +777,10 @@ impl DataWorkload {
     /// that series' own type. A declared histogram family `foo` holds the
     /// series `foo_bucket`, `foo_sum` and `foo_count`; a declared summary
     /// family `foo` holds `foo`, `foo_sum` and `foo_count`; `_sum` and
-    /// `_count` series are counters. Any other name is its own source,
-    /// looked up as is: a suffix never makes a type.
+    /// `_count` series are counters. A declared family wins over a series'
+    /// own entry (`foo_sum`'s entry is ignored here when `foo` is a declared
+    /// histogram). Any other name is its own source, looked up as is: a
+    /// suffix never makes a type.
     pub fn series_facts(
         &self,
         series: &str,

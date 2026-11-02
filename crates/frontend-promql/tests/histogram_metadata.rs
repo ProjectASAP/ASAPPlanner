@@ -125,6 +125,21 @@ fn declared_native_histogram_is_rejected() {
     }
 }
 
+/// A family `foo` declared a native histogram is rejected under
+/// `histogram_quantile(0.9, foo)`, the form a user writes for one.
+#[test]
+fn declared_native_histogram_family_is_rejected() {
+    let lowered = asap_frontend_promql::lower_promql_query_workload(&over_family(
+        "histogram_quantile(0.9, foo)",
+        "foo",
+        NativeHistogram,
+    ));
+    assert!(
+        matches!(&lowered, Err(e) if e.to_string().contains("native histogram")),
+        "{lowered:?}"
+    );
+}
+
 /// A declared summary family `foo`: a quantile series is a plain value read
 /// (no quantile computed), `histogram_quantile(s)` over it is rejected, and
 /// `foo_sum`/`foo_count` read the family's facts as counters.

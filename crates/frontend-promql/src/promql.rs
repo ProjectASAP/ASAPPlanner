@@ -1467,8 +1467,8 @@ fn clamp_bounds_filter(min: &Scalar, max: &Scalar, child: Unresolved) -> Unresol
 
 /// Collect the metric names of every vector/matrix selector reachable in
 /// `expr`: the metrics whose declared type and sample interval
-/// ([`PromqlLowerer::lower_query`]) lowering looks up. Skips selectors that lowering rejects, such as `{le="…"}` with no
-/// metric name.
+/// ([`PromqlLowerer::lower_query`]) lowering looks up. Skips selectors that
+/// lowering rejects, such as `{le="…"}` with no metric name.
 fn collect_metric_names(expr: &Expr, out: &mut Vec<String>) {
     match expr {
         Expr::VectorSelector(vs) => {
