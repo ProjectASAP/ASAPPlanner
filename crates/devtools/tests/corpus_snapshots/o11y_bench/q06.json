@@ -2,9 +2,6 @@
   "accuracy_guarantees": "enforced",
   "materialized_views": [],
   "materialized_views_error": "raw-data window of node 1 is unsupported: a subquery or a TimeShift above the range",
-  "tumbling_window_retention_ms": {
-    "1": 3900000
-  },
   "proven_optimal": true,
   "query": "max_over_time(histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"user-service\"}[5m])) by (le))[12h:1m])",
   "selected": {
@@ -795,9 +792,9 @@
                     "kind": "unknown_or_signed"
                   }
                 },
+                "reduction": "PerEntity",
                 "tumbling_window_count": 5,
-                "tumbling_window_width_ms": 60000,
-                "reduction": "PerEntity"
+                "tumbling_window_width_ms": 60000
               }
             }
           }
@@ -1318,5 +1315,8 @@
       "scalar_roots": []
     },
     "display_name": "Q1 Max acc + Sum acc + Rate acc ×5 tumbling windows · ingestion time: Rate acc for Q1, 5 × 1m tumbling windows"
+  },
+  "tumbling_window_retention_ms": {
+    "1": 3900000
   }
 }

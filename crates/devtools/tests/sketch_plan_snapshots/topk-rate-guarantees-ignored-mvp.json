@@ -1142,9 +1142,6 @@
       "stage2_node_id": 1
     }
   ],
-  "tumbling_window_retention_ms": {
-    "1": 300000
-  },
   "proven_optimal": true,
   "queries": [
     "topk(5, sum by (job) (rate(data_total[5m])))"
@@ -1758,9 +1755,9 @@
                     "kind": "unknown_or_signed"
                   }
                 },
+                "reduction": "PerEntity",
                 "tumbling_window_count": 30,
-                "tumbling_window_width_ms": 10000,
-                "reduction": "PerEntity"
+                "tumbling_window_width_ms": 10000
               }
             }
           }
@@ -2097,5 +2094,8 @@
       "scalar_roots": []
     },
     "display_name": "Q1 CMS+heap + Rate acc ×30 tumbling windows · ingestion time: Rate acc for Q1, 30 × 10s tumbling windows"
+  },
+  "tumbling_window_retention_ms": {
+    "1": 300000
   }
 }

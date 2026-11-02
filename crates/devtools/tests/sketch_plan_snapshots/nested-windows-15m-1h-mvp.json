@@ -2282,9 +2282,6 @@
       "stage2_node_id": 1
     }
   ],
-  "tumbling_window_retention_ms": {
-    "1": 3600000
-  },
   "proven_optimal": true,
   "queries": [
     "quantile_over_time(0.9, data[15m])",
@@ -2979,9 +2976,9 @@
                     "kind": "unknown_or_signed"
                   }
                 },
+                "reduction": "PerEntity",
                 "tumbling_window_count": 60,
-                "tumbling_window_width_ms": 60000,
-                "reduction": "PerEntity"
+                "tumbling_window_width_ms": 60000
               }
             }
           }
@@ -3519,5 +3516,8 @@
       "scalar_roots": []
     },
     "display_name": "Q1 DDSketch ×60 tumbling windows · Q2 DDSketch ×60 tumbling windows · shared DDSketch ×60 tumbling windows (Q1, Q2) · shared Scan (Q1, Q2) · ingestion time: DDSketch for Q1, Q2, 60 × 1m tumbling windows"
+  },
+  "tumbling_window_retention_ms": {
+    "1": 3600000
   }
 }

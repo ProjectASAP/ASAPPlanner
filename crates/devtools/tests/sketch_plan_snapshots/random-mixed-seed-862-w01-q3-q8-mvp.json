@@ -5322,10 +5322,6 @@
       "stage2_node_id": 13
     }
   ],
-  "tumbling_window_retention_ms": {
-    "1": 100000,
-    "13": 1200000
-  },
   "proven_optimal": true,
   "queries": [
     "avg by (region) (quantile_over_time(0.95, data[100s]))",
@@ -6692,9 +6688,9 @@
                     "kind": "unknown_or_signed"
                   }
                 },
+                "reduction": "PerEntity",
                 "tumbling_window_count": 100,
-                "tumbling_window_width_ms": 1000,
-                "reduction": "PerEntity"
+                "tumbling_window_width_ms": 1000
               }
             }
           }
@@ -7947,9 +7943,9 @@
                     "kind": "unknown_or_signed"
                   }
                 },
+                "reduction": "PerEntity",
                 "tumbling_window_count": 40,
-                "tumbling_window_width_ms": 30000,
-                "reduction": "PerEntity"
+                "tumbling_window_width_ms": 30000
               }
             }
           }
@@ -8360,5 +8356,9 @@
       "scalar_roots": []
     },
     "display_name": "Q1 Sum acc + DDSketch ×100 tumbling windows + Count acc · Q2 Rate acc ×40 tumbling windows · ingestion time: DDSketch for Q1, 100 × 1s tumbling windows, Rate acc for Q2, 40 × 30s tumbling windows"
+  },
+  "tumbling_window_retention_ms": {
+    "1": 100000,
+    "13": 1200000
   }
 }
